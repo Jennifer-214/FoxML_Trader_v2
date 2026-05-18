@@ -470,18 +470,65 @@ namespace tt {
         return false;
     }
 
+    // v5.15.5.F.4d.1.B.3 Step 0.5a — first-drift attribution helper for framework drift walker.
+    // Sister to cfg_drift_compare (which detects drift but loses field-attribution info).
+    // Used by cfg_derived::drift_check_from_derived to write first-drift attribution into
+    // caller-allocated buffer per failure-attribution-buffer-pattern.md § Framework-extension shape
+    // (Stage 3 first canonical reference).
+    //
+    // Idiom: caller-allocated buffer + first-failure-wins (snprintf only if buf[0] == '\0').
+    // Per Stage 2 DRAFT spec, the canonical format is "<field> drift: stamp=<stamp_val> cfg=<cfg_val>".
+    // Type-family dispatch via if-constexpr sister to cfg_drift_compare; same StampT/CfgT asymmetry.
+    //
+    // Boot/load-time only (slow path); no hot-path use. snprintf cost is acceptable at this cadence.
+    template <typename StampT, typename CfgT>
+    inline int cfg_drift_format_reason(char* buf, size_t cap,
+                                        const char* field_name,
+                                        const StampT& stamp_val,
+                                        const CfgT& cfg_val) {
+        static_assert(is_FPN_v<StampT>
+                   || std::is_floating_point_v<StampT>
+                   || std::is_integral_v<StampT>
+                   || std::is_array_v<StampT>,
+                      "stamp field type not in recognized family — "
+                      "extend tt::cfg_drift_format_reason<StampT,CfgT> with a new branch.");
+
+        if (!buf || cap == 0) return 0;
+
+        if constexpr (std::is_floating_point_v<StampT> && is_FPN_v<CfgT>) {
+            // Stamp recorded as double (legacy struct-gen); cfg runtime is FPN<F>.
+            // Format in double-space (matches wire-emit semantic per cfg_emit_field).
+            return snprintf(buf, cap, "%s drift: stamp=%g cfg=%g",
+                            field_name, (double)stamp_val, FPN_ToDouble(cfg_val));
+        } else if constexpr (is_FPN_v<StampT> && is_FPN_v<CfgT>) {
+            return snprintf(buf, cap, "%s drift: stamp=%g cfg=%g",
+                            field_name, FPN_ToDouble(stamp_val), FPN_ToDouble(cfg_val));
+        } else if constexpr (std::is_floating_point_v<StampT> && std::is_floating_point_v<CfgT>) {
+            return snprintf(buf, cap, "%s drift: stamp=%g cfg=%g",
+                            field_name, (double)stamp_val, (double)cfg_val);
+        } else if constexpr (std::is_array_v<StampT> && std::is_array_v<CfgT>) {
+            return snprintf(buf, cap, "%s drift: stamp=\"%s\" cfg=\"%s\"",
+                            field_name, stamp_val, cfg_val);
+        } else if constexpr (std::is_integral_v<StampT> && std::is_integral_v<CfgT>) {
+            return snprintf(buf, cap, "%s drift: stamp=%lld cfg=%lld",
+                            field_name, (long long)stamp_val, (long long)cfg_val);
+        }
+        return 0;
+    }
+
     // Note: cfg_render_field<T> is implemented inline in GUI/SettingsPanel.hpp (Step 0.5
     // landed at .F.4c), since rendering depends on ImGui which isn't included by this header
     // (used by non-GUI code — the parser includes this header but doesn't link ImGui).
     //
-    // The tt:: dispatch septet for cfg fields at .F.4d.1.B.1 (in-file 7 + GUI 1 = 8 codebase-wide):
-    //   tt::cfg_parse_field<T>          (text → typed; here)
-    //   tt::cfg_save_field<T>           (typed → text [operator-readable %.4f]; here)
-    //   tt::cfg_assign_field<T>         (default → typed; here)
-    //   tt::cfg_diff_field<T>           (typed vs default → bool; here)
-    //   tt::cfg_emit_field<T>           (typed → HMAC wire-format kv [%.17g lossless]; here; .B.1+)
-    //   tt::cfg_populate_inf_field<T>   (cfg → inf.field + inf.has_field; gate-aware; here; .B.1+)
-    //   tt::cfg_drift_compare<T>        (stamp vs cfg → bool; here; .B.1+)
-    //   tt::cfg_render_field<T>         (typed → ImGui widget; GUI/SettingsPanel.hpp)
+    // The tt:: dispatch octet for cfg fields at .F.4d.1.B.3 (in-file 8 + GUI 1 = 9 codebase-wide):
+    //   tt::cfg_parse_field<T>            (text → typed; here)
+    //   tt::cfg_save_field<T>             (typed → text [operator-readable %.4f]; here)
+    //   tt::cfg_assign_field<T>           (default → typed; here)
+    //   tt::cfg_diff_field<T>             (typed vs default → bool; here)
+    //   tt::cfg_emit_field<T>             (typed → HMAC wire-format kv [%.17g lossless]; here; .B.1+)
+    //   tt::cfg_populate_inf_field<T>     (cfg → inf.field + inf.has_field; gate-aware; here; .B.1+)
+    //   tt::cfg_drift_compare<T>          (stamp vs cfg → bool; here; .B.1+)
+    //   tt::cfg_drift_format_reason<T>    (stamp + cfg → attribution buf; here; .B.3+; first canonical of failure-attribution-buffer-pattern.md)
+    //   tt::cfg_render_field<T>           (typed → ImGui widget; GUI/SettingsPanel.hpp)
 
 }  // namespace tt

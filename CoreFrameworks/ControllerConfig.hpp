@@ -371,8 +371,6 @@ static_assert(sizeof(PerCoreCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
 // [CONFIG]
 //======================================================================================================
 template <unsigned F> struct ControllerConfig {
-  uint32_t poll_interval;  // ticks between slow-path runs
-  uint32_t warmup_ticks;   // ticks to observe before trading
   FPN<F> r2_threshold;     // min R^2 to trust regression
   FPN<F> slope_scale_buy;  // how much slope shifts buy price threshold
   FPN<F> max_shift;        // max drift from initial buy conditions
@@ -417,7 +415,6 @@ template <unsigned F> struct ControllerConfig {
                            // starting balance (e.g. 0.10 = 10%)
   FPN<F> max_exposure_pct; // max fraction of balance deployed in positions
                            // (e.g. 0.50 = 50%)
-  uint32_t max_positions;  // max simultaneous open positions (1-16, default 1)
   // enhanced buy signal (disabled by default = backward compatible)
   FPN<F> offset_stddev_mult; // stddev-scaled offset multiplier (0 = use
                              // percentage mode)
@@ -453,7 +450,6 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> stddev_adapt_scale; // P&L regression → stddev/breakout shift (0.1)
   FPN<F> vol_adapt_scale;    // P&L regression → volume shift (0.1)
   FPN<F> breakout_min;       // momentum breakout floor in stddevs (0.5)
-  uint32_t slow_path_max_secs; // wall-time floor between slow paths (3 seconds)
   // time-based exit (disabled by default)
   uint32_t
       max_hold_ticks; // close position if held longer than this (0 = disabled)
@@ -479,7 +475,6 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> regime_vol_spike_ratio;     // variance ratio threshold: short/long
                                      // variance > this = volatile spike
   uint32_t regime_hysteresis;  // slow-path cycles before regime switch (e.g. 5)
-  uint32_t min_warmup_samples; // min rolling stats samples before trading (0 =
                                // use warmup_ticks only). CAPS AT W=128: this
                                // gates on rolling.count which is bounded by
                                // the rolling window size. Values > 128 are
@@ -497,7 +492,6 @@ template <unsigned F> struct ControllerConfig {
   // Without this guard, unsorted CSVs (concatenated daily exports,
   // mistyped tick replays) silently produce garbage rolling stats /
   // ROR / tick-rate features at training time.
-  int csv_sort_check_mode;
   // post-SL cooldown
   uint32_t sl_cooldown_cycles; // slow-path cycles to pause buying after SL (0 =
                                // disabled)
@@ -610,13 +604,11 @@ template <unsigned F> struct ControllerConfig {
   // gated) is preferred for live capital because hardcoded strategies
   // fire regardless of regime. Setting this to 1 is the operator
   // saying "I know what I'm doing" and is logged.
-  int acknowledge_hardcoded_strategy_in_live;
   // v5.11.3 — mlockall failure handling. 1 (default) = HFT-correct: fatal
   // exit if pages can't be locked into RAM (deployment must have enough
   // RLIMIT_MEMLOCK + CAP_IPC_LOCK). 0 = laptop / dev: warn and continue
   // when mlockall fails. Setting this to 0 in production trades determinism
   // for portability — operator should explicitly opt out.
-  int require_mlockall;
   // v5.11.22 — InitArena MAP_HUGETLB opt-in. Default 0 = use 4 KB pages
   // (no OS dependency); set to 1 to request 2 MB hugepages for the 8 MB
   // boot arena, reducing TLB pressure on slow-path CoreSlowState +
@@ -631,7 +623,6 @@ template <unsigned F> struct ControllerConfig {
   // InitArena_Create retries WITHOUT MAP_HUGETLB and emits a stderr
   // WARN — engine continues with normal pages, no fatal. See
   // DOCS/OPERATOR_DEPLOYMENT.md for the production-machine recipe.
-  int init_arena_use_hugepages;
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
   // kill_switch_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
   FPN<F>
@@ -652,13 +643,11 @@ template <unsigned F> struct ControllerConfig {
   // tick-driven last_ws_tick_us would otherwise produce a huge gap vs
   // local clock and fire a phantom flatten on every cycle.
   // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
-  int ws_dead_time_flatten_threshold_secs;   // gap threshold (default 60)
   // v5.12.1.A.3 — recovery refusal window in seconds after a flatten
   // fires. Strategy_BuildParameters' caller (RebuildOneCore) sets
   // BUY_BLOCKED + SHALT_RECOVERY while now_us < oms.recovery_until_us.
   // Auto-clears when now_us crosses the deadline, on the next slow-path
   // cycle to detect the expiry.
-  int recovery_delay_secs;                   // recovery refusal window (default 30)
   // v5.12.1.B.3 — hot-path parameter freshness gate. Slow-path stalls
   // (GC pause, OS scheduler hiccup, blocking I/O on health log) leave the
   // hot path executing on stale GateParameters. ConfidenceScorer freshness
@@ -668,7 +657,6 @@ template <unsigned F> struct ControllerConfig {
   // Disabled by default; flip to 1 BEFORE live deployment after
   // measuring slow-path p99 latency on operator hardware.
   // param_staleness_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-  uint64_t param_max_age_ticks;              // gap threshold (default 1000 = 10x default poll_interval=100)
   // v5.14.8.E — stale-MODEL age check (load-time gate). Operator policy:
   // if a loaded model's stamp body claims training_timestamp_us older
   // than max_age_hours, engine WARNs (held_out_gate_strict=0) or
@@ -766,7 +754,6 @@ template <unsigned F> struct ControllerConfig {
   // is the per-tick price-delta threshold below which the slow-path cycle
   // is considered "no material change."
   // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
-  uint64_t lazy_rebuild_force_period_us;     // default 1_000_000 (1s)
   FPN<F>   lazy_rebuild_price_threshold_pct; // default 0.0005 (0.05%)
   // v5.12.2.D — Treelite AOT inference backend (INFRASTRUCTURE ONLY in
   // this ship; Treelite vendoring + Predict_AOT impl deferred to follow-
@@ -776,7 +763,6 @@ template <unsigned F> struct ControllerConfig {
   // When 0 (default) OR AOT load fails OR sha mismatch → engine falls
   // back to XGBoost C API path silently. Per-stamp opt-in via the
   // stamp body fields, not just the cfg flag.
-  int use_aot_inference;                     // 0=off (default), 1=opt-in
   // v5.13.0 — sell-side ML predictions (Path 3: path-based role
   // discrimination using existing PEAK_VALLEY_STABLE 3-class labels).
   // When enabled + ezoo->exit_predictor_count > 0, MLStrategy runs
@@ -817,37 +803,28 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> no_trade_band_mult; // signal must exceed fee_rate * this to trade
                              // (e.g. 3.0)
   // ML inference
-  int ml_backend;              // 0=disabled, 1=xgboost, 2=lightgbm
   char ml_model_path[256];     // path to buy-signal model file
   FPN<F> ml_buy_threshold;     // prediction > this = buy signal (e.g. 0.6)
   FPN<F> ml_tp_pct;            // TP % for ML positions (e.g. 0.015 = 1.5%)
   FPN<F> ml_sl_pct;            // SL % for ML positions (e.g. 0.008 = 0.8%)
-  int regime_model_backend;    // 0=disabled, 1=xgboost, 2=lightgbm
   char regime_model_path[256]; // path to regime enrichment model
   FPN<F> regime_model_weight;  // score weight in Regime_Classify (e.g. 2)
   // danger gradient (hot-path crash protection)
-  int danger_enabled;          // 0=disabled, 1=enabled
   FPN<F> danger_warn_stddevs;  // gradient starts at this many stddevs below avg
                                // (e.g. 3.0)
   FPN<F> danger_crash_stddevs; // full gate kill at this many stddevs below avg
                                // (e.g. 6.0)
   // tick recording (writes raw ticks to CSV for backtesting/ML training)
-  int record_ticks; // 0=disabled (default), 1=record to
                     // data/{symbol}/YYYY-MM-DD.csv
   // depth recording (Phase 8a c5): writes @depth5@100ms snapshots to
   // data/{symbol}/depth/YYYY-MM-DD.csv. Requires depth_enabled=1 (recorder
   // is fed by depth_thread_fn). Off by default — opt-in for replay/audit.
-  int record_depth; // 0=disabled (default), 1=record depth snapshots
-  uint32_t
-      record_max_days; // auto-prune CSVs older than this (default 30, ~2GB cap)
 
   // operational alerts (Phase 8b): route kill switch, orphan, disconnect
   // events through a configurable backend. All off by default.
   // notify_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
-  int notify_backend;             // 0=stderr (default), 1=command (popen-based)
   char notify_command[512];       // shell template with up to 2 %s (subject, body)
                                   // examples in engine.cfg / SettingsPanel tooltip
-  uint32_t notify_cooldown_secs;  // per-event-kind cooldown (default 60)
   // FoxML integration — Phase 6C (all default OFF, zero behavior change when
   // disabled)
   // cost_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1) — original comment: 0=disabled, 1=estimate trade cost via CostModel,
@@ -886,7 +863,6 @@ template <unsigned F> struct ControllerConfig {
   // mismatch checks (CoreModelZoo).
   FPN<F>   held_out_fraction;        // 0.20 = 20% of data reserved for final-test
                                      // (clamped to [0.05, 0.30] in HeldOutSplit_Make)
-  FPN<F>   gap_acceptable_threshold; // max acceptable |WF mean - held_out| gap
                                      // (default 0.05 — gap above this = poor generalization)
   // v5.2.0 (held-out gate Phase 1) — model attestation infrastructure.
   // Each .bin model can have a paired .stamp file with hash+signature
@@ -895,7 +871,6 @@ template <unsigned F> struct ControllerConfig {
   // stamp. Defaults: strict=0 (gate disabled — existing models still load),
   // secret="" (which makes verify_model_stamp accept any stamp signature
   // — useful for dev). Set both for production live deploy.
-  int    held_out_gate_strict;       // 0=warn-only (default), 1=refuse load, -1=skip
   // v5.9.2b — allow loading a model whose stamp's engine_version differs
   // by major version from current build (e.g. stamp says 5.x but engine
   // is 6.x). Cross-major can introduce hot-path predicate changes that
@@ -903,14 +878,12 @@ template <unsigned F> struct ControllerConfig {
   // cross-major in both strict + non-strict modes); operator opts in
   // explicitly with allow_cross_major_engine=1 + held_out_gate_strict=0.
   // Within-major loads (5.7 → 5.9) are always permitted.
-  int    allow_cross_major_engine;
   char   held_out_stamp_secret[128]; // HMAC-SHA256 secret for stamp signing/verify
   // v5.3.2 — auto-stamp on held-out completion. When 1, Backtest_RunFullValidation
   // calls stamp_write_for_model after a successful held-out training pass, using
   // held_out_stamp_secret + gap_acceptable_threshold above. Default 0 to preserve
   // current behavior (manual stamping via tools/stamp_model.sh); flip to 1 after
   // configuring the secret to enable hands-off stamp generation in foxml_suite.
-  int    auto_stamp_on_held_out;
   // v5.11.47 — auto-stamp HMAC secret. When non-empty AND
   // auto_stamp_on_held_out=1, the suite signs each generated stamp
   // with this secret. Empty = devmode (signature accepted as-is at
@@ -925,7 +898,6 @@ template <unsigned F> struct ControllerConfig {
   //   health_log_path: "" (default) = disabled; non-empty = JSONL output path
   //   health_log_level: 0 = info (always), 1 = debug, 2 = trace
   char   health_log_path[256];
-  int    health_log_level;
   // v5.9.4 — health log rotation (in-process, atomic rename pattern).
   // Without rotation, long soaks (30+ days) accumulate >5GB of JSONL,
   // operator-unfriendly. Rotates via rename to <path>.<unix_ts>,
@@ -935,8 +907,6 @@ template <unsigned F> struct ControllerConfig {
   //   health_log_keep_count: 0 = keep nothing (default; only the
   //                              active file lives); N = keep last N
   //                              rotated files (typical: 7)
-  uint64_t health_log_max_bytes;
-  int      health_log_keep_count;
   // v5.9.4 — acknowledge_cross_binary_version_drift MIGRATED to ops_cfg_flags
   // bitmap (MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT) at v5.15.5.A.7. Read
   // sites use BITMAP_IS_SET; legacy cfg key `acknowledge_cross_binary_version_drift=1`
@@ -954,7 +924,6 @@ template <unsigned F> struct ControllerConfig {
   // Setting this flag = 1 acknowledges that a single position may have
   // its entry and exit driven by different models, which can produce
   // unintuitive realized P&L. Default 0 keeps the entry-exit symmetry.
-  int    acknowledge_hot_swap_with_open_positions;
   // v5.10.0e — runtime IC drift detection. Sampled post-fill on ML cores;
   // sustained breach (avg IC over `confidence_ic_floor_window` seconds
   // below `confidence_ic_floor`) emits CRITICAL log. When `auto_kill_on_drift=1`
@@ -990,9 +959,7 @@ template <unsigned F> struct ControllerConfig {
   //                              for operator-friendly + back-compat reading.
   // Default reconcile_mode=WARN is intentional friction — flip to STRICT
   // for production refusal-on-mismatch, or AUTO_SYNC for replay+cancel.
-  int    reconcile_interval_sec;
   int    reconcile_dry_run;          // legacy; back-compat shim translates to reconcile_mode
-  uint8_t reconcile_mode;             // v5.14.4 — ReconcileMode enum stored as uint8_t
                                       // (avoid pulling Reconcile.hpp into universal-include
                                       //  ControllerConfig.hpp; cast at point of use)
   // v5.15.2 — TradingMode discriminates paper vs live vs shadow operation.
@@ -1005,7 +972,6 @@ template <unsigned F> struct ControllerConfig {
   // items; WARN-only on paper/shadow. Values defined at file scope below
   // (TRADING_MODE_PAPER / LIVE / SHADOW; matches engine_mode constant
   // style for consistency).
-  uint8_t trading_mode;               // v5.15.2 — TradingMode enum (default PAPER)
   // v5.15.4 — bitmap of "operator explicitly set this key" flags. Used
   // by ControllerConfig_NormalizeForMode<F> to honor operator overrides
   // when applying mode-specific defaults. Adding a new tracked key = 1
@@ -1031,13 +997,9 @@ template <unsigned F> struct ControllerConfig {
   // a) warnings (default), b) load failures (strict=1), or c) ignored (=-1).
   // strict mode is recommended for production deployment; default mode
   // for development so a single missing expected.cfg doesn't break startup.
-  int model_verify_strict;     // 0=warn (default), 1=strict, -1=skip
   // Per-core sharding (Phase 13) — STARTUP-ONLY, ignored by hot reload
-  uint8_t
-      engine_mode; // ENGINE_MODE_SINGLE_CORE (default) or ENGINE_MODE_SHARDED
   // v4.7.39 (per-core slow-path migration): slow-path threading model
   // under sharded mode. STARTUP-ONLY. See ENGINE_ARCH_* constants above.
-  uint8_t engine_arch; // ENGINE_ARCH_CENTRALIZED (default) or PER_CORE_SLOW
   // v5.0.2: slow-path CPU pin policy. STARTUP-ONLY.
   //   < 0  → do not pin slow-paths (OS-scheduled — original v5.0 behavior)
   //   == 0 → auto: pin slow-path c to (drainer_cpu + 1 + c) mod nproc.
@@ -1047,14 +1009,11 @@ template <unsigned F> struct ControllerConfig {
   // Default 0 (auto). Slow-paths are jitter-tolerant so HT-sharing with
   // spare cores is acceptable. Set to -1 to disable (e.g. for benchmarks
   // comparing pinned vs unpinned).
-  int slow_path_pin_offset;
-  uint16_t num_execution_cores; // sharded mode only, ignored in single_core
                                 // mode (default 4, cap 16)
   // Phase 14: when 1, sharded mode forces the synthetic tick generator
   // (sawtooth around $60k) instead of connecting to Binance. Useful for
   // latency demos that need reliable trade firing without depending on
   // current market volatility. Default 0 = use real Binance feed.
-  uint8_t sharded_force_synthetic;
   // Per-core strategy assignment for sharded mode. core_strategies[i] is the
   // STRATEGY_* constant for execution core i. Default: all STRATEGY_SIMPLE_DIP.
   // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
@@ -1190,8 +1149,6 @@ template <unsigned F> struct ControllerConfig {
   // when stamp's value differs from cfg's at boot.
   FPN<F>   xgb_subsample;          // row subsample per tree (0.5-1.0); default 0.8
   FPN<F>   xgb_colsample_bytree;   // column subsample per tree (0.5-1.0); default 0.8
-  int      xgb_min_child_weight;   // min sum-of-weights per leaf (1-50); default 5
-  int      xgb_seed;               // RNG seed for reproducible runs; default 42
   char     xgb_tree_method[16];    // hist | exact | approx | auto; default "hist"
 
   // v5.10.0 Item D — hardware-aware cfg. Operator-tunable thread counts
@@ -1202,9 +1159,6 @@ template <unsigned F> struct ControllerConfig {
   // Thread counts (default=1 matches current hardcoded behavior at
   // BacktestEngine.hpp:1352, 1638). Setting >1 breaks bytewise reproducibility;
   // boot-time WARN fires when operator sets >1 to make the tradeoff explicit.
-  int      xgb_train_nthread;      // XGBoost Train Model worker nthread; default 4 (matches pre-v5.10 BacktestPanels.hpp hardcoded)
-  int      xgb_eval_nthread;       // XGBoost WF/HeldOut eval nthread; default 1 (deterministic per-fold)
-  int      csv_load_workers;       // parallel CSV worker threads (Item C); default 1 (serial)
   // v5.11.41 — Multi-Horizon parallelism cap. Worker spawns
   //   min(N_horizons, multi_horizon_max_threads) pthreads, each running a
   //   full per-horizon Backtest_RunFullValidation pipeline. 0 = auto
@@ -1213,14 +1167,10 @@ template <unsigned F> struct ControllerConfig {
   //   pins xgb_train_nthread=1 inside parallel worker for bytewise
   //   determinism vs serial-mode-with-nthread=1. Recorded in stamp body
   //   via xgb_train_nthread field for forensic mode-divergence detection.
-  int      multi_horizon_max_threads;
 
   // RAM budgets (advisory soft caps — emit WARN at boot if dataset projects
   // to exceed; no hard refuse since the streaming label compute closes
   // OOM regardless). Operator hint when sizing the box.
-  int      feature_collect_max_gb; // soft cap on feature_matrix RAM; default 12
-  int      wf_split_max_gb;        // soft cap on WF split RAM; default 8
-  int      held_out_max_gb;        // soft cap on held-out RAM; default 4
 
   // v5.10.0a Item #4 — multi-horizon training. Comma-separated list of
   // forward-tick horizons; Train Model worker iterates and trains one
@@ -1364,6 +1314,28 @@ template <unsigned F> struct ControllerConfig {
   // CI script: tools/check_per_core_registry_integrity.py verifies every entry has a
   // FOREACH_MANUAL_PER_CORE_FIELD row + a MANUAL_FIELDS_INVENTORY.md row + correct type.
   FOREACH_MANUAL_PER_CORE_FIELD(EMIT_MANUAL_PER_CORE_DECL)
+
+  //==================================================================================================
+  // [Global cfg field auto-generation — v5.15.5.F.4d.1.B.3 Step 0.5b.B Path α landing]
+  //==================================================================================================
+  // 48 global cfg fields auto-generated from FOREACH_GLOBAL_CFG_FIELD (one source of truth at
+  // CoreFrameworks/CfgFieldRegistry.hpp). Sister to FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
+  // at PerCoreCfg<F>:324 — closes the global↔per-core column asymmetry per Decision A (a) Path α.
+  //
+  // Per H17 invariant (STRONG at per-core; HARD-promoted at global surface at .B.3 Step 0.5b.B
+  // codification): adding a new global cfg field = 1 row in FOREACH_GLOBAL_CFG_FIELD; the row's
+  // STORAGE_T column drives the struct field decl + parser auto-flow + GUI render + drift check.
+  // NO manual cfg-surface field declarations allowed in ControllerConfig<F> body outside of this
+  // X-macro invocation (legacy fields at struct top are pre-registry-era; future cfg fields go
+  // through the registry).
+  //
+  // Step 0.5b.B closure: 48 manual cfg field decls atomically replaced by this single X-macro
+  // invocation. CI Check 9 (forthcoming at Step 4) static_asserts STAMP_BOUND_CFG_DERIVED cohort
+  // coverage. Closes TECH_DEBT-093 (gap_acceptable_threshold manual storage cleanup);
+  // ALSO closes 47 sibling cohort manual decls in same atomic edit (struct-gen + bulk delete).
+  //
+  // SEE DESIGN_SPECS/universal-cfg-field-registry-pattern.md for the full pattern doc.
+  FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD)
 };
 
 //======================================================================================================
@@ -2112,7 +2084,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.15.5.F.4c — HAS_SIDE_EFFECT bit: registry walker skips parse; manual parser block
     // below handles the side-effect logic (e.g., fee_rate_maker/_taker explicit_set tracking,
     // risk_scale_by_confidence DEPRECATED shim translation, crypto-init pairs).
-    #define EMIT_GLOBAL_CFG_PARSER_CASE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
+    #define EMIT_GLOBAL_CFG_PARSER_CASE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
                                          applies_to_strategy, applies_to_op_mode, \
                                          applies_to_regime, applies_to_risk, lives_in_struct) \
         if (strcmp(key, #name) == 0 && !((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
@@ -2441,7 +2413,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     #undef X
 
     // GATE bitmap walk
-    #define X(name, legacy_field, display_label, section, doc) \
+    // v5.15.5.F.4d.1.B.3 Step 0.5d.a.0 — FOREACH_GATE_CFG_FLAG migrated to 6-arg sig per
+    // Meta-gap M1b cohort migration discipline (sister to .B.2 FOREACH_ML_CFG_FLAG migration).
+    #define X(name, legacy_field, display_label, section, metadata_flags, doc) \
       if (strcmp(key, #legacy_field) == 0) { \
         int _v = atoi(val); \
         if (_v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_##name; \
@@ -2938,10 +2912,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 // Per-domain per-row macros: capture mask + val into outer scope when matched
 #define _PARSE_OV_BITMAP_ROW_lifecycle(name, legacy_field, dl, sec, doc) \
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_LIFECYCLE_CFG_##name; }
-#define _PARSE_OV_BITMAP_ROW_gate(name, legacy_field, dl, sec, doc) \
+// v5.15.5.F.4d.1.B.3 Step 0.5d.a.0 — _gate variant takes 6 args (FOREACH_GATE_CFG_FLAG 5→6 sig
+// migration per Meta-gap M1b cohort discipline; sister to .B.2 _ml migration).
+#define _PARSE_OV_BITMAP_ROW_gate(name, legacy_field, dl, sec, metadata_flags, doc) \
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_GATE_CFG_##name; }
-// v5.15.5.F.4d.1.B.2 — _ml variant takes 6 args (FOREACH_ML_CFG_FLAG 5→6 sig migration);
-// other 4 _PARSE_OV_BITMAP_ROW_* domains stay 5-arg until their respective registries migrate.
+// v5.15.5.F.4d.1.B.2 — _ml variant takes 6 args (FOREACH_ML_CFG_FLAG 5→6 sig migration).
+// Remaining 3 _PARSE_OV_BITMAP_ROW_* domains (lifecycle/risk/ops) stay 5-arg per Meta-gap M1b
+// § DEFER with explicit rationale — no STAMP_BOUND-eligible consumer at this ship.
 #define _PARSE_OV_BITMAP_ROW_ml(name, legacy_field, dl, sec, metadata_flags, doc) \
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_ML_CFG_##name; }
 #define _PARSE_OV_BITMAP_ROW_risk(name, legacy_field, dl, sec, doc) \

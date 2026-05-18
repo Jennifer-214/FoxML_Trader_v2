@@ -11309,8 +11309,13 @@ e3_skip_load:;
                 /*gap_threshold=*/0.05,
                 /*expected_format_version=*/MODEL_FORMAT_VERSION,
                 /*expected_feature_registry_hash=*/current_hash);
-            check("v5.8.6: verifier reads engine_version from stamp body (matches ENGINE_VERSION_STRING)",
-                  vr1.valid == 1 && strcmp(vr1.engine_version, ENGINE_VERSION_STRING) == 0);
+            // v5.15.5.F.4d.1.B.3 — strncmp(..., 15) to match documented [16]-buffer truncation
+            // contract at ModelInference.hpp:1171. engine_version is for cross-major version
+            // check + display, not bit-identity verification. Wire body retains full string;
+            // parser truncates at 15 chars + null.
+            check("v5.8.6: verifier reads engine_version from stamp body (prefix matches ENGINE_VERSION_STRING)",
+                  vr1.valid == 1 && strncmp(vr1.engine_version, ENGINE_VERSION_STRING,
+                                             sizeof(vr1.engine_version) - 1) == 0);
 
             // 2. Mismatched registry hash → REJECT (drift catch fires).
             //    The mismatch is exactly what would happen if a model was
@@ -11425,8 +11430,11 @@ e3_skip_load:;
                           vr.valid == 1);
                     check("v5.8.8: bash-written feature_registry_hash parses correctly",
                           vr.feature_registry_hash == FEATURE_REGISTRY_HASH());
-                    check("v5.8.8: bash-written engine_version parses correctly",
-                          strcmp(vr.engine_version, ENGINE_VERSION_STRING) == 0);
+                    // v5.15.5.F.4d.1.B.3 — strncmp(..., 15) to match ModelInference.hpp:1171
+                    // [16]-buffer truncation contract (sister to v5.8.6 above).
+                    check("v5.8.8: bash-written engine_version parses correctly (prefix)",
+                          strncmp(vr.engine_version, ENGINE_VERSION_STRING,
+                                  sizeof(vr.engine_version) - 1) == 0);
                 } else {
                     check("v5.8.8: bash-signed stamp with new fields verifies via in-process", 0);
                     check("v5.8.8: bash-written feature_registry_hash parses correctly", 0);
@@ -26198,7 +26206,10 @@ e3_skip_load:;
             ModelStampResult handle = {};
             ControllerConfig<64> cfg = {};
             int drift_count = 0;
-            DRIFT_CHECK_FROM_DERIVED(failure_flags, handle, cfg, drift_count);
+            // v5.15.5.F.4d.1.B.3 Step 0.5a — macro signature extended with reason_buf + reason_cap
+            // per failure-attribution-buffer-pattern.md § Framework-extension shape. Pass nullptr
+            // + 0 to exercise nullable opt-in (this test verifies counts; not attribution UX).
+            DRIFT_CHECK_FROM_DERIVED(failure_flags, handle, cfg, drift_count, nullptr, 0);
             check("v5.15.5.F.4d.1.B.1: DRIFT_CHECK_FROM_DERIVED 0-row walk → failure_flags unset",
                   failure_flags == 0);
             check("v5.15.5.F.4d.1.B.1: DRIFT_CHECK_FROM_DERIVED 0-row walk → drift_count zero",

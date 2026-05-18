@@ -20,11 +20,17 @@
 // (boot-frozen + engine-wide + hot-path-tolerant + no compile-time elision benefit +
 //  cfg-domain-coherent — entry/exit gate mechanics).
 //
-// NOTE: barrier_gate_enabled is stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST (model-const
-// registry, not cfg-bound registry). Stamp emission reads from `inf->barrier_gate_enabled`
-// (StampInferenceCfgInputs struct field), populated by callers that read from cfg side.
-// Those populator sites migrate to BITMAP_IS_SET as part of this ship's normal cascade —
-// no special stamp-binding dispatch needed (that's .F.2 scope for ML-domain stamp-bound flags).
+// NOTE (v5.15.5.F.4d.1.B.3 Step 0.5d.a.0 — Meta-gap M1b first canonical reference): metadata_flags
+// column added 2026-05-18 (sister to FOREACH_ML_CFG_FLAG .B.2 migration at engine commit `de41ff2`)
+// per canonical-sister-extension-discipline.md § Sister-registry sig migration as cohort discipline.
+// BARRIER_GATE_ENABLED row gets STAMP_BOUND_CFG_DERIVED — stamp emission migrates to framework
+// walker (cfg_derived::populate_stamp_cfg_from_derived extended at Step 0.5d.a-d to walk
+// FOREACH_GATE_CFG_FLAG with metadata_flags filter); POST_CFG entry at StampBoundModelConstRegistry.hpp:283-284
+// (`inference_cfg_barrier_gate_enabled=`) deleted at Decision D mechanism 1 (closes Class 18 mirror
+// + Class 32 prefix asymmetry instance). Other 5 rows get 0 (no stamp-binding need at .B.3).
+// FOREACH_LIFECYCLE_CFG_FLAG + FOREACH_RISK_CFG_FLAG + FOREACH_OPS_CFG_FLAG stay 5-col per Meta-gap
+// M1b § Decision per sister: DEFER with explicit rationale — no STAMP_BOUND-eligible consumer at
+// this ship; future ship that needs the column adds migration as setup step in same commit.
 //======================================================================================================
 #ifndef GATE_CFG_FLAG_REGISTRY_HPP
 #define GATE_CFG_FLAG_REGISTRY_HPP
@@ -42,20 +48,25 @@
 // gate price, no-trade band suppression, cost-aware sizing gate, ML barrier gating,
 // param staleness gating).
 
-// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
-#define FOREACH_GATE_CFG_FLAG(X)                                                                                                                                                                       \
-    X(DEPTH_ENABLED,                depth_enabled,                "Order Book",            "Toggles",         "order book depth feed + book imbalance gate")                                            \
-    X(GATE_EMA_ENABLED,             gate_ema_enabled,             "EMA Enabled",           "EMA Gate",        "use EMA price for gate (vs rolling avg)")                                                \
-    X(NO_TRADE_BAND_ENABLED,        no_trade_band_enabled,        "No-Trade Band##bool",   "No-Trade Band",   "suppress entries when signal in no-trade band")                                          \
-    X(COST_GATE_ENABLED,            cost_gate_enabled,            "Cost Gate",             "FoxML",           "fee-aware sizing gate (require TP > round-trip cost)")                                   \
-    X(BARRIER_GATE_ENABLED,         barrier_gate_enabled,         "Barrier Gate",          "Barrier",         "ML 3-class barrier gate (P(peak)/P(stable) gating; stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST)") \
-    X(PARAM_STALENESS_GATE_ENABLED, param_staleness_gate_enabled, "Param Staleness Gate",  "Risk Management", "GATE_FLAG_STALENESS_ENABLED hot-path gate via slow-path rebuild")
+// Tuple: X(NAME, legacy_field, display_label, section, metadata_flags, doc)  [6-col v5.15.5.F.4d.1.B.3+]
+// metadata_flags column added at .B.3 Step 0.5d.a.0 per Meta-gap M1b cohort migration discipline;
+// sister to FOREACH_ML_CFG_FLAG .B.2 migration. Only BARRIER_GATE_ENABLED has STAMP_BOUND_CFG_DERIVED;
+// other 5 rows get 0 (no stamp-binding consumer at this ship).
+// CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED requires CfgFieldRegistry.hpp to be in scope at
+// CONSUMER X-macro expansion site (not at FOREACH_GATE_CFG_FLAG definition site — text-only here).
+#define FOREACH_GATE_CFG_FLAG(X)                                                                                                                                                                                                                                          \
+    X(DEPTH_ENABLED,                depth_enabled,                "Order Book",            "Toggles",         0,                                                "order book depth feed + book imbalance gate")                                                                \
+    X(GATE_EMA_ENABLED,             gate_ema_enabled,             "EMA Enabled",           "EMA Gate",        0,                                                "use EMA price for gate (vs rolling avg)")                                                                    \
+    X(NO_TRADE_BAND_ENABLED,        no_trade_band_enabled,        "No-Trade Band##bool",   "No-Trade Band",   0,                                                "suppress entries when signal in no-trade band")                                                              \
+    X(COST_GATE_ENABLED,            cost_gate_enabled,            "Cost Gate",             "FoxML",           0,                                                "fee-aware sizing gate (require TP > round-trip cost)")                                                       \
+    X(BARRIER_GATE_ENABLED,         barrier_gate_enabled,         "Barrier Gate",          "Barrier",         CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "ML 3-class barrier gate (P(peak)/P(stable) gating; stamp-bound via framework walker at .B.3+; was POST_CFG pre-.B.3)") \
+    X(PARAM_STALENESS_GATE_ENABLED, param_staleness_gate_enabled, "Param Staleness Gate",  "Risk Management", 0,                                                "GATE_FLAG_STALENESS_ENABLED hot-path gate via slow-path rebuild")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]
 //------------------------------------------------------------------------------------------------------
 enum GateCfgFlag {
-#define X_GEN_GATE_CFG_BIT(name, legacy_field, display_label, section, doc) GATE_CFG_##name,
+#define X_GEN_GATE_CFG_BIT(name, legacy_field, display_label, section, metadata_flags, doc) GATE_CFG_##name,
     FOREACH_GATE_CFG_FLAG(X_GEN_GATE_CFG_BIT)
     GATE_CFG_COUNT
 #undef X_GEN_GATE_CFG_BIT
@@ -67,7 +78,7 @@ static_assert(GATE_CFG_COUNT <= 8,
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED MASK_GATE_CFG_<NAME> CONSTANTS]
 //------------------------------------------------------------------------------------------------------
-#define X_GEN_GATE_CFG_MASK(name, legacy_field, display_label, section, doc) \
+#define X_GEN_GATE_CFG_MASK(name, legacy_field, display_label, section, metadata_flags, doc) \
     static constexpr uint8_t MASK_GATE_CFG_##name = (uint8_t)(1u << GATE_CFG_##name);
 FOREACH_GATE_CFG_FLAG(X_GEN_GATE_CFG_MASK)
 #undef X_GEN_GATE_CFG_MASK

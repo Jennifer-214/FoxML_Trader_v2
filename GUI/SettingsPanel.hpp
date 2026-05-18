@@ -183,7 +183,7 @@ struct GlobalCfgRenderTable {
     // cfg_render_and_persist<T> wrapper (render + save + per-edit file write).
     using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&, const char*);
 
-    #define X_GEN_GLOBAL_RENDER_FN(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+    #define X_GEN_GLOBAL_RENDER_FN(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                      applies_to_strategy, applies_to_op_mode, \
                                      applies_to_regime, applies_to_risk, lives_in_struct) \
         static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc, const char* cfg_path) { \
@@ -192,7 +192,7 @@ struct GlobalCfgRenderTable {
     FOREACH_GLOBAL_CFG_FIELD(X_GEN_GLOBAL_RENDER_FN)
     #undef X_GEN_GLOBAL_RENDER_FN
 
-    #define X_GEN_GLOBAL_RENDER_PTR(KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
+    #define X_GEN_GLOBAL_RENDER_PTR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
         &GlobalCfgRenderTable<F>::render_##name,
     static constexpr RenderFn fns[FIELD_IDX_GLOBAL_END] = {
         FOREACH_GLOBAL_CFG_FIELD(X_GEN_GLOBAL_RENDER_PTR)
@@ -494,19 +494,24 @@ static const CfgFieldDef field_defs[] = {
     // See CoreFrameworks/{Lifecycle,Gate,Risk,Ops}CfgFlagRegistry.hpp +
     // ML_Headers/MlCfgFlagRegistry.hpp for full lists.
     // v5.15.5.F.4d.1.B.2 — FOREACH_ML_CFG_FLAG migrated to 6-arg sig (added metadata_flags
-    // column for STAMP_BOUND_CFG_DERIVED cohort flagging). Other 4 FOREACH_*_CFG_FLAG
-    // registries still 5-arg; need parallel X macros. Inline-split to handle the sig
-    // asymmetry until/unless all 5 registries migrate to 6-arg uniformly.
+    // column for STAMP_BOUND_CFG_DERIVED cohort flagging).
+    // v5.15.5.F.4d.1.B.3 Step 0.5d.a.0 — FOREACH_GATE_CFG_FLAG ALSO migrated to 6-arg sig
+    // per Meta-gap M1b cohort migration. Remaining 3 registries (LIFECYCLE/RISK/OPS) stay
+    // 5-arg per Meta-gap M1b § DEFER with explicit rationale — no STAMP_BOUND-eligible
+    // consumer at this ship; future ships migrate as setup steps when consumer demand surfaces.
     #define X_ML(name, legacy_field, display_label, section, metadata_flags, doc) \
+        {#legacy_field, display_label, section, CFG_BOOL, NULL, doc},
+    #define X_GATE(name, legacy_field, display_label, section, metadata_flags, doc) \
         {#legacy_field, display_label, section, CFG_BOOL, NULL, doc},
     #define X(name, legacy_field, display_label, section, doc) \
         {#legacy_field, display_label, section, CFG_BOOL, NULL, doc},
     FOREACH_LIFECYCLE_CFG_FLAG(X)
-    FOREACH_GATE_CFG_FLAG(X)
+    FOREACH_GATE_CFG_FLAG(X_GATE)
     FOREACH_ML_CFG_FLAG(X_ML)
     FOREACH_RISK_CFG_FLAG(X)
     FOREACH_OPS_CFG_FLAG(X)
     #undef X
+    #undef X_GATE
     #undef X_ML
 
     //==========================================================================

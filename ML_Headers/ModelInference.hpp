@@ -1168,7 +1168,17 @@ struct ModelStampResult {
     double   generalization_gap;
     double   gap_threshold;
     uint64_t feature_registry_hash;  // v5.8.1a: 0 if absent (old stamps)
-    char     engine_version[16];     // v5.8.6: SemVer string at training time, "" if absent
+    char     engine_version[16];     // v5.8.6: SemVer string at training time, "" if absent.
+                                     // v5.15.5.F.4d.1.B.3 — INTENTIONAL TRUNCATION at 15 chars +
+                                     // null. The engine_version field is used for cross-major
+                                     // version check (first integer digit; ModelInference.hpp:1428-1429)
+                                     // + operator-facing display ("unknown" if absent). Full
+                                     // version string preservation is NOT a design requirement.
+                                     // Wire body retains the full string (HMAC chain unaffected);
+                                     // parser truncation is per-design. Tests use strncmp(..., 15)
+                                     // to match this contract (see v5.8.6 + v5.8.8 sections).
+                                     // Catches: silent str compare drift between truncated parsed
+                                     // value vs full ENGINE_VERSION_STRING macro (caught at .B.3).
     int      stamp_format_version;   // v5.9.0: schema version of the stamp body itself.
                                      //         0 if absent (v5.8.x and older).
                                      //         1 = current (v5.9.0+).

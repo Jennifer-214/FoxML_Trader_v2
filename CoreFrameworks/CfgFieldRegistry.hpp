@@ -212,12 +212,20 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
               "CfgFieldDescriptor::MetadataFlag bitmap overflowed uint16_t — upgrade to uint32_t");
 
 //======================================================================================================
-// [FOREACH_*_CFG_FIELD — 12-col Option D tuple]
+// [FOREACH_*_CFG_FIELD — 13-col tuple (per-core + global uniform at v5.15.5.F.4d.1.B.3+)]
 //======================================================================================================
-// Tuple (12 args):
-//   X(KIND_TOKEN, name, label, section, meta, payload, tooltip,
+// Tuple (13 args; STORAGE_T leading column added to GLOBAL at .B.3 Step 0.5b.A per
+// Decision A (a) Path α cascade closing global↔per-core column asymmetry):
+//   X(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip,
 //     applies_to_strategy_cat, applies_to_op_mode_cat,
 //     applies_to_regime_cat, applies_to_risk_cat, lives_in_struct)
+//
+// STORAGE_T is the C++ destination type stored on ControllerConfig<F> (global rows) or
+// PerCoreCfg<F> (per-core rows). KIND_TOKEN is GUI metadata only (H13/H14: Kind doesn't
+// drive storage; STORAGE_T does). Adding a new global field = 1 row in
+// FOREACH_GLOBAL_CFG_FIELD with explicit STORAGE_T + KIND_TOKEN; auto-gen mechanism
+// in ControllerConfig<F> at Step 0.5b.B will replace 48 manual cfg field decls
+// uniformly per H17 STRONG codification.
 //
 // payload macro: DBL(default, min, max) for KIND_DOUBLE / KIND_DOUBLE_PCT
 //                INT(default, min, max) for KIND_INT
@@ -254,144 +262,144 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //======================================================================================================
 #define FOREACH_GLOBAL_CFG_FIELD(X)                                                                                                                                                                                  \
     /* === System / Operational (5) === */                                                                                                                                                                            \
-    X(KIND_INT,        num_execution_cores,         "Execution Cores",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
+    X(uint16_t,             KIND_INT,        num_execution_cores,         "Execution Cores",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
         "Number of per-core execution shards (per-core engine_arch). Clamp [1, 16].",                                                                                                                               \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       require_mlockall,            "Require mlockall",     "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
+    X(int,                  KIND_BOOL,       require_mlockall,            "Require mlockall",     "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
         "Pin engine memory at boot via mlockall(2) — prevents swap-out under memory pressure. Requires CAP_IPC_LOCK or root. Boot-only; runtime changes ignored.",                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       init_arena_use_hugepages,    "Use Hugepages",        "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
+    X(int,                  KIND_BOOL,       init_arena_use_hugepages,    "Use Hugepages",        "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
         "Initialize per-core arenas with 2MB hugepages (MAP_HUGETLB). Reduces TLB pressure on hot path. Requires /sys/kernel/mm/hugepages configured. Boot-only.",                                                   \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       sharded_force_synthetic,     "Force Synthetic Ticks","Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
+    X(uint8_t,              KIND_BOOL,       sharded_force_synthetic,     "Force Synthetic Ticks","Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
         "Debug/test toggle — force sharded engine to use synthetic tick generator instead of real Binance WS feed. Used for offline reproducibility tests. Boot-only.",                                              \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        slow_path_pin_offset,        "Slow-Path Pin Offset", "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(-1, -1, 256),                               \
+    X(int,                  KIND_INT,        slow_path_pin_offset,        "Slow-Path Pin Offset", "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(-1, -1, 256),                               \
         "Slow-path CPU pin offset. -1 = disabled, 0 = auto, >0 = explicit CPU offset.",                                                                                                                             \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Engine timing / Slow-path discipline (5) === */                                                                                                                                                            \
-    X(KIND_INT,        poll_interval,               "Poll Interval",        "Engine Timing",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 1, 1000000),                                                              \
+    X(uint32_t,             KIND_INT,        poll_interval,               "Poll Interval",        "Engine Timing",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 1, 1000000),                                                              \
         "Ticks between slow-path runs (regression, adaptation, sample collection)\ndefault 100. ML training note: with poll_interval << forward_ticks,\nconsecutive samples have heavily-overlapping forward windows → label\nautocorrelation. For independent samples set poll_interval = forward_ticks.",                                                                                                                                                                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        slow_path_max_secs,          "Slow-Path Max Secs",   "Engine Timing",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 3600),                                                                  \
+    X(uint32_t,             KIND_INT,        slow_path_max_secs,          "Slow-Path Max Secs",   "Engine Timing",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 3600),                                                                  \
         "Maximum wall-clock seconds per slow-path cycle. If exceeded, slow path emits warning + caps cycle. Default 60s; clamp [1, 3600].",                                                                          \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        warmup_ticks,                "Warmup Ticks",         "Engine Timing",   CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 100000000),                          \
+    X(uint32_t,             KIND_INT,        warmup_ticks,                "Warmup Ticks",         "Engine Timing",   CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 100000000),                          \
         "Minimum raw ticks before trading starts. Counts every tick.\nUse this when you want a longer total-tick warmup. No upper bound.",                                                                          \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        min_warmup_samples,          "Min Rolling Samples",  "Engine Timing",   CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(64, 0, 128),                                \
+    X(uint32_t,             KIND_INT,        min_warmup_samples,          "Min Rolling Samples",  "Engine Timing",   CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(64, 0, 128),                                \
         "Min rolling-stats samples before trading. CAPS at 128 (rolling window\nsize). Values >128 are clamped at config load with a warning. Use\nwarmup_ticks for longer raw-tick warmup.",                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        lazy_rebuild_force_period_us,"Lazy Rebuild Force Period (us)","Performance",CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000000, 0, 600000000),                                                    \
+    X(uint64_t,             KIND_INT,        lazy_rebuild_force_period_us,"Lazy Rebuild Force Period (us)","Performance",CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000000, 0, 600000000),                                                    \
         "Force slow-path rebuild every N microseconds even if no parameter inputs changed. Defensive against stale state. Default 1s (1M us).",                                                                     \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Hot-path discipline (1) === */                                                                                                                                                                             \
-    X(KIND_INT,        param_max_age_ticks,         "Param Max Age Ticks",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(100000, 0, 1000000000),                                                        \
+    X(uint64_t,             KIND_INT,        param_max_age_ticks,         "Param Max Age Ticks",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(100000, 0, 1000000000),                                                        \
         "Hot-path parameter staleness gate — refuse trades if engine.cfg parameters last touched > N ticks ago. 0 = disabled.",                                                                                     \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Risk / Position limits — engine-wide (3) === */                                                                                                                                                            \
-    X(KIND_INT,        max_positions,               "Max Pos",              "Risk Management", CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                                                    \
+    X(uint32_t,             KIND_INT,        max_positions,               "Max Pos",              "Risk Management", CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                                                    \
         nullptr,                                                                                                                                                                                                    \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        recovery_delay_secs,         "Recovery Delay",       "Risk Management", CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 0, 86400),                                                                 \
+    X(int,                  KIND_INT,        recovery_delay_secs,         "Recovery Delay",       "Risk Management", CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 0, 86400),                                                                 \
         "Wait this many seconds after flatten event before resuming trades. Prevents tilted re-entry on dead WS recovery.",                                                                                          \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        ws_dead_time_flatten_threshold_secs,"WS Dead-Time Flatten Threshold","Risk Management",CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 3600),                                                   \
+    X(int,                  KIND_INT,        ws_dead_time_flatten_threshold_secs,"WS Dead-Time Flatten Threshold","Risk Management",CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 3600),                                                   \
         "OMS_FlattenAll triggers if WS dead for >N seconds (paired with ws_dead_time_flatten_enabled bitmap flag).",                                                                                                 \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Recording (3) === */                                                                                                                                                                                       \
-    X(KIND_BOOL,       record_ticks,                "Record Ticks",         "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
+    X(int,                  KIND_BOOL,       record_ticks,                "Record Ticks",         "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         "Record raw ticks to CSV for backtesting/ML training\nOutput: data/{SYMBOL}/YYYY-MM-DD.csv\n~30-70MB/day for BTCUSDT",                                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       record_depth,                "Record Depth",         "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
+    X(int,                  KIND_BOOL,       record_depth,                "Record Depth",         "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         "Record @depth5@100ms snapshots to CSV (top-of-book + lastUpdateId)\nOutput: data/{SYMBOL}/depth/YYYY-MM-DD.csv\nRequires depth_enabled=1. Daily rotation, auto-pruned by record_max_days.\nGap markers (# GAP) on backward last_update_id, wallclock >2s, or disconnect.\n~50 MB/day for BTCUSDT. Required for future backtest replay of book state.",                                                                                                                                                                                                                                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        record_max_days,             "Record Max Days",      "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 1, 365),                                                                   \
+    X(uint32_t,             KIND_INT,        record_max_days,             "Record Max Days",      "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 1, 365),                                                                   \
         "Auto-delete tick + depth CSVs older than this many days. 30 = ~1-2GB cap on disk usage.",                                                                                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Training (9) === */                                                                                                                                                                                        \
-    X(KIND_INT,        xgb_min_child_weight,        "Min Child Weight",     "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 50),                                  \
+    X(int,                  KIND_INT,        xgb_min_child_weight,        "Min Child Weight",     "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 50),                                  \
         "Min sum-of-weights per leaf (1-50). Higher = more regularization.\nDefault 5. Match deployed model's training value or expect WARN.",                                                                      \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        xgb_seed,                    "Seed",                 "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(42, 0, 2147483647),                         \
+    X(int,                  KIND_INT,        xgb_seed,                    "Seed",                 "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(42, 0, 2147483647),                         \
         "RNG seed for reproducible runs. Default 42. Match deployed model's\ntraining seed or expect WARN.",                                                                                                        \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        xgb_train_nthread,           "Train Threads",        "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+    X(int,                  KIND_INT,        xgb_train_nthread,           "Train Threads",        "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
         "XGBoost training thread count (OpenMP). Default 4; clamp [1, 256].",                                                                                                                                       \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        xgb_eval_nthread,            "Eval Threads",         "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+    X(int,                  KIND_INT,        xgb_eval_nthread,            "Eval Threads",         "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
         "XGBoost evaluation thread count (OpenMP). Default 4; clamp [1, 256].",                                                                                                                                     \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        csv_load_workers,            "CSV Load Workers",     "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+    X(int,                  KIND_INT,        csv_load_workers,            "CSV Load Workers",     "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
         "Worker thread count for parallel CSV tick load during training. Default 4.",                                                                                                                               \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        multi_horizon_max_threads,   "Multi-Horizon Threads","Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+    X(int,                  KIND_INT,        multi_horizon_max_threads,   "Multi-Horizon Threads","Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
         "Max parallel threads for multi-horizon training. Default 4.",                                                                                                                                              \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        feature_collect_max_gb,      "Feature Collect Max GB","Training",       CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
+    X(int,                  KIND_INT,        feature_collect_max_gb,      "Feature Collect Max GB","Training",       CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
         "Max GB of RAM for feature collection during training. OOM-kill protection. Default 8.",                                                                                                                    \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        wf_split_max_gb,             "Walk-Fwd Split Max GB","Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
+    X(int,                  KIND_INT,        wf_split_max_gb,             "Walk-Fwd Split Max GB","Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
         "Max GB of RAM for walk-forward split during training. Default 8.",                                                                                                                                         \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        held_out_max_gb,             "Held-Out Max GB",      "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
+    X(int,                  KIND_INT,        held_out_max_gb,             "Held-Out Max GB",      "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
         "Max GB of RAM for held-out validation set load. Default 8.",                                                                                                                                               \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Training discipline / Held-out (3) === */                                                                                                                                                                  \
-    X(KIND_INT,        csv_sort_check_mode,         "CSV Sort Check Mode",  "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 0, 2),                                   \
+    X(int,                  KIND_INT,        csv_sort_check_mode,         "CSV Sort Check Mode",  "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 0, 2),                                   \
         "CSV tick-sort validation: 0=STRICT (refuse load on unsort), 1=WARN (log + proceed; default), 2=DISABLED. Ships as KIND_INT pending TECH_DEBT-068.",                                                         \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       auto_stamp_on_held_out,      "Auto-Stamp on Held-Out","ML",             CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(1),                                                                          \
+    X(int,                  KIND_BOOL,       auto_stamp_on_held_out,      "Auto-Stamp on Held-Out","ML",             CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(1),                                                                          \
         "v5.8.10 — suite Run Full Validation auto-signs each generated stamp on held-out pass. Default 1 (auto-stamp); set 0 only for manual tools/stamp_model.sh workflow.",                                        \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        held_out_gate_strict,        "Held-Out Gate Strict", "Drift Acknowledgments",CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, -1, 1),                                                                \
+    X(int,                  KIND_INT,        held_out_gate_strict,        "Held-Out Gate Strict", "Drift Acknowledgments",CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, -1, 1),                                                                \
         "Held-out validation gate: -1=skip, 0=warn-only (default), 1=refuse load. Tri-state KIND_INT pending categorical applicability INT_ENUM upgrade.",                                                          \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML inference backend — engine-wide (3) === */                                                                                                                                                              \
-    X(KIND_INT,        ml_backend,                  "ML Backend",           "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                   \
+    X(int,                  KIND_INT,        ml_backend,                  "ML Backend",           "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                   \
         "ML inference backend selection. Ships as KIND_INT pending TECH_DEBT-068 ML enum registry; promote to KIND_INT_ENUM with XGBOOST/ONNX/AOT labels after.",                                                    \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        regime_model_backend,        "Regime Model Backend", "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                   \
+    X(int,                  KIND_INT,        regime_model_backend,        "Regime Model Backend", "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                   \
         "Regime detection model backend. Ships as KIND_INT pending TECH_DEBT-068.",                                                                                                                                 \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       use_aot_inference,           "Use AOT Inference",    "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
+    X(int,                  KIND_BOOL,       use_aot_inference,           "Use AOT Inference",    "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
         "Use ahead-of-time-compiled inference path instead of XGBoost runtime. Faster per-tick (~50ns vs ~500ns) but requires AOT model build via tools/aot_compile. Boot-only.",                                    \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Notifications (2) === */                                                                                                                                                                                   \
-    X(KIND_INT,        notify_backend,              "Notify Backend",       "Notifications",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                                                      \
+    X(int,                  KIND_INT,        notify_backend,              "Notify Backend",       "Notifications",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                                                      \
         "Notification backend: 0=Discord, 1=Telegram, 2=Slack (per notify_command template). Ships as KIND_INT pending TECH_DEBT-068.",                                                                              \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        notify_cooldown_secs,        "Notify Cooldown Secs", "Notifications",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 0, 86400),                                                                 \
+    X(uint32_t,             KIND_INT,        notify_cooldown_secs,        "Notify Cooldown Secs", "Notifications",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 0, 86400),                                                                 \
         "Min seconds between notifications (debounce). 0 = no cooldown.",                                                                                                                                           \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Health Logging (3) === */                                                                                                                                                                                  \
-    X(KIND_INT,        health_log_level,            "Health Log Level",     "Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 0, 4),                                                                      \
+    X(int,                  KIND_INT,        health_log_level,            "Health Log Level",     "Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 0, 4),                                                                      \
         "Health log severity: 0=DEBUG, 1=INFO (default), 2=WARN, 3=ERROR. Ships as KIND_INT pending TECH_DEBT-068.",                                                                                                 \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        health_log_max_bytes,        "Health Log Max Bytes", "Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(1048576, 1024, 1073741824),                                                    \
+    X(uint64_t,             KIND_INT,        health_log_max_bytes,        "Health Log Max Bytes", "Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(1048576, 1024, 1073741824),                                                    \
         "Health log file size limit (rotates at this size). Default 1MB; clamp [1KB, 1GB].",                                                                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        health_log_keep_count,       "Health Log Keep Count","Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 1000),                                                                   \
+    X(int,                  KIND_INT,        health_log_keep_count,       "Health Log Keep Count","Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 1000),                                                                   \
         "Number of rotated health log files to keep before deletion.",                                                                                                                                              \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Reconcile (2) === */                                                                                                                                                                                       \
-    X(KIND_INT,        reconcile_interval_sec,      "Reconcile Interval",   "Reconcile",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 86400),                                                                 \
+    X(int,                  KIND_INT,        reconcile_interval_sec,      "Reconcile Interval",   "Reconcile",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 86400),                                                                 \
         "Seconds between reconciliation passes (paper-position vs broker-position drift check).",                                                                                                                   \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        reconcile_mode,              "Reconcile Mode",       "Reconcile",       CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2),                                \
+    X(uint8_t,              KIND_INT,        reconcile_mode,              "Reconcile Mode",       "Reconcile",       CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2),                                \
         "Reconcile mode: 0=STRICT, 1=WARN (default), 2=AUTO_SYNC. Accepts string ('strict'/'warn'/'auto_sync') or int. HAS_SIDE_EFFECT — manual parser handles string + sets cfg_keys_explicit + mirrors reconcile_dry_run.",                                                                                                                                                                                                                                                                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Engine-wide mode (4) === */                                                                                                                                                                                \
-    X(KIND_INT,        engine_mode,                 "Engine Mode",          "Operational",     CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::IS_BOOT_ONLY, INT(1, 0, 2),                                 \
+    X(uint8_t,              KIND_INT,        engine_mode,                 "Engine Mode",          "Operational",     CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::IS_BOOT_ONLY, INT(1, 0, 2),                                 \
         "Engine mode: 0=SINGLE_CORE (legacy), 1=SHARDED (default v5.0+). Accepts string ('sharded'/'single_core') or int. HAS_SIDE_EFFECT — manual parser handles string form; registry walker skips.",            \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        engine_arch,                 "Engine Arch",          "Operational",     CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::IS_BOOT_ONLY, INT(1, 0, 1),                                 \
+    X(uint8_t,              KIND_INT,        engine_arch,                 "Engine Arch",          "Operational",     CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::IS_BOOT_ONLY, INT(1, 0, 1),                                 \
         "Slow-path threading model: 0=CENTRALIZED, 1=PER_CORE_SLOW (default). Accepts string ('per_core_slow'/'centralized') or int. HAS_SIDE_EFFECT — manual parser handles string form.",                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        model_verify_strict,         "Model Verify Strict",  "Drift Acknowledgments",CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(-1, -1, 1),                         \
+    X(int,                  KIND_INT,        model_verify_strict,         "Model Verify Strict",  "Drift Acknowledgments",CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(-1, -1, 1),                         \
         "Model verification strictness: -1=auto (strict in live, lenient in paper; default), 0=lenient, 1=strict. Tri-state. HAS_SIDE_EFFECT — manual parser sets cfg_keys_explicit bit for NormalizeForMode flip rule.",                                                                                                                                                                                                                                                                                                       \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        trading_mode,                "Trading Mode",         "Operational",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::SAFETY_CRITICAL | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
+    X(uint8_t,              KIND_INT,        trading_mode,                "Trading Mode",         "Operational",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::SAFETY_CRITICAL | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
         "Trading mode: 0=PAPER (default; safe), 1=PROD_SHADOW (live wired but bracketed), 2=LIVE (real money). Accepts string ('paper'/'shadow'/'live') or int. LIVE flips model_verify_strict 0->1 + reconcile_mode WARN->STRICT. HAS_SIDE_EFFECT — manual parser handles string form + NormalizeForMode triggers. SAFETY_CRITICAL.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Validation (1; v5.15.5.F.4d.1.B.2 Step 2 partial — gap_acceptable_threshold migration) === */ \
@@ -400,21 +408,21 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
      * Registry row provides descriptor + STAMP_BOUND_CFG_DERIVED bit (framework walks via FOREACH_GLOBAL_CFG_FIELD filter) + auto-registers GUI render \
      * (manual GUI entry at GUI/SettingsPanel.hpp:414 deleted in same edit; registry-driven render covers). HAS_SIDE_EFFECT marks "manual parser handles" → \
      * registry walker skips auto-parse via tt::cfg_parse_field. */ \
-    X(KIND_DOUBLE,     gap_acceptable_threshold,    "Gap Threshold",        "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
+    X(FPN<F>,               KIND_DOUBLE,     gap_acceptable_threshold,    "Gap Threshold",        "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
         "Max acceptable |WF mean - held_out| gap for model 'OK' verdict. Default 0.05 = 5%. Stamp-bound (training-time gap value captured at stamp emit). HAS_SIDE_EFFECT — manual parser at ControllerConfig.hpp:2554 handles FPN<F> storage; registry walker skips auto-parse.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Drift Acknowledgments (3) === */                                                                                                                                                                            \
-    X(KIND_BOOL,       acknowledge_hardcoded_strategy_in_live, "Ack Hardcoded Strategy in Live", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),             \
+    X(int,                  KIND_BOOL,       acknowledge_hardcoded_strategy_in_live, "Ack Hardcoded Strategy in Live", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),             \
         "Explicit acknowledgment required to run hardcoded strategy (no per-core override) in live mode. Safety gate; operator must opt-in.",                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       acknowledge_hot_swap_with_open_positions, "Ack Hot Swap w/ Open Positions", "Drift Acknowledgments", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                              \
+    X(int,                  KIND_BOOL,       acknowledge_hot_swap_with_open_positions, "Ack Hot Swap w/ Open Positions", "Drift Acknowledgments", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                              \
         "Explicit acknowledgment to hot-swap strategy/model while positions are open. Without this, hot-swap is DEFERRED until position closes (v5.10.0c default).",                                                 \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       allow_cross_major_engine,    "Allow Cross-Major Engine", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                              \
+    X(int,                  KIND_BOOL,       allow_cross_major_engine,    "Allow Cross-Major Engine", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                              \
         "Allow engine to load when model_path is from a different major version. v5.9.2b — refuse by default; explicit override to enable cross-major migration.",                                                   \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Runtime GUI toggle (1) === */                                                                                                                                                                              \
-    X(KIND_BOOL,       danger_enabled,              "Enabled",              "Danger Gradient", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
+    X(int,                  KIND_BOOL,       danger_enabled,              "Enabled",              "Danger Gradient", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         nullptr,                                                                                                                                                                                                    \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
@@ -694,6 +702,27 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     STORAGE_T name;
 
 //======================================================================================================
+// [EMIT_GLOBAL_CFG_STRUCT_FIELD — payload macro for global cfg field struct generation (v5.15.5.F.4d.1.B.3+)]
+//======================================================================================================
+// Sister to EMIT_PER_CORE_CFG_STRUCT_FIELD; landed at .B.3 Step 0.5b.A Path α cascade closing the
+// global↔per-core column asymmetry. ControllerConfig<F>'s 48 manual global cfg field decls become
+// FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) at .B.3 Step 0.5b.B (this ship's follow-up
+// sub-step deletes the 48 manual decls atomically with the auto-gen invocation).
+//
+// At .B.3 Step 0.5b.A landing: macro DEFINED but NOT YET INVOKED. Step 0.5b.B invokes inside
+// ControllerConfig<F> body + deletes 48 manual decls. Per Meta-gap M1b cohort migration —
+// the 2-step split preserves clean rollback boundaries.
+//
+// H17 closure note: at .B.3 Step 0.5b.B, FOREACH_GLOBAL_CFG_FIELD becomes the SINGLE source of
+// truth for global cfg field declarations (matches H17 STRONG codification at per-core surface;
+// promotes H17 to HARD at global surface per CLAUDE.md going-forward roadmap).
+//======================================================================================================
+#define EMIT_GLOBAL_CFG_STRUCT_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                       applies_to_strategy_cat, applies_to_op_mode_cat, \
+                                       applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    STORAGE_T name;
+
+//======================================================================================================
 // [FOREACH_MANUAL_PER_CORE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]
 //======================================================================================================
 // PURPOSE: documented exemptions for per-core fields that can't fit
@@ -889,7 +918,7 @@ inline constexpr size_t kPerCoreCfgMaxPaddingBytes        = kPerCoreCfgFieldCoun
 // [FIELD_IDX enums — per-registry auto-generated]
 //======================================================================================================
 // Drives g_*_cfg_field_descriptors[FIELD_IDX_*_<name>] direct access at compile time.
-#define X_GEN_GLOBAL_FIELD_IDX(KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+#define X_GEN_GLOBAL_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     FIELD_IDX_GLOBAL_##name,
 #define X_GEN_PER_CORE_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     FIELD_IDX_PER_CORE_##name,
@@ -912,7 +941,7 @@ enum CfgPerCoreFieldIdx : uint16_t {
 //======================================================================================================
 // Single source of truth for descriptor data; consumers index via FIELD_IDX_GLOBAL_<name>
 // or FIELD_IDX_PER_CORE_<name>.
-#define X_GEN_DESCRIPTOR_GLOBAL(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+#define X_GEN_DESCRIPTOR_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     CfgFieldDescriptor{                                                                                  \
         /* kind            */ CfgFieldDescriptor::KIND_TOKEN,                                            \
         /* lives_in_struct */ static_cast<uint8_t>(lives_in_struct),                                     \

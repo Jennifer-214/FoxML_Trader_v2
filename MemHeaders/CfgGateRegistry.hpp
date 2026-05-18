@@ -240,7 +240,7 @@ namespace cfg_derived {
         FOREACH_PER_CORE_CFG_FIELD(X_INFERENCE_CFG_POPULATE_PER_CORE)
         #undef X_INFERENCE_CFG_POPULATE_PER_CORE
 
-        #define X_INFERENCE_CFG_POPULATE_GLOBAL(KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+        #define X_INFERENCE_CFG_POPULATE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
                 const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/false, cfg); \
@@ -275,7 +275,7 @@ namespace cfg_derived {
         FOREACH_PER_CORE_CFG_FIELD(X_STAMP_CFG_POPULATE_PER_CORE)
         #undef X_STAMP_CFG_POPULATE_PER_CORE
 
-        #define X_STAMP_CFG_POPULATE_GLOBAL(KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+        #define X_STAMP_CFG_POPULATE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
                 const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/false, cfg); \
@@ -318,9 +318,17 @@ namespace cfg_derived {
                                           uint64_t failure_mask,
                                           const HandleT& handle,
                                           const ControllerConfig<F>& cfg,
-                                          int& drift_count) {
+                                          int& drift_count,
+                                          char* reason_buf,
+                                          size_t reason_cap) {
         (void)failure_flags; (void)stamp_has_inference_cfg; (void)failure_mask;
         (void)handle; (void)cfg; (void)drift_count;  // 0-row walk at .B.1
+        (void)reason_buf; (void)reason_cap;          // first-failure-wins; nullable opt-in
+
+        // v5.15.5.F.4d.1.B.3 Step 0.5a — first-failure-wins attribution per
+        // failure-attribution-buffer-pattern.md. Each X-macro variant writes
+        // attribution into caller-allocated reason_buf ONLY IF buf empty + trigger fires.
+        // Caller passes nullptr to opt out (no snprintf overhead).
 
         #define X_DRIFT_CHECK_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
@@ -330,11 +338,14 @@ namespace cfg_derived {
                 const bool _trigger = _gate & _drifted; \
                 failure_flags |= ((uint64_t)_trigger * failure_mask); \
                 drift_count += (int)_trigger; \
+                if (_trigger && reason_buf && reason_buf[0] == '\0') { \
+                    tt::cfg_drift_format_reason(reason_buf, reason_cap, #name, handle.name, cfg.name); \
+                } \
             }
         FOREACH_PER_CORE_CFG_FIELD(X_DRIFT_CHECK_PER_CORE)
         #undef X_DRIFT_CHECK_PER_CORE
 
-        #define X_DRIFT_CHECK_GLOBAL(KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+        #define X_DRIFT_CHECK_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
                 const bool _gate = cfg_gate::lookup_drift(_idx, /*is_per_core*/false, cfg, stamp_has_inference_cfg); \
@@ -342,6 +353,9 @@ namespace cfg_derived {
                 const bool _trigger = _gate & _drifted; \
                 failure_flags |= ((uint64_t)_trigger * failure_mask); \
                 drift_count += (int)_trigger; \
+                if (_trigger && reason_buf && reason_buf[0] == '\0') { \
+                    tt::cfg_drift_format_reason(reason_buf, reason_cap, #name, handle.name, cfg.name); \
+                } \
             }
         FOREACH_GLOBAL_CFG_FIELD(X_DRIFT_CHECK_GLOBAL)
         #undef X_DRIFT_CHECK_GLOBAL
@@ -349,6 +363,7 @@ namespace cfg_derived {
         // v5.15.5.F.4d.1.B.2 Step 0.5b — drift check BITMAP_BIT rows from FOREACH_ML_CFG_FLAG.
         // handle.<legacy_field> stores recorded stamp value (int 0 or 1 per legacy emit);
         // current cfg bit value via BITMAP_IS_SET; mismatch = drift. Branchless mask-select per H20.
+        // v5.15.5.F.4d.1.B.3 Step 0.5a — first-failure-wins attribution snprintf added.
         #define X_DRIFT_CHECK_ML_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
             if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 const int _bit_val = BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_##NAME) ? 1 : 0; \
@@ -356,6 +371,9 @@ namespace cfg_derived {
                 const bool _trigger = stamp_has_inference_cfg & _drifted; \
                 failure_flags |= ((uint64_t)_trigger * failure_mask); \
                 drift_count += (int)_trigger; \
+                if (_trigger && reason_buf && reason_buf[0] == '\0') { \
+                    tt::cfg_drift_format_reason(reason_buf, reason_cap, #legacy_field, handle.legacy_field, _bit_val); \
+                } \
             }
         FOREACH_ML_CFG_FLAG(X_DRIFT_CHECK_ML_CFG_FLAG)
         #undef X_DRIFT_CHECK_ML_CFG_FLAG
@@ -379,14 +397,21 @@ namespace cfg_derived {
 // in scope per MemHeaders/FailureModeRegistry.hpp). The macro wrapper extracts both + calls
 // template fn. Per CfgDriftCheckRegistry.hpp:104, INFERENCE_CFG drift category maps to
 // FAILURE_MASK_cfg_binding_drift (not _cfg_inference_drift; that symbol doesn't exist).
-#define DRIFT_CHECK_FROM_DERIVED(failure_flags, handle, cfg, drift_count_ref) \
+//
+// v5.15.5.F.4d.1.B.3 Step 0.5a — reason_buf + reason_cap args added per
+// failure-attribution-buffer-pattern.md § Framework-extension shape (Stage 3 first canonical).
+// Caller passes ModelStampResult.reason + sizeof(.reason) for first-drift attribution;
+// pass nullptr to opt out (no snprintf overhead).
+#define DRIFT_CHECK_FROM_DERIVED(failure_flags, handle, cfg, drift_count_ref, reason_buf, reason_cap) \
     cfg_derived::drift_check_from_derived( \
         (failure_flags), \
         STAMP_HAS((handle), inference_cfg), \
         FAILURE_MASK_cfg_binding_drift, \
         (handle), \
         (cfg), \
-        (drift_count_ref))
+        (drift_count_ref), \
+        (reason_buf), \
+        (reason_cap))
 
 //======================================================================================================
 // [Cross-references]
