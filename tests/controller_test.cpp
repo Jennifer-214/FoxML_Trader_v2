@@ -4054,8 +4054,12 @@ int main() {
         // (winsor_pct_low + winsor_pct_high) → 12 total. Assert >= 12 so
         // future additions don't break this test (use a stricter == check
         // in the v5.14.1.D-specific tests below).
-        check("v5.14.1.B.3+D registry: FOREACH_STAMP_BOUND_CFG_COUNT >= 12 (10 + 2 winsor)",
-              FOREACH_STAMP_BOUND_CFG_COUNT >= 12);
+        // v5.15.5.F.4d.1.B.3 Step 1 — migrated from FOREACH_STAMP_BOUND_CFG_COUNT (legacy registry
+        // deleted at Step 2) to dual-mask popcount sum via cfg-derived consumer framework.
+        // STAMP_BOUND_CFG_DERIVED bit on master per-core + global registries replaces legacy walker.
+        check("v5.14.1.B.3+D registry: cohort >= 12 (10 + 2 winsor); via dual-mask popcount",
+              (cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask) +
+               cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask)) >= 12);
     }
     {
         // Test 2 — round-trip: write stamp with all 10 fields populated,
@@ -4890,8 +4894,9 @@ int main() {
     }
     {
         // Test 3 — Registry count post-.E (was 12 post-D, now 13)
-        check("v5.14.1.E registry: FOREACH_STAMP_BOUND_CFG_COUNT >= 15 (D 12 + E 1 + v5.14.2.E.2 ml_buy_threshold + gap_acceptable_threshold)",
-              FOREACH_STAMP_BOUND_CFG_COUNT >= 15);
+        check("v5.14.1.E registry: cohort >= 15 (D 12 + E 1 + v5.14.2.E.2 ml_buy_threshold + gap_acceptable_threshold); via dual-mask popcount",
+              (cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask) +
+               cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask)) >= 15);
     }
     {
         // Test 4 — EnsembleModelZoo init: exit_ridge_state + exit_reward_ring
@@ -22194,8 +22199,9 @@ e3_skip_load:;
     {
         // Registry size sanity (>= per /readiness Check 21).
         // Pre-v5.14.9.C had 13 entries; .C adds 4 (risk_degradation_curve + 3 thresholds).
-        check("v5.14.9.C: FOREACH_STAMP_BOUND_CFG_COUNT >= 17 post-C",
-              FOREACH_STAMP_BOUND_CFG_COUNT >= 17);
+        check("v5.14.9.C: cohort >= 17 post-C; via dual-mask popcount",
+              (cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask) +
+               cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask)) >= 17);
     }
     {
         // Round-trip: stamp_write_for_model writes ladder fields when
@@ -23593,39 +23599,45 @@ e3_skip_load:;
               BITMAP_IS_SET(flags_both, MASK_BANDIT_SHADOW_LEARNING));
     }
 
-    // ─── Test B.8: FOREACH_STAMP_BOUND_CFG includes new entries (FOREACH walk count) ───
-    // Compile-time check: walk the registry counting matches for the 4 new field names.
+    // ─── Test B.8: STAMP_BOUND_CFG_DERIVED cohort includes new entries (descriptor walk) ───
+    // v5.15.5.F.4d.1.B.3 Step 1 — migrated from FOREACH_STAMP_BOUND_CFG legacy walker to
+    // master per-core cfg registry descriptor walk filtered by STAMP_BOUND_CFG_DERIVED bit.
+    // Equivalent semantic: verify cohort presence + STAMP_BOUND_CFG_DERIVED metadata bit set.
     {
         int found_bandit_algorithm = 0;
         int found_thompson_mu_prior = 0;
         int found_thompson_precision_prior = 0;
         int found_thompson_precision_obs = 0;
-        #define X_COUNT_THOMPSON_FIELD(name, type, fmt, def, get_expr, emit_when, src) \
-            if (strcmp(#name, "bandit_algorithm") == 0)         found_bandit_algorithm++; \
-            if (strcmp(#name, "thompson_mu_prior") == 0)        found_thompson_mu_prior++; \
-            if (strcmp(#name, "thompson_precision_prior") == 0) found_thompson_precision_prior++; \
-            if (strcmp(#name, "thompson_precision_obs") == 0)   found_thompson_precision_obs++;
-        FOREACH_STAMP_BOUND_CFG(X_COUNT_THOMPSON_FIELD)
-        #undef X_COUNT_THOMPSON_FIELD
-        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes bandit_algorithm",
+        for (size_t i = 0; i < std::size(g_per_core_cfg_field_descriptors); i++) {
+            const auto& desc = g_per_core_cfg_field_descriptors[i];
+            if (!(desc.metadata_flags & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED)) continue;
+            if (strcmp(desc.cfg_field_name, "bandit_algorithm") == 0)         found_bandit_algorithm++;
+            if (strcmp(desc.cfg_field_name, "thompson_mu_prior") == 0)        found_thompson_mu_prior++;
+            if (strcmp(desc.cfg_field_name, "thompson_precision_prior") == 0) found_thompson_precision_prior++;
+            if (strcmp(desc.cfg_field_name, "thompson_precision_obs") == 0)   found_thompson_precision_obs++;
+        }
+        check("v5.14.10.B STAMP_BOUND_CFG_DERIVED cohort includes bandit_algorithm",
               found_bandit_algorithm == 1);
-        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes thompson_mu_prior",
+        check("v5.14.10.B STAMP_BOUND_CFG_DERIVED cohort includes thompson_mu_prior",
               found_thompson_mu_prior == 1);
-        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes thompson_precision_prior",
+        check("v5.14.10.B STAMP_BOUND_CFG_DERIVED cohort includes thompson_precision_prior",
               found_thompson_precision_prior == 1);
-        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes thompson_precision_obs",
+        check("v5.14.10.B STAMP_BOUND_CFG_DERIVED cohort includes thompson_precision_obs",
               found_thompson_precision_obs == 1);
     }
 
-    // ─── Test B.9: FOREACH_STAMP_BOUND_CFG does NOT include thompson_rng_seed ───
+    // ─── Test B.9: STAMP_BOUND_CFG_DERIVED cohort does NOT include thompson_rng_seed ───
     // (rng_seed is runtime-only; doesn't affect cross-stamp inference reproducibility)
+    // v5.15.5.F.4d.1.B.3 Step 1 — migrated from FOREACH_STAMP_BOUND_CFG legacy walker to
+    // master per-core cfg registry descriptor walk filtered by STAMP_BOUND_CFG_DERIVED bit.
     {
         int found_rng_seed = 0;
-        #define X_COUNT_RNG_SEED(name, type, fmt, def, get_expr, emit_when, src) \
-            if (strcmp(#name, "thompson_rng_seed") == 0) found_rng_seed++;
-        FOREACH_STAMP_BOUND_CFG(X_COUNT_RNG_SEED)
-        #undef X_COUNT_RNG_SEED
-        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG correctly EXCLUDES thompson_rng_seed (runtime-only)",
+        for (size_t i = 0; i < std::size(g_per_core_cfg_field_descriptors); i++) {
+            const auto& desc = g_per_core_cfg_field_descriptors[i];
+            if (!(desc.metadata_flags & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED)) continue;
+            if (strcmp(desc.cfg_field_name, "thompson_rng_seed") == 0) found_rng_seed++;
+        }
+        check("v5.14.10.B STAMP_BOUND_CFG_DERIVED cohort correctly EXCLUDES thompson_rng_seed (runtime-only)",
               found_rng_seed == 0);
     }
 
@@ -25386,8 +25398,9 @@ e3_skip_load:;
         // (FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG_COUNT lives there).
         check("v5.15.3.A.0 PARITY-022: FOREACH_STAMP_BOUND_MODEL_CONST_COUNT > 0",
               FOREACH_STAMP_BOUND_MODEL_CONST_COUNT > 0);
-        check("v5.15.3.A.0 PARITY-022: FOREACH_STAMP_BOUND_CFG_COUNT > 0 (cfg-bound sister registry)",
-              FOREACH_STAMP_BOUND_CFG_COUNT > 0);
+        check("v5.15.3.A.0 PARITY-022: cohort > 0 (cfg-derived consumer framework); via dual-mask popcount",
+              (cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask) +
+               cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask)) > 0);
     }
 
     printf("\n--- v5.15.4: Live-mode normalize + alignas zoos + shadow-load helpers ---\n");

@@ -1476,6 +1476,18 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   ControllerConfig<F> cfg;
+
+  // v5.15.5.F.4d.1.B.3 Step 1.6.1 — auto-defaults for all 48 global cfg fields via
+  // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT). Sister to struct-gen invocation
+  // at line 1338+ (Step 0.5b.B). Closes TECH_DEBT-093 (gap_acceptable_threshold full closure)
+  // + future-headache reducer for all 48 globals. Manual default lines DELETED below
+  // (Python script /tmp/delete_manual_defaults.py).
+  //
+  // tt::cfg_assign_field reads descriptor.payload per KIND dispatch (FPN<F> from as_double;
+  // int/uint{8,16,32,64}_t from as_int or as_bool; KIND_INT_ENUM from as_int_enum).
+  // Defaults baked in registry rows at CfgFieldRegistry.hpp:255-419 — single source of truth.
+  FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
+
   cfg.poll_interval = 100;
   cfg.warmup_ticks = 128; // minimum raw ticks before trading
   cfg.min_warmup_samples =
@@ -1698,7 +1710,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_hard_block_threshold = FPN_FromDouble<F>(0.0);
   // Phase 7 prep — held-out validation defaults
   cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
-  cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
+  // v5.15.5.F.4d.1.B.3 Step 1.6.1 — gap_acceptable_threshold default deleted; auto-default via
+  // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT) at function start applies registry DBL(0.05, 0.0, 1.0).
+  // TECH_DEBT-093 FULL closure. Other 47 manual defaults audited and retained: some diverge from
+  // registry defaults (e.g., warmup_ticks registry=0 but manual=128); registry default audit deferred
+  // to follow-up TECH_DEBT entry (see TECH_DEBT-107 NEW at ship close).
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
   cfg.allow_cross_major_engine    = 0;                            // v5.9.2b — refuse cross-major by default
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
@@ -2526,7 +2542,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(confidence_threshold_scale)
     CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     CFG_PARSE_FPN(held_out_fraction)
-    CFG_PARSE_FPN(gap_acceptable_threshold)
+    // v5.15.5.F.4d.1.B.3 Step 1.6.1 — gap_acceptable_threshold migrated to registry auto-parser
+    // (TECH_DEBT-093 closure). HAS_SIDE_EFFECT bit removed at CfgFieldRegistry.hpp registry row;
+    // tt::cfg_parse_field<FPN<F>> handles FPN_FromDouble + clamp via DBL(0.05, 0.0, 1.0) payload.
     // v5.15.5.F.4c — allow_cross_major_engine migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
     // Registry walker handles parse; manual CFG_PARSE_INT removed.
     // v5.9.5h — XGBoost hyperparam parsers

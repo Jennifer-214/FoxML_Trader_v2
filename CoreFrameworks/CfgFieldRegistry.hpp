@@ -408,8 +408,8 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
      * Registry row provides descriptor + STAMP_BOUND_CFG_DERIVED bit (framework walks via FOREACH_GLOBAL_CFG_FIELD filter) + auto-registers GUI render \
      * (manual GUI entry at GUI/SettingsPanel.hpp:414 deleted in same edit; registry-driven render covers). HAS_SIDE_EFFECT marks "manual parser handles" → \
      * registry walker skips auto-parse via tt::cfg_parse_field. */ \
-    X(FPN<F>,               KIND_DOUBLE,     gap_acceptable_threshold,    "Gap Threshold",        "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
-        "Max acceptable |WF mean - held_out| gap for model 'OK' verdict. Default 0.05 = 5%. Stamp-bound (training-time gap value captured at stamp emit). HAS_SIDE_EFFECT — manual parser at ControllerConfig.hpp:2554 handles FPN<F> storage; registry walker skips auto-parse.", \
+    X(FPN<F>,               KIND_DOUBLE,     gap_acceptable_threshold,    "Gap Threshold",        "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
+        "Max acceptable |WF mean - held_out| gap for model 'OK' verdict. Default 0.05 = 5%. Stamp-bound (training-time gap value captured at stamp emit). v5.15.5.F.4d.1.B.3 Step 1.6.1 — HAS_SIDE_EFFECT bit removed; auto-parser handles FPN<F> storage via tt::cfg_parse_field (TECH_DEBT-093 closure).", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Drift Acknowledgments (3) === */                                                                                                                                                                            \
     X(int,                  KIND_BOOL,       acknowledge_hardcoded_strategy_in_live, "Ack Hardcoded Strategy in Live", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),             \
@@ -721,6 +721,24 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
                                        applies_to_strategy_cat, applies_to_op_mode_cat, \
                                        applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     STORAGE_T name;
+
+//======================================================================================================
+// [EMIT_GLOBAL_CFG_DEFAULT — payload macro for auto-defaults in ControllerConfig_Default (v5.15.5.F.4d.1.B.3+)]
+//======================================================================================================
+// Sister to EMIT_GLOBAL_CFG_STRUCT_FIELD; landed at .B.3 Step 1.6.1 (TECH_DEBT-093 full closure) +
+// future-headache reducer for all 48 global default-init lines.
+//
+// Mechanism: tt::cfg_assign_field<T> reads default from descriptor.payload (per KIND dispatch:
+// as_double.default_val for FPN<F> / as_int.default_val for int* / as_bool.default_val for bool).
+// Sister to EMIT_PER_CORE_CFG_DEFAULT (future work; per-core defaults still manual at HEAD).
+//
+// H17 STRONG→HARD codification: adding a new global cfg field = 1 row in FOREACH_GLOBAL_CFG_FIELD
+// with default in payload column; auto-default flows through this macro at ControllerConfig_Default.
+//======================================================================================================
+#define EMIT_GLOBAL_CFG_DEFAULT(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                  applies_to_strategy_cat, applies_to_op_mode_cat, \
+                                  applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    tt::cfg_assign_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name]);
 
 //======================================================================================================
 // [FOREACH_MANUAL_PER_CORE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]

@@ -304,6 +304,22 @@ namespace cfg_derived {
         FOREACH_ML_CFG_FLAG(X_STAMP_CFG_POPULATE_ML_CFG_FLAG)
         #undef X_STAMP_CFG_POPULATE_ML_CFG_FLAG
 
+        // v5.15.5.F.4d.1.B.3 Step 0.5d.a — sister walker for FOREACH_GATE_CFG_FLAG bitmap-bool
+        // rows flagged STAMP_BOUND_CFG_DERIVED. Sister-extension to X_STAMP_CFG_POPULATE_ML_CFG_FLAG
+        // (sig migration at Step 0.5d.a.0 added metadata_flags column to FOREACH_GATE_CFG_FLAG).
+        // Currently 1 flagged row (BARRIER_GATE_ENABLED — closes Class 32 instance + activates
+        // framework walker per Meta-gap M1b cohort migration discipline). Adapts MASK_GATE_CFG_*
+        // prefix + reads cfg.gate_cfg_flags bitmap.
+        #define X_STAMP_CFG_POPULATE_GATE_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                const int _bit_val = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_##NAME) ? 1 : 0; \
+                const size_t _remain = (cap > written) ? (cap - written) : 0u; \
+                int _n_written = snprintf(buf + written, _remain, "%s=%d\n", #legacy_field, _bit_val); \
+                if (_n_written > 0) written += static_cast<size_t>(_n_written); \
+            }
+        FOREACH_GATE_CFG_FLAG(X_STAMP_CFG_POPULATE_GATE_CFG_FLAG)
+        #undef X_STAMP_CFG_POPULATE_GATE_CFG_FLAG
+
         return written;
     }
 
@@ -377,6 +393,12 @@ namespace cfg_derived {
             }
         FOREACH_ML_CFG_FLAG(X_DRIFT_CHECK_ML_CFG_FLAG)
         #undef X_DRIFT_CHECK_ML_CFG_FLAG
+
+        // v5.15.5.F.4d.1.B.3 Step 0.5d.d DEFERRED — sister drift walker for FOREACH_GATE_CFG_FLAG
+        // requires `handle.barrier_gate_enabled` discrete field on ModelStampResult, which
+        // Step 1.6.3 (Decision C Approach A unconditional struct-gen) provides. Walker emit
+        // (Step 0.5d.a above at populate_stamp_cfg_from_derived) landed; drift check rejoins
+        // after Step 1.6.3 lands ModelStampResult auto-gen extension.
     }
 
 }  // namespace cfg_derived
