@@ -227,21 +227,15 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // contract documented in StampBoundCfgRegistry.hpp).
         if (cfg_ptr && sr.valid > 0) {
             const ControllerConfig<F>& cfg = *cfg_ptr;
-            // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused here)
-            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
-                if (sr.has_##name) {                                                \
-                    type cfg_val = (type)(get_cfg_expr);                            \
-                    if (sr.name != cfg_val) {                                       \
-                        sr.inference_cfg_drift_count++;                             \
-                        if (sr.reason[0] == '\0') {                                 \
-                            snprintf(sr.reason, sizeof(sr.reason),                  \
-                                "%s drift: stamp=" fmt " cfg=" fmt,                 \
-                                #name, sr.name, cfg_val);                           \
-                        }                                                            \
-                    }                                                                \
-                }
-            FOREACH_STAMP_BOUND_CFG(X)
-            #undef X
+            // v5.15.5.F.4d.1.B.3 Step 1.6.6 (Decision B (a); codified at v1.12 plan body) —
+            // legacy FOREACH_STAMP_BOUND_CFG drift walker replaced with framework
+            // DRIFT_CHECK_FROM_DERIVED macro wrapper. Framework template fn at
+            // CfgGateRegistry.hpp:332+ walks 4 master cfg registries filtered by
+            // STAMP_BOUND_CFG_DERIVED bit; mask-select per H20 branchless; first-failure-wins
+            // reason buffer attribution preserved per Step 0.5a primitive.
+            // FAILURE_MASK symbol: FAILURE_MASK_cfg_binding_drift (per CRIT-CONV-4).
+            uint64_t failure_flags = 0;
+            DRIFT_CHECK_FROM_DERIVED(failure_flags, sr, cfg, sr.inference_cfg_drift_count, sr.reason, sizeof(sr.reason));
             if (sr.inference_cfg_drift_count > 0) {
                 sr.valid = 0;  // treat drift as verification failure
             }

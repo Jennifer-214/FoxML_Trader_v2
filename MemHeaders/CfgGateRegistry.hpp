@@ -401,7 +401,141 @@ namespace cfg_derived {
         // after Step 1.6.3 lands ModelStampResult auto-gen extension.
     }
 
+    //==============================================================================================
+    // [parse_stamp_cfg_to_derived — 4-walker parser dispatch for stamp parse-side]
+    //==============================================================================================
+    // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A option (e) framework consolidation;
+    // codified at v1.12 plan body) — sister to populate_stamp_cfg_from_derived + drift_check_from_derived
+    // + populate_inference_cfg_from_derived (4-of-4 cfg-derived consumer family).
+    //
+    // Matches a single key=value pair against currently-flagged STAMP_BOUND_CFG_DERIVED rows across
+    // 4 cfg registries (per-core + global + ml_cfg_flag + gate_cfg_flag); on match, parses value into
+    // the corresponding struct field via tt::cfg_parse_field<T> + sets Surface G has_<name> flag +
+    // returns true. Returns false if no match (caller falls through to legacy / model-const handlers).
+    //
+    // Caller (ModelInference.hpp parser): `else if (cfg_derived::parse_stamp_cfg_to_derived<F>(r, key, val)) { /* matched */ }`
+    //
+    // Branchless: if-constexpr meta-bit filter compiles to ONLY flagged rows' strcmp branches; runtime
+    // cost = up to 27 strcmp comparisons (boot/load-time; not hot path; acceptable per H8).
+    template <unsigned F, typename ResultT>
+    inline bool parse_stamp_cfg_to_derived(ResultT& r, const char* key, const char* val) {
+        #define X_PARSE_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+            if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (strcmp(key, #name) == 0) { \
+                    constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
+                    tt::cfg_parse_field(r.name, g_per_core_cfg_field_descriptors[_idx], val); \
+                    r.has_##name = 1; \
+                    return true; \
+                } \
+            }
+        FOREACH_PER_CORE_CFG_FIELD(X_PARSE_PER_CORE)
+        #undef X_PARSE_PER_CORE
+
+        #define X_PARSE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+            if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (strcmp(key, #name) == 0) { \
+                    constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
+                    tt::cfg_parse_field(r.name, g_global_cfg_field_descriptors[_idx], val); \
+                    r.has_##name = 1; \
+                    return true; \
+                } \
+            }
+        FOREACH_GLOBAL_CFG_FIELD(X_PARSE_GLOBAL)
+        #undef X_PARSE_GLOBAL
+
+        // ML cfg flag bitmap-bool entries: wire key = #legacy_field; storage = int (per legacy emit pattern).
+        // Parser matches lowercase legacy_field key; sets r.legacy_field = atoi(val); sets r.has_<legacy_field>.
+        #define X_PARSE_ML_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (strcmp(key, #legacy_field) == 0) { \
+                    r.legacy_field = atoi(val); \
+                    r.has_##legacy_field = 1; \
+                    return true; \
+                } \
+            }
+        FOREACH_ML_CFG_FLAG(X_PARSE_ML_CFG_FLAG)
+        #undef X_PARSE_ML_CFG_FLAG
+
+        // Gate cfg flag bitmap-bool entries: same shape as ML.
+        #define X_PARSE_GATE_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (strcmp(key, #legacy_field) == 0) { \
+                    r.legacy_field = atoi(val); \
+                    r.has_##legacy_field = 1; \
+                    return true; \
+                } \
+            }
+        FOREACH_GATE_CFG_FLAG(X_PARSE_GATE_CFG_FLAG)
+        #undef X_PARSE_GATE_CFG_FLAG
+
+        return false;
+    }
+
 }  // namespace cfg_derived
+
+//==============================================================================================
+// [STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN — unconditional struct-field auto-gen for 4 registries]
+//==============================================================================================
+// v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A option (e) framework consolidation;
+// codified at v1.12 plan body) — sister to STAMP_CFG_AUTOPOPULATE + INFERENCE_CFG_POPULATE_FROM_DERIVED
+// macros. Invoked at struct scope to declare ALL stamp-bound derived fields from 4 cfg registries
+// (per-core + global + ml_cfg_flag + gate_cfg_flag) UNCONDITIONALLY (no metadata filter).
+//
+// Caller (ModelInference.hpp ModelStampResult + StampInferenceCfgInputs struct definitions):
+//   `STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()`
+//
+// Approach A unconditional: emits `uint8_t has_<name>; STORAGE_T <name>;` for ALL rows (not just
+// STAMP_BOUND_CFG_DERIVED-flagged subset). Bounded .bss cost (~1-1.5KB per struct); preserves
+// Surface G semantic per-entry. Sister consumers (parse + emit + drift) filter by metadata bit
+// at use sites — struct holds all fields, walkers process flagged subset.
+//
+// Bug classes closed: Class 14 (struct field that doesn't exist for flagged rows) +
+// Class 18 (mirror between struct-gen + emit walker) + Class 21 (parallel-descriptor across walkers).
+//
+// Sparse exclusion sidecar — names declared in FOREACH_STAMP_BOUND_MODEL_CONST (architectural-constants
+// registry) that collide with master cfg names. Per H18 SIDECAR OVERRIDE pattern + Pillar B13
+// (cross-walker struct-field uniqueness; codified at .B.3 v1.12 mid-coding).
+//
+// Why duplicate names exist: training-time architectural constants (xgb_*) live in MODEL_CONST as
+// "training snapshot recorded in stamp"; same field name appears in master FOREACH_GLOBAL_CFG_FIELD
+// as "runtime cfg value". Conceptually distinct semantic (training-time recorded vs runtime live);
+// SAME field name. ModelStampResult holds the TRAINING-TIME value via MODEL_CONST walker; master
+// walker must SKIP these names to avoid duplicate member declaration.
+//
+// Mechanism: each struct site uses #define/#undef redirect bracket (see ModelInference.hpp struct
+// definitions). Excluded names get redirected to dead `_stamp_result_excluded_<name>` field
+// during macro expansion (~16 bytes wasted per excluded name × 2 structs = ~96 bytes for current 3).
+//
+// CI tool `check_struct_field_uniqueness.py` (NEW at .B.3) enforces: any name in BOTH master cfg AND
+// FOREACH_STAMP_BOUND_MODEL_CONST MUST appear in this exclusion sidecar (else CI fail at build).
+// Future collisions = add 1 sidecar entry + 2 #define/#undef lines per struct site. Bounded scope.
+#define FOREACH_STAMP_RESULT_FIELD_EXCLUSION(X) \
+    X(xgb_min_child_weight) \
+    X(xgb_seed)             \
+    X(xgb_train_nthread)
+
+// X-macro field helpers (private framework internals; underscore prefix):
+#define _STAMP_RESULT_PER_CORE_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+    uint8_t has_##name; STORAGE_T name;
+#define _STAMP_RESULT_GLOBAL_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+    uint8_t has_##name; STORAGE_T name;
+#define _STAMP_RESULT_ML_CFG_FIELD(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+    uint8_t has_##legacy_field; int legacy_field;
+#define _STAMP_RESULT_GATE_CFG_FIELD(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+    uint8_t has_##legacy_field; int legacy_field;
+
+#define STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() \
+    FOREACH_PER_CORE_CFG_FIELD(_STAMP_RESULT_PER_CORE_FIELD) \
+    FOREACH_GLOBAL_CFG_FIELD(_STAMP_RESULT_GLOBAL_FIELD) \
+    FOREACH_ML_CFG_FLAG(_STAMP_RESULT_ML_CFG_FIELD) \
+    FOREACH_GATE_CFG_FLAG(_STAMP_RESULT_GATE_CFG_FIELD)
+
+// PARSE_STAMP_CFG_TO_DERIVED: caller-facing macro wrapper. Returns true on match.
+// F hardcoded to 64 (production FPN<F> precision) — ResultT must have matching FPN<64> fields
+// via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() with `static constexpr unsigned F = 64;` in scope.
+// When ModelStampResult templated in future ship, change to `decltype((r))::F`.
+#define PARSE_STAMP_CFG_TO_DERIVED(r, key, val) \
+    cfg_derived::parse_stamp_cfg_to_derived<64>((r), (key), (val))
 
 //==================================================================================================
 // [Consumer macros — thin wrappers around template fns]

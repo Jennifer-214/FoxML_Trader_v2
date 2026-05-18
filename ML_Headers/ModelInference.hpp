@@ -28,6 +28,7 @@
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
 #include "StampBoundCfgRegistry.hpp"     // v5.14.1.B.3 — FOREACH_STAMP_BOUND_CFG X-macro
 #include "StampBoundModelConstRegistry.hpp"  // v5.14.8.0+ — FOREACH_STAMP_BOUND_MODEL_CONST X-macro (registry, MASK constants, STAMP_HAS aliases, AUTOPOPULATE)
+#include "../MemHeaders/CfgGateRegistry.hpp"  // v5.15.5.F.4d.1.B.3 Step 1.6.3 — STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN macro + PARSE_STAMP_CFG_TO_DERIVED + cfg_derived::parse_stamp_cfg_to_derived template fn
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -1161,6 +1162,11 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
 // Caller migration: `r.has_<X>` → `STAMP_HAS(r, <group_or_entry>)`;
 // field reads continue as `r.<canonical_name>`.
 struct ModelStampResult {
+    // v5.15.5.F.4d.1.B.3 Step 1.6.3 — F=64 brought into struct scope for STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
+    // expansion (master STORAGE_T includes FPN<F>; expansion needs F in scope).
+    // Future: when ModelStampResult is templated, replace with template parameter.
+    static constexpr unsigned F = 64;
+
     // === Runtime-only fields (NOT in registry) ===
     int      valid;             // 1 / 0 / -1 per above
     char     reason[256];       // human-readable failure reason
@@ -1199,15 +1205,30 @@ struct ModelStampResult {
     FOREACH_STAMP_BOUND_MODEL_CONST(X)
     #undef X
 
-    // === FOREACH_STAMP_BOUND_CFG fields (sister registry; v5.14.1.B.3 X-macro driven) ===
-    // Each field has a uint8_t has_<name> Surface G forward-compat flag
-    // (per-entry semantics; sister registry uses per-entry has_*, not group-bit).
-    // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for struct gen)
-    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
-        uint8_t has_##name;                                                       \
-        type name;
-    FOREACH_STAMP_BOUND_CFG(X)
-    #undef X
+    // === Derived cfg fields — auto-generated from 4 master cfg registries (per-core + global + ml_cfg_flag + gate_cfg_flag) ===
+    // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A; codified at v1.12 plan body) —
+    // UNCONDITIONAL struct-gen replaces legacy FOREACH_STAMP_BOUND_CFG walker. Sister to
+    // populate_stamp_cfg_from_derived + drift_check_from_derived + populate_inference_cfg_from_derived
+    // (4-of-4 cfg-derived consumer family) — per option (e) framework consolidation.
+    //
+    // Generates ~163 fields (uint8_t has_<name> + STORAGE_T <name> per row across 4 registries).
+    // Bounded .bss cost (~1-1.5KB per struct). Per-entry Surface G has_<name> semantic preserved.
+    // Walkers (parse / emit / drift / inference_cfg populate) filter by STAMP_BOUND_CFG_DERIVED bit
+    // at use sites — struct holds ALL fields; walkers process flagged subset.
+    //
+    // EXCLUSION REDIRECT (H18 SIDECAR; Pillar B13 cross-walker struct-field uniqueness):
+    // 3 names (xgb_*) collide with FOREACH_STAMP_BOUND_MODEL_CONST walker above. Per
+    // FOREACH_STAMP_RESULT_FIELD_EXCLUSION sidecar in CfgGateRegistry.hpp, redirect them to dead
+    // `_stamp_result_excluded_<name>` fields during master walker expansion. Real fields come from
+    // MODEL_CONST walker (training-time semantic preserved). ~96 bytes wasted; bounded.
+    // CI tool check_struct_field_uniqueness.py catches future collisions automatically.
+    #define xgb_min_child_weight _stamp_result_excluded_xgb_min_child_weight
+    #define xgb_seed             _stamp_result_excluded_xgb_seed
+    #define xgb_train_nthread    _stamp_result_excluded_xgb_train_nthread
+    STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
+    #undef xgb_min_child_weight
+    #undef xgb_seed
+    #undef xgb_train_nthread
 
     // === Late-emit architectural fields auto-generated from FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG ===
     // (v5.14.8.A.merged.4 — TECH_DEBT-006 full closure). 6 entries:
@@ -1399,17 +1420,14 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 }
             FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)
             #undef X
-            // v5.14.1.B.3 — X-macro-driven parser branches (positions 24+).
-            // Each X expands to one `else if (strcmp(key, "<name>") == 0)`
-            // branch that uses the type-dispatched STAMP_CFG_PARSE macro.
-            // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for parser)
-            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
-                else if (strcmp(key, #name) == 0) {                                       \
-                    r.name = (type)(STAMP_CFG_PARSE(type, val));                          \
-                    r.has_##name = 1;                                                     \
-                }
-            FOREACH_STAMP_BOUND_CFG(X)
-            #undef X
+            // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A; codified at v1.12 plan body) —
+            // single-call framework dispatch replaces inline X-macro walker. PARSE_STAMP_CFG_TO_DERIVED
+            // returns true when key matches any STAMP_BOUND_CFG_DERIVED-flagged row across 4 master
+            // cfg registries (per-core + global + ml_cfg_flag + gate_cfg_flag); on match, parses value
+            // + sets r.<name> + r.has_<name>. Walker filtered by metadata bit at template fn level.
+            else if (PARSE_STAMP_CFG_TO_DERIVED(r, key, val)) {
+                /* matched a STAMP_BOUND_CFG_DERIVED-flagged master cfg row; framework wrote to struct */
+            }
             // v5.14.8.A.merged.4 — POST_CFG section parser branches (registry-driven).
             // Replaces manual if-else branches for expected_*, overlay_hash,
             // effective_hash (6 fields total). All POST_CFG entries are
@@ -1635,6 +1653,9 @@ struct StampWriteResult {
 // additions auto-flow via the registry (extinguishes v5.9.5b production-
 // caller class for stamp body fields).
 struct StampInferenceCfgInputs {
+    // v5.15.5.F.4d.1.B.3 Step 1.6.3 — F=64 brought into struct scope for STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN().
+    static constexpr unsigned F = 64;
+
     // === Bit-packed has_* flags (matches ModelStampResult) ===
     uint64_t has_flags;
 
@@ -1645,13 +1666,17 @@ struct StampInferenceCfgInputs {
     FOREACH_STAMP_BOUND_MODEL_CONST(X)
     #undef X
 
-    // === FOREACH_STAMP_BOUND_CFG fields (sister registry; per-entry has_*) ===
-    // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for struct gen)
-    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
-        int  has_##name;                                                          \
-        type name;
-    FOREACH_STAMP_BOUND_CFG(X)
-    #undef X
+    // === Derived cfg fields — auto-generated via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN ===
+    // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A; codified at v1.12 plan body) —
+    // sister site to ModelStampResult unconditional struct-gen. Same 4-walker framework primitive.
+    // EXCLUSION REDIRECT: 3 xgb_* names redirect to dead-prefixed per H18 sidecar (see ModelStampResult site).
+    #define xgb_min_child_weight _stamp_result_excluded_xgb_min_child_weight
+    #define xgb_seed             _stamp_result_excluded_xgb_seed
+    #define xgb_train_nthread    _stamp_result_excluded_xgb_train_nthread
+    STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
+    #undef xgb_min_child_weight
+    #undef xgb_seed
+    #undef xgb_train_nthread
 
     // === Late-emit architectural fields — auto-generated via FOREACH_STAMP_BOUND_MODEL_CONST union (v5.14.8.A.merged.4) ===
     // POST_CFG section's entries declared above via X-macro walk over
