@@ -48,26 +48,32 @@
 // ML pipeline behavior (confidence scoring, bandit warmup, exit-model arms,
 // volatility scaling, lazy slow-path rebuild).
 
-// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
+// Tuple: X(NAME, legacy_field, display_label, section, metadata_flags, doc)  [6-col v5.15.5.F.4d.1.B.2+]
+// metadata_flags column added at .B.2 cohort migration; 5 STAMP_BOUND-eligible rows
+// gain STAMP_BOUND_CFG_DERIVED bit (CONFIDENCE_COMPOSITE_ENABLED + RIDGE_WITHIN_HORIZON +
+// RIDGE_ACROSS_HORIZONS + EXIT_BLENDER_MODE + PER_HORIZON_BARRIER_BLEND); 7 runtime-only
+// rows get 0. Cohort fields auto-flow through new cfg-derived consumer framework when the
+// framework consumer template fns are extended to walk FOREACH_ML_CFG_FLAG (Step 0.5b of
+// .B.2 plan body).
 #define FOREACH_ML_CFG_FLAG(X)                                                                                                                                                                          \
-    X(CONFIDENCE_ENABLED,           confidence_enabled,           "Confidence",            "FoxML",       "scale entry threshold by confidence score")                                                  \
-    X(CONFIDENCE_COMPOSITE_ENABLED, confidence_composite_enabled, "Composite Confidence",  "FoxML",       "use 4-factor composite confidence (vs legacy 3-factor); stamp-bound")                         \
-    X(BANDIT_ENABLED,               bandit_enabled,               "Bandit",                "FoxML",       "Exp3-IX bandit for buy-signal arm selection (default; cfg.bandit_algorithm=1 swaps to Thompson)") \
-    X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Exit Bandit",           "FoxML",       "Exp3-IX bandit for exit-side arm selection (sell-side; v5.13.4)")                              \
-    X(USE_EXIT_MODEL,               use_exit_model,               "Use Exit Model",        "FoxML",       "use dedicated exit-side ML model (vs entry model fallback)")                                 \
-    X(FOXML_VOL_SCALING_ENABLED,    foxml_vol_scaling_enabled,    "Vol Scaling",           "FoxML",       "scale trade size by recent volatility (FoxML VolScaler)")                                    \
-    X(LAZY_REBUILD_ENABLED,         lazy_rebuild_enabled,         "Lazy Rebuild",          "Performance", "skip slow-path rebuild when no parameter inputs changed")                                    \
-    X(RIDGE_WITHIN_HORIZON,         ridge_within_horizon,         "Ridge Within Horizon",  "ML/Ridge",    "Ridge blend across role-arms within a horizon (v5.14.0; stamp-bound) [v5.14.11.C cohort migration from direct int]") \
-    X(RIDGE_ACROSS_HORIZONS,        ridge_across_horizons,        "Ridge Across Horizons", "ML/Ridge",    "Ridge blend across horizons (vs bandit selection); infrastructure-only until consumer ships [v5.14.11.C cohort migration]") \
-    X(EXIT_BLENDER_MODE,            exit_blender_mode,            "Exit Blender Mode",     "ML/Ridge",    "Ridge blend across exit_predictor handles (v5.14.1.E; stamp-bound) [v5.14.11.C cohort migration]") \
-    X(RIDGE_ONLINE_CORR,            ridge_online_corr,            "Ridge Online Corr",     "ML/Ridge",    "Use sliding-window incremental correlation matrix in Ridge (default 0=full recompute; v5.14.11)") \
-    X(PER_HORIZON_BARRIER_BLEND,    per_horizon_barrier_blend,    "Per-Horizon Barriers",  "FoxML",       "Enable per-horizon TP/SL serving via blend/dominant modes (vs cfg-direct LEGACY fallback); paired with cfg.barrier_blend_mode enum [v5.15.5.A.5]")
+    X(CONFIDENCE_ENABLED,           confidence_enabled,           "Confidence",            "FoxML",       0,                                                "scale entry threshold by confidence score")                                                  \
+    X(CONFIDENCE_COMPOSITE_ENABLED, confidence_composite_enabled, "Composite Confidence",  "FoxML",       CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "use 4-factor composite confidence (vs legacy 3-factor); stamp-bound")                         \
+    X(BANDIT_ENABLED,               bandit_enabled,               "Bandit",                "FoxML",       0,                                                "Exp3-IX bandit for buy-signal arm selection (default; cfg.bandit_algorithm=1 swaps to Thompson)") \
+    X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Exit Bandit",           "FoxML",       0,                                                "Exp3-IX bandit for exit-side arm selection (sell-side; v5.13.4)")                              \
+    X(USE_EXIT_MODEL,               use_exit_model,               "Use Exit Model",        "FoxML",       0,                                                "use dedicated exit-side ML model (vs entry model fallback)")                                 \
+    X(FOXML_VOL_SCALING_ENABLED,    foxml_vol_scaling_enabled,    "Vol Scaling",           "FoxML",       0,                                                "scale trade size by recent volatility (FoxML VolScaler)")                                    \
+    X(LAZY_REBUILD_ENABLED,         lazy_rebuild_enabled,         "Lazy Rebuild",          "Performance", 0,                                                "skip slow-path rebuild when no parameter inputs changed")                                    \
+    X(RIDGE_WITHIN_HORIZON,         ridge_within_horizon,         "Ridge Within Horizon",  "ML/Ridge",    CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "Ridge blend across role-arms within a horizon (v5.14.0; stamp-bound) [v5.14.11.C cohort migration from direct int]") \
+    X(RIDGE_ACROSS_HORIZONS,        ridge_across_horizons,        "Ridge Across Horizons", "ML/Ridge",    CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "Ridge blend across horizons (vs bandit selection); infrastructure-only until consumer ships [v5.14.11.C cohort migration]") \
+    X(EXIT_BLENDER_MODE,            exit_blender_mode,            "Exit Blender Mode",     "ML/Ridge",    CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "Ridge blend across exit_predictor handles (v5.14.1.E; stamp-bound) [v5.14.11.C cohort migration]") \
+    X(RIDGE_ONLINE_CORR,            ridge_online_corr,            "Ridge Online Corr",     "ML/Ridge",    0,                                                "Use sliding-window incremental correlation matrix in Ridge (default 0=full recompute; v5.14.11)") \
+    X(PER_HORIZON_BARRIER_BLEND,    per_horizon_barrier_blend,    "Per-Horizon Barriers",  "FoxML",       0,                                                "Enable per-horizon TP/SL serving via blend/dominant modes (vs cfg-direct LEGACY fallback); paired with cfg.barrier_blend_mode enum [v5.15.5.A.5]; STAMP_BOUND_CFG_DERIVED bit deferred to .B.3 — requires inf struct unification (only POST_CFG-prefixed inf.inference_cfg_per_horizon_barrier_blend exists at .B.2; unprefixed field needed for framework walker)")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]
 //------------------------------------------------------------------------------------------------------
 enum MlCfgFlag {
-#define X_GEN_ML_CFG_BIT(name, legacy_field, display_label, section, doc) ML_CFG_##name,
+#define X_GEN_ML_CFG_BIT(name, legacy_field, display_label, section, metadata_flags, doc) ML_CFG_##name,
     FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_BIT)
     ML_CFG_COUNT
 #undef X_GEN_ML_CFG_BIT
@@ -79,10 +85,39 @@ static_assert(ML_CFG_COUNT <= 16,
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED MASK_ML_CFG_<NAME> CONSTANTS]
 //------------------------------------------------------------------------------------------------------
-#define X_GEN_ML_CFG_MASK(name, legacy_field, display_label, section, doc) \
+#define X_GEN_ML_CFG_MASK(name, legacy_field, display_label, section, metadata_flags, doc) \
     static constexpr uint16_t MASK_ML_CFG_##name = (uint16_t)(1u << ML_CFG_##name);
 FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 #undef X_GEN_ML_CFG_MASK
+
+//------------------------------------------------------------------------------------------------------
+// [COHORT GATE MACROS — v5.15.5.F.4d.1.B.2 Step 5.0]
+//------------------------------------------------------------------------------------------------------
+// Shared cohort gate predicates across 3 registries:
+//   - FOREACH_STAMP_BOUND_CFG col 5 (emit_when) at ML_Headers/StampBoundCfgRegistry.hpp
+//   - FOREACH_CFG_DRIFT_CHECK col 8 (gate_when) at ML_Headers/CfgDriftCheckRegistry.hpp
+//   - FOREACH_CFG_GATE_PER_CORE entries at MemHeaders/CfgGateRegistry.hpp
+//
+// Path γ #3 structural close (audit synthesis CRIT-CONV-5): 3-way drift surface where
+// same conceptual cohort gates were encoded inline at multiple registries. Adding a new
+// cohort = 1 new COHORT_GATE_* macro + 1 row per registry referencing it.
+//
+// Macros expand at consumer expansion time → `cfg` must be in scope (typed
+// ControllerConfig<F>); MASK_ML_CFG_* + BITMAP_IS_SET/BITMAP_ANY already in scope via
+// this file + MemHeaders/BitmapMacros.hpp.
+//
+// Semantics match legacy FOREACH_STAMP_BOUND_CFG emit_when (the wire-emit source of
+// truth pre-.B.2). Names BANDIT_THOMPSON / BANDIT_BLEND_STATE_4 reflect actual
+// semantics (not just "BANDIT_ENABLED"; legacy gate uses cfg.bandit_algorithm != 0
+// which means "Thompson-class algorithm active" — distinct from MASK_ML_CFG_BANDIT_ENABLED
+// flag which controls bandit selection wiring).
+
+#define COHORT_GATE_BANDIT_THOMPSON       (cfg.bandit_algorithm != 0)
+#define COHORT_GATE_BANDIT_BLEND_STATE_4  (cfg.bandit_algorithm == 4)
+#define COHORT_GATE_RIDGE_ANY             BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS)
+#define COHORT_GATE_COMPOSITE_CONFIDENCE  BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)
+#define COHORT_GATE_SOFTRISK_ENABLED      (cfg.risk_degradation_curve != 0)
+#define COHORT_GATE_PER_HORIZON_BARRIER   BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND)
 
 //------------------------------------------------------------------------------------------------------
 // [AUTOPOPULATE COMPANION]

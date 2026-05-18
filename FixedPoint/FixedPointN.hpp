@@ -786,6 +786,28 @@ template <unsigned F> inline int FPN_GreaterThanOrEqual(FPN<F> a, FPN<F> b) {
 }
 
 //======================================================================================================
+// [FIXED-POINT COMPARISON OPERATORS — v5.15.5.F.4d.1.B.2 Step 6.5]
+//======================================================================================================
+// Operator overloads wrapping the existing FPN_Equal / FPN_LessThan / etc. free
+// functions. Removes the FPN_ToDouble(a) < FPN_ToDouble(b) workaround pattern
+// throughout the codebase — callers can use `a < b` directly.
+//
+// Coding-time discovery during .B.2 Step 6 Winsor parse-time validation:
+// Caramel asked "should we address this?" when the FPN_ToDouble fallback came up.
+// Per `feedback_motivated_collaborator_for_caramel` + `feedback_overengineering_boundary_when_future_easier`
+// — adding primitive operators NOW removes a recurring workaround forever.
+//
+// Per H4 — these operators compare in the integer-limb domain (no float math on
+// accounting types); same backend semantics as the FPN_* free functions they wrap.
+
+template <unsigned F> inline bool operator==(FPN<F> a, FPN<F> b) { return FPN_Equal(a, b) != 0; }
+template <unsigned F> inline bool operator!=(FPN<F> a, FPN<F> b) { return !FPN_Equal(a, b); }
+template <unsigned F> inline bool operator< (FPN<F> a, FPN<F> b) { return FPN_LessThan(a, b) != 0; }
+template <unsigned F> inline bool operator<=(FPN<F> a, FPN<F> b) { return FPN_LessThanOrEqual(a, b) != 0; }
+template <unsigned F> inline bool operator> (FPN<F> a, FPN<F> b) { return FPN_GreaterThan(a, b) != 0; }
+template <unsigned F> inline bool operator>=(FPN<F> a, FPN<F> b) { return FPN_GreaterThanOrEqual(a, b) != 0; }
+
+//======================================================================================================
 // [FIXED-POINT UTILITY FUNCTIONS]
 //======================================================================================================
 template <unsigned F> inline FPN<F> FPN_Negate(FPN<F> value) {

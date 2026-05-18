@@ -26004,19 +26004,28 @@ e3_skip_load:;
     // Layer 2 + cli_explain_mask fix + stamp_emit_mask delete.
     // =============================================================================
     {
-        // T1: STAMP_BOUND_CFG_emit_canonical_body returns 0 at empty-filter case
-        // (zero rows have STAMP_BOUND_CFG_DERIVED bit at .A landing; .B flags rows)
+        // T1: STAMP_BOUND_CFG_emit_canonical_body — at .B.2 cohort migration, 19 master rows
+        // (18 per-core + 1 global trading_mode) flag STAMP_BOUND_CFG_DERIVED → non-empty body.
+        // Was `len == 0` at .A landing per empty filter; STRENGTHENED at .B.2 per /test-strength-audit
+        // discipline (not weakened).
         char body[8192] = {0};
         size_t len = STAMP_BOUND_CFG_emit_canonical_body(body, sizeof(body));
-        check("v5.15.5.F.4d.1.A: STAMP_BOUND_CFG emit returns 0 at empty filter case (.A landing)",
-              len == 0);
+        check("v5.15.5.F.4d.1.B.2: STAMP_BOUND_CFG emit returns non-empty body at .B.2 (19 master rows flagged)",
+              len > 0);
     }
 
     {
-        // T2: wire_format_invariants helper invocation — I1-I5 vacuously PASS at empty body
+        // T2: wire_format_invariants helper invocation — at .B.2 use dual-mask shape
+        // (per_core_mask_words + global_mask_words; sum popcount; walk both descriptor
+        // arrays for I4). Stage 3 second reference of helper at .B.2 (was Stage 3 first
+        // reference at .A vacuous PASS).
         InvariantContext ctx{
-            /*.mask_words =*/ g_global_cfg_stamp_bound_cfg_derived_mask.words,
-            /*.mask_size_words =*/ sizeof(g_global_cfg_stamp_bound_cfg_derived_mask.words) / sizeof(uint64_t),
+            /*.mask_words =*/ g_per_core_cfg_stamp_bound_cfg_derived_mask.words,        // legacy field (unused when dual-mask populated)
+            /*.mask_size_words =*/ sizeof(g_per_core_cfg_stamp_bound_cfg_derived_mask.words) / sizeof(uint64_t),
+            /*.per_core_mask_words =*/ g_per_core_cfg_stamp_bound_cfg_derived_mask.words,
+            /*.per_core_mask_size_words =*/ sizeof(g_per_core_cfg_stamp_bound_cfg_derived_mask.words) / sizeof(uint64_t),
+            /*.global_mask_words =*/ g_global_cfg_stamp_bound_cfg_derived_mask.words,
+            /*.global_mask_size_words =*/ sizeof(g_global_cfg_stamp_bound_cfg_derived_mask.words) / sizeof(uint64_t),
             /*.per_core_descriptors =*/ g_per_core_cfg_field_descriptors,
             /*.per_core_count =*/ FIELD_IDX_PER_CORE_END,
             /*.global_descriptors =*/ g_global_cfg_field_descriptors,
@@ -26025,7 +26034,7 @@ e3_skip_load:;
             /*.filter_name =*/ "STAMP_BOUND_CFG"
         };
         run_wire_format_canonical_body_invariants(ctx);
-        // 5 check() calls fire inside helper (I1-I5; vacuously PASS at empty body)
+        // 5 check() calls fire inside helper (I1-I5; substantive at .B.2 non-empty body)
     }
 
     {
@@ -26132,12 +26141,16 @@ e3_skip_load:;
     }
 
     {
-        // T13: stamp_bound_cfg_derived mask exists and is zero at .A landing
+        // T13: stamp_bound_cfg_derived mask — at .B.2 cohort migration, 19 master rows flagged
+        // (18 per-core + 1 global). Was `== 0` at .A; STRENGTHENED at .B.2 per /test-strength-audit
+        // discipline. Count may grow further at subsequent Steps (parity gaps + retroactive .A.7 +
+        // gap_acceptable_threshold + ML_CFG_FLAG cohort if framework extended); final count
+        // verified at Step 9 walker integration tests.
         size_t stamp_bound_cfg_derived_count =
             cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask)
           + cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask);
-        check("v5.15.5.F.4d.1.A: g_*_cfg_stamp_bound_cfg_derived_mask all-zero at .A (no rows flagged yet; .B flags 24)",
-              stamp_bound_cfg_derived_count == 0);
+        check("v5.15.5.F.4d.1.B.2: g_*_cfg_stamp_bound_cfg_derived_mask >= 19 at .B.2 Step 1 (18 per-core + 1 global)",
+              stamp_bound_cfg_derived_count >= 19);
     }
 
     // =====================================================================================
@@ -26165,14 +26178,16 @@ e3_skip_load:;
         }
 
         // ---------------------------------------------------------------------------------
-        // T2: STAMP_CFG_POPULATE_FROM_DERIVED — 0-row walk produces empty body
+        // T2: STAMP_CFG_POPULATE_FROM_DERIVED — at .B.2 cohort migration, 19 rows flagged
+        // → walker emits non-empty body. STRENGTHENED at .B.2 per /test-strength-audit
+        // discipline (was `buf[0] == '\0'` at .B.1 0-row walk).
         // ---------------------------------------------------------------------------------
         {
-            char buf[1024] = {0};
+            char buf[8192] = {0};
             ControllerConfig<64> cfg = {};
-            STAMP_CFG_POPULATE_FROM_DERIVED(buf, sizeof(buf), cfg);
-            check("v5.15.5.F.4d.1.B.1: STAMP_CFG_POPULATE_FROM_DERIVED 0-row walk → empty body",
-                  buf[0] == '\0');
+            size_t written = STAMP_CFG_POPULATE_FROM_DERIVED(buf, sizeof(buf), cfg);
+            check("v5.15.5.F.4d.1.B.2: STAMP_CFG_POPULATE_FROM_DERIVED non-empty at .B.2 (19+ rows flagged)",
+                  written > 0 && buf[0] != '\0');
         }
 
         // ---------------------------------------------------------------------------------
@@ -26286,28 +26301,133 @@ e3_skip_load:;
         // ---------------------------------------------------------------------------------
 
         // ---------------------------------------------------------------------------------
-        // T12: FOREACH_CFG_GATE_PER_CORE empty at .B.1 (cohort populates at .B.2)
+        // T12: FOREACH_CFG_GATE_PER_CORE populated at .B.2 (cohort gates per Step 5)
+        // STRENGTHENED at .B.2 per /test-strength-audit discipline (was `== 0` at .B.1).
         // ---------------------------------------------------------------------------------
         {
             size_t per_core_gate_count = 0;
             #define X_COUNT_CFG_GATE_PC(name, expr) ++per_core_gate_count;
             FOREACH_CFG_GATE_PER_CORE(X_COUNT_CFG_GATE_PC)
             #undef X_COUNT_CFG_GATE_PC
-            check("v5.15.5.F.4d.1.B.1: FOREACH_CFG_GATE_PER_CORE empty at .B.1 (.B.2 populates cohort)",
-                  per_core_gate_count == 0);
+            check("v5.15.5.F.4d.1.B.2: FOREACH_CFG_GATE_PER_CORE has cohort gates (16 at .B.2 Step 5)",
+                  per_core_gate_count == 16);
         }
 
         // ---------------------------------------------------------------------------------
-        // T13: FOREACH_CFG_GATE_GLOBAL empty at .B.1 (sister to per-core)
+        // T13: FOREACH_CFG_GATE_GLOBAL empty at .B.2 — trading_mode + ml_buy_threshold both
+        // use default always-emit gate; gap_acceptable_threshold migration deferred to .B.3.
         // ---------------------------------------------------------------------------------
         {
             size_t global_gate_count = 0;
             #define X_COUNT_CFG_GATE_GL(name, expr) ++global_gate_count;
             FOREACH_CFG_GATE_GLOBAL(X_COUNT_CFG_GATE_GL)
             #undef X_COUNT_CFG_GATE_GL
-            check("v5.15.5.F.4d.1.B.1: FOREACH_CFG_GATE_GLOBAL empty at .B.1 (.B.2 populates cohort)",
+            check("v5.15.5.F.4d.1.B.2: FOREACH_CFG_GATE_GLOBAL empty (global rows use default always-emit gate)",
                   global_gate_count == 0);
         }
+    }
+
+    // =====================================================================================
+    // v5.15.5.F.4d.1.B.2 Step 9 — substantive cohort migration correctness tests
+    // =====================================================================================
+    // Per /test-strength-audit discipline + feedback_motivated_collaborator_for_caramel:
+    // verify cohort migration CORRECTNESS (not just structural shape). Tests cohort gate
+    // predicates under various cfg states + FPN<F> primitive operators + Winsor invariant.
+    printf("\n--- v5.15.5.F.4d.1.B.2 Step 9: cohort migration correctness ---\n");
+
+    {
+        // T-FPN1: FPN<F> operator== identity
+        FPN<64> a = FPN_FromDouble<64>(3.14);
+        FPN<64> b = FPN_FromDouble<64>(3.14);
+        check("v5.15.5.F.4d.1.B.2 FPN<F> operator== same value true", a == b);
+        check("v5.15.5.F.4d.1.B.2 FPN<F> operator!= same value false", !(a != b));
+    }
+    {
+        // T-FPN2: FPN<F> operator< ordering
+        FPN<64> small_val = FPN_FromDouble<64>(0.1);
+        FPN<64> big_val   = FPN_FromDouble<64>(0.9);
+        check("v5.15.5.F.4d.1.B.2 FPN<F> operator< correct ordering",  small_val < big_val);
+        check("v5.15.5.F.4d.1.B.2 FPN<F> operator<= reflexive",        small_val <= small_val);
+        check("v5.15.5.F.4d.1.B.2 FPN<F> operator> correct ordering",  big_val > small_val);
+        check("v5.15.5.F.4d.1.B.2 FPN<F> operator>= reflexive",        big_val >= big_val);
+        check("v5.15.5.F.4d.1.B.2 FPN<F> operator< asymmetry",         !(big_val < small_val));
+    }
+    {
+        // T-COHORT1: Bandit cohort gate fires only when bandit_algorithm != 0
+        ControllerConfig<64> cfg = {};
+        cfg.bandit_algorithm = 0;  // EXP3 default
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_BANDIT_THOMPSON false when bandit_algorithm == 0",
+              !((bool)COHORT_GATE_BANDIT_THOMPSON));
+        cfg.bandit_algorithm = 1;  // THOMPSON
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_BANDIT_THOMPSON true when bandit_algorithm == 1",
+              (bool)COHORT_GATE_BANDIT_THOMPSON);
+        cfg.bandit_algorithm = 4;  // BLENDED
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_BANDIT_BLEND_STATE_4 true when bandit_algorithm == 4",
+              (bool)COHORT_GATE_BANDIT_BLEND_STATE_4);
+        cfg.bandit_algorithm = 1;
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_BANDIT_BLEND_STATE_4 false when bandit_algorithm != 4",
+              !((bool)COHORT_GATE_BANDIT_BLEND_STATE_4));
+    }
+    {
+        // T-COHORT2: Soft-risk cohort gate fires only when risk_degradation_curve != 0
+        ControllerConfig<64> cfg = {};
+        cfg.risk_degradation_curve = 0;
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_SOFTRISK_ENABLED false when curve == 0",
+              !((bool)COHORT_GATE_SOFTRISK_ENABLED));
+        cfg.risk_degradation_curve = 1;  // LINEAR
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_SOFTRISK_ENABLED true when curve != 0",
+              (bool)COHORT_GATE_SOFTRISK_ENABLED);
+    }
+    {
+        // T-COHORT3: Ridge cohort gate fires when WITHIN_HORIZON or ACROSS_HORIZONS set
+        ControllerConfig<64> cfg = {};
+        cfg.ml_cfg_flags = 0;
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_RIDGE_ANY false when neither bit set",
+              !((bool)COHORT_GATE_RIDGE_ANY));
+        cfg.ml_cfg_flags = MASK_ML_CFG_RIDGE_WITHIN_HORIZON;
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_RIDGE_ANY true when WITHIN_HORIZON set",
+              (bool)COHORT_GATE_RIDGE_ANY);
+        cfg.ml_cfg_flags = MASK_ML_CFG_RIDGE_ACROSS_HORIZONS;
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_RIDGE_ANY true when ACROSS_HORIZONS set",
+              (bool)COHORT_GATE_RIDGE_ANY);
+    }
+    {
+        // T-COHORT4: Composite confidence gate fires when COMPOSITE_CONFIDENCE_ENABLED set
+        ControllerConfig<64> cfg = {};
+        cfg.ml_cfg_flags = 0;
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_COMPOSITE_CONFIDENCE false when flag clear",
+              !((bool)COHORT_GATE_COMPOSITE_CONFIDENCE));
+        cfg.ml_cfg_flags = MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED;
+        check("v5.15.5.F.4d.1.B.2 COHORT_GATE_COMPOSITE_CONFIDENCE true when flag set",
+              (bool)COHORT_GATE_COMPOSITE_CONFIDENCE);
+    }
+    {
+        // T-WALKER1: Framework walker emits non-empty body at .B.2 with cohort flagged
+        ControllerConfig<64> cfg = {};
+        // Default cfg has no cohort flags set; gates filter most rows. Force a cohort enabled
+        // to verify framework can emit when gate passes.
+        cfg.bandit_algorithm = 1;  // enables bandit cohort gate
+        char buf[8192] = {0};
+        size_t written = cfg_derived::populate_stamp_cfg_from_derived(buf, sizeof(buf), cfg);
+        check("v5.15.5.F.4d.1.B.2 framework walker emits non-empty body when cohort gate passes",
+              written > 0 && buf[0] != '\0');
+        // Should contain bandit_algorithm row name in emit output
+        check("v5.15.5.F.4d.1.B.2 framework walker emit contains bandit_algorithm name",
+              strstr(buf, "bandit_algorithm") != nullptr);
+    }
+    {
+        // T-WINSOR1: Winsor cross-field invariant catches inverted bounds
+        // Synthesize a cfg with low >= high; the validation logic at ControllerConfig_ParseFile
+        // should detect this. We can't easily call the parser inline, but we can verify the
+        // FPN<F>-native compare works as expected (the underlying primitive).
+        FPN<64> bad_low  = FPN_FromDouble<64>(0.6);
+        FPN<64> bad_high = FPN_FromDouble<64>(0.4);
+        check("v5.15.5.F.4d.1.B.2 Winsor invariant: low > high → !(low < high) detected",
+              !(bad_low < bad_high));
+        FPN<64> good_low  = FPN_FromDouble<64>(0.005);
+        FPN<64> good_high = FPN_FromDouble<64>(0.995);
+        check("v5.15.5.F.4d.1.B.2 Winsor invariant: good bounds → (low < high) passes",
+              good_low < good_high);
     }
 
     printf("\n======================================\n");

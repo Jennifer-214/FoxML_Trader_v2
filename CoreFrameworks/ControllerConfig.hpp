@@ -2452,7 +2452,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     #undef X
 
     // ML bitmap walk
-    #define X(name, legacy_field, display_label, section, doc) \
+    // v5.15.5.F.4d.1.B.2 — FOREACH_ML_CFG_FLAG migrated to 6-arg sig.
+    #define X(name, legacy_field, display_label, section, metadata_flags, doc) \
       if (strcmp(key, #legacy_field) == 0) { \
         int _v = atoi(val); \
         if (_v) cfg.ml_cfg_flags |=  MASK_ML_CFG_##name; \
@@ -2939,7 +2940,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_LIFECYCLE_CFG_##name; }
 #define _PARSE_OV_BITMAP_ROW_gate(name, legacy_field, dl, sec, doc) \
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_GATE_CFG_##name; }
-#define _PARSE_OV_BITMAP_ROW_ml(name, legacy_field, dl, sec, doc) \
+// v5.15.5.F.4d.1.B.2 — _ml variant takes 6 args (FOREACH_ML_CFG_FLAG 5→6 sig migration);
+// other 4 _PARSE_OV_BITMAP_ROW_* domains stay 5-arg until their respective registries migrate.
+#define _PARSE_OV_BITMAP_ROW_ml(name, legacy_field, dl, sec, metadata_flags, doc) \
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_ML_CFG_##name; }
 #define _PARSE_OV_BITMAP_ROW_risk(name, legacy_field, dl, sec, doc) \
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_RISK_CFG_##name; }
@@ -3154,6 +3157,24 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
             "instead (counts raw ticks, no upper bound).\n",
             cfg.min_warmup_samples, ROLLING_WINDOW_SHORT, ROLLING_WINDOW_SHORT);
     cfg.min_warmup_samples = ROLLING_WINDOW_SHORT;
+  }
+
+  // v5.15.5.F.4d.1.B.2 Step 6 — Winsor cross-field invariant validation.
+  // Individual bounds (low ∈ [0.0, 0.5], high ∈ [0.5, 1.0]) already enforced by
+  // WARN_ON_CLAMP at tt::cfg_parse_field<T> clamp dispatch (CoreFrameworks/CfgFieldDispatch.hpp).
+  // Cross-field invariant low < high adds the missing piece per CRIT-4 audit finding.
+  // Decision 4 (A) at triage: cross-field invariant only; leverage existing canonical
+  // (avoids duplicating individual-bound clamps that WARN_ON_CLAMP already covers).
+  // FPN<F>-native compare per MED-4 audit recommendation (now possible at .B.2 Step 6.5
+  // operator overloads landing in FixedPointN.hpp). Compares in integer-limb domain
+  // per H4 (no FPN_ToDouble round-trip for the comparison itself).
+  if (!(cfg.winsor_pct_low < cfg.winsor_pct_high)) {
+    fprintf(stderr,
+        "[cfg] WARN: winsor_pct_low (%.6f) >= winsor_pct_high (%.6f); "
+        "resetting to defaults (low=0.005, high=0.995)\n",
+        FPN_ToDouble(cfg.winsor_pct_low), FPN_ToDouble(cfg.winsor_pct_high));
+    cfg.winsor_pct_low  = FPN_FromDouble<F>(0.005);
+    cfg.winsor_pct_high = FPN_FromDouble<F>(0.995);
   }
 
   // v5.15.5.F.4c.3 Step 2 — populate per-core authoritative view from flat fields.

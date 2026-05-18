@@ -5,7 +5,78 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.1"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.2"
+// .F.4d.1.B.2 (v5.15.5.F.4d.1.B.2) — Cohort migration (2 of 3 in .B split; 2026-05-17).
+//
+// LANDED at .B.2:
+// - 19 master per-core + 1 master global + 4 ML_CFG_FLAG BITMAP_BIT = 24 cohort fields
+//   flag STAMP_BOUND_CFG_DERIVED metadata bit (Step 1 + Step 4 + ml_buy_threshold Step 3.1
+//   + gap_acceptable_threshold registry row Step 2 partial)
+// - FOREACH_ML_CFG_FLAG 5→6 sig migration (metadata_flags column; 4 consumer X-macros migrated)
+// - Framework extended to walk FOREACH_ML_CFG_FLAG (Step 0.5b)
+// - tt:: dispatch extended: SrcT/DstT/HasT for cfg_populate_inf_field (FPN→double conversion);
+//   StampT/CfgT for cfg_drift_compare (coding-time discoveries 1 + 2)
+// - wire_format_invariants helper extended to dual-mask shape (Stage 3 second reference)
+// - 6 COHORT_GATE_* macros extracted at MlCfgFlagRegistry.hpp; FOREACH_STAMP_BOUND_CFG +
+//   FOREACH_CFG_GATE_PER_CORE reference shared macros (Path γ #3 partial closure; 2 of 3
+//   registries unified — CfgDriftCheck has distinct semantics preserved)
+// - FOREACH_CFG_GATE_PER_CORE populated with 16 cohort gate entries (Step 5)
+// - Winsor parse-time cross-field invariant validation (Step 6)
+// - FPN<F> 6 comparison operators (==, !=, <, <=, >, >=) at FixedPointN.hpp (Step 6.5;
+//   removes FPN_ToDouble workaround pattern codebase-wide)
+// - GUI/SettingsPanel.hpp gap_acceptable_threshold manual render entry DELETED
+// - Framework prefix drop at CfgGateRegistry.hpp template fns (Decision 5)
+// - 4 test fixture updates (.A/.B.1 strengthened to .B.2 reality per /test-strength-audit)
+// - 22 new substantive correctness tests (Step 9): FPN<F> operators + cohort gate
+//   predicates under various cfg states + framework walker content verification +
+//   Winsor invariant edge cases
+//
+// Tests: 3235 controller_test passed (3213 baseline + 22 new) + 17 depth_recorder_test
+// GREEN. 5 binaries (test/gui/suite/tsan/asan) clean. Hot path UNTOUCHED. CI:
+// check_meta_registry.py 3 PASS (65/65 enrolled); check_per_core_registry_integrity.py
+// 6 PASS (0 Class 27 exemptions).
+//
+// DEFERRED to .B.3 (8 items; each with concrete TECH_DEBT entry — TECH_DEBT-09X series):
+// 1. Step 2 manual cfg storage cleanup (gap_acceptable_threshold decl/default/parser at
+//    ControllerConfig.hpp:889/:1729/:2554) — STRUCTURAL: FOREACH_GLOBAL_CFG_FIELD doesn't
+//    auto-gen struct fields; deletion requires cfg-storage-discipline amendment + struct-gen
+//    extension at .B.3 or .F.4f
+// 2. Step 3 retroactive .A.7 cohort + bandit_blend_ratio bit-add (5 prefixed-only fields:
+//    ml_tp_pct + ml_sl_pct + barrier_blend_mode + bandit_blend_ratio + per_horizon_barrier_blend)
+//    — STRUCTURAL: only POST_CFG-prefixed inf fields exist; framework can't walk without
+//    inf struct unification; .B.3 legacy POST_CFG deletion forces unification
+// 3. Step 7.1/7.2/7.3 ModelInference struct-gen migrations (3 sites) — STRUCTURAL: tied
+//    to .B.3 legacy registry deletion + struct-gen mechanism choice (approach A/B/C unresolved)
+// 4. Step 7.4 production canonical body emit migration (ModelInference.hpp:1788) —
+//    STRUCTURAL: coupled with stamp_format_version bump (Step 8); .B.3 legacy registry
+//    deletion FORCES this migration (build BREAKS without it)
+// 5. Step 7.5 StampHelper.hpp:156 STAMP_CFG_AUTOPOPULATE migration — STRUCTURAL: legacy
+//    walker writes legacy struct fields; .B.3 deletion forces migration
+// 6. Step 7.6 CoreModelZoo.hpp:243 drift walker migration — STRUCTURAL: reason-field
+//    semantic preservation requires framework extension; .B.3 framework can grow reason
+//    arg OR migration accepts behavior change
+// 7. Step 8 stamp_format_version 5 sub-steps (constant extraction + bounds check + bump +
+//    fixture test + DESIGN_SPEC amendment) — STRUCTURAL: coupled with Step 7.4
+// 8. per_horizon_barrier_blend ML_CFG_FLAG STAMP_BOUND_CFG_DERIVED bit-add — STRUCTURAL:
+//    no unprefixed inf field; same root cause as item 2 (inf struct unification at .B.3)
+//
+// 10 coding-time discoveries documented in postmortem at
+// plans/v5.15-live-readiness/postmortems/2026-05-17-v5.15.5.F.4d.1.B.2-postmortem.md.
+//
+// Bug classes closed at .B.2:
+// - Class 14 / 18 / 21 at cfg-derived consumer surface (cohort migration validates framework
+//   non-empty across 3 registries; 24 fields auto-flow through unified consumer macros)
+// - Path γ #3 across cohort-gate-predicate registries PARTIAL closure (2 of 3 registries
+//   reference shared COHORT_GATE_* macros; CfgDriftCheck has distinct semantic preserved)
+// - Class 24 strengthened (ml_buy_threshold pre-canonical parity gap closed)
+//
+// New DESIGN_SPECs amendments at ship close: cfg-derived-consumer-framework.md v1.2
+// (first non-empty cohort walk); canonical-sister-extension-discipline.md v1.1 (2nd canonical);
+// future-oriented-plan-template.md v1.1 (first NEW plan from inception).
+//
+// Per per-sub-ship cycle: postmortem at
+// plans/v5.15-live-readiness/postmortems/2026-05-17-v5.15.5.F.4d.1.B.2-postmortem.md.
+
 // .F.4d.1.B.1 (v5.15.5.F.4d.1.B.1) — Framework consolidation ship (2026-05-17).
 // First of 3 split sub-ships of v5.15.5.F.4d.1.B (.B.1 framework / .B.2 cohort migration /
 // .B.3 legacy empty-out) per /readiness audit recommendation + CRIT-1 wider-scope acceptance

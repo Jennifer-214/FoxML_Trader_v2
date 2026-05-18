@@ -411,9 +411,10 @@ static const CfgFieldDef field_defs[] = {
     {"held_out_fraction",        "Held-Out %",         "Validation", CFG_FLOAT, "%.2f",
         "Fraction of data reserved as held-out test set (training-time).\n"
         "Clamped [0.05, 0.30]. Engine-wide setup; one bundle per training run."},
-    {"gap_acceptable_threshold", "Gap Threshold",      "Validation", CFG_FLOAT, "%.3f",
-        "Max acceptable WF↔held-out generalization gap (training-time).\n"
-        "Engine-wide quality bar for ALL trained models in this session."},
+    // v5.15.5.F.4d.1.B.2 Step 2 partial — gap_acceptable_threshold entry DELETED; registry-driven
+    // render via FOREACH_GLOBAL_CFG_FIELD row at CfgFieldRegistry.hpp covers GUI render now.
+    // Manual cfg storage at ControllerConfig.hpp:889/:1729/:2554 stays at .B.2 (deferred to .B.3
+    // with cfg-storage-discipline amendment).
     // v4.7.31: ML model paths + barrier gate stay engine-wide for now.
     // ml_model_path is already overridable per-core via core_N_model_path;
     // regime / peak / valley paths don't have per-core storage yet —
@@ -492,14 +493,21 @@ static const CfgFieldDef field_defs[] = {
     // auto-extends → widget appears with correct label / section / tooltip.
     // See CoreFrameworks/{Lifecycle,Gate,Risk,Ops}CfgFlagRegistry.hpp +
     // ML_Headers/MlCfgFlagRegistry.hpp for full lists.
+    // v5.15.5.F.4d.1.B.2 — FOREACH_ML_CFG_FLAG migrated to 6-arg sig (added metadata_flags
+    // column for STAMP_BOUND_CFG_DERIVED cohort flagging). Other 4 FOREACH_*_CFG_FLAG
+    // registries still 5-arg; need parallel X macros. Inline-split to handle the sig
+    // asymmetry until/unless all 5 registries migrate to 6-arg uniformly.
+    #define X_ML(name, legacy_field, display_label, section, metadata_flags, doc) \
+        {#legacy_field, display_label, section, CFG_BOOL, NULL, doc},
     #define X(name, legacy_field, display_label, section, doc) \
         {#legacy_field, display_label, section, CFG_BOOL, NULL, doc},
     FOREACH_LIFECYCLE_CFG_FLAG(X)
     FOREACH_GATE_CFG_FLAG(X)
-    FOREACH_ML_CFG_FLAG(X)
+    FOREACH_ML_CFG_FLAG(X_ML)
     FOREACH_RISK_CFG_FLAG(X)
     FOREACH_OPS_CFG_FLAG(X)
     #undef X
+    #undef X_ML
 
     //==========================================================================
     // v5.15.5.F.4c — EMIT_CFG_FIELD_DEF_FROM_REGISTRY auto-extension REMOVED.

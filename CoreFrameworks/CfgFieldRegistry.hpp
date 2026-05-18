@@ -391,8 +391,17 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(KIND_INT,        model_verify_strict,         "Model Verify Strict",  "Drift Acknowledgments",CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(-1, -1, 1),                         \
         "Model verification strictness: -1=auto (strict in live, lenient in paper; default), 0=lenient, 1=strict. Tri-state. HAS_SIDE_EFFECT — manual parser sets cfg_keys_explicit bit for NormalizeForMode flip rule.",                                                                                                                                                                                                                                                                                                       \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        trading_mode,                "Trading Mode",         "Operational",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::SAFETY_CRITICAL | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
+    X(KIND_INT,        trading_mode,                "Trading Mode",         "Operational",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::SAFETY_CRITICAL | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
         "Trading mode: 0=PAPER (default; safe), 1=PROD_SHADOW (live wired but bracketed), 2=LIVE (real money). Accepts string ('paper'/'shadow'/'live') or int. LIVE flips model_verify_strict 0->1 + reconcile_mode WARN->STRICT. HAS_SIDE_EFFECT — manual parser handles string form + NormalizeForMode triggers. SAFETY_CRITICAL.", \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Validation (1; v5.15.5.F.4d.1.B.2 Step 2 partial — gap_acceptable_threshold migration) === */ \
+    /* Manual cfg storage at ControllerConfig.hpp:889 (FPN<F>) + manual default at :1729 + manual parser at :2554 stays at .B.2 \
+     * (FOREACH_GLOBAL_CFG_FIELD doesn't auto-gen struct fields — manual decl/default/parser cleanup deferred to .B.3 with cfg-storage-discipline amendment). \
+     * Registry row provides descriptor + STAMP_BOUND_CFG_DERIVED bit (framework walks via FOREACH_GLOBAL_CFG_FIELD filter) + auto-registers GUI render \
+     * (manual GUI entry at GUI/SettingsPanel.hpp:414 deleted in same edit; registry-driven render covers). HAS_SIDE_EFFECT marks "manual parser handles" → \
+     * registry walker skips auto-parse via tt::cfg_parse_field. */ \
+    X(KIND_DOUBLE,     gap_acceptable_threshold,    "Gap Threshold",        "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
+        "Max acceptable |WF mean - held_out| gap for model 'OK' verdict. Default 0.05 = 5%. Stamp-bound (training-time gap value captured at stamp emit). HAS_SIDE_EFFECT — manual parser at ControllerConfig.hpp:2554 handles FPN<F> storage; registry walker skips auto-parse.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Drift Acknowledgments (3) === */                                                                                                                                                                            \
     X(KIND_BOOL,       acknowledge_hardcoded_strategy_in_live, "Ack Hardcoded Strategy in Live", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),             \
@@ -521,7 +530,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         "Slow-path cycles before regime switch\nprevents rapid flipping between strategies",                                                                                                                        \
         STRAT_CAT_REGIME_AWARE,                              OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML — entry threshold + TP/SL (3) === */                                                                                                                                                                    \
-    X(FPN<F>                , KIND_DOUBLE, ml_buy_threshold,            "ML Buy Thresh",        "ML",              0,                                  DBL(0.5, 0.0, 1.0),      "Buy threshold for ML strategy (predictions above this enter)",                                    STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, ml_buy_threshold,            "ML Buy Thresh",        "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(0.5, 0.0, 1.0), "Buy threshold for ML strategy (predictions above this enter; pre-canonical parity gap closed at .B.2 — STAMP_BOUND added to master; legacy FOREACH_STAMP_BOUND_CFG entry at StampBoundCfgRegistry.hpp:157-158 deleted at .B.3 along with macro body)", STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN<F>                , KIND_DOUBLE_PCT, ml_tp_pct,                   "ML TP %%",             "ML",              0,                                  DBL(2.0, 0.0, 100.0),    "ML strategy take profit (overrides take_profit_pct)",                                            STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN<F>                , KIND_DOUBLE_PCT, ml_sl_pct,                   "ML SL %%",             "ML",              0,                                  DBL(1.0, 0.0, 100.0),    "ML strategy stop loss (overrides stop_loss_pct)",                                                STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML — Bandit/Confidence/Ensemble (per-core authoritative) (11) === */                                                                                                                                       \
@@ -556,65 +565,65 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === STAMP_BOUND scalar cohort — Ridge + Winsor + Confidence + Thompson (12 DOUBLE) === */ \
     /*       Ridge risk-parity blending (v5.14.0) */ \
-    X(FPN<F>                , KIND_DOUBLE, ridge_lambda,                "Ridge Lambda",         "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 10.0), \
+    X(FPN<F>                , KIND_DOUBLE, ridge_lambda,                "Ridge Lambda",         "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 10.0), \
         "Ridge regularization strength. Higher = more aggressive blending toward equal weights; lower = trusts per-arm IC signal more. Default 0.15. Stamp-bound (parity-critical).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, ridge_cost_penalty,          "Ridge Cost Penalty",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.5, 0.0, 100.0), \
+    X(FPN<F>                , KIND_DOUBLE, ridge_cost_penalty,          "Ridge Cost Penalty",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.5, 0.0, 100.0), \
         "Cost penalty in net_IC = IC - penalty*cost (basis for ridge_min_ic_floor gate). Higher = penalizes arms with worse cost-IC tradeoff. Default 0.5. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, ridge_min_ic_floor,          "Ridge Min IC Floor",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.001, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, ridge_min_ic_floor,          "Ridge Min IC Floor",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.001, 0.0, 1.0), \
         "Minimum net_IC floor — arms below this floor get zero weight (prevents zero-sum starvation when all arms have weak signal). Default 0.001. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Winsorization (label clipping for training-time outlier handling) */ \
-    X(FPN<F>                , KIND_DOUBLE, winsor_pct_low,              "Winsor Low",           "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.005, 0.0, 0.5), \
+    X(FPN<F>                , KIND_DOUBLE, winsor_pct_low,              "Winsor Low",           "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.005, 0.0, 0.5), \
         "Lower winsor clip percentile (ratio, NOT percent). Default 0.005 = clip bottom 0.5%% of labels. Stamp-bound (training-serve parity).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, winsor_pct_high,             "Winsor High",          "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.995, 0.5, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, winsor_pct_high,             "Winsor High",          "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.995, 0.5, 1.0), \
         "Upper winsor clip percentile (ratio). Default 0.995 = clip top 0.5%% of labels. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Composite confidence (v5.14.1) */ \
-    X(FPN<F>                , KIND_DOUBLE, confidence_freshness_tau_secs, "Conf Freshness Tau", "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3600.0, 0.0, 86400.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_freshness_tau_secs, "Conf Freshness Tau", "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3600.0, 0.0, 86400.0), \
         "Time-decay tau (seconds) for confidence-freshness term. Higher = slower decay of model trust as time-since-train grows. Default 3600s (1h). Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, confidence_capacity_target_dollars, "Conf Capacity Target $", "ML/Confidence", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1000000.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_capacity_target_dollars, "Conf Capacity Target $", "ML/Confidence", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1000000.0), \
         "Target trade capacity (dollars) for confidence-capacity term. 0 = disabled. Higher = larger trades trusted at full confidence. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, confidence_capacity_kappa,   "Conf Capacity Kappa",  "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.1, 0.0, 10.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_capacity_kappa,   "Conf Capacity Kappa",  "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.1, 0.0, 10.0), \
         "Capacity-curve shape parameter (kappa). Controls steepness of confidence falloff as trade size exceeds capacity. Default 0.1. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, confidence_rmse_baseline,    "Conf RMSE Baseline",   "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0, 100.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_rmse_baseline,    "Conf RMSE Baseline",   "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0, 100.0), \
         "RMSE baseline for confidence-error term. Predictions with RMSE above this baseline get reduced confidence. Default 1.0. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Bayesian Thompson sampling (v5.14.10.B) */ \
-    X(FPN<F>                , KIND_DOUBLE, thompson_mu_prior,           "Thompson Mu Prior",    "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, -1000.0, 1000.0), \
+    X(FPN<F>                , KIND_DOUBLE, thompson_mu_prior,           "Thompson Mu Prior",    "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, -1000.0, 1000.0), \
         "Posterior mean prior (mu_0) for Bayesian Thompson sampling. Default 0.0 = neutral prior. Stamp-bound (parity-critical when bandit_algorithm == THOMPSON).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, thompson_precision_prior,    "Thompson Tau Prior",   "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
+    X(FPN<F>                , KIND_DOUBLE, thompson_precision_prior,    "Thompson Tau Prior",   "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
         "Posterior precision prior (tau_0 = 1/variance) for Bayesian Thompson sampling. Default 1.0 = unit variance prior. Higher = tighter prior. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, thompson_precision_obs,      "Thompson Tau Obs",     "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
+    X(FPN<F>                , KIND_DOUBLE, thompson_precision_obs,      "Thompson Tau Obs",     "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
         "Observation precision (tau_obs = 1/sigma^2) for each reward update. Higher = each reward trusted more (faster posterior shift). Default 1.0. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Bandit algorithm selector — INT enum (5-state post-v5.15.5.F.4d; Option C wire-byte preservation for cfg=0/1/2) */ \
-    X(int                   , KIND_INT, bandit_algorithm,            "Bandit Algorithm",     "ML/Bandit",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4), \
+    X(int                   , KIND_INT, bandit_algorithm,            "Bandit Algorithm",     "ML/Bandit",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4), \
         "Bandit selector: 0=EXP3 (default; legacy), 1=THOMPSON (Bayesian; Class 24 fix — posterior now updates from rewards), 2=EXP3_OP_THOMPSON_GHOST (Exp3 drives + Thompson shadow-learns; was 'BOTH' pre-.F.4d; legacy 'Both'/'BOTH' string aliases preserved), 3=THOMPSON_OP_EXP3_GHOST (NEW .F.4d; Thompson drives + Exp3 shadow-learns), 4=BLENDED (NEW .F.4d EXPERIMENTAL; weighted blend via thompson_exp3_blend_alpha). Accepts string (canonical or legacy alias) or int. HAS_SIDE_EFFECT — manual parser handles string form. Stamp-bound (parity-critical).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       thompson_exp3_blend_alpha — BLENDED state-4 weight ratio (v5.15.5.F.4d NEW per § C.1 of merged plan body) */ \
-    X(FPN<F>                , KIND_DOUBLE, thompson_exp3_blend_alpha,   "Blend α (Exp3↔Thompson)", "ML/Bandit",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.5, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, thompson_exp3_blend_alpha,   "Blend α (Exp3↔Thompson)", "ML/Bandit",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.5, 0.0, 1.0), \
         "Operator-weighted blend ratio for cfg.bandit_algorithm=4 BLENDED state. weights = (1-α)×Exp3_probs + α×Thompson_softmax(mu_post). Only meaningful when bandit_algorithm=4; GUI should grey-out when bandit_algorithm != 4. Default 0.5 = 50/50 blend. Stamp-bound (parity-critical; reproducibility requires α to be locked to training-time value).", \
         STRAT_CAT_USES_BANDIT,                               OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Per-core risk thresholds — STAMP_BOUND (4) === */ \
     /*       Risk degradation (v5.14.9 soft-risk) */ \
-    X(int                   , KIND_INT, risk_degradation_curve,      "Risk Degradation Curve","Risk Management",CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
+    X(int                   , KIND_INT, risk_degradation_curve,      "Risk Degradation Curve","Risk Management",CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
         "Risk degradation curve shape: 0=CURVE_OFF (no degradation), 1=LINEAR, 2=EXP. Accepts string ('off'/'linear'/'exp') or int. HAS_SIDE_EFFECT — manual parser handles string form + legacy risk_scale_by_confidence alias. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, risk_full_size_threshold,    "Risk Full-Size Thresh","Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, risk_full_size_threshold,    "Risk Full-Size Thresh","Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 1.0), \
         "Confidence threshold above which trades get full size. Default 0.15. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, risk_min_size_threshold,     "Risk Min-Size Thresh", "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, risk_min_size_threshold,     "Risk Min-Size Thresh", "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
         "Confidence threshold below which trades get blocked (no-trade band). Default 0.05. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(FPN<F>                , KIND_DOUBLE, risk_min_size_pct,           "Risk Min-Size Floor",  "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.10, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, risk_min_size_pct,           "Risk Min-Size Floor",  "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.10, 0.0, 1.0), \
         "Floor on degraded position size (ratio of full size, e.g. 0.10 = 10%% of normal). Default 0.10. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Partial exits / Breakeven (3) === */                                                                                                                                                                       \

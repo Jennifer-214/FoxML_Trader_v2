@@ -30,9 +30,23 @@
 #include "../CoreFrameworks/CfgFieldRegistry.hpp"
 
 struct InvariantContext {
-    // Auto-generated mask (CfgMaskArray<N_WORDS>.words) — single-bit OR composed
+    // Auto-generated mask (CfgMaskArray<N_WORDS>.words) — single-bit OR composed.
+    // Legacy single-mask field (kept for backward compat with .A test invocations);
+    // .B.2+ should populate per_core_mask_words + global_mask_words instead for full
+    // dual-registry coverage. If global_mask_words==nullptr, helper treats mask_words
+    // as per_core mask only.
     const uint64_t*           mask_words;
     size_t                    mask_size_words;
+
+    // Per-core + global masks separately (v5.15.5.F.4d.1.B.2 extension — Stage 3
+    // second reference of wire-format-canonical-body-invariants-helper.md).
+    // If both are non-null, helper sums popcounts + walks both for I1 + I4.
+    // If global_mask_words is null, helper falls back to legacy single-mask behavior.
+    const uint64_t*           per_core_mask_words = nullptr;
+    size_t                    per_core_mask_size_words = 0;
+    const uint64_t*           global_mask_words = nullptr;
+    size_t                    global_mask_size_words = 0;
+
     // Descriptor arrays for name lookups
     const CfgFieldDescriptor* per_core_descriptors;
     size_t                    per_core_count;
@@ -58,8 +72,18 @@ inline void run_wire_format_canonical_body_invariants(const InvariantContext& ct
         if (body[i] == '\n') newline_count++;
     }
     size_t pop_count = 0;
-    for (size_t w = 0; w < ctx.mask_size_words; w++) {
-        pop_count += static_cast<size_t>(__builtin_popcountll(ctx.mask_words[w]));
+    // .B.2+ dual-mask path: sum per_core + global popcounts. .A legacy path: single mask.
+    if (ctx.per_core_mask_words != nullptr && ctx.global_mask_words != nullptr) {
+        for (size_t w = 0; w < ctx.per_core_mask_size_words; w++) {
+            pop_count += static_cast<size_t>(__builtin_popcountll(ctx.per_core_mask_words[w]));
+        }
+        for (size_t w = 0; w < ctx.global_mask_size_words; w++) {
+            pop_count += static_cast<size_t>(__builtin_popcountll(ctx.global_mask_words[w]));
+        }
+    } else {
+        for (size_t w = 0; w < ctx.mask_size_words; w++) {
+            pop_count += static_cast<size_t>(__builtin_popcountll(ctx.mask_words[w]));
+        }
     }
     char tname[256];
     snprintf(tname, sizeof(tname), "%s I1: line count == mask popcount", ctx.filter_name);
@@ -86,30 +110,53 @@ inline void run_wire_format_canonical_body_invariants(const InvariantContext& ct
     check(tname, memchr(body, ',', body_len) == nullptr);
 
     // === I4: per-row name appears EXACTLY when mask bit set ===
-    // Walk mask via popcount-style iteration; verify each set-bit's
-    // descriptor name appears as substring in body.
+    // .B.2+ dual-mask path: walk per-core + global masks separately with their respective
+    // descriptor arrays. .A legacy path: single mask + per-core descriptors only.
     bool all_names_present = true;
 
-    // Per-core descriptors range: bits 0 to per_core_count
-    size_t per_core_words = (ctx.per_core_count + 63) / 64;
-    for (size_t w = 0; w < ctx.mask_size_words && w < per_core_words; w++) {
-        uint64_t word = ctx.mask_words[w];
-        while (word) {
-            size_t bit = static_cast<size_t>(__builtin_ctzll(word));
-            size_t idx = w * 64 + bit;
-            if (idx < ctx.per_core_count) {
-                const char* name = ctx.per_core_descriptors[idx].cfg_field_name;
-                if (strstr(body, name) == nullptr) all_names_present = false;
+    if (ctx.per_core_mask_words != nullptr && ctx.global_mask_words != nullptr) {
+        // Walk per-core mask + per-core descriptors
+        for (size_t w = 0; w < ctx.per_core_mask_size_words; w++) {
+            uint64_t word = ctx.per_core_mask_words[w];
+            while (word) {
+                size_t bit = static_cast<size_t>(__builtin_ctzll(word));
+                size_t idx = w * 64 + bit;
+                if (idx < ctx.per_core_count) {
+                    const char* name = ctx.per_core_descriptors[idx].cfg_field_name;
+                    if (strstr(body, name) == nullptr) all_names_present = false;
+                }
+                word &= word - 1;
             }
-            word &= word - 1;
+        }
+        // Walk global mask + global descriptors
+        for (size_t w = 0; w < ctx.global_mask_size_words; w++) {
+            uint64_t word = ctx.global_mask_words[w];
+            while (word) {
+                size_t bit = static_cast<size_t>(__builtin_ctzll(word));
+                size_t idx = w * 64 + bit;
+                if (idx < ctx.global_count) {
+                    const char* name = ctx.global_descriptors[idx].cfg_field_name;
+                    if (strstr(body, name) == nullptr) all_names_present = false;
+                }
+                word &= word - 1;
+            }
+        }
+    } else {
+        // Legacy single-mask path (.A vacuous case)
+        size_t per_core_words = (ctx.per_core_count + 63) / 64;
+        for (size_t w = 0; w < ctx.mask_size_words && w < per_core_words; w++) {
+            uint64_t word = ctx.mask_words[w];
+            while (word) {
+                size_t bit = static_cast<size_t>(__builtin_ctzll(word));
+                size_t idx = w * 64 + bit;
+                if (idx < ctx.per_core_count) {
+                    const char* name = ctx.per_core_descriptors[idx].cfg_field_name;
+                    if (strstr(body, name) == nullptr) all_names_present = false;
+                }
+                word &= word - 1;
+            }
         }
     }
-    // Note: this generic helper takes ONE mask_words array; consumer chooses
-    // whether to invoke once with global mask + per-core descriptors lookup
-    // OR construct separate contexts. At STAMP_BOUND_CFG_DERIVED at .A both
-    // masks are empty so the distinction is moot. .B activates non-empty
-    // masks; consumer may need to invoke helper twice (once per registry) OR
-    // helper extends to multi-mask shape — verify at .B.
     snprintf(tname, sizeof(tname), "%s I4: per-row name appears when bit set", ctx.filter_name);
     check(tname, all_names_present);
 

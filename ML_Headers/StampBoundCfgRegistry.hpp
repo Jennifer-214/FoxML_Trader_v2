@@ -105,32 +105,32 @@
     /* emit_when: any Ridge mode enabled (cohort bitmap) */                                                                                                  \
     X(ridge_within_horizon,                int,    "%d",     0,                                                                                              \
         (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON) ? 1 : 0),                                                                          \
-        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), BITMAP_BIT)                                       \
+        COHORT_GATE_RIDGE_ANY, BITMAP_BIT)                                       \
     X(ridge_across_horizons,               int,    "%d",     0,                                                                                              \
         (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_ACROSS_HORIZONS) ? 1 : 0),                                                                         \
-        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), BITMAP_BIT)                                       \
+        COHORT_GATE_RIDGE_ANY, BITMAP_BIT)                                       \
     X(ridge_lambda,                        double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_lambda),                                                            \
-        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), DIRECT_FIELD)                                     \
+        COHORT_GATE_RIDGE_ANY, DIRECT_FIELD)                                     \
     X(ridge_cost_penalty,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_cost_penalty),                                                      \
-        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), DIRECT_FIELD)                                     \
+        COHORT_GATE_RIDGE_ANY, DIRECT_FIELD)                                     \
     X(ridge_min_ic_floor,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_min_ic_floor),                                                      \
-        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), DIRECT_FIELD)                                     \
+        COHORT_GATE_RIDGE_ANY, DIRECT_FIELD)                                     \
     /* v5.14.1.B.3 — Composite confidence (PARITY-005) */                                                                                                    \
     /* emit_when: composite enabled */                                                                                                                       \
     /* v5.14.9.F.2 — confidence_composite_enabled migrated to ml_cfg_flags bitmap. */                                                                        \
     /*               get_cfg + emit_when read via BITMAP_IS_SET → produce identical wire bytes. */                                                           \
     /*               emit_source=BITMAP_BIT (Y3 dispatch shape per heterogeneous-registry-pattern.md). */                                                    \
     X(confidence_composite_enabled,        int,    "%d",     0,                                                                                              \
-        (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) ? 1 : 0),                                                                  \
-        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), BITMAP_BIT)                                                               \
+        (COHORT_GATE_COMPOSITE_CONFIDENCE ? 1 : 0),                                                                  \
+        COHORT_GATE_COMPOSITE_CONFIDENCE, BITMAP_BIT)                                                               \
     X(confidence_freshness_tau_secs,       double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_freshness_tau_secs),                                           \
-        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+        COHORT_GATE_COMPOSITE_CONFIDENCE, DIRECT_FIELD)                                                              \
     X(confidence_capacity_target_dollars,  double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_target_dollars),                                      \
-        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+        COHORT_GATE_COMPOSITE_CONFIDENCE, DIRECT_FIELD)                                                              \
     X(confidence_capacity_kappa,           double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_kappa),                                               \
-        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+        COHORT_GATE_COMPOSITE_CONFIDENCE, DIRECT_FIELD)                                                              \
     X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline),                                                \
-        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+        COHORT_GATE_COMPOSITE_CONFIDENCE, DIRECT_FIELD)                                                              \
     /* v5.14.1.D — Feature winsorization (PARITY drift detection) */                                                                                         \
     /* emit_when: cfg has valid winsor range (low > 0 AND high < 1 AND low < high) */                                                                        \
     X(winsor_pct_low,                      double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_low),                                                          \
@@ -146,13 +146,13 @@
         BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE), BITMAP_BIT)                                                                          \
     /* v5.14.9.C — Soft risk degradation ladder (4 fields). emit_when: ladder enabled. */                                                                    \
     X(risk_degradation_curve,              int,    "%d",     0,   cfg.risk_degradation_curve,                                                                \
-        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+        COHORT_GATE_SOFTRISK_ENABLED, DIRECT_FIELD)                                                                                                     \
     X(risk_full_size_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_full_size_threshold),                                                \
-        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+        COHORT_GATE_SOFTRISK_ENABLED, DIRECT_FIELD)                                                                                                     \
     X(risk_min_size_threshold,             double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_threshold),                                                 \
-        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+        COHORT_GATE_SOFTRISK_ENABLED, DIRECT_FIELD)                                                                                                     \
     X(risk_min_size_pct,                   double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_pct),                                                       \
-        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+        COHORT_GATE_SOFTRISK_ENABLED, DIRECT_FIELD)                                                                                                     \
     /* v5.14.2.E.2 — expected.cfg → stamp body migration. Always emit (model trained with these values). */                                                  \
     X(ml_buy_threshold,                    double, "%.17g",  0.0, FPN_ToDouble(cfg.ml_buy_threshold),                                                        \
         1, DIRECT_FIELD)                                                                                                                                     \
@@ -161,16 +161,16 @@
     /* v5.14.10.B — Bayesian Thompson sampling bandit (4 fields stamp-bound; rng_seed excluded — runtime-only state). */                                     \
     /* emit_when: cfg.bandit_algorithm != 0 (only emit when Thompson active; legacy stamps without these fields load with has_*=0 per Surface G). */         \
     X(bandit_algorithm,                    int,    "%d",     0,   cfg.bandit_algorithm,                                                                      \
-        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
+        COHORT_GATE_BANDIT_THOMPSON, DIRECT_FIELD)                                                                                                           \
     X(thompson_mu_prior,                   double, "%.17g",  0.0, FPN_ToDouble(cfg.thompson_mu_prior),                                                       \
-        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
+        COHORT_GATE_BANDIT_THOMPSON, DIRECT_FIELD)                                                                                                           \
     X(thompson_precision_prior,            double, "%.17g",  1.0, FPN_ToDouble(cfg.thompson_precision_prior),                                                \
-        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
+        COHORT_GATE_BANDIT_THOMPSON, DIRECT_FIELD)                                                                                                           \
     X(thompson_precision_obs,              double, "%.17g",  1.0, FPN_ToDouble(cfg.thompson_precision_obs),                                                  \
-        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                            \
+        COHORT_GATE_BANDIT_THOMPSON, DIRECT_FIELD)                                                                                                            \
     /* v5.15.5.F.4d — BLENDED state-4 blend ratio (only emitted when bandit_algorithm==4; preserves HMAC byte equivalence for legacy stamps which never used BLENDED). */ \
     X(thompson_exp3_blend_alpha,           double, "%.17g",  0.5, FPN_ToDouble(cfg.thompson_exp3_blend_alpha),                                                \
-        (cfg.bandit_algorithm == 4), DIRECT_FIELD)                                                                                                            \
+        COHORT_GATE_BANDIT_BLEND_STATE_4, DIRECT_FIELD)                                                                                                            \
     /* v5.15.2 — trading_mode (paper / live / shadow) stamp-bound. Every model carries its */                                                                \
     /* training-time mode for audit trail. emit_when=1 (always emit). Legacy stamps lack    */                                                                \
     /* this row → has_trading_mode=0 → effective PAPER (legacy default); Surface G          */                                                                \

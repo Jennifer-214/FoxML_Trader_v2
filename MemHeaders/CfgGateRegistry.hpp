@@ -62,18 +62,43 @@
 // CI verification (Check 9 at .B.3): every entry's `name` references a real flagged source row.
 // Adding an entry without flagging the source row would fail CI.
 
+// v5.15.5.F.4d.1.B.2 Step 5 — populated with cohort-gated entries. Inline gate expressions
+// match legacy FOREACH_STAMP_BOUND_CFG emit_when col semantic (Decision 9 v1.2 reframe:
+// flat cfg access for SOFTRISK + BLENDED — engine-wide global cfg snapshot at stamp emit).
+// .B.3 may extract shared COHORT_GATE_* macros to dedupe across registries (Path γ #3
+// structural close); .B.2 keeps inline for minimum viable scope (replacing 3 registries'
+// inline predicates is .B.3 work alongside legacy registry deletion).
 #define FOREACH_CFG_GATE_PER_CORE(X) \
-    /* Empty at .B.1; .B.2 cohort migration populates below. Sample shape for reference: */ \
-    /* X(bandit_algorithm,                  BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \ */ \
-    /* X(thompson_mu_prior,                 BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \ */ \
-    /* X(thompson_precision_prior,          BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \ */ \
-    /* X(thompson_precision_obs,            BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \ */ \
-    /* X(thompson_exp3_blend_alpha,         BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \ */ \
-    /* X(ridge_lambda,                      BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS)) \ */ \
-    /* X(confidence_freshness_tau_secs,     BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)) \ */
+    /* Bandit/Thompson cohort — MATCHES legacy FOREACH_STAMP_BOUND_CFG emit_when semantic \
+     * (cfg.bandit_algorithm != 0) at lines 162-170. Coding-time discovery: my initial \
+     * BITMAP_IS_SET(MASK_ML_CFG_BANDIT_ENABLED) attempt diverged from legacy → wire byte \
+     * mismatch. Path γ #3 macros at MlCfgFlagRegistry.hpp use the same (!= 0) semantic. */ \
+    X(bandit_algorithm,                   COHORT_GATE_BANDIT_THOMPSON) \
+    X(thompson_mu_prior,                  COHORT_GATE_BANDIT_THOMPSON) \
+    X(thompson_precision_prior,           COHORT_GATE_BANDIT_THOMPSON) \
+    X(thompson_precision_obs,             COHORT_GATE_BANDIT_THOMPSON) \
+    /* BLENDED state-4 — only emit when bandit_algorithm == 4 */ \
+    X(thompson_exp3_blend_alpha,          COHORT_GATE_BANDIT_BLEND_STATE_4) \
+    /* Composite confidence cohort */ \
+    X(confidence_freshness_tau_secs,      COHORT_GATE_COMPOSITE_CONFIDENCE) \
+    X(confidence_capacity_target_dollars, COHORT_GATE_COMPOSITE_CONFIDENCE) \
+    X(confidence_capacity_kappa,          COHORT_GATE_COMPOSITE_CONFIDENCE) \
+    X(confidence_rmse_baseline,           COHORT_GATE_COMPOSITE_CONFIDENCE) \
+    /* Ridge cohort */ \
+    X(ridge_lambda,                       COHORT_GATE_RIDGE_ANY) \
+    X(ridge_cost_penalty,                 COHORT_GATE_RIDGE_ANY) \
+    X(ridge_min_ic_floor,                 COHORT_GATE_RIDGE_ANY) \
+    /* Soft-risk degradation cohort */ \
+    X(risk_degradation_curve,             COHORT_GATE_SOFTRISK_ENABLED) \
+    X(risk_full_size_threshold,           COHORT_GATE_SOFTRISK_ENABLED) \
+    X(risk_min_size_threshold,            COHORT_GATE_SOFTRISK_ENABLED) \
+    X(risk_min_size_pct,                  COHORT_GATE_SOFTRISK_ENABLED)
 
 #define FOREACH_CFG_GATE_GLOBAL(X) \
-    /* Empty at .B.1; .B.2 cohort migration populates if global cohort fields gain STAMP_BOUND_CFG_DERIVED. */
+    /* No entries at .B.2: trading_mode + ml_buy_threshold both use default always-emit gate \
+     * (matching legacy emit_when = 1 for these rows). gap_acceptable_threshold migration \
+     * deferred to .B.3 per coding-time discovery (FOREACH_GLOBAL_CFG_FIELD doesn't auto-gen \
+     * struct fields; manual cfg storage cleanup is .B.3 scope). */
 
 //======================================================================================================
 // [Sidecar lookup helpers — used by consumer macros at Step 2]
@@ -209,8 +234,8 @@ namespace cfg_derived {
                 constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
                 const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/true, cfg); \
                 tt::cfg_populate_inf_field(cfg.name, \
-                                            inf.inference_cfg_##name, \
-                                            inf.has_inference_cfg_##name, _gate); \
+                                            inf.name, \
+                                            inf.has_##name, _gate); \
             }
         FOREACH_PER_CORE_CFG_FIELD(X_INFERENCE_CFG_POPULATE_PER_CORE)
         #undef X_INFERENCE_CFG_POPULATE_PER_CORE
@@ -220,8 +245,8 @@ namespace cfg_derived {
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
                 const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/false, cfg); \
                 tt::cfg_populate_inf_field(cfg.name, \
-                                            inf.inference_cfg_##name, \
-                                            inf.has_inference_cfg_##name, _gate); \
+                                            inf.name, \
+                                            inf.has_##name, _gate); \
             }
         FOREACH_GLOBAL_CFG_FIELD(X_INFERENCE_CFG_POPULATE_GLOBAL)
         #undef X_INFERENCE_CFG_POPULATE_GLOBAL
@@ -265,6 +290,20 @@ namespace cfg_derived {
         FOREACH_GLOBAL_CFG_FIELD(X_STAMP_CFG_POPULATE_GLOBAL)
         #undef X_STAMP_CFG_POPULATE_GLOBAL
 
+        // v5.15.5.F.4d.1.B.2 Step 0.5b — emit BITMAP_BIT rows from FOREACH_ML_CFG_FLAG.
+        // Inline snprintf (no CfgFieldDescriptor since ML_CFG_FLAG rows are in a separate
+        // registry). %d format matches legacy BITMAP_BIT wire emit at StampBoundCfgRegistry.hpp:106-146;
+        // ternary normalization to 0/1 int.
+        #define X_STAMP_CFG_POPULATE_ML_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                const int _bit_val = BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_##NAME) ? 1 : 0; \
+                const size_t _remain = (cap > written) ? (cap - written) : 0u; \
+                int _n_written = snprintf(buf + written, _remain, "%s=%d\n", #legacy_field, _bit_val); \
+                if (_n_written > 0) written += static_cast<size_t>(_n_written); \
+            }
+        FOREACH_ML_CFG_FLAG(X_STAMP_CFG_POPULATE_ML_CFG_FLAG)
+        #undef X_STAMP_CFG_POPULATE_ML_CFG_FLAG
+
         return written;
     }
 
@@ -287,7 +326,7 @@ namespace cfg_derived {
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
                 const bool _gate = cfg_gate::lookup_drift(_idx, /*is_per_core*/true, cfg, stamp_has_inference_cfg); \
-                const bool _drifted = tt::cfg_drift_compare(handle.inference_cfg_##name, cfg.name); \
+                const bool _drifted = tt::cfg_drift_compare(handle.name, cfg.name); \
                 const bool _trigger = _gate & _drifted; \
                 failure_flags |= ((uint64_t)_trigger * failure_mask); \
                 drift_count += (int)_trigger; \
@@ -299,13 +338,27 @@ namespace cfg_derived {
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
                 const bool _gate = cfg_gate::lookup_drift(_idx, /*is_per_core*/false, cfg, stamp_has_inference_cfg); \
-                const bool _drifted = tt::cfg_drift_compare(handle.inference_cfg_##name, cfg.name); \
+                const bool _drifted = tt::cfg_drift_compare(handle.name, cfg.name); \
                 const bool _trigger = _gate & _drifted; \
                 failure_flags |= ((uint64_t)_trigger * failure_mask); \
                 drift_count += (int)_trigger; \
             }
         FOREACH_GLOBAL_CFG_FIELD(X_DRIFT_CHECK_GLOBAL)
         #undef X_DRIFT_CHECK_GLOBAL
+
+        // v5.15.5.F.4d.1.B.2 Step 0.5b — drift check BITMAP_BIT rows from FOREACH_ML_CFG_FLAG.
+        // handle.<legacy_field> stores recorded stamp value (int 0 or 1 per legacy emit);
+        // current cfg bit value via BITMAP_IS_SET; mismatch = drift. Branchless mask-select per H20.
+        #define X_DRIFT_CHECK_ML_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                const int _bit_val = BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_##NAME) ? 1 : 0; \
+                const bool _drifted = (handle.legacy_field != _bit_val); \
+                const bool _trigger = stamp_has_inference_cfg & _drifted; \
+                failure_flags |= ((uint64_t)_trigger * failure_mask); \
+                drift_count += (int)_trigger; \
+            }
+        FOREACH_ML_CFG_FLAG(X_DRIFT_CHECK_ML_CFG_FLAG)
+        #undef X_DRIFT_CHECK_ML_CFG_FLAG
     }
 
 }  // namespace cfg_derived

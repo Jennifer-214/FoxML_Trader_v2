@@ -379,30 +379,48 @@ namespace tt {
     // on x86-64). Array T uses conditional copy (no portable branchless string copy at
     // template level; fallback is acceptable since populate is slow-path/stamp-emit cadence).
     //
-    template <typename T>
-    inline void cfg_populate_inf_field(const T& cfg_src, T& inf_dst, uint8_t& inf_has_dst, bool gate) {
-        static_assert(is_FPN_v<T>
-                   || std::is_floating_point_v<T>
-                   || std::is_integral_v<T>
-                   || std::is_array_v<T>,
-                      "cfg field type not in recognized family — "
-                      "extend tt::cfg_populate_inf_field<T> with a new branch.");
+    // v5.15.5.F.4d.1.B.2 — extended SrcT/DstT/HasT independent templates per coding-time
+    // discovery at Step 1 build verify. Cohort cfg fields are FPN<F> in master registry but
+    // inf struct fields are double (per FOREACH_STAMP_BOUND_CFG legacy struct-gen at
+    // ModelInference.hpp:1199 `type name;` where type=double for FPN cohort rows + has_ field
+    // is uint8_t for StampInferenceCfgInputs OR int for ModelStampResult at :1643). Framework
+    // walker needs to convert SrcT→DstT (FPN_ToDouble for FPN→double) + accept any integral
+    // HasT. Sister precedent: cfg_emit_field already handles FPN→double via FPN_ToDouble inline.
+    template <typename SrcT, typename DstT, typename HasT>
+    inline void cfg_populate_inf_field(const SrcT& cfg_src, DstT& inf_dst, HasT& inf_has_dst, bool gate) {
+        static_assert(is_FPN_v<SrcT>
+                   || std::is_floating_point_v<SrcT>
+                   || std::is_integral_v<SrcT>
+                   || std::is_array_v<SrcT>,
+                      "cfg field src type not in recognized family — "
+                      "extend tt::cfg_populate_inf_field<SrcT,DstT> with a new branch.");
+        static_assert(std::is_integral_v<HasT>,
+                      "inf_has_dst must be integral (uint8_t for StampInferenceCfgInputs; "
+                      "int for ModelStampResult).");
 
-        if constexpr (std::is_array_v<T>) {
+        if constexpr (std::is_array_v<SrcT>) {
             // String/array: branched copy + has bit. Slow-path cadence — acceptable.
             if (gate) {
-                strncpy(inf_dst, cfg_src, std::extent_v<T> - 1);
-                inf_dst[std::extent_v<T> - 1] = '\0';
-                inf_has_dst = 1u;
+                strncpy(inf_dst, cfg_src, std::extent_v<DstT> - 1);
+                inf_dst[std::extent_v<DstT> - 1] = '\0';
+                inf_has_dst = static_cast<HasT>(1);
             } else {
                 inf_dst[0] = '\0';
-                inf_has_dst = 0u;
+                inf_has_dst = static_cast<HasT>(0);
             }
+        } else if constexpr (is_FPN_v<SrcT> && std::is_floating_point_v<DstT>) {
+            // FPN<F> → double via FPN_ToDouble (cohort field common case; sister to
+            // cfg_emit_field FPN→double conversion at line 339).
+            inf_dst = gate ? FPN_ToDouble(cfg_src) : DstT{};
+            inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
+        } else if constexpr (is_FPN_v<SrcT> && is_FPN_v<DstT>) {
+            // FPN<F> → FPN<F> direct (no conversion).
+            inf_dst = gate ? cfg_src : DstT{};
+            inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
         } else {
-            // Scalar (FPN<F> / integral / floating): branchless via conditional move.
-            // GCC/clang -O2 emit cmov for `gate ? cfg_src : T{}`.
-            inf_dst = gate ? cfg_src : T{};
-            inf_has_dst = gate ? 1u : 0u;
+            // Integral / floating: implicit conversion via static_cast (branchless cmov).
+            inf_dst = gate ? static_cast<DstT>(cfg_src) : DstT{};
+            inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
         }
     }
 
@@ -419,25 +437,34 @@ namespace tt {
     // Returns true if values differ (drift detected). Per H4 — FPN<F> compared via integer
     // equality (NEVER float math on accounting types).
     //
-    template <typename T>
-    inline bool cfg_drift_compare(const T& stamp_val, const T& cfg_val) {
-        static_assert(is_FPN_v<T>
-                   || std::is_floating_point_v<T>
-                   || std::is_integral_v<T>
-                   || std::is_array_v<T>,
-                      "cfg field type not in recognized family — "
-                      "extend tt::cfg_drift_compare<T> with a new branch.");
+    // v5.15.5.F.4d.1.B.2 — extended StampT/CfgT independent templates per coding-time
+    // discovery at Step 1 build verify. Stamp's recorded value is at the inf struct's type
+    // (double for FPN cohort rows per ModelInference.hpp:1643 `int has_##name; type name;`
+    // where type=double); cfg runtime value is FPN<F>. Compare in DstT space (the stamp's
+    // recorded type — what was actually wire-emitted at training time).
+    template <typename StampT, typename CfgT>
+    inline bool cfg_drift_compare(const StampT& stamp_val, const CfgT& cfg_val) {
+        static_assert(is_FPN_v<StampT>
+                   || std::is_floating_point_v<StampT>
+                   || std::is_integral_v<StampT>
+                   || std::is_array_v<StampT>,
+                      "stamp field type not in recognized family — "
+                      "extend tt::cfg_drift_compare<StampT,CfgT> with a new branch.");
 
-        if constexpr (is_FPN_v<T>) {
+        if constexpr (std::is_floating_point_v<StampT> && is_FPN_v<CfgT>) {
+            // stamp is double (legacy struct-gen) vs cfg is FPN<F>. Compare in double space
+            // (what was wire-emitted at training time per FPN_ToDouble in cfg_emit_field).
+            return stamp_val != FPN_ToDouble(cfg_val);
+        } else if constexpr (is_FPN_v<StampT> && is_FPN_v<CfgT>) {
             // FPN equality via byte comparison (H4 — never float math on accounting types).
             // memcmp on POD struct compares the underlying integer limb array bit-exactly;
             // FPN<F> doesn't define operator== directly so we go through the byte layer.
-            return memcmp(&stamp_val, &cfg_val, sizeof(T)) != 0;
-        } else if constexpr (std::is_floating_point_v<T>) {
+            return memcmp(&stamp_val, &cfg_val, sizeof(StampT)) != 0;
+        } else if constexpr (std::is_floating_point_v<StampT> && std::is_floating_point_v<CfgT>) {
             return stamp_val != cfg_val;
-        } else if constexpr (std::is_array_v<T>) {
-            return strncmp(stamp_val, cfg_val, std::extent_v<T>) != 0;
-        } else if constexpr (std::is_integral_v<T>) {
+        } else if constexpr (std::is_array_v<StampT> && std::is_array_v<CfgT>) {
+            return strncmp(stamp_val, cfg_val, std::extent_v<StampT>) != 0;
+        } else if constexpr (std::is_integral_v<StampT> && std::is_integral_v<CfgT>) {
             return static_cast<int64_t>(stamp_val) != static_cast<int64_t>(cfg_val);
         }
         return false;
