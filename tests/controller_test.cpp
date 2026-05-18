@@ -4081,21 +4081,21 @@ int main() {
             inf.has_ridge_across_horizons = 1;
             inf.ridge_across_horizons = 0;
             inf.has_ridge_lambda = 1;
-            inf.ridge_lambda = 0.15;
+            inf.ridge_lambda = FPN_FromDouble<64>(0.15);
             inf.has_ridge_cost_penalty = 1;
-            inf.ridge_cost_penalty = 0.5;
+            inf.ridge_cost_penalty = FPN_FromDouble<64>(0.5);
             inf.has_ridge_min_ic_floor = 1;
-            inf.ridge_min_ic_floor = 0.001;
+            inf.ridge_min_ic_floor = FPN_FromDouble<64>(0.001);
             inf.has_confidence_composite_enabled = 1;
             inf.confidence_composite_enabled = 1;
             inf.has_confidence_freshness_tau_secs = 1;
-            inf.confidence_freshness_tau_secs = 3600.0;
+            inf.confidence_freshness_tau_secs = FPN_FromDouble<64>(3600.0);
             inf.has_confidence_capacity_target_dollars = 1;
-            inf.confidence_capacity_target_dollars = 0.0;
+            inf.confidence_capacity_target_dollars = FPN_FromDouble<64>(0.0);
             inf.has_confidence_capacity_kappa = 1;
-            inf.confidence_capacity_kappa = 0.1;
+            inf.confidence_capacity_kappa = FPN_FromDouble<64>(0.1);
             inf.has_confidence_rmse_baseline = 1;
-            inf.confidence_rmse_baseline = 0.5;
+            inf.confidence_rmse_baseline = FPN_FromDouble<64>(0.5);
 
             StampWriteResult sw = stamp_write_for_model(tmp_model,
                 /*secret=*/"", /*format_version=*/6, "2026-05-09",
@@ -4115,26 +4115,26 @@ int main() {
             check("v5.14.1.B.3.E round-trip: has_ridge_across_horizons",
                   sr.has_ridge_across_horizons == 1 && sr.ridge_across_horizons == 0);
             check("v5.14.1.B.3.E round-trip: has_ridge_lambda + value",
-                  sr.has_ridge_lambda == 1 && fabs(sr.ridge_lambda - 0.15) < 1e-12);
+                  sr.has_ridge_lambda == 1 && fabs(FPN_ToDouble(sr.ridge_lambda) - 0.15) < 1e-12);
             check("v5.14.1.B.3.E round-trip: has_ridge_cost_penalty + value",
-                  sr.has_ridge_cost_penalty == 1 && fabs(sr.ridge_cost_penalty - 0.5) < 1e-12);
+                  sr.has_ridge_cost_penalty == 1 && fabs(FPN_ToDouble(sr.ridge_cost_penalty) - 0.5) < 1e-12);
             check("v5.14.1.B.3.E round-trip: has_ridge_min_ic_floor + value",
-                  sr.has_ridge_min_ic_floor == 1 && fabs(sr.ridge_min_ic_floor - 0.001) < 1e-12);
+                  sr.has_ridge_min_ic_floor == 1 && fabs(FPN_ToDouble(sr.ridge_min_ic_floor) - 0.001) < 1e-12);
             check("v5.14.1.B.3.E round-trip: has_confidence_composite_enabled",
                   sr.has_confidence_composite_enabled == 1 &&
                   sr.confidence_composite_enabled == 1);
             check("v5.14.1.B.3.E round-trip: has_freshness_tau + value",
                   sr.has_confidence_freshness_tau_secs == 1 &&
-                  fabs(sr.confidence_freshness_tau_secs - 3600.0) < 1e-9);
+                  fabs(FPN_ToDouble(sr.confidence_freshness_tau_secs) - 3600.0) < 1e-9);
             check("v5.14.1.B.3.E round-trip: has_capacity_target + value",
                   sr.has_confidence_capacity_target_dollars == 1 &&
-                  fabs(sr.confidence_capacity_target_dollars - 0.0) < 1e-12);
+                  fabs(FPN_ToDouble(sr.confidence_capacity_target_dollars) - 0.0) < 1e-12);
             check("v5.14.1.B.3.E round-trip: has_capacity_kappa + value",
                   sr.has_confidence_capacity_kappa == 1 &&
-                  fabs(sr.confidence_capacity_kappa - 0.1) < 1e-12);
+                  fabs(FPN_ToDouble(sr.confidence_capacity_kappa) - 0.1) < 1e-12);
             check("v5.14.1.B.3.E round-trip: has_rmse_baseline + value",
                   sr.has_confidence_rmse_baseline == 1 &&
-                  fabs(sr.confidence_rmse_baseline - 0.5) < 1e-12);
+                  fabs(FPN_ToDouble(sr.confidence_rmse_baseline) - 0.5) < 1e-12);
 
             // Cleanup
             char stamp_path[1024];
@@ -4191,7 +4191,7 @@ int main() {
 
         // Pretend stamp had ridge_lambda=0.15 + composite_enabled=1
         sr.has_ridge_lambda = 1;
-        sr.ridge_lambda = 0.15;
+        sr.ridge_lambda = FPN_FromDouble<64>(0.15);
         sr.has_confidence_composite_enabled = 1;
         sr.confidence_composite_enabled = 1;
 
@@ -4215,12 +4215,12 @@ int main() {
         // FakeCfg shape, not ControllerConfig). Tests the drift LOGIC
         // pattern, not the X-macro expansion (covered by the CoreModelZoo
         // path which compiles successfully).
-        if (sr.has_ridge_lambda && sr.ridge_lambda != fake_cfg.ridge_lambda_d) {
+        if (sr.has_ridge_lambda && FPN_ToDouble(sr.ridge_lambda) != fake_cfg.ridge_lambda_d) {
             sr.inference_cfg_drift_count++;
             if (sr.reason[0] == '\0') {
                 snprintf(sr.reason, sizeof(sr.reason),
                     "ridge_lambda drift: stamp=%.6g cfg=%.6g",
-                    sr.ridge_lambda, fake_cfg.ridge_lambda_d);
+                    FPN_ToDouble(sr.ridge_lambda), fake_cfg.ridge_lambda_d);
             }
         }
         if (sr.has_confidence_composite_enabled &&
@@ -4248,10 +4248,10 @@ int main() {
         sr.reason[0] = '\0';
         sr.inference_cfg_drift_count = 0;
         sr.has_ridge_lambda = 0;  // legacy stamp; field absent
-        sr.ridge_lambda = 0.0;
+        sr.ridge_lambda = FPN_FromDouble<64>(0.0);
 
         // Mimicked drift check skips when has_*=0
-        if (sr.has_ridge_lambda && sr.ridge_lambda != 0.99) {
+        if (sr.has_ridge_lambda && FPN_ToDouble(sr.ridge_lambda) != 0.99) {
             sr.inference_cfg_drift_count++;  // should NOT execute
         }
 
@@ -22220,11 +22220,11 @@ e3_skip_load:;
             inf.has_risk_degradation_curve = 1;
             inf.risk_degradation_curve = 1;  // CURVE_LINEAR
             inf.has_risk_full_size_threshold = 1;
-            inf.risk_full_size_threshold = 0.18;
+            inf.risk_full_size_threshold = FPN_FromDouble<64>(0.18);
             inf.has_risk_min_size_threshold = 1;
-            inf.risk_min_size_threshold = 0.04;
+            inf.risk_min_size_threshold = FPN_FromDouble<64>(0.04);
             inf.has_risk_min_size_pct = 1;
-            inf.risk_min_size_pct = 0.12;
+            inf.risk_min_size_pct = FPN_FromDouble<64>(0.12);
 
             StampWriteResult sw = stamp_write_for_model(tmp_model,
                 /*secret=*/"", /*format_version=*/6, "2026-05-10",
@@ -22244,13 +22244,13 @@ e3_skip_load:;
                   sr.risk_degradation_curve == 1);
             check("v5.14.9.C round-trip: has_risk_full_size_threshold + value",
                   sr.has_risk_full_size_threshold == 1 &&
-                  fabs(sr.risk_full_size_threshold - 0.18) < 1e-9);
+                  fabs(FPN_ToDouble(sr.risk_full_size_threshold) - 0.18) < 1e-9);
             check("v5.14.9.C round-trip: has_risk_min_size_threshold + value",
                   sr.has_risk_min_size_threshold == 1 &&
-                  fabs(sr.risk_min_size_threshold - 0.04) < 1e-9);
+                  fabs(FPN_ToDouble(sr.risk_min_size_threshold) - 0.04) < 1e-9);
             check("v5.14.9.C round-trip: has_risk_min_size_pct + value",
                   sr.has_risk_min_size_pct == 1 &&
-                  fabs(sr.risk_min_size_pct - 0.12) < 1e-9);
+                  fabs(FPN_ToDouble(sr.risk_min_size_pct) - 0.12) < 1e-9);
 
             char stamp_path[1024];
             snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
@@ -22310,11 +22310,11 @@ e3_skip_load:;
         check("v5.14.9.C: AUTOPOPULATE writes risk_degradation_curve value",
               inf.risk_degradation_curve == 2);
         check("v5.14.9.C: AUTOPOPULATE writes risk_full_size_threshold value",
-              fabs(inf.risk_full_size_threshold - 0.22) < 1e-6);
+              fabs(FPN_ToDouble(inf.risk_full_size_threshold) - 0.22) < 1e-6);
         check("v5.14.9.C: AUTOPOPULATE writes risk_min_size_threshold value",
-              fabs(inf.risk_min_size_threshold - 0.06) < 1e-6);
+              fabs(FPN_ToDouble(inf.risk_min_size_threshold) - 0.06) < 1e-6);
         check("v5.14.9.C: AUTOPOPULATE writes risk_min_size_pct value",
-              fabs(inf.risk_min_size_pct - 0.15) < 1e-6);
+              fabs(FPN_ToDouble(inf.risk_min_size_pct) - 0.15) < 1e-6);
     }
     {
         // emit_when=false path via AUTOPOPULATE: cfg.risk_degradation_curve=0
