@@ -4807,12 +4807,13 @@ int main() {
         }
     }
 
-    // ----- v5.14.1.E.E.B: STAMP_CFG_AUTOPOPULATE macro tests ---------------------------------------
+    // ----- v5.14.1.E.E.B: cfg-bound autopopulate tests (migrated STAMP_CFG_AUTOPOPULATE → INFERENCE_CFG_POPULATE_FROM_DERIVED at .B.3) ----
     // Verifies the X-macro auto-populate eliminates the v5.9.5b
     // production-caller field-population gap class. With this macro, adding
-    // a new stamp-bound cfg field is ONE registry line; population is
-    // guaranteed by compile-time expansion (cannot be forgotten).
-    printf("\n--- v5.14.1.E.E.B: STAMP_CFG_AUTOPOPULATE ---\n");
+    // a new stamp-bound cfg field is ONE master-registry row with the
+    // STAMP_BOUND_CFG_DERIVED metadata bit; population is guaranteed by
+    // compile-time expansion of the filtered cohort walker (cannot be forgotten).
+    printf("\n--- v5.14.1.E.E.B: INFERENCE_CFG_POPULATE_FROM_DERIVED (cohort framework) ---\n");
     {
         // Test 1 — All emit_when=true → all 13 fields populated
         StampInferenceCfgInputs inf = {};
@@ -4822,7 +4823,7 @@ int main() {
         BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);     // Composite block (5 fields)
         // Winsor: defaults (0.005/0.995) already trigger emit_when (low>0 && high<1)
         BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);                // Exit blender (1 field)
-        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
         check("v5.14.1.E.E.B autopopulate: has_ridge_within_horizon = 1",
               inf.has_ridge_within_horizon == 1);
         check("v5.14.1.E.E.B autopopulate: has_ridge_lambda = 1",
@@ -4842,7 +4843,7 @@ int main() {
         StampInferenceCfgInputs inf = {};
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         // Defaults: ridge=0, composite=0, exit_blender=0; winsor=0.005/0.995 (valid)
-        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
         check("v5.14.1.E.E.B autopopulate: defaults → ridge has_*=0",
               inf.has_ridge_within_horizon == 0);
         check("v5.14.1.E.E.B autopopulate: defaults → composite has_*=0",
@@ -4860,7 +4861,7 @@ int main() {
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         cfg.winsor_pct_low = FPN_FromDouble<64>(0.0);
         cfg.winsor_pct_high = FPN_FromDouble<64>(1.0);
-        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
         check("v5.14.1.E.E.B autopopulate: winsor disabled (0/1) → has_*=0",
               inf.has_winsor_pct_low == 0 && inf.has_winsor_pct_high == 0);
     }
@@ -22302,7 +22303,7 @@ e3_skip_load:;
         cfg.risk_min_size_pct        = FPN_FromDouble<64>(0.15);
 
         StampInferenceCfgInputs inf = {};
-        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
 
         check("v5.14.9.C: AUTOPOPULATE sets has_risk_degradation_curve",
               inf.has_risk_degradation_curve == 1);
@@ -22323,7 +22324,7 @@ e3_skip_load:;
         cfg.risk_full_size_threshold = FPN_FromDouble<64>(0.50);  // non-default
 
         StampInferenceCfgInputs inf = {};
-        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
 
         check("v5.14.9.C: AUTOPOPULATE skips when curve=OFF (has_*=0)",
               inf.has_risk_degradation_curve == 0 &&
@@ -22734,7 +22735,7 @@ e3_skip_load:;
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         StampInferenceCfgInputs inf = {};
-        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
         check("v5.14.9.F.2: Y3 dispatch — AUTOPOPULATE sets has_confidence_composite_enabled",
               inf.has_confidence_composite_enabled == 1);
         check("v5.14.9.F.2: Y3 dispatch — confidence_composite_enabled value == 1 (byte-equivalent to direct read)",
@@ -22745,7 +22746,7 @@ e3_skip_load:;
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         StampInferenceCfgInputs inf = {};
-        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
         check("v5.14.9.F.2: Y3 dispatch — emit_when=false skips has_confidence_composite_enabled",
               inf.has_confidence_composite_enabled == 0);
     }

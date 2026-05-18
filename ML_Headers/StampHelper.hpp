@@ -146,14 +146,17 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     StampInferenceCfgInputs inf = {};
 
     // ────────────────────────────────────────────────────────────────────
-    // (1) CFG-bound fields — registry-driven via STAMP_CFG_AUTOPOPULATE.
-    // Walks FOREACH_STAMP_BOUND_CFG and populates inf.<field> + has_<field>
-    // per the registry's emit_when guard. Closes PARITY-020: any future
-    // caller that calls this helper automatically gets the ~22 cfg-bound
-    // fields (ridge_*, composite_*, winsor_*, ml_*, thompson_*, trading_mode,
-    // etc.) without needing to remember the call.
+    // (1) CFG-bound fields — framework-driven via INFERENCE_CFG_POPULATE_FROM_DERIVED.
+    // Walks master FOREACH_PER_CORE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD
+    // filtered by STAMP_BOUND_CFG_DERIVED metadata bit; populates inf.<field>
+    // + has_<field> per the per-field cohort gate from cfg_gate::lookup_populate.
+    // Closes PARITY-020: any future caller that calls this helper automatically
+    // gets the cohort cfg-bound fields (ridge_*, composite_*, winsor_*, ml_*,
+    // thompson_*, trading_mode, etc.) without needing to remember the call.
+    // Migrated from legacy STAMP_CFG_AUTOPOPULATE at v5.15.5.F.4d.1.B.3 Step 1.6.5
+    // (closes Class 18 mirror at inf-struct surface; cohort framework consolidation).
     // ────────────────────────────────────────────────────────────────────
-    STAMP_CFG_AUTOPOPULATE(inf, cfg);
+    INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
 
     // ────────────────────────────────────────────────────────────────────
     // (2a) Cfg-derived model-const fields — registry-driven (v5.15.5.A.7).
