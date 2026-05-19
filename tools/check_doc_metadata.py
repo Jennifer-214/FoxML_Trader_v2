@@ -31,15 +31,15 @@ from pathlib import Path
 WORKSPACE = Path("/home/caramel/code/tick-trader-percore-workspace")
 ENGINE = Path("/home/caramel/code/FoxML_Trader_v2")
 
-VOCAB_PATH = WORKSPACE / "DESIGN_SPECS" / "doc-tag-vocabulary.md"
-CONVENTION_PATH = WORKSPACE / "DESIGN_SPECS" / "doc-frontmatter-convention.md"
+VOCAB_PATH = WORKSPACE / "DESIGN_SPECS" / "meta-disciplines" / "doc-tag-vocabulary.md"
+CONVENTION_PATH = WORKSPACE / "DESIGN_SPECS" / "meta-disciplines" / "doc-frontmatter-convention.md"
 
 VALID_TYPES = {
     "refactor-pattern", "feature-pattern", "framework-pattern",
     "audit-methodology", "data-discipline", "concurrency-pattern",
     "wire-format-pattern", "doc-discipline", "meta-discipline",
     "plan-template", "ledger-template", "architecture-overview",
-    "skill", "feedback", "user", "project", "reference",
+    "skill", "skill-check", "feedback", "user", "project", "reference",
     "sprint-master", "sub-plan", "handoff", "postmortem",
     "audit-report", "orientation-doc",
 }
@@ -158,7 +158,19 @@ def validate_doc(path, concern_vocab, surface_vocab, strict=False):
             if ref_clean.startswith("DESIGN_SPECS/"):
                 ref_path = WORKSPACE / ref_clean
             else:
+                # Try root + each subdir per folder-subdivision layout
                 ref_path = WORKSPACE / "DESIGN_SPECS" / ref_clean
+                if not ref_path.exists():
+                    found = False
+                    for subdir in (WORKSPACE / "DESIGN_SPECS").iterdir():
+                        if subdir.is_dir():
+                            candidate = subdir / ref_clean
+                            if candidate.exists():
+                                ref_path = candidate
+                                found = True
+                                break
+                    if not found:
+                        ref_path = WORKSPACE / "DESIGN_SPECS" / ref_clean
             if not ref_path.exists():
                 violations.append(f"BROKEN sister_specs ref '{ref_clean}': {path}")
 

@@ -73,7 +73,7 @@ This is the FIRST canonical application of `meta-registry-pattern-for-codebase-r
 
 ## Section C — Subsystem-state cfg-mirror exemptions (Class 27 exemption registry; established v5.15.5.F.4c.3 WIP2d-1.B.0c)
 
-Per `DESIGN_SPECS/decision-time-data-binding-pattern.md` + `RECURRING_BUG_PATTERNS.md` Class 27, scalar cfg-mirror fields on subsystem state types are FORBIDDEN by default. Subsystems must either:
+Per `DESIGN_SPECS/refactor-patterns/decision-time-data-binding-pattern.md` + `RECURRING_BUG_PATTERNS.md` Class 27, scalar cfg-mirror fields on subsystem state types are FORBIDDEN by default. Subsystems must either:
 - (a) Pre-resolve cfg values onto in-flight objects (Order, Position, Event, TradeEvent) at decision time (PREFERRED), OR
 - (b) Use `FOREACH_<SUBSYS>_CFG_CACHE` registry-driven per-instance cache (fallback for genuinely no-in-flight-object cases)
 
@@ -104,10 +104,10 @@ Removing an exemption:
 
 ## Cross-references
 
-- `tick-trader-percore-workspace/DESIGN_SPECS/manual-fields-inventory-pattern.md` — the pattern doc (Stage 2 DRAFT at this ship; Stage 3 ACTIVE at `.F.4c.3` close)
-- `tick-trader-percore-workspace/DESIGN_SPECS/cfg-scope-discipline.md` § Anti-pattern 2 — discipline closure (Section A + B)
-- `tick-trader-percore-workspace/DESIGN_SPECS/decision-time-data-binding-pattern.md` — Section C principle (Class 27 closure)
-- `tick-trader-percore-workspace/DESIGN_SPECS/per-instance-registry-pattern.md` — the framework Section A + B primitive enforces
+- `tick-trader-percore-workspace/DESIGN_SPECS/framework-patterns/manual-fields-inventory-pattern.md` — the pattern doc (Stage 2 DRAFT at this ship; Stage 3 ACTIVE at `.F.4c.3` close)
+- `tick-trader-percore-workspace/DESIGN_SPECS/refactor-patterns/cfg-scope-discipline.md` § Anti-pattern 2 — discipline closure (Section A + B)
+- `tick-trader-percore-workspace/DESIGN_SPECS/refactor-patterns/decision-time-data-binding-pattern.md` — Section C principle (Class 27 closure)
+- `tick-trader-percore-workspace/DESIGN_SPECS/framework-patterns/per-instance-registry-pattern.md` — the framework Section A + B primitive enforces
 - `tick-trader-percore-workspace/DOCS/DESIGN_PHILOSOPHY.md` § 2 H17 — STRONG at `.F.4c.3` (per-core surface); HARD at `.F.4d` (full cfg surface)
 - `tick-trader-percore-workspace/DOCS/RECURRING_BUG_PATTERNS.md` Class 27 — Section C closure target
 - `CoreFrameworks/CfgFieldRegistry.hpp` — `FOREACH_PER_CORE_FIELD_TYPE` + `FOREACH_MANUAL_PER_CORE_FIELD` X-macros
