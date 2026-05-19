@@ -159,31 +159,40 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
 
     // ────────────────────────────────────────────────────────────────────
-    // (2a) Cfg-derived model-const fields — registry-driven (v5.15.5.A.7).
+    // (2a) Legacy INFERENCE_CFG_AUTOPOPULATE call ELIMINATED at v5.15.5.F.4d.1.B.3 Step 1.5.
     //
-    // CLOSES TECH_DEBT-037 (cfg-derived inference_cfg_* taxonomy drift).
+    // Pre-Step-1.5: this section called INFERENCE_CFG_AUTOPOPULATE(inf, cfg)
+    // which walked legacy MemHeaders/CfgDerivedInferenceCfgRegistry.hpp
+    // (14 entries) and set PREFIXED `inf.inference_cfg_<name>` fields.
     //
-    // Pre-v5.15.5.A.7: this section was ~20 lines of manual `inf.inference_cfg_X
-    // = cfg.Y` mapping. Each new cfg-derived inference_cfg_* field required
-    // a registry entry AND a manual line here. Recurring Class 18 mirror that
-    // grew with each addition (TECH_DEBT-037).
+    // Post-Step-1.5: legacy walker call REMOVED. The cfg-derived cohort
+    // (post-Step-1.6.2 15-key scope: 9 thompson/.A.7 cohort + 1 standalone
+    // bandit_blend_ratio + 5 model-state cohort + per_horizon_barrier_blend
+    // ml_cfg_flag) is now fully covered by INFERENCE_CFG_POPULATE_FROM_DERIVED
+    // at section (1) above (framework walker; sets UNPREFIXED `inf.<name>` per
+    // master FOREACH_PER_CORE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD +
+    // FOREACH_ML_CFG_FLAG + FOREACH_GATE_CFG_FLAG filtered by
+    // STAMP_BOUND_CFG_DERIVED bit). Drift impossible by construction.
     //
-    // v5.15.5.A.7: replaced with INFERENCE_CFG_AUTOPOPULATE registry walker
-    // (MemHeaders/CfgDerivedInferenceCfgRegistry.hpp). 11 entries total
-    // (7 existing + 4 new per-horizon barrier cohort). Adding the next
-    // cfg-derived inference_cfg_* field is now ONE registry row; auto-flows
-    // through this call automatically. Cannot drift.
+    // Legacy CfgDerivedInferenceCfgRegistry.hpp file + INFERENCE_CFG_AUTOPOPULATE
+    // macro definition + legacy prefixed inf.inference_cfg_<name> struct fields
+    // are DELETED at Step 2 (FORCED LAST in BUILD-FORCED sequencing). Until
+    // then, prefixed fields exist on inf struct as transitional state but
+    // are not populated (orphaned; cleared by `StampInferenceCfgInputs inf = {};`
+    // at line 146).
     //
-    // 3rd application of autopopulate-pattern-for-production-caller-class.md
-    // (after STAMP_CFG_AUTOPOPULATE + STAMP_MODEL_CONST_AUTOPOPULATE quarantined).
+    // Closes Class 18 mirror at inf-struct surface for cfg-derived cohort
+    // (production walker is single source of truth via framework).
     //
-    // STAMP_SET(inf, fees) — fees group was historically set in the manual
-    // block; preserved here outside the AUTOPOPULATE because fees has its own
-    // group has flag, set only when cost gate enabled. The cfg-derived registry
-    // sets per-field values; group flags for inference_cfg + bandit are set by
-    // AUTOPOPULATE / per-field STAMP_SET. fees group flag stays explicit.
+    // BITMAP_IS_SET STAMP_SET checks below preserve wire-byte-relevant has-flag
+    // semantics. The bandit_blend_ratio prefixed has-flag controls legacy emit
+    // walker's `inference_cfg_bandit_blend_ratio=X` wire key emission at
+    // ModelInference.hpp:1817 FOREACH_STAMP_BOUND_CFG walker — REQUIRED at
+    // Step 1.5 (Phase F trio NOT YET LANDED; legacy walker still active +
+    // wire format must stay byte-preserved until SOFT bump). Removed at Step 2
+    // when legacy POST_CFG entry + prefixed struct field deleted atomically.
+    // The fees group has-flag is similarly wire-byte-relevant for fees emit.
     // ────────────────────────────────────────────────────────────────────
-    INFERENCE_CFG_AUTOPOPULATE(inf, cfg);
     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
         STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
     }
