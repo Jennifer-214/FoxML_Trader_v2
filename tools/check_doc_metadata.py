@@ -177,10 +177,38 @@ def validate_doc(path, concern_vocab, surface_vocab, strict=False):
     return violations
 
 
+def check_bidirectional_sisters(files_with_fm):
+    """Verify: if A.sister_specs = [B], then B.sister_specs should contain A."""
+    violations = []
+    by_name = {}
+    for path, fm in files_with_fm:
+        by_name[Path(path).name] = (path, fm)
+    for path, fm in files_with_fm:
+        my_name = Path(path).name
+        sisters = fm.get("sister_specs", [])
+        for sister in sisters:
+            sister_clean = sister.strip('"').strip("'")
+            if not sister_clean:
+                continue
+            sister_name = Path(sister_clean).name
+            if sister_name not in by_name:
+                continue
+            _, sister_fm = by_name[sister_name]
+            sister_sisters = sister_fm.get("sister_specs", [])
+            back_refs = [Path(s.strip('"').strip("'")).name for s in sister_sisters]
+            if my_name not in back_refs:
+                violations.append(
+                    f"BIDIR sister-doc asymmetry: {path} → {sister_name} "
+                    f"(but {sister_name} does not point back at {my_name})"
+                )
+    return violations
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--strict", action="store_true", help="enforce SHOULD-HAVE frontmatter on docs")
     parser.add_argument("--paths", nargs="*", help="specific files to check (default: all)")
+    parser.add_argument("--bidirectional", action="store_true", help="verify sister_specs is bidirectional")
     args = parser.parse_args()
 
     concern_vocab, surface_vocab = load_vocabulary()
@@ -198,18 +226,30 @@ def main():
 
     all_violations = []
     files_checked = 0
+    files_with_fm = []
     for path in files_to_check:
         if not path.exists():
             continue
         files_checked += 1
         violations = validate_doc(path, concern_vocab, surface_vocab, strict=args.strict)
         all_violations.extend(violations)
+        fm = parse_frontmatter(path)
+        if fm:
+            files_with_fm.append((str(path), fm))
+
+    if args.bidirectional:
+        bidir_violations = check_bidirectional_sisters(files_with_fm)
+        all_violations.extend(bidir_violations)
 
     print(f"Checked {files_checked} files; loaded {len(concern_vocab)} concern + {len(surface_vocab)} surface tags")
+    if args.bidirectional:
+        print(f"Bidirectional sister_specs check: {len(files_with_fm)} files scanned")
     if all_violations:
         print(f"\nVIOLATIONS ({len(all_violations)}):")
-        for v in all_violations:
+        for v in all_violations[:50]:
             print(f"  {v}")
+        if len(all_violations) > 50:
+            print(f"  ... and {len(all_violations) - 50} more")
         return 1
     print("\nAll frontmatter valid.")
     return 0

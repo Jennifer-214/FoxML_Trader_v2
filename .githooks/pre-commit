@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Pre-commit hook: validate doc-system frontmatter on changed .md files.
+#
+# Install: git config core.hooksPath .githooks
+# (Sister tools: check_meta_registry.py / check_per_core_registry_integrity.py / etc.
+#  enforced at ship close; this runs FASTER per-commit for doc-system drift.)
+
+set -e
+CHANGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
+if [ -z "$CHANGED_MD" ]; then
+    exit 0
+fi
+
+# Resolve workspace path symlinks → workspace canonical paths
+ABS_PATHS=""
+for f in $CHANGED_MD; do
+    if [ -L "$f" ]; then
+        ABS_PATHS="$ABS_PATHS $(readlink -f "$f")"
+    elif [[ "$f" == DOCS/* ]] || [[ "$f" == CLAUDE* ]]; then
+        # Engine-tracked doc; resolve to absolute path
+        ABS_PATHS="$ABS_PATHS $(pwd)/$f"
+    fi
+done
+
+if [ -z "$ABS_PATHS" ]; then
+    exit 0
+fi
+
+if ! python3 /home/caramel/code/FoxML_Trader_v2/tools/check_doc_metadata.py --paths $ABS_PATHS; then
+    echo ""
+    echo "Pre-commit hook FAILED: doc-system frontmatter violations."
+    echo "Fix the violations above, OR bypass via 'git commit --no-verify' (NOT recommended)."
+    exit 1
+fi
