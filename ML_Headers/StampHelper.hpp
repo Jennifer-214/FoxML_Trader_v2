@@ -325,7 +325,10 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // (4) Final emit via stamp_write_for_model (signature stable since
     // v5.14.8.A.merged; helper just wraps).
     // ────────────────────────────────────────────────────────────────────
-    return stamp_write_for_model(
+    // v5.15.5.F.4d.1.B.3 Step 1.6.4 — pass &cfg as cfg_ptr so cfg-derived rows emit via
+    // framework call cfg_derived::populate_stamp_cfg_from_derived<F>. Source-of-truth shift:
+    // cfg-derived wire keys read from cfg at emit time (not from inf intermediary).
+    return stamp_write_for_model<F>(
         output_stamp_path,
         hmac_secret,
         args.format_version,
@@ -336,7 +339,8 @@ inline StampWriteResult Stamp_AssembleAndEmit(
         args.force,
         feat_hash,
         eng_ver,
-        /*inf=*/&inf);
+        /*inf=*/&inf,
+        /*cfg_ptr=*/&cfg);
 }
 
 }  // namespace tt

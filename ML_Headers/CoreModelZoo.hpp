@@ -391,12 +391,12 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // inference_cfg_* at Model_Init zero defaults; comparison skipped.
         if (STAMP_HAS(sr, inference_cfg)) {
             STAMP_SET(*handle, inference_cfg);
-            handle->inference_cfg_confidence_threshold_scale =
-                sr.inference_cfg_confidence_threshold_scale;
-            handle->inference_cfg_barrier_gate_enabled =
-                sr.inference_cfg_barrier_gate_enabled;
-            handle->inference_cfg_confidence_hard_block_threshold =
-                sr.inference_cfg_confidence_hard_block_threshold;
+            handle->confidence_threshold_scale =
+                sr.confidence_threshold_scale;
+            handle->barrier_gate_enabled =
+                sr.barrier_gate_enabled;
+            handle->confidence_hard_block_threshold =
+                sr.confidence_hard_block_threshold;
             // v5.14.9.D — DELETED inference_cfg_freshness_tau population
             // (TECH_DEBT-004 close); registry entry + ModelHandle field deleted.
         }

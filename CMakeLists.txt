@@ -250,6 +250,11 @@ target_compile_options(compare_scalers PRIVATE -O2 -march=native)
 target_include_directories(compare_scalers PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(compare_scalers PRIVATE ssl crypto)
 
+# v5.15.5.F.4d.1.B.3 Phase L REVERTED — stamp_model_cli target REMOVED. Operator workflow shifts to
+# foxml_suite GUI auto-stamp via Backtest_RunFullValidation → Stamp_AssembleAndEmit (in-process).
+# DESIGN_SPEC `framework-driven-cli-binary-pattern.md` retained as Stage 2 DRAFT; first canonical
+# queued for v5.16+ cmdline-invocable training per `plans/_future/2026-05-12-decoupling-endgoal-roadmap.md`.
+
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
 add_test(NAME depth_recorder_test COMMAND depth_recorder_test)

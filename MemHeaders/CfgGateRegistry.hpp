@@ -531,7 +531,7 @@ namespace cfg_derived {
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 if (strcmp(key, #name) == 0) { \
                     constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
-                    tt::cfg_parse_field(r.name, g_per_core_cfg_field_descriptors[_idx], val); \
+                    tt::cfg_parse_field(r.name, g_per_core_cfg_field_descriptors[_idx], val, /*wire_context=*/true); \
                     r.has_##name = 1; \
                     return true; \
                 } \
@@ -541,7 +541,7 @@ namespace cfg_derived {
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 if (strcmp(key, #name) == 0) { \
                     constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
-                    tt::cfg_parse_field(r.name, g_global_cfg_field_descriptors[_idx], val); \
+                    tt::cfg_parse_field(r.name, g_global_cfg_field_descriptors[_idx], val, /*wire_context=*/true); \
                     r.has_##name = 1; \
                     return true; \
                 } \

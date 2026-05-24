@@ -1852,13 +1852,13 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                         ImGui::TextColored(FoxmlColors::comment,
                                            "Recorded cfg at training time:");
                         ImGui::Text("  confidence_threshold_scale:       %.4g",
-                                    v.inference_cfg_confidence_threshold_scale);
+                                    v.confidence_threshold_scale);
                         ImGui::Text("  barrier_gate_enabled:             %d",
-                                    v.inference_cfg_barrier_gate_enabled);
+                                    v.barrier_gate_enabled);
                         ImGui::Text("  confidence_hard_block_threshold:  %.4g",
-                                    v.inference_cfg_confidence_hard_block_threshold);
+                                    v.confidence_hard_block_threshold);
                         ImGui::Text("  held_out_fraction:                %.3f",
-                                    v.inference_cfg_held_out_fraction);
+                                    v.held_out_fraction);
                         // v5.14.9.D — DELETED freshness_tau display
                         // (TECH_DEBT-004 close); registry entry + struct field
                         // deleted; stamp body line no longer emitted.

@@ -861,9 +861,9 @@ template <unsigned F> struct ControllerConfig {
   // Phase 7 prep — held-out validation infrastructure. Used by foxml_suite
   // when training/evaluating a model. Live engine reads via expected.cfg
   // mismatch checks (CoreModelZoo).
-  FPN<F>   held_out_fraction;        // 0.20 = 20% of data reserved for final-test
-                                     // (clamped to [0.05, 0.30] in HeldOutSplit_Make)
-                                     // (default 0.05 — gap above this = poor generalization)
+  // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — manual `FPN<F> held_out_fraction;` decl REMOVED;
+  // auto-gen via FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) at line 1338 (Path α)
+  // covers the field declaration from the new registry row at CfgFieldRegistry.hpp Validation.
   // v5.2.0 (held-out gate Phase 1) — model attestation infrastructure.
   // Each .bin model can have a paired .stamp file with hash+signature
   // attesting that held-out validation passed. When held_out_gate_strict=1,
@@ -1708,10 +1708,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.9.1 — hard-block floor. 0.0 = disabled (pre-v5.9.1 behavior).
   // Operator opts in (audit-recommended 0.05) for the noise-floor protection.
   cfg.confidence_hard_block_threshold = FPN_FromDouble<F>(0.0);
-  // Phase 7 prep — held-out validation defaults
-  cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
-  // v5.15.5.F.4d.1.B.3 Step 1.6.1 — gap_acceptable_threshold default deleted; auto-default via
-  // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT) at function start applies registry DBL(0.05, 0.0, 1.0).
+  // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — held_out_fraction default removed (was 0.20);
+  // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT) at function start applies registry DBL(0.20, 0.0, 1.0).
+  // Sister to gap_acceptable_threshold cleanup at Step 1.6.1 (TECH_DEBT-093 closure).
   // TECH_DEBT-093 FULL closure. Other 47 manual defaults audited and retained: some diverge from
   // registry defaults (e.g., warmup_ticks registry=0 but manual=128); registry default audit deferred
   // to follow-up TECH_DEBT entry (see TECH_DEBT-107 NEW at ship close).
@@ -2541,7 +2540,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // tolerant parser shim.
     CFG_PARSE_FPN(confidence_threshold_scale)
     CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
-    CFG_PARSE_FPN(held_out_fraction)
+    // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — held_out_fraction manual parser removed (was CFG_PARSE_FPN).
+    // Registry auto-parser via FOREACH_GLOBAL_CFG_FIELD walker at line 2110 handles via tt::cfg_parse_field<FPN<F>>.
     // v5.15.5.F.4d.1.B.3 Step 1.6.1 — gap_acceptable_threshold migrated to registry auto-parser
     // (TECH_DEBT-093 closure). HAS_SIDE_EFFECT bit removed at CfgFieldRegistry.hpp registry row;
     // tt::cfg_parse_field<FPN<F>> handles FPN_FromDouble + clamp via DBL(0.05, 0.0, 1.0) payload.

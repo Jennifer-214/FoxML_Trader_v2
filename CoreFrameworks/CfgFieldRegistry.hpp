@@ -411,6 +411,15 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(FPN<F>,               KIND_DOUBLE,     gap_acceptable_threshold,    "Gap Threshold",        "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
         "Max acceptable |WF mean - held_out| gap for model 'OK' verdict. Default 0.05 = 5%. Stamp-bound (training-time gap value captured at stamp emit). v5.15.5.F.4d.1.B.3 Step 1.6.1 — HAS_SIDE_EFFECT bit removed; auto-parser handles FPN<F> storage via tt::cfg_parse_field (TECH_DEBT-093 closure).", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — held_out_fraction migration to cfg-derived cohort. \
+     * Was MC PRE_CFG row at StampBoundModelConstRegistry.hpp emitting `inference_cfg_held_out_fraction` wire key; \
+     * inf-driven via STAMP_INFERENCE_CFG_AUTOPOPULATE (deleted at Step 1.5). After Phase F: emits unprefixed \
+     * `held_out_fraction=` via cfg-derived framework call (populate_stamp_cfg_from_derived); legacy stamps \
+     * load via FOREACH_LEGACY_PREFIXED_KEY back-compat dispatch. Closes Class 21 (parallel descriptor between \
+     * cfg-side + MC-side for same semantic). Sister precedent: gap_acceptable_threshold above. */ \
+    X(FPN<F>,               KIND_DOUBLE,     held_out_fraction,           "Held-Out %",           "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.20, 0.0, 1.0), \
+        "Fraction of training data reserved as held-out validation set. Default 0.20 = 20%. Stamp-bound (training-time value captured at stamp emit; engine load WARN on drift). v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — migrated from MC PRE_CFG inf-side row to cfg-derived cohort; closes Class 21 parallel descriptor.", \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Drift Acknowledgments (3) === */                                                                                                                                                                            \
     X(int,                  KIND_BOOL,       acknowledge_hardcoded_strategy_in_live, "Ack Hardcoded Strategy in Live", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),             \
         "Explicit acknowledgment required to run hardcoded strategy (no per-core override) in live mode. Safety gate; operator must opt-in.",                                                                       \

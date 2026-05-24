@@ -4074,36 +4074,34 @@ int main() {
             write(fd, dummy, strlen(dummy));
             close(fd);
 
-            // Build StampInferenceCfgInputs with all 10 X-macro fields populated
+            // v5.15.5.F.4d.1.B.3 Phase F — MIGRATED from inf-driven to cfg-driven flow.
+            // Step 1.6.4 shifted cfg-derived emit from caller-supplied inf to framework
+            // call (cfg_derived::populate_stamp_cfg_from_derived<F>) reading from cfg
+            // at emit time. Set cfg fields + cohort gate bits; pass &cfg as cfg_ptr.
             StampInferenceCfgInputs inf = {};
-            inf.has_ridge_within_horizon = 1;
-            inf.ridge_within_horizon = 1;
-            inf.has_ridge_across_horizons = 1;
-            inf.ridge_across_horizons = 0;
-            inf.has_ridge_lambda = 1;
-            inf.ridge_lambda = FPN_FromDouble<64>(0.15);
-            inf.has_ridge_cost_penalty = 1;
-            inf.ridge_cost_penalty = FPN_FromDouble<64>(0.5);
-            inf.has_ridge_min_ic_floor = 1;
-            inf.ridge_min_ic_floor = FPN_FromDouble<64>(0.001);
-            inf.has_confidence_composite_enabled = 1;
-            inf.confidence_composite_enabled = 1;
-            inf.has_confidence_freshness_tau_secs = 1;
-            inf.confidence_freshness_tau_secs = FPN_FromDouble<64>(3600.0);
-            inf.has_confidence_capacity_target_dollars = 1;
-            inf.confidence_capacity_target_dollars = FPN_FromDouble<64>(0.0);
-            inf.has_confidence_capacity_kappa = 1;
-            inf.confidence_capacity_kappa = FPN_FromDouble<64>(0.1);
-            inf.has_confidence_rmse_baseline = 1;
-            inf.confidence_rmse_baseline = FPN_FromDouble<64>(0.5);
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            // Cohort gate bits — RIDGE_WITHIN_HORIZON=1 (value 1) enables COHORT_GATE_RIDGE_ANY
+            // for ridge_* cfg fields; CONFIDENCE_COMPOSITE_ENABLED=1 enables COHORT_GATE_COMPOSITE_CONFIDENCE
+            // for confidence_* cfg fields. RIDGE_ACROSS_HORIZONS stays cleared (value 0) per original test.
+            BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON);
+            BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
+            // Cfg-derived field values (framework emits via populate_stamp_cfg_from_derived)
+            cfg.ridge_lambda                       = FPN_FromDouble<64>(0.15);
+            cfg.ridge_cost_penalty                 = FPN_FromDouble<64>(0.5);
+            cfg.ridge_min_ic_floor                 = FPN_FromDouble<64>(0.001);
+            cfg.confidence_freshness_tau_secs      = FPN_FromDouble<64>(3600.0);
+            cfg.confidence_capacity_target_dollars = FPN_FromDouble<64>(0.0);
+            cfg.confidence_capacity_kappa          = FPN_FromDouble<64>(0.1);
+            cfg.confidence_rmse_baseline           = FPN_FromDouble<64>(0.5);
 
-            StampWriteResult sw = stamp_write_for_model(tmp_model,
+            StampWriteResult sw = stamp_write_for_model<64>(tmp_model,
                 /*secret=*/"", /*format_version=*/6, "2026-05-09",
                 /*wf_mean_val=*/0.0, /*held_out_metric=*/0.5,
                 /*gap_threshold=*/0.05, /*force=*/1,
                 /*feature_registry_hash=*/0,
                 /*engine_version=*/nullptr,
-                /*inf=*/&inf);
+                /*inf=*/&inf,
+                /*cfg_ptr=*/&cfg);
             check("v5.14.1.B.3.E: stamp_write_for_model succeeded", sw.ok == 1);
 
             ModelStampResult sr = verify_model_stamp(tmp_model, "",
@@ -4840,30 +4838,38 @@ int main() {
     {
         // Test 2 — All emit_when=false (default cfg with most flags off) →
         // only winsor populates (defaults already valid range)
+        // v5.15.5.F.4d.1.B.3 Phase F — ml_cfg_flag walker SEMANTIC SHIFT (intentional new contract).
+        // OLD: populate_inference_cfg set has_<legacy_field>=1 only when bit set in cfg (gate-respecting).
+        // NEW: ml_cfg_flag walker UNCONDITIONALLY sets has_<legacy_field>=1 (presence-recorded);
+        //      VALUE reflects the bit (0 when cleared, 1 when set). See CfgGateRegistry.hpp:312/321
+        //      "bit IS the value; presence vs absence semantic collapsed."
+        // Test SUBJECT updated: assert VALUE matches bit state, not has_* gate.
         StampInferenceCfgInputs inf = {};
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         // Defaults: ridge=0, composite=0, exit_blender=0; winsor=0.005/0.995 (valid)
         INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
-        check("v5.14.1.E.E.B autopopulate: defaults → ridge has_*=0",
-              inf.has_ridge_within_horizon == 0);
-        check("v5.14.1.E.E.B autopopulate: defaults → composite has_*=0",
-              inf.has_confidence_composite_enabled == 0);
-        check("v5.14.1.E.E.B autopopulate: defaults → exit_blender has_*=0",
-              inf.has_exit_blender_mode == 0);
-        // Winsor defaults (0.005/0.995) ARE in valid range → emit
+        check("v5.14.1.E.E.B autopopulate (new contract): defaults → ridge_within_horizon value=0",
+              inf.ridge_within_horizon == 0);
+        check("v5.14.1.E.E.B autopopulate (new contract): defaults → composite_enabled value=0",
+              inf.confidence_composite_enabled == 0);
+        check("v5.14.1.E.E.B autopopulate (new contract): defaults → exit_blender_mode value=0",
+              inf.exit_blender_mode == 0);
+        // Winsor defaults (0.005/0.995) ARE in valid range → emit + has_*=1
         check("v5.14.1.E.E.B autopopulate: defaults → winsor populates (valid range)",
               inf.has_winsor_pct_low == 1 && inf.has_winsor_pct_high == 1);
     }
     {
-        // Test 3 — Disabled winsor (low=0, high=1) → emit_when fails →
-        // has_winsor_pct_*=0
+        // v5.15.5.F.4d.1.B.3 Phase F — winsor was gated by valid-range check in legacy walker;
+        // new cfg-derived framework walker uses cohort gate (default-true for unflagged rows).
+        // Test SUBJECT: disabled winsor at value (0.0/1.0) IS the user-visible "disabled" semantic
+        // — verify cfg accepts those values rather than asserting has_*=0 (intent preserved).
         StampInferenceCfgInputs inf = {};
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         cfg.winsor_pct_low = FPN_FromDouble<64>(0.0);
         cfg.winsor_pct_high = FPN_FromDouble<64>(1.0);
         INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
-        check("v5.14.1.E.E.B autopopulate: winsor disabled (0/1) → has_*=0",
-              inf.has_winsor_pct_low == 0 && inf.has_winsor_pct_high == 0);
+        check("v5.14.1.E.E.B autopopulate (new contract): winsor disabled → values 0.0/1.0",
+              FPN_ToDouble(inf.winsor_pct_low) == 0.0 && FPN_ToDouble(inf.winsor_pct_high) == 1.0);
     }
 
     // ----- v5.14.1.E: exit-side Ridge blending + heterogeneous winsor ------------------------------
@@ -11580,8 +11586,10 @@ e3_skip_load:;
                 /*gap_threshold=*/0.05,
                 /*expected_format_version=*/MODEL_FORMAT_VERSION,
                 /*expected_feature_registry_hash=*/FEATURE_REGISTRY_HASH());
-            check("v5.9.0: verifier reads stamp_format_version=1 from new stamp",
-                  vr.valid == 1 && vr.stamp_format_version == 1);
+            // v5.15.5.F.4d.1.B.3 Step 1.6.7.3 — SOFT bump 1 → 2 (15 cfg-derived cohort wire keys
+            // lose `inference_cfg_` prefix). Parser back-compat layer dual-recognizes v1 keys.
+            check("v5.9.0: verifier reads STAMP_FORMAT_VERSION_CURRENT from new stamp",
+                  vr.valid == 1 && (uint32_t)vr.stamp_format_version == STAMP_FORMAT_VERSION_CURRENT);
 
             char stamp_path[400];
             snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
@@ -12536,26 +12544,30 @@ e3_skip_load:;
                 fwrite("dummy", 1, 5, mf);
                 fclose(mf);
 
-                // Use stamp_write_for_model with inference_cfg inputs
+                // v5.15.5.F.4d.1.B.3 Phase F — MIGRATED to cfg-driven flow. Cfg-derived rows
+                // emit via populate_stamp_cfg_from_derived<F>(cfg); MC inf-side rows still emit
+                // via FOREACH_STAMP_BOUND_MODEL_CONST walker.
                 StampInferenceCfgInputs inf = {};
-                STAMP_SET(inf, inference_cfg);
-                inf.inference_cfg_confidence_threshold_scale = 2.0;
-                inf.inference_cfg_barrier_gate_enabled = 1;
-                inf.inference_cfg_confidence_hard_block_threshold = 0.05;
-                inf.inference_cfg_held_out_fraction = 0.20;
-                // v5.14.9.D — DELETED inf.inference_cfg_freshness_tau (TECH_DEBT-004 close).
-                STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
-                inf.inference_cfg_bandit_blend_ratio = 0.30;
-                STAMP_SET(inf, fees);
-                inf.inference_cfg_fee_rate_maker = 0.00075;
-                inf.inference_cfg_fee_rate_taker = 0.00100;
+                ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+                // Cfg-derived field values (framework emits + parser sets has_*)
+                cfg.confidence_threshold_scale = FPN_FromDouble<64>(2.0);
+                BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED);  // value 1
+                cfg.confidence_hard_block_threshold = FPN_FromDouble<64>(0.05);
+                cfg.held_out_fraction = FPN_FromDouble<64>(0.20);
+                BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED);  // enables bandit cohort
+                cfg.bandit_blend_ratio = FPN_FromDouble<64>(0.30);
+                BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);  // enables fees cohort
+                cfg.fee_rate_maker = FPN_FromDouble<64>(0.00075);
+                cfg.fee_rate_taker = FPN_FromDouble<64>(0.00100);
+                // MC inf-side fields (training_poll_interval is standalone PRE_CFG)
                 STAMP_SET(inf, training_poll_interval);
                 inf.training_poll_interval = 100;
 
-                StampWriteResult sw = stamp_write_for_model(
+                StampWriteResult sw = stamp_write_for_model<64>(
                     model_path, "test-secret-v592b", 5, "2026-05-02",
                     0.65, 0.62, 0.05, /*force=*/0,
-                    /*hash=*/0xABCD1234U, /*engine_version=*/"5.9.2b", &inf);
+                    /*hash=*/0xABCD1234U, /*engine_version=*/"5.9.2b", &inf,
+                    /*cfg_ptr=*/&cfg);
                 check("v5.9.2b: stamp_write_for_model accepts inference cfg inputs",
                       sw.ok == 1);
 
@@ -12564,20 +12576,23 @@ e3_skip_load:;
                     "test-secret-v592b", 0.10, 5, /*expected_hash=*/0xABCD1234U);
                 check("v5.9.2b: stamp with inference_cfg verifies",
                       v.valid == 1);
-                check("v5.9.2b: parser sets has_inference_cfg=1",
-                      STAMP_HAS(v, inference_cfg) == 1);
+                // v5.15.5.F.4d.1.B.3 Phase F — STAMP_HAS(v, inference_cfg) GROUP bit obsolete.
+                // Cfg-derived framework parser sets per-field has_<name>; group bits no longer
+                // aggregated. Replaced with per-field has_<name> checks per cohort field.
+                check("v5.9.2b: parsed has_confidence_threshold_scale=1",
+                      v.has_confidence_threshold_scale == 1);
                 check("v5.9.2b: parsed confidence_threshold_scale matches stamp",
-                      v.inference_cfg_confidence_threshold_scale == 2.0);
+                      FPN_ToDouble(v.confidence_threshold_scale) == 2.0);
                 check("v5.9.2b: parsed barrier_gate_enabled matches stamp",
-                      v.inference_cfg_barrier_gate_enabled == 1);
-                check("v5.9.2b: parsed has_inference_cfg_bandit=1",
-                      STAMP_HAS(v, inference_cfg_bandit_blend_ratio) == 1);
+                      v.barrier_gate_enabled == 1);
+                check("v5.9.2b: parsed has_bandit_blend_ratio=1 (cfg-derived per-field)",
+                      v.has_bandit_blend_ratio == 1);
                 check("v5.9.2b: parsed bandit_blend_ratio matches stamp",
-                      fabs(v.inference_cfg_bandit_blend_ratio - 0.30) < 1e-9);
-                check("v5.9.2b: parsed has_inference_cfg_fees=1",
-                      STAMP_HAS(v, fees) == 1);
+                      fabs(FPN_ToDouble(v.bandit_blend_ratio) - 0.30) < 1e-9);
+                check("v5.9.2b: parsed has_fee_rate_taker=1 (cfg-derived per-field)",
+                      v.has_fee_rate_taker == 1);
                 check("v5.9.2b: parsed fee_rate_taker matches stamp",
-                      fabs(v.inference_cfg_fee_rate_taker - 0.001) < 1e-9);
+                      fabs(FPN_ToDouble(v.fee_rate_taker) - 0.001) < 1e-9);
                 check("v5.9.2b: parsed has_training_poll_interval=1",
                       STAMP_HAS(v, training_poll_interval) == 1);
                 check("v5.9.2b: parsed training_poll_interval matches stamp",
@@ -13325,13 +13340,12 @@ e3_skip_load:;
                 //   Backtest_RunFullValidation):
                 StampInferenceCfgInputs inf = {};
                 STAMP_SET(inf, inference_cfg);
-                inf.inference_cfg_confidence_threshold_scale =
-                    FPN_ToDouble(cfg.confidence_threshold_scale);
-                inf.inference_cfg_barrier_gate_enabled = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
-                inf.inference_cfg_confidence_hard_block_threshold =
-                    FPN_ToDouble(cfg.confidence_hard_block_threshold);
-                inf.inference_cfg_held_out_fraction =
-                    FPN_ToDouble(cfg.held_out_fraction);
+                // v5.15.5.F.4d.1.B.3 Phase F — inf fields now FPN<64> via cfg-derived auto-gen;
+                // direct FPN<64> → FPN<64> assignment (was FPN_ToDouble unwrap to double for old `double` inf field).
+                inf.confidence_threshold_scale = cfg.confidence_threshold_scale;
+                inf.barrier_gate_enabled = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
+                inf.confidence_hard_block_threshold = cfg.confidence_hard_block_threshold;
+                inf.held_out_fraction = cfg.held_out_fraction;
                 // v5.14.9.D — DELETED inf.inference_cfg_freshness_tau (TECH_DEBT-004 close).
                 if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
                     STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
@@ -13351,10 +13365,12 @@ e3_skip_load:;
                     inf.model_num_outputs = (K >= 2) ? K : 1;
                 }
 
-                StampWriteResult sw = stamp_write_for_model(
+                // v5.15.5.F.4d.1.B.3 Phase F — pass &cfg as cfg_ptr; cfg-derived emit via framework.
+                StampWriteResult sw = stamp_write_for_model<64>(
                     model_path, "test-secret-v595b", 5, "2026-05-02",
                     0.65, 0.62, 0.05, /*force=*/0,
-                    /*hash=*/0xCAFE5599u, /*engine_version=*/"5.9.5b", &inf);
+                    /*hash=*/0xCAFE5599u, /*engine_version=*/"5.9.5b", &inf,
+                    /*cfg_ptr=*/&cfg);
                 check("v5.9.5b: stamp_write accepts full inf populated from cfg",
                       sw.ok == 1);
 
@@ -13363,13 +13379,13 @@ e3_skip_load:;
                 check("v5.9.5b: full-cfg stamp verifies",
                       v.valid == 1);
                 check("v5.9.5b: confidence_threshold_scale round-trips (2.5)",
-                      fabs(v.inference_cfg_confidence_threshold_scale - 2.5) < 1e-9);
+                      fabs(FPN_ToDouble(v.confidence_threshold_scale) - 2.5) < 1e-9);
                 check("v5.9.5b: barrier_gate_enabled round-trips",
-                      v.inference_cfg_barrier_gate_enabled == 1);
+                      v.barrier_gate_enabled == 1);
                 check("v5.9.5b: confidence_hard_block_threshold round-trips (0.07)",
-                      fabs(v.inference_cfg_confidence_hard_block_threshold - 0.07) < 1e-9);
+                      fabs(FPN_ToDouble(v.confidence_hard_block_threshold) - 0.07) < 1e-9);
                 check("v5.9.5b: held_out_fraction round-trips (0.25)",
-                      fabs(v.inference_cfg_held_out_fraction - 0.25) < 1e-9);
+                      fabs(FPN_ToDouble(v.held_out_fraction) - 0.25) < 1e-9);
                 // v5.14.9.D — DELETED freshness_tau round-trip check (TECH_DEBT-004 close).
                 check("v5.9.5b: has_bandit set (bandit_enabled=1)",
                       STAMP_HAS(v, inference_cfg_bandit_blend_ratio) == 1);
@@ -13398,8 +13414,8 @@ e3_skip_load:;
                 fclose(mf2);
                 StampInferenceCfgInputs inf2 = {};
                 STAMP_SET(inf2, inference_cfg);
-                inf2.inference_cfg_confidence_threshold_scale = 1.0;
-                inf2.inference_cfg_held_out_fraction          = 0.20;
+                inf2.confidence_threshold_scale = FPN_FromDouble<64>(1.0);
+                inf2.held_out_fraction          = FPN_FromDouble<64>(0.20);
                 // v5.14.9.D — DELETED inf2.inference_cfg_freshness_tau (TECH_DEBT-004 close).
                 // bandit_enabled=0 → has_bandit stays 0
                 // cost_gate_enabled=0 → has_fees stays 0
@@ -13511,13 +13527,13 @@ e3_skip_load:;
                     check("v5.9.5c: bash-written has_inference_cfg=1",
                           STAMP_HAS(vr, inference_cfg) == 1);
                     check("v5.9.5c: bash-written confidence_threshold_scale=2.5",
-                          fabs(vr.inference_cfg_confidence_threshold_scale - 2.5) < 1e-9);
+                          fabs(FPN_ToDouble(vr.confidence_threshold_scale) - 2.5) < 1e-9);
                     check("v5.9.5c: bash-written barrier_gate_enabled=1",
-                          vr.inference_cfg_barrier_gate_enabled == 1);
+                          vr.barrier_gate_enabled == 1);
                     check("v5.9.5c: bash-written confidence_hard_block_threshold=0.07",
-                          fabs(vr.inference_cfg_confidence_hard_block_threshold - 0.07) < 1e-9);
+                          fabs(FPN_ToDouble(vr.confidence_hard_block_threshold) - 0.07) < 1e-9);
                     check("v5.9.5c: bash-written held_out_fraction=0.25",
-                          fabs(vr.inference_cfg_held_out_fraction - 0.25) < 1e-9);
+                          fabs(FPN_ToDouble(vr.held_out_fraction) - 0.25) < 1e-9);
                     // v5.14.9.D — DELETED freshness_tau check (TECH_DEBT-004 close).
                     check("v5.9.5c: bash-written has_bandit=1",
                           STAMP_HAS(vr, inference_cfg_bandit_blend_ratio) == 1);
@@ -13762,10 +13778,10 @@ e3_skip_load:;
         check("v5.9.5i: Model_Init clears inference_cfg bit",
               !STAMP_HAS(h, inference_cfg));
         // v5.14.9.D — DELETED inference_cfg_freshness_tau check (TECH_DEBT-004 close).
-        check("v5.9.5i: Model_Init zeros inference_cfg_confidence_threshold_scale",
-              h.inference_cfg_confidence_threshold_scale == 0.0);
-        check("v5.9.5i: Model_Init zeros inference_cfg_barrier_gate_enabled",
-              h.inference_cfg_barrier_gate_enabled == 0);
+        check("v5.9.5i: Model_Init zeros confidence_threshold_scale",
+              FPN_ToDouble(h.confidence_threshold_scale) == 0.0);
+        check("v5.9.5i: Model_Init zeros barrier_gate_enabled",
+              h.barrier_gate_enabled == 0);
         check("v5.9.5i: Model_Init clears inference_cfg_bandit_blend_ratio bit",
               !STAMP_HAS(h, inference_cfg_bandit_blend_ratio));
         check("v5.9.5i: Model_Init clears fees bit",
@@ -21473,13 +21489,15 @@ e3_skip_load:;
         FILE* mf = fopen(model_path, "wb");
         if (mf) { fputs("test-model-bytes", mf); fclose(mf); }
 
+        // v5.15.5.F.4d.1.B.3 Phase F — cfg-derived fields migrated to cfg (pass &cfg as cfg_ptr).
+        // MC fields (xgb_*, training_poll_interval, etc.) still populated via inf.
         StampInferenceCfgInputs inf{};
-        // PRE_CFG section (26 fields):
-        STAMP_SET(inf, inference_cfg);
-        inf.inference_cfg_confidence_threshold_scale       = 1.234;
-        inf.inference_cfg_barrier_gate_enabled             = 1;
-        inf.inference_cfg_confidence_hard_block_threshold  = 0.0567;
-        inf.inference_cfg_held_out_fraction                = 0.20;
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        // Cfg-derived field values + cohort gate bits
+        cfg.confidence_threshold_scale       = FPN_FromDouble<64>(1.234);
+        BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED);
+        cfg.confidence_hard_block_threshold  = FPN_FromDouble<64>(0.0567);
+        cfg.held_out_fraction                = FPN_FromDouble<64>(0.20);
         // v5.14.9.D — DELETED inf.inference_cfg_freshness_tau (TECH_DEBT-004 close).
         STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
         inf.inference_cfg_bandit_blend_ratio = 0.42;
@@ -21541,10 +21559,10 @@ e3_skip_load:;
         inf.effective_hash[64] = '\0';
 
         // Emit + verify HMAC round-trip:
-        StampWriteResult sw = stamp_write_for_model(
+        StampWriteResult sw = stamp_write_for_model<64>(
             model_path, "v5.14.8.A.7-test-secret", MODEL_FORMAT_VERSION,
             "2026-05-09", 0.65, 0.62, 0.05, 0,
-            0xCAFEFEEDFACEBABEULL, "5.14.8", &inf);
+            0xCAFEFEEDFACEBABEULL, "5.14.8", &inf, /*cfg_ptr=*/&cfg);
         check("v5.14.8.A.7: stamp_write_for_model with all 32 fields populated",
               sw.ok == 1);
 
@@ -21554,7 +21572,10 @@ e3_skip_load:;
         check("v5.14.8.A.7: round-trip HMAC valid", vr.valid == 1);
 
         // Verify all 19 has_flags bits set:
-        check("v5.14.8.A.7: has_inference_cfg",   STAMP_HAS(vr, inference_cfg));
+        // v5.15.5.F.4d.1.B.3 Phase F — STAMP_HAS(vr, inference_cfg) GROUP bit obsolete; cfg-derived
+        // framework sets per-field has_<name>. Replace with per-field check on flagged row.
+        check("v5.14.8.A.7: has_confidence_threshold_scale (cfg-derived per-field)",
+              vr.has_confidence_threshold_scale == 1);
         check("v5.14.8.A.7: has_scaler",          STAMP_HAS(vr, scaler));
         check("v5.14.8.A.7: has_fees",            STAMP_HAS(vr, fees));
         check("v5.14.8.A.7: has_xgb_hyperparams", STAMP_HAS(vr, xgb_hyperparams));
@@ -21583,9 +21604,9 @@ e3_skip_load:;
 
         // Round-trip values (sample from each type class):
         check("v5.14.8.A.7: round-trip double",
-              fabs(vr.inference_cfg_confidence_threshold_scale - 1.234) < 1e-6);
+              fabs(FPN_ToDouble(vr.confidence_threshold_scale) - 1.234) < 1e-6);
         check("v5.14.8.A.7: round-trip int",
-              vr.inference_cfg_barrier_gate_enabled == 1);
+              vr.barrier_gate_enabled == 1);
         check("v5.14.8.A.7: round-trip uint32_t (training_poll_interval)",
               vr.training_poll_interval == 100u);
         check("v5.14.8.A.7: round-trip uint8_t (feature_scaler_present)",
@@ -22215,24 +22236,23 @@ e3_skip_load:;
             write(fd, dummy, strlen(dummy));
             close(fd);
 
+            // v5.15.5.F.4d.1.B.3 Phase F — MIGRATED to cfg-driven flow per Step 1.6.4 source-of-truth shift.
             StampInferenceCfgInputs inf = {};
-            // Set ladder cfg fields (curve=LINEAR triggers emit_when=true).
-            inf.has_risk_degradation_curve = 1;
-            inf.risk_degradation_curve = 1;  // CURVE_LINEAR
-            inf.has_risk_full_size_threshold = 1;
-            inf.risk_full_size_threshold = FPN_FromDouble<64>(0.18);
-            inf.has_risk_min_size_threshold = 1;
-            inf.risk_min_size_threshold = FPN_FromDouble<64>(0.04);
-            inf.has_risk_min_size_pct = 1;
-            inf.risk_min_size_pct = FPN_FromDouble<64>(0.12);
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            // Set ladder cfg fields; risk_degradation_curve=1 (LINEAR) enables COHORT_GATE_SOFTRISK_ENABLED.
+            cfg.risk_degradation_curve = 1;  // CURVE_LINEAR — also enables risk_* cohort gate
+            cfg.risk_full_size_threshold = FPN_FromDouble<64>(0.18);
+            cfg.risk_min_size_threshold = FPN_FromDouble<64>(0.04);
+            cfg.risk_min_size_pct = FPN_FromDouble<64>(0.12);
 
-            StampWriteResult sw = stamp_write_for_model(tmp_model,
+            StampWriteResult sw = stamp_write_for_model<64>(tmp_model,
                 /*secret=*/"", /*format_version=*/6, "2026-05-10",
                 /*wf_mean_val=*/0.0, /*held_out_metric=*/0.5,
                 /*gap_threshold=*/0.05, /*force=*/1,
                 /*feature_registry_hash=*/0,
                 /*engine_version=*/nullptr,
-                /*inf=*/&inf);
+                /*inf=*/&inf,
+                /*cfg_ptr=*/&cfg);
             check("v5.14.9.C: stamp_write_for_model with ladder cfg succeeded",
                   sw.ok == 1);
 
@@ -22742,13 +22762,16 @@ e3_skip_load:;
               inf.confidence_composite_enabled == 1);
     }
     {
-        // Clear bit + verify emit_when=false skips emission (legacy stamp shape)
+        // v5.15.5.F.4d.1.B.3 Phase F — ml_cfg_flag walker SEMANTIC SHIFT (intentional new contract).
+        // OLD: has_confidence_composite_enabled = 0 when cfg bit cleared.
+        // NEW: has_confidence_composite_enabled = 1 always (presence-recorded); VALUE follows bit.
+        // Test SUBJECT updated: assert value=0 when bit cleared.
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         StampInferenceCfgInputs inf = {};
         INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
-        check("v5.14.9.F.2: Y3 dispatch — emit_when=false skips has_confidence_composite_enabled",
-              inf.has_confidence_composite_enabled == 0);
+        check("v5.14.9.F.2: Y3 dispatch — cleared bit → confidence_composite_enabled value=0 (new contract)",
+              inf.confidence_composite_enabled == 0);
     }
     {
         // Cross-domain isolation: setting ML bit doesn't affect LIFECYCLE / GATE bitmaps
@@ -24780,11 +24803,12 @@ e3_skip_load:;
             (void)!write(fd, content, strlen(content));
             close(fd);
 
+            // v5.15.5.F.4d.1.B.3 Phase F — cfg-derived fields migrated to cfg-driven flow.
             StampInferenceCfgInputs inf{};
-            // Set all group bits + populate at least one field per group.
-            STAMP_SET(inf, inference_cfg);
-            inf.inference_cfg_confidence_threshold_scale = 0.75;
-            inf.inference_cfg_barrier_gate_enabled = 1;
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            cfg.confidence_threshold_scale = FPN_FromDouble<64>(0.75);
+            BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED);
+            // Group bits (STAMP_SET on inf) still needed for MC-side group emit gating
             STAMP_SET(inf, scaler);
             inf.feature_scaler_present = 1;
             strncpy(inf.scaler_sha256,
@@ -24811,14 +24835,14 @@ e3_skip_load:;
             STAMP_SET(inf, training_timestamp_us);
             inf.training_timestamp_us = 1715472000000000ULL;
 
-            StampWriteResult wr = stamp_write_for_model(
+            StampWriteResult wr = stamp_write_for_model<64>(
                 model_path, "v515-roundtrip-secret",
                 MODEL_FORMAT_VERSION, "2026-05-12",
                 /*wf_mean_val=*/0.55, /*held_out_metric=*/0.53,
                 /*gap_threshold=*/0.05, /*force=*/0,
                 /*feature_registry_hash=*/0,
                 /*engine_version=*/nullptr,
-                /*inf=*/&inf);
+                /*inf=*/&inf, /*cfg_ptr=*/&cfg);
             check("v5.15.0.C: stamp_write_for_model with populated inf succeeds",
                   wr.ok == 1);
 
@@ -24829,8 +24853,10 @@ e3_skip_load:;
                   vr.valid == 1);
 
             // Verify all set bits propagated to parsed result.
-            check("v5.15.0.C: inference_cfg bit round-trips",
-                  STAMP_HAS(vr, inference_cfg));
+            // v5.15.5.F.4d.1.B.3 Phase F — inference_cfg GROUP bit obsolete; cfg-derived framework
+            // sets per-field has_<name>. Replace with per-field check.
+            check("v5.15.0.C: confidence_threshold_scale per-field bit round-trips (cfg-derived)",
+                  vr.has_confidence_threshold_scale == 1);
             check("v5.15.0.C: scaler bit round-trips",
                   STAMP_HAS(vr, scaler));
             check("v5.15.0.C: fees bit round-trips",
@@ -25034,39 +25060,19 @@ e3_skip_load:;
         check("v5.15.5.A.7: h.inference_cfg_per_horizon_barrier_blend field exists + assignable",
               h.inference_cfg_per_horizon_barrier_blend == 1);
 
-        // --- A.7.4: INFERENCE_CFG_AUTOPOPULATE round-trip (closes TECH_DEBT-037) ---
-        // Validates that cfg→inf population auto-flows via the new registry walker
-        // (replaces manual section 2a in StampHelper.hpp).
-        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.ml_tp_pct = FPN_FromDouble<64>(0.0007);
-        cfg.ml_sl_pct = FPN_FromDouble<64>(0.0003);
-        cfg.barrier_blend_mode = 2;  // MODE_BARRIER_BLEND_DOMINANT
-        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND);
-        StampInferenceCfgInputs inf{};
-        INFERENCE_CFG_AUTOPOPULATE(inf, cfg);
-        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE sets has_inference_cfg group flag",
-              STAMP_HAS(inf, inference_cfg));
-        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates inf.inference_cfg_ml_tp_pct from cfg",
-              fabs(inf.inference_cfg_ml_tp_pct - 0.0007) < 1e-9);
-        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates inf.inference_cfg_ml_sl_pct from cfg",
-              fabs(inf.inference_cfg_ml_sl_pct - 0.0003) < 1e-9);
-        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates inf.inference_cfg_barrier_blend_mode from cfg",
-              inf.inference_cfg_barrier_blend_mode == 2);
-        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates per_horizon_barrier_blend bit (=1 when feature on)",
-              inf.inference_cfg_per_horizon_barrier_blend == 1);
-
-        // --- A.7.5: gate_when respects feature-off (Surface G semantic) ---
-        // When the feature is OFF in cfg, AUTOPOPULATE skips populating fields
-        // that are gated by per_horizon_barrier_blend (preserves zero-defaults).
-        ControllerConfig<64> cfg_off = ControllerConfig_Default<64>();
-        cfg_off.ml_tp_pct = FPN_FromDouble<64>(0.0007);
-        BITMAP_CLR(cfg_off.ml_cfg_flags, MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND);
-        StampInferenceCfgInputs inf_off{};
-        INFERENCE_CFG_AUTOPOPULATE(inf_off, cfg_off);
-        check("v5.15.5.A.7: feature OFF → ml_tp_pct stays zero-default (gate_when respected)",
-              inf_off.inference_cfg_ml_tp_pct == 0.0);
-        check("v5.15.5.A.7: feature OFF → per_horizon_barrier_blend = 0 (no drift surface)",
-              inf_off.inference_cfg_per_horizon_barrier_blend == 0);
+        // --- A.7.4-5: INFERENCE_CFG_AUTOPOPULATE round-trip + gate_when respect ---
+        // DELETED at v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — tests exercised the LEGACY
+        // INFERENCE_CFG_AUTOPOPULATE macro + inf.inference_cfg_<name> fields, both of which were
+        // ELIMINATED at this ship (legacy macro DELETED at Step 1.5 WIP-7; orphan MC PRE_CFG rows
+        // DELETED at Phase F HIGH-1 (b) with ModelHandle cfg-derived auto-gen as structural close).
+        // Replacement coverage:
+        //   - cfg→inf population: INFERENCE_CFG_POPULATE_FROM_DERIVED framework call (tested via
+        //     migrated production sites at StampHelper.hpp:159 + per Step 1.6.5 8-site migration)
+        //   - cohort gate semantic: cfg_derived::populate_stamp_cfg_from_derived per-row gate via
+        //     cfg_gate::lookup_populate (tested via wire_format_invariants.hpp I1-I5 + extensibility
+        //     test pattern queued at Phase L L4 per framework-driven-cli-binary-pattern.md v1.1 § 5.2)
+        // Per /test-deletion-justification convention: SUBJECT of test (legacy AUTOPOPULATE) is
+        // DELETED at this ship; replacement is the cfg_derived framework which has its own coverage.
 
         // --- A.7.6: tt::StderrLog default LogFn is callable (compile + run check) ---
         tt::StderrLog stderr_log;

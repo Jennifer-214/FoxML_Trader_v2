@@ -133,6 +133,14 @@
 //           with pre-v5.10 IEEE-754 math; retrain required" message.
 #define MODEL_FORMAT_VERSION 6
 
+// v5.15.5.F.4d.1.B.3 Step 1.6.7.1-3 — SOFT version bump infrastructure per
+// DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
+// CURRENT is the version emit produces; MAX_SUPPORTED is the upper bound parser accepts.
+// Bump CURRENT when wire-format changes; bump MAX_SUPPORTED when next bump is planned.
+// Legacy versions ≥ 1 continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat (see verify_model_stamp).
+static constexpr uint32_t STAMP_FORMAT_VERSION_CURRENT      = 2;  // v5.15.5.F.4d.1.B.3 Step 1.6.7.3 — SOFT bump 1 → 2 (cfg-derived cohort wire keys lose `inference_cfg_` prefix)
+static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 2;  // parser accepts [1, MAX] inclusive; > MAX = future version this engine doesn't understand
+
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
 //======================================================================================================
@@ -360,6 +368,25 @@ struct alignas(64) ModelHandle {
         STAMP_HANDLE_GEN_##presence(name, type)
     FOREACH_STAMP_BOUND_MODEL_CONST(X)
     #undef X
+
+    // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) cascade close — cfg-derived cohort fields auto-gen on
+    // ModelHandle (sister to ModelStampResult struct-gen at line 1236 + StampInferenceCfgInputs at
+    // line 1742). Same STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() macro; F=64 brought into struct scope
+    // (sister pattern at lines 1173 + 1722). After Phase F HIGH-1 (b) row deletion at Step 2:
+    // handle.<name> auto-gen IS the sole source for cfg-derived field storage at runtime; CoreModelZoo
+    // load-time copy `handle.<name> = sr.<name>` flows sr (cfg-derived auto-gen on ModelStampResult)
+    // → handle (cfg-derived auto-gen here). Drift check via cfg_derived::drift_check_from_derived
+    // reads handle.<name> (cfg-derived) + cfg.<name> (cfg-derived) — same source-of-truth surface.
+    // EXCLUSION REDIRECT: 3 xgb_* names redirect to dead-prefixed per H18 sidecar (sister to
+    // ModelStampResult exclusion at line 1233-1239 + FOREACH_STAMP_RESULT_FIELD_EXCLUSION sidecar).
+    static constexpr unsigned F_for_derived = F;  // bring template F into nested-struct scope
+    #define xgb_min_child_weight _stamp_result_excluded_xgb_min_child_weight
+    #define xgb_seed             _stamp_result_excluded_xgb_seed
+    #define xgb_train_nthread    _stamp_result_excluded_xgb_train_nthread
+    STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
+    #undef xgb_min_child_weight
+    #undef xgb_seed
+    #undef xgb_train_nthread
 
     // =====================================================================
     // COLD-2 CLUSTER — runtime-only identifiers (NOT in stamp registry)
@@ -1267,6 +1294,40 @@ inline int stamp_parse_line(char* line, const char** key_out, const char** val_o
     return 1;
 }
 
+// v5.15.5.F.4d.1.B.3 Step 1.6.7.4 — Legacy wire-key back-compat for SOFT version 1 → 2 bump.
+// Per DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
+//
+// 15 cfg-derived cohort fields lost the `inference_cfg_` prefix at v2 wire format. v1 stamps
+// continue loading on v2+ engine via parser dispatch: legacy key match → framework dispatch on
+// unprefixed sister name. Deletion target tracked at TECH_DEBT-101 (when production v1 stamps
+// eliminated). v1 LOAD test fixture at controller_test.cpp regression-locks back-compat.
+//
+// Adding a new (legacy, current) pair = add 1 row below; parser dispatch + tests auto-flow.
+// Removing the back-compat layer = delete the X-macro body + remove parser dispatch + close TECH_DEBT.
+#define FOREACH_LEGACY_PREFIXED_KEY(X) \
+    /* 9 thompson/.A.7 cohort (per Decision D v1.6 scope) */                          \
+    X(inference_cfg_bandit_algorithm,            bandit_algorithm)                    \
+    X(inference_cfg_thompson_mu_prior,           thompson_mu_prior)                   \
+    X(inference_cfg_thompson_precision_prior,    thompson_precision_prior)            \
+    X(inference_cfg_thompson_precision_obs,      thompson_precision_obs)              \
+    X(inference_cfg_thompson_exp3_blend_alpha,   thompson_exp3_blend_alpha)           \
+    X(inference_cfg_ml_tp_pct,                   ml_tp_pct)                           \
+    X(inference_cfg_ml_sl_pct,                   ml_sl_pct)                           \
+    X(inference_cfg_barrier_blend_mode,          barrier_blend_mode)                  \
+    X(inference_cfg_per_horizon_barrier_blend,   per_horizon_barrier_blend)           \
+    /* 1 standalone */                                                                \
+    X(inference_cfg_bandit_blend_ratio,          bandit_blend_ratio)                  \
+    /* 5 model-state cohort (Class 32 closure scope) */                               \
+    X(inference_cfg_confidence_threshold_scale,  confidence_threshold_scale)          \
+    X(inference_cfg_barrier_gate_enabled,        barrier_gate_enabled)                \
+    X(inference_cfg_confidence_hard_block_threshold, confidence_hard_block_threshold) \
+    X(inference_cfg_fee_rate_maker,              fee_rate_maker)                      \
+    X(inference_cfg_fee_rate_taker,              fee_rate_taker)                      \
+    /* 1 Phase F HIGH-1 (b) — held_out_fraction Class 21 closure: migrated from MC */ \
+    /* PRE_CFG inf-side row to cfg-derived cohort. v1 stamps emit prefixed key;     */ \
+    /* v2 emits unprefixed via cfg-derived framework; back-compat keeps v1 loading. */ \
+    X(inference_cfg_held_out_fraction,           held_out_fraction)
+
 // Verify a model stamp. See header for return values + format.
 //
 // model_path: path to the .bin file. `.stamp` is implied by appending.
@@ -1420,6 +1481,17 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 }
             FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)
             #undef X
+            // v5.15.5.F.4d.1.B.3 Step 1.6.7.4 — Legacy prefixed wire-key back-compat (SOFT v1 → v2
+            // bump). Translates each legacy `inference_cfg_<name>` key to its unprefixed sister
+            // via framework dispatch. v1 stamps continue loading on v2+ engine. See
+            // FOREACH_LEGACY_PREFIXED_KEY above (line 1278+) for the closed-set list +
+            // DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
+            #define X(legacy_key, current_key) \
+                else if (strcmp(key, #legacy_key) == 0) { \
+                    PARSE_STAMP_CFG_TO_DERIVED(r, #current_key, val); \
+                }
+            FOREACH_LEGACY_PREFIXED_KEY(X)
+            #undef X
             // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A; codified at v1.12 plan body) —
             // single-call framework dispatch replaces inline X-macro walker. PARSE_STAMP_CFG_TO_DERIVED
             // returns true when key matches any STAMP_BOUND_CFG_DERIVED-flagged row across 4 master
@@ -1463,6 +1535,19 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
         if (stamp_major != cur_major && stamp_major > 0 && cur_major > 0) {
             r.cross_major_engine = 1;
         }
+    }
+
+    // 0b. v5.15.5.F.4d.1.B.3 Step 1.6.7.2 — stamp_format_version bounds check (RELAXED accept [1, MAX]).
+    // Reject FUTURE versions only — engine doesn't know how to interpret unknown shape. Legacy
+    // versions ≥ 1 continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat dispatch + per-field
+    // has_<name> Surface G semantic. Per Layer 6b SOFT bump procedure.
+    if ((uint32_t)r.stamp_format_version > MAX_SUPPORTED_STAMP_FORMAT_VERSION) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "stamp_format_version too new: stamp=%d engine_max=%u "
+            "(retrain on an engine version that supports this stamp shape)",
+            r.stamp_format_version, MAX_SUPPORTED_STAMP_FORMAT_VERSION);
+        return r;
     }
 
     // 1. Format version match
@@ -1685,6 +1770,12 @@ struct StampInferenceCfgInputs {
     // for accessor.
 };
 
+// v5.15.5.F.4d.1.B.3 Step 1.6.4 — templated on F + cfg_ptr param for cfg-driven canonical body
+// emit via cfg_derived::populate_stamp_cfg_from_derived<F>. Default F=64 preserves call shape
+// for non-cfg callers (cfg_ptr=nullptr skips cfg-derived emit; matches Stamp_AssembleAndEmit ↔
+// stamp_write_for_model contract). Source-of-truth shift: cfg-derived wire keys read from cfg
+// at emit time (not from caller-populated inf). Cohort gating per-row from cfg_gate::lookup_populate.
+template <unsigned F = 64>
 inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 const char* secret,
                                                 int   format_version,
@@ -1697,7 +1788,11 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 const char* engine_version = nullptr,
                                                 // v5.9.2b — inference cfg binding.
                                                 // Optional; nullptr = skip emit (legacy callers).
-                                                const StampInferenceCfgInputs* inf = nullptr) {
+                                                const StampInferenceCfgInputs* inf = nullptr,
+                                                // v5.15.5.F.4d.1.B.3 Step 1.6.4 — cfg pointer for
+                                                // cfg-driven canonical body emit via framework.
+                                                // nullptr = skip cfg-derived emit (legacy callers).
+                                                const ControllerConfig<F>* cfg_ptr = nullptr) {
     StampWriteResult r;
     r.ok = 0;
     r.error[0] = '\0';
@@ -1745,11 +1840,15 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     //    Each line ends with \n.
     int has_hash    = (format_version >= 5 && feature_registry_hash != 0);
     int has_engver  = (format_version >= 5 && engine_version && engine_version[0] != '\0');
-    // v5.9.0: stamp_format_version=1 emitted whenever format_version >= 5
+    // v5.9.0: stamp_format_version emitted whenever format_version >= 5
     // (the v5.8.1a+ wire-format era — the era that has feature_registry_hash
     // and engine_version). Schema version of the stamp body itself,
     // distinct from MODEL_FORMAT_VERSION (which versions the model file
     // shape, not the stamp). Bumped on future stamp body schema changes.
+    // v5.15.5.F.4d.1.B.3 Step 1.6.7.1-3 — version literal extracted to
+    // STAMP_FORMAT_VERSION_CURRENT constant; SOFT bump 1 → 2 (15 cfg-derived
+    // cohort wire keys lose `inference_cfg_` prefix). Parser back-compat
+    // layer (FOREACH_LEGACY_PREFIXED_KEY) dual-recognizes v1 + v2 keys.
     int has_stamp_ver = (format_version >= 5);
     // v5.9.2b — bumped from 2048 → 4096. Original ~700 bytes; 9 new
     // inference_cfg_* + training_poll_interval fields × ~50 bytes each
@@ -1779,7 +1878,7 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     }
     if (has_stamp_ver && n > 0 && (size_t)n < sizeof(canonical)) {
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "stamp_format_version=1\n");
+            "stamp_format_version=%u\n", STAMP_FORMAT_VERSION_CURRENT);
         if (wrote > 0) n += wrote;
     }
     // v5.14.8.A.merged.3 — Registry-driven emit walk. Replaces ~152 lines
@@ -1807,21 +1906,24 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)
     #undef X
 
-    // v5.14.1.B.3 — X-macro-driven emit for stamp-bound cfg fields.
-    // Each X expands to one `if (inf->has_<name>) snprintf("<name>=...")`
-    // emit block. Surface G discipline: legacy callers (which leave
-    // inf->has_<name>=0) emit nothing → canonical body stays
-    // bytewise-identical to pre-v5.14.1.B.3 stamps.
-    // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for emit — wire bytes
-    // are read from inf->name struct field, populated by AUTOPOPULATE which dispatched by emit_source)
-    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
-        if (inf && inf->has_##name && n > 0 && (size_t)n < sizeof(canonical)) {   \
-            int wrote = snprintf(canonical + n, sizeof(canonical) - n,            \
-                #name "=" fmt "\n", inf->name);                                   \
-            if (wrote > 0) n += wrote;                                            \
-        }
-    FOREACH_STAMP_BOUND_CFG(X)
-    #undef X
+    // v5.15.5.F.4d.1.B.3 Step 1.6.4 — Production canonical body emit migration.
+    // Replaces legacy FOREACH_STAMP_BOUND_CFG(X) walker with framework call
+    // `cfg_derived::populate_stamp_cfg_from_derived<F>(buf, cap, cfg)`. Framework walks all 4
+    // cfg-derived cohort registries (per-core + global + ml_cfg_flag + gate_cfg_flag) filtered
+    // by STAMP_BOUND_CFG_DERIVED bit; per-row cohort gate from cfg_gate::lookup_populate; per-row
+    // emit via tt::cfg_emit_field<T> (handles FPN<F> ↔ %.17g + bitmap-bool ↔ %d correctly).
+    //
+    // Source-of-truth shift: cfg-derived wire keys now read from cfg AT EMIT TIME (not from
+    // caller-populated inf). Wire keys lose `inference_cfg_` prefix at v2 wire format per
+    // SOFT bump (Step 1.6.7); v1 stamps load via FOREACH_LEGACY_PREFIXED_KEY back-compat.
+    //
+    // cfg_ptr=nullptr → skip cfg-derived emit (legacy callers; equivalent to all-inf-has-zero
+    // pre-migration). Stamp_AssembleAndEmit passes &cfg → cfg-derived rows emit per gate.
+    if (cfg_ptr && n > 0 && (size_t)n < sizeof(canonical)) {
+        size_t added = cfg_derived::populate_stamp_cfg_from_derived<F>(
+            canonical + n, sizeof(canonical) - (size_t)n, *cfg_ptr);
+        if (added > 0) n += (int)added;
+    }
 
     // v5.14.8.A.merged.4 — POST_CFG section emit walk (registry-driven).
     // Closes TECH_DEBT-006: 6 late-emit fields (expected_*, overlay_hash,

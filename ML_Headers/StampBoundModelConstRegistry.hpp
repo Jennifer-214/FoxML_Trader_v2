@@ -277,21 +277,16 @@ namespace tt {
 // canonical wire format. 26 entries today. Adding new pre-cfg field =
 // 1 row here.
 #define FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)                                                  \
-    /* === inference_cfg group (4 fields post-v5.14.9.D — freshness_tau DELETED) === */            \
-    X(inference_cfg_confidence_threshold_scale, inference_cfg, INCLUDE, double, "%g", 0.0,          \
-      inf->confidence_threshold_scale, inf->has_inference_cfg, "confidence threshold scale")        \
-    X(inference_cfg_barrier_gate_enabled,       inference_cfg, INCLUDE, int,    "%d", 0,            \
-      inf->barrier_gate_enabled, inf->has_inference_cfg, "barrier gate enabled flag")               \
-    X(inference_cfg_confidence_hard_block_threshold, inference_cfg, INCLUDE, double, "%g", 0.0,     \
-      inf->confidence_hard_block_threshold, inf->has_inference_cfg, "confidence hard-block threshold") \
-    /* held_out_fraction is parser-checked but NOT propagated to ModelHandle (no runtime use). */   \
-    X(inference_cfg_held_out_fraction,          inference_cfg, SKIP_HANDLE, double, "%g", 0.0,      \
-      inf->held_out_fraction, inf->has_inference_cfg, "held-out fraction at training")              \
-    /* v5.14.9.D — DELETED X(inference_cfg_freshness_tau, ...) entry           */                  \
-    /* (TECH_DEBT-004 close). Cfg field was mathematically inert (data_age=0   */                  \
-    /* in production); registry entry deletion → struct field auto-removed →   */                  \
-    /* stamp body no longer emits the line. Legacy stamps load (parser ignores */                  \
-    /* unknown key); HMAC chain unbroken (HMAC is per-stamp).                  */                  \
+    /* === inference_cfg group (4 fields) DELETED at v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) ===   */ \
+    /* Cleanup completes the single-source-of-truth migration: 3 rows (confidence_threshold_scale / */ \
+    /* barrier_gate_enabled / confidence_hard_block_threshold) had cfg-derived sisters; held_out_  */ \
+    /* fraction migrated to cfg-derived cohort at this ship. ModelHandle + ModelStampResult +     */ \
+    /* StampInferenceCfgInputs all gain these fields via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN     */ \
+    /* (cfg-derived auto-gen; sister to ModelStampResult struct-gen at ModelInference.hpp:1236).  */ \
+    /* v1 stamps continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat dispatch (parser    */ \
+    /* translates `inference_cfg_<name>=` → unprefixed → cfg-derived framework). `has_inference_cfg`*/ \
+    /* group bit + group declaration at line 231 retained as dead infra; future ship cleans up.   */ \
+    /* v5.14.9.D PRECEDENT: freshness_tau DELETED via same pattern (TECH_DEBT-004 close).         */ \
     /* === bandit (standalone) — emitted at line 2189 === */                                        \
     X(inference_cfg_bandit_blend_ratio,         _, INCLUDE, double, "%g", 0.0,                      \
       inf->bandit_blend_ratio, inf->has_bandit, "bandit blend ratio (Exp3 vs ridge)")               \

@@ -45,8 +45,17 @@ namespace tt {
     // [PARSE: text → typed cfg field]
     //==================================================================================================
     // Caller passes destination BY REFERENCE; T deduced. NEVER takes void*+offset.
+    //
+    // v5.15.5.F.4d.1.B.3 Phase F — `wire_context` param added. KIND_DOUBLE_PCT scaling (operator-facing
+    // %-input convention; "15.0" → stored 0.15) applies to CFG-FILE parsing ONLY, NOT wire parsing.
+    // Wire format (stamp body) carries raw fractions (sister to cfg_emit_field which doesn't scale).
+    // Caller from parse_stamp_cfg_to_derived passes wire_context=true; cfg-file parser passes false
+    // (default). Closes round-trip asymmetry exposed by fee_rate_taker test at v5.9.2b — production
+    // bug: stamp body parse would scale fee rates 100× smaller on load. Sister discipline: tt::cfg_emit_field
+    // is wire-context by definition (no scaling); cfg_parse_field needs the flag for symmetric semantic.
     template <typename T>
-    inline void cfg_parse_field(T& dst, const CfgFieldDescriptor& desc, const char* val) {
+    inline void cfg_parse_field(T& dst, const CfgFieldDescriptor& desc, const char* val,
+                                 bool wire_context = false) {
         // BARRIER 3: compile-time type-family guard.
         // Adding a cfg field of an unrecognized type FAILS THE BUILD here, forcing
         // a deliberate decision (extend tt::cfg_parse_field<T> with a new branch)
@@ -61,17 +70,17 @@ namespace tt {
                       "DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.");
 
         if constexpr (is_FPN_v<T>) {
-            // FPN<F>: parse double, apply percent scaling if KIND_DOUBLE_PCT,
+            // FPN<F>: parse double, apply percent scaling if KIND_DOUBLE_PCT (cfg-file context only),
             // clamp to descriptor range, convert to FPN<T::F>.
             double v = parse_double_fast(val);
-            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) {
-                v /= 100.0;  // operator types "15.0" → stored as 0.15
+            if (!wire_context && desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) {
+                v /= 100.0;  // operator types "15.0" → stored as 0.15 (cfg-FILE convention)
             }
             v = std::clamp(v, desc.payload.as_double.clamp_min, desc.payload.as_double.clamp_max);
             dst = FPN_FromDouble<T::F>(v);
         } else if constexpr (std::is_floating_point_v<T>) {
             double v = parse_double_fast(val);
-            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v /= 100.0;
+            if (!wire_context && desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v /= 100.0;
             v = std::clamp(v, desc.payload.as_double.clamp_min, desc.payload.as_double.clamp_max);
             dst = static_cast<T>(v);
         } else if constexpr (std::is_array_v<T>) {
