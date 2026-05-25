@@ -311,6 +311,50 @@ int main(int argc, char *argv[]) {
         strncpy(settings.cfg_path, suite_cfg, 255);
     }
 
+    // v5.15.5.F.4d.1.B.3 Step 5.5 (2026-05-24) — backtest.cfg/engine.cfg drift guardrail.
+    // Per foxml_suite ML↔LIVE agent CRIT-1: backtest.cfg is first-boot copy of engine.cfg;
+    // idempotent-skip on subsequent boots; the two files DRIFT silently after first boot.
+    // Phase F structurally encoded the drift into stamp HMAC body — Stamp_AssembleAndEmit
+    // reads results->config_used (from backtest.cfg); live engine reads engine.cfg; stamp
+    // values reflect backtest.cfg state. Drift-check at load fires correctly but operator
+    // may dismiss as "models always drift" without recognizing root cause is 2 cfg files.
+    //
+    // This boot-time guardrail surfaces drift IMMEDIATELY so operator knows to reconcile
+    // (or knowingly accept divergence) before running backtests. Stop-gap until structural
+    // fix lands at v5.15.6.A/B/C per TECH_DEBT-123 (lives_in_struct-aware parser dispatch).
+    //
+    // Discipline: simple byte-level file diff (fast; catches all drift). More-precise
+    // STAMP_BOUND_CFG_DERIVED-field-specific diff queued with the structural fix.
+    {
+        FILE* fe = fopen("engine.cfg", "rb");
+        FILE* fb = fopen("backtest.cfg", "rb");
+        if (fe && fb) {
+            fseek(fe, 0, SEEK_END); long se = ftell(fe);
+            fseek(fb, 0, SEEK_END); long sb = ftell(fb);
+            int differs = (se != sb);
+            if (!differs) {
+                fseek(fe, 0, SEEK_SET); fseek(fb, 0, SEEK_SET);
+                char be[4096], bb[4096];
+                size_t ne, nb;
+                while ((ne = fread(be, 1, sizeof(be), fe)) > 0 &&
+                       (nb = fread(bb, 1, sizeof(bb), fb)) > 0) {
+                    if (ne != nb || memcmp(be, bb, ne) != 0) { differs = 1; break; }
+                }
+            }
+            if (differs) {
+                fprintf(stderr, "\n[suite] !!! engine.cfg / backtest.cfg DIVERGENT !!!\n");
+                fprintf(stderr, "[suite]     engine.cfg = %ld bytes, backtest.cfg = %ld bytes\n", se, sb);
+                fprintf(stderr, "[suite]     Backtest stamp bodies encode backtest.cfg state.\n");
+                fprintf(stderr, "[suite]     Live engine reads engine.cfg — train/serve cfg-state\n");
+                fprintf(stderr, "[suite]     parity is NOT GUARANTEED. Inspect via:\n");
+                fprintf(stderr, "[suite]         diff engine.cfg backtest.cfg\n");
+                fprintf(stderr, "[suite]     Structural fix queued at v5.15.6 (TECH_DEBT-123).\n\n");
+            }
+        }
+        if (fe) fclose(fe);
+        if (fb) fclose(fb);
+    }
+
     // trade history
     TradeHistory trade_history;
     TradeHistory_Init(&trade_history, BACKTEST_TRADE_CSV);
