@@ -1331,7 +1331,7 @@ template <unsigned F> struct ControllerConfig {
   // through the registry).
   //
   // Step 0.5b.B closure: 48 manual cfg field decls atomically replaced by this single X-macro
-  // invocation. CI Check 9 (forthcoming at Step 4) static_asserts STAMP_BOUND_CFG_DERIVED cohort
+  // invocation. CI Check 9 (LANDED v5.15.5.F.4d.1.B.3 WIP-9 at CfgFieldRegistry.hpp:1156-1180) static_asserts STAMP_BOUND_CFG_DERIVED cohort
   // coverage. Closes TECH_DEBT-093 (gap_acceptable_threshold manual storage cleanup);
   // ALSO closes 47 sibling cohort manual decls in same atomic edit (struct-gen + bulk delete).
   //
@@ -1489,11 +1489,16 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // Defaults baked in registry rows at CfgFieldRegistry.hpp:255-419 — single source of truth.
   FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
 
-  cfg.poll_interval = 100;
-  cfg.warmup_ticks = 128; // minimum raw ticks before trading
-  cfg.min_warmup_samples =
-      0; // min slow-path samples in rolling window (0 = warmup_ticks only)
-  cfg.csv_sort_check_mode = CSV_SORT_WARN; // v5.9.2c — default: log + proceed
+  // v5.15.5.F.4d.1.B.3 Step 8.6 (2026-05-24): poll_interval MATCH — registry INT(100) == manual; DELETED.
+  // warmup_ticks DIFFER: registry INT(0, 0, 100000000); manual=128. Manual=128 is operational floor
+  // (minimum raw ticks before trading; pre-registry historical value). Keep manual; registry default
+  // for new operators OR when key absent could be either; manual is the safer "always warmup" floor.
+  cfg.warmup_ticks = 128; // KEEP — registry INT(0) too permissive for trading-ready boot
+  // min_warmup_samples DIFFER: registry INT(64, 0, 128); manual=0 (disables; uses warmup_ticks only).
+  // Manual=0 preserves the pre-cfg behavior where min_warmup_samples was unconditional 0. Keep manual.
+  cfg.min_warmup_samples = 0;  // KEEP — registry INT(64) would add a samples-floor; manual=0 preserves pre-cfg behavior
+  // v5.15.5.F.4d.1.B.3 Step 8.6: csv_sort_check_mode DIFFER — registry INT(1=STRICT); manual=CSV_SORT_WARN(0).
+  cfg.csv_sort_check_mode = CSV_SORT_WARN; // KEEP — registry INT(1) STRICT would refuse mis-sorted CSVs; manual=WARN(0) logs + proceeds per v5.9.2c contract
   cfg.r2_threshold = FPN_FromDouble<F>(0.30);
   cfg.slope_scale_buy = FPN_FromDouble<F>(0.50);
   cfg.max_shift =
@@ -1521,7 +1526,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.max_drawdown_pct = FPN_FromDouble<F>(0.10); // halt at 10% drawdown
   cfg.max_exposure_pct =
       FPN_FromDouble<F>(0.50); // max 50% of balance in positions
-  cfg.max_positions = 1; // single slot — exchange BTC balance IS the position
+  // v5.15.5.F.4d.1.B.3 Step 8.6: max_positions MATCH — registry INT(1) == manual; DELETED.
   cfg.offset_stddev_mult = FPN_Zero<F>(); // 0 = disabled, use percentage mode
   cfg.offset_stddev_min =
       FPN_FromDouble<F>(0.5); // 0.5 stddev - most aggressive
@@ -1549,7 +1554,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.stddev_adapt_scale = FPN_FromDouble<F>(0.1);
   cfg.vol_adapt_scale = FPN_FromDouble<F>(0.1);
   cfg.breakout_min = FPN_FromDouble<F>(0.5); // 0.5 stddev floor
-  cfg.slow_path_max_secs = 3;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: slow_path_max_secs DIFFER — registry INT(60); manual=3. Manual=3 is
+  // per-cycle slow-path budget (seconds per rebuild iteration); registry default 60 too permissive
+  // for HFT cadence. Keep manual.
+  cfg.slow_path_max_secs = 3;  // KEEP — registry INT(60) too permissive for HFT slow-path cadence
   cfg.max_hold_ticks = 0; // 0 = disabled
   // v5.12.3.C — all per-core overrides default 0 (use global). Operator
   // sets specific cores via core_<N>_time_exit_ticks=<value> in cfg.
@@ -1648,13 +1656,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(0.003); // 1.0 - 0.997
   cfg.default_strategy = -1; // -1 = regime auto (backward compat)
   cfg.use_real_money = 0;    // 0 = paper trading (default safe)
-  cfg.acknowledge_hardcoded_strategy_in_live = 0;  // v5.7.2 — operator
-                                                    // must set to 1 to
-                                                    // run hardcoded
-                                                    // strategies live
-  cfg.init_arena_use_hugepages = 0;  // v5.11.22 — opt-in; requires OS reservation
-  cfg.require_mlockall = 1;  // v5.11.3 — HFT-correct default; set to 0
-                              // for laptop dev where RLIMIT_MEMLOCK is tight
+  // v5.15.5.F.4d.1.B.3 Step 8.6: acknowledge_hardcoded_strategy_in_live MATCH — registry BOOL(0) == manual; DELETED.
+  // init_arena_use_hugepages MATCH — registry BOOL(0) == manual; DELETED.
+  // require_mlockall DIFFER: registry BOOL(0); manual=1 (HFT-correct; safety-first). Keep manual —
+  // registry default 0 is laptop-dev permissive; manual 1 forces operator to opt-out for dev (set to 0
+  // for laptop where RLIMIT_MEMLOCK is tight).
+  cfg.require_mlockall = 1;  // KEEP — registry BOOL(0) too permissive; HFT-correct default safety-first
   // kill switch
   // kill_switch_enabled migrated to risk_cfg_flags (default 1 — safety-first; set via AUTOPOPULATE above)
   cfg.kill_switch_daily_loss_pct =
@@ -1671,30 +1678,29 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // no_trade_band_enabled migrated to gate_cfg_flags (default 0)
   cfg.no_trade_band_mult = FPN_FromDouble<F>(3.0);
   // ML inference (disabled by default — zero overhead when off)
-  cfg.ml_backend = 0;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: ml_backend MATCH — registry INT(0) == manual; DELETED.
   cfg.ml_model_path[0] = '\0';
   cfg.ml_buy_threshold = FPN_FromDouble<F>(0.6);
   cfg.ml_tp_pct = FPN_FromDouble<F>(0.015); // 1.5% TP
   cfg.ml_sl_pct = FPN_FromDouble<F>(0.008); // 0.8% SL
-  cfg.regime_model_backend = 0;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: regime_model_backend MATCH — registry INT(0) == manual; DELETED.
   cfg.regime_model_path[0] = '\0';
   cfg.regime_model_weight = FPN_FromDouble<F>(2.0);
+  // v5.15.5.F.4d.1.B.3 Step 8.6: danger_enabled DIFFER — registry BOOL(0); manual=1 (gradient ON).
+  // Keep manual — registry default 0 would disable the danger gradient by default; manual=1 is
+  // the operationally-correct "always-on safety gradient" setting. Future operator opts out via cfg.
   // danger gradient
-  cfg.danger_enabled = 1;
+  cfg.danger_enabled = 1;  // KEEP — registry BOOL(0) would disable safety gradient; manual=1 is safety-first
   cfg.danger_warn_stddevs =
       FPN_FromDouble<F>(3.0); // gradient starts at 3σ below avg
   cfg.danger_crash_stddevs =
       FPN_FromDouble<F>(6.0); // full gate kill at 6σ below avg
-  // tick recording (disabled by default — no disk usage unless explicitly
-  // enabled)
-  cfg.record_ticks = 0;
-  cfg.record_depth = 0; // Phase 8a c5 — opt-in
-  cfg.record_max_days = 30;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: 3 record_* fields MATCH registry defaults (BOOL(0)/BOOL(0)/INT(30)); DELETED.
+  // (tick recording disabled by default — no disk usage unless operator opts in)
   // Phase 8b — operational alerts (all opt-in; default = no behavior change)
   // notify_enabled migrated to ops_cfg_flags (default 0)
-  cfg.notify_backend = 0;          // stderr
+  // v5.15.5.F.4d.1.B.3 Step 8.6: notify_backend MATCH (registry INT(0)); notify_cooldown_secs MATCH (INT(60)); both DELETED.
   cfg.notify_command[0] = '\0';
-  cfg.notify_cooldown_secs = 60;
   // FoxML integration — Phase 6C (all OFF by default, zero behavior change)
   // cost_gate_enabled migrated to gate_cfg_flags (default 0)
   // foxml_vol_scaling_enabled migrated to ml_cfg_flags (default 0)
@@ -1715,18 +1721,18 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // TECH_DEBT-093 FULL closure. Other 47 manual defaults audited and retained: some diverge from
   // registry defaults (e.g., warmup_ticks registry=0 but manual=128); registry default audit deferred
   // to follow-up TECH_DEBT entry (see TECH_DEBT-107 NEW at ship close).
-  cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
-  cfg.allow_cross_major_engine    = 0;                            // v5.9.2b — refuse cross-major by default
+  // v5.15.5.F.4d.1.B.3 Step 8.6: held_out_gate_strict MATCH (registry INT(0)); allow_cross_major_engine MATCH (BOOL(0)); auto_stamp_on_held_out MATCH (BOOL(1)); 3 manual defaults DELETED.
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
-  cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); =0 reserved for v5.16+ cmdline-invocable training (manual bash workflow DELETED at v5.15.5.F.4d.1.B.3 Path C)
   cfg.auto_stamp_secret[0]        = '\0';                         // v5.11.47 default empty = devmode (signs stamps but accepts any signature at load); operator sets in cfg or GUI Validation panel
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
-  cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
-  cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
+  // v5.15.5.F.4d.1.B.3 Step 8.6: health_log_max_bytes DIFFER — registry INT(1048576); manual=0 (no rotation; back-compat). Keep manual.
+  cfg.health_log_max_bytes        = 0;                            // KEEP — registry INT(1MB) would rotate by default; manual=0 preserves back-compat (no rotation)
+  // health_log_keep_count DIFFER — registry INT(5); manual=0 (keep all retained files; back-compat). Keep manual.
+  cfg.health_log_keep_count       = 0;                            // KEEP — registry INT(5) caps retained files; manual=0 preserves back-compat (no rotation)
   // v5.15.5.A.7 — acknowledge_cross_binary_version_drift + acknowledge_inference_cfg_drift
   // migrated to ops_cfg_flags bitmap. Both default OFF via `cfg.ops_cfg_flags = 0` init above.
   // Legacy default semantics preserved: WARN on cross-binary drift; REFUSE/WARN on inference_cfg.
-  cfg.acknowledge_hot_swap_with_open_positions = 0;               // v5.10.0c — default DEFER swap until position close
+  // v5.15.5.F.4d.1.B.3 Step 8.6: acknowledge_hot_swap_with_open_positions MATCH — registry BOOL(0) == manual; DELETED.
   cfg.confidence_ic_floor                       = 0.02;           // v5.10.0e — Spearman correlation > random
   cfg.confidence_ic_floor_window                = 86400u;          // v5.10.0e — 24h sustained-breach window
   cfg.auto_kill_on_drift                        = 0;              // v5.10.0e — log only by default; opt-in to auto-kill
@@ -1735,8 +1741,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // operators get identical training output post-upgrade.
   cfg.xgb_subsample           = FPN_FromDouble<F>(0.8);
   cfg.xgb_colsample_bytree    = FPN_FromDouble<F>(0.8);
-  cfg.xgb_min_child_weight    = 5;
-  cfg.xgb_seed                = 42;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: xgb_min_child_weight MATCH (registry INT(5)); xgb_seed MATCH (INT(42)); 2 manual defaults DELETED.
   strncpy(cfg.xgb_tree_method, "hist", sizeof(cfg.xgb_tree_method) - 1);
   cfg.xgb_tree_method[sizeof(cfg.xgb_tree_method) - 1] = '\0';
   // v5.10.0 Item D — hardware-aware cfg. Defaults match pre-v5.10
@@ -1748,18 +1753,23 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   //     for deterministic per-fold output (validation parity)
   // Setting these NOW separable. Operators wanting all-deterministic
   // workflow set both to 1; operators with bigger boxes can bump both.
-  cfg.xgb_train_nthread       = 4;   // matches BacktestPanels.hpp:2056 pre-v5.10
-  cfg.xgb_eval_nthread        = 1;   // matches BacktestEngine.hpp:1352, 1638
-  cfg.csv_load_workers        = 1;   // serial CSV load (matches pre-v5.10 behavior)
-  cfg.multi_horizon_max_threads = 1; // 1 = forced serial (DEFAULT; stable). v5.11.45:
+  // v5.15.5.F.4d.1.B.3 Step 8.6: xgb_train_nthread MATCH — registry INT(4) == manual 4; DELETED.
+  // xgb_eval_nthread DIFFER — registry INT(4); manual=1 (determinism for validation parity).
+  cfg.xgb_eval_nthread        = 1;   // KEEP — registry INT(4) breaks per-fold determinism; manual=1 matches BacktestEngine.hpp:1352, 1638 pre-v5.10
+  // csv_load_workers DIFFER — registry INT(4); manual=1 (serial CSV load for back-compat).
+  cfg.csv_load_workers        = 1;   // KEEP — registry INT(4) would parallelize CSV load; manual=1 matches pre-v5.10 serial behavior
+  // multi_horizon_max_threads DIFFER — registry INT(4); manual=1 (CRITICAL: v5.11.45 segfault avoidance).
+  cfg.multi_horizon_max_threads = 1; // KEEP — registry INT(4) would re-enable v5.11.45 segfault class; XGBoost+libgomp+pthread interaction fragile. 1 = forced serial (DEFAULT; stable). v5.11.45:
                                       // changed from 0 (auto) -> 1 after segfault reports.
                                       // XGBoost + libgomp + pthread interaction is fragile;
                                       // even with per-pthread omp_set_num_threads(1), libgomp
                                       // state can race across pthreads. Set >1 to opt into
                                       // experimental parallel mode (may segfault).
-  cfg.feature_collect_max_gb  = 12;  // advisory cap; WARN-only
-  cfg.wf_split_max_gb         = 8;
-  cfg.held_out_max_gb         = 4;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: feature_collect_max_gb DIFFER — registry INT(8); manual=12 (operator-favored ceiling).
+  cfg.feature_collect_max_gb  = 12;  // KEEP — registry INT(8) too restrictive; advisory cap; WARN-only
+  // wf_split_max_gb MATCH — registry INT(8) == manual; DELETED.
+  // held_out_max_gb DIFFER — registry INT(8); manual=4 (tighter operator ceiling).
+  cfg.held_out_max_gb         = 4;   // KEEP — registry INT(8) too loose; held-out fold is smaller cohort
   // v5.10.0a — multi-horizon training. Default empty = single-horizon
   // (Train Model uses TrainingPanel's label_forward_ticks). Operator opts
   // in by setting cfg.horizon_list=100,500,1000.
@@ -1802,15 +1812,19 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       cfg.core_disabled_horizons[i][0] = '\0';
       cfg.core_feature_mask[i] = 0xFFFFFFFFFFFFFFFFULL;  // all features enabled
   }
-  cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
-  cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
+  // v5.15.5.F.4d.1.B.3 Step 8.6: health_log_level DIFFER — registry INT(1=debug); manual=0=info (less verbose default).
+  cfg.health_log_level            = 0;                            // KEEP — registry INT(1=debug) too verbose; manual=0=info matches operator expectation
+  // reconcile_interval_sec DIFFER — registry INT(60=periodic); manual=0=boot-only (back-compat).
+  cfg.reconcile_interval_sec      = 0;                            // KEEP — registry INT(60) would enable periodic reconcile; manual=0 boot-only preserves back-compat
   cfg.reconcile_dry_run           = 1;                            // legacy field; safer default
-  cfg.reconcile_mode              = 1;                            // v5.14.4 — RECONCILE_WARN (matches dry_run=1 legacy behavior)
-  cfg.trading_mode                = TRADING_MODE_PAPER;           // v5.15.2 — pre-v5.15 behavior preserved
+  // reconcile_mode DIFFER — registry INT(0=STRICT); manual=1=RECONCILE_WARN (matches dry_run=1 legacy behavior).
+  cfg.reconcile_mode              = 1;                            // KEEP — registry INT(0) STRICT mode too aggressive; manual=1=WARN matches dry_run=1 legacy + v5.14.4 contract
+  // trading_mode MATCH — registry INT(0) == TRADING_MODE_PAPER == 0; DELETED.
   cfg.cfg_keys_explicit           = 0;                            // v5.15.4 — no keys explicit by default
   cfg.prediction_normalize = 0;
   // barrier_gate_enabled migrated to gate_cfg_flags (default 0)
-  cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
+  // v5.15.5.F.4d.1.B.3 Step 8.6: model_verify_strict DIFFER — registry INT(-1=skip); manual=0=warn.
+  cfg.model_verify_strict = 0;  // KEEP — registry INT(-1) SKIP would silently miss model mismatches; manual=0=WARN surfaces them
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
   // Per-core sharding (Phase 13+) — DEFAULT IS SHARDED. Sharded is the
@@ -1827,10 +1841,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // benchmark / regression / legacy use. Train-serve parity preserved
   // structurally: all 3 callers (centralized live, per_core_slow live,
   // backtest) execute the same OneCore helpers on the same state.cores[c].
-  cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
-  cfg.slow_path_pin_offset = 0;  // 0 = auto-derive (drainer_cpu + 1)
-  cfg.num_execution_cores = 4;
-  cfg.sharded_force_synthetic = 0;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: engine_arch MATCH — registry INT(1) == ENGINE_ARCH_PER_CORE_SLOW(1); DELETED.
+  // slow_path_pin_offset DIFFER — registry INT(-1); manual=0 (auto-derive drainer_cpu+1).
+  cfg.slow_path_pin_offset = 0;  // KEEP — registry INT(-1) means no pin; manual=0 is "auto-derive (drainer_cpu + 1)" — operationally distinct
+  // num_execution_cores DIFFER — registry INT(1); manual=4 (operator-default for 4-core deployment).
+  cfg.num_execution_cores = 4;   // KEEP — registry INT(1) single-core too conservative for production; manual=4 is operator-typical
+  // sharded_force_synthetic MATCH — registry BOOL(0) == manual; DELETED.
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
   cfg.core_strategies_explicit_set = 0;                       // v5.9.0c: no bits set = all defaulted
   cfg.source_cfg_path[0] = '\0';                              // v5.9.0c: populated by ControllerConfig_Load
@@ -1842,15 +1858,17 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.1.A — disabled by default. Operator opts in for live deployment;
   // backtest MUST keep this off (live-only safety net).
   // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (default 0)
-  cfg.ws_dead_time_flatten_threshold_secs = 60;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: ws_dead_time_flatten_threshold_secs MATCH — registry INT(60) == manual; DELETED.
   // v5.12.1.A.3 — recovery window after a flatten fires. New entries
   // refused for this many seconds while operator-side reconcile catches
   // up to exchange truth. After window expires, flatten_pending +
   // recovery_until_us auto-clear; trading resumes (assuming WS healthy).
-  cfg.recovery_delay_secs = 30;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: recovery_delay_secs DIFFER — registry INT(60); manual=30 (tighter operator-favored window).
+  cfg.recovery_delay_secs = 30;  // KEEP — registry INT(60) too long; manual=30 matches reconcile UX expectation
   // v5.12.1.B.3 — disabled by default; flip after measuring slow-path p99.
   // param_staleness_gate_enabled migrated to gate_cfg_flags (default 0)
-  cfg.param_max_age_ticks = 1000;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: param_max_age_ticks DIFFER — registry INT(100000); manual=1000 (tighter staleness window).
+  cfg.param_max_age_ticks = 1000;  // KEEP — registry INT(100000) too permissive; manual=1000 catches stale params sooner
   // v5.14.8.E — stale-model age check (boot-time gate). Default 0 = disabled.
   cfg.model_max_age_hours = 0;
   // v5.12.1.D — disabled by default (DEPRECATED v5.14.9.A; replaced by
@@ -1886,10 +1904,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.2.B — disabled by default; activate after parity-check confirms
   // regime histogram unchanged within tolerance under enabled mode.
   // lazy_rebuild_enabled migrated to ml_cfg_flags (default 0)
-  cfg.lazy_rebuild_force_period_us = 1000000ULL;  // 1 second
+  // v5.15.5.F.4d.1.B.3 Step 8.6: lazy_rebuild_force_period_us MATCH — registry INT(1000000) == manual; DELETED.
   cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(0.0005);  // 0.05%
   // v5.12.2.D — disabled by default; operator opts in after tooling is wired.
-  cfg.use_aot_inference = 0;
+  // v5.15.5.F.4d.1.B.3 Step 8.6: use_aot_inference MATCH — registry BOOL(0) == manual; DELETED.
   // v5.13.0 — sell-side ML defaults: disabled; opt-in for paper-test.
   // use_exit_model migrated to ml_cfg_flags (default 0)
   cfg.exit_threshold = FPN_FromDouble<F>(0.6);
