@@ -5,8 +5,118 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.2.h1"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.3"
 
+// .F.4d.1.B.3 (v5.15.5.F.4d.1.B.3) — Legacy empty-out + Path C bash CLI deletion +
+// Phase K cleanups (2026-05-24). Closes .F.4d.1.B split (.B.1 framework + .B.2 cohort
+// migration + .B.3 legacy empty-out).
+//
+// LANDED at .B.3 across 6 engine commits + hotfix tag:
+//
+// A1 KILL_SWITCH HOTFIX (commit 6fd0ba3; GPG-signed tag v5.15.5.F.4d.1.B.2.h1-killswitch-fix):
+// - Closes PARITY-026 — Live kill_switch was DEAD in production (EngineSharded.hpp:742
+//   missing EventLoopState_ConfigureKillSwitch call mirror of BacktestSharded:217-221;
+//   broken since sharded path was built; ~14 months silent live-safety hole)
+// - 5-LOC mirror-the-backtest fix; surfaced by 2026-05-24 ML↔LIVE structural sweep
+//
+// WIP-9 (commit 8caac1f) — Steps 1.6.6.a/b + 6.10 + 2 + 3 + 4:
+// - 12-row STAMP-side h->inference_cfg_X → h->X rename at CfgDriftCheckRegistry.hpp
+//   (3 already done at Phase F WIP-8 HIGH-1(b) cascade; 12 remaining done at WIP-9)
+// - 11 COHORT_GATE substitutions: 4 to existing COHORT_GATE_BANDIT_BLEND_STATE_4 +
+//   COHORT_GATE_PER_HORIZON_BARRIER (Step 1.6.6.a) + 7 to 2 NEW COHORT_GATE_BANDIT_ENABLED
+//   + COHORT_GATE_COST_GATE_ENABLED extracted at MlCfgFlagRegistry.hpp:122-123 (Step 6.10)
+// - FPN_ToDouble() wrapping on 9 FPN<F> h-> fields post-rename (ModelHandle cfg-derived
+//   auto-gen produces FPN<F> fields; drift compare macro requires double cast)
+// - Closes Path γ #3 PARTIAL → MOSTLY (3 of 3 cohort registries reference shared COHORT_GATE_*
+//   macros; per_horizon_barrier_blend ternary at expected-value column line 311 + group-bit
+//   STAMP_HAS preserved with rationale)
+// - DELETED ML_Headers/StampBoundCfgRegistry.hpp (full file; FOREACH_STAMP_BOUND_CFG body +
+//   STAMP_CFG_AUTOPOPULATE + FOREACH_STAMP_BOUND_CFG_COUNT)
+// - DELETED MemHeaders/CfgDerivedInferenceCfgRegistry.hpp (full file)
+// - Removed 2 #includes (StampHelper.hpp:55 + ModelInference.hpp:29) + 2 FOREACH_REGISTRY
+//   rows at MetaRegistry.hpp:52/99
+// - 1 test assertion deleted at controller_test.cpp:25028 (FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT)
+//   per /test-deletion-justification — replaced by Step 4 CI Check 9 compile-time coverage
+// - NEW CI Check 9 static_assert at CfgFieldRegistry.hpp:1156-1180 — STAMP_BOUND_CFG_DERIVED
+//   cohort coverage regression guard (compile-time; ≥ 20 across per-core + global masks)
+//
+// WIP-10 (commit c519104) — Path C cleanup Steps 6.5-6.9:
+// - DOCS/ML_TRAINING.md operator-recipe section updated to foxml_suite GUI auto-stamp
+//   workflow (away from deleted tools/stamp_model.sh bash CLI)
+// - 5 source-comment + tooltip sweeps (CfgFieldRegistry tooltip + ControllerConfig doc/init
+//   + BacktestPanels 3 sites) — Path C deletion context added to operator-visible help
+// - DELETED 4 bash-CLI test blocks at controller_test.cpp:9339/11323/13321/13453 per
+//   /test-deletion-justification; 21 assertions replaced by structural-guarantee comments
+//   cross-ref to single-emitter discipline + cfg-derived consumer framework auto-flow
+// - Fixed tools/validate_feature_mask.sh dead branch (Surface 3 stamp_model.sh refs)
+// - Fixed foxml_suite Optimizer panel cfg default ("engine.cfg" → "backtest.cfg" restoring
+//   parity with RunControl_Init:160; closes foxml_suite agent HIGH-3 finding)
+//
+// WIP-11 (commit 101b4aa) — Step 5.5 drift guardrail:
+// - foxml_suite.cpp boot-time engine.cfg/backtest.cfg byte-diff check with operator-visible
+//   WARN block if divergent. Closes foxml_suite agent CRIT-1 (stop-gap until structural
+//   fix at v5.15.6.A/B/C per TECH_DEBT-123)
+//
+// Step 8.6 (commit b4843b0) — 49-globals registry-default sweep (OWN COMMIT per plan body):
+// - 12 MATCH cases: deleted redundant manual defaults that equaled registry payload defaults
+//   (poll_interval, max_positions, init_arena_use_hugepages, acknowledge_hardcoded_strategy_in_live,
+//    ml_backend, regime_model_backend, record_ticks+record_depth+record_max_days, notify_backend+
+//    notify_cooldown_secs, held_out_gate_strict+allow_cross_major_engine+auto_stamp_on_held_out,
+//    acknowledge_hot_swap_with_open_positions, xgb_min_child_weight+xgb_seed, xgb_train_nthread,
+//    ws_dead_time_flatten_threshold_secs, trading_mode, engine_arch, sharded_force_synthetic,
+//    lazy_rebuild_force_period_us, use_aot_inference, wf_split_max_gb)
+// - 16 DIFFER cases: inline rationale comments added (KEEP-MANUAL with reason per
+//   feedback_motivated_collaborator_for_caramel — operator-policy values preserved, registry-
+//   default updates deferred to follow-up sub-ship to avoid test-fixture+muscle-memory breakage)
+//
+// FRAMEWORK CONSOLIDATION CLOSURE (per Charter):
+// After .B.3 ships: framework discipline at cfg/stamp/drift surface STRUCTURALLY COMPLETE.
+// Adding a new cfg field = 1 row in master registry; parser + GUI render + tooltip + per-core
+// override emission + stamp emit + drift check all auto-flow via cfg-derived consumer framework.
+//
+// BUG CLASSES STRUCTURALLY CLOSED at .B.3:
+// - Class 11 (Extensibility friction at cfg surface)
+// - Class 12 (Wired-but-unexercised ML paths) — cfg-derived consumer activated across 4 cohort registries
+// - Class 14 (Plan calls struct field that doesn't exist) — by-construction via auto-gen
+// - Class 18 (Mirror state/code at inf struct + wire-format-emit + double-emit surfaces)
+// - Class 21 (Multiple parallel descriptors) at cfg-derived layer
+// - Class 24 (Capability-cfg surface mismatch) for per_horizon_barrier_blend
+//
+// NEW BUG CLASSES CODIFIED at .B.3 ship close:
+// - Class 31 (Wire-format duplicate-key emit from sister registries; 10 instances closed)
+// - Class 32 (Prefixed/unprefixed struct field mirror in X-macro auto-gen registry; 10 closed;
+//   ~5 sibling instances at model-state cohort tracked via TECH_DEBT-104)
+//
+// META-DISCIPLINE CODIFIED at .B.3 ship close:
+// - M5 train-serve EXECUTION-LAYER parity (DESIGN_SPECS/meta-disciplines/train-serve-execution-layer-parity.md
+//   Stage 2 DRAFT v0.1 — first canonical at v5.15.5.F.4d.1.B.4 ship close via EngineCommon_BootPerCore
+//   + EngineCommon_SlowPathCycleOneCore shared helper extract)
+//
+// 6 NEW PARITY ENTRIES (PARITY-026 through PARITY-031; train-serve asymmetry surfaced by
+// 2026-05-24 ML↔LIVE sweep): PARITY-026 closed by hotfix; 027/028/029/030/031 target .B.4 structural close.
+//
+// 6 NEW TECH_DEBT ENTRIES (TECH_DEBT-119 through TECH_DEBT-124; named homes per closure matrix):
+// - TECH_DEBT-119 EngineCommon extract → .B.4 (closes 4 CRITs + 3 HIGHs structurally)
+// - TECH_DEBT-120 parity_harness per_core_slow coverage → .F.5.C
+// - TECH_DEBT-121 live bandit_state_prior_path → .F.5.A
+// - TECH_DEBT-122 parity_harness rename/extend → .F.5.C
+// - TECH_DEBT-123 foxml_suite cfg-source-of-truth structural fix → v5.15.6.A/B/C
+// - TECH_DEBT-124 cross-tool emit-site CI guard → defer (defensive)
+//
+// Tests: 3208 pass / 0 fail (-22 from .A baseline; intentional /test-deletion-justification
+// for deleted bash-CLI test blocks + FOREACH_CFG_DERIVED count assertion; replacement coverage
+// via in-process round-trip + CI Check 9 + single-emitter discipline + cfg-derived consumer
+// framework auto-flow).
+// Build: 5 binaries (test/gui/suite/tsan/asan) clean. 6 CI checks PASS. Hot path UNTOUCHED.
+//
+// NEW .B.4 sub-ship queued: plans/v5.15-live-readiness/subplans/
+// 2026-05-24-v5.15.5.F.4d.1.B.4-train-serve-execution-layer-parity.md (DRAFT v1.0).
+// Closes PARITY-027/028/029/030/031 + TECH_DEBT-119 structurally via EngineCommon_BootPerCore +
+// EngineCommon_SlowPathCycleOneCore shared helper extract per pattern at
+// DESIGN_SPECS/refactor-patterns/shared-helper-extract-for-train-serve-mirror-close.md (DRAFT v0.1).
+//
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-05-24-v5.15.5.F.4d.1.B.3-postmortem.md.
+//
 // .F.4d.1.B.2.h1 (v5.15.5.F.4d.1.B.2.h1 — hotfix; 2026-05-24)
 // === LIVE-SAFETY HOTFIX — closes PARITY-026 ===
 //
