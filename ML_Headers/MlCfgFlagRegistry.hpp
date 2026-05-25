@@ -118,6 +118,16 @@ FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 #define COHORT_GATE_COMPOSITE_CONFIDENCE  BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)
 #define COHORT_GATE_SOFTRISK_ENABLED      (cfg.risk_degradation_curve != 0)
 #define COHORT_GATE_PER_HORIZON_BARRIER   BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND)
+// v5.15.5.F.4d.1.B.3 Step 6.10 (2026-05-24) — 7-site inline-bitmap-gate extraction.
+// Sister to existing 6 above; closes Path γ #3 MOSTLY (was PARTIAL pre-this-add) per
+// audit finding HIGH-1 (opp-scan H-2 + readiness M1 + dod-audit HIGH-1 cross-flagged).
+// Substituted at CfgDriftCheckRegistry.hpp lines 250/256/260/264/268 (5 BANDIT_ENABLED
+// sites for bandit_blend_ratio + bandit_algorithm + thompson_mu_prior + thompson_precision_prior + thompson_precision_obs).
+// Co-located here despite COST_GATE belonging at GateCfgFlagRegistry — kept all 8 COHORT_GATE_*
+// adjacent for discoverability + per [[feedback_categorical_triggers_over_hardcoded_refs]] —
+// the cohort-gate macro family is the canonical home; per-mask-registry split would scatter.
+#define COHORT_GATE_BANDIT_ENABLED        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)
+#define COHORT_GATE_COST_GATE_ENABLED     BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)
 
 //------------------------------------------------------------------------------------------------------
 // [AUTOPOPULATE COMPANION]

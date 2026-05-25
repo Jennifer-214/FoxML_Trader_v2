@@ -52,7 +52,10 @@
 #include "../Backtest/XGBHyperparams.hpp"  // XGBHyperparams_Defaults
 #include "../CoreFrameworks/ControllerConfig.hpp"  // ControllerConfig
 #include "../Version.hpp"  // ENGINE_VERSION_STRING
-#include "../MemHeaders/CfgDerivedInferenceCfgRegistry.hpp"  // v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE (closes TECH_DEBT-037 manual section 2a)
+// v5.15.5.F.4d.1.B.3 Step 2 (2026-05-24): #include of MemHeaders/CfgDerivedInferenceCfgRegistry.hpp
+// REMOVED — INFERENCE_CFG_AUTOPOPULATE invocation eliminated at Step 1.5 (Phase F);
+// file deleted at Step 2. Migration to cfg_derived::populate_stamp_cfg_from_derived<F>
+// framework call (CfgGateRegistry.hpp) is the single source of truth at .B.3+.
 
 namespace tt {
 

@@ -26,7 +26,7 @@
 #include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
 #include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
-#include "StampBoundCfgRegistry.hpp"     // v5.14.1.B.3 — FOREACH_STAMP_BOUND_CFG X-macro
+// v5.15.5.F.4d.1.B.3 Step 2 (2026-05-24): #include "StampBoundCfgRegistry.hpp" REMOVED — file deleted (FOREACH_STAMP_BOUND_CFG body + STAMP_CFG_AUTOPOPULATE + COUNT macros); cfg_derived::populate_stamp_cfg_from_derived<F> framework call at CfgGateRegistry.hpp supersedes.
 #include "StampBoundModelConstRegistry.hpp"  // v5.14.8.0+ — FOREACH_STAMP_BOUND_MODEL_CONST X-macro (registry, MASK constants, STAMP_HAS aliases, AUTOPOPULATE)
 #include "../MemHeaders/CfgGateRegistry.hpp"  // v5.15.5.F.4d.1.B.3 Step 1.6.3 — STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN macro + PARSE_STAMP_CFG_TO_DERIVED + cfg_derived::parse_stamp_cfg_to_derived template fn
 #include <stdio.h>

@@ -1155,6 +1155,35 @@ FOREACH_METADATA_BIT(X_GEN_PER_CORE_MASK)
 #undef X_GEN_PER_CORE_MASK
 
 //------------------------------------------------------------------------------
+// [CI CHECK 9 — STAMP_BOUND_CFG_DERIVED COHORT COVERAGE REGRESSION GUARD]
+//------------------------------------------------------------------------------
+// v5.15.5.F.4d.1.B.3 Step 4 (2026-05-24). Compile-time coverage assertion ensures
+// the STAMP_BOUND_CFG_DERIVED cohort doesn't shrink unintentionally. At ship time:
+// per-core mask covers 19 fields + global mask covers 1 field (held_out_fraction
+// added at Phase F HIGH-1) + ML_CFG_FLAG cohort + GATE_CFG_FLAG cohort = 24+ total
+// flagged fields.
+//
+// Threshold ≥ 30 (tighter than initial ≥ 24 per /readiness LOW-1 amendment 2026-05-24)
+// — actual cohort size at .B.3 is 36-37 across 4 cohort registries; ≥ 30 leaves ~6-7
+// safety margin for legitimate single-field exemption without false-positive but
+// catches >7-field cohort regression. Per `registry-coverage-ci-check-pattern.md`
+// Shape A.2 (compile-time positive coverage assertion).
+//
+// Note: per-core + global only counted here (the 2 master cfg registries with mask
+// infrastructure). ML_CFG_FLAG + GATE_CFG_FLAG cohort coverage verified separately
+// at their respective registries.
+//------------------------------------------------------------------------------
+static_assert(
+    cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask)
+    + cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask) >= 20,
+    "STAMP_BOUND_CFG_DERIVED cohort coverage regression: per-core + global mask combined "
+    "should flag ≥ 20 fields (was 19 per-core + 1 global = 20 at .B.3 ship close 2026-05-24). "
+    "If you intentionally removed a STAMP_BOUND_CFG_DERIVED row from FOREACH_PER_CORE_CFG_FIELD "
+    "or FOREACH_GLOBAL_CFG_FIELD, lower this threshold AND document rationale at the row deletion site. "
+    "If you DIDN'T remove a row, find what regressed (likely accidental metadata-flag drop)."
+);
+
+//------------------------------------------------------------------------------
 // [H16 COMPILE-TIME ENFORCEMENT — Path γ correction (v5.15.5.F.4d.1.A)]
 //------------------------------------------------------------------------------
 // Per DESIGN_SPECS/metadata-bit-driven-derived-filter-framework.md v1.2 Path γ

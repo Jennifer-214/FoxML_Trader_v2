@@ -25024,9 +25024,12 @@ e3_skip_load:;
         // for BLENDED state-4 per § C.3 of merged plan body).
         check("v5.15.5.F.4d: FOREACH_CFG_DRIFT_CHECK_COUNT == 23 (was 18; +5 PARITY-026 bandit/thompson + BLENDED at .F.4d)",
               FOREACH_CFG_DRIFT_CHECK_COUNT == 23);
-        // v5.15.5.F.4d: cfg→inf wiring count 11 → 16 (+5 PARITY-026 cfg→inf wiring rows per § C.4 of plan body).
-        check("v5.15.5.F.4d: FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 16 (was 11; +5 PARITY-026 cfg→inf wiring at .F.4d)",
-              FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 16);
+        // v5.15.5.F.4d.1.B.3 Step 2 (2026-05-24): FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT assertion DELETED —
+        // per /test-deletion-justification: subject of test (registry MemHeaders/CfgDerivedInferenceCfgRegistry.hpp)
+        // is deleted at Step 2. cfg-derived consumer framework (cfg_derived::populate_inference_cfg_from_derived<F>
+        // at CfgGateRegistry.hpp) supersedes; consumer-flow over master FOREACH_PER_CORE_CFG_FIELD +
+        // FOREACH_GLOBAL_CFG_FIELD + FOREACH_ML_CFG_FLAG + FOREACH_GATE_CFG_FLAG with STAMP_BOUND_CFG_DERIVED
+        // metadata bit. Coverage now verified at compile-time via Step 4 CI Check 9 static_assert.
         check("v5.15.5.A.7: FOREACH_OPS_CFG_FLAG_COUNT == 4 (post-ACK migration; was 2)",
               (int)OPS_CFG_COUNT == 4);
         check("v5.15.5.A.7: OPS_CFG count fits uint8_t (≤8)",
