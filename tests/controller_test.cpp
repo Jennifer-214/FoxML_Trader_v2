@@ -9335,70 +9335,12 @@ e3_skip_load:;
             check("v5.3.0b: atomic write — no .tmp residue after success", 0);
         }
     }
-    {
-        // BASH-COMPAT REGRESSION (load-bearing): tools/stamp_model.sh
-        // generates a stamp; the new in-process verify path must accept it.
-        // If this fails, the canonical body byte-for-byte format diverged.
-        char model_path[] = "/tmp/test_v530b_bashcompat_XXXXXX";
-        int fd = mkstemp(model_path);
-        if (fd >= 0) {
-            (void)!write(fd, "bashcompat-content", 18);
-            close(fd);
-
-            // Find the bash script. Tests run from build_X/ so use repo-relative.
-            // Try common locations; skip test if none works.
-            const char* script_candidates[] = {
-                "../tools/stamp_model.sh",
-                "./tools/stamp_model.sh",
-                "tools/stamp_model.sh",
-                NULL
-            };
-            const char* script = NULL;
-            for (int i = 0; script_candidates[i]; ++i) {
-                if (access(script_candidates[i], X_OK) == 0) {
-                    script = script_candidates[i];
-                    break;
-                }
-            }
-
-            if (script) {
-                char cmd[2048];
-                // Use format-version=MODEL_FORMAT_VERSION so the verifier
-                // accepts the stamp.
-                snprintf(cmd, sizeof(cmd),
-                    "%s --model '%s' --secret 'bashcompat-secret' "
-                    "--wf-mean-val 0.55 --held-out-metric 0.53 "
-                    "--gap-threshold 0.05 --trained-on 2026-04-29 "
-                    "--format-version %d 2>/dev/null",
-                    script, model_path, MODEL_FORMAT_VERSION);
-                int rc = system(cmd);
-                if (rc == 0) {
-                    ModelStampResult vr = verify_model_stamp(
-                        model_path, "bashcompat-secret",
-                        0.05, MODEL_FORMAT_VERSION);
-                    check("v5.3.0b: bash-compat regression — script-generated stamp verifies",
-                          vr.valid == 1);
-                } else {
-                    check("v5.3.0b: bash-compat regression — script-generated stamp verifies",
-                          0); // bash script failed
-                }
-            } else {
-                // Script not found at expected paths — skip with a passing
-                // sentinel so test counts stay stable. Will catch this case
-                // in CI where the path is reliable.
-                fprintf(stderr, "[v5.3.0b] WARN: stamp_model.sh not found at expected paths — bash-compat test skipped\n");
-                check("v5.3.0b: bash-compat regression — script-generated stamp verifies",
-                      1);
-            }
-
-            char stamp_path[520];
-            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
-            unlink(stamp_path);
-            unlink(model_path);
-        } else {
-            check("v5.3.0b: bash-compat regression — script-generated stamp verifies", 0);
-        }
-    }
+    // v5.15.5.F.4d.1.B.3 Step 6.7 (2026-05-24): v5.3.0b bash-compat regression test block DELETED
+    // per /test-deletion-justification: subject of test (tools/stamp_model.sh) was DELETED at .B.3
+    // Path C 2026-05-24. Block previously skipped with check(..., 1) sentinel when script absent —
+    // forever-skipped no-op post-Path-C contaminating test counts. Canonical body byte-equivalence
+    // regression now verified via in-process round-trip tests below (v5.3.0b locale-pinning +
+    // subsequent verify_model_stamp coverage).
     {
         // Locale-pinning regression: round-trip should work even when
         // LC_NUMERIC is set to a comma-decimal locale. Without uselocale
@@ -11378,97 +11320,12 @@ e3_skip_load:;
         }
     }
 
-    printf("\n--- EXTENSIBILITY: v5.8.8 bash-script field parity (new fields round-trip via openssl) ---\n");
-    {
-        // Bash-compat regression for the v5.8.6 stamp-body extension. The
-        // tools/stamp_model.sh script must produce stamps bytewise-identical
-        // (in canonical body) to the in-process stamp_write_for_model so
-        // both sides' HMAC signatures verify. Specifically tests:
-        //   - feature_registry_hash field appears in canonical body when supplied
-        //   - engine_version field appears when supplied
-        //   - Field order matches in-process (feature_registry_hash before
-        //     engine_version)
-        //   - Verifier accepts the bash-signed stamp + reads both fields back
-        char model_path[] = "/tmp/test_v588_bash_parity_XXXXXX";
-        int fd = mkstemp(model_path);
-        if (fd >= 0) {
-            (void)!write(fd, "v588-bash-parity-content", 24);
-            close(fd);
-
-            const char* script_candidates[] = {
-                "../tools/stamp_model.sh",
-                "./tools/stamp_model.sh",
-                "tools/stamp_model.sh",
-                NULL
-            };
-            const char* script = NULL;
-            for (int i = 0; script_candidates[i]; ++i) {
-                if (access(script_candidates[i], X_OK) == 0) {
-                    script = script_candidates[i];
-                    break;
-                }
-            }
-
-            if (script) {
-                // Use the same hash + version values the v5.8.7+ engine
-                // produces, so the verifier's expected_feature_registry_hash
-                // check (when caller passes non-zero) will match.
-                char hash_hex[32];
-                snprintf(hash_hex, sizeof(hash_hex), "%016lx",
-                         (unsigned long)FEATURE_REGISTRY_HASH());
-
-                char cmd[2048];
-                snprintf(cmd, sizeof(cmd),
-                    "%s --model '%s' --secret 'v588-parity-secret' "
-                    "--wf-mean-val 0.55 --held-out-metric 0.53 "
-                    "--gap-threshold 0.05 --trained-on 2026-05-01 "
-                    "--format-version %d "
-                    "--feature-registry-hash %s "
-                    "--engine-version '%s' "
-                    "2>/dev/null",
-                    script, model_path, MODEL_FORMAT_VERSION,
-                    hash_hex, ENGINE_VERSION_STRING);
-                int rc = system(cmd);
-                if (rc == 0) {
-                    // Verify with the SAME registry hash the bash script wrote.
-                    // If the bash canonical body diverged from in-process
-                    // (different field order, missing field, locale issue, etc.)
-                    // the HMAC verify here would fail.
-                    ModelStampResult vr = verify_model_stamp(
-                        model_path, "v588-parity-secret",
-                        0.05, MODEL_FORMAT_VERSION,
-                        FEATURE_REGISTRY_HASH());
-                    check("v5.8.8: bash-signed stamp with new fields verifies via in-process",
-                          vr.valid == 1);
-                    check("v5.8.8: bash-written feature_registry_hash parses correctly",
-                          vr.feature_registry_hash == FEATURE_REGISTRY_HASH());
-                    // v5.15.5.F.4d.1.B.3 — strncmp(..., 15) to match ModelInference.hpp:1171
-                    // [16]-buffer truncation contract (sister to v5.8.6 above).
-                    check("v5.8.8: bash-written engine_version parses correctly (prefix)",
-                          strncmp(vr.engine_version, ENGINE_VERSION_STRING,
-                                  sizeof(vr.engine_version) - 1) == 0);
-                } else {
-                    check("v5.8.8: bash-signed stamp with new fields verifies via in-process", 0);
-                    check("v5.8.8: bash-written feature_registry_hash parses correctly", 0);
-                    check("v5.8.8: bash-written engine_version parses correctly", 0);
-                }
-            } else {
-                // Script not found at expected paths — skip with passing
-                // sentinels (CI has reliable paths).
-                fprintf(stderr, "[v5.8.8] WARN: stamp_model.sh not found at expected paths — bash-parity test skipped\n");
-                check("v5.8.8: bash-signed stamp with new fields verifies via in-process", 1);
-                check("v5.8.8: bash-written feature_registry_hash parses correctly", 1);
-                check("v5.8.8: bash-written engine_version parses correctly", 1);
-            }
-
-            char stamp_path[520];
-            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
-            unlink(stamp_path);
-            unlink(model_path);
-        } else {
-            check("v5.8.8: tmp model file creation for bash parity", 0);
-        }
-    }
+    // v5.15.5.F.4d.1.B.3 Step 6.7 (2026-05-24): v5.8.8 bash-script field parity test block DELETED
+    // per /test-deletion-justification: subject (tools/stamp_model.sh) DELETED at .B.3 Path C.
+    // Field-parity for feature_registry_hash + engine_version is now verified at in-process tests
+    // throughout v5.8.6+ stamp-body extension test sections (parser correctness exercised by
+    // canonical-body emit + verify_model_stamp round-trip; bash script parallel-emit surface
+    // ELIMINATED — only one stamp emitter post-Path-C).
 
     printf("\n--- EXTENSIBILITY: v5.9.0 NaN/Inf guards + WF purge post-check + stamp_format_version ---\n");
     {
@@ -13461,116 +13318,16 @@ e3_skip_load:;
         }
     }
 
-    printf("\n--- EXTENSIBILITY: v5.9.5c — bash CLI parity for full inference cfg binding ---\n");
-    {
-        // v5.9.5c — extends v5.8.8's bash↔in-process round-trip to cover the
-        // 9 inference cfg flags added in v5.9.2b/.3b/.4a (the "half-wired"
-        // class that v5.9.5b closed in-process; v5.9.5c closes the bash
-        // CLI side). Verifies bash emits each field, signature is
-        // verifiable, and parser reads each value back.
-        char model_path[] = "/tmp/test_v595c_bash_XXXXXX";
-        int fd = mkstemp(model_path);
-        if (fd >= 0) {
-            (void)!write(fd, "v595c-bash-content", 18);
-            close(fd);
-
-            const char* script_candidates[] = {
-                "../tools/stamp_model.sh",
-                "./tools/stamp_model.sh",
-                "tools/stamp_model.sh",
-                NULL
-            };
-            const char* script = NULL;
-            for (int i = 0; script_candidates[i]; ++i) {
-                if (access(script_candidates[i], X_OK) == 0) {
-                    script = script_candidates[i];
-                    break;
-                }
-            }
-
-            if (script) {
-                char hash_hex[32];
-                snprintf(hash_hex, sizeof(hash_hex), "%016lx",
-                         (unsigned long)FEATURE_REGISTRY_HASH());
-
-                // Larger cmd buffer per readiness check — 9 new flags
-                // ~150 chars overhead.
-                char cmd[4096];
-                snprintf(cmd, sizeof(cmd),
-                    "%s --model '%s' --secret 'v595c-parity-secret' "
-                    "--wf-mean-val 0.55 --held-out-metric 0.53 "
-                    "--gap-threshold 0.05 --trained-on 2026-05-02 "
-                    "--format-version %d "
-                    "--feature-registry-hash %s "
-                    "--engine-version '%s' "
-                    "--confidence-threshold-scale 2.5 "
-                    "--barrier-gate-enabled 1 "
-                    "--confidence-hard-block-threshold 0.07 "
-                    "--held-out-fraction 0.25 "
-                    "--freshness-tau 450 "
-                    "--bandit-blend-ratio 0.40 "
-                    "--fee-rate-maker 0.00060 "
-                    "--fee-rate-taker 0.00090 "
-                    "--training-poll-interval 200 "
-                    "--model-num-outputs 3 "
-                    "2>/dev/null",
-                    script, model_path, MODEL_FORMAT_VERSION,
-                    hash_hex, ENGINE_VERSION_STRING);
-                int rc = system(cmd);
-                if (rc == 0) {
-                    ModelStampResult vr = verify_model_stamp(
-                        model_path, "v595c-parity-secret",
-                        0.05, MODEL_FORMAT_VERSION,
-                        FEATURE_REGISTRY_HASH());
-                    check("v5.9.5c: bash-signed stamp with full inf verifies via in-process",
-                          vr.valid == 1);
-                    check("v5.9.5c: bash-written has_inference_cfg=1",
-                          STAMP_HAS(vr, inference_cfg) == 1);
-                    check("v5.9.5c: bash-written confidence_threshold_scale=2.5",
-                          fabs(FPN_ToDouble(vr.confidence_threshold_scale) - 2.5) < 1e-9);
-                    check("v5.9.5c: bash-written barrier_gate_enabled=1",
-                          vr.barrier_gate_enabled == 1);
-                    check("v5.9.5c: bash-written confidence_hard_block_threshold=0.07",
-                          fabs(FPN_ToDouble(vr.confidence_hard_block_threshold) - 0.07) < 1e-9);
-                    check("v5.9.5c: bash-written held_out_fraction=0.25",
-                          fabs(FPN_ToDouble(vr.held_out_fraction) - 0.25) < 1e-9);
-                    // v5.14.9.D — DELETED freshness_tau check (TECH_DEBT-004 close).
-                    check("v5.9.5c: bash-written has_bandit=1",
-                          STAMP_HAS(vr, inference_cfg_bandit_blend_ratio) == 1);
-                    check("v5.9.5c: bash-written bandit_blend_ratio=0.40",
-                          fabs(vr.inference_cfg_bandit_blend_ratio - 0.40) < 1e-9);
-                    check("v5.9.5c: bash-written has_fees=1",
-                          STAMP_HAS(vr, fees) == 1);
-                    check("v5.9.5c: bash-written fee_rate_maker=0.00060",
-                          fabs(vr.inference_cfg_fee_rate_maker - 0.00060) < 1e-9);
-                    check("v5.9.5c: bash-written fee_rate_taker=0.00090",
-                          fabs(vr.inference_cfg_fee_rate_taker - 0.00090) < 1e-9);
-                    check("v5.9.5c: bash-written training_poll_interval=200",
-                          STAMP_HAS(vr, training_poll_interval) == 1 &&
-                          vr.training_poll_interval == 200u);
-                    check("v5.9.5c: bash-written model_num_outputs=3",
-                          STAMP_HAS(vr, model_num_outputs) == 1 &&
-                          vr.model_num_outputs == 3);
-
-                    char stamp_path[256];
-                    snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
-                    unlink(stamp_path);
-                } else {
-                    for (int i = 0; i < 13; ++i) {
-                        check("v5.9.5c: bash CLI invocation failed", 0);
-                    }
-                }
-            } else {
-                fprintf(stderr, "[v5.9.5c] WARN: stamp_model.sh not found — bash-parity test skipped\n");
-                for (int i = 0; i < 13; ++i) {
-                    check("v5.9.5c: bash-parity test (skipped, script not found)", 1);
-                }
-            }
-            unlink(model_path);
-        } else {
-            check("v5.9.5c: tmp model file for bash test", 0);
-        }
-    }
+    // v5.15.5.F.4d.1.B.3 Step 6.7 (2026-05-24): v5.9.5c bash CLI full-inference-cfg parity test block
+    // DELETED per /test-deletion-justification: subject (tools/stamp_model.sh) DELETED at .B.3 Path C.
+    // The 13 inference-cfg field parity assertions are now structurally guaranteed by single-emitter
+    // discipline (only tt::Stamp_AssembleAndEmit → stamp_write_for_model emits stamps post-Path-C;
+    // no parallel-emitter surface that could diverge). The cfg-derived consumer framework
+    // (cfg_derived::populate_stamp_cfg_from_derived<F> at CfgGateRegistry.hpp) auto-flows ALL
+    // STAMP_BOUND_CFG_DERIVED-flagged fields from master registry — adding a new cfg field is 1 row
+    // in FOREACH_PER_CORE_CFG_FIELD or FOREACH_GLOBAL_CFG_FIELD; all consumers auto-extend. Drift
+    // impossible by construction. Sister coverage: in-process Phase F SOFT bump fixture test
+    // (Step 5; v1 stamps load on v2 engine via FOREACH_LEGACY_PREFIXED_KEY back-compat).
 
     printf("\n--- EXTENSIBILITY: v5.9.5h — XGBoost hyperparam ownership ---\n");
     {
@@ -13693,71 +13450,11 @@ e3_skip_load:;
             check("v5.9.5h: tmp dir for stamp test", 0);
         }
 
-        // === Test 5: Bash CLI parity (extends v5.8.8/v5.9.5c block) ===
-        char model_path[] = "/tmp/test_v595h_bash_XXXXXX";
-        int fd = mkstemp(model_path);
-        if (fd >= 0) {
-            (void)!write(fd, "v595h-bash", 10);
-            close(fd);
-            const char* script_candidates[] = {
-                "../tools/stamp_model.sh",
-                "./tools/stamp_model.sh",
-                "tools/stamp_model.sh",
-                NULL
-            };
-            const char* script = NULL;
-            for (int i = 0; script_candidates[i]; ++i) {
-                if (access(script_candidates[i], X_OK) == 0) {
-                    script = script_candidates[i];
-                    break;
-                }
-            }
-            if (script) {
-                char hash_hex[32];
-                snprintf(hash_hex, sizeof(hash_hex), "%016lx",
-                         (unsigned long)FEATURE_REGISTRY_HASH());
-                char cmd[4096];
-                snprintf(cmd, sizeof(cmd),
-                    "%s --model '%s' --secret 'v595h-secret' "
-                    "--wf-mean-val 0.55 --held-out-metric 0.53 "
-                    "--gap-threshold 0.05 --trained-on 2026-05-02 "
-                    "--format-version %d --feature-registry-hash %s "
-                    "--engine-version '%s' "
-                    "--xgb-max-depth 8 --xgb-learning-rate 0.05 "
-                    "--xgb-n-estimators 300 --xgb-subsample 0.7 "
-                    "--xgb-colsample-bytree 0.9 --xgb-min-child-weight 3 "
-                    "--xgb-seed 123 --xgb-tree-method exact "
-                    "2>/dev/null",
-                    script, model_path, MODEL_FORMAT_VERSION,
-                    hash_hex, ENGINE_VERSION_STRING);
-                int rc = system(cmd);
-                if (rc == 0) {
-                    ModelStampResult vr = verify_model_stamp(
-                        model_path, "v595h-secret",
-                        0.05, MODEL_FORMAT_VERSION, FEATURE_REGISTRY_HASH());
-                    check("v5.9.5h: bash-stamp with xgb_hyperparams verifies",
-                          vr.valid == 1);
-                    check("v5.9.5h: bash xgb_max_depth round-trips",
-                          vr.xgb_max_depth == 8);
-                    check("v5.9.5h: bash xgb_subsample round-trips",
-                          fabs(vr.xgb_subsample - 0.7) < 1e-9);
-                    check("v5.9.5h: bash xgb_tree_method round-trips",
-                          strcmp(vr.xgb_tree_method, "exact") == 0);
-                    char sp[256];
-                    snprintf(sp, sizeof(sp), "%s.stamp", model_path);
-                    unlink(sp);
-                } else {
-                    for (int i = 0; i < 4; ++i)
-                        check("v5.9.5h: bash CLI invocation failed", 0);
-                }
-            } else {
-                for (int i = 0; i < 4; ++i)
-                    check("v5.9.5h: bash test skipped (script not found)", 1);
-            }
-            unlink(model_path);
-        } else {
-            check("v5.9.5h: tmp model file for bash test", 0);
-        }
+        // v5.15.5.F.4d.1.B.3 Step 6.7 (2026-05-24): v5.9.5h bash CLI XGBoost-hyperparam parity test
+        // DELETED per /test-deletion-justification: subject (tools/stamp_model.sh) DELETED at .B.3 Path C.
+        // XGBoost hyperparam round-trip is exercised in-process by Tests 1-4 above (verify_model_stamp
+        // round-trip with hyperparam fields); single-emitter discipline post-Path-C eliminates
+        // parallel-emitter divergence risk that bash-parity test originally guarded against.
     }
 
     printf("\n--- EXTENSIBILITY: v5.9.5i — inference cfg load-time enforcement + drift counters ---\n");

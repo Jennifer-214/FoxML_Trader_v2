@@ -86,25 +86,15 @@ fi
 
 echo ""
 echo "=== Surface 3: verify_model_stamp parses feature_mask round-trip ==="
-# tools/stamp_model.sh has a verify mode? Let me check stamp_model.sh capabilities
-if [ -x tools/stamp_model.sh ] && tools/stamp_model.sh 2>&1 | grep -q verify; then
-    # Try a verify; output should contain feature_mask if stamp has it
-    VERIFY_OUTPUT=$(tools/stamp_model.sh verify "$MODEL_PATH" "$SECRET" 2>&1)
-    if [ -n "$MASK_HEX" ]; then
-        if echo "$VERIFY_OUTPUT" | grep -qiE "feature_mask.*${MASK_HEX}|has_feature_mask.*1"; then
-            pass "stamp_model.sh verify reads feature_mask correctly"
-        else
-            fail "stamp_model.sh verify did NOT surface feature_mask field"
-            note "      verify output: $VERIFY_OUTPUT"
-        fi
-    else
-        note "skipping verify check — no mask in stamp body (default mask path)"
-    fi
-else
-    note "tools/stamp_model.sh has no verify subcommand; surface 3 not testable"
-    note "      via shell. Code-side: ML_Headers/ModelInference.hpp parser at"
-    note "      verify_model_stamp() handles it (see Surface 4 for load-time)."
-fi
+# v5.15.5.F.4d.1.B.3 Step 6.8 (2026-05-24): tools/stamp_model.sh DELETED at Path C
+# (see plan body line 8). Shell-side verification of feature_mask round-trip
+# unavailable. Code-side verification at ML_Headers/ModelInference.hpp
+# verify_model_stamp() is the canonical path (also exercised at Surface 4 below).
+# foxml_suite GUI auto-stamp flow (Backtest_RunFullValidation →
+# tt::Stamp_AssembleAndEmit at Backtest/BacktestEngine.hpp:1202) covers operator
+# stamp generation; verification round-trip is exercised at load-time in the engine.
+note "Surface 3 N/A — tools/stamp_model.sh DELETED at v5.15.5.F.4d.1.B.3 Path C."
+note "  Round-trip parse verification exercised at Surface 4 (engine load-time)."
 
 echo ""
 echo "=== Surface 4: engine refuses load when cfg mask != stamp mask ==="

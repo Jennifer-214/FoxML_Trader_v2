@@ -2107,7 +2107,13 @@ static inline void OptimizerPanel_Init(OptimizerPanelState *state) {
     state->ranges[0].lo = 1.0; state->ranges[0].hi = 5.0; state->ranges[0].step = 0.5;
     strncpy(state->ranges[1].key, "stop_loss_pct", 31);
     state->ranges[1].lo = 0.5; state->ranges[1].hi = 3.0; state->ranges[1].step = 0.5;
-    strncpy(state->config_path, "engine.cfg", sizeof(state->config_path) - 1);
+    // v5.15.5.F.4d.1.B.3 Step 6.9 (2026-05-24) — closes foxml_suite Optimizer-vs-RunControl
+    // divergence. Pre-fix: OptimizerPanel defaulted to "engine.cfg" while RunControl_Init:160
+    // defaulted to "backtest.cfg" — two suite-internal panels loaded DIFFERENT cfg files.
+    // foxml_suite agent CRIT-3 finding 2026-05-24. Fix: 1-line "engine.cfg" → "backtest.cfg"
+    // restores parity between suite panels. (Note: backtest.cfg/engine.cfg structural drift
+    // closes separately at v5.15.6.A/B/C per TECH_DEBT-123.)
+    strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
 }
 
 struct OptWorkerArgs {
@@ -2816,9 +2822,11 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     // AND ran_held_out=1; both are met here when training succeeds.
     //
     // v5.8.10 — gate path-setting on the cfg's auto_stamp_on_held_out flag.
-    // When the operator runs the suite with auto_stamp_on_held_out=0 (intent:
-    // manual stamping via tools/stamp_model.sh), the FV button still runs
-    // held-out validation but skips the stamp write. Honors operator intent.
+    // When the operator runs the suite with auto_stamp_on_held_out=0 (originally:
+    // for manual stamping via tools/stamp_model.sh; bash CLI DELETED at .B.3 Path C
+    // 2026-05-24; =0 now only meaningful for v5.16+ cmdline-invocable training per
+    // decoupling-endgoal-roadmap), the FV button still runs held-out validation
+    // but skips the stamp write. Honors operator intent.
     memset(&state->fv_results, 0, sizeof(state->fv_results));
     int auto_stamp_enabled = data->config_used.auto_stamp_on_held_out;
     if (auto_stamp_enabled) {
@@ -3209,9 +3217,10 @@ static inline void *train_model_worker_fn(void *arg) {
     // v5.9.3b — train-time scaler computation + sidecar persist (Gap G).
     // Reads train_features (still alive at this point, freed below).
     // Atomic ordering: Compute → Persist → SHA-256 hex → log to operator.
-    // Operator runs tools/stamp_model.sh --feature-scaler-present=1
-    // --scaler-sha256=<hex> (or sets auto_stamp_path in cfg for next run)
-    // to bind the sidecar to the model's stamp.
+    // v5.15.5.F.4d.1.B.3 Path C 2026-05-24: stamp binding now auto-flows via
+    // Backtest_RunFullValidation → tt::Stamp_AssembleAndEmit (scaler_sha256 +
+    // feature_scaler_present populate from training state). Operator no longer
+    // runs manual bash; foxml_suite GUI auto-stamp covers the workflow.
     int scaler_persisted = 0;
     char scaler_sha256_hex[80] = {0};
     char scaler_path[600] = {0};
@@ -5371,9 +5380,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::PopItemWidth();
             ImGui::PopStyleColor();
             ImGui::SetItemTooltip("SHA-256 of the persisted .scaler sidecar file.\n"
-                                  "Run Full Validation auto-binds via in-process emit\n"
-                                  "(v5.9.5b). For manual stamping via tools/stamp_model.sh,\n"
-                                  "pass --scaler-sha256=<this value> + --feature-scaler-present=1.");
+                                  "Run Full Validation auto-binds via in-process emit (v5.9.5b).\n"
+                                  "Manual bash CLI (tools/stamp_model.sh) DELETED at v5.15.5.F.4d.1.B.3\n"
+                                  "Path C 2026-05-24 — foxml_suite GUI auto-stamp is the workflow.\n"
+                                  "cmdline-invocable training queued for v5.16+.");
         }
         // v5.9.5j — Train Model auto-stamp result. Renders when worker
         // attempted auto-stamp (cfg.auto_stamp_on_held_out=1 + non-empty

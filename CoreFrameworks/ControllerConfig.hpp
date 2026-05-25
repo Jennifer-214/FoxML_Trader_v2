@@ -881,9 +881,10 @@ template <unsigned F> struct ControllerConfig {
   char   held_out_stamp_secret[128]; // HMAC-SHA256 secret for stamp signing/verify
   // v5.3.2 — auto-stamp on held-out completion. When 1, Backtest_RunFullValidation
   // calls stamp_write_for_model after a successful held-out training pass, using
-  // held_out_stamp_secret + gap_acceptable_threshold above. Default 0 to preserve
-  // current behavior (manual stamping via tools/stamp_model.sh); flip to 1 after
-  // configuring the secret to enable hands-off stamp generation in foxml_suite.
+  // held_out_stamp_secret + gap_acceptable_threshold above. Default 1 since v5.8.10
+  // (suite Run Full Validation auto-stamps). v5.15.5.F.4d.1.B.3 Path C 2026-05-24:
+  // manual tools/stamp_model.sh DELETED; the =0 alternative is now only meaningful
+  // for v5.16+ cmdline-invocable training per decoupling-endgoal-roadmap.
   // v5.11.47 — auto-stamp HMAC secret. When non-empty AND
   // auto_stamp_on_held_out=1, the suite signs each generated stamp
   // with this secret. Empty = devmode (signature accepted as-is at
@@ -1717,7 +1718,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
   cfg.allow_cross_major_engine    = 0;                            // v5.9.2b — refuse cross-major by default
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
-  cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); set 0 only for manual tools/stamp_model.sh workflow
+  cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); =0 reserved for v5.16+ cmdline-invocable training (manual bash workflow DELETED at v5.15.5.F.4d.1.B.3 Path C)
   cfg.auto_stamp_secret[0]        = '\0';                         // v5.11.47 default empty = devmode (signs stamps but accepts any signature at load); operator sets in cfg or GUI Validation panel
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
   cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)

@@ -158,19 +158,20 @@ scaling) via the `.scaler` sidecar binary. Operator workflow change:
    The status_msg in the GUI also shows `[+scaler]` suffix when
    persist succeeded.
 
-3. **Bind the scaler to the stamp** via tools/stamp_model.sh:
-   ```bash
-   ./tools/stamp_model.sh \
-       --model models/aggressive/buy_signal.bin \
-       --secret "$HELD_OUT_STAMP_SECRET" \
-       --wf-mean-val 0.55 \
-       --held-out-metric 0.53 \
-       --gap-threshold 0.05 \
-       --feature-registry-hash <hex from build> \
-       --engine-version 5.9.3b \
-       --feature-scaler-present 1 \
-       --scaler-sha256 <hex from worker log>
-   ```
+3. **Bind the scaler to the stamp** — automatic via foxml_suite GUI auto-stamp flow.
+
+   *(v5.15.5.F.4d.1.B.3 Path C 2026-05-24: legacy `tools/stamp_model.sh` bash CLI
+   DELETED. Operator workflow now uses foxml_suite GUI auto-stamp via
+   Backtest_RunFullValidation → tt::Stamp_AssembleAndEmit at
+   `Backtest/BacktestEngine.hpp:1202`. Scaler fields auto-populate from training
+   state; no manual bash invocation required. cmdline-invocable training queued
+   for v5.16+ per `plans/_future/2026-05-12-decoupling-endgoal-roadmap.md`.)*
+
+   **Procedure:** Run foxml_suite → Run Control panel → "Run Full Validation"
+   button. Stamp emits at validation close with all cfg-derived + scaler fields
+   auto-bound. Stamp body bytes are HMAC-signed via `held_out_stamp_secret` cfg
+   field — set in `engine.cfg` (live) or `backtest.cfg` (training) BEFORE
+   running validation.
 
 4. **Verify the binding** at engine boot:
    - ML Status panel shows green "scaler: applied (registry_hash=...)"
@@ -181,7 +182,7 @@ scaling) via the `.scaler` sidecar binary. Operator workflow change:
 ### Training a model WITHOUT the scaler
 
 The scaler is optional. To skip:
-- Don't pass `--feature-scaler-present` to `tools/stamp_model.sh`
+- Train via foxml_suite with scaler persist disabled (toggle in training panel)
 - Stamp body lacks the field; engine loads with `has_scaler_fields=0`,
   `feature_scaler_present=0`. Apply path early-returns identity.
 - ML Status panel shows sand "scaler: NONE (legacy v5 model)"
