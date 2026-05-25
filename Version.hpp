@@ -5,7 +5,41 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.2"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.2.h1"
+
+// .F.4d.1.B.2.h1 (v5.15.5.F.4d.1.B.2.h1 — hotfix; 2026-05-24)
+// === LIVE-SAFETY HOTFIX — closes PARITY-026 ===
+//
+// Issue: CoreFrameworks/EngineSharded.hpp:742 calls only EventLoopState_Init at boot
+// but NEVER follows with EventLoopState_ConfigureKillSwitch. Backtest/BacktestSharded.hpp:217-221
+// correctly configures the kill switch from cfg.risk_cfg_flags + cfg.kill_switch_drawdown_pct.
+// Result: operator sets kill_switch_enabled=1 + drawdown_pct=5.0 in engine.cfg, backtest
+// replays trip the switch correctly, but LIVE TRADING IGNORES BOTH FIELDS. Worst-case silent
+// unbounded loss for unattended live runs.
+//
+// Has been broken since the sharded path was built; sprint named v5.15-LIVE-READINESS made
+// the gap especially ironic. Surfaced 2026-05-24 by an ad-hoc ML↔LIVE structural sweep
+// (Caramel-prompted) that surfaced 4 sister train-serve-asymmetry CRITs at the boot surface.
+//
+// Fix: 5-LOC mirror of backtest discipline inserted at EngineSharded.hpp:742 after
+// EventLoopState_Init. Build clean; 3230 tests pass (unchanged from .B.2 baseline);
+// hot path UNTOUCHED.
+//
+// Sister findings closing at v5.15.5.F.4d.1.B.4 (NEW sub-ship; train-serve-execution-layer-parity
+// structural extract via EngineCommon_BootPerCore + EngineCommon_SlowPathCycleOneCore shared
+// helpers per TECH_DEBT-119): PARITY-027 (backtest no ML exit-prediction submit) / PARITY-028
+// (backtest no ConfidenceScorer composite cfg bind) / PARITY-029 (backtest no Strategy_InitPerCore
+// — pre-v5.4 F7 bug never closed on backtest) + 3 HIGH PARITY-030/031/B2 by 1 structural refactor.
+//
+// M5 meta-discipline codification queued at .B.4 ship close: NEW DESIGN_SPECS
+// train-serve-execution-layer-parity.md (audit methodology) + shared-helper-extract-for-train-serve-mirror-close.md
+// (the implementation pattern). DRAFT v0.1 already written 2026-05-24; Stage 3 first canonical
+// at .B.4 ship.
+//
+// Full audit report: plans/v5.15-live-readiness/plan_checks/2026-05-24-train-serve-asymmetry-sweep.md
+// PARITY-026 entry: DOCS/PARITY_ISSUES.md
+// Operator workaround pre-hotfix: monitor drawdown manually in live trading (not safe for unattended).
+//
 // .F.4d.1.B.2 (v5.15.5.F.4d.1.B.2) — Cohort migration (2 of 3 in .B split; 2026-05-17).
 //
 // LANDED at .B.2:

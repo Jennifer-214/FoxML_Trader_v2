@@ -741,6 +741,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     EventLoopState<F> state;
     EventLoopState_Init(&state, &oms);
 
+    // v5.15.5.F.4d.1.B.3-killswitch-hotfix (2026-05-24) — closes PARITY-026.
+    // Mirror of Backtest/BacktestSharded.hpp:217-221 — backtest had the call;
+    // live boot was missing it for the entire sharded path lifetime (~14 months).
+    // Class 18 mirror at execution layer; sister to PARITY-028 + PARITY-029
+    // closing at v5.15.5.F.4d.1.B.4 via EngineCommon_BootPerCore extract (TECH_DEBT-119).
+    if (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED)) {
+        EventLoopState_ConfigureKillSwitch(&state,
+            FPN_Zero<F>(),  // no hard balance floor; drawdown-only kill
+            cfg.kill_switch_drawdown_pct);
+    }
+
     // v5.14.5.B.0.A — re-init regime_state with cfg-driven hysteresis
     // (EventLoopState_Init uses safe default 5; here we override with
     // cfg.regime_hysteresis so operators can tune per-deployment).
