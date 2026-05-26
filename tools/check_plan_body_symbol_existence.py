@@ -225,6 +225,185 @@ def extract_cpp_blocks(plan_text):
             i += 1
 
 
+# Line-anchor verification (v5.15.5.F.4d.1.B.4 v1.7.5 — extends B-Plus from symbol-existence
+# to line-range accuracy; fills the /trace-deps coverage gap caught at WIP-9 pre-coding gate
+# where C.1's -380 LOC delta shifted EngineSharded.hpp line numbers but plan body cites still
+# pointed at pre-shift positions). Closes M7 line-anchor-drift subclass at COMMIT layer.
+PLAN_CONTEXT_IDENTIFIER_PATTERNS = [
+    # CamelCase_snake_case function names (e.g., EventLoop_BreakevenOnProfit / EngineCommon_BootGlobal)
+    re.compile(r'\b([A-Z][a-zA-Z0-9]*_[A-Za-z0-9_]+)\b'),
+    # ALL_CAPS_constants (MASK_*, FOREACH_*, STRATEGY_*, GATE_*, etc.)
+    re.compile(r'\b(MASK_[A-Z0-9_]+|FOREACH_[A-Z0-9_]+|STRATEGY_[A-Z0-9_]+|GATE_[A-Z0-9_]+|BACKTEST_[A-Z0-9_]+)\b'),
+    # Backtick-quoted member access (`drv->current_spread`, `state.cores[c].slow_state`)
+    re.compile(r'`([a-z_][\w]*(?:->\w+|\.[a-z_][\w]*))`'),
+    # Backtick-quoted function call opens (`Function_Name(`)
+    re.compile(r'`([A-Za-z_][\w]*)\s*\(`'),
+]
+
+# Generic words to filter out (too common to be load-bearing identifiers)
+PLAN_CONTEXT_STOPWORDS = {
+    "F", "BACKTEST_FP", "INT", "BOOT", "STEP", "LIVE", "MASK", "FOREACH",
+    "PARITY", "TECH_DEBT", "STAGE", "CLOSE", "DELETE", "KEEP", "ADD", "VERIFY",
+}
+
+
+def extract_line_anchors(plan_text):
+    """Yield (plan_line, citation, relpath, start_line, end_line, context_text) tuples
+    for each <path>:<line> or <path>:<start>-<end> citation in plan body.
+
+    Context: ±3 plan body lines around the citation, used to extract surrounding identifiers
+    for fuzzy verification.
+    """
+    lines = plan_text.split('\n')
+    # Pattern: optionally-backticked file:line or file:start-end (e.g., `EngineSharded.hpp:3044-3311`)
+    pattern = re.compile(r'`?([A-Za-z_][\w/.-]*\.(?:hpp|cpp)):(\d+)(?:-(\d+))?`?')
+    for plan_idx, line in enumerate(lines, 1):
+        for m in pattern.finditer(line):
+            relpath, start_str, end_str = m.groups()
+            start = int(start_str)
+            end = int(end_str) if end_str else start
+            # Surrounding context for identifier extraction (±3 plan body lines)
+            ctx_start = max(0, plan_idx - 4)
+            ctx_end = min(len(lines), plan_idx + 3)
+            context = '\n'.join(lines[ctx_start:ctx_end])
+            yield (plan_idx, m.group(0), relpath, start, end, context)
+
+
+def extract_context_identifiers(context_text):
+    """Return set of identifiers from plan body context useful for fuzzy line-anchor verification."""
+    identifiers = set()
+    for pat in PLAN_CONTEXT_IDENTIFIER_PATTERNS:
+        for m in pat.finditer(context_text):
+            ident = m.group(1)
+            if ident in PLAN_CONTEXT_STOPWORDS:
+                continue
+            # Strip trailing/leading whitespace + drop overly short
+            ident = ident.strip()
+            if len(ident) < 4:
+                continue
+            identifiers.add(ident)
+    return identifiers
+
+
+def _find_first_line(file_lines, identifier, lo=0, hi=None):
+    """Return 1-indexed line number of first occurrence of identifier in file_lines[lo:hi], or None."""
+    if hi is None:
+        hi = len(file_lines)
+    for i in range(lo, hi):
+        if identifier in file_lines[i]:
+            return i + 1
+    return None
+
+
+_FILE_RESOLUTION_CACHE = {}  # (relpath_str, project_root_str) -> resolved Path or None
+
+
+def _resolve_filepath(relpath, project_root, workspace_root=None):
+    """Resolve a cited relpath to an actual Path; supports bare filenames via recursive search.
+
+    Plan body often cites bare filenames (e.g., `EngineSharded.hpp` not
+    `CoreFrameworks/EngineSharded.hpp`). Search recursively when path is bare.
+    Cached per project_root to avoid repeated rglob.
+    """
+    cache_key = (relpath, str(project_root))
+    if cache_key in _FILE_RESOLUTION_CACHE:
+        return _FILE_RESOLUTION_CACHE[cache_key]
+
+    # Try direct path first (engine root then workspace)
+    direct = project_root / relpath
+    if direct.exists():
+        _FILE_RESOLUTION_CACHE[cache_key] = direct
+        return direct
+    if workspace_root is not None:
+        ws_direct = workspace_root / relpath
+        if ws_direct.exists():
+            _FILE_RESOLUTION_CACHE[cache_key] = ws_direct
+            return ws_direct
+
+    # Bare filename — recursive search (skip build dirs / .git / etc.)
+    if '/' not in relpath:
+        bare = Path(relpath).name
+        skip_dirs = {"build", "build_gui", "build_suite", "build_tsan", "build_asan",
+                     "build_lat", "build_latency", "build_gui_asan", ".git", "node_modules"}
+        for root in (project_root,) + ((workspace_root,) if workspace_root else ()):
+            if not root.exists():
+                continue
+            for found in root.rglob(bare):
+                # Skip files inside build dirs (compiled artifacts) or .git
+                parts = set(found.relative_to(root).parts)
+                if parts & skip_dirs:
+                    continue
+                _FILE_RESOLUTION_CACHE[cache_key] = found
+                return found
+
+    _FILE_RESOLUTION_CACHE[cache_key] = None
+    return None
+
+
+def verify_line_anchor(plan_line, citation, relpath, start, end, context, project_root,
+                      workspace_root=None, fuzzy_window=50):
+    """Return (status, detail) for one line-anchor verification.
+
+    Status:
+      PASS       — cited range exists + ≥1 context identifier appears in cited range
+      SKIP       — no useful identifiers in context (nothing to verify against)
+      OOB        — cited line exceeds file's actual line count (clearly stale)
+      DRIFT      — identifiers found within fuzzy window but NOT in cited range
+      DRIFT-FAR  — identifiers exist in file but >fuzzy_window lines from cited range
+      MISSING    — file not found at project root or workspace root
+      NOTFOUND   — file exists but identifiers not found anywhere in it (possible fabrication or full rename)
+    """
+    filepath = _resolve_filepath(relpath, project_root, workspace_root)
+    if filepath is None:
+        return ("MISSING", f"file not found at engine root: {relpath}")
+
+    try:
+        file_text = filepath.read_text(encoding='utf-8', errors='replace')
+    except Exception as e:
+        return ("MISSING", f"read failed: {e}")
+    file_lines = file_text.split('\n')
+    total = len(file_lines)
+    if start > total:
+        return ("OOB", f"cite line {start} > file has {total} lines (clearly stale)")
+
+    identifiers = extract_context_identifiers(context)
+    # Subtract identifiers that ARE the filepath itself (e.g., "EngineSharded" appears in both
+    # context and path; doesn't help verify line accuracy)
+    file_stem = Path(relpath).stem
+    identifiers = {ident for ident in identifiers if file_stem not in ident}
+    if not identifiers:
+        return ("SKIP", "no useful context identifiers (nothing to verify against)")
+
+    # Check identifiers in cited range
+    cited_slice = '\n'.join(file_lines[start-1:min(end, total)])
+    cited_hits = {ident for ident in identifiers if ident in cited_slice}
+    if cited_hits:
+        sample = sorted(cited_hits)[:3]
+        return ("PASS", f"found {len(cited_hits)}/{len(identifiers)} ids in cited range: {sample}")
+
+    # Try fuzzy window (±fuzzy_window lines)
+    fuzzy_lo = max(0, start - fuzzy_window - 1)
+    fuzzy_hi = min(total, end + fuzzy_window)
+    fuzzy_slice = '\n'.join(file_lines[fuzzy_lo:fuzzy_hi])
+    fuzzy_hits = {ident: _find_first_line(file_lines, ident, fuzzy_lo, fuzzy_hi)
+                  for ident in identifiers if ident in fuzzy_slice}
+    if fuzzy_hits:
+        # Report most-cited identifier's actual line
+        rep = sorted(fuzzy_hits.items(), key=lambda kv: kv[1] or 99999)[:2]
+        return ("DRIFT", f"ids found near cited range but NOT in [{start}-{end}]; "
+                         f"actual: {[(k, v) for k, v in rep]}")
+
+    # Search whole file
+    whole_hits = {ident: _find_first_line(file_lines, ident, 0, total)
+                  for ident in identifiers if ident in file_text}
+    if whole_hits:
+        rep = sorted(whole_hits.items(), key=lambda kv: kv[1] or 99999)[:2]
+        return ("DRIFT-FAR", f"ids exist in file but >±{fuzzy_window} lines from cite [{start}-{end}]; "
+                             f"actual: {[(k, v) for k, v in rep]}")
+
+    return ("NOTFOUND", f"none of {len(identifiers)} context identifiers found anywhere in {relpath}")
+
+
 def derive_includes(code):
     """Return list of #include paths needed for this code block, based on
     symbol references in the block matched against SYMBOL_INCLUDES map."""
@@ -386,20 +565,25 @@ def try_compile(code_str, label):
             pass
 
 
-def check_plan_body(plan_path, strict=False):
-    """Return (n_blocks, n_fabrications, n_harness, [(line, classification, excerpt, error_line), ...])."""
+def check_plan_body(plan_path, strict=False, verify_anchors=True):
+    """Return dict with code-block + line-anchor verification results.
+
+    Keys:
+      n_blocks, n_fab, n_harness, code_findings
+      n_anchors, n_pass, n_skip, n_drift, n_oob, n_missing, n_notfound, anchor_findings
+    """
     text = plan_path.read_text(encoding='utf-8', errors='replace')
+
+    # === Pass 1: cpp code-block compilation (symbol existence — Class 14 closure) ===
     blocks = list(extract_cpp_blocks(text))
-    findings = []
+    code_findings = []
     n_fab = 0
     n_harness = 0
     for (line, body) in blocks:
-        # Skip X-macro expansion fragments (can only verify inside registry context)
         if looks_like_xmacro_expansion(body):
             continue
-        # Skip blocks that look like full TUs (operator wrote complete includes); don't wrap
         if looks_like_full_tu(body):
-            wrapped = body  # let it stand on its own
+            wrapped = body
         else:
             includes = derive_includes(body)
             wrapped = wrap_block(body, includes)
@@ -407,12 +591,57 @@ def check_plan_body(plan_path, strict=False):
         if not ok:
             classification, error_line = classify_failure(stderr)
             excerpt = body.split('\n')[0][:80]
-            findings.append((line, classification, excerpt, error_line))
+            code_findings.append((line, classification, excerpt, error_line))
             if classification == "FABRICATION":
                 n_fab += 1
             else:
                 n_harness += 1
-    return (len(blocks), n_fab, n_harness, findings)
+
+    # === Pass 2: line-anchor verification (line-range accuracy — line-drift closure) ===
+    anchor_findings = []
+    n_anchors = 0
+    n_pass = 0
+    n_skip = 0
+    n_drift = 0
+    n_oob = 0
+    n_missing = 0
+    n_notfound = 0
+    if verify_anchors:
+        for (plan_line, citation, relpath, start, end, context) in extract_line_anchors(text):
+            n_anchors += 1
+            status, detail = verify_line_anchor(plan_line, citation, relpath, start, end, context,
+                                                project_root=ENGINE, workspace_root=WORKSPACE)
+            if status == "PASS":
+                n_pass += 1
+            elif status == "SKIP":
+                n_skip += 1
+            elif status == "OOB":
+                n_oob += 1
+                anchor_findings.append((plan_line, status, citation, detail))
+            elif status in ("DRIFT", "DRIFT-FAR"):
+                n_drift += 1
+                anchor_findings.append((plan_line, status, citation, detail))
+            elif status == "MISSING":
+                n_missing += 1
+                anchor_findings.append((plan_line, status, citation, detail))
+            elif status == "NOTFOUND":
+                n_notfound += 1
+                anchor_findings.append((plan_line, status, citation, detail))
+
+    return {
+        "n_blocks": len(blocks),
+        "n_fab": n_fab,
+        "n_harness": n_harness,
+        "code_findings": code_findings,
+        "n_anchors": n_anchors,
+        "n_pass": n_pass,
+        "n_skip": n_skip,
+        "n_drift": n_drift,
+        "n_oob": n_oob,
+        "n_missing": n_missing,
+        "n_notfound": n_notfound,
+        "anchor_findings": anchor_findings,
+    }
 
 
 def main():
@@ -424,6 +653,10 @@ def main():
                    help="report HARNESS-ISSUE blocks too (default: only FABRICATION)")
     p.add_argument("--quiet", action="store_true",
                    help="only print failures + summary")
+    p.add_argument("--no-verify-anchors", action="store_true",
+                   help="skip line-anchor verification pass (default: always run)")
+    p.add_argument("--show-drift", action="store_true",
+                   help="report line-anchor DRIFTs (default: only OOB + MISSING printed; drifts in summary)")
     args = p.parse_args()
 
     if args.all:
@@ -438,24 +671,49 @@ def main():
     total_blocks = 0
     total_fab = 0
     total_harness = 0
+    total_anchors = 0
+    total_drift = 0
+    total_oob = 0
+    total_missing = 0
+    total_notfound = 0
     any_fabrication = False
+    any_anchor_error = False  # OOB + MISSING are blocking; DRIFT is warning
 
     for path in paths:
         if not path.exists():
             print(f"[error] not found: {path}", file=sys.stderr)
             any_fabrication = True
             continue
-        n_blocks, n_fab, n_harness, findings = check_plan_body(path, strict=args.strict)
+        result = check_plan_body(path, strict=args.strict,
+                                  verify_anchors=not args.no_verify_anchors)
+        n_blocks = result["n_blocks"]
+        n_fab = result["n_fab"]
+        n_harness = result["n_harness"]
+        code_findings = result["code_findings"]
+        n_anchors = result["n_anchors"]
+        n_drift = result["n_drift"]
+        n_oob = result["n_oob"]
+        n_missing = result["n_missing"]
+        n_notfound = result["n_notfound"]
+        anchor_findings = result["anchor_findings"]
+
         total_blocks += n_blocks
         total_fab += n_fab
         total_harness += n_harness
+        total_anchors += n_anchors
+        total_drift += n_drift
+        total_oob += n_oob
+        total_missing += n_missing
+        total_notfound += n_notfound
         if n_fab > 0:
             any_fabrication = True
+        if n_oob > 0 or n_missing > 0:
+            any_anchor_error = True
 
-        # Report
+        # === Code-block report (existing) ===
         if n_fab > 0 or (args.strict and n_harness > 0):
             print(f"\n=== {path.name}  ({n_fab} fabrications + {n_harness} harness-issues of {n_blocks} blocks) ===", file=sys.stderr)
-            for (line, cls, excerpt, error_line) in findings:
+            for (line, cls, excerpt, error_line) in code_findings:
                 if cls == "FABRICATION" or (args.strict and cls == "HARNESS-ISSUE"):
                     marker = "❌ FABRICATION" if cls == "FABRICATION" else "⚠️  HARNESS-ISSUE"
                     print(f"\n  {marker} at {path.name}:line~{line}", file=sys.stderr)
@@ -465,8 +723,31 @@ def main():
             extra = f" ({n_harness} harness-issues; use --strict to see)" if n_harness else ""
             print(f"[ok] {path.name}  ({n_blocks} blocks; 0 fabrications{extra})")
 
-    print(f"\n=== SUMMARY: {total_blocks} blocks checked across {len(paths)} files; {total_fab} FABRICATIONS + {total_harness} harness-issues ===", file=sys.stderr)
-    sys.exit(1 if any_fabrication else 0)
+        # === Line-anchor report (NEW) ===
+        if anchor_findings:
+            show_drift = args.show_drift or args.strict
+            blocking = [f for f in anchor_findings if f[1] in ("OOB", "MISSING")]
+            drift = [f for f in anchor_findings if f[1] in ("DRIFT", "DRIFT-FAR", "NOTFOUND")]
+            if blocking or (show_drift and drift):
+                print(f"\n=== {path.name} line-anchor verification ===", file=sys.stderr)
+                for (plan_line, status, citation, detail) in anchor_findings:
+                    if status in ("OOB", "MISSING"):
+                        print(f"  ❌ {status} at plan:line~{plan_line}  cite={citation}", file=sys.stderr)
+                        print(f"     {detail}", file=sys.stderr)
+                    elif show_drift and status in ("DRIFT", "DRIFT-FAR", "NOTFOUND"):
+                        print(f"  ⚠️  {status} at plan:line~{plan_line}  cite={citation}", file=sys.stderr)
+                        print(f"     {detail}", file=sys.stderr)
+
+    # === Summary ===
+    anchor_summary = ""
+    if total_anchors > 0:
+        anchor_summary = (f"; {total_anchors} line-anchors ({total_drift} drift + {total_oob} OOB"
+                          f" + {total_missing} missing + {total_notfound} notfound)")
+    print(f"\n=== SUMMARY: {total_blocks} blocks checked across {len(paths)} files; {total_fab} FABRICATIONS + {total_harness} harness-issues{anchor_summary} ===", file=sys.stderr)
+    if total_drift > 0 and not args.show_drift:
+        print(f"  (line-anchor DRIFTs: {total_drift}; rerun with --show-drift to see details)", file=sys.stderr)
+    # Exit non-zero on fabrication OR anchor blocker (OOB / MISSING)
+    sys.exit(1 if (any_fabrication or any_anchor_error) else 0)
 
 
 if __name__ == "__main__":
