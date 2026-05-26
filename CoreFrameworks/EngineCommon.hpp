@@ -188,22 +188,44 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 
 // 3. EngineCommon_BootPerCore
 //    const cfg per-core boot:
-//      - per-core OrderManager_RegisterCore
-//      - ConfidenceScorer_Init + BindCompositeCfg
-//      - RollingTurnover_Init
-//      - per-core model load (when cfg.cores[c].strategy is ML)
-//      - Strategy_InitPerCore (closes PARITY-029 — pre-v5.4 F7 bug)
+//      - SPSCRing_Init(&tick_ring) + ExecutionCore_Init(&core, c, &tick_ring)
+//      - EventLoopState_RegisterCore (per v1.5 D1 correction; NOT
+//        OrderManager_RegisterCore which doesn't exist in the codebase)
+//      - EventLoopState_SetCoreStrategy(&state, c, cfg.core_strategies[c], core_balance)
+//      - ML branch (when cfg.core_strategies[c] == STRATEGY_ML && zoo_ptr && ezoo_ptr):
+//          CoreModelZoo_Init + EnsembleModelZoo_Init + Load + PostLoadSetup +
+//          ValidateAgainstCfg + FeatureOverlay_PostLoadVerify +
+//          ConfidenceScorer_Init + ConfidenceScorer_BindCompositeCfg +
+//          RollingTurnover_Init
+//      - Strategy_InitPerCore (closes PARITY-029 — pre-v5.4 F7 bug; outside ML branch)
+//      - ExecutionCore_SetPermission(&core, 0)
 //
 //    Called N times per boot (per-core loop). External wrappers (e.g.,
-//    bandit_state_prior_path) called AFTER this returns.
+//    bandit_state_prior_path; oms.ezoo_refs LIVE-only wire; CoreLatencyStats_Enable
+//    LIVE-only) called AFTER this returns per Decision B + M5 false-positive surface.
 //
-//    Closes PARITY-027 (exit-model bind) + PARITY-028 (BindCompositeCfg) +
-//    PARITY-029 (Strategy_InitPerCore) by-construction.
+//    Caller responsibilities per v1.7 O4:
+//      - Precompute core_balance per O2 bytewise-identical math (preserved from
+//        LIVE :898-906 + :915-920 + BACKTEST :234-238 + :258-263 verbatim)
+//      - Allocate zoo_ptr + ezoo_ptr per arch (LIVE: aligned_alloc(64) with
+//        null-check + CORE_STATE_FLAG_SET(MODEL_LOAD_FAILED) on alloc fail;
+//        BACKTEST: Free+Init static array element)
+//      - Pass nullptr for both zoo_ptr + ezoo_ptr when non-ML strategy
+//
+//    Closes PARITY-027 (exit-model bind) + PARITY-028 (BindCompositeCfg +
+//    RollingTurnover) + PARITY-029 (Strategy_InitPerCore) by-construction.
+//
+//    Signature (8 args per v1.7 O1 — drops unused oms; adds caller-owned
+//    statics + nullable ML zoos + caller-precomputed core_balance):
 template <int F>
 void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                                int c,
                                EventLoopState<F>& state,
-                               OrderManagerState<F>& oms);
+                               SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE>& tick_ring,
+                               ExecutionCore<F>& core,
+                               CoreModelZoo<F>* zoo_ptr,        // nullable: non-ML OR alloc-failed
+                               EnsembleModelZoo<F>* ezoo_ptr,   // nullable: same
+                               FPN<F> core_balance);            // caller-precomputed (O2 bytewise-identical)
 
 // 4. EngineCommon_SlowPathCycleOneCore
 //    const cfg per-core slow-path-cycle body (atomic per-core unit):
