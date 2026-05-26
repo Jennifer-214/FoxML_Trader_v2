@@ -28,6 +28,7 @@
 #include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
+#include "../CoreFrameworks/EngineCommon.hpp"              // v5.15.5.F.4d.1.B.4 — shared train-serve helpers (ApplyBnbDiscount + Boot* + SlowPathCycle*)
 #include "../DataStream/EngineTUI.hpp"                   // v5.0.4 — topology populator tests
 #include "../CoreFrameworks/Reconcile.hpp"                // v5.2.1 — live reconciliation tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
@@ -21763,6 +21764,100 @@ e3_skip_load:;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: AUTOPOPULATE CLEARS composite when cfg flips to 0 (full re-eval)",
               !BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
+    }
+
+    //======================================================================
+    // [v5.15.5.F.4d.1.B.4 — D1-B BREAKEVEN_ON_PROFIT row + AUTOPOPULATE + EngineCommon_ApplyBnbDiscount]
+    //======================================================================
+    {
+        using namespace tt;
+        // PARITY-032 closure: new ENGINE_WIDE row added at .B.4 (count 2 → 3).
+        // MASK_BREAKEVEN_ON_PROFIT (slow-path-gate auto-generated) distinct from
+        // cfg-side MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT per prefix convention
+        // (slow-path-gate uses MASK_<name>; cfg-flag uses MASK_LIFECYCLE_CFG_<name>).
+        check("v5.15.5.F.4d.1.B.4: FOREACH_SLOW_PATH_GATE_ENGINE_WIDE_COUNT >= 3 (lazy_rebuild + ws_flatten + breakeven_on_profit)",
+              FOREACH_SLOW_PATH_GATE_ENGINE_WIDE_COUNT >= 3);
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_ENGINE_WIDE — default cfg → MASK_BREAKEVEN_ON_PROFIT off
+        // (default lifecycle_cfg_flags has BREAKEVEN_ON_PROFIT unset →
+        // branchless skip preserves pre-.B.4 per_core_slow behavior bytewise)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        GlobalGateState state;
+        state.flags = 0xFFFF;  // pre-set to verify AUTOPOPULATE clears stale bits
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
+        check("v5.15.5.F.4d.1.B.4: ENGINE_WIDE default cfg → MASK_BREAKEVEN_ON_PROFIT off",
+              !BITMAP_IS_SET(state.flags, MASK_BREAKEVEN_ON_PROFIT));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_ENGINE_WIDE — cfg lifecycle BREAKEVEN_ON_PROFIT=1 → cached bit on
+        // (PARITY-032 cohort path; D1-B dispatch fires inside SlowPathCycleOneCore)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT);
+        GlobalGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
+        check("v5.15.5.F.4d.1.B.4: cfg.lifecycle_cfg_flags BREAKEVEN_ON_PROFIT=1 → cached MASK_BREAKEVEN_ON_PROFIT set",
+              BITMAP_IS_SET(state.flags, MASK_BREAKEVEN_ON_PROFIT));
+    }
+    {
+        using namespace tt;
+        // Scope discipline: AUTOPOPULATE_PER_CORE SKIPs the ENGINE_WIDE row even
+        // when cfg flag is set. BREAKEVEN_ON_PROFIT is scope=ENGINE_WIDE; per_core
+        // variant emits no code for it (X_AUTOPOP_PER_CORE_DISPATCH_ENGINE_WIDE
+        // → X_AUTOPOP_PER_CORE_SKIP). Catches Class 18 mirror drift at scope axis.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT);
+        SlowPathGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.15.5.F.4d.1.B.4: AUTOPOPULATE_PER_CORE SKIPs ENGINE_WIDE BREAKEVEN_ON_PROFIT (scope discipline)",
+              !BITMAP_IS_SET(state.flags, MASK_BREAKEVEN_ON_PROFIT));
+    }
+    {
+        using namespace tt;
+        // Full re-eval discipline: AUTOPOPULATE clears MASK_BREAKEVEN_ON_PROFIT
+        // when cfg flag flips set→unset. Sister to v5.14.9.B.0 composite test pattern.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT);
+        GlobalGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
+        check("v5.15.5.F.4d.1.B.4: AUTOPOPULATE sets MASK_BREAKEVEN_ON_PROFIT when cfg=1",
+              BITMAP_IS_SET(state.flags, MASK_BREAKEVEN_ON_PROFIT));
+        BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT);
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
+        check("v5.15.5.F.4d.1.B.4: AUTOPOPULATE CLEARS MASK_BREAKEVEN_ON_PROFIT when cfg flips to 0 (full re-eval)",
+              !BITMAP_IS_SET(state.flags, MASK_BREAKEVEN_ON_PROFIT));
+    }
+    {
+        using namespace tt;
+        // EngineCommon_ApplyBnbDiscount: pay_fees_in_bnb=1 → 0.75x factor
+        // applied to all per-core fee_rate_maker + fee_rate_taker. Closes
+        // PARITY-030 by-construction (LIVE + BACKTEST both call this pre-loop).
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.pay_fees_in_bnb = 1;
+        cfg.cores[0].fee_rate_maker = FPN_FromDouble<64>(0.001);
+        cfg.cores[0].fee_rate_taker = FPN_FromDouble<64>(0.001);
+        EngineCommon_ApplyBnbDiscount(cfg);
+        // 0.001 * 0.75 = 0.00075 (exactly representable in F=64 FPN)
+        check("v5.15.5.F.4d.1.B.4: ApplyBnbDiscount pay_fees_in_bnb=1 reduces core[0] fee_rate_maker",
+              FPN_ToDouble(cfg.cores[0].fee_rate_maker) < 0.001);
+        check("v5.15.5.F.4d.1.B.4: ApplyBnbDiscount pay_fees_in_bnb=1 reduces core[0] fee_rate_taker",
+              FPN_ToDouble(cfg.cores[0].fee_rate_taker) < 0.001);
+    }
+    {
+        using namespace tt;
+        // EngineCommon_ApplyBnbDiscount: pay_fees_in_bnb=0 → no mutation
+        // (default cfg path; preserves pre-.B.4 fee_rate_* values verbatim)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.pay_fees_in_bnb = 0;
+        FPN<64> baseline_maker = FPN_FromDouble<64>(0.001);
+        cfg.cores[0].fee_rate_maker = baseline_maker;
+        EngineCommon_ApplyBnbDiscount(cfg);
+        // Compare via FPN_ToDouble for tolerant exact-match (F=64 represents
+        // doubles exactly in normal range; conversion roundtrip is identity).
+        check("v5.15.5.F.4d.1.B.4: ApplyBnbDiscount pay_fees_in_bnb=0 → fee_rate_maker unchanged",
+              FPN_ToDouble(cfg.cores[0].fee_rate_maker) == FPN_ToDouble(baseline_maker));
     }
 
     //======================================================================
