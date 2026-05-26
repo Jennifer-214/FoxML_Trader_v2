@@ -44,6 +44,7 @@
 #include "../CoreFrameworks/EventLoopAggregates.hpp"
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
+#include "../CoreFrameworks/EngineCommon.hpp"  // v5.15.5.F.4d.1.B.4 — shared train-serve helpers (ApplyBnbDiscount + BootGlobal + BootPerCore + SlowPathCycle*)
 #include "../CoreFrameworks/ShardedSnapshot.hpp"  // Track E.7 — TUI_CopySnapshotSharded
 #include "PhaseTimers.hpp"  // v5.10.0 Item A — per-phase backtest timers
 #include "../CoreFrameworks/Tick.hpp"
@@ -194,31 +195,26 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // OrderManager_Init at line 183 above). Adding a new cfg-derived boot
     // bit flag = ONE row in FOREACH_OMS_FIELD; no more external SET sites.
     // Closes /dod-audit HIGH-1 (2026-05-13 Phase 3b audit).
+    // v5.15.5.F.4d.1.B.4 Step C.2 — extracted to EngineCommon_ApplyBnbDiscount
+    // (NEW for BACKTEST — closes PARITY-030 by-construction; LIVE sister at Step C.1
+    // calls same helper. Pre-`.B.4` BACKTEST was missing BNB discount entirely; cohorts
+    // using pay_fees_in_bnb=1 had train-serve fee divergence). Body at
+    // CoreFrameworks/EngineCommon.hpp:152-164.
+    EngineCommon_ApplyBnbDiscount(cfg);
+
     EventLoopState<BACKTEST_FP> state;
-    EventLoopState_Init(&state, &oms);
-
-    // v5.14.5.B.0.B — re-init regime_state with cfg-driven hysteresis
-    // (mirrors EngineSharded boot at ~line 880; same single source of
-    // truth = cfg.regime_hysteresis). EventLoopState_Init uses safe
-    // default 5; this override matches EngineSharded so train-serve
-    // parity is guaranteed by construction.
-    //
-    // Universalization (v5.14.5.B.0.A) means Regime_Classify now fires
-    // on ALL cores (not just AUTO). Backtest replay reproduces the same
-    // hysteresed current_regime sequence as live for any given tick
-    // stream, enabling regime-context ML features (v5.14.5.B class_onehot).
-    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
-        Regime_Init(&state.cores[i].regime_state, (int)cfg.cores[i].regime_hysteresis);
-    }
-
-    // Configure kill switch from the existing config fields. The drawdown
-    // field in cfg is already a fraction (parsed via CFG_PARSE_PCT) so it
-    // matches what _ConfigureKillSwitch expects.
-    if (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED)) {
-        EventLoopState_ConfigureKillSwitch(&state,
-            FPN_Zero<BACKTEST_FP>(),  // no hard balance floor in legacy mode either
-            cfg.kill_switch_drawdown_pct);
-    }
+    // v5.15.5.F.4d.1.B.4 Step C.2 — extracted to EngineCommon_BootGlobal (closes
+    // PARITY-026 sister-discipline via TECH_DEBT-119 fold; LIVE sister at Step C.1
+    // calls same helper). Body preserved verbatim from prior inline at BACKTEST :198 +
+    // :210-212 + :217-221 → CoreFrameworks/EngineCommon.hpp:181-200 (Init +
+    // ConfigureKillSwitch + Regime_Init loop with cfg-driven hysteresis per
+    // cfg.cores[i].regime_hysteresis). Note: helper INTERNAL order is
+    // Init → KillSwitch → Regime; prior BACKTEST inline order was Init → Regime →
+    // KillSwitch. Order-of-operations bytewise-identical because each step is
+    // independent — Init sets defaults; KillSwitch + Regime_Init both write to
+    // distinct state fields (kill_switch_state vs regime_state) with no
+    // cross-dependency. Train-serve parity preserved.
+    EngineCommon_BootGlobal(cfg, state, oms);
 
     int num_cores = (int)cfg.num_execution_cores;
     if (num_cores < 1) num_cores = 1;
@@ -249,172 +245,58 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     static EnsembleModelZoo<BACKTEST_FP> ml_ensemble_zoos[MAX_EXECUTION_CORES];
 
     for (int i = 0; i < num_cores; ++i) {
-        SPSCRing_Init(&tick_rings[i]);
-        ExecutionCore_Init(&cores[i], (uint16_t)i, &tick_rings[i]);
-        // intended TP/SL/qty get filled in by the slow-path strategy rebuild
-        EventLoopState_RegisterCore(&state, &cores[i],
-            FPN_Zero<BACKTEST_FP>(), FPN_Zero<BACKTEST_FP>(), FPN_Zero<BACKTEST_FP>());
+        // v5.15.5.F.4d.1.B.4 Step C.2 — per-core boot extracted to
+        // EngineCommon_BootPerCore (TECH_DEBT-119 closure + closes PARITY-027 +
+        // PARITY-028 (BindCompositeCfg + RollingTurnover_Init NEW for BACKTEST) +
+        // PARITY-029 (Strategy_InitPerCore NEW for BACKTEST) by-construction; LIVE
+        // sister at Step C.1 invokes same helper). Helper body preserved verbatim from
+        // prior inline at BACKTEST :252-417 → CoreFrameworks/EngineCommon.hpp:233-427.
+        //
+        // BACKTEST caller owns: core_balance precompute (O2 bytewise-identical math) +
+        // ML zoo Free+Init prior-run state (static array vs LIVE aligned_alloc heap;
+        // multi-run-per-process discipline frees accumulated state from prior backtest
+        // in same suite session) + post-helper bandit_state_prior_path operator override
+        // (Decision B external wrapper; BACKTEST-only because LIVE has no run_cfg
+        // analog at this scope).
 
-        // per-core risk: cfg.core_risk_pct[i] override or even-split default
+        // Per-core risk: same as LIVE per v1.6 O2 bytewise-identical math discipline.
         double core_balance = default_per_core;
         if (!FPN_IsZero(cfg.core_risk_pct[i])) {
             core_balance = total_balance * FPN_ToDouble(cfg.core_risk_pct[i]);
             if (core_balance < 1.0) core_balance = 1.0;
         }
-        EventLoopState_SetCoreStrategy(&state, i,
-            cfg.core_strategies[i],
-            FPN_FromDouble<BACKTEST_FP>(core_balance));
 
-        // Track E.2 — ML model load for STRATEGY_ML cores. Three resolution
-        // paths, mirrors EngineSharded_Run lines 576-631:
-        //   1. core_N_model_dir set → CoreModelZoo from directory
-        //   2. core_N_model_path set → legacy single buy_signal model
-        //   3. ml_model_path globally → legacy fallback
+        // BACKTEST ML zoo Free+Init prior-run state. CoreModelZoo holds heap
+        // allocations; double-Init without Free leaks the prior allocation.
+        CoreModelZoo<BACKTEST_FP>* zoo_ptr = nullptr;
+        EnsembleModelZoo<BACKTEST_FP>* ezoo_ptr = nullptr;
         if (cfg.core_strategies[i] == STRATEGY_ML) {
-            // Free any prior backtest run's zoo state on this slot before
-            // reinit. CoreModelZoo holds heap allocations; double-Init
-            // without Free leaks the prior allocation.
             CoreModelZoo_Free(&ml_zoos[i]);
-            CoreModelZoo_Init(&ml_zoos[i]);
-            // v5.10.0a.G.5 — same pattern for ensemble zoo
             EnsembleModelZoo_Free(&ml_ensemble_zoos[i]);
-            EnsembleModelZoo_Init(&ml_ensemble_zoos[i]);
-            int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
-            int loaded = 0;
-            if (cfg.core_model_dir[i][0]) {
-                // v5.10.4 — Plumb cfg-derived strict/gap/secret/drift args
-                // (parity-check Finding #13). v5.10.1.C closed the matching
-                // AutoDetectFromDir call at line ~306 but this LoadFromDir
-                // sibling at line 263 was missed in the same file. Same
-                // fix shape — without these, backtest path silently bypasses
-                // operator's held_out_gate_strict cfg.
-                loaded = CoreModelZoo_LoadFromDir(&ml_zoos[i],
-                                                   cfg.core_model_dir[i], backend,
-                                                   cfg.held_out_stamp_secret,
-                                                   FPN_ToDouble(cfg.gap_acceptable_threshold),
-                                                   cfg.held_out_gate_strict,
-                                                   (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
-                fprintf(stderr, "[backtest sharded] core %d: zoo from %s, %d role(s) loaded\n",
-                        i, cfg.core_model_dir[i], loaded);
-            } else {
-                const char* model_path = cfg.core_model_path[i][0]
-                    ? cfg.core_model_path[i] : cfg.ml_model_path;
-                if (model_path[0]) {
-                    loaded = CoreModelZoo_LoadLegacy(&ml_zoos[i], model_path, backend);
-                    if (loaded) {
-                        fprintf(stderr, "[backtest sharded] core %d: legacy buy_signal model loaded from %s\n",
-                                i, model_path);
-                    } else {
-                        fprintf(stderr, "[backtest sharded] core %d: ML model load FAILED (%s), "
-                                         "falling back to SimpleDip\n", i, model_path);
-                    }
-                }
-            }
-            if (loaded) {
-                state.cores[i].model_handle = &ml_zoos[i];
-                // v5.14.2.E.1 — canonical post-load setup (X-macro registry
-                // FOREACH_SINGLE_ZOO_POST_LOAD; today: VerifyExpected).
-                // Returns 1 if all steps OK; 0 if any failed.
-                if (cfg.core_model_dir[i][0]) {
-                    int post_ok = CoreModelZoo_PostLoadSetup<BACKTEST_FP>(
-                        &ml_zoos[i], cfg, i, cfg.core_model_dir[i]);
-                    if (!post_ok && cfg.model_verify_strict > 0) {
-                        fprintf(stderr, "[backtest sharded] core %d: ML model UNLOADED due to "
-                                         "strict verify failure\n", i);
-                        CoreModelZoo_Free(&ml_zoos[i]);
-                        state.cores[i].model_handle = NULL;
-                    }
-                }
-                // v5.10.0a.G.5 — try ensemble auto-detect on the base dir
-                // (cfg.core_model_dir without _horizon_<H> suffix).
-                // No-op when no _horizon_* siblings present; ezoo->active=0
-                // so engine continues using single-zoo path.
-                if (cfg.core_model_dir[i][0]) {
-                    // v5.10.1.C — Plumb cfg-derived strict/gap/secret/drift args
-                    // (parity-check Finding #6). Backtest path now respects
-                    // cfg.held_out_gate_strict in ensemble mode (was silently 0).
-                    int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
-                        &ml_ensemble_zoos[i],
-                        cfg.core_model_dir[i],
-                        backend,
-                        cfg.held_out_stamp_secret,
-                        FPN_ToDouble(cfg.gap_acceptable_threshold),
-                        cfg.held_out_gate_strict,
-                        (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
-                    if (n_loaded > 0 && BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_ACTIVE)) {
-                        fprintf(stderr, "[backtest sharded] core %d: ensemble active "
-                                        "(%d horizons; %d total models)\n",
-                                i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
-                        // v5.14.2.E.1 — canonical post-load setup (closes
-                        // PARITY-010: backtest was missing v5.13.4 InitExitBandits
-                        // + LoadExitBanditState that boot has).
-                        EnsembleModelZoo_PostLoadSetup<BACKTEST_FP>(
-                            &ml_ensemble_zoos[i], cfg, i, cfg.core_model_dir[i]);
-                        // v5.10.0a.next.1 — backtest-only operator-explicit
-                        // prior path override (run_cfg, NOT in standard helper).
-                        // Overrides the default LoadBanditState the helper just
-                        // ran. Skips bundle-id check (operator may be transferring
-                        // weights from a sibling bundle deliberately).
-                        if (run_cfg && run_cfg->bandit_state_prior_path[0]) {
-                            EnsembleModelZoo_LoadBanditStateFromPath(
-                                &ml_ensemble_zoos[i],
-                                run_cfg->bandit_state_prior_path,
-                                /*skip_bundle_check=*/1);
-                        }
-                        // Wire ensemble pointer into the per-core handle slot;
-                        // dispatcher's ml_ctx.ensemble_zoo reads from this.
-                        state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
-                    } else {
-                        // ensure stale handle from prior run cleared
-                        state.cores[i].ensemble_handle = nullptr;
-                    }
-                }
-                // v5.14.2.E.1 — closes PARITY-012: backtest was missing
-                // CoreModelZoo_ValidateAgainstCfg that boot has at
-                // EngineSharded.hpp:1192. Skipping it silently bypassed
-                // inference_cfg drift detection (Ridge / composite / winsor /
-                // exit_blender) for backtest replays. Now matches boot path.
-                // ValidateAgainstCfg lives in ../CoreFrameworks/ModelValidation.hpp
-                // (moved from EngineSharded.hpp in v5.14.2.E.1; backtest can't
-                // include EngineSharded.hpp).
-                if (cfg.core_model_dir[i][0] && state.cores[i].model_handle) {
-                    CoreModelZoo<BACKTEST_FP>* zoo_for_validate = &ml_zoos[i];
-                    EnsembleModelZoo<BACKTEST_FP>* ezoo_for_validate =
-                        state.cores[i].ensemble_handle ? &ml_ensemble_zoos[i] : nullptr;
-                    CoreModelZoo_ValidateAgainstCfg<BACKTEST_FP>(
-                        zoo_for_validate, ezoo_for_validate, cfg, /*core_id=*/i,
-                        cfg.held_out_gate_strict,
-                        (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
-                        (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                        &state.display_meta[i], &state.cores[i]);
-                    // Note: validator returns -1 on REFUSE in strict mode but
-                    // backtest semantics match boot's "log loudly + leave loaded"
-                    // (counters written, FATAL log fires, replay continues).
-
-                    // v5.14.3.B — overlay sidecar verification (3-layer
-                    // fingerprinting). Per-handle: if stamp claims overlay,
-                    // read sidecar + compare hash. Backtest semantics: log +
-                    // continue replay (matches ValidateAgainstCfg above).
-                    FeatureOverlay_PostLoadVerify<BACKTEST_FP>(
-                        zoo_for_validate, ezoo_for_validate, /*core_id=*/i,
-                        cfg.held_out_gate_strict);
-                }
-            }
-            // Phase 6prep — ConfidenceScorer with cfg tunables.
-            // v4.7.32: per-core resolved tau (mirrors EngineSharded_Run
-            // for train-serve parity). confidence_window stays global.
-            // v5.14.9.D — TECH_DEBT-004 close: confidence_freshness_tau
-            // cfg field + per-core override deleted; tau hardcoded.
-            ConfidenceScorer_Init(&state.cores[i].confidence,
-                                   (int)cfg.cores[i].confidence_window,
-                                   CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+            zoo_ptr  = &ml_zoos[i];
+            ezoo_ptr = &ml_ensemble_zoos[i];
         }
 
-        // Track E.2 — permission starts 0; granted after warmup samples
-        // accumulate. Mirrors EngineSharded_Run lines 999-1019. Pre-E.2,
-        // BacktestSharded set permission=1 immediately, which let strategies
-        // fire on garbage rolling stats during the first ticks.
-        ExecutionCore_SetPermission(&cores[i], 0);
+        // Helper call — closes PARITY-027/028/029 by-construction. Body covers:
+        // SPSCRing_Init + ExecutionCore_Init + RegisterCore + SetCoreStrategy + full
+        // ML branch (load/init/post-load/validate/overlay/ConfidenceScorer + NEW
+        // BindCompositeCfg + NEW RollingTurnover_Init) + NEW Strategy_InitPerCore +
+        // SetPermission.
+        EngineCommon_BootPerCore(cfg, i, state, tick_rings[i], cores[i],
+                                  zoo_ptr, ezoo_ptr,
+                                  FPN_FromDouble<BACKTEST_FP>(core_balance));
+
+        // Post-helper BACKTEST-only operator override (Decision B external wrapper).
+        // v5.10.0a.next.1 — operator-explicit prior path overrides the default
+        // LoadBanditState the helper just ran. Skips bundle-id check (operator may
+        // be transferring weights from a sibling bundle deliberately for
+        // transfer-learning experiments).
+        if (state.cores[i].ensemble_handle != nullptr && run_cfg && run_cfg->bandit_state_prior_path[0]) {
+            EnsembleModelZoo_LoadBanditStateFromPath(
+                &ml_ensemble_zoos[i],
+                run_cfg->bandit_state_prior_path,
+                /*skip_bundle_check=*/1);
+        }
     }
 
     // RollingStats lives on the stack here so the slow-path parameter rebuild
