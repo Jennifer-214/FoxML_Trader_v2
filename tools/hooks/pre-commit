@@ -1,0 +1,62 @@
+#!/bin/bash
+# Pre-commit hook — runs B-Plus CI tool against any plan body .md being committed.
+# Catches Class 14 fabricated-symbol bugs at commit time per /readiness Check 32.
+#
+# Codified at v5.15.5.F.4d.1.B.4 v1.7.4 cycle after M6 memory codification alone failed
+# to prevent in-cycle recurrence (6 NEW Class 14 fabrications introduced post-codification).
+#
+# Skipped if:
+#   - No plan body .md files in staged changes (most commits)
+#   - Tool not present (clean clone without tools/check_plan_body_symbol_existence.py)
+#   - Operator explicitly bypasses via SKIP_PLAN_BODY_CHECK=1 env var (use sparingly)
+
+if [ "${SKIP_PLAN_BODY_CHECK:-0}" = "1" ]; then
+    echo "[pre-commit] SKIP_PLAN_BODY_CHECK=1 set; skipping plan-body symbol verification"
+    exit 0
+fi
+
+TOOL="/home/caramel/code/FoxML_Trader_v2/tools/check_plan_body_symbol_existence.py"
+if [ ! -x "$TOOL" ] && [ ! -f "$TOOL" ]; then
+    # Tool absent (clean clone); silently skip
+    exit 0
+fi
+
+# Find staged plan body .md files
+# Plans live at workspace path; check both engine + workspace stage areas
+STAGED_PLANS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^plans/.*\.md$|.*subplans/.*\.md$|.*MASTER\.md$' || true)
+
+if [ -z "$STAGED_PLANS" ]; then
+    # No plan body changes; skip
+    exit 0
+fi
+
+echo "[pre-commit] Verifying plan body symbol existence for staged plan(s):"
+echo "$STAGED_PLANS" | sed 's/^/  - /'
+
+ANY_FAB=0
+for plan in $STAGED_PLANS; do
+    # If running from engine repo + plan is symlink resolving to workspace, check via target
+    if [ -L "$plan" ]; then
+        plan=$(readlink -f "$plan")
+    fi
+    if [ ! -f "$plan" ]; then
+        # Plan in workspace not present at this path; skip silently
+        continue
+    fi
+    if ! python3 "$TOOL" "$plan" 2>&1 | tee /tmp/plan_body_check_$$.log; then
+        ANY_FAB=1
+    fi
+done
+rm -f /tmp/plan_body_check_$$.log
+
+if [ "$ANY_FAB" = "1" ]; then
+    echo ""
+    echo "[pre-commit] FABRICATION(S) DETECTED in plan body code samples (Class 14)."
+    echo "[pre-commit] Fix the fabricated symbol citations OR pass SKIP_PLAN_BODY_CHECK=1"
+    echo "[pre-commit] if the finding is a known-good HARNESS-ISSUE that the tool"
+    echo "[pre-commit] doesn't model (rare; consider extending the tool's classifier first)."
+    exit 1
+fi
+
+echo "[pre-commit] Plan body symbol verification PASS"
+exit 0
