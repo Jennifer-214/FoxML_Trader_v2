@@ -416,26 +416,11 @@ partial_exit_pct=0.50           # fraction to exit at TP1 (0.50 = 50%)
 tp2_mult=2.00                   # TP2 = TP1 distance × this
 breakeven_on_partial=1          # move SL to breakeven after TP1 hit
 
-#==============================================================================
-# ENGINE ARCHITECTURE (v5.0.0+)
-#==============================================================================
-# engine_arch — slow-path threading model under sharded mode.
-#   per_core_slow (default since v5.0.0): each engine = self-contained
-#                  strategy unit (slow + hot pthread pair). N slow-path
-#                  threads spawn at boot, each runs RebuildOneCore +
-#                  TimeExitOneCore + TrailingSLRatchetOneCore for its
-#                  own core. Producer thread keeps global work
-#                  (RollingStats, depth, snapshot save, GUI publish).
-#                  Real prop-shop architecture; matches Xeon-class deploy.
-#   centralized   (legacy): producer thread runs slow-path for all cores
-#                  in one loop. Available for benchmark / regression
-#                  comparison. Functionally equivalent (shared OneCore
-#                  helpers); just a different threading topology.
-# STARTUP-ONLY — changes ignored on hot reload.
-engine_arch=per_core_slow
-
 # v5.0.2: slow_path_pin_offset — CPU pinning policy for slow-path threads
-# (only used when engine_arch=per_core_slow).
+# (always-on since v5.15.5.F.4d.1.B.4 B-full SHARDED centralized-arch deprecation;
+# `engine_arch` cfg field deleted — per_core_slow is the only SHARDED execution mode;
+# operators wanting centralized execution semantics use legacy single_core LIVE binary
+# sister-architectural preservation per Decision I full-surface-deletion).
 #   -1 = no pin (OS-scheduled — original v5.0 behavior)
 #    0 = auto-derive (base = num_execution_cores + 2, past the drainer)
 #   >0 = explicit base CPU. Slow-path c pins to (offset + c) mod nproc.
@@ -906,9 +891,8 @@ reconcile_mode=warn         # default (legacy dry_run=1 behavior preserved)
 # v5.15.2 — TRADING MODE (paper / live / shadow)
 #
 # Top-level discriminator between paper, live, and shadow operation.
-# Distinct from engine_mode (sharded/single_core architectural) and
-# engine_arch (per_core_slow/centralized). Stamp-bound: every model
-# carries its training-time mode for audit trail.
+# Distinct from engine_mode (sharded/single_core architectural).
+# Stamp-bound: every model carries its training-time mode for audit trail.
 #
 # Values:
 #   trading_mode=paper      (= 0; default; gates default-off; safe to ship-test)

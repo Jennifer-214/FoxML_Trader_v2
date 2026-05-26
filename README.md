@@ -192,7 +192,6 @@ requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XG
 ```ini
 # engine.cfg — minimal example
 engine_mode = sharded
-engine_arch = per_core_slow      # v5.0+ default
 num_execution_cores = 4
 use_real_money = 0               # paper trading (default)
 

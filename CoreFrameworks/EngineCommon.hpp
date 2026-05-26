@@ -41,7 +41,7 @@
 // PER-CALL-SITE EXEMPTION DISCIPLINE
 // ----------------------------------
 // Legitimate live-only / backtest-only differences are handled via:
-//   - cfg flag branches at boot time (e.g., cfg.engine_arch dispatch)
+//   - cfg flag branches at boot time (e.g., cfg.lifecycle_cfg_flags BITMAP_IS_SET dispatch)
 //   - Conditional compile (#ifdef LATENCY_PROFILING)
 //   - External wrapper before/after helper (e.g., bandit_state_prior_path operator override)
 // NOT via nullable args — every helper takes reference (`&`), no pointer (`*`) args.

@@ -257,9 +257,9 @@ struct OrderManagerState {
     // drift amounts. OrderManager_Tick drains this third.
     alignas(64) SPSCRing<Command, 64> reconcile_queue;
 
-    // v4.7.37: per-core submit queues. Producer threads (today: producer
-    // slow-path; future: per-core slow-path threads in engine_arch=
-    // per_core_slow) push SubmitCommands here. The drainer thread pops
+    // v4.7.37: per-core submit queues. Producer threads (producer slow-path
+    // + per-core slow-path threads in SHARDED per_core_slow execution mode
+    // since v5.0.0 default) push SubmitCommands here. The drainer thread pops
     // them in OMS_DrainSubmit and calls OrderManager_Submit serially —
     // preserving the documented "drainer is sole Submit caller" contract.
     //

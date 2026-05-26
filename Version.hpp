@@ -63,7 +63,7 @@
 //    ml_backend, regime_model_backend, record_ticks+record_depth+record_max_days, notify_backend+
 //    notify_cooldown_secs, held_out_gate_strict+allow_cross_major_engine+auto_stamp_on_held_out,
 //    acknowledge_hot_swap_with_open_positions, xgb_min_child_weight+xgb_seed, xgb_train_nthread,
-//    ws_dead_time_flatten_threshold_secs, trading_mode, engine_arch, sharded_force_synthetic,
+//    ws_dead_time_flatten_threshold_secs, trading_mode, sharded_force_synthetic,
 //    lazy_rebuild_force_period_us, use_aot_inference, wf_split_max_gb)
 // - 16 DIFFER cases: inline rationale comments added (KEEP-MANUAL with reason per
 //   feedback_motivated_collaborator_for_caramel — operator-policy values preserved, registry-

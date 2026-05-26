@@ -171,7 +171,6 @@ marked startup-only):
 | `max_drawdown_pct` / `max_exposure_pct` | Risk caps | yes |
 | `core_N_strategy` | Per-core strategy override | startup-only |
 | `num_execution_cores` | How many sharded cores | startup-only |
-| `engine_arch` | `per_core_slow` (default) vs `centralized` (legacy) | startup-only |
 
 Full reference: [`CONFIGURATION.md`](CONFIGURATION.md).
 
