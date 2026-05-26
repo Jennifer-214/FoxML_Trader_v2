@@ -51,7 +51,9 @@
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // CumDeltaState, TickRateState
+#include "../DataStream/BinanceDepth.hpp"  // v5.15.5.F.4d.1.B.4 WIP-13 — BookSnapshot<F> for EngineCommon_SlowPathCycleAllCores 9-arg signature
 #include "ControllerEventLoop.hpp"
+#include "EngineCommon.hpp"  // v5.15.5.F.4d.1.B.4 WIP-13 — train-serve execution-layer parity helpers (Phase C.4 BACKTEST migration)
 #include "ExecutionCore.hpp"
 #include "OrderManager.hpp"
 #include "Tick.hpp"
@@ -333,55 +335,42 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                                             tick.timestamp);
             }
         }
-        if (drv->rolling && drv->config) {
-            // v5.1.2 (full symmetric decoupling): backtest pushes to per-
-            // core slow_state via the shared helper, then rebuilds via
-            // RebuildAllParameters_PerCore. Train-serve parity is now
-            // structural — backtest, centralized, and per_core_slow live
-            // all consume the same `state.cores[c].slow_state`.
-            //
-            // The driver's shared rolling state above is still pushed
-            // (keeps existing tests + benchmark/regression callers
-            // working) but no longer feeds the rebuild call.
-            EventLoop_UpdateRollingStateAllCores(
-                drv->state, tick.price, tick.volume, tick.timestamp,
-                tick.is_buyer_maker,
-                drv->book_imbalance ? *drv->book_imbalance : FPN_Zero<F>(),
-                drv->current_spread ? *drv->current_spread : FPN_Zero<F>(),
-                /*depth_enabled=*/(drv->book_imbalance || drv->current_spread) ? 1 : 0);
-            // ema_price replication — same pattern as live producer.
-            if (drv->ema_price) {
-                EventLoop_UpdateEmaPriceAllCores(drv->state, *drv->ema_price);
-            }
-            EventLoop_RebuildAllParameters_PerCore(
-                drv->state, drv->config,
-                /* current_price   */ &tick.price,
-                /* timestamp_us    */ tick.timestamp,
-                /* book_imbalance  */ drv->book_imbalance,
-                /* current_spread  */ drv->current_spread
-                                       ? FPN_ToDouble(*drv->current_spread) : 0.0,
-                /* current_mid_price*/ drv->current_mid_price
-                                       ? FPN_ToDouble(*drv->current_mid_price) : 0.0);
+        // v5.15.5.F.4d.1.B.4 WIP-13 Phase C.4 — BACKTEST slow-path-cycle migration to
+        // EngineCommon helper per train-serve execution-layer parity (M5 first canonical).
+        // Replaces explicit trio (UpdateRollingStateAllCores + RebuildAllParameters_PerCore +
+        // PushParameters + TimeExit + TrailingSLRatchet + BreakevenOnProfit) with single
+        // call to EngineCommon_SlowPathCycleAllCores per WIP-11 LIVE migration sister.
+        // Sister wrapper EventLoop_TimeExit / _TrailingSLRatchet / _BreakevenOnProfit
+        // cohort deletion at WIP-14 (B-full SHARDED centralized-arch deprecation per
+        // Class 18 cohort wrapper deletion rationale + Decision I full surface deletion).
+        //
+        // KEEPS per v1.7.3 N-4 REVERT (producer-thread sisters in LIVE; deletion would
+        // REVERSE PARITY-026 closure intent — kill_switch + ema_price must fire in BOTH
+        // paths since backtest has no producer thread to mirror LIVE's :1817-1821 ema_price
+        // replication + :1886 KillSwitchEvaluate):
+        //   - EmaPrice replication (LIVE producer-thread sister)
+        //   - KillSwitchEvaluate (LIVE producer-thread sister)
+        if (drv->ema_price) {
+            EventLoop_UpdateEmaPriceAllCores(drv->state, *drv->ema_price);
         }
-        EventLoop_PushParameters(drv->state);
-        EventLoop_KillSwitchEvaluate(drv->state);
+        if (drv->config && drv->oms && drv->rolling) {
+            // Caller-precompute per v1.6 O2 bytewise-identical math discipline.
+            // BookSnapshot per v1.7.3 N-6 9-arg signature (sister-canonical reuse from
+            // DataStream/BinanceDepth.hpp:29-41 per feedback_audit_canonical_sister_before_new_infra).
+            // Field-mapping verified at v1.7.4: drv->book_imbalance / drv->current_spread /
+            // drv->current_mid_price are POINTER types (const FPN<F>*) requiring deref before
+            // assign (v1.7.4 NEW-4 closure); null-check each before deref.
+            BookSnapshot<F> depth = BookSnapshot_Init<F>();
+            if (drv->book_imbalance)    { depth.imbalance = *drv->book_imbalance; }
+            if (drv->current_spread)    { depth.spread    = *drv->current_spread; }
+            if (drv->current_mid_price) { depth.mid_price = *drv->current_mid_price; }
 
-        // v4.7.17: same shared time-exit + trailing-SL ratchet helpers the
-        // live engine calls (EngineSharded_Run line ~1117). Pre-v4.7.17 both
-        // were inlined into EngineSharded only, leaving backtest silently
-        // no-op when user enabled cfg.max_hold_ticks or cfg.tp_hold_score
-        // → ML model trained on backtest never learned the early-exit
-        // pattern that live applies. tick_index is the per-run tick
-        // counter, equivalent to live's `ticks_produced.load()`.
-        if (drv->oms && drv->config && drv->rolling) {
-            double current_price = FPN_ToDouble(tick.price);
-            EventLoop_TimeExit(drv->state, drv->oms, *drv->config,
-                               (uint64_t)tick_index, current_price);
-            EventLoop_TrailingSLRatchet(drv->state, *drv->config,
-                                         *drv->rolling, current_price);
-            // v5.15.2 — breakeven_on_profit ratchet (TECH_DEBT-024 close).
-            EventLoop_BreakevenOnProfit(drv->state, *drv->config, current_price);
+            EngineCommon_SlowPathCycleAllCores<F>(
+                *drv->config, *drv->state, *drv->oms,
+                tick.price, tick.volume, tick.timestamp,
+                (uint64_t)tick_index, depth);
         }
+        EventLoop_KillSwitchEvaluate(drv->state);
 
         drv->slow_path_runs++;
 
