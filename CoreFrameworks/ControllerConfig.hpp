@@ -74,20 +74,6 @@ constexpr uint16_t MASK_CFG_KEY_MODEL_VERIFY_STRICT = 1u << 0;
 constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
 // Reserved bits 2..15 for future tracked keys.
 
-// v4.7.39: engine_arch — controls slow-path threading model under sharded
-// mode. STARTUP-ONLY (changes ignored on hot reload).
-//   ENGINE_ARCH_CENTRALIZED (default): slow-path runs on producer thread,
-//     iterating per-core work in one loop. Existing behavior since v4.x.
-//   ENGINE_ARCH_PER_CORE_SLOW: spawns N pthreads at boot, each running
-//     a per-core slow-path loop. Producer keeps global work (RollingStats
-//     pushes, snapshot save, GUI publish, global KillSwitchEvaluate).
-//     Per-core slow-paths handle: strategy dispatch, regime classify,
-//     gate parameter rebuild, time-exit, trailing SL, post-fill drain,
-//     warmup permission, per-core kill switch, swap/drag/manual-close.
-//   See plans/2026-04-28-per-core-slow-path-master.md for full design.
-constexpr uint8_t ENGINE_ARCH_CENTRALIZED   = 0;
-constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
-
 //======================================================================================================
 // [PER-CORE OVERRIDES — v4.0]
 //======================================================================================================
@@ -964,9 +950,9 @@ template <unsigned F> struct ControllerConfig {
                                       // (avoid pulling Reconcile.hpp into universal-include
                                       //  ControllerConfig.hpp; cast at point of use)
   // v5.15.2 — TradingMode discriminates paper vs live vs shadow operation.
-  // Distinct from engine_mode (sharded vs single_core architectural) and
-  // engine_arch (per_core_slow vs centralized). Default PAPER preserves
-  // pre-v5.15 behavior; legacy cfgs unset → PAPER → no behavior change.
+  // Distinct from engine_mode (sharded vs single_core architectural).
+  // Default PAPER preserves pre-v5.15 behavior; legacy cfgs unset →
+  // PAPER → no behavior change.
   // Stamp-bound via FOREACH_STAMP_BOUND_CFG so every model carries its
   // training-time mode for audit trail. Read at boot for
   // LiveReadiness_Verify dispatch — REFUSE on live + missing pre-flight
@@ -999,8 +985,6 @@ template <unsigned F> struct ControllerConfig {
   // strict mode is recommended for production deployment; default mode
   // for development so a single missing expected.cfg doesn't break startup.
   // Per-core sharding (Phase 13) — STARTUP-ONLY, ignored by hot reload
-  // v4.7.39 (per-core slow-path migration): slow-path threading model
-  // under sharded mode. STARTUP-ONLY. See ENGINE_ARCH_* constants above.
   // v5.0.2: slow-path CPU pin policy. STARTUP-ONLY.
   //   < 0  → do not pin slow-paths (OS-scheduled — original v5.0 behavior)
   //   == 0 → auto: pin slow-path c to (drainer_cpu + 1 + c) mod nproc.
@@ -1835,13 +1819,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // Adding new features in legacy-only paths = silent production gap;
   // see CLAUDE.md "Cross-Mode Init Placement" invariant.
   cfg.engine_mode = ENGINE_MODE_SHARDED;
-  // v5.0.0 (Phase F): per_core_slow is the new default. Each engine = a
-  // self-contained strategy unit (slow + hot pthread pair). Centralized
-  // architecture available as opt-out via engine_arch=centralized for
-  // benchmark / regression / legacy use. Train-serve parity preserved
-  // structurally: all 3 callers (centralized live, per_core_slow live,
-  // backtest) execute the same OneCore helpers on the same state.cores[c].
-  // v5.15.5.F.4d.1.B.3 Step 8.6: engine_arch MATCH — registry INT(1) == ENGINE_ARCH_PER_CORE_SLOW(1); DELETED.
+  // v5.0.0 (Phase F): per-core slow-path is the only sharded execution
+  // mode. Each engine = a self-contained strategy unit (slow + hot
+  // pthread pair). Train-serve parity preserved structurally: all
+  // callers (live, backtest) execute the same OneCore helpers on the
+  // same state.cores[c].
   // slow_path_pin_offset DIFFER — registry INT(-1); manual=0 (auto-derive drainer_cpu+1).
   cfg.slow_path_pin_offset = 0;  // KEEP — registry INT(-1) means no pin; manual=0 is "auto-derive (drainer_cpu + 1)" — operationally distinct
   // num_execution_cores DIFFER — registry INT(1); manual=4 (operator-default for 4-core deployment).
@@ -2795,15 +2777,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.engine_mode = ENGINE_MODE_SHARDED;
       else
         cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
-      continue;
-    }
-    // v4.7.39: engine_arch — slow-path threading model (sharded only).
-    // Accepts string forms "centralized"/"per_core_slow" or int "0"/"1".
-    if (strcmp(key, "engine_arch") == 0) {
-      if (strcmp(val, "per_core_slow") == 0 || strcmp(val, "1") == 0)
-        cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
-      else
-        cfg.engine_arch = ENGINE_ARCH_CENTRALIZED;
       continue;
     }
     // v5.15.5.F.4c — slow_path_pin_offset + num_execution_cores migrated to FOREACH_CFG_FIELD (KIND_INT).

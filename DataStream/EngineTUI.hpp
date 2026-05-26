@@ -948,7 +948,6 @@ struct TUISnapshot {
     // v5.0.2 (Engine Topology): system + thread layout for the GUI
     // Engine Topology panel. Populated once at boot in EngineSharded_Run
     // (values are static after thread spawn).
-    uint8_t engine_arch;           // ENGINE_ARCH_CENTRALIZED / PER_CORE_SLOW
     int16_t producer_cpu;          // pinned CPU for the producer thread
     int16_t drainer_cpu;           // pinned CPU for the drainer thread
     int16_t nproc;                 // sysconf(_SC_NPROCESSORS_ONLN)
@@ -989,7 +988,7 @@ struct TUISnapshot {
         double   max_ns;
         double   avg_ns;
         // v5.0.1 (Phase H): slow-path latency (per-cycle work in
-        // engine_arch=per_core_slow). 0 in centralized mode.
+        // per-core slow-path thread).
         uint64_t sp_samples;
         double   sp_min_ns;
         double   sp_p50_ns;
@@ -1196,7 +1195,6 @@ struct TUISnapshot {
         uint8_t  sp_state;
         // v5.1.1 (slow-path work breakdown): per-section p50 in ns.
         // Sections: 0=rebuild, 1=push_params, 2=time_exit, 3=trail_sl, 4=other
-        // Only populated when engine_arch=per_core_slow.
         double   sp_breakdown_p50_ns[5];
         double   sp_breakdown_p99_ns[5];
         // v5.10.0a.G.10 — ensemble (multi-horizon) visualization.
@@ -1478,7 +1476,6 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->partial_exit_enabled = 0;
     snap->per_core_count = 0;
     // v5.0.2: topology — zeroed in legacy mode (panel won't render).
-    snap->engine_arch = 0;
     snap->producer_cpu = -1;
     snap->drainer_cpu = -1;
     snap->nproc = 0;
@@ -1862,7 +1859,6 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
 // since the values are static for the lifetime of the engine.
 //
 // Args:
-//   engine_arch         — cfg.engine_arch (centralized vs per_core_slow)
 //   producer_cpu        — pin assignment for producer thread (always 0 today)
 //   drainer_cpu         — pin assignment for drainer thread (num_cores + 1)
 //   nproc               — sysconf(_SC_NPROCESSORS_ONLN)
@@ -1872,7 +1868,6 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
 //   poll_interval[i]    — per-core resolved poll cadence
 //======================================================================================================
 static inline void TUI_PopulateTopology(TUISnapshot *snap,
-                                         uint8_t engine_arch,
                                          int producer_cpu,
                                          int drainer_cpu,
                                          int nproc,
@@ -1880,7 +1875,6 @@ static inline void TUI_PopulateTopology(TUISnapshot *snap,
                                          const int *hot_cpu,
                                          const int *slow_cpu,
                                          const uint32_t *poll_interval) {
-    snap->engine_arch          = engine_arch;
     snap->producer_cpu         = (int16_t)producer_cpu;
     snap->drainer_cpu          = (int16_t)drainer_cpu;
     snap->nproc                = (int16_t)nproc;

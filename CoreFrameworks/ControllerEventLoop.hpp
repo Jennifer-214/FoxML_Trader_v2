@@ -3363,7 +3363,6 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 //======================================================================================================
 // v4.7.38 (Phase C.1): per-core helper, processes only this core's slots.
 // Caller-checked preconditions (cfg.max_hold_ticks > 0 && current_price > 0).
-// Wrapper EventLoop_TimeExit checks once + iterates.
 template <unsigned F>
 inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
                                        OrderManagerState<F>* oms,
@@ -3426,22 +3425,6 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
         fprintf(stderr,
             "[time-exit] core %d slot %d: held %lu ticks, gain %.3f%%\n",
             core_id, slot, (unsigned long)elapsed, gain_pct * 100.0);
-    }
-}
-
-// Wrapper: preconditions + iterate. Existing callers (centralized + backtest)
-// keep working unchanged.
-template <unsigned F>
-inline void EventLoop_TimeExit(EventLoopState<F>* state,
-                                OrderManagerState<F>* oms,
-                                const ControllerConfig<F>& cfg,
-                                uint64_t now_tick,
-                                double current_price) {
-    if (cfg.max_hold_ticks == 0)  return;  // WIP2d-1 Phase 3 — wrapper-level early-exit; needs per-core check
-    if (current_price <= 0.01)    return;
-
-    for (int c = 0; c < state->registered_count; ++c) {
-        EventLoop_TimeExitOneCore(state, oms, cfg, now_tick, current_price, c);
     }
 }
 
@@ -3717,22 +3700,6 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
     }
 }
 
-// Wrapper: preconditions + iterate.
-template <unsigned F, unsigned W>
-inline void EventLoop_TrailingSLRatchet(EventLoopState<F>* state,
-                                         const ControllerConfig<F>& cfg,
-                                         const RollingStats<F, W>& rolling,
-                                         double current_price) {
-    if (FPN_IsZero(cfg.sl_trail_mult))   return;  // WIP2d-1 Phase 3 — wrapper-level early-exit
-    if (FPN_IsZero(cfg.tp_hold_score))   return;  // WIP2d-1 Phase 3 — wrapper-level early-exit
-    if (FPN_IsZero(rolling.price_stddev)) return;
-    if (current_price <= 0.01)            return;
-
-    for (int c = 0; c < state->registered_count; ++c) {
-        EventLoop_TrailingSLRatchetOneCore(state, cfg, rolling, current_price, c);
-    }
-}
-
 //======================================================================================================
 // v5.15.2 — Breakeven-on-profit slow-path ratchet (TECH_DEBT-024 close)
 //======================================================================================================
@@ -3788,18 +3755,6 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
             state->cores[core_id].pending_params.ratchet_sl = breakeven_sl;
             CORE_STATE_FLAG_SET(state->cores[core_id], DIRTY);
         }
-    }
-}
-
-// Wrapper: bit check + iterate.
-template <unsigned F>
-inline void EventLoop_BreakevenOnProfit(EventLoopState<F>* state,
-                                         const ControllerConfig<F>& cfg,
-                                         double current_price) {
-    if (!BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT)) return;
-    if (current_price <= 0.01) return;
-    for (int c = 0; c < state->registered_count; ++c) {
-        EventLoop_BreakevenOnProfitOneCore(state, cfg, current_price, c);
     }
 }
 

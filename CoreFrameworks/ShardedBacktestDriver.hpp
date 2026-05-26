@@ -335,19 +335,13 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                                             tick.timestamp);
             }
         }
-        // v5.15.5.F.4d.1.B.4 WIP-13 Phase C.4 — BACKTEST slow-path-cycle migration to
-        // EngineCommon helper per train-serve execution-layer parity (M5 first canonical).
-        // Replaces explicit trio (UpdateRollingStateAllCores + RebuildAllParameters_PerCore +
-        // PushParameters + TimeExit + TrailingSLRatchet + BreakevenOnProfit) with single
-        // call to EngineCommon_SlowPathCycleAllCores per WIP-11 LIVE migration sister.
-        // Sister wrapper EventLoop_TimeExit / _TrailingSLRatchet / _BreakevenOnProfit
-        // cohort deletion at WIP-14 (B-full SHARDED centralized-arch deprecation per
-        // Class 18 cohort wrapper deletion rationale + Decision I full surface deletion).
+        // BACKTEST slow-path-cycle via EngineCommon helper per train-serve
+        // execution-layer parity (M5 first canonical). Single call to
+        // EngineCommon_SlowPathCycleAllCores fans across per-core slow-path body.
         //
-        // KEEPS per v1.7.3 N-4 REVERT (producer-thread sisters in LIVE; deletion would
-        // REVERSE PARITY-026 closure intent — kill_switch + ema_price must fire in BOTH
-        // paths since backtest has no producer thread to mirror LIVE's :1817-1821 ema_price
-        // replication + :1886 KillSwitchEvaluate):
+        // KEEPS (producer-thread sisters in LIVE; kill_switch + ema_price must
+        // fire in BOTH paths since backtest has no producer thread to mirror
+        // LIVE's ema_price replication + KillSwitchEvaluate):
         //   - EmaPrice replication (LIVE producer-thread sister)
         //   - KillSwitchEvaluate (LIVE producer-thread sister)
         if (drv->ema_price) {

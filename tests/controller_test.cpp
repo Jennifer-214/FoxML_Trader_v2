@@ -1732,7 +1732,7 @@ static void test_v5_15_5_F4c_cfg_field_dispatch() {
 
         size_t has_side_effect_count = cfg_field_count(g_global_cfg_has_side_effect_mask)
                                     + cfg_field_count(g_per_core_cfg_has_side_effect_mask);
-        check("v5.15.5.F.4c.3: HAS_SIDE_EFFECT mask aggregate ≥4 bits (reconcile_mode/engine_mode/engine_arch/model_verify_strict/thompson_rng_seed/bandit_algorithm/risk_degradation_curve/trading_mode)",
+        check("v5.15.5.F.4c.3: HAS_SIDE_EFFECT mask aggregate ≥4 bits (reconcile_mode/engine_mode/model_verify_strict/thompson_rng_seed/bandit_algorithm/risk_degradation_curve/trading_mode)",
               has_side_effect_count >= 4);
     }
 
@@ -8718,7 +8718,7 @@ e3_skip_load:;
 
     printf("\n--- v5.0.4 — Topology field stability ---\n");
     {
-        // TUISnapshot::engine_arch / nproc / pin_offset / per-core hot/slow CPU
+        // TUISnapshot::nproc / pin_offset / per-core hot/slow CPU
         // round-trip via TUI_PopulateTopology.
         TUISnapshot snap;
         memset(&snap, 0, sizeof(snap));
@@ -8729,15 +8729,12 @@ e3_skip_load:;
         uint32_t poll[16] = {100, 50, 200, 100, 0,0,0,0, 0,0,0,0, 0,0,0,0};
 
         TUI_PopulateTopology(&snap,
-            /*engine_arch*/ 1,           // PER_CORE_SLOW
             /*producer_cpu*/ 0,
             /*drainer_cpu*/ 5,
             /*nproc*/ 16,
             /*slow_path_pin_off*/ 0,
             hot_cpu, slow_cpu, poll);
 
-        check("v5.0.4: topology engine_arch round-trips",
-              snap.engine_arch == 1);
         check("v5.0.4: topology producer_cpu round-trips",
               snap.producer_cpu == 0);
         check("v5.0.4: topology drainer_cpu round-trips",
@@ -8763,9 +8760,7 @@ e3_skip_load:;
             slow_cpu[i] = -1;  // disable
             poll[i] = 999;
         }
-        TUI_PopulateTopology(&snap, 0, 1, 2, 8, -1, hot_cpu, slow_cpu, poll);
-        check("v5.0.4: topology re-populate updates engine_arch (1→0)",
-              snap.engine_arch == 0);
+        TUI_PopulateTopology(&snap, 1, 2, 8, -1, hot_cpu, slow_cpu, poll);
         check("v5.0.4: topology re-populate updates pin_offset (0→-1)",
               snap.slow_path_pin_offset == -1);
         check("v5.0.4: topology re-populate updates per-core slow CPU",

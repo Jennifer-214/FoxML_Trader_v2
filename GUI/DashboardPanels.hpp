@@ -2032,8 +2032,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     }
 
     // Per-core latency panel (sharded mode only). v5.0.1 (Phase H): split
-    // into HOT and SLOW sub-tables. Slow-path table only populated when
-    // engine_arch=per_core_slow; otherwise sp_samples stays 0.
+    // into HOT and SLOW sub-tables.
     if (s->sharded_mode_active && s->per_core_count > 0) {
         ImGui::Begin("Per-Core Latency");
 
@@ -2082,7 +2081,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         ImGui::Spacing();
         SectionHeader("PER-ENGINE SLOW-PATH LATENCY");
         ImGui::TextColored(FoxmlColors::comment,
-            "(per-cycle work in engine_arch=per_core_slow; centralized = 0 samples)");
+            "(per-cycle work in per-core slow-path thread)");
 
         if (ImGui::BeginTable("##percore_slow", 9, tf)) {
             ImGui::TableSetupColumn("Engine",  ImGuiTableColumnFlags_WidthFixed, 45);
@@ -2162,31 +2161,24 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 uint8_t sid = pc->strategy_id_display;
                 ImGui::TextColored(FoxmlColors::primary, "%s",
                                    sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
-                if (s->engine_arch != 1) {
-                    for (int k = 0; k < 9; ++k) {
-                        ImGui::TableNextColumn();
-                        ImGui::TextColored(FoxmlColors::comment, "-");
-                    }
-                } else {
-                    // Section order in struct: 0=rebuild, 1=push, 2=time, 3=trail, 4=other
-                    // Column display reorders for readability.
-                    // v5.1.3: indices match SP_SECTION_* (0=ROLLING, 1=REBUILD,
-                    // 2=PUSH, 3=TIME_EXIT, 4=TRAIL_SL).
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[0]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[0]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[1]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[1]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[2]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[2]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[3]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[4]));
-                    double sum_p50 = pc->sp_breakdown_p50_ns[0] +
-                                     pc->sp_breakdown_p50_ns[1] +
-                                     pc->sp_breakdown_p50_ns[2] +
-                                     pc->sp_breakdown_p50_ns[3] +
-                                     pc->sp_breakdown_p50_ns[4];
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(sum_p50));
-                }
+                // Section order in struct: 0=rebuild, 1=push, 2=time, 3=trail, 4=other
+                // Column display reorders for readability.
+                // v5.1.3: indices match SP_SECTION_* (0=ROLLING, 1=REBUILD,
+                // 2=PUSH, 3=TIME_EXIT, 4=TRAIL_SL).
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[0]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[0]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[1]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[1]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[2]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[2]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[3]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[4]));
+                double sum_p50 = pc->sp_breakdown_p50_ns[0] +
+                                 pc->sp_breakdown_p50_ns[1] +
+                                 pc->sp_breakdown_p50_ns[2] +
+                                 pc->sp_breakdown_p50_ns[3] +
+                                 pc->sp_breakdown_p50_ns[4];
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(sum_p50));
             }
             ImGui::EndTable();
         }
@@ -2199,25 +2191,15 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     // ─────────────────────────────────────────────────────────────────────
     // v5.0.2 (Phase H): Engine Topology panel — shows the static thread
     // layout: which CPU each thread is pinned to, what each engine's
-    // strategy + cadence is, and the system architecture (engine_arch,
-    // nproc, slow_path_pin_offset). Helps diagnose pin conflicts /
-    // unexpected OS scheduling and explains "why is engine 3 a bit
-    // jittery on this box".
+    // strategy + cadence is, and the system architecture (nproc,
+    // slow_path_pin_offset). Helps diagnose pin conflicts / unexpected
+    // OS scheduling and explains "why is engine 3 a bit jittery on
+    // this box".
     // ─────────────────────────────────────────────────────────────────────
     if (s->sharded_mode_active && s->per_core_count > 0) {
         ImGui::Begin("Engine Topology");
 
         SectionHeader("SYSTEM");
-        const char *arch_label = (s->engine_arch == 1)
-            ? "per_core_slow"
-            : "centralized";
-        ImGui::TextColored(FoxmlColors::comment, "engine_arch:");
-        ImGui::SameLine();
-        ImGui::TextColored(s->engine_arch == 1
-                            ? FoxmlColors::green_b
-                            : FoxmlColors::accent,
-                           "%s", arch_label);
-
         ImGui::TextColored(FoxmlColors::comment, "system CPUs (nproc):");
         ImGui::SameLine();
         ImGui::Text("%d", (int)s->nproc);
@@ -2258,7 +2240,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         ImGui::Spacing();
         SectionHeader("PER-ENGINE THREADS");
         // v5.0.3: now includes live thread state, drift, and lifecycle.
-        const int topo_col_count = (s->engine_arch == 1 && shared) ? 10 : 9;
+        const int topo_col_count = shared ? 10 : 9;
         if (ImGui::BeginTable("##topo_engines", topo_col_count,
                 ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
                 ImGuiTableFlags_SizingStretchProp)) {
@@ -2271,7 +2253,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             ImGui::TableSetupColumn("Last cycle", ImGuiTableColumnFlags_WidthFixed, 80);
             ImGui::TableSetupColumn("Cycles",   ImGuiTableColumnFlags_WidthFixed, 80);
             ImGui::TableSetupColumn("Q",        ImGuiTableColumnFlags_WidthFixed, 40);
-            if (s->engine_arch == 1 && shared) {
+            if (shared) {
                 ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed, 70);
             }
             ImGui::TableHeadersRow();
@@ -2308,9 +2290,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 }
 
                 ImGui::TableNextColumn();
-                if (s->engine_arch != 1) {
-                    ImGui::TextColored(FoxmlColors::comment, "(prod)");
-                } else if (pc->slow_path_cpu < 0) {
+                if (pc->slow_path_cpu < 0) {
                     ImGui::TextColored(FoxmlColors::yellow, "unpin");
                 } else {
                     ImGui::Text("%d", (int)pc->slow_path_cpu);
@@ -2321,23 +2301,17 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
 
                 // State — coarse thread state with color
                 ImGui::TableNextColumn();
-                if (s->engine_arch != 1) {
-                    ImGui::TextColored(FoxmlColors::comment, "(prod)");
-                } else {
-                    switch (pc->sp_state) {
-                        case 0: ImGui::TextColored(FoxmlColors::green_b, "running"); break;
-                        case 1: ImGui::TextColored(FoxmlColors::yellow,  "parked");  break;
-                        case 2: ImGui::TextColored(FoxmlColors::comment, "yield");   break;
-                        case 3: ImGui::TextColored(FoxmlColors::red,     "PAUSED");  break;
-                        default: ImGui::TextColored(FoxmlColors::comment, "?"); break;
-                    }
+                switch (pc->sp_state) {
+                    case 0: ImGui::TextColored(FoxmlColors::green_b, "running"); break;
+                    case 1: ImGui::TextColored(FoxmlColors::yellow,  "parked");  break;
+                    case 2: ImGui::TextColored(FoxmlColors::comment, "yield");   break;
+                    case 3: ImGui::TextColored(FoxmlColors::red,     "PAUSED");  break;
+                    default: ImGui::TextColored(FoxmlColors::comment, "?"); break;
                 }
 
                 // Last cycle — Δus since last sp_last_tick_us. Drift indicator.
                 ImGui::TableNextColumn();
-                if (s->engine_arch != 1) {
-                    ImGui::TextColored(FoxmlColors::comment, "-");
-                } else if (pc->sp_last_tick_us == 0) {
+                if (pc->sp_last_tick_us == 0) {
                     ImGui::TextColored(FoxmlColors::comment, "warmup");
                 } else {
                     uint64_t delta = (now_us > pc->sp_last_tick_us)
@@ -2354,11 +2328,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
 
                 // Cycles — total completed slow-path cycles
                 ImGui::TableNextColumn();
-                if (s->engine_arch != 1) {
-                    ImGui::TextColored(FoxmlColors::comment, "-");
-                } else {
-                    ImGui::Text("%llu", (unsigned long long)pc->sp_cycles_total);
-                }
+                ImGui::Text("%llu", (unsigned long long)pc->sp_cycles_total);
 
                 // Submit queue depth (capacity 32; warn if > 16)
                 ImGui::TableNextColumn();
@@ -2369,8 +2339,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                     ImGui::Text("%u", (unsigned)pc->sp_submit_q_depth);
                 }
 
-                // Pause/Resume — only in per_core_slow with shared control
-                if (s->engine_arch == 1 && shared) {
+                // Pause/Resume — requires shared control
+                if (shared) {
                     ImGui::TableNextColumn();
                     bool paused = (shared->paused_engines_mask &
                                    (uint16_t)(1u << i)) != 0;
@@ -2395,8 +2365,6 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             "Hot CPU = pinned core for the SPSC consumer (per-tick gate eval).");
         ImGui::TextColored(FoxmlColors::comment,
             "Slow CPU = pinned core for the per-engine slow-path thread.");
-        ImGui::TextColored(FoxmlColors::comment,
-            "(prod) = centralized arch — slow-path runs on the producer thread.");
         ImGui::TextColored(FoxmlColors::comment,
             "State: running=actively rebuilding | yield=between cadences | parked=reset in progress | PAUSED=user toggle.");
         ImGui::TextColored(FoxmlColors::comment,

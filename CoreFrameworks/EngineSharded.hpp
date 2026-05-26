@@ -1208,14 +1208,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     pthread_create(&gui_tid, NULL, gui_thread_fn, &g_shared);
 #endif
 
-    // v4.7.39 (Phase C.2): Reset Paper coordination flag for per-core
-    // slow-path threads. Producer's reset handler sets this before
-    // touching shared state, slow-paths park on it, producer clears
-    // when reset completes. Declared at EngineSharded_Run scope so BOTH
-    // the producer thread lambda (which writes it during reset) AND the
-    // per-core slow-path lambdas (which read it at top of poll loop)
-    // can capture it by reference. No-op when engine_arch=centralized
-    // (no slow-paths exist; flag is just unused).
+    // Reset Paper coordination flag for per-core slow-path threads.
+    // Producer's reset handler sets this before touching shared state,
+    // slow-paths park on it, producer clears when reset completes.
+    // Declared at EngineSharded_Run scope so BOTH the producer thread
+    // lambda (which writes it during reset) AND the per-core slow-path
+    // lambdas (which read it at top of poll loop) can capture it by
+    // reference.
     std::atomic<bool> paper_reset_in_progress{false};
 
     //----------------------------------------------------------------------
@@ -1428,76 +1427,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             slow_path_counter++;
             if (slow_path_counter >= slow_path_interval) {
                 slow_path_counter = 0;
-                // v5.1.2 (full symmetric decoupling): centralized arch
-                // pushes per-cadence state into ALL N engines' slow_state
-                // via the shared helper. per_core_slow lambdas do their
-                // own pushes — skip here. Helper handles depth-history
-                // pushes via depth_enabled flag (we pass FPN_Zero placeholders
-                // for depth state when depth_enabled=0; the producer's main
-                // slow-path body below handles depth-history symmetrically).
-                if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW) {
-                    EventLoop_UpdateRollingStateAllCores(
-                        &state, t.price, t.volume, ts_us,
-                        is_buyer_maker,
-                        FPN_Zero<F>(), FPN_Zero<F>(),
-                        /*depth_enabled=*/0);  // depth-history pushed in slow-path body
-                }
 #ifdef USE_IMGUI_GUI
-                // v4.0 hot-swap strategy: GUI requests are picked up here.
-                // STRATEGY_NONE (0xFF) = no request; any other value swaps
-                // the core's strategy. Open positions are honored — the swap
-                // waits until the position closes naturally so the old
-                // strategy's TP/SL still applies to its own entry.
-                // v4.7.39 (Phase C.2): in per_core_slow mode each slow-path
-                // thread handles its own swap-pending pickup. Producer skips.
-                if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW)
-                for (int c = 0; c < num_cores && c < 16; ++c) {
-                    uint8_t pending = __atomic_load_n(
-                        &g_shared.swap_strategy_requested[c], __ATOMIC_ACQUIRE);
-                    if (pending == STRATEGY_NONE) continue;
-                    // v4.7.28: partials-aware open-position check. With
-                    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-                    // partial_exit_enabled=1 each core owns 2 slots
-                    // (leg A at 2c, leg B at 2c+1). Pre-v4.7.28 this
-                    // checked bit `c` only — for Core 2 that's bit 2,
-                    // which under partials is actually Core 1's leg A.
-                    // If Core 1 had a position open, Core 2's swap would
-                    // defer forever even though Core 2 has nothing open.
-                    int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-                    uint16_t open_mask = partial_on
-                        ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
-                        : (uint16_t)(1u << c);
-                    if ((state.oms->portfolio.active_bitmap & open_mask) != 0) {
-                        continue;  // position open; defer until exit
-                    }
-                    // v4.0 audit: refuse swap-to-ML if this core never had
-                    // a model loaded. Otherwise ML_BuildParameters would
-                    // silently fall back to SimpleDip while the GUI claims
-                    // the core is ML — confusing failure mode. model_handle
-                    // is set at engine boot for cores configured with
-                    // core_N_strategy=ml + a model path; we can't load a
-                    // model mid-session because that requires file I/O off
-                    // the controller thread.
-                    if (pending == STRATEGY_ML &&
-                        state.cores[c].model_handle == NULL) {
-                        fprintf(stderr,
-                                "[sharded] core %d: refusing swap to ML — no model "
-                                "loaded for this core. Set core_%d_model_dir or "
-                                "core_%d_model_path in engine.cfg + restart.\n",
-                                c, c, c);
-                        __atomic_store_n(&g_shared.swap_strategy_requested[c],
-                                         STRATEGY_NONE, __ATOMIC_RELEASE);
-                        continue;
-                    }
-                    uint8_t old_strat = state.cores[c].strategy_id;
-                    state.cores[c].strategy_id = pending;
-                    __atomic_store_n(&g_shared.swap_strategy_requested[c],
-                                     STRATEGY_NONE, __ATOMIC_RELEASE);
-                    fprintf(stderr,
-                            "[sharded] core %d: strategy swapped %u -> %u\n",
-                            c, (unsigned)old_strat, (unsigned)pending);
-                }
-
                 // v5.1.4: drag-TP/SL pickup MOVED out of the slow-path cadence
                 // block to fire every tick — see fan_out's tick-rate handler
                 // at line ~870. Pre-v5.1.4 this lived here and added 5-33s of
@@ -1616,32 +1546,6 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // cadence. Mirror in BacktestSharded driver. Push happens
                 // BEFORE RebuildAllParameters so Regime_ComputeSignals reads
                 // the freshly-updated history.
-                // v5.1.2: centralized arch pushes depth-history into ALL
-                // N engines' slow_state. per_core_slow lambdas do their
-                // own pushes. The "rolling" inputs are nullptr here —
-                // we're only pushing depth fields; the helper short-
-                // circuits if `price` is zero, so pass current price.
-                if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) &&
-                    cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW) {
-                    for (int c = 0; c < state.registered_count; ++c) {
-                        auto* sst = state.cores[c].slow_state;
-                        if (!sst) continue;
-                        BookImbHistory_Push(&sst->book_imb_history, book_imb);
-                        SpreadState_Push(&sst->spread_state, book_spread);
-                    }
-                }
-                // v5.1.2 (full symmetric decoupling): centralized arch
-                // calls per-core RebuildAllParameters which reads each
-                // engine's OWN slow_state. per_core_slow lambdas skip
-                // (they call OneCore directly with their own pointers).
-                if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW)
-                EventLoop_RebuildAllParameters_PerCore(&state, &cfg,
-                    FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
-                    rebuild_ts_us,
-                    BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? &book_imb : nullptr,
-                    FPN_ToDouble(book_spread),
-                    FPN_ToDouble(book_mid));
-
                 // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
                 // cycles, paper mode only. With slow_path_interval=8 ticks and
                 // ~10 ticks/sec that's roughly every 13 minutes — frequent
@@ -1655,13 +1559,6 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
                                               BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
                 }
-                // v4.7.39 (Phase C.2): per_core_slow inlines the push inside
-                // each slow-path thread (after RebuildOneCore). Producer skips.
-                if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW)
-                // v5.12.1.B.2 — publish_tick = current ticks_produced so
-                // the hot-path freshness gate can detect slow-path stalls.
-                EventLoop_PushParameters(&state,
-                    ticks_produced.load(std::memory_order_relaxed));
                 // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
                 // oms->balance from this (producer) thread while the drainer
                 // thread writes it via OnEvent / OMS_Tick fill handler.
@@ -1688,60 +1585,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // race during the first few ticks.
                 uint32_t min_samples = cfg.min_warmup_samples > 0
                     ? cfg.min_warmup_samples : 64;
-                // v4.7.39 (Phase C.2): in per_core_slow mode, each slow-path
-                // grants its own permission. Producer skips.
-                // v5.1.2: read per-core slow_state count (engine 0 — all
-                // engines push at same cadence with same input, counts equal).
-                if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW &&
-                    state.cores[0].slow_state &&
-                    state.cores[0].slow_state->rolling_short.count >= (int)min_samples) {
-                    for (int c = 0; c < num_cores; ++c) {
-                        if (state.cores[c].strategy_id != STRATEGY_NONE) {
-                            ExecutionCore_SetPermission(&cores[c], 1);
-                        }
-                    }
-                }
-
-                // v4.7.17: time-exit + trailing SL ratchet extracted to shared
-                // helpers in ControllerEventLoop.hpp so backtest + live evolve
-                // identically when these features are enabled. Pre-v4.7.17 both
-                // were inlined here, leaving backtest silently no-op when user
-                // set max_hold_ticks > 0 or tp_hold_score > 0 → train-serve drift.
-                // v4.7.39 (Phase C.2): in per_core_slow mode, each slow-path
-                // calls TimeExitOneCore + TrailingSLRatchetOneCore for its own
-                // core. Producer skips the centralized iteration.
-                // v5.1.2: TrailingSLRatchet still takes a single rolling
-                // ref (legacy wrapper signature). For centralized arch we
-                // pass engine 0's slow_state's rolling_short — all engines
-                // have identical pushes so any is fine. Per-engine ratchet
-                // reads its own state inside the OneCore call internally.
-                if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW)
-                {
-                    uint64_t now_tick      = ticks_produced.load(std::memory_order_relaxed);
-                    double   current_price = last_price.load(std::memory_order_relaxed);
-                    EventLoop_TimeExit(&state, state.oms, cfg, now_tick, current_price);
-                    if (state.cores[0].slow_state) {
-                        EventLoop_TrailingSLRatchet(&state, cfg,
-                            state.cores[0].slow_state->rolling_short, current_price);
-                    }
-                    // v5.15.2 — breakeven_on_profit ratchet (TECH_DEBT-024 close).
-                    // Independent of trailing-SL preconditions; writes to the same
-                    // pending_params.ratchet_sl with max-only composition.
-                    EventLoop_BreakevenOnProfit(&state, cfg, current_price);
-                    // v5.12.1.A.2 — WS-staleness emergency-flatten gate.
-                    // Default cfg.ws_dead_time_flatten_enabled=0 → 5ns
-                    // early return. Live deployment (=1) → ~150ns/cycle
-                    // including vDSO clock_gettime; fires OMS_FlattenAll
-                    // when producer goes silent for > threshold seconds.
-                    // Centralized arch reads clock once for the gate;
-                    // per_core_slow path (below) shares clock with the
-                    // existing sp_last_tick_us update (~50ns saving).
-                    uint64_t centralized_now_us = (uint64_t)
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count();
-                    EventLoop_CheckWsStaleness(&state, cfg, current_price,
-                                                centralized_now_us);
-                }
+                // Permission grant: per-core slow-path threads grant their
+                // own permission once their per-core rolling_short.count
+                // crosses min_samples threshold (see SlowPathCycleOneCore).
 
 #ifdef USE_IMGUI_GUI
                 // Populate TUISnapshot for the GUI — same double-buffered
@@ -1770,7 +1616,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v5.0.1 (Phase H): slow-path latency from CoreContext.
                     TUI_PopulatePerCoreSlowPathLatency(bs, &state, tsc_ghz);
                     // v5.0.2 (Phase H): topology — system + thread layout.
-                    TUI_PopulateTopology(bs, cfg.engine_arch,
+                    TUI_PopulateTopology(bs,
                                           topo_producer_cpu, topo_drainer_cpu,
                                           (int)topo_nproc,
                                           cfg.slow_path_pin_offset,
@@ -1842,12 +1688,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // paper reset: zero balance, clear positions, reset counters
                 if (g_shared.paper_reset_requested && !cfg.use_real_money) {
                     g_shared.paper_reset_requested = 0;
-                    // v4.7.39 (Phase C.2): coordinate Reset Paper with per-core
-                    // slow-path threads. Set the in-progress flag → slow-paths
-                    // park (yield) at top of their loop. After reset completes,
-                    // clear the flag → slow-paths resume with fresh state.
-                    // No-op when engine_arch=centralized (slow-paths don't
-                    // exist; the flag is just unused).
+                    // Coordinate Reset Paper with per-core slow-path threads.
+                    // Set the in-progress flag → slow-paths park (yield) at
+                    // top of their loop. After reset completes, clear the
+                    // flag → slow-paths resume with fresh state.
                     paper_reset_in_progress.store(true, std::memory_order_release);
                     // Brief yield to let slow-paths observe the flag and park.
                     // Worst case they don't yet — shared state writes below
@@ -2460,13 +2304,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         }
     });
 
-    // v4.7.39 (Phase C.2 of per-core slow-path migration): when
-    // engine_arch=per_core_slow, spawn N per-core slow-path threads. Each
-    // runs OneCore helpers (RebuildOneCore, TimeExitOneCore,
-    // TrailingSLRatchetOneCore) on a fixed cadence. Producer continues
-    // doing GLOBAL work (RollingStats pushes, depth state, snapshot save,
-    // GUI publish, account-level KillSwitchEvaluate). Per-core sections
-    // in producer's slow-path body are gated on engine_arch.
+    // Spawn N per-core slow-path threads. Each runs OneCore helpers
+    // (RebuildOneCore, TimeExitOneCore, TrailingSLRatchetOneCore) on
+    // a fixed cadence. Producer continues doing GLOBAL work
+    // (RollingStats pushes, depth state, snapshot save, GUI publish,
+    // account-level KillSwitchEvaluate).
     //
     // v5.0.2: slow-path pinning. cfg.slow_path_pin_offset:
     //   < 0  → no pin (OS-scheduled, original v5.0 behavior)
@@ -2481,7 +2323,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // it. Slow-paths park (yield) when set; producer's reset handler sets,
     // runs reset, clears.
     std::vector<std::thread> slow_paths;
-    if (cfg.engine_arch == ENGINE_ARCH_PER_CORE_SLOW) {
+    {
         // v5.1.5: smart pin selection. With cfg.slow_path_pin_offset == 0
         // (auto), use SmartSlowPathPins to AVOID landing on SMT siblings of
         // producer/hot-path/drainer CPUs. Pre-v5.1.5 the auto-derive was a
@@ -2503,7 +2345,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 sp_pins);
             if (smart_ok) {
                 sp_pin_base = sp_pins[0];  // for log only
-                fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+                fprintf(stderr, "[sharded] spawning %d "
                                 "slow-path threads (smart pin: ", num_cores);
                 for (int c = 0; c < num_cores; ++c) {
                     fprintf(stderr, "%s%d", c ? "," : "", sp_pins[c]);
@@ -2512,18 +2354,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             } else {
                 // Fallback: simple (num_cores + 2 + c) % nproc
                 sp_pin_base = num_cores + 2;
-                fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+                fprintf(stderr, "[sharded] spawning %d "
                                 "slow-path threads (smart pin failed; fallback base CPU %d, nproc %ld)\n",
                         num_cores, sp_pin_base, nproc);
             }
         } else if (cfg.slow_path_pin_offset > 0) {
             sp_pin_base = cfg.slow_path_pin_offset;
-            fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+            fprintf(stderr, "[sharded] spawning %d "
                             "slow-path threads (explicit pin base CPU %d, nproc %ld)\n",
                     num_cores, sp_pin_base, nproc);
         } else {
             // < 0: no pin
-            fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+            fprintf(stderr, "[sharded] spawning %d "
                             "slow-path threads (UNPINNED, slow_path_pin_offset=%d)\n",
                     num_cores, cfg.slow_path_pin_offset);
         }

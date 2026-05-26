@@ -433,8 +433,8 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 //      - EventLoop_RebuildOneCore (regime classification + strategy rebuild)
 //      - EventLoop_TimeExitOneCore
 //      - EventLoop_TrailingSLRatchetOneCore
-//      - EventLoop_BreakevenOnProfit (PARITY-032 fold-in; was MISSING from
-//        per_core_slow lambda pre-.B.4)
+//      - EventLoop_BreakevenOnProfitOneCore (PARITY-032 fold-in; was MISSING
+//        from per_core_slow lambda pre-.B.4)
 //      - ML exit-prediction submit (when MASK_ML_CFG_USE_EXIT_MODEL set)
 //      - per-core regime collection (state.cores[c].regime_state populated)
 //
@@ -818,8 +818,7 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
     // decoupling boundary — viewer reuses this wrapper as natural per-tick
     // mmap-publish API.
     //
-    // Loop bound = state.registered_count (sister to EventLoop_BreakevenOnProfit
-    // wrapper at ControllerEventLoop.hpp:3801); preserves num_cores-clamped
+    // Loop bound = state.registered_count; preserves num_cores-clamped
     // iteration semantic at LIVE :622-624 + BACKTEST :223-225 by-construction
     // since EventLoopState_RegisterCore is the single increment site.
     for (int c = 0; c < state.registered_count; ++c) {
