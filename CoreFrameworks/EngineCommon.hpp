@@ -99,6 +99,9 @@
 #include "../ML_Headers/ConfidenceScore.hpp"     // ConfidenceScorer_Init, ConfidenceScorer_BindCompositeCfg, CONFIDENCE_FRESHNESS_TAU_DEFAULT
 #include "../ML_Headers/RollingTurnover.hpp"     // RollingTurnover_Init
 #include "../ML_Headers/FeatureRegistryOverlay.hpp"  // FeatureOverlay_PostLoadVerify
+// Phase B Step B.3 includes (v1.7.3 N-6 + N-2 + N-3 + N-4; landed at v1.7.3 amendment cycle):
+#include "../DataStream/BinanceDepth.hpp"             // BookSnapshot<F> sister-canonical reuse per v1.7.3 N-6 (DepthSnapshot NOT invented; reuse existing canonical per feedback_audit_canonical_sister_before_new_infra)
+#include "SlowPathGateRegistry.hpp"                   // SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE macro + MASK_BREAKEVEN_ON_PROFIT cached gate bit (D1-B; v1.7.3 N-2 correct arg signature is (state.global_gate_state, cfg))
 
 // Phase B include enumeration (for body coding; uncomment as needed):
 //   #include "CoreFrameworks/ControllerConfig.hpp"
@@ -441,13 +444,39 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 //
 //    Closes PARITY-031 (per-core regime) + PARITY-032 (breakeven) +
 //    auxiliary by-construction.
+// Signature (v1.7.3 N-6: 9 args per /trace-deps + /dod-audit + /readiness + /bug-check
+// convergent finding — body needs volume + now_tick + depth in addition to v1.7.2 6 args;
+// BookSnapshot<F> sister-canonical reuse from DataStream/BinanceDepth.hpp:32-35 per
+// feedback_audit_canonical_sister_before_new_infra — REUSE existing canonical instead of
+// inventing new DepthBundle struct):
+//
+// Caller responsibilities (v1.7.3 HIGH-1 mtm_price + N-6 caller-wiring; v1.7.3 self-catch
+// removed fabricated `enabled` field — BookSnapshot per DataStream/BinanceDepth.hpp:29-41
+// has NO `enabled` field; helper checks MASK_GATE_CFG_DEPTH_ENABLED internally at read
+// time per current LIVE pattern :3052-3058):
+//   - LIVE per_core_slow lambda: resolve volume from last_volume.load();
+//     now_tick from ticks_produced.load(); depth = g_depth_shared.snapshots[
+//     __atomic_load_n(&g_depth_shared.active_idx, __ATOMIC_ACQUIRE)] (existing
+//     BookSnapshot<F> ref; no new struct construction needed).
+//     mtm_price precompute at caller-side per O2 bytewise-identical math discipline.
+//   - BACKTEST ShardedBacktest_RunTick: resolve volume from tick.volume; now_tick from
+//     (uint64_t)tick_index; depth via BookSnapshot<F> constructed from BACKTEST
+//     DepthReplayState fields (field-mapping verified at Phase C implementation; spec
+//     points to Backtest/DepthReplayState.hpp for the source struct).
+//   Helper handles depth-disabled flag at read time (BITMAP_IS_SET on cfg.gate_cfg_flags
+//   MASK_GATE_CFG_DEPTH_ENABLED) — when disabled, helper substitutes FPN_Zero values
+//   regardless of what's in the passed BookSnapshot. Matches current LIVE :3052-3058
+//   pattern verbatim per bytewise-identical math discipline.
 template <unsigned F>
 void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                                         int c,
                                         EventLoopState<F>& state,
                                         OrderManagerState<F>& oms,
                                         FPN<F> price,
-                                        uint64_t ts_us);
+                                        FPN<F> volume,                  // v1.7.3 N-6 NEW
+                                        uint64_t ts_us,
+                                        uint64_t now_tick,              // v1.7.3 N-6 NEW (tick counter; DISTINCT from ts_us microseconds)
+                                        const BookSnapshot<F>& depth);  // v1.7.3 N-6 NEW (sister-canonical reuse)
 
 // 5. EngineCommon_SlowPathCycleAllCores
 //    const cfg fan wrapper (~10 LOC for-loop calling SlowPathCycleOneCore N times).
@@ -456,11 +485,16 @@ void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
 //
 //    Backtest calls this ONCE per tick (ShardedBacktest_RunTick).
 //    Live does NOT call this (each per_core_slow thread calls OneCore directly).
+//
+//    Signature (v1.7.3 N-6 consequential: 8 args; pass-through to OneCore expanded args):
 template <unsigned F>
 void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                          EventLoopState<F>& state,
                                          OrderManagerState<F>& oms,
                                          FPN<F> price,
-                                         uint64_t ts_us);
+                                         FPN<F> volume,                  // v1.7.3 N-6 NEW pass-through
+                                         uint64_t ts_us,
+                                         uint64_t now_tick,              // v1.7.3 N-6 NEW pass-through
+                                         const BookSnapshot<F>& depth);  // v1.7.3 N-6 NEW pass-through
 
 }  // namespace tt
