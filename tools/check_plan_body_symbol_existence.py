@@ -644,6 +644,229 @@ def check_plan_body(plan_path, strict=False, verify_anchors=True):
     }
 
 
+# =============================================================================
+# v0.4 — deletion-target consumer-enumeration helper (Class 33 closure;
+# M7 3rd canonical structural enforcement at OPERATOR-USE layer)
+# =============================================================================
+#
+# Closes Class 33 (consumer-enumeration undercount on deletion) sister to
+# Class 14 (fabricated symbols, flipped — Class 14 cites X that doesn't exist;
+# Class 33 deletes X but misses N consumers).
+#
+# Codified at v5.15.5.F.4d.1.B.4 v1.7.5 WIP-12 per `feedback_no_defer_for_effort`
+# + `feedback_structural_fix_for_recurring_class` (deletion-target consumer
+# enumeration recurrence pattern: v1.4 N5 missed write site + v1.7.5 17-files
+# /81-occurrences cohort undercount = 2 ship-level instances per ≥2-instance
+# Stage 2 Recurrence trigger).
+#
+# MVP scope (v0.4 generator mode): operator-facing planning helper. Run via
+# `--gen-deletion-cohort PATTERN` at plan-drafting time; classifier output
+# is the cohort enumeration operator pastes into plan body Phase A.6.5.c
+# CSV artifact + Phase C deletion-step enumeration. Sister to v0.3 line-anchor
+# generator mode at COMMIT layer.
+#
+# Future scope (v0.5 verifier mode if Class 33 recurs post-MVP): scan plan
+# body for declared deletion patterns + counts; verify against actual grep;
+# pre-commit hook integration. Queue per `feedback_framework_layer_payoff_
+# diminishing_returns` (do not over-build at first canonical).
+#
+# Archived changelog exclusion per `feedback_archived_changelog_preservation_
+# discipline` (NEW v1.7.5 sister memory at WIP-12): `DOCS/changelogs/2026-04-*`
+# + sister archived files are TIMELESS HISTORY of what shipped at each version;
+# rewriting violates timeless-doc principle; tool excludes by default.
+
+# Classification heuristic for each grep match — sister to /trace-deps
+# manual classification; mechanical at COMMIT/PLANNING layer.
+def classify_deletion_kind(path: str, line_content: str) -> str:
+    """Heuristic classification of a grep match per deletion semantics.
+
+    Used by --gen-deletion-cohort to produce ready-to-paste enumeration
+    sorted by deletion_kind for plan body Phase A.6.5.c CSV artifact +
+    Phase C deletion-step enumeration.
+
+    Sister disciplines:
+    - B14 multi-surface deletion ordering pillar (leaves-first sequencing
+      derived from classification order: operator-doc → stale-comment →
+      log-string → GUI-gating → code-reference → cohort-wrapper → cfg-field-row)
+    - B15 unconditionalization latent assumption pillar (detects
+      UNCONDITIONALIZE-body vs DELETE-with-body via != vs ==)
+    """
+    s = line_content.strip()
+
+    # Archived changelogs LEAVE per discipline
+    if "DOCS/changelogs/2026-04-" in path or "DOCS/changelogs/2026-05-" in path:
+        return "archived-changelog (LEAVE)"
+    if path.endswith("DOCS/CHANGELOG.md"):
+        return "current-changelog (historical-row LEAVE; new row added at ship close)"
+
+    # Operator-facing doc surfaces — per `feedback_operator_facing_doc_cohort_at_cfg_deletion`
+    if path == "README.md" or path == "DOCS/QUICKSTART.md" or path == "engine.cfg.example":
+        return "operator-facing-doc"
+
+    # Test surface
+    if path.startswith("tests/"):
+        return "test-surface"
+
+    # Plan body / DESIGN_SPECS / memory — LEAVE per timeless-doc principle
+    if path.startswith("plans/") or path.startswith("DESIGN_SPECS/"):
+        return "plan-or-spec-reference (LEAVE; amendment-history or pattern doc)"
+    if "/memory/" in path:
+        return "memory-reference (LEAVE; sister rule citation)"
+
+    # Code surfaces (.cpp / .hpp)
+    if path.endswith(".cpp") or path.endswith(".hpp"):
+        # B15 detection — UNCONDITIONALIZE-body via positive gate
+        if "if (" in s and "==" in s:
+            return "UNCONDITIONALIZE-body (positive gate per B15 pillar; verify latent assumptions)"
+        # B15 sister — negated DELETE-with-body
+        if "if (" in s and "!=" in s:
+            return "DELETE-with-body (negated branch + body)"
+        # Stale comment
+        if s.startswith("//") or s.startswith("/*") or s.startswith("*"):
+            return "stale-comment (cleanup)"
+        # Log string
+        if "fprintf" in s or "printf" in s or 'std::cerr' in s or 'std::cout' in s:
+            return "log-string (cleanup or sister-log replacement)"
+        # X-macro registry row
+        if "X(" in s and ("FOREACH_" in path.upper() or "CfgFieldRegistry" in path):
+            return "cfg-field-row (X-macro registry; H17 framework auto-flow)"
+        # Enum constant
+        if "ENGINE_ARCH_" in s and ("enum " in s.lower() or "= " in s):
+            return "enum-constant (header)"
+        # Function declaration / call
+        if "(" in s and ")" in s:
+            return "code-reference (function call or declaration)"
+        # Field declaration
+        return "code-reference (field or other)"
+
+    # Build / config files
+    if path == "Version.hpp":
+        return "version-history-comment (cleanup; cfg field list)"
+    if path.endswith(".cfg") or path.endswith(".cfg.example"):
+        return "config-file-doc"
+    if path.endswith(".sh") or path.endswith(".py"):
+        return "tool-or-script-reference"
+
+    return "unknown"
+
+
+def gen_deletion_cohort(pattern: str, project_roots=None,
+                        exclude_archived: bool = True) -> dict:
+    """Run comprehensive `rg <pattern>` over project roots; classify each
+    match per deletion-kind heuristic. Returns dict with summary + per-match
+    details suitable for paste into plan body cohort enumeration.
+
+    Args:
+        pattern: rg pattern (e.g., 'engine_arch|ENGINE_ARCH_')
+        project_roots: list of paths to search (default: [ENGINE])
+        exclude_archived: skip DOCS/changelogs/2026-04-* (default: True)
+    """
+    if project_roots is None:
+        project_roots = [ENGINE]
+    all_matches = []
+    for root in project_roots:
+        rg_cmd = ["rg", "-n", "--no-heading", pattern, str(root)]
+        if exclude_archived:
+            rg_cmd.extend(["-g", "!DOCS/changelogs/2026-04-*"])
+        try:
+            result = subprocess.run(rg_cmd, capture_output=True, text=True, timeout=60)
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
+            return {"error": f"rg failed: {e}", "matches": [], "summary": {}}
+        if result.returncode not in (0, 1):  # 0 = matches found; 1 = no matches
+            continue
+        for line in result.stdout.splitlines():
+            m = re.match(r'^([^:]+):(\d+):(.*)$', line)
+            if not m:
+                continue
+            full_path, lineno, content = m.groups()
+            # Make path relative to engine root for stable enumeration
+            try:
+                rel_path = str(Path(full_path).relative_to(root))
+            except ValueError:
+                rel_path = full_path
+            kind = classify_deletion_kind(rel_path, content)
+            all_matches.append({
+                "path": rel_path,
+                "line": int(lineno),
+                "content": content.strip(),
+                "kind": kind,
+                "root": str(root.name) if hasattr(root, 'name') else str(root),
+            })
+
+    # Summary: counts per kind, per file
+    summary = {"total": len(all_matches), "by_kind": {}, "by_file": {}}
+    for m in all_matches:
+        summary["by_kind"][m["kind"]] = summary["by_kind"].get(m["kind"], 0) + 1
+        summary["by_file"][m["path"]] = summary["by_file"].get(m["path"], 0) + 1
+    return {"matches": all_matches, "summary": summary}
+
+
+def print_deletion_cohort(pattern: str, cohort: dict, csv_format: bool = False):
+    """Print deletion-cohort enumeration in human-readable or CSV format.
+
+    CSV format suitable for paste into plan_checks/<date>-<ship>-<pattern>-
+    deletion-enumeration.csv artifact per Phase A.6.5.c discipline.
+    """
+    if "error" in cohort:
+        print(f"[error] {cohort['error']}", file=sys.stderr)
+        return
+
+    matches = cohort["matches"]
+    summary = cohort["summary"]
+
+    if csv_format:
+        print("path,line,kind,content")
+        for m in sorted(matches, key=lambda x: (x["kind"], x["path"], x["line"])):
+            content_csv = m["content"].replace('"', '""')
+            print(f'{m["path"]},{m["line"]},"{m["kind"]}","{content_csv}"')
+        return
+
+    # Human-readable
+    print(f"\n=== Deletion-cohort enumeration for pattern: {pattern} ===\n")
+    print(f"TOTAL: {summary['total']} occurrences across {len(summary['by_file'])} files\n")
+    print("=== By classification ===")
+    # Leaves-first ordering per B14 multi-surface deletion ordering pillar
+    leaves_first_order = [
+        "operator-facing-doc",
+        "stale-comment (cleanup)",
+        "log-string (cleanup or sister-log replacement)",
+        "version-history-comment (cleanup; cfg field list)",
+        "code-reference (field or other)",
+        "code-reference (function call or declaration)",
+        "UNCONDITIONALIZE-body (positive gate per B15 pillar; verify latent assumptions)",
+        "DELETE-with-body (negated branch + body)",
+        "cohort-wrapper",
+        "enum-constant (header)",
+        "cfg-field-row (X-macro registry; H17 framework auto-flow)",
+        "test-surface",
+    ]
+    leaves_last = [
+        "archived-changelog (LEAVE)",
+        "current-changelog (historical-row LEAVE; new row added at ship close)",
+        "plan-or-spec-reference (LEAVE; amendment-history or pattern doc)",
+        "memory-reference (LEAVE; sister rule citation)",
+    ]
+    sorted_kinds = leaves_first_order + sorted(
+        k for k in summary["by_kind"] if k not in leaves_first_order and k not in leaves_last
+    ) + leaves_last
+    for kind in sorted_kinds:
+        n = summary["by_kind"].get(kind, 0)
+        if n > 0:
+            print(f"  {n:4d}  {kind}")
+    print("\n=== Per-match details (leaves-first ordering per B14) ===")
+    by_kind = {}
+    for m in matches:
+        by_kind.setdefault(m["kind"], []).append(m)
+    for kind in sorted_kinds:
+        ms = by_kind.get(kind, [])
+        if not ms:
+            continue
+        print(f"\n--- {kind} ({len(ms)} match{'es' if len(ms) != 1 else ''}) ---")
+        for m in sorted(ms, key=lambda x: (x["path"], x["line"])):
+            print(f"  {m['path']}:{m['line']}")
+            print(f"    {m['content'][:120]}{'...' if len(m['content']) > 120 else ''}")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("paths", nargs="*", help="plan body .md files to check")
@@ -657,7 +880,35 @@ def main():
                    help="skip line-anchor verification pass (default: always run)")
     p.add_argument("--show-drift", action="store_true",
                    help="report line-anchor DRIFTs (default: only OOB + MISSING printed; drifts in summary)")
+    # v0.4 — deletion-target consumer-enumeration helper (Class 33 closure)
+    p.add_argument("--gen-deletion-cohort", metavar="PATTERN",
+                   help="v0.4 generator mode: print comprehensive deletion-cohort enumeration "
+                        "for PATTERN (rg syntax) with classification per deletion-kind heuristic. "
+                        "Sister to /trace-deps but mechanical. Closes Class 33 at operator-use "
+                        "layer (sister to v0.3 line-anchor closing Class 14 at commit layer). "
+                        "Excludes DOCS/changelogs/2026-04-* per archived-changelog-preservation "
+                        "discipline. Output suitable for paste into plan body Phase A.6.5.c CSV "
+                        "artifact + Phase C deletion-step enumeration.")
+    p.add_argument("--include-archived", action="store_true",
+                   help="v0.4: include archived changelogs in --gen-deletion-cohort output "
+                        "(default: exclude per archived-changelog-preservation discipline)")
+    p.add_argument("--csv", action="store_true",
+                   help="v0.4: print --gen-deletion-cohort output as CSV "
+                        "(suitable for plan_checks/<date>-<ship>-deletion-enumeration.csv artifact)")
+    p.add_argument("--include-workspace", action="store_true",
+                   help="v0.4: include workspace project root in --gen-deletion-cohort search "
+                        "(default: engine-only)")
     args = p.parse_args()
+
+    # v0.4 generator mode — standalone helper; no plan body needed
+    if args.gen_deletion_cohort:
+        roots = [ENGINE]
+        if args.include_workspace:
+            roots.append(WORKSPACE)
+        cohort = gen_deletion_cohort(args.gen_deletion_cohort, project_roots=roots,
+                                      exclude_archived=not args.include_archived)
+        print_deletion_cohort(args.gen_deletion_cohort, cohort, csv_format=args.csv)
+        sys.exit(0)
 
     if args.all:
         paths = sorted(PLANS_DIR.rglob("*.md"))
