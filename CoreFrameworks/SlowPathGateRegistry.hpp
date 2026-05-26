@@ -114,7 +114,18 @@ namespace tt {
     /* v5.12.1.A — WS staleness emergency-flatten (engine-wide outer) */                            \
     X(ENGINE_WIDE, WS_FLATTEN_ACTIVE,                                                                \
       BITMAP_IS_SET((_gate_cfg).risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED),         \
-      "fire OMS_FlattenAll when WS dead longer than threshold")
+      "fire OMS_FlattenAll when WS dead longer than threshold")                                      \
+    /* v5.15.5.F.4d.1.B.4 — PARITY-032 closure: cache lifecycle cfg flag engine-wide for branchless */ \
+    /* gating inside SlowPathCycleOneCore. Sister consumer pattern at ControllerEventLoop.hpp:2344  */ \
+    /* (MASK_LAZY_REBUILD_ACTIVE) + :3558 (MASK_WS_FLATTEN_ACTIVE). D1-B applies slow-path-gate     */ \
+    /* cache pattern to breakeven for the first time (NOT cosmetic-extension of wrapper at :3799   */ \
+    /* which reads cfg directly). Default cfg unset → cached bit 0 → branchless skip. Mask name    */ \
+    /* MASK_BREAKEVEN_ON_PROFIT distinct from cfg-side MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT by    */ \
+    /* full-token compare + prefix discipline (slow-path-gate uses MASK_<name>; cfg-flag uses       */ \
+    /* MASK_LIFECYCLE_CFG_<name>).                                                                  */ \
+    X(ENGINE_WIDE, BREAKEVEN_ON_PROFIT,                                                              \
+      BITMAP_IS_SET((_gate_cfg).lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT),        \
+      "breakeven-on-profit lifecycle event (ratchet SL to fee-floored breakeven when in profit)")
 
 //======================================================================================================
 // [SCOPE-DISPATCH HELPER MACROS — same shape as STAMP_HANDLE_GEN_INCLUDE/SKIP]

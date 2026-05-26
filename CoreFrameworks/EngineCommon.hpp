@@ -78,8 +78,9 @@
 
 #pragma once
 
-#include <cstdint>  // uint64_t (used in slow-path-cycle helper signatures for ts_us)
-#include <cstdio>   // fprintf (used in ApplyBnbDiscount stderr message)
+#include <cstdint>      // uint64_t (used in slow-path-cycle helper signatures for ts_us)
+#include <cstdio>       // fprintf (used in ApplyBnbDiscount stderr message)
+#include <x86intrin.h>  // __rdtsc (slow-path latency sampling — sister to EngineSharded.hpp:82)
 
 // Phase B includes (added as helper bodies land; sister-convention relative paths):
 //   B.0 ApplyBnbDiscount → ControllerConfig.hpp (cfg.cores[c].fee_rate_*) + FixedPointN.hpp (FPN<F> arithmetic)
@@ -461,22 +462,336 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 //     mtm_price precompute at caller-side per O2 bytewise-identical math discipline.
 //   - BACKTEST ShardedBacktest_RunTick: resolve volume from tick.volume; now_tick from
 //     (uint64_t)tick_index; depth via BookSnapshot<F> constructed from BACKTEST
-//     DepthReplayState fields (field-mapping verified at Phase C implementation; spec
-//     points to Backtest/DepthReplayState.hpp for the source struct).
+//     ShardedBacktestDriver<F> pointer fields (drv->book_imbalance per :102 — NO
+//     `current_` prefix; deref *drv->current_spread + *drv->current_mid_price per
+//     :119-120 POINTER types; null-check each pointer individually before deref per
+//     canonical idiom at :287/:307/:349-350; v1.7.4 NEW-1/2/3/4 path + prefix +
+//     pointer-deref corrections landed; spec points to
+//     CoreFrameworks/ShardedBacktestDriver.hpp for the source struct).
 //   Helper handles depth-disabled flag at read time (BITMAP_IS_SET on cfg.gate_cfg_flags
 //   MASK_GATE_CFG_DEPTH_ENABLED) — when disabled, helper substitutes FPN_Zero values
 //   regardless of what's in the passed BookSnapshot. Matches current LIVE :3052-3058
 //   pattern verbatim per bytewise-identical math discipline.
 template <unsigned F>
-void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
-                                        int c,
-                                        EventLoopState<F>& state,
-                                        OrderManagerState<F>& oms,
-                                        FPN<F> price,
-                                        FPN<F> volume,                  // v1.7.3 N-6 NEW
-                                        uint64_t ts_us,
-                                        uint64_t now_tick,              // v1.7.3 N-6 NEW (tick counter; DISTINCT from ts_us microseconds)
-                                        const BookSnapshot<F>& depth);  // v1.7.3 N-6 NEW (sister-canonical reuse)
+inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
+                                               int c,
+                                               EventLoopState<F>& state,
+                                               OrderManagerState<F>& oms,
+                                               FPN<F> price,
+                                               FPN<F> volume,
+                                               uint64_t ts_us,
+                                               uint64_t now_tick,
+                                               const BookSnapshot<F>& depth) {
+    // v1.7.3 HIGH-4 Telemetry Path A INTERNAL: helper computes own rdtsc bracket
+    // start + 5 CoreLatencyStats_Sample calls inside body. Slight BACKTEST
+    // overhead (~25-50ns per cycle for rdtsc + array writes) preserves LIVE
+    // per-section breakdown semantic (M5 LIVE-only display surface kept
+    // untouched). Per feedback_motivated_collaborator_for_caramel — preserve
+    // LIVE semantic > save BACKTEST ns.
+    uint64_t _sp_t0 = __rdtsc();
+    uint64_t _sec_t_other_start = _sp_t0;
+
+    // v1.7.1 M2.B + v1.7.3 N-2 + D1-B: refresh engine-wide gate cache at body
+    // entry BEFORE BITMAP_IS_SET reads downstream. Sister consumer pattern at
+    // ControllerEventLoop.hpp:2335 + :3555. Macro signature `(state.global_gate_state,
+    // cfg)` per v1.7.3 N-2 correction — was incorrectly `(state, cfg)` which
+    // would COMPILE FAIL since EventLoopState<F> has no `.flags` member.
+    SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state.global_gate_state, cfg);
+
+    // Derive double from caller-precomputed FPN<F> price for guard checks.
+    // `price` IS the mtm_price per caller-side O2 bytewise-identical math
+    // (LIVE :3068-3071 / BACKTEST equivalent — caller does
+    // price = price_d > 0.0 ? FPN_FromDouble(price_d) : FPN_Zero()). FPN<F=64>
+    // has 64 fractional bits + ~4032 integer bits; FPN_ToDouble of
+    // FPN_FromDouble(x) recovers x bytewise-identical for normal doubles.
+    double price_d = FPN_ToDouble(price);
+
+    // === Read shared market state (eventually-consistent) ===
+    // Producer is single writer; slow-paths read with relaxed
+    // ordering. Stale-by-poll-interval is acceptable for
+    // slow-path strategy dispatch (always was — pre-migration
+    // producer's slow-path also operated on whatever rolling
+    // values were current at slow-path entry).
+    //
+    // Caller pre-resolved depth (LIVE: g_depth_shared.snapshots[active_idx];
+    // BACKTEST: BookSnapshot constructed from ShardedBacktestDriver<F> pointer
+    // fields per v1.7.4 NEW-1/2/3/4 corrections). Helper checks
+    // MASK_GATE_CFG_DEPTH_ENABLED internally per LIVE :3052-3058 pattern —
+    // when disabled, substitutes FPN_Zero regardless of what's in passed depth.
+    FPN<F> book_imb = FPN_Zero<F>();
+    double book_spread_d = 0.0, book_mid_d = 0.0;
+    if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)) {
+        book_imb      = depth.imbalance;
+        book_spread_d = FPN_ToDouble(depth.spread);
+        book_mid_d    = FPN_ToDouble(depth.mid_price);
+    }
+
+    // Pre-loop scalar (matches RebuildAllParameters wrapper).
+    int book_imbalance_blocked = 0;
+    if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) && !FPN_IsZero(cfg.min_book_imbalance)) {
+        book_imbalance_blocked = FPN_LessThan(book_imb,
+            cfg.min_book_imbalance) ? 1 : 0;
+    }
+
+    // rebuild_ts_us = caller-precomputed ts_us. LIVE caller does
+    // std::chrono::system_clock::now() → microseconds at slow-path entry;
+    // BACKTEST caller passes synthesized ts. Local alias preserved for
+    // body-symbol parity with LIVE :3073 (bytewise-identical math).
+    uint64_t rebuild_ts_us = ts_us;
+
+    // v5.1.2 (full symmetric): use shared OneCore helper.
+    // Single-writer is this thread (per_core_slow's c).
+    auto* sst = state.cores[c].slow_state;
+    FPN<F> bs = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ?
+        FPN_FromDouble<F>(book_spread_d) : FPN_Zero<F>();
+    EventLoop_UpdateRollingStateOneCore(
+        &state, c,
+        price, volume, rebuild_ts_us,
+        /*is_buyer_maker=*/0, // TODO(parity-check Finding #5): plumb through scalar bus (v5.10.X)
+        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? book_imb : FPN_Zero<F>(),
+        bs,
+        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? 1 : 0);
+
+    // v5.1.1: bracket OTHER section (depth read + swap pickup
+    // + per-cadence pushes setup).
+    uint64_t _sec_t_rebuild_start = __rdtsc();
+    CoreLatencyStats_Sample(
+        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_ROLLING],
+        _sec_t_rebuild_start - _sec_t_other_start, _sec_t_rebuild_start);
+
+    // === Strategy dispatch + gate parameter rebuild ===
+    // v5.1.0: pass per-core slow_state pointers instead of
+    // producer-shared state. Each engine reads ONLY its own.
+    // v5.12.1.B clock hoist: pass rebuild_ts_us as now_us so
+    // the recovery refusal check inside RebuildOneCore reuses
+    // it instead of doing its own clock_gettime. Saves ~50ns/
+    // cycle in the post-flatten recovery window.
+    EventLoop_RebuildOneCore(
+        &state, c, &sst->rolling_short, &cfg, &sst->rolling_long,
+        &sst->regime_ror, &sst->ema_price,
+        FPN_IsZero(price) ? nullptr : &price,
+        &sst->rolling_medium, &sst->rolling_baseline,
+        &sst->cumdelta_state, &sst->tick_rate_state, rebuild_ts_us,
+        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? &book_imb : nullptr,
+        &sst->book_imb_history, &sst->flow_state,
+        &sst->large_trade_state, &sst->spread_state,
+        book_spread_d, book_mid_d, book_imbalance_blocked,
+        /*now_us (clock hoist)=*/rebuild_ts_us);
+
+    // v5.1.1: bracket REBUILD section.
+    uint64_t _sec_t_push_start = __rdtsc();
+    CoreLatencyStats_Sample(
+        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_REBUILD],
+        _sec_t_push_start - _sec_t_rebuild_start, _sec_t_push_start);
+
+    // === Push pending_params via seqlock (was inside
+    // PushParameters wrapper; inline for per-core path).
+    // v5.12.1.B.2 — pass publish_tick = now_tick (caller-precomputed
+    // from ticks_produced.load() in LIVE; tick_index in BACKTEST)
+    // so hot-path staleness gate sees fresh tick stamp.
+    if (CORE_STATE_FLAG_IS_SET(state.cores[c], DIRTY)) {
+        ExecutionCore<F>* core = state.cores[c].core;
+        if (core) {
+            ExecutionCore_SetParameters(core,
+                state.cores[c].pending_params,
+                now_tick);
+        }
+        CORE_STATE_FLAG_CLR(state.cores[c], DIRTY);
+    }
+
+    // v5.1.1: bracket PUSH_PARAMS section.
+    uint64_t _sec_t_te_start = __rdtsc();
+    CoreLatencyStats_Sample(
+        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_PUSH],
+        _sec_t_te_start - _sec_t_push_start, _sec_t_te_start);
+
+    // === v5.13.0.B — sell-side ML exit-prediction submit ===
+    // RebuildOneCore wrote state.cores[c].last_exit_prediction
+    // (when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor models loaded).
+    // If above threshold and any positions are open on this
+    // core's slot(s), fire MARKET_SELL via OMS_PushSubmit and
+    // mark per-slot last_exit_predicted_bitmap for v5.13.4 reward
+    // attribution. Default cfg path (use_exit_model=0): the
+    // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
+    if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
+        && state.cores[c].last_exit_prediction
+           > FPN_ToDouble(cfg.exit_threshold)
+        && price_d > 0.01) {
+        // Slot mask: under partials each core owns 2 slots
+        // (legs A + B); single-leg under partial_exit_enabled=0.
+        // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+        int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+        uint16_t my_mask = partial_on
+            ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
+            : (uint16_t)(1u << c);
+        uint16_t bm = (uint16_t)
+            (oms.portfolio.active_bitmap & my_mask);
+        if (bm) {
+            FPN<F> price_fpn = FPN_FromDouble<F>(price_d);
+            while (bm) {
+                int pidx = __builtin_ctz(bm);
+                bm &= (uint16_t)(bm - 1);
+                FPN<F> qty =
+                    oms.portfolio.positions[pidx].quantity;
+                if (FPN_IsZero(qty)) continue;
+                // Mark per-slot for v5.13.4 attribution + v5.13.0.B
+                // calibration log. Set BEFORE OMS_PushSubmit so the
+                // SPSC ring release-acquire makes it visible to drainer
+                // when the fill arrives.
+                // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
+                BITMAP_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(pidx));
+                oms.last_exit_predicted_p[pidx] =
+                    state.cores[c].last_exit_prediction;
+                // v5.13.4 — capture chosen arm + regime per-slot
+                // for HandleFill's exit_bandit Update.
+                // v5.13.6.C — defensive bounds (parity-check
+                // M.3 gap-close 2026-05-08). Catches trainer↔
+                // engine model dimension mismatch + regime
+                // out-of-range at SUBMIT time vs. silently
+                // skipping bandit update at attribution time.
+                // CRITICAL log + clamp; doesn't refuse submit
+                // (exit fires for safety; bandit skips later).
+                int captured_arm =
+                    state.cores[c].last_exit_dominant_horizon;
+                int captured_regime =
+                    state.cores[c].regime_state.current_regime;
+                EnsembleModelZoo<F>* ezoo_b = (EnsembleModelZoo<F>*)
+                    state.cores[c].ensemble_handle;
+                int n_arms_b = (ezoo_b
+                    ? ezoo_b->exit_predictor_count : 0);
+                if (captured_arm < 0 ||
+                    captured_arm >= n_arms_b) {
+                    static uint64_t s_arm_log_us[16] = {0};
+                    Health_LogCriticalRateLimited(
+                        &s_arm_log_us[c & 15], 60000000ULL,
+                        c, "ml",
+                        "exit submit: captured arm %d out of "
+                        "range [0, %d) — bandit Update will "
+                        "skip; trainer↔engine horizon count "
+                        "mismatch?",
+                        captured_arm, n_arms_b);
+                    captured_arm = -1;  // -1 sentinel; HandleFill skips
+                }
+                if (captured_regime < 0 ||
+                    captured_regime >= NUM_REGIMES) {
+                    captured_regime = -1;
+                }
+                // v5.15.5.C.2.1 (LOW-2) — bit-packed in
+                // last_exit_predicted_meta. OMS_META_PACK
+                // sets the validity bit (replaces pre-LOW-2
+                // -1 sentinel). If EITHER arm or regime is
+                // -1 (out-of-range above), clear the slot
+                // so drainer's OMS_META_IS_VALID predicate
+                // returns false (no bandit Update).
+                if (captured_arm >= 0 && captured_regime >= 0) {
+                    oms.last_exit_predicted_meta[pidx] =
+                        OMS_META_PACK(captured_arm, captured_regime);
+                } else {
+                    OMS_META_CLEAR(oms.last_exit_predicted_meta[pidx]);
+                }
+                // v5.15.5.C.4 Phase D5 — Class-18 helper
+                // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit
+                tt::OMS_PushExitForSlot(&oms, (int16_t)pidx,
+                    qty, state.cores[c].strategy_id, price_fpn,
+                    /*leg*/(uint8_t)0, &cfg.cores[c]);
+            }
+            state.cores[c].strategy_halt_reason =
+                SHALT_EXIT_PREDICTED;
+        }
+    }
+
+    // === Time exit + trailing SL ratchet (per-core) ===
+    if (cfg.cores[c].max_hold_ticks > 0 && price_d > 0.01) {
+        EventLoop_TimeExitOneCore(&state, &oms, cfg,
+            now_tick, price_d, c);
+    }
+    // v5.1.1: bracket TIME_EXIT section.
+    uint64_t _sec_t_tsl_start = __rdtsc();
+    CoreLatencyStats_Sample(
+        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_TIME_EXIT],
+        _sec_t_tsl_start - _sec_t_te_start, _sec_t_tsl_start);
+
+    if (!FPN_IsZero(cfg.cores[c].sl_trail_mult) &&
+        !FPN_IsZero(cfg.cores[c].tp_hold_score) &&
+        !FPN_IsZero(sst->rolling_short.price_stddev) &&
+        price_d > 0.01) {
+        EventLoop_TrailingSLRatchetOneCore(&state, cfg,
+            sst->rolling_short, price_d, c);
+    }
+
+    // === v5.15.5.F.4d.1.B.4 D1-B PARITY-032 closure: breakeven-on-profit ===
+    // Cached gate bit refreshed at body entry via AUTOPOPULATE_ENGINE_WIDE.
+    // Default cfg has MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT UNSET → cached
+    // MASK_BREAKEVEN_ON_PROFIT bit = 0 → branchless BITMAP_IS_SET returns 0
+    // → no call (bytewise-identical to pre-`.B.4` per_core_slow behavior).
+    // Cohorts with cfg flag SET → cached bit = 1 → fires (5+ year correctness
+    // gap closed for per_core_slow arch). Sister consumers at
+    // ControllerEventLoop.hpp:2344 (MASK_LAZY_REBUILD_ACTIVE) + :3558
+    // (MASK_WS_FLATTEN_ACTIVE). D1-B is legitimately NEW slow-path-gate
+    // application — wrapper at :3799 reads cfg directly, NOT via cache.
+    if (BITMAP_IS_SET(state.global_gate_state.flags, MASK_BREAKEVEN_ON_PROFIT)
+        && price_d > 0.01) {
+        EventLoop_BreakevenOnProfitOneCore(&state, cfg, price_d, c);
+    }
+
+    // v5.1.1: bracket TRAIL_SL section (now covers TrailingSLRatchet +
+    // BreakevenOnProfit; D1-B sister exit-mechanism shares bracket).
+    // Tail-end "OTHER" (warmup permission + post-cycle book-keeping)
+    // folds into the next iteration's _sec_t_other_start delta —
+    // negligible (<100ns) so we don't add another bracket.
+    uint64_t _sec_t_tail = __rdtsc();
+    CoreLatencyStats_Sample(
+        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_TRAIL_SL],
+        _sec_t_tail - _sec_t_tsl_start, _sec_t_tail);
+
+    // === Warmup permission grant (per-core check) ===
+    uint32_t min_samples = cfg.min_warmup_samples > 0
+        ? cfg.min_warmup_samples : 64;
+    if (sst->rolling_short.count >= (int)min_samples &&
+        state.cores[c].strategy_id != STRATEGY_NONE) {
+        // Original LIVE used producer-thread static `cores[c]` array
+        // address; helper uses the pointer stored on EventLoopState via
+        // EventLoopState_RegisterCore (registration sets state.cores[c].core
+        // = address of producer's static array element; identical pointer).
+        ExecutionCore_SetPermission(state.cores[c].core, 1);
+    }
+
+    // v4.7.42 (Phase E): close rdtsc bracket + sample.
+    uint64_t _sp_t1 = __rdtsc();
+    CoreLatencyStats_Sample(&state.display_meta[c].slow_path_latency,
+                             _sp_t1 - _sp_t0, _sp_t1);
+
+    // v5.12.1.B clock hoist: reuse rebuild_ts_us captured at
+    // slow-path entry instead of taking another system_clock::now()
+    // read here. Saves ~50ns/cycle/core. sp_last_tick_us semantic
+    // shifts from "wall-clock at end of cycle" to "wall-clock at
+    // start of cycle" — sub-100us drift across the slow-path body,
+    // irrelevant for both operator liveness display + CheckWsStaleness
+    // 60s+ threshold math.
+    {
+        state.cores[c].sp_telemetry.last_tick_us.store(rebuild_ts_us,
+                                              std::memory_order_relaxed);
+        state.cores[c].sp_telemetry.cycles_total.fetch_add(1,
+                                                  std::memory_order_relaxed);
+        EventLoop_CheckWsStaleness(&state, cfg, price_d,
+                                    rebuild_ts_us);
+    }
+
+    // NOTE: DrainPostFill stays on the drainer thread (single
+    // writer of last_*_mask is HandleFill on drainer; same
+    // thread reads + clears via DrainPostFill wrapper). No
+    // need for atomic mask conversion in C.2.
+    //
+    // NOTE: KillSwitchEvaluate is GLOBAL (account-level
+    // drawdown), runs on producer thread in LIVE; backtest
+    // calls it from ShardedBacktestDriver scope per
+    // Step C.4 N-4 REVERT. Per-core kill switch state is
+    // mutated INSIDE RebuildOneCore.
+    //
+    // NOTE: Drag TP/SL pickup + manual close stay on drainer
+    // + producer threads respectively. They submit via
+    // OMS_PushSubmit (Phase B) — thread-safe.
+}
 
 // 5. EngineCommon_SlowPathCycleAllCores
 //    const cfg fan wrapper (~10 LOC for-loop calling SlowPathCycleOneCore N times).
@@ -488,13 +803,29 @@ void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
 //
 //    Signature (v1.7.3 N-6 consequential: 8 args; pass-through to OneCore expanded args):
 template <unsigned F>
-void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
-                                         EventLoopState<F>& state,
-                                         OrderManagerState<F>& oms,
-                                         FPN<F> price,
-                                         FPN<F> volume,                  // v1.7.3 N-6 NEW pass-through
-                                         uint64_t ts_us,
-                                         uint64_t now_tick,              // v1.7.3 N-6 NEW pass-through
-                                         const BookSnapshot<F>& depth);  // v1.7.3 N-6 NEW pass-through
+inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
+                                                EventLoopState<F>& state,
+                                                OrderManagerState<F>& oms,
+                                                FPN<F> price,
+                                                FPN<F> volume,
+                                                uint64_t ts_us,
+                                                uint64_t now_tick,
+                                                const BookSnapshot<F>& depth) {
+    // Fan wrapper: BACKTEST (centralized arch) calls this ONCE per tick;
+    // loops over registered cores firing SlowPathCycleOneCore per-core.
+    // LIVE per_core_slow does NOT call this (each per-core thread invokes
+    // OneCore directly). Per Option D future-orientation for v6.0 viewer
+    // decoupling boundary — viewer reuses this wrapper as natural per-tick
+    // mmap-publish API.
+    //
+    // Loop bound = state.registered_count (sister to EventLoop_BreakevenOnProfit
+    // wrapper at ControllerEventLoop.hpp:3801); preserves num_cores-clamped
+    // iteration semantic at LIVE :622-624 + BACKTEST :223-225 by-construction
+    // since EventLoopState_RegisterCore is the single increment site.
+    for (int c = 0; c < state.registered_count; ++c) {
+        EngineCommon_SlowPathCycleOneCore(cfg, c, state, oms,
+                                           price, volume, ts_us, now_tick, depth);
+    }
+}
 
 }  // namespace tt
