@@ -5666,7 +5666,7 @@ int main() {
             // Phase 3: 10% drawdown threshold, $5 floor, MTM enabled
             c.max_drawdown_pct = FPN_FromDouble<64>(0.10);
             c.min_kill_loss    = FPN_FromDouble<64>(5.0);
-            c.enable_mtm_kill_switch = 1;
+            BITMAP_SET(c.risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED);  // v5.15.5.F.4d.1.B.4 Cx-T H14 migration
             return c;
         };
 
@@ -5769,7 +5769,7 @@ int main() {
         {
             auto* r = fresh_state();
             ControllerConfig<64> cfg = stub_cfg();
-            cfg.enable_mtm_kill_switch = 0;  // realized-only mode
+            BITMAP_CLR(cfg.risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED);  // realized-only mode (v5.15.5.F.4d.1.B.4 Cx-T H14 migration)
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
             Portfolio_OpenSlot(&r->oms.portfolio, 0,
                 FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.01),

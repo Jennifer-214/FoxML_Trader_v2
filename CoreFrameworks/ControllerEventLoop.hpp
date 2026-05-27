@@ -393,7 +393,7 @@ struct alignas(64) CoreContext {
     // v4.0.3 D7 SL cooldown: after a stop-loss exit, pause entries on this
     // core for N slow-path cycles. Decremented each rebuild; entries
     // zero-gated while > 0. Optionally adaptive — scales by trend confidence
-    // at SL time (cfg.sl_cooldown_adaptive).
+    // at SL time (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED) per Cx-U H14 migration).
     uint32_t sl_cooldown_remaining;
     // v4.2.1 — slow-path cycles since last fill on this core. Resets on
     // entry. Used as a "death-spiral" detector: if a core hasn't fired
@@ -2941,7 +2941,7 @@ inline void EventLoop_RebuildOneCore(
             // live in slots 2c and 2c+1 (one Position per leg, each with
             // independent qty). Sum unrealized across both. Without
             // partials, only slot c is walked.
-            if (config->enable_mtm_kill_switch && px_in && !FPN_IsZero(*px_in)) {
+            if (BITMAP_IS_SET(config->risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED) && px_in && !FPN_IsZero(*px_in)) {
                 uint16_t mask = Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
                 uint16_t bm   = state->oms->portfolio.active_bitmap & mask;
                 while (bm) {

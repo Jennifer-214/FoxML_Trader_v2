@@ -430,6 +430,31 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     /* === Runtime GUI toggle (1) === */                                                                                                                                                                              \
     X(int,                  KIND_BOOL,       danger_enabled,              "Enabled",              "Danger Gradient", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         nullptr,                                                                                                                                                                                                    \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Phase Cx-D extension cohort (v5.15.5.F.4d.1.B.4 v1.7.6 — 7 fields migrated from FOREACH_PER_CORE_CFG_FIELD GLOBAL_ONLY_READERS to canonical FOREACH_GLOBAL_CFG_FIELD; per Registry default precedence v1.1 § procedure all MATCH operational manual values; closes Class 26 worked-instance cohort + H17 STRONG→HARD progression at global surface per CfgFieldRegistry.hpp:722-724 roadmap) === */ \
+    X(uint32_t,             KIND_INT,        kill_recovery_warmup,        "Recovery",             "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, INT(50, 0, 1000000),                                                                \
+        "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry).",                                                                                                       \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Gate Recovery (4) === */ \
+    X(uint32_t,             KIND_INT,        sl_cooldown_base,            "SL Cooldown Base",     "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(2, 0, 1000000),                                                                 \
+        "Base cycles to cooldown after stop loss (adaptive mode adds extra per loss; non-adaptive uses sl_cooldown_cycles alone).",                                                                                  \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(uint32_t,             KIND_INT,        sl_cooldown_extra,           "SL Cooldown Extra",    "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 0, 1000000),                                                                 \
+        "Extra cooldown cycles per consecutive stop loss (BITMAP_IS_SET(risk_cfg_flags, MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED) only).",                                                                          \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(uint32_t,             KIND_INT,        sl_cooldown_cycles,          "SL Cooldown",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 0, 1000000),                                                                 \
+        "Slow-path cycles to pause after stop loss\nlets market settle before re-entry.",                                                                                                                            \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(uint32_t,             KIND_INT,        idle_reset_cycles,           "Idle Reset",           "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 0, 1000000),                                                                \
+        "Cycles with no fill before gate decay\nprevents permanent lockout after losses.",                                                                                                                           \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Lifecycle (1) === */ \
+    X(uint32_t,             KIND_INT,        model_max_age_hours,         "Model Max Age Hours",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 87600),                                                                   \
+        "Refuse model load if file mtime older than N hours. 0 = disabled (legacy default; v5.14.8.E).",                                                                                                              \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Slow Path (1) === */ \
+    X(FPN<F>,               KIND_DOUBLE_PCT, lazy_rebuild_price_threshold_pct, "Lazy Rebuild Price Thresh %%", "Slow Path", CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0005, 0.0, 0.1),                                                       \
+        "Per-tick price-delta threshold below which slow-path cycle is 'no material change' (skips RebuildOneCore). Default 0.0005 (0.05%).",                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
@@ -493,28 +518,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(FPN<F>                , KIND_DOUBLE_PCT, kill_switch_drawdown_pct,    "Drawdown %%",          "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(5.0, 0.0, 100.0),                                                                                                           \
         "Max drawdown from session peak before kill\n5.0 = halt if 5%% below intra-session high",                                                                                                                                                                 \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_BOOL, enable_mtm_kill_switch,      "MTM Kill Switch",      "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
-        "Mark-to-market kill switch — halt new entries when realized + unrealized P&L crosses kill_switch_threshold_pct. Separate from balance-based kill switch (always armed).",                                  \
-        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_INT, kill_recovery_warmup,        "Recovery",             "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
-        "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)",                                                                                                       \
-        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    /* === Gate Recovery (5) === */                                                                                                                                                                                   \
-    X(int                   , KIND_BOOL, sl_cooldown_adaptive,        "Adaptive CD",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
-        "Post-stop-loss cooldown mode: 0 = fixed cycles (sl_cooldown_cycles), 1 = scale by trend confidence (longer cooldown when trend weakens; shorter when trend resumes).",                                     \
-        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_INT, sl_cooldown_base,            "SL Cooldown Base",     "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
-        "Base cycles to cooldown after stop loss (adaptive mode adds extra per loss; non-adaptive uses sl_cooldown_cycles alone).",                                                                                 \
-        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_INT, sl_cooldown_extra,           "SL Cooldown Extra",    "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
-        "Extra cooldown cycles per consecutive stop loss (adaptive mode only).",                                                                                                                                    \
-        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_INT, sl_cooldown_cycles,          "SL Cooldown",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 0, 1000000),                                                               \
-        "Slow-path cycles to pause after stop loss\nlets market settle before re-entry",                                                                                                                            \
-        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_INT, idle_reset_cycles,           "Idle Reset",           "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
-        "Cycles with no fill before gate decay\nprevents permanent lockout after losses",                                                                                                                           \
-        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* v5.15.5.F.4d.1.B.4 Phase Cx-D: enable_mtm_kill_switch + kill_recovery_warmup + sl_cooldown_adaptive/base/extra/cycles + idle_reset_cycles per-core registry rows DELETED (GLOBAL_ONLY_READERS — production consumers at ControllerEventLoop.hpp read via const ControllerConfig<F>* config global pointer; per-core auto-gen was dead code). Global manual struct fields at ControllerConfig.hpp KEPT as canonical (load-bearing for actual consumers). Sister to feedback_cfg_field_categorization_at_registry_add_time + Class 26 worked instances. */ \
     /* === Momentum strategy (7) === */                                                                                                                                                                               \
     X(FPN<F>                , KIND_DOUBLE, momentum_min_tp_margin_pct,  "Mom Min TP Margin",    "Strategies",      0,                                  DBL(0.0, 0.0, 0.05),     "Block momentum entry if TP too tight (0 = disabled; rec: 0.0040 = 0.40%)",                       STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN<F>                , KIND_DOUBLE, momentum_min_buy_delta_recent, "Mom Min Buy Delta", "Strategies",       0,                                  DBL(0.0, 0.0, 1.0),      "Min recent volume delta for momentum entry (rec: 0.05)",                                          STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -540,8 +544,8 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(FPN<F>                , KIND_DOUBLE_PCT, regime_r2_threshold,         "R² Threshold",         "Regime Detection",0,                                  DBL(70.0, 0.0, 100.0),                                                                                                           \
         "Min R-squared consistency for TRENDING\n70 = 70%% of price variance explained by trend",                                                                                                                                                                 \
         STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_INT, regime_hysteresis,           "Hysteresis",           "Regime Detection",CfgFieldDescriptor::WARN_ON_CLAMP, INT(3, 1, 100),                                                                    \
-        "Slow-path cycles before regime switch\nprevents rapid flipping between strategies",                                                                                                                        \
+    X(uint32_t              , KIND_INT, regime_hysteresis,           "Hysteresis",           "Regime Detection",CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 100),                                                                    \
+        "Slow-path cycles before regime switch\nprevents rapid flipping between strategies (default 5 = operational; v5.15.5.F.4d.1.B.4 Cx-E.2 registry update from INT(3) to match manual init)",                  \
         STRAT_CAT_REGIME_AWARE,                              OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML — entry threshold + TP/SL (3) === */                                                                                                                                                                    \
     X(FPN<F>                , KIND_DOUBLE, ml_buy_threshold,            "ML Buy Thresh",        "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(0.5, 0.0, 1.0), "Buy threshold for ML strategy (predictions above this enter; pre-canonical parity gap closed at .B.2 — STAMP_BOUND added to master; legacy FOREACH_STAMP_BOUND_CFG entry at StampBoundCfgRegistry.hpp:157-158 deleted at .B.3 along with macro body)", STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -574,9 +578,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(uint64_t              , KIND_INT, thompson_rng_seed,           "Thompson RNG Seed",    "FoxML",           CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::HAS_SIDE_EFFECT, INT(42, 0, 9223372036854775807),                \
         "splitmix64 seed for Thompson sampling bandit. Default 42. 0 = use ThompsonBandit.hpp's THOMPSON_RNG_SEED_DEFAULT. Boot-only; required for replay-determinism. HAS_SIDE_EFFECT — manual parser supports hex (0x...) base-auto-detect; registry walker skips.",                                                                                                                                                                                                                                                          \
         STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(uint32_t              , KIND_INT, model_max_age_hours,         "Model Max Age Hours",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 87600),                                                                  \
-        "Refuse model load if file mtime older than N hours. 0 = disabled (legacy default; v5.14.8.E).",                                                                                                             \
-        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* v5.15.5.F.4d.1.B.4 Phase Cx-D: model_max_age_hours per-core registry row DELETED (GLOBAL_ONLY_READERS — consumer at LiveReadiness.hpp:125 + CoreModelZoo.hpp reads via cfg.model_max_age_hours global form; per-core auto-gen was dead code). Global manual struct field at ControllerConfig.hpp KEPT. */ \
     /* === STAMP_BOUND scalar cohort — Ridge + Winsor + Confidence + Thompson (12 DOUBLE) === */ \
     /*       Ridge risk-parity blending (v5.14.0) */ \
     X(FPN<F>                , KIND_DOUBLE, ridge_lambda,                "Ridge Lambda",         "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 10.0), \
@@ -661,9 +663,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         "Per-horizon TP/SL serving mode: 0=LEGACY (cfg-direct fallback), 1=BLEND (weighted across horizons), 2=DOMINANT (highest-weight horizon). HAS_SIDE_EFFECT — manual parser handles string form ('legacy'/'blend'/'dominant'). .B.3 Step 1.6.2 cohort bit-add (Decision D mechanism 1; legacy inference_cfg_barrier_blend_mode wire key deleted at Step 2).", \
         STRAT_CAT_ML,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === v5.15.5.F.4d TECH_DEBT-082 .F.5 residual close — 3 fields migrate from manual parser cases to auto-flow X-macro (Class 23 anti-pattern close at these 3 sites) === */                                          \
-    X(FPN<F>                , KIND_DOUBLE_PCT, lazy_rebuild_price_threshold_pct, "Lazy Rebuild Price Thresh %%", "Slow Path", CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0005, 0.0, 0.1),                                  \
-        "Per-tick price-delta threshold below which slow-path cycle is 'no material change' (skips RebuildOneCore). Default 0.0005 (0.05%). Per-core eligible — cores with different vol profiles can use different sensitivity. .F.4d TECH_DEBT-082 close.", \
-        STRAT_CAT_ALL,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* v5.15.5.F.4d.1.B.4 Phase Cx-D: lazy_rebuild_price_threshold_pct per-core registry row DELETED (GLOBAL_ONLY_READERS — production consumer at ControllerEventLoop.hpp:2364 reads via config->lazy_rebuild_price_threshold_pct global pointer; per-core auto-gen was dead code). Global manual struct field at ControllerConfig.hpp:743 KEPT as canonical. Per-core eligibility framing in original tooltip was aspirational; no per-core override syntax exists (PER_CORE_OVERRIDE_INT_FIELDS doesn't include it). */ \
     X(FPN<F>                , KIND_DOUBLE, exit_threshold,              "Exit Threshold",       "ML/Exit",         CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.6, 0.0, 1.0),                                                  \
         "Blended exit probability threshold for sell-side ML predictions (Path 3 architecture; v5.13.0). When blended exit_prob > exit_threshold AND position open, fires early market-exit. Default 0.6 (60%). Per-core eligible — each core has its own ML model with different exit calibration. .F.4d TECH_DEBT-082 close.", \
         STRAT_CAT_ML,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -745,6 +745,34 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
                                   applies_to_strategy_cat, applies_to_op_mode_cat, \
                                   applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     tt::cfg_assign_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name]);
+
+//======================================================================================================
+// [EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR — payload macro for per-core registry rows' global manual struct field defaults (v5.15.5.F.4d.1.B.4 Phase Cx-E.1)]
+//======================================================================================================
+// Sister to EMIT_GLOBAL_CFG_DEFAULT; lands the "future work" noted at :739 comment above.
+// Per-core registry rows (FOREACH_PER_CORE_CFG_FIELD) have global manual struct field declarations
+// on ControllerConfig<F> (load-bearing for EMIT_PER_CORE_COPY walker propagation at
+// ControllerConfig.hpp:1432-1437). This walker auto-initializes those global manual struct fields
+// from registry payload defaults at ControllerConfig_Default<F> time — closes the H17 vestigial-init
+// surface (Registry default precedence v1.1 § procedure: registry is single source of truth).
+//
+// Mechanism mirrors EMIT_GLOBAL_CFG_DEFAULT: tt::cfg_assign_field<T> reads default from descriptor.payload
+// via KIND dispatch (KIND_DOUBLE/PCT → FPN_FromDouble<F>; KIND_INT → int; KIND_BOOL → uint*).
+//
+// NO_FLAT_FIELD filter: rows with NO_FLAT_FIELD bit (e.g., `strategy`) have NO global manual struct
+// field — walker skips via if-constexpr (sister to EMIT_PER_CORE_COPY skip pattern).
+//
+// Invoked in ControllerConfig_Default<F> alongside FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
+// — auto-flows registry defaults to global manual struct fields; downstream EMIT_PER_CORE_COPY walker
+// propagates global → all cores[c]; per-core override path (PER_CORE_OVERRIDE_INT_FIELDS for the 3 fields
+// in that macro) applies on top via ControllerConfig_ResolveForCore.
+//======================================================================================================
+#define EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                                  applies_to_strategy_cat, applies_to_op_mode_cat, \
+                                                  applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    if constexpr (!((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
+        tt::cfg_assign_field(cfg.name, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_##name]); \
+    }
 
 //======================================================================================================
 // [FOREACH_MANUAL_PER_CORE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]

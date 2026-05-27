@@ -615,7 +615,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
         && state.cores[c].last_exit_prediction
-           > FPN_ToDouble(cfg.exit_threshold)
+           > FPN_ToDouble(cfg.cores[c].exit_threshold)  // Class 25 scope-discipline: per-core read at per-core scope (value-equivalent via walker propagation; future-proofs against per-core override addition)
         && price_d > 0.01) {
         // Slot mask: under partials each core owns 2 slots
         // (legs A + B); single-leg under partial_exit_enabled=0.

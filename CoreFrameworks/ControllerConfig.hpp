@@ -478,17 +478,10 @@ template <unsigned F> struct ControllerConfig {
   // Without this guard, unsorted CSVs (concatenated daily exports,
   // mistyped tick replays) silently produce garbage rolling stats /
   // ROR / tick-rate features at training time.
-  // post-SL cooldown
-  uint32_t sl_cooldown_cycles; // slow-path cycles to pause buying after SL (0 =
-                               // disabled)
-  int sl_cooldown_adaptive;  // 0 = fixed cycles, 1 = scale by trend confidence
-                             // at SL time
-  uint32_t sl_cooldown_base; // minimum cooldown cycles (even on spikes)
-  uint32_t
-      sl_cooldown_extra; // max additional cycles (scaled by trend confidence)
-  // gate death spiral recovery
-  uint32_t idle_reset_cycles; // slow-path cycles with no fill before gate decay
-                              // (0 = disabled)
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: sl_cooldown_cycles + sl_cooldown_base + sl_cooldown_extra
+  // + idle_reset_cycles manual decls DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker
+  // at line ~1326 per H17 STRONG→HARD progression at global surface (Phase Cx-D extension).
+  // Cx-U sister: sl_cooldown_adaptive (was BOOL int) H14-migrated to MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED bit.
   // momentum strategy
   FPN<F>
       momentum_breakout_mult; // buy when price > avg + stddev * this (e.g. 1.5)
@@ -615,8 +608,7 @@ template <unsigned F> struct ControllerConfig {
       kill_switch_daily_loss_pct; // max daily loss before kill (e.g. 0.03 = 3%)
   FPN<F> kill_switch_drawdown_pct; // max drawdown from session peak before kill
                                    // (e.g. 0.05 = 5%)
-  uint32_t kill_recovery_warmup; // slow-path cycles to observe after kill reset
-                                 // before trading
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: kill_recovery_warmup manual decl DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker per H17 STRONG→HARD progression.
   // v5.12.1.A — WS dead-time emergency-flatten policy (live-only).
   // Slow-path reads producer's last_ws_tick_us (set in EngineSharded fan_out),
   // computes (local_now_us - last_ws_tick_us). When the gap exceeds
@@ -651,7 +643,7 @@ template <unsigned F> struct ControllerConfig {
   // boot-time gate). Per-model evaluation in CoreModelZoo_CheckStaleModel
   // (uses ModelHandle.training_timestamp_us — stamp-bound field added
   // in v5.14.8.D via FOREACH_STAMP_BOUND_MODEL_CONST registry).
-  uint32_t model_max_age_hours;
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: model_max_age_hours manual decl DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker.
   // v5.12.1.D — confidence-conditional sizing INFRASTRUCTURE (DEPRECATED v5.14.9.A).
   //   0 = disabled (default; flat risk_pct regardless of prediction P)
   //   1 = linear scale (factor = clamp((P - threshold) / (1 - threshold), 0, 1))
@@ -740,7 +732,7 @@ template <unsigned F> struct ControllerConfig {
   // is the per-tick price-delta threshold below which the slow-path cycle
   // is considered "no material change."
   // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
-  FPN<F>   lazy_rebuild_price_threshold_pct; // default 0.0005 (0.05%)
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: lazy_rebuild_price_threshold_pct manual decl DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker.
   // v5.12.2.D — Treelite AOT inference backend (INFRASTRUCTURE ONLY in
   // this ship; Treelite vendoring + Predict_AOT impl deferred to follow-
   // up). When 1 + stamp body has has_aot_compiled_sha256=1 + the .so
@@ -1033,10 +1025,11 @@ template <unsigned F> struct ControllerConfig {
   // and the kill trips on rounding noise. Default $5. Config syntax:
   // min_kill_loss=5.0
   FPN<F> min_kill_loss;
-  // enable_mtm_kill_switch: 1 = include unrealized P&L in kill eval (mark
-  // to market every slow path); 0 = realized-only (legacy behavior). MTM
-  // catches "position riding down with no SL hit yet" scenarios. Default 1.
-  uint32_t enable_mtm_kill_switch;
+  // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch H14 migration — moved from `uint32_t`
+  // scalar to MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit in cfg.risk_cfg_flags. Default ENABLED
+  // (safety-critical; sister to MASK_RISK_CFG_KILL_SWITCH_ENABLED). MTM catches "position riding
+  // down with no SL hit yet" scenarios. Consumers use BITMAP_IS_SET. Operator-facing cfg key
+  // `enable_mtm_kill_switch=` preserved via FOREACH_RISK_CFG_FLAG legacy_field column.
   // Per-core ML model path. Each core running STRATEGY_ML can load its
   // own model. Default empty = use shared ml_model_path. Config syntax:
   // core_0_model_path=models/aggressive.xgb
@@ -1472,6 +1465,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // int/uint{8,16,32,64}_t from as_int or as_bool; KIND_INT_ENUM from as_int_enum).
   // Defaults baked in registry rows at CfgFieldRegistry.hpp:255-419 — single source of truth.
   FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
+  // v5.15.5.F.4d.1.B.4 Phase Cx-E.1 — sister walker for per-core registry rows' global manual struct
+  // field defaults (lands the "future work" noted at CfgFieldRegistry.hpp:739 comment). Per Registry
+  // default precedence v1.1: registry payload becomes single source of truth; manual init lines for
+  // per-core registry rows (regime_hysteresis + exit_threshold + sl_cooldown_cycles + 9 others) deleted
+  // at Phase Cx-E.3 atomically with this walker landing. Walker skips NO_FLAT_FIELD rows (strategy) via
+  // if-constexpr. Downstream EMIT_PER_CORE_COPY propagates global → cores[c] for all non-NO_FLAT_FIELD rows.
+  FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR)
 
   // v5.15.5.F.4d.1.B.3 Step 8.6 (2026-05-24): poll_interval MATCH — registry INT(100) == manual; DELETED.
   // warmup_ticks DIFFER: registry INT(0, 0, 100000000); manual=128. Manual=128 is operational floor
@@ -1561,12 +1561,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       FPN_FromDouble<F>(0.0005); // 0.05% stddev/price (legacy compat)
   cfg.regime_vol_spike_ratio =
       FPN_FromDouble<F>(2.0);   // variance spike: 2x baseline = volatile
-  cfg.regime_hysteresis = 5;    // 5 slow-path cycles before switch
-  cfg.idle_reset_cycles = 30;   // ~90s idle before gate decay to initial
-  cfg.sl_cooldown_cycles = 5;   // 5 slow-path cycles pause after SL
-  cfg.sl_cooldown_adaptive = 0; // 0 = fixed, 1 = adaptive (backward compat)
-  cfg.sl_cooldown_base = 2;     // min cooldown (spike recovery)
-  cfg.sl_cooldown_extra = 8;    // max extra (strong downtrend)
+  // v5.15.5.F.4d.1.B.4 Cx-E.2/E.3 + Cx-D extension: regime_hysteresis (5; registry payload bumped INT(3)→INT(5) at CfgFieldRegistry.hpp:543) + idle_reset_cycles (30) + sl_cooldown_cycles (5) + sl_cooldown_base (2) + sl_cooldown_extra (8) manual init lines DELETED; defaults now applied via FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR) + FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT) walkers at top of function (Registry default precedence v1.1).
+  // v5.15.5.F.4d.1.B.4 Cx-U: sl_cooldown_adaptive default (OFF) applied via RISK_CFG_FLAG_AUTOPOPULATE_FROM_QUINTUPLE above (MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED bit OFF).
   // momentum strategy
   cfg.momentum_breakout_mult = FPN_FromDouble<F>(1.5); // buy 1.5σ above avg
   // v5.7.5 — MOM quality filters default 0 (off, preserves pre-v5.7 behavior)
@@ -1609,11 +1605,15 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       /*use_exit_model*/               0,
       /*foxml_vol_scaling_enabled*/    0,
       /*lazy_rebuild_enabled*/         0);
-  // v5.14.9.F.3 — risk_cfg_flags defaults: kill_switch ON (safety-first), rest OFF
-  RISK_CFG_FLAG_AUTOPOPULATE_FROM_TRIPLE(cfg.risk_cfg_flags,
+  // v5.14.9.F.3 — risk_cfg_flags defaults: kill_switch ON (safety-first), rest OFF.
+  // v5.15.5.F.4d.1.B.4 Cx-T/U — MTM_KILL_SWITCH_ENABLED defaults ON (safety-critical;
+  // sister to KILL_SWITCH_ENABLED); SL_COOLDOWN_ADAPTIVE_ENABLED defaults OFF (backward compat).
+  RISK_CFG_FLAG_AUTOPOPULATE_FROM_QUINTUPLE(cfg.risk_cfg_flags,
       /*kill_switch_enabled*/          1,
       /*vol_sizing_enabled*/           0,
-      /*ws_dead_time_flatten_enabled*/ 0);
+      /*ws_dead_time_flatten_enabled*/ 0,
+      /*mtm_kill_switch_enabled*/      1,
+      /*sl_cooldown_adaptive_enabled*/ 0);
   // v5.14.9.F.3 — ops_cfg_flags defaults: all flags off (backward compat).
   // v5.15.5.A.7 — Cohort grew from 2 → 4 entries with ACKNOWLEDGE_INFERENCE_CFG_DRIFT
   // + ACKNOWLEDGE_CROSS_BINARY_DRIFT migration. FROM_PAIR macro retired (couldn't
@@ -1652,8 +1652,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       FPN_FromDouble<F>(0.03); // 3% daily loss triggers kill
   cfg.kill_switch_drawdown_pct =
       FPN_FromDouble<F>(0.05); // 5% drawdown from session peak
-  cfg.kill_recovery_warmup =
-      50; // 50 slow-path cycles observation after kill reset
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: kill_recovery_warmup (50) manual init DELETED; auto-populated via FOREACH_GLOBAL_CFG_FIELD walker.
   // vol-scaled sizing
   // vol_sizing_enabled migrated to risk_cfg_flags (default 0)
   cfg.vol_scale_min = FPN_FromDouble<F>(0.25);
@@ -1836,7 +1835,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // Phase 3: per-core kill switch overrides default to 0 (= use shared).
   for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = FPN_Zero<F>();
   cfg.min_kill_loss = FPN_FromDouble<F>(5.0);   // $5 absolute-loss floor for trip
-  cfg.enable_mtm_kill_switch = 1;                // mark-to-market enabled by default
+  // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch default (ENABLED) now applied via RISK_CFG_FLAG_AUTOPOPULATE_FROM_QUINTUPLE above (MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit ON; safety-critical).
   // v5.12.1.A — disabled by default. Operator opts in for live deployment;
   // backtest MUST keep this off (live-only safety net).
   // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (default 0)
@@ -1852,7 +1851,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.15.5.F.4d.1.B.3 Step 8.6: param_max_age_ticks DIFFER — registry INT(100000); manual=1000 (tighter staleness window).
   cfg.param_max_age_ticks = 1000;  // KEEP — registry INT(100000) too permissive; manual=1000 catches stale params sooner
   // v5.14.8.E — stale-model age check (boot-time gate). Default 0 = disabled.
-  cfg.model_max_age_hours = 0;
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: model_max_age_hours (0) manual init DELETED; auto-populated via FOREACH_GLOBAL_CFG_FIELD walker.
   // v5.12.1.D — disabled by default (DEPRECATED v5.14.9.A; replaced by
   // risk_degradation_curve below; kept for back-compat parser shim).
   cfg.risk_scale_by_confidence = 0;
@@ -1887,12 +1886,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // regime histogram unchanged within tolerance under enabled mode.
   // lazy_rebuild_enabled migrated to ml_cfg_flags (default 0)
   // v5.15.5.F.4d.1.B.3 Step 8.6: lazy_rebuild_force_period_us MATCH — registry INT(1000000) == manual; DELETED.
-  cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(0.0005);  // 0.05%
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: lazy_rebuild_price_threshold_pct (0.0005) manual init DELETED; auto-populated via FOREACH_GLOBAL_CFG_FIELD walker + tt::cfg_assign_field<FPN<F>> dispatch.
   // v5.12.2.D — disabled by default; operator opts in after tooling is wired.
   // v5.15.5.F.4d.1.B.3 Step 8.6: use_aot_inference MATCH — registry BOOL(0) == manual; DELETED.
   // v5.13.0 — sell-side ML defaults: disabled; opt-in for paper-test.
   // use_exit_model migrated to ml_cfg_flags (default 0)
-  cfg.exit_threshold = FPN_FromDouble<F>(0.6);
+  // v5.15.5.F.4d.1.B.4 Cx-E.3: exit_threshold (0.6) manual init DELETED; auto-populated via FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR) walker (registry DBL(0.6, 0.0, 1.0) MATCH).
   cfg.exit_signal_model_dir[0] = '\0';
   cfg.calibration_log_path[0] = '\0';
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared

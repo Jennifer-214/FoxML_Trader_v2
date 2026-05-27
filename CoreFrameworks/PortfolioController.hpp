@@ -354,8 +354,10 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
     if (config.valley_model_path[0])
       Model_Load(&ctrl->valley_model, config.valley_model_path, config.ml_backend ? config.ml_backend : 1);
   }
-  // regime detector
-  Regime_Init(&ctrl->regime, config.regime_hysteresis);
+  // regime detector — legacy single_core uses core 0's per-core value
+  // (sister to EngineCommon.hpp:199 SHARDED per-core convention;
+  // value-equivalent via EMIT_PER_CORE_COPY walker propagating global → cores)
+  Regime_Init(&ctrl->regime, config.cores[0].regime_hysteresis);
   ctrl->regime_ror = RORRegressor_Init<F>();
   ctrl->volume_spike_ratio = FPN_Zero<F>();
   ctrl->sl_cooldown_counter = 0;
@@ -659,7 +661,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
 
     // SL cooldown: adaptive or fixed, only on SL exits
     if (reason == 1) {
-        if (ctrl->config.sl_cooldown_adaptive) {
+        if (BITMAP_IS_SET(ctrl->config.risk_cfg_flags, MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED)) {
             double r2 = FPN_ToDouble(ctrl->rolling.price_r_squared);
             double slope = FPN_ToDouble(ctrl->rolling.price_slope);
             double confidence = r2 * (slope < 0.0 ? 1.0 : 0.0);
@@ -2020,7 +2022,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->mean_rev.live_stddev_mult   = new_cfg.offset_stddev_mult;
     ctrl->momentum.live_breakout_mult = new_cfg.momentum_breakout_mult;
     ctrl->momentum.live_vol_mult      = new_cfg.volume_multiplier;
-    ctrl->regime.hysteresis_threshold = new_cfg.regime_hysteresis;
+    ctrl->regime.hysteresis_threshold = new_cfg.cores[0].regime_hysteresis;  // sister to Init at :358
 
     // live strategy switch
     // default_strategy >= 0: explicit strategy selection (0=MR, 1=Momentum, 2=SimpleDip)
