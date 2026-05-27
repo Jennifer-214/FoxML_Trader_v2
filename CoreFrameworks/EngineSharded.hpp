@@ -99,12 +99,15 @@
 #include "ModelValidation.hpp"   // v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg (extracted; PARITY-012)
 #include "../ML_Headers/FeatureRegistryOverlay.hpp"  // v5.14.3.B — FeatureOverlay_PostLoadVerify
 
-namespace tt {
+// Subfolder split landed v5.15.5.F.4d.1.B.6 per file-size-split-discipline.md.
+// Boot.hpp owns: g_engine_sharded_shutdown + g_engine_sharded_gui_quit_ptr +
+// EngineSharded_SignalHandler. Both globals are C++17 `inline` (single shared
+// storage across TUs) per NEW DESIGN_SPEC cpp17-inline-variable-for-header-shared-state.md.
+// Sister .hpp sub-files (Async.hpp / SlowPath.hpp / Run.hpp) land at subsequent
+// Phase B steps; for now this file retains the rest of EngineSharded_Run + utilities.
+#include "EngineSharded/Boot.hpp"
 
-// File-scope shutdown flag the SIGINT handler flips. The handler is installed
-// only while EngineSharded_Run is active, so this flag is only set when the
-// sharded engine is the one that wants to know about it.
-static volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
+namespace tt {
 
 //======================================================================================================
 // [ORDER LATENCY STATS — file-static instance]
@@ -115,25 +118,13 @@ static volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
 // the TUI render loop reads from. OrderManager_Init takes a pointer to it so
 // the OMS can sample each REST round trip into the same counters the TUI
 // already displays.
+//
+// v5.15.5.F.4d.1.B.6: converted from `static` to `inline` per C++17 inline-variable
+// discipline (Decision C; sister to Boot.hpp pattern). Will migrate to
+// EngineSharded/Run.hpp sub-file at Phase B Step B.4; for now stays here as part
+// of incremental subfolder split.
 //======================================================================================================
-static ShardedOrderLatency g_sharded_order_lat;
-
-// Pointer to the GUI's quit_requested flag, set by EngineSharded_Run after
-// g_shared is constructed. The signal handler writes through it so SDL's GUI
-// thread (which loops on quit_requested) exits in lockstep with the engine
-// threads (which loop on g_engine_sharded_shutdown). Without this, Ctrl+C
-// flips g_engine_sharded_shutdown but the GUI thread keeps running until the
-// main thread reaches its post-join cleanup — which can hang if SDL's event
-// dispatch holds resources the joiner is waiting on. Two flags, one signal.
-static volatile sig_atomic_t* g_engine_sharded_gui_quit_ptr = nullptr;
-
-extern "C" inline void EngineSharded_SignalHandler(int sig) {
-    (void)sig;
-    g_engine_sharded_shutdown = 1;
-    if (g_engine_sharded_gui_quit_ptr) {
-        *g_engine_sharded_gui_quit_ptr = 1;
-    }
-}
+inline ShardedOrderLatency g_sharded_order_lat;
 
 //======================================================================================================
 // [TSC CALIBRATION]
