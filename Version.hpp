@@ -5,7 +5,114 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.4"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.6"
+
+// .F.4d.1.B.6 (v5.15.5.F.4d.1.B.6) — EngineSharded.hpp subfolder split (first canonical of
+// subfolder pattern at source-code level) + 2 NEW DESIGN_SPECs + 2 NEW anti-pattern Classes +
+// 2 NEW M4 pillars + file-size-split-discipline.md v1.3 (code-LOC counting methodology) +
+// tests/test_common.hpp shared infrastructure extract (formerly queued as .B.5 PARTIAL;
+// folded into .B.6 per session pivot 2026-05-27).
+//
+// FILE SPLIT (3,202 → 96 INDEX shim + 4 sub-files in CoreFrameworks/EngineSharded/):
+//   - Boot.hpp (67 total / 12 code) — 2 inline globals (g_engine_sharded_shutdown +
+//     g_engine_sharded_gui_quit_ptr) + EngineSharded_SignalHandler (extern "C" inline)
+//   - SlowPath.hpp (188/78) — EngineSharded_SlowPath_DrainPostFill (hoist of drain_post_fill
+//     lambda) + EngineSharded_SlowPath_DrainManualCloses (MERGED LIVE+NO-OP per Decision H;
+//     #ifdef USE_IMGUI_GUI moved INSIDE function body for single source of truth)
+//   - Async.hpp (905/460) — g_engine_drainer_cycle_hist inline global +
+//     EngineSharded_Async_FanOut (hoist of fan_out lambda; 25 explicit args including 6
+//     block-scope-static refs: tick_rings/cores/g_tick_rec/g_depth_shared/g_shared/g_candle_acc) +
+//     EngineSharded_Async_DrainWithSubmit (hoist of drain_with_submit lambda; 4 args) +
+//     ShardedSnapshot_Save explicit include for C++17 two-phase lookup compliance
+//   - Run.hpp (2,436/1,406) — g_sharded_order_lat inline global + EngineSharded_CalibrateTscGhz
+//     + EngineSharded_PinThread + EngineSharded_GetSiblingCPU + EngineSharded_SmartSlowPathPins
+//     + EngineSharded_DumpLatency<F> template + EngineSharded_Run<F, BENCH> orchestrator
+//
+// ALL SUB-FILES UNDER 1,500 CODE-LOC THRESHOLD (per code-LOC counting methodology landed at
+// file-size-split-discipline.md v1.3). Run.hpp at 1,406 code-LOC has 94-line headroom.
+//
+// DECISIONS APPLIED:
+//   - Decision A — subfolder pattern (sub-folder named after original + top-level shim)
+//   - Decision B — lambda hoisting to template<unsigned F> named functions (BENCH NOT
+//     propagated; all Live/Backtest dispatch is cfg-flag-driven, not BENCH-driven)
+//   - Decision C — 4 globals migrated `static` → C++17 `inline` (single shared storage
+//     across TUs; sister to tests/test_common.hpp pattern)
+//   - Decision D — shim include order Boot → SlowPath → Async → Run (verified via
+//     /trace-deps B7 include topology cycle check)
+//   - Decision E — INDEX shim shape (4 sub-file #includes + license + comprehensive
+//     doc-comment header preserving original cold-pickup context)
+//   - Decision G — SH_* color macros stay atomic with their TUI render block usage
+//     (not hoisted separately; stay inside EngineSharded_Run body)
+//   - Decision H — drain_manual_closes LIVE + NO-OP MERGED into single function
+//     (#ifdef inside body; single source of truth; sister to .B.4 EngineCommon_BootPerCore
+//     dual-cfg shape)
+//
+// SHIP-CLOSE CODIFICATIONS LANDED:
+//   - NEW DESIGN_SPEC: cpp17-inline-variable-for-header-shared-state.md (Stage 3 first
+//     canonical; 2 canonical applications: tests/test_common.hpp + Boot.hpp)
+//   - NEW DESIGN_SPEC: single-source-of-truth-discipline.md (Stage 3 first canonical;
+//     Decision H merge as worked example)
+//   - file-size-split-discipline.md v1.2 → v1.3 (subfolder pattern Stage 3 first canonical
+//     reference + code-LOC counting methodology section)
+//   - NEW Class 34: Forward-decl namespace shadow (RECURRING_BUG_PATTERNS catalog;
+//     detection signature + 2 instances at .B.6 Phase B.3 + B.2)
+//   - NEW Class 35: Block-scope statics inaccessible from hoisted header functions
+//     (RECURRING_BUG_PATTERNS catalog; detection signature + 1 instance at .B.6 Phase B.2)
+//   - Class 32 (mega-file accumulation): recurrence_count increment + this ship's 3,202→96
+//     instance documented
+//   - B17 + B18 NEW pillars in implementation-layer-blindspot-taxonomy.md (Stage 2 DRAFT)
+//   - 3 NEW memory rules: feedback_cpp17_inline_variable_for_shared_state_across_tus +
+//     feedback_single_source_of_truth_discipline + feedback_count_code_loc_not_total_lines
+//     + 2 sister memories (feedback_forward_decl_at_global_scope_not_namespace +
+//     feedback_enumerate_block_scope_statics_before_hoist)
+//   - CLAUDE.local.md going-forward rules: 5 NEW entries
+//
+// PATH NOT TAKEN — Phase B.4.1 full Run.hpp sub-split REVERTED (commit 6323c17):
+// Triggered by total-LOC threshold check (Run.hpp 2,436 total = 62% "over"). After agent
+// completed ~30 min of sub-sub-file work, the code-LOC methodology gap surfaced — Run.hpp
+// at 1,406 code-LOC was ALREADY UNDER threshold. Work reverted; methodology lesson codified
+// in file-size-split-discipline.md v1.3. Audit-rigor miss: 4-pillar self-audit pillar 4
+// (novel alternative consideration) should have surfaced "different counting methodology"
+// before triggering split work. Lesson worth remembering across the sprint.
+//
+// QUEUED REMAINING file-size cleanup (post-code-LOC re-analysis 2026-05-27 — scope CUT
+// IN HALF; 6 files genuinely need splits, 6 files dropped as comment-heavy-but-code-fine):
+//   - .B.7 BacktestPanels.hpp (4,639 code-LOC; 3× over; biggest remaining)
+//   - .B.8 ControllerEventLoop + CoreModelZoo + BacktestEngine bundle (3 files; each
+//     ~1.7-1.8k code-LOC just over threshold)
+//   - .B.9 DashboardPanels + PortfolioController bundle (2 files; barely over)
+//   - DROPPED — 6 marginal files UNDER code-LOC threshold (ControllerConfig + EngineTUI +
+//     ModelInference + StrategyParameters + SettingsPanel + OrderManager)
+//
+// TECH_DEBT UPDATES:
+//   - TECH_DEBT-029 → PARTIAL_CLOSURE (1 of 6 actual splits per code-LOC analysis;
+//     full close at .B.9 once 3 remaining ships land)
+//   - TECH_DEBT-130 NEW — 4 defensive nullptr guards in Async.hpp fan_out body
+//     (runtime-dead under USE_IMGUI_GUI; slow-path cadence; optional __builtin_expect
+//     polish OR delete; future post-paper-test if perf data shows need)
+//   - TECH_DEBT-131 NEW — 7 stale `EngineSharded.hpp:LINENO` comment refs in 5 sibling
+//     files (cosmetic comment drift; cleanup at next stale-comment sweep)
+//
+// PHASE C COMPREHENSIVE VERIFICATION — GREEN:
+//   - Build: 5 binaries clean (test + gui + suite + tsan + asan)
+//   - Tests: 3,215 controller_test + 17 depth_recorder_test (both pass / 0 fail; baseline preserved)
+//   - Hot path UNTOUCHED — ExecutionCore.hpp + Strategies/ no diff vs pre-B.6 baseline
+//     (11 occurrences of BG_Evaluate/SG_Evaluate/ExecutionCore_Tick preserved verbatim)
+//   - External callers: 30 files include EngineSharded.hpp; ZERO bypass shim
+//     (all use shim path; subfolder split is transparent)
+//   - /parity-check GREEN — lambda hoists are byte-equivalent under capture→arg rewrite;
+//     wire format + HMAC + train-serve helpers UNTOUCHED
+//   - /dod-audit GREEN — cache-line alignment preserved (H6); branchless preserved (H7);
+//     bit-packing preserved (H14); subfolder pattern correctly applied
+//   - /blindspot-scan GREEN — B7 include topology cycle check PASS (Boot → Async → SlowPath
+//     → Run order works); 2 NEW pillar candidates B17/B18 surfaced + codified
+//   - /bug-check 7/8 Classes CLEAN + 1 YELLOW (Class 28 4 nullptr guards; not blocker; queued
+//     as TECH_DEBT-130)
+//
+// PHASE D first-canonical viability gate: PASS — subfolder pattern is GREEN for .B.7-.B.9
+// propagation (3 remaining file-size cleanup ships; ~3-6 days focused work).
+//
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-05-27-v5.15.5.F.4d.1.B.6-postmortem.md.
 
 // .F.4d.1.B.4 (v5.15.5.F.4d.1.B.4) — Train-serve execution-layer parity structural extract
 // + B-full SHARDED centralized-arch full surface deletion + Phase Cx-cfg-cohort closure
