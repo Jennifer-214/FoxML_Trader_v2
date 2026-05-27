@@ -73,9 +73,19 @@
 // self-containment, but the canonical order here ensures availability for any
 // future sub-file or external consumer.
 //
-// **B.5 (queued) will simplify this file further to a ~5-line INDEX shim** —
-// just the 4 includes plus a single header comment. Current state preserves
-// the original WHAT-THIS-IS narrative for cold-pickup context.
+// **B.5 (LANDED at WIP-B7 2026-05-27):** INDEX shim discipline applied. This
+// file is now the canonical INDEX per `file-size-split-discipline.md`. Rich
+// documentation preserved for cold-pickup context; executable content is
+// `#pragma once` + 4 sub-file includes only. Sub-files do all the work.
+//
+// INDEX shim metadata per file-size-split-discipline.md:
+//   splits_into: [EngineSharded/Boot.hpp, EngineSharded/SlowPath.hpp,
+//                 EngineSharded/Async.hpp, EngineSharded/Run.hpp]
+//   total_loc_at_split: 3202 (pre-B.6)
+//   split_date: 2026-05-27
+//   split_criteria: by-concern (boot / async / slow-path / orchestrator)
+//   first_canonical_application: file-size-split-discipline.md subfolder
+//                                pattern Stage 2 DRAFT -> Stage 3 first canonical
 //======================================================================================================
 
 #pragma once
