@@ -100,12 +100,18 @@
 #include "../ML_Headers/FeatureRegistryOverlay.hpp"  // v5.14.3.B — FeatureOverlay_PostLoadVerify
 
 // Subfolder split landed v5.15.5.F.4d.1.B.6 per file-size-split-discipline.md.
-// Boot.hpp owns: g_engine_sharded_shutdown + g_engine_sharded_gui_quit_ptr +
-// EngineSharded_SignalHandler. Both globals are C++17 `inline` (single shared
-// storage across TUs) per NEW DESIGN_SPEC cpp17-inline-variable-for-header-shared-state.md.
-// Sister .hpp sub-files (Async.hpp / SlowPath.hpp / Run.hpp) land at subsequent
-// Phase B steps; for now this file retains the rest of EngineSharded_Run + utilities.
+// Sub-files in CoreFrameworks/EngineSharded/:
+//   - Boot.hpp: g_engine_sharded_shutdown + g_engine_sharded_gui_quit_ptr +
+//     EngineSharded_SignalHandler. Both globals are C++17 `inline` (single
+//     shared storage across TUs) per NEW DESIGN_SPEC
+//     cpp17-inline-variable-for-header-shared-state.md.
+//   - SlowPath.hpp: EngineSharded_SlowPath_DrainPostFill (hoist of
+//     drain_post_fill lambda) + EngineSharded_SlowPath_DrainManualCloses
+//     (MERGED hoist of drain_manual_closes LIVE+NO-OP variants per Decision H).
+//   - Async.hpp (PENDING Phase B Step B.2): fan_out + drain_with_submit hoist.
+//   - Run.hpp (PENDING Phase B Step B.4): orchestrator + utility fns + DumpLatency.
 #include "EngineSharded/Boot.hpp"
+#include "EngineSharded/SlowPath.hpp"
 
 namespace tt {
 
@@ -2104,116 +2110,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         return total_drained;
     };
 
-    // Phase 6prep sharded c14: feed the ConfidenceScorer with realized returns
-    // from each just-closed position. Bitmap is cleared after drain so the
-    // next Tick starts fresh. ML cores only — non-ML cores ignored even if
-    // the bit is set (defensive: shouldn't happen since only ML strategy
-    // emits trades that produce predictions, but cheap to guard).
-    // Mode 1 per-fill drainer pass — implementation in
-    // ControllerEventLoop.hpp::EventLoop_DrainPostFill. Same producer-
-    // consumer contract: drainer thread (here) consumes what
-    // OrderManager_Tick produces. Extracted to a standalone function so
-    // it's directly unit-testable without standing up a producer thread.
-    auto drain_post_fill = [&state, &oms, &cfg]() {
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — static const fee_rate_taker_d cache DELETED (Class 27
-        // fn-local variant; froze first-cfg-value globally). fee_rate_taker_for_cf scalar
-        // param chain DELETED from EventLoop_DrainPostFill / DrainPostFillOneCore signatures —
-        // OneCore reads per-core fee from o->pre_resolved.fee_rate (Order carries pre-resolved
-        // value via Order_BindPreResolved at submit time). See decision-time-data-binding-
-        // pattern.md + RECURRING_BUG_PATTERNS Class 27.
-        EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles,
-                                 cfg.ensemble_trade_reward_mult,
-                                 cfg.confidence_ic_floor,
-                                 cfg.confidence_ic_floor_window,
-                                 cfg.auto_kill_on_drift,
-                                 // v5.13.4 — sell-side bandit attribution
-                                 BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED));
-    };
-
-    // v4.7.8: manual force-close requests from the GUI. User clicks a
-    // button on the Positions panel → GUI sets manual_close_requested[slot]=1
-    // → drainer reads + emits a synthetic SELL via OrderManager_Submit
-    // bypassing the hot-path SG. Race with the hot path (ExecutionCore
-    // could fire a real SL on the same slot in the same window) is
-    // tolerated: HandleFill checks the bitmap before CloseSlot, so a
-    // double-close becomes a no-op on the second attempt. Slow-path only.
-    //
-    // GUI-only: g_shared lives in the GUI build's #ifdef USE_IMGUI_GUI
-    // block. ANSI TUI / headless builds compile a no-op lambda so the
-    // drainer thread doesn't have to fork on build flags.
+    // drain_post_fill + drain_manual_closes lambdas hoisted to
+    // EngineSharded/SlowPath.hpp at v5.15.5.F.4d.1.B.6 (Phase B Step B.3).
+    //   - EngineSharded_SlowPath_DrainPostFill: thin wrapper around EventLoop_DrainPostFill
+    //   - EngineSharded_SlowPath_DrainManualCloses: MERGED LIVE+NO-OP variants per
+    //     Decision H. #ifdef USE_IMGUI_GUI gate moved INSIDE function body. Single source
+    //     of truth + sister to .B.4 EngineCommon_BootPerCore dual-cfg shape.
+    // shared_ptr declared unconditionally (nullptr under non-GUI build) so the
+    // call site is unconditional: SlowPath_DrainManualCloses(state, oms, cfg,
+    // last_price, shared_ptr). Body's #ifdef inside gates the dereference.
 #ifdef USE_IMGUI_GUI
     TUISharedState* shared_ptr = &g_shared;
-    auto drain_manual_closes = [&state, &oms, &cfg, &last_price, shared_ptr]() {
-        // v5.15.5.C.4 Phase T1 — hoist partial_on out of slot loop.
-        // Drainer-thread-stable predicate; one read per drain_manual_closes
-        // call vs N slots × 1 read.
-        const int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-        for (int slot = 0; slot < MAX_PORTFOLIO_POSITIONS; ++slot) {
-            if (!shared_ptr->manual_close_requested[slot]) continue;
-            shared_ptr->manual_close_requested[slot] = 0;
-            // Skip if no open position at this slot — defensive against
-            // double-clicks or races with auto-close.
-            if ((oms.portfolio.active_bitmap & (uint16_t)(1u << slot)) == 0) {
-                std::fprintf(stderr,
-                    "[manual-close] slot %d: no active position, ignoring\n", slot);
-                continue;
-            }
-            FPN<F> qty = oms.portfolio.positions[slot].quantity;
-            if (FPN_IsZero(qty)) continue;
-            // Map slot → core_id for strategy_id + leg lookup
-            // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
-            // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
-            int core_id = partial_on ? (slot >> 1) : slot;
-            int leg     = partial_on ? (slot & 1)  : 0;
-            if (core_id < 0 || core_id >= state.registered_count) continue;
-            uint8_t strategy_id = state.cores[core_id].strategy_id;
-            // Use latest tick price as fill price for paper mode. Live
-            // mode would route to a real adapter SELL — same Submit call.
-            FPN<F> fill_px = FPN_FromDouble<F>(
-                last_price.load(std::memory_order_relaxed));
-            if (FPN_IsZero(fill_px)) {
-                fill_px = oms.portfolio.positions[slot].entry_price;  // safe fallback
-            }
-            // v4.7.37 (Phase B reordered): push through OMS_PushSubmit so
-            // the drainer thread serializes Submit calls. Manual close is a
-            // GUI-driven event; without funneling, this site races with
-            // other producer-thread Submits when Phase C spawns multiple.
-            // v5.15.5.C.4 Phase D5: routed via OMS_PushExitForSlot helper —
-            // 8-arg market-sell-with-degenerate-TP/SL → 6-arg helper call.
-            tt::OMS_PushExitForSlot(&oms,
-                (int16_t)slot,
-                qty,
-                strategy_id,
-                fill_px,
-                (uint8_t)leg,
-                &cfg.cores[core_id]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-core cfg for pre-resolve at submit
-            // v4.7.19: counter bumps moved to EventLoop_DrainPostFill —
-            // see the doctrine note there. Pre-v4.7.19 we bumped here
-            // BEFORE Submit could fail (queue full, slot already closed,
-            // etc.), causing 7-vs-5 counter-vs-CSV drift. Now bumps fire
-            // exactly when HandleFill writes a CSV row.
-            // Clear the matching ExecutionCore active flag so the hot
-            // path doesn't re-emit on the next tick (race-tolerant —
-            // worst case is one duplicate exit event that HandleFill
-            // dedups via the empty-slot bitmap check).
-            if (state.cores[core_id].core) {
-                if (leg == 0) state.cores[core_id].core->active   = 0;
-                else          state.cores[core_id].core->active_b = 0;
-            }
-            std::fprintf(stderr,
-                "[manual-close] slot %d (core %d leg %s): force-exit @ %.2f, qty %.6f\n",
-                slot, core_id, leg == 0 ? "A" : "B",
-                FPN_ToDouble(fill_px), FPN_ToDouble(qty));
-        }
-    };
 #else
-    // ANSI / headless build: no GUI → no manual close requests possible.
-    // No-op lambda so the drainer loop doesn't need build-flag forks.
-    auto drain_manual_closes = []() {};
+    TUISharedState* shared_ptr = nullptr;
 #endif
 
     std::thread drainer([&state, &oms, &producer_done, &drain_with_submit,
-                         &drain_post_fill, &drain_manual_closes, &cfg] {
+                         &cfg, &last_price, shared_ptr] {
         // v5.15.5.C.4 Phase T1: &cfg added to capture list for DrainerConstants_Init
         // v5.15.5.C.4 Phase F — drainer-local bucket arrays for phase-separated
         // dispatch. ~7 KB stack allocation; reused per cycle (Reset at top of
@@ -2249,7 +2162,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 tt::DrainerConstants_Init(state.registered_count, cfg, oms);
 
             int total_drained = drain_with_submit();
-            drain_manual_closes();
+            EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, last_price, shared_ptr);
             OMS_DrainSubmit(&oms, dc.drain_count);  // v4.7.37; v5.15.5.C.4 T1 uses cached dc.drain_count
 
             // v5.15.5.C.4 Phase F — phase-separated drain (replaces unified
@@ -2261,7 +2174,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
             tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
             tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);  // Phase A
-            drain_post_fill();                                              // Phase A.5
+            EngineSharded_SlowPath_DrainPostFill(state, oms, cfg);                                              // Phase A.5
             tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);   // Phase B
             tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);  // Phase C
 
@@ -2274,7 +2187,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (producer_done.load(std::memory_order_acquire)) {
                 for (int k = 0; k < 16; ++k) {
                     drain_with_submit();
-                    drain_manual_closes();
+                    EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, last_price, shared_ptr);
                     // v5.4.1 Bug B2: same partials-aware drain count as the
                     // main loop above. v5.15.5.C.4 Phase T1: per-iter dc
                     // recompute (state may have shifted across k iterations).
@@ -2286,7 +2199,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // thread-local bucket array declared at lambda entry.
                     tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
                     tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);
-                    drain_post_fill();
+                    EngineSharded_SlowPath_DrainPostFill(state, oms, cfg);
                     tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);
                     tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);
                 }
