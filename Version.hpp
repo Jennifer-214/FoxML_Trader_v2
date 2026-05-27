@@ -5,7 +5,139 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.3"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.4"
+
+// .F.4d.1.B.4 (v5.15.5.F.4d.1.B.4) — Train-serve execution-layer parity structural extract
+// + B-full SHARDED centralized-arch full surface deletion + Phase Cx-cfg-cohort closure
+// (cfg field categorization correction across 11+ instances) (2026-05-27).
+//
+// LANDED across multiple WIPs (engine commits):
+//
+// WIP-12 framework layer (commit ae8dfad) — B-Plus v0.4 generator mode (~250 LOC Python
+// addition); B14/B15 NEW pillars in implementation-layer-blindspot-taxonomy.md Stage 2 DRAFT;
+// 4 NEW sister memories codified (multi-surface deletion ordering / unconditionalization latent
+// assumption / operator-facing doc cohort / archived changelog preservation); 2 memory
+// amendments; Class 33 NEW catalog entry; CLAUDE.local.md 5 going-forward rules + 1 amendment;
+// /readiness Checks 41/42/43; /precoding-audit-gate + /handoff + /blindspot-scan skill
+// amendments. M7 Stage 5 → Stage 6 cadence-locked trigger met.
+//
+// WIP-13 BACKTEST migration (commit 708044d) — Phase C.4 atomic ADD EngineCommon_SlowPathCycleAllCores
+// call + DELETE 6 trio targets per Decision F. CATASTROPHIC double-fire risk surface; ADD + DELETE
+// atomic. -11 LOC.
+//
+// WIP-14a B-full SHARDED operator-facing doc + stale comment cleanup (commit 85b54bc) —
+// cosmetic leaves-first; sister to WIP-14b compile-critical surface delete.
+//
+// WIP-14b B-full SHARDED centralized-arch compile-critical surface delete (commit d53ef53) —
+// 9 files / 367 lines deleted / 84 inserted = net -283 LOC; 12-step leaves-first ordering per
+// B14 multi-surface deletion ordering pillar (FIRST CANONICAL Stage 3); Class 18 cohort wrapper
+// deletion via F17 (3 sister wrappers EventLoop_TimeExit/_TrailingSLRatchet/_BreakevenOnProfit);
+// D18 full surface deletion per `feedback_backwards_compat_not_default_concern` FIRST CANONICAL
+// application; closes PARITY-026/027/028/029/030/031 + multiple cfg/parser/GUI/test surfaces.
+//
+// WIP-15 PARITY-031 ordering closure + parity_harness extension (commit 4c48d5d) — Phase C.4.5
+// 4-consumer fc_ctx.regime_state cohort closed via per-core BACKTEST_REGIME_SAMPLE_CORE read
+// pattern (sister to LIVE per-core regime classification); parity_harness Phase C.6 extension
+// adds --pay-fees-in-bnb CLI + cross-path total_fees BPS equality check; partial close
+// TECH_DEBT-120/-122 (full close at .F.5.C).
+//
+// WIP-16 Phase Cx-cfg-cohort closure (commits b8bba2b + 9d18eac engine + ccb3692 workspace) —
+// cfg field categorization correction across 11+ instances per Path 2 v5 final scope:
+// - 9 GLOBAL_ONLY_READERS per-core registry rows DELETED at FOREACH_PER_CORE_CFG_FIELD
+//   (kill_recovery_warmup + sl_cooldown_base/extra/cycles + idle_reset_cycles + model_max_age_hours
+//   + lazy_rebuild_price_threshold_pct + enable_mtm_kill_switch + sl_cooldown_adaptive)
+// - 7 of those 9 fields MIGRATED to FOREACH_GLOBAL_CFG_FIELD with operational manual values as
+//   registry payload (H17 STRONG→HARD progression at global surface per roadmap)
+// - 2 H14 violations CLOSED via cfg-flag bitmap migration (enable_mtm_kill_switch +
+//   sl_cooldown_adaptive → MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED + MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED
+//   in risk_cfg_flags bitmap; sister to MASK_RISK_CFG_KILL_SWITCH_ENABLED PARITY-026 hotfix)
+// - NEW EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR walker (lands "future work" noted at
+//   CfgFieldRegistry.hpp:739 pre-cycle comment); auto-populates per-core registry rows' global
+//   manual struct field defaults at ControllerConfig_Default<F> time
+// - Class 25 cosmetic consumer fix at EngineCommon.hpp:618 (exit_threshold per-core scope; value-
+//   equivalent; future-proofs against per-core override addition)
+// - regime_hysteresis PortfolioController.hpp:358/:2023 cosmetic legacy single_core migration
+// - Registry default precedence v1.1 procedure applied: regime_hysteresis registry payload bumped
+//   INT(3)→INT(5) to match operational manual; 11 manual init lines DELETED (auto-populate via
+//   walker)
+//
+// NEW DESIGN_SPECS landed:
+// - framework-patterns/cfg-field-categorization-discipline.md (Stage 2 DRAFT v1.0 → Stage 3
+//   first-canonical at this ship close per pattern-codification-lifecycle.md; 4-category decision
+//   tree + 5-step re-categorization migration + sister-pattern co-location + DOD audit)
+//
+// NEW SISTER MEMORIES codified:
+// - feedback_cfg_field_categorization_at_registry_add_time + feedback_categorize_by_consumer_pattern_not_field_name
+//   + feedback_operator_pushback_as_audit_signal + feedback_no_question_boxes (M7 escalation
+//   candidate worked example) + feedback_motivated_collaborator_for_caramel "right not fast"
+//   articulation amendment.
+//
+// NEW SKILL EXTENSIONS:
+// - /precoding-audit-gate Stage 4 synthesis extension (M7 4th canonical structural enforcement of
+//   `feedback_audit_canonical_sister_before_new_infra` at synthesis-stage planning surface)
+// - /readiness Check 44 sidecar (cfg field categorization plan-time verification; 5-question
+//   consumer-pattern verify + 4-category decision tree + 5-step re-categorization migration)
+//
+// CI INFRASTRUCTURE:
+// - check_per_core_registry_integrity.py Check 8 scaffold (M7 4th canonical; mechanical detection
+//   patterns at sister mini-ship per token-budget pragmatism; discipline ENFORCED at /readiness
+//   Check 44 plan-time + Stage 4 synthesis stage + DESIGN_SPEC layer)
+//
+// CLAUDE.md / CLAUDE.local.md STRUCTURAL ENFORCEMENT:
+// - CLAUDE.md "How to..." table row: substantive plan body amendment triggers
+//   /precoding-audit-gate re-fire BEFORE coding
+// - CLAUDE.local.md going-forward rule index entry: audit re-fire at substantive plan amendment
+//   (sister to feedback_iteration_spiral_signals_audit_meta_gap recognition trigger)
+// - /precoding-audit-gate SKILL.md WHEN-TO-USE expanded with substantive-amendment trigger
+//
+// META-DISCIPLINE PROMOTIONS at .B.4 ship close:
+// - M5 train-serve EXECUTION-LAYER parity Stage 2 DRAFT → Stage 3 first-canonical (this ship's
+//   EngineCommon_BootPerCore + EngineCommon_SlowPathCycleOneCore + SlowPathCycleAllCores extract
+//   = canonical reference; sister memory feedback_train_serve_execution_layer_meta_gap)
+// - M6 body-content-enumeration-at-plan-time Stage 2 DRAFT → Stage 3 first-canonical
+// - M7 structural-enforcement-when-memory-insufficient Stage 5 → Stage 6 cadence-locked
+//   (B-Plus v0.2/v0.3/v0.4 = 3 canonical applications; cfg-field-categorization-discipline +
+//   CI Check 8 + /readiness Check 44 = 4th canonical application)
+// - B14 multi-surface deletion ordering Stage 2 DRAFT → Stage 3 first-canonical (engine_arch
+//   51-site cohort delete at WIP-14b = canonical reference)
+// - B15 unconditionalization latent assumption STAYS Stage 2 DRAFT (1st instance only at
+//   EngineSharded.hpp:2484 boot-spawn gate; Stage 3 promotion deferred to 2nd canonical per
+//   feedback_proactive_novel_alternative_consideration 2-instance threshold)
+//
+// CLASS N CATALOG UPDATES at .B.4 ship close:
+// - Class 14 stays 12 (B-Plus v0.3/v0.4 prevents new fabrications structurally at COMMIT layer)
+// - Class 18 recurrence_count 7 → 8 (F17 sister-wrapper cohort-deletion at WIP-14b)
+// - Class 25 recurrence_count 2 → 3 (CONFIRMED RECURRING; exit_threshold cosmetic fix at WIP-16)
+// - Class 26 recurrence_count 1 → 11 (MANDATORY structural fix threshold met; 10 new worked
+//   instances at WIP-16 Phase Cx-D + Cx-T/U closure)
+// - Class 28 canonical closures entry (8-branch elimination at WIP-14b = NET branchless improvement
+//   per H20 discipline)
+// - Class 33 NEW catalog entry (consumer-enumeration undercount on deletion; codified at WIP-12;
+//   sister to Class 14 flipped; recurrence_count = 2 instances)
+//
+// 7+ PARITY ENTRIES CLOSED:
+// - PARITY-026 (kill_switch live-safety hole; closed by hotfix .B.2.h1 pre-cycle)
+// - PARITY-027/028/029/030 (boot-time train-serve asymmetry; closed by EngineCommon_BootPerCore
+//   structural extract at WIP-7/8/9)
+// - PARITY-031 (regime sample ordering; closed by Phase C.4.5 at WIP-15 via per-core read pattern)
+// - PARITY-032 (BREAKEVEN_ON_PROFIT cached-gate dispatch; closed by D1-B at WIP-11)
+//
+// MULTIPLE TECH_DEBT ENTRIES CLOSED/PARTIAL:
+// - TECH_DEBT-119 CLOSED structurally (EngineCommon extract = closes 4 CRITs + 3 HIGHs)
+// - TECH_DEBT-120/-122 PARTIAL close at Phase C.6 parity_harness extension; full close at .F.5.C
+//
+// SCOPE EXPANSION at v1.7.6 mid-cycle (operator-driven; no defer pattern):
+// - Phase Cx-cfg-cohort NEW (per operator question on regime_hysteresis; cascaded to comprehensive
+//   cfg field categorization correction; 5 path iterations Path 1 → 2 → 2 v3 → 2 v4 → 2 v5
+//   final; iteration spiral itself became evidence for structural enforcement codification at
+//   Cx-K Stage 4 synthesis + Cx-L/M/N CLAUDE.md amendment-trigger updates)
+//
+// Tests: 3215 pass / 0 fail (-2 from .B.3 baseline; engine_arch round-trip tests intentionally
+// deleted at WIP-14b per topology test surface removal). Build: 6 dirs PASS (test/gui/suite/tsan/
+// asan/lat). 7 CI checks PASS (Check 8 pending sister-ship mechanical impl).
+// Hot path UNTOUCHED (per H7/H8 budgets; verified via calls_graph_diff.sh verify).
+//
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-05-27-v5.15.5.F.4d.1.B.4-postmortem.md.
 
 // .F.4d.1.B.3 (v5.15.5.F.4d.1.B.3) — Legacy empty-out + Path C bash CLI deletion +
 // Phase K cleanups (2026-05-24). Closes .F.4d.1.B split (.B.1 framework + .B.2 cohort
