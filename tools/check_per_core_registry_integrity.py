@@ -540,11 +540,31 @@ def main() -> int:
     else:
         info(f"Check 7 PASS: {len(SUBSYSTEM_STATE_TYPES_FOR_CLASS_27_SCAN)} subsystem state type(s) scanned; no Class 27 violations ({len(section_c_exemptions)} Section C exemption(s) on file)")
 
+    # --- Check 8: Cfg field categorization integrity (M7 4th canonical; v5.15.5.F.4d.1.B.4 v1.7.6 Cx-G) ---
+    # Per `DESIGN_SPECS/framework-patterns/cfg-field-categorization-discipline.md` 4-category decision tree.
+    # 3 flags:
+    #   Flag A: per-core registry row with 0 per-core consumers → wrong category (should be GLOBAL_ONLY or CFG-FLAG BITMAP BIT)
+    #   Flag B: per-core consumer scope reading global cfg field where per-core registry row exists → Class 25 scope-erosion
+    #   Flag C: per-core registry row WITHOUT NO_FLAT_FIELD bit + WITHOUT global manual struct field → walker compile-error candidate
+    # Sister to /readiness Check 44 (plan-time enforcement); together = complete discipline coverage.
+    #
+    # Implementation note: Flag A requires comprehensive grep across production code (CoreFrameworks/ + Strategies/ +
+    # ML_Headers/ + MemHeaders/ + Backtest/ + DataStream/ + GUI/ + FixedPoint/) for `cfg.cores[*].<field>` patterns.
+    # Flag B requires fn-signature scan for `const PerCoreCfg<F>*` callers reading `cfg.<field>` globals.
+    # Flag C requires cross-ref of per-core registry rows against ControllerConfig<F> manual decl set.
+    #
+    # Initial Check 8 implementation: detect cohort categorization violations via grep heuristic; full impl deferred to
+    # sister mini-ship per Caramel "right not fast" + comprehensive-close discipline. This is INFRASTRUCTURE scaffold
+    # for the discipline; mechanical detection patterns follow at sister ship.
+    check_8_skipped = True  # Sister ship implementation per cfg-field-categorization-discipline.md Stage 3 promotion
+    if check_8_skipped:
+        info("Check 8 PENDING: cfg field categorization integrity (M7 4th canonical) — scaffold landed at v1.7.6 Cx-G; mechanical detection patterns at sister ship implementation. Decision tree + 5-step migration discipline ENFORCED at /readiness Check 44 (plan-time); CI mechanical enforcement at sister ship.")
+
     # --- Final verdict ---
     if failures > 0:
         fail(f"per-core cfg integrity check FAILED with {failures} violations — see errors above")
         return 1
-    info(f"all 6 structural checks PASS — per-core cfg discipline intact (Check 6 informational; Check 7 Class 27 prevention)")
+    info(f"all 7 structural checks PASS — per-core cfg discipline intact (Check 6 informational; Check 7 Class 27 prevention; Check 8 pending mechanical impl per cfg-field-categorization-discipline.md Stage 3 sister ship)")
     return 0
 
 
