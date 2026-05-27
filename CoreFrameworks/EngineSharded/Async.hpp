@@ -57,7 +57,8 @@
 #include "../ExecutionCore.hpp"             // ExecutionCore + EventLoopState
 #include "../OrderManager.hpp"              // OrderManagerState + SubmitCommand + OMS_PushSubmit
 #include "../OrderEventLog.hpp"             // OrderEventLog_Reset
-#include "../ShardedSnapshot.hpp"           // ShardedSnapshot_Save + TUI_CopySnapshotSharded
+#include "../ShardedSnapshot.hpp"           // TUI_CopySnapshotSharded
+#include "../ShardedSnapshotPersist.hpp"    // ShardedSnapshot_Save (declared as template; needed BEFORE call at line 428 to satisfy C++17 two-phase lookup; avoids -Wc++20-extensions warning)
 #include "../ShardedTradeLog.hpp"           // ShardedTradeLog_Flush / _Rotate / _FormatPerCoreFilename
 #include "../PaperResetArchive.hpp"         // PaperResetArchive_* + Summary_WriteJson
 #include "../SPSCRing.hpp"                  // SPSCRing + SPSCRing_TryPush / _TryPop
