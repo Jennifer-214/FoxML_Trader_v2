@@ -413,21 +413,17 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // 1034-1035 of PortfolioController.hpp).
         uint32_t          warmup_ticks;
         uint32_t          min_warmup_samples;
-        // v5.14.5.B — per-collection regime state for parity with live
-        // serve path. Live serve runs Regime_Classify every slow-path
-        // cycle (universalized in v5.14.5.B.0.A); training matrix
-        // collector mirrors via this state to populate ctx.current_regime
-        // identically. Without this, regime_class_onehot would train
-        // on constant 0 and serve with actual classifications (silent
-        // train-serve drift).
-        RegimeState<BACKTEST_FP> regime_state;
     };
     FeatureCollectCtx fc_ctx{};
     fc_ctx.results            = results;
     fc_ctx.cfg                = &cfg;
     fc_ctx.warmup_ticks       = cfg.warmup_ticks;
     fc_ctx.min_warmup_samples = cfg.min_warmup_samples;
-    Regime_Init(&fc_ctx.regime_state, (int)cfg.regime_hysteresis);
+    // Train-serve regime parity via per-core read (PARITY-031 closure):
+    // EngineCommon_SlowPathCycleAllCores fires Regime_Classify per-core
+    // before this callback runs (ShardedBacktestDriver tick ordering);
+    // collector reads state.cores[BACKTEST_REGIME_SAMPLE_CORE].regime_state
+    // at feature-pack time — bytewise-identical to live serve path.
 
     if (run_cfg->collect_features) {
         drv.hook_ctx = &fc_ctx;
@@ -481,17 +477,16 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // weights. Features_PackAll returns -1 sentinel on validation
             // failure.
             {
-                // v5.14.5.B — classify regime BEFORE feature pack so
-                // ctx.current_regime reflects the prior cycle's hysteresed
-                // state (matches live serve path semantics: Regime_Classify
-                // runs each slow-path cycle, then features are packed).
-                if (d->rolling && d->rolling_long && d->regime_ror && d->ema_price) {
-                    Regime_Classify(&fc->regime_state, &sig, fc->cfg);
-                }
+                // PARITY-031 closure (v5.15.5.F.4d.1.B.4): regime classified
+                // per-core inside EngineCommon_SlowPathCycleAllCores (fired
+                // before this callback by ShardedBacktestDriver tick ordering);
+                // read from canonical sample core for ctx.current_regime —
+                // bytewise-identical to pre-.B.4 fc_ctx.regime_state semantic
+                // (single regime per feature collector tick).
                 FeatureComputeCtx<BACKTEST_FP> ctx{};
                 ctx.signals       = &sig;
                 ctx.short_rolling = d->rolling;
-                ctx.current_regime = fc->regime_state.current_regime;
+                ctx.current_regime = d->state->cores[BACKTEST_REGIME_SAMPLE_CORE].regime_state.current_regime;
                 int n = Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
                 if (n < 0) {

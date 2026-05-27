@@ -24,9 +24,17 @@
 //
 // Usage:
 //   parity_harness <tick_file.csv> [config_file] [--tolerance 1e-6]
+//                                                [--pay-fees-in-bnb 0|1]
 //
 // Single tick file at a time — call from a shell script for the multi-
 // file sweep the plan calls for ("3 representative tick files").
+//
+// --pay-fees-in-bnb override (v5.15.5.F.4d.1.B.4 WIP-15 Phase C.6 — PARITY-030
+// regression cohort): forces cfg.pay_fees_in_bnb on both runs. ApplyBnbDiscount
+// (EngineCommon helper; called once at boot in both LIVE + BACKTEST per WIP-13
+// migration) mutates per-core fee_rate_maker/taker to 0.75 × baseline. Train-
+// serve parity verified by cross-path total_fees BPS equality below — if BNB
+// discount applied asymmetrically across paths, total_fees would diverge.
 //======================================================================================================
 
 #include <cstdio>
@@ -94,7 +102,8 @@ static void compute_diff_stats(const BacktestResults* a,
 static int run_one_path(BacktestResults* out_results,
                          const char* tick_file,
                          const char* config_path,
-                         int engine_mode_value) {
+                         int engine_mode_value,
+                         int pay_fees_in_bnb_override) {
     BacktestResults_Init(out_results);
 
     BacktestRunConfig run;
@@ -105,6 +114,11 @@ static int run_one_path(BacktestResults* out_results,
     run.use_config_override = 1;
     run.config_override = ControllerConfig_Load<BACKTEST_FP>(config_path);
     run.config_override.engine_mode = engine_mode_value;
+    // PARITY-030 regression cohort (Phase C.6): override pay_fees_in_bnb when
+    // operator passes --pay-fees-in-bnb. Value < 0 = inherit cfg setting.
+    if (pay_fees_in_bnb_override >= 0) {
+        run.config_override.pay_fees_in_bnb = (pay_fees_in_bnb_override != 0) ? 1 : 0;
+    }
     run.collect_features = 1;
     run.label_type = LABEL_WIN_LOSS;
     run.label_tp_pct = 1.5;
@@ -125,35 +139,45 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tick_file.csv> [config_file] [--tolerance 1e-6]\n"
+                "                                       [--pay-fees-in-bnb 0|1]\n"
                 "\n"
                 "Runs the same tick file through both engine_mode=single_core\n"
                 "(legacy) and engine_mode=sharded paths, then diffs the\n"
-                "feature_matrix output. Exit 0 = parity. Exit 1 = drift.\n",
+                "feature_matrix output + cross-path total_fees equality.\n"
+                "Exit 0 = parity. Exit 1 = drift.\n",
                 argv[0]);
         return 2;
     }
     const char* tick_file   = argv[1];
     const char* config_path = (argc >= 3 && argv[2][0] != '-') ? argv[2] : "backtest.cfg";
     double tolerance = 1e-6;
+    int    pay_fees_in_bnb_override = -1;  // -1 = inherit cfg; 0/1 = override
     for (int i = 1; i < argc - 1; i++) {
         if (strcmp(argv[i], "--tolerance") == 0) {
             tolerance = atof(argv[i + 1]);
-            break;
+        } else if (strcmp(argv[i], "--pay-fees-in-bnb") == 0) {
+            pay_fees_in_bnb_override = atoi(argv[i + 1]);
         }
     }
 
-    fprintf(stderr, "[parity-harness] tick_file = %s\n", tick_file);
-    fprintf(stderr, "[parity-harness] config    = %s\n", config_path);
-    fprintf(stderr, "[parity-harness] tolerance = %.1e\n", tolerance);
+    fprintf(stderr, "[parity-harness] tick_file        = %s\n", tick_file);
+    fprintf(stderr, "[parity-harness] config           = %s\n", config_path);
+    fprintf(stderr, "[parity-harness] tolerance        = %.1e\n", tolerance);
+    if (pay_fees_in_bnb_override >= 0) {
+        fprintf(stderr, "[parity-harness] pay_fees_in_bnb  = %d (override)\n",
+                pay_fees_in_bnb_override);
+    }
 
     fprintf(stderr, "[parity-harness] running LEGACY (engine_mode=single_core)...\n");
     BacktestResults legacy;
-    int n_legacy = run_one_path(&legacy, tick_file, config_path, ENGINE_MODE_SINGLE_CORE);
+    int n_legacy = run_one_path(&legacy, tick_file, config_path, ENGINE_MODE_SINGLE_CORE,
+                                 pay_fees_in_bnb_override);
     fprintf(stderr, "[parity-harness] legacy: %d samples\n", n_legacy);
 
     fprintf(stderr, "[parity-harness] running SHARDED (engine_mode=sharded)...\n");
     BacktestResults sharded;
-    int n_sharded = run_one_path(&sharded, tick_file, config_path, ENGINE_MODE_SHARDED);
+    int n_sharded = run_one_path(&sharded, tick_file, config_path, ENGINE_MODE_SHARDED,
+                                  pay_fees_in_bnb_override);
     fprintf(stderr, "[parity-harness] sharded: %d samples\n", n_sharded);
 
     int passed = 1;
@@ -232,11 +256,37 @@ int main(int argc, char** argv) {
         }
     }
 
+    // PARITY-030 cross-path total_fees equality check (Phase C.6 PARTIAL
+    // closure; per-fill o->pre_resolved.fee_rate assertion deferred to
+    // .F.5.C — requires on_fill hook in ShardedBacktestDriver + Order
+    // pre_resolved exposure that exceed parity_harness scope). Cross-path
+    // total_fees BPS equality is the aggregate verification: if BNB
+    // discount applied asymmetrically across legacy/sharded paths, totals
+    // would diverge. BPS tolerance = 1e-4 (0.01 BPS = sub-cent on $100
+    // total_fees aggregate).
+    fprintf(stderr, "\n[parity-harness] total_fees cross-path equality check:\n");
+    fprintf(stderr, "  legacy.stats.total_fees  = %.4f\n", legacy.stats.total_fees);
+    fprintf(stderr, "  sharded.stats.total_fees = %.4f\n", sharded.stats.total_fees);
+    double fee_abs_diff = fabs(legacy.stats.total_fees - sharded.stats.total_fees);
+    double fee_mag = fmax(fabs(legacy.stats.total_fees), fabs(sharded.stats.total_fees));
+    double fee_rel_diff = (fee_mag > 1e-12) ? (fee_abs_diff / fee_mag) : fee_abs_diff;
+    const double FEE_BPS_TOL = 1e-4;
+    if (fee_rel_diff > FEE_BPS_TOL) {
+        fprintf(stderr,
+                "  FAIL — total_fees diverged (abs=%.6e rel=%.6e > %.0e)\n",
+                fee_abs_diff, fee_rel_diff, FEE_BPS_TOL);
+        passed = 0;
+    } else if (fee_mag > 1e-12) {
+        fprintf(stderr, "  PASS — total_fees BPS equality (rel=%.3e)\n", fee_rel_diff);
+    } else {
+        fprintf(stderr, "  (both zero — no fills under this cfg/tick combo)\n");
+    }
+
     BacktestResults_Free(&legacy);
     BacktestResults_Free(&sharded);
 
     if (passed) {
-        fprintf(stderr, "\n[parity-harness] PASS — features match within tolerance\n");
+        fprintf(stderr, "\n[parity-harness] PASS — features + total_fees match within tolerance\n");
         return 0;
     } else {
         fprintf(stderr, "\n[parity-harness] FAIL — drift detected (see above)\n");
