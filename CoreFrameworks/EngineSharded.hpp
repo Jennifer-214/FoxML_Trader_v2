@@ -62,26 +62,16 @@
 //     drain_with_submit lambda). File-local-static refs (cores[], tick_rings[],
 //     g_tick_rec, g_depth_shared, g_shared, g_candle_acc) passed explicitly
 //     because they cannot be referenced from header scope.
-//   - Run.hpp: EngineSharded_Run<F, BENCH> main orchestrator template (~1500 LOC).
-//     Includes its own Run/ second-tier subfolder with peer sub-sub-files
-//     (Decision: split at .B.4.1 to bring Run.hpp under 1500-line source-header
-//     threshold per file-size-split-discipline.md):
-//       - Run/Utilities.hpp: EngineSharded_CalibrateTscGhz + EngineSharded_PinThread +
-//         EngineSharded_GetSiblingCPU + EngineSharded_SmartSlowPathPins.
-//       - Run/Latency.hpp: g_sharded_order_lat inline singleton +
-//         EngineSharded_DumpLatency<F>.
-//       - Run/AnsiTui.hpp: EngineSharded_AnsiTui_RenderLoop<F> — ANSI-build TUI
-//         render loop body (non-GUI build only).
-//       - Run/SlowPathThreads.hpp: EngineSharded_SpawnSlowPathThreads<F> — per-core
-//         slow-path thread spawn + smart-pin selection + hot-swap pickup body.
-//       - Run/Shutdown.hpp: EngineSharded_Shutdown_PreJoin<F> +
-//         EngineSharded_Shutdown_PostJoin<F, BENCH> — engine shutdown helpers.
+//   - Run.hpp: g_sharded_order_lat inline global + EngineSharded_CalibrateTscGhz
+//     + EngineSharded_PinThread + EngineSharded_GetSiblingCPU +
+//     EngineSharded_SmartSlowPathPins + EngineSharded_DumpLatency<F> +
+//     EngineSharded_Run<F, BENCH> (main orchestrator template).
 //
-// **Decision D — include order:** Boot → SlowPath → Async → Run. Run.hpp's
-// EngineSharded_Run body references hoisted helpers + inline globals from the
-// other three sub-files + its own Run/ sub-sub-files. Sub-file includes are
-// redundant inside Run.hpp for self-containment, but the canonical order here
-// ensures availability for any future sub-file or external consumer.
+// **Decision D — include order:** Boot → SlowPath → Async → Run.
+// Run.hpp's EngineSharded_Run body references hoisted helpers + inline globals
+// from the other three; Run.hpp also redundantly includes those sub-files for
+// self-containment, but the canonical order here ensures availability for any
+// future sub-file or external consumer.
 //
 // **B.5 (LANDED at WIP-B7 2026-05-27):** INDEX shim discipline applied. This
 // file is now the canonical INDEX per `file-size-split-discipline.md`. Rich

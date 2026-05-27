@@ -127,31 +127,210 @@
 #include "SlowPath.hpp" // EngineSharded_SlowPath_DrainPostFill / _DrainManualCloses
 #include "Async.hpp"    // g_engine_drainer_cycle_hist / EngineSharded_Async_FanOut / _DrainWithSubmit
 
-// v5.15.5.F.4d.1.B.6 Phase B Step B.4.1: sub-sub-files in Run/ subfolder.
-// Second-tier subfolder split to bring Run.hpp under the 1,500-line source-header
-// threshold per file-size-split-discipline.md. All sub-sub-files are pure helper
-// translation units consumed exclusively by EngineSharded_Run body.
-#include "Run/Utilities.hpp"   // EngineSharded_CalibrateTscGhz / _PinThread / _GetSiblingCPU / _SmartSlowPathPins
-#include "Run/Latency.hpp"     // g_sharded_order_lat inline singleton + EngineSharded_DumpLatency<F>
-#include "Run/AnsiTui.hpp"     // EngineSharded_AnsiTui_RenderLoop<F> — ANSI-build TUI render loop body
-#include "Run/SlowPathThreads.hpp"  // EngineSharded_SpawnSlowPathThreads<F> — per-core slow-path thread spawn block
-#include "Run/Shutdown.hpp"    // EngineSharded_Shutdown_PreJoin<F> / _PostJoin<F, BENCH> — engine shutdown helpers
-
 // parent_index: CoreFrameworks/EngineSharded.hpp
 
 namespace tt {
 
-// v5.15.5.F.4d.1.B.6 Phase B Step B.4.1: extracted to Run/Utilities.hpp
-// (EngineSharded_CalibrateTscGhz + EngineSharded_PinThread +
-// EngineSharded_GetSiblingCPU + EngineSharded_SmartSlowPathPins).
-// Atomic extraction unit: all four utilities are peers (boot-time topology +
-// thread placement helpers). Run.hpp body still references them via this
-// include; no caller-side changes needed.
+//======================================================================================================
+// [ORDER LATENCY STATS — file-static instance]
+//======================================================================================================
+// the type and helper functions live in CoreFrameworks/ShardedOrderLatency.hpp
+// (extracted during the OMS phase 01 refactor so OrderManager.hpp can call
+// Sample without circular includes). this file just owns the singleton instance
+// the TUI render loop reads from. OrderManager_Init takes a pointer to it so
+// the OMS can sample each REST round trip into the same counters the TUI
+// already displays.
 //
-// v5.15.5.F.4d.1.B.6 Phase B Step B.4.1: g_sharded_order_lat inline singleton +
-// EngineSharded_DumpLatency<F> extracted to Run/Latency.hpp (atomic extraction
-// unit: global + template that reads it). Same caller-shape preserved via
-// include above; no migration step needed for EngineSharded_Run body.
+// v5.15.5.F.4d.1.B.6: converted from `static` to `inline` per C++17 inline-variable
+// discipline (Decision C; sister to Boot.hpp pattern). Moved from EngineSharded.hpp
+// to here at Phase B Step B.4 — co-located with DumpLatency + EngineSharded_Run final
+// dump that reads it (the only consumers).
+//======================================================================================================
+inline ShardedOrderLatency g_sharded_order_lat;
+
+//======================================================================================================
+// [TSC CALIBRATION]
+//======================================================================================================
+// Quick TSC frequency calibration so the latency dump can show ns alongside
+// raw cycles. ~50ms of busy work, plenty accurate for diagnostic display.
+//======================================================================================================
+static inline double EngineSharded_CalibrateTscGhz() {
+    auto wall0 = std::chrono::high_resolution_clock::now();
+    uint32_t hi0, lo0;
+    asm volatile("mfence\n\tlfence\n\trdtsc\n\t" : "=a"(lo0), "=d"(hi0));
+    uint64_t t0 = ((uint64_t)hi0 << 32) | lo0;
+
+    volatile uint64_t x = 0;
+    for (uint64_t i = 0; i < 50'000'000; ++i) x ^= i;
+    (void)x;
+
+    uint32_t hi1, lo1;
+    asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo1), "=d"(hi1) : : "rcx");
+    uint64_t t1 = ((uint64_t)hi1 << 32) | lo1;
+    auto wall1 = std::chrono::high_resolution_clock::now();
+
+    double wall_ns = std::chrono::duration<double, std::nano>(wall1 - wall0).count();
+    double cycles = (double)(t1 - t0);
+    return cycles / wall_ns;  // GHz
+}
+
+//======================================================================================================
+// [PIN THREAD TO CORE]
+//======================================================================================================
+// Best-effort core pinning. Returns 1 on success, 0 on failure (logged but
+// not fatal — if pinning fails the engine still runs, just with potentially
+// worse tail latency due to scheduler migration).
+//======================================================================================================
+static inline int EngineSharded_PinThread(int cpu_id) {
+#ifdef __linux__
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu_id, &cpuset);
+    int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+    if (rc != 0) {
+        fprintf(stderr, "[sharded] WARN: pthread_setaffinity_np(%d) failed: %d\n", cpu_id, rc);
+        return 0;
+    }
+    return 1;
+#else
+    (void)cpu_id;
+    return 0;
+#endif
+}
+
+//======================================================================================================
+// [SMART SLOW-PATH CPU PIN ASSIGNMENT — v5.1.5]
+//======================================================================================================
+// Read /sys/devices/system/cpu/cpuN/topology/thread_siblings_list to learn
+// which CPUs share a physical core (SMT siblings). Choose slow-path pins
+// that AVOID landing on SMT siblings of the producer/hot-path/drainer
+// threads — those siblings contend with the busiest threads on the box
+// for L1/L2 cache and execution units.
+//
+// Returns 1 on success (writes N pins to out_pins[0..N-1]), 0 on failure
+// (caller should fall back to the simple round-robin auto-derive).
+//======================================================================================================
+static inline int EngineSharded_GetSiblingCPU(int cpu_id) {
+#ifdef __linux__
+    char path[256];
+    snprintf(path, sizeof(path),
+        "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu_id);
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    char buf[64] = {0};
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return -1; }
+    fclose(f);
+    // Format: "cpu_id,sibling_id" or "cpu_id-sibling_id" — parse two ints.
+    int a = -1, b = -1;
+    if (sscanf(buf, "%d,%d", &a, &b) == 2 || sscanf(buf, "%d-%d", &a, &b) == 2) {
+        if (a == cpu_id) return b;
+        if (b == cpu_id) return a;
+    }
+    return -1;  // single-thread-per-core CPU
+#else
+    (void)cpu_id;
+    return -1;
+#endif
+}
+
+// Computes slow-path pin assignment that avoids SMT-sharing with busy
+// threads. Strategy:
+//   1. Build set of "hot" CPUs = {producer_cpu, hot_path[0..N-1], drainer_cpu}
+//   2. Build set of "tainted" CPUs = SMT siblings of hot CPUs
+//   3. Build candidate list: CPUs not in hot ∪ tainted (true idle)
+//   4. If we have enough candidates, assign in order
+//   5. Otherwise fall back to including tainted CPUs (still better than
+//      colliding with hot — round-robin among the tainted pool)
+//
+// out_pins[0..num_slow-1] gets the chosen CPU IDs. Returns 1 on success.
+static inline int EngineSharded_SmartSlowPathPins(int producer_cpu,
+                                                    int drainer_cpu,
+                                                    int num_hot,
+                                                    int num_slow,
+                                                    int* out_pins) {
+    if (num_slow <= 0 || num_slow > 16) return 0;
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc < 2) return 0;
+
+    // Mark hot CPUs (running busy work).
+    bool hot[64] = {false};
+    if (producer_cpu >= 0 && producer_cpu < (int)nproc) hot[producer_cpu] = true;
+    if (drainer_cpu  >= 0 && drainer_cpu  < (int)nproc) hot[drainer_cpu] = true;
+    for (int i = 0; i < num_hot && i < 16; ++i) {
+        int hcpu = i + 1;  // hot-path i pins to CPU i+1 by convention
+        if (hcpu >= 0 && hcpu < (int)nproc) hot[hcpu] = true;
+    }
+
+    // Mark tainted = SMT siblings of hot CPUs.
+    bool tainted[64] = {false};
+    for (int i = 0; i < (int)nproc && i < 64; ++i) {
+        if (!hot[i]) continue;
+        int sib = EngineSharded_GetSiblingCPU(i);
+        if (sib >= 0 && sib < (int)nproc) tainted[sib] = true;
+    }
+
+    // First pass: pick truly idle CPUs (not hot, not tainted).
+    int chosen[16] = {0};
+    int chosen_count = 0;
+    for (int i = 0; i < (int)nproc && chosen_count < num_slow; ++i) {
+        if (!hot[i] && !tainted[i]) {
+            chosen[chosen_count++] = i;
+        }
+    }
+    // Second pass: if we still need more, fall back to tainted (better
+    // than landing on hot CPUs themselves).
+    for (int i = 0; i < (int)nproc && chosen_count < num_slow; ++i) {
+        if (tainted[i] && !hot[i]) {
+            // Skip if already chosen
+            bool already = false;
+            for (int j = 0; j < chosen_count; ++j) if (chosen[j] == i) already = true;
+            if (!already) chosen[chosen_count++] = i;
+        }
+    }
+    // Third pass (rare — small CPU box): wrap around to hot CPUs.
+    for (int i = 0; i < (int)nproc && chosen_count < num_slow; ++i) {
+        bool already = false;
+        for (int j = 0; j < chosen_count; ++j) if (chosen[j] == i) already = true;
+        if (!already) chosen[chosen_count++] = i;
+    }
+
+    if (chosen_count < num_slow) return 0;
+    for (int i = 0; i < num_slow; ++i) out_pins[i] = chosen[i];
+    return 1;
+}
+
+//======================================================================================================
+// [LATENCY DUMP]
+//======================================================================================================
+// Dumps per-core latency stats in a compact table after the run finishes.
+// One row per core, all converted to ns via the calibrated TSC frequency.
+//======================================================================================================
+template <unsigned F>
+static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* cores,
+                                              int num_cores, double tsc_ghz) {
+    fprintf(stderr, "\n");
+    fprintf(stderr, "================================================================\n");
+    fprintf(stderr, "[sharded] PER-CORE LATENCY (samples are p-stats from 256 most recent ticks)\n");
+    fprintf(stderr, "================================================================\n");
+    fprintf(stderr, "core   samples       min        p50        p95        p99        max        avg\n");
+    fprintf(stderr, "----   --------   --------   --------   --------   --------   --------   --------\n");
+    for (int i = 0; i < num_cores; ++i) {
+        CoreLatencySnapshot s = CoreLatencyStats_Snapshot(&cores[i].latency_stats, tsc_ghz);
+        if (s.total_count == 0) {
+            fprintf(stderr, " %2d        0     -          -          -          -          -          -\n", i);
+            continue;
+        }
+        fprintf(stderr, " %2d   %8lu   %6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns\n",
+                i, (unsigned long)s.total_count,
+                s.min_ns, s.p50_ns, s.p95_ns, s.p99_ns, s.max_ns, s.avg_ns);
+    }
+    fprintf(stderr, "================================================================\n");
+    fprintf(stderr, "Note: rdtsc bracketing has a ~25-30ns floor on this CPU.\n");
+    fprintf(stderr, "Subtract the floor from min/p50 for actual hot-path work cost.\n");
+    fprintf(stderr, "Max outliers are usually kernel preemption (try chrt -f 90 +\n");
+    fprintf(stderr, "isolcpus on a real production box for cleaner tails).\n");
+    fprintf(stderr, "================================================================\n");
+}
 
 //======================================================================================================
 // [RUN]
@@ -1377,29 +1556,406 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // earlier (~line 786) so fan_out lambda's reset handler can reference
     // it. Slow-paths park (yield) when set; producer's reset handler sets,
     // runs reset, clears.
-    // Slow-path threads spawn hoisted to tt::EngineSharded_SpawnSlowPathThreads<F>
-    // in EngineSharded/Run/SlowPathThreads.hpp at v5.15.5.F.4d.1.B.6 Phase B Step
-    // B.4.1 (~400 LOC moved out). Per-core spawn loop + smart-pin selection +
-    // per-thread body (paper-reset park + cadence yield + hot-swap pickup +
-    // EngineCommon_SlowPathCycleOneCore dispatch) all live in the helper. Block-
-    // scope statics (g_shared + g_depth_shared) passed by reference per B.2 hoist
-    // discipline. Slow-path SEMANTICS preserved bytewise — same body, same atomic
-    // ordering, same #ifdef gates.
     std::vector<std::thread> slow_paths;
+    {
+        // v5.1.5: smart pin selection. With cfg.slow_path_pin_offset == 0
+        // (auto), use SmartSlowPathPins to AVOID landing on SMT siblings of
+        // producer/hot-path/drainer CPUs. Pre-v5.1.5 the auto-derive was a
+        // simple (num_cores + 2 + c) % nproc, which on a 16-thread Intel
+        // (8 phys × 2 SMT) put slow-paths 2,3 on CPUs 8,9 = SMT siblings of
+        // producer/hot-path-0 → 2× slowdown vs slow-paths 0,1 on idle
+        // physical cores 6,7. Smart logic prefers truly-idle CPUs first,
+        // then SMT siblings of idle cores, then falls back gracefully.
+        int sp_pins[16];
+        long nproc = topo_nproc;
+        bool smart_ok = false;
+        int sp_pin_base = -1;  // <0 = no pin
+        if (cfg.slow_path_pin_offset == 0) {
+            smart_ok = EngineSharded_SmartSlowPathPins(
+                /*producer_cpu=*/topo_producer_cpu,
+                /*drainer_cpu=*/topo_drainer_cpu,
+                /*num_hot=*/num_cores,
+                /*num_slow=*/num_cores,
+                sp_pins);
+            if (smart_ok) {
+                sp_pin_base = sp_pins[0];  // for log only
+                fprintf(stderr, "[sharded] spawning %d "
+                                "slow-path threads (smart pin: ", num_cores);
+                for (int c = 0; c < num_cores; ++c) {
+                    fprintf(stderr, "%s%d", c ? "," : "", sp_pins[c]);
+                }
+                fprintf(stderr, ", nproc %ld)\n", nproc);
+            } else {
+                // Fallback: simple (num_cores + 2 + c) % nproc
+                sp_pin_base = num_cores + 2;
+                fprintf(stderr, "[sharded] spawning %d "
+                                "slow-path threads (smart pin failed; fallback base CPU %d, nproc %ld)\n",
+                        num_cores, sp_pin_base, nproc);
+            }
+        } else if (cfg.slow_path_pin_offset > 0) {
+            sp_pin_base = cfg.slow_path_pin_offset;
+            fprintf(stderr, "[sharded] spawning %d "
+                            "slow-path threads (explicit pin base CPU %d, nproc %ld)\n",
+                    num_cores, sp_pin_base, nproc);
+        } else {
+            // < 0: no pin
+            fprintf(stderr, "[sharded] spawning %d "
+                            "slow-path threads (UNPINNED, slow_path_pin_offset=%d)\n",
+                    num_cores, cfg.slow_path_pin_offset);
+        }
+        slow_paths.reserve(num_cores);
+        for (int c = 0; c < num_cores; ++c) {
+            int sp_cpu;
+            if (smart_ok) {
+                sp_cpu = sp_pins[c];
+            } else if (sp_pin_base >= 0) {
+                sp_cpu = (int)((sp_pin_base + c) % nproc);
+            } else {
+                sp_cpu = -1;
+            }
+            topo_slow_cpu[c] = sp_cpu;  // v5.0.2: capture for topology panel
+            slow_paths.emplace_back([c, sp_cpu, &state, &oms, &cores, &cfg,
+                                      &ticks_produced, &last_price, &last_volume,
+                                      &paper_reset_in_progress]() {
+                // v5.0.2: best-effort pin to chosen CPU. Failure logged,
+                // execution continues unpinned.
+                if (sp_cpu >= 0) {
+                    EngineSharded_PinThread(sp_cpu);
+                }
+                // v4.7.40 (Phase D): per-core poll interval from resolved
+                // cfg. If core has core_N_poll_interval set, use that;
+                // otherwise inherit global cfg.poll_interval.
+                ControllerConfig<F> resolved_init =
+                    ControllerConfig_ResolveForCore(cfg, c);
+                int slow_path_interval = (int)resolved_init.poll_interval;
+                if (slow_path_interval < 1) slow_path_interval = 100;
+                fprintf(stderr,
+                    "[slow-path-%d] poll_interval=%d ticks (override=%u, global=%u) "
+                    "pinned_cpu=%d\n",
+                    c, slow_path_interval,
+                    (unsigned)cfg.core_overrides[c].poll_interval,
+                    (unsigned)cfg.poll_interval,
+                    sp_cpu);
+                // v4.7.42 (Phase E): enable per-core slow-path latency stats.
+                // Sampled around the per-cycle work below (RebuildOneCore +
+                // PushParameters + TimeExitOneCore + TrailingSL + permission).
+                CoreLatencyStats_Enable(&state.display_meta[c].slow_path_latency);
+                // v5.1.1: enable per-section breakdown stats.
+                for (int s = 0; s < tt::SP_SECTION_COUNT; ++s) {
+                    CoreLatencyStats_Enable(&state.display_meta[c].slow_path_breakdown[s]);
+                }
+                uint64_t last_seen_tick = 0;
+                while (!g_engine_sharded_shutdown) {
+                    // v5.0.3: user pause via paused_engines_mask bit c.
 #ifdef USE_IMGUI_GUI
-    TUISharedState* g_shared_ptr_for_sp = &g_shared;
-#else
-    TUISharedState* g_shared_ptr_for_sp = nullptr;
+                    if (g_shared.paused_engines_mask & (uint16_t)(1u << c)) {
+                        state.cores[c].sp_telemetry.state.store(3, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
+                        std::this_thread::yield();
+                        continue;
+                    }
 #endif
-    EngineSharded_SpawnSlowPathThreads<F>(
-        num_cores, cfg, state, oms, cores,
-        ticks_produced, last_price, last_volume,
-        paper_reset_in_progress,
-        topo_producer_cpu, topo_drainer_cpu, topo_nproc,
-        topo_slow_cpu,
-        g_shared_ptr_for_sp,
-        g_depth_shared,
-        slow_paths);
+                    // Reset Paper coordination — park while reset runs.
+                    if (paper_reset_in_progress.load(std::memory_order_acquire)) {
+                        state.cores[c].sp_telemetry.state.store(1, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    // Cadence — wake when enough ticks have passed.
+                    uint64_t now_tick = ticks_produced.load(std::memory_order_acquire);
+                    if (now_tick - last_seen_tick < (uint64_t)slow_path_interval) {
+                        state.cores[c].sp_telemetry.state.store(2, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    last_seen_tick = now_tick;
+                    state.cores[c].sp_telemetry.state.store(0, std::memory_order_relaxed);  // running
+
+                    // v5.15.5.F.4d.1.B.4 Step C.3 — slow-path latency telemetry
+                    // (v4.7.42 outer bracket + v5.1.1 per-section breakdown) moved
+                    // INSIDE EngineCommon_SlowPathCycleOneCore body per v1.7.3 HIGH-4
+                    // (Telemetry Path A INTERNAL); helper computes its own _sp_t0 +
+                    // 5 CoreLatencyStats_Sample calls.
+
+                    // Skip cores with STRATEGY_NONE (caller responsibility per
+                    // OneCore contract; OneCore would no-op on STRATEGY_NONE
+                    // body because Strategy_BuildParameters dispatcher skips it,
+                    // but the explicit check here is cheap and clarifying).
+                    if (state.cores[c].strategy_id == STRATEGY_NONE) continue;
+
+                    // === Per-core swap-pending pickup ===
+                    // Mirrors the producer-thread swap walker — but checks only
+                    // THIS core's request slot. Race-safe: __atomic_load gives
+                    // acquire on g_shared.swap_strategy_requested[c].
+#ifdef USE_IMGUI_GUI
+                    {
+                        uint8_t pending = __atomic_load_n(
+                            &g_shared.swap_strategy_requested[c],
+                            __ATOMIC_ACQUIRE);
+                        if (pending != STRATEGY_NONE) {
+                            // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+                            int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+                            uint16_t open_mask = partial_on
+                                ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
+                                : (uint16_t)(1u << c);
+                            if ((state.oms->portfolio.active_bitmap & open_mask) == 0) {
+                                if (pending == STRATEGY_ML &&
+                                    state.cores[c].model_handle == NULL) {
+                                    fprintf(stderr,
+                                        "[slow-path-%d] refusing swap to ML — "
+                                        "no model loaded\n", c);
+                                    __atomic_store_n(
+                                        &g_shared.swap_strategy_requested[c],
+                                        STRATEGY_NONE, __ATOMIC_RELEASE);
+                                } else {
+                                    uint8_t old_strat = state.cores[c].strategy_id;
+                                    state.cores[c].strategy_id = pending;
+                                    __atomic_store_n(
+                                        &g_shared.swap_strategy_requested[c],
+                                        STRATEGY_NONE, __ATOMIC_RELEASE);
+                                    fprintf(stderr,
+                                        "[slow-path-%d] strategy swapped %u -> %u\n",
+                                        c, (unsigned)old_strat, (unsigned)pending);
+                                }
+                            }
+                            // else: position open; leave pending — try next cycle
+                        }
+                    }
+                    // === v5.10.0c — Per-core model hot-swap pickup ===
+                    // Mirrors the strategy hot-swap pattern above, but the
+                    // payload is a directory path (string) instead of a
+                    // strategy id (uint8). On request: free + reinit + reload
+                    // ml_zoos[c] from the new dir; update model_handle on
+                    // success, NULL it on failure (engine falls back to
+                    // SimpleDip via ML_BuildParameters dispatcher).
+                    {
+                        uint8_t mswap = __atomic_load_n(
+                            &g_shared.swap_model_path_requested[c],
+                            __ATOMIC_ACQUIRE);
+                        if (mswap) {
+                            // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+                            int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+                            uint16_t open_mask = partial_on
+                                ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
+                                : (uint16_t)(1u << c);
+                            int has_open = (state.oms->portfolio.active_bitmap & open_mask) != 0;
+
+                            if (has_open && !cfg.acknowledge_hot_swap_with_open_positions) {
+                                // Defer: leave flag set, retry next slow-path cycle.
+                                // Operator opts in via cfg field if they want
+                                // entry+exit on different models.
+                            } else {
+                                char new_path[256];
+                                strncpy(new_path, g_shared.pending_model_path[c], 255);
+                                new_path[255] = '\0';
+
+                                if (new_path[0] == '\0') {
+                                    fprintf(stderr,
+                                        "[hot_swap] core %d REFUSED: empty path\n", c);
+                                    __atomic_store_n(
+                                        &g_shared.swap_model_path_requested[c], 0,
+                                        __ATOMIC_RELEASE);
+                                } else {
+                                    // Cast model_handle back to the typed zoo
+                                    // pointer set at boot (line ~805). NULL
+                                    // means the core wasn't STRATEGY_ML at
+                                    // boot, so no zoo storage was allocated;
+                                    // hot-swap requires operator pre-config.
+                                    CoreModelZoo<F>* swap_zoo =
+                                        (CoreModelZoo<F>*)state.cores[c].model_handle;
+                                    if (swap_zoo == nullptr) {
+                                        fprintf(stderr,
+                                            "[hot_swap] core %d REFUSED: "
+                                            "core not ML at boot (set "
+                                            "core_%d_strategy=ml + restart "
+                                            "to enable hot-swap)\n", c, c);
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    } else if (state.cores[c].ensemble_handle != nullptr) {
+                                        // v5.15.4 — ENSEMBLE SHADOW-LOAD HOT-SWAP.
+                                        // Replaces v5.14.2's in-place Free+Init+Load
+                                        // pattern (now legacy in EnsembleHotSwap.hpp;
+                                        // kept compiled but not called from this
+                                        // production path). PARITY-023's broken
+                                        // capture-pointer Revert design replaced by
+                                        // shadow-load discipline per
+                                        // DESIGN_SPECS/shadow-load-state-transition-pattern.md.
+                                        //
+                                        // Helper:
+                                        //   1. Allocates NEW ezoo via aligned_alloc(64)
+                                        //   2. Loads + PostLoadSetup into new_ezoo
+                                        //   3. Atomically swaps state.cores[c].ensemble_handle
+                                        //   4. Free's old ezoo
+                                        // Pre-swap untouched on any failure; caller
+                                        // sees nonzero rc and continues serving from
+                                        // pre-swap state.
+                                        int swap_backend = cfg.ml_backend
+                                            ? cfg.ml_backend
+                                            : MODEL_BACKEND_XGBOOST;
+                                        int rc = tt::HotSwap_ShadowLoad_Ensemble<F>(
+                                            state, c, cfg, new_path, swap_backend);
+                                        if (rc != 0) {
+                                            // Pre-swap state preserved automatically;
+                                            // helper already logged the specific
+                                            // failure mode. Leave model_load_failed
+                                            // at its pre-call value (likely 0 if
+                                            // pre-swap was healthy).
+                                            fprintf(stderr,
+                                                "[hot_swap] ensemble core %d shadow-load "
+                                                "FAILED (rc=%d); pre-swap state preserved\n",
+                                                c, rc);
+                                        } else {
+                                            CORE_STATE_FLAG_CLR(state.cores[c], MODEL_LOAD_FAILED);
+                                            // Re-fetch ezoo after swap to run post-load
+                                            // validators on the NEW ezoo. v5.14.2.E.1
+                                            // closes PARITY-009.F: ValidateAgainstCfg +
+                                            // FeatureOverlay_PostLoadVerify still run
+                                            // on hot-swap (was bypassed pre-v5.14.2.E.1).
+                                            EnsembleModelZoo<F>* swap_ezoo =
+                                                (EnsembleModelZoo<F>*)state.cores[c].ensemble_handle;
+                                            int validate_rc = CoreModelZoo_ValidateAgainstCfg<F>(
+                                                /*zoo=*/nullptr,
+                                                swap_ezoo,
+                                                cfg, /*core_id=*/c,
+                                                cfg.held_out_gate_strict,
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
+                                                &state.display_meta[c], &state.cores[c]);
+                                            if (validate_rc < 0) {
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
+                                                fprintf(stderr,
+                                                    "[hot_swap] ensemble core %d "
+                                                    "REFUSED post-load validation "
+                                                    "in strict mode; new model "
+                                                    "loaded but flagged degraded. "
+                                                    "Operator must reconcile cfg "
+                                                    "vs stamp + restart.\n", c);
+                                            }
+                                            int overlay_rc = FeatureOverlay_PostLoadVerify<F>(
+                                                /*zoo=*/nullptr, swap_ezoo,
+                                                /*core_id=*/c, cfg.held_out_gate_strict);
+                                            if (overlay_rc < 0) {
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
+                                            }
+                                        }
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    } else {
+                                        // v5.15.4 — SINGLE-ZOO SHADOW-LOAD HOT-SWAP.
+                                        // Replaces in-place Free+Init+LoadFromDir
+                                        // (v5.10.0c "log-and-leave" pattern; brief
+                                        // empty-zoo window). Shadow-load discipline:
+                                        // allocate NEW zoo + Load + PostLoadSetup,
+                                        // atomically swap, Free old. Pre-swap
+                                        // untouched on any failure → no empty-zoo
+                                        // window; failed swaps preserve state.
+                                        int swap_backend = cfg.ml_backend
+                                            ? cfg.ml_backend
+                                            : MODEL_BACKEND_XGBOOST;
+                                        int rc = tt::HotSwap_ShadowLoad_SingleZoo<F>(
+                                            state, c, cfg, new_path, swap_backend);
+                                        if (rc != 0) {
+                                            // Pre-swap state preserved by helper;
+                                            // log + continue. Don't null the handle;
+                                            // pre-swap zoo remains active.
+                                            fprintf(stderr,
+                                                "[hot_swap] single-zoo core %d shadow-load "
+                                                "FAILED (rc=%d); pre-swap state preserved\n",
+                                                c, rc);
+                                        } else {
+                                            CORE_STATE_FLAG_CLR(state.cores[c], MODEL_LOAD_FAILED);
+                                            // Re-fetch zoo after swap to run post-load
+                                            // validators on the NEW zoo (parity-check
+                                            // Finding #3 closure preserved).
+                                            CoreModelZoo<F>* new_swap_zoo =
+                                                (CoreModelZoo<F>*)state.cores[c].model_handle;
+                                            int validate_rc = CoreModelZoo_ValidateAgainstCfg<F>(
+                                                new_swap_zoo,
+                                                /*ezoo=*/nullptr,
+                                                cfg, /*core_id=*/c,
+                                                cfg.held_out_gate_strict,
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
+                                                &state.display_meta[c], &state.cores[c]);
+                                            if (validate_rc < 0) {
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
+                                                fprintf(stderr,
+                                                    "[hot_swap] core %d REFUSED post-load "
+                                                    "validation in strict mode; new model "
+                                                    "loaded but flagged degraded. Operator "
+                                                    "must reconcile cfg vs stamp + restart.\n", c);
+                                            }
+                                            int overlay_rc = FeatureOverlay_PostLoadVerify<F>(
+                                                new_swap_zoo, /*ezoo=*/nullptr,
+                                                /*core_id=*/c, cfg.held_out_gate_strict);
+                                            if (overlay_rc < 0) {
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
+                                            }
+                                        }
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    }
+                                }
+                            }
+                        }
+                    }
+#endif
+                    // v5.15.5.F.4d.1.B.4 Step C.3 — extracted to
+                    // EngineCommon_SlowPathCycleOneCore (closes PARITY-032 by-construction
+                    // via D1-B BREAKEVEN_ON_PROFIT cached-gate dispatch sister to
+                    // TrailingSLRatchet; BACKTEST sister at Step C.4 invokes AllCores
+                    // wrapper). Helper body preserved verbatim from prior inline at LIVE
+                    // :2834-3101 → CoreFrameworks/EngineCommon.hpp:470-770. Caller resolves
+                    // per-cycle scalars per v1.6 O2 bytewise-identical math (price =
+                    // mtm_price per v1.7.3 HIGH-1) + v1.7.3 N-6 9-arg with BookSnapshot<F>
+                    // sister-canonical reuse. Telemetry Path A INTERNAL (helper computes
+                    // own rdtsc bracket + 5 CoreLatencyStats_Sample calls inside body per
+                    // v1.7.3 HIGH-4).
+
+                    // Per-cycle scalar inputs (mtm_price discipline preserved; helper takes
+                    // FPN<F> price = mtm_price, derives double internally via FPN_ToDouble
+                    // for guard checks).
+                    double price_d = last_price.load(std::memory_order_relaxed);
+                    double volume_d = last_volume.load(std::memory_order_relaxed);
+                    FPN<F> price = price_d > 0.0
+                                 ? FPN_FromDouble<F>(price_d) : FPN_Zero<F>();
+                    FPN<F> volume = volume_d > 0.0
+                                  ? FPN_FromDouble<F>(volume_d) : FPN_Zero<F>();
+                    uint64_t ts_us =
+                        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+
+                    // Depth snapshot — existing BookSnapshot<F> ref from g_depth_shared
+                    // static (LIVE; BACKTEST sister uses ShardedBacktestDriver<F> pointer
+                    // fields at Step C.4). Helper checks MASK_GATE_CFG_DEPTH_ENABLED
+                    // internally per v1.7.3 N-6 + canonical LIVE :3052-3058 pattern (no
+                    // `enabled` field on BookSnapshot).
+                    int dactive = __atomic_load_n(&g_depth_shared.active_idx, __ATOMIC_ACQUIRE);
+                    const BookSnapshot<F>& depth = g_depth_shared.snapshots[dactive];
+
+                    // Helper call (v1.7.3 N-6 9-arg signature)
+                    EngineCommon_SlowPathCycleOneCore(cfg, c, state, oms,
+                                                       price, volume, ts_us,
+                                                       now_tick, depth);
+
+                    // NOTE: DrainPostFill stays on the drainer thread (single writer of
+                    // last_*_mask is HandleFill on drainer; same thread reads + clears
+                    // via DrainPostFill wrapper). NOTE: KillSwitchEvaluate is GLOBAL
+                    // (account-level drawdown), runs on producer thread. Per-core kill
+                    // switch state is mutated INSIDE RebuildOneCore (now inside helper).
+                    // NOTE: Drag TP/SL pickup + manual close stay on drainer + producer
+                    // threads respectively. They submit via OMS_PushSubmit (Phase B) —
+                    // thread-safe.
+                }
+                fprintf(stderr, "[slow-path-%d] thread exiting\n", c);
+            });
+        }
+    }
 
 #ifdef USE_IMGUI_GUI
     // GUI mode: the GUI thread handles rendering. Just wait for shutdown.
@@ -1408,27 +1964,309 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         if (g_shared.quit_requested) g_engine_sharded_shutdown = 1;
     }
 #else
-    // ANSI TUI render loop hoisted to tt::EngineSharded_AnsiTui_RenderLoop<F>
-    // in EngineSharded/Run/AnsiTui.hpp at v5.15.5.F.4d.1.B.6 Phase B Step B.4.1
-    // (~230 LOC moved out). Block-scope statics (g_user_data + g_reconciler)
-    // passed by reference per B.2 hoist discipline. SH_* color macros + #undefs
-    // are scoped INSIDE the hoisted function body — no leak into surrounding code.
-    EngineSharded_AnsiTui_RenderLoop<F>(
-        live_trading, num_cores, tsc_ghz, use_synthetic,
-        state, oms,
-        last_price, last_volume,
-        ticks_produced, ticks_consumed_total,
-        cores,
-        g_user_data, g_reconciler, g_sharded_order_lat);
+    // Live TUI render loop. Refreshes ~5x/sec on stdout with the per-core
+    // latency table front and center. Uses the same warm color palette as
+    // the legacy TUI for visual consistency. Hides the cursor while running
+    // and clears the screen on each refresh; restores both on exit.
+    //
+    // ANSI escape codes used:
+    //   \033[?25l   hide cursor
+    //   \033[?25h   show cursor
+    //   \033[2J     clear screen
+    //   \033[H      cursor home (1;1)
+    //   \033[K      clear to end of line
+    //
+    // Color tokens borrowed from DataStream/TUIAnsi.hpp.
+    #define SH_RESET   "\033[0m"
+    #define SH_BOLD    "\033[1m"
+    #define SH_WHEAT   "\033[38;2;220;198;150m"
+    #define SH_SAND    "\033[38;2;190;170;140m"
+    #define SH_PEACH   "\033[38;2;230;165;120m"
+    #define SH_FG      "\033[38;2;200;190;170m"
+    #define SH_DIM     "\033[38;2;120;115;105m"
+    #define SH_GREEN   "\033[38;2;140;195;130m"
+    #define SH_RED     "\033[38;2;210;120;120m"
+    #define SH_PNL(v)  ((v) >= 0.0 ? SH_GREEN : SH_RED)
+
+    fprintf(stdout, "\033[?25l");  // hide cursor
+    fflush(stdout);
+
+    auto t_start = std::chrono::steady_clock::now();
+    while (!g_engine_sharded_shutdown) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // Header
+        fprintf(stdout, "\033[H");  // cursor home, no clear (avoids flicker)
+        fprintf(stdout, SH_BOLD SH_PEACH "  /l、" SH_RESET "  " SH_BOLD SH_PEACH "FOXML TRADER" SH_RESET "  " SH_DIM "(per-core sharded)" SH_RESET "\033[K\n");
+        fprintf(stdout, SH_DIM " ( °_ ° 7" SH_RESET "  " SH_DIM "engine v3.7.2" SH_RESET "  " SH_FG "%s" SH_RESET "\033[K\n",
+                use_synthetic ? "synthetic ticks" : "real Binance feed");
+        fprintf(stdout, SH_DIM "  ド  ヘ" SH_RESET "\033[K\n");
+        fprintf(stdout, SH_DIM " じし_,)ノ" SH_RESET "\033[K\n");
+        fprintf(stdout, "\033[K\n");
+
+        // Top bar
+        auto now = std::chrono::steady_clock::now();
+        long uptime = std::chrono::duration_cast<std::chrono::seconds>(now - t_start).count();
+        double bal = FPN_ToDouble(state.oms->balance);
+        double pnl = FPN_ToDouble(state.oms->realized_pnl);
+        int active = __builtin_popcount(state.oms->portfolio.active_bitmap);
+        fprintf(stdout, " " SH_DIM "STATE: " SH_RESET SH_FG "ACTIVE" SH_RESET
+                "  " SH_DIM "│" SH_RESET "  " SH_DIM "UPTIME: " SH_RESET SH_FG "%02ld:%02ld:%02ld" SH_RESET
+                "  " SH_DIM "│" SH_RESET "  " SH_DIM "MODE: " SH_RESET SH_PEACH "SHARDED" SH_RESET "\033[K\n",
+                uptime / 3600, (uptime / 60) % 60, uptime % 60);
+        fprintf(stdout, "\033[K\n");
+
+        // Market + account
+        double price_d = last_price.load(std::memory_order_relaxed);
+        double vol_d = last_volume.load(std::memory_order_relaxed);
+        // compute equity = balance + unrealized P&L across all open positions
+        double unrealized = 0.0;
+        {
+            uint16_t bm = state.oms->portfolio.active_bitmap;
+            while (bm) {
+                int s = __builtin_ctz(bm);
+                bm &= (uint16_t)(bm - 1);
+                double entry = FPN_ToDouble(state.oms->portfolio.positions[s].entry_price);
+                double qty   = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
+                unrealized += (price_d - entry) * qty;
+            }
+        }
+        double equity = bal + unrealized;
+        fprintf(stdout, " " SH_DIM " PRICE " SH_RESET SH_BOLD SH_WHEAT "$%.2f" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "VOL " SH_RESET SH_FG "%.4f" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "BAL " SH_RESET SH_FG "$%.2f" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "EQUITY " SH_RESET SH_BOLD "%s$%.2f" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "POS " SH_RESET SH_FG "%d/%u" SH_RESET "\033[K\n",
+                price_d, vol_d, bal, SH_PNL(equity - 10000.0), equity, active, (unsigned)num_cores);
+        fprintf(stdout, " " SH_DIM " P&L " SH_RESET SH_BOLD "%s$%+.4f" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "UNREAL " SH_RESET SH_BOLD "%s$%+.4f" SH_RESET "\033[K\n",
+                SH_PNL(pnl), pnl, SH_PNL(unrealized), unrealized);
+        fprintf(stdout, "\033[K\n");
+
+        // Counters
+        fprintf(stdout, " " SH_DIM " produced  " SH_RESET SH_FG "%lu" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "consumed  " SH_RESET SH_FG "%lu" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "entries  " SH_RESET SH_FG "%lu" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "exits  " SH_RESET SH_FG "%lu" SH_RESET "\033[K\n",
+                (unsigned long)ticks_produced.load(),
+                (unsigned long)ticks_consumed_total.load(),
+                (unsigned long)state.total_entries,
+                (unsigned long)state.total_exits);
+        fprintf(stdout, "\033[K\n");
+
+        // Per-core latency table — the headline
+        fprintf(stdout, SH_BOLD SH_PEACH " PER-CORE LATENCY" SH_RESET SH_DIM "  (last 256 samples per core)" SH_RESET "\033[K\n");
+        fprintf(stdout, "  " SH_DIM "core   samples       min        p50        p95        p99        max        avg" SH_RESET "\033[K\n");
+        for (int i = 0; i < num_cores; ++i) {
+            CoreLatencySnapshot ls = CoreLatencyStats_Snapshot(&cores[i].latency_stats, tsc_ghz);
+            if (ls.total_count == 0) {
+                fprintf(stdout, "  " SH_FG " %2d   " SH_DIM "%8s   %6s ns   %6s ns   %6s ns   %6s ns   %6s ns   %6s ns" SH_RESET "\033[K\n",
+                        i, "0", "-", "-", "-", "-", "-", "-");
+            } else {
+                fprintf(stdout, "  " SH_FG " %2d   " SH_DIM "%8lu   " SH_FG "%6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns" SH_RESET "\033[K\n",
+                        i, (unsigned long)ls.total_count,
+                        ls.min_ns, ls.p50_ns, ls.p95_ns, ls.p99_ns, ls.max_ns, ls.avg_ns);
+            }
+        }
+
+        // Per-core position details — shows which core has a position,
+        // entry price, quantity, unrealized P&L, and TP/SL levels.
+        // only renders rows for active positions to keep the display compact.
+        if (active > 0) {
+            fprintf(stdout, "\033[K\n");
+            fprintf(stdout, SH_BOLD SH_PEACH " POSITIONS" SH_RESET "\033[K\n");
+            fprintf(stdout, "  " SH_DIM "core   strategy     entry          qty       unreal         TP             SL" SH_RESET "\033[K\n");
+            uint16_t bm = state.oms->portfolio.active_bitmap;
+            while (bm) {
+                int s = __builtin_ctz(bm);
+                bm &= (uint16_t)(bm - 1);
+                double entry_d = FPN_ToDouble(state.oms->portfolio.positions[s].entry_price);
+                double qty_d   = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
+                double tp_d    = FPN_ToDouble(state.oms->portfolio.positions[s].take_profit_price);
+                double sl_d    = FPN_ToDouble(state.oms->portfolio.positions[s].stop_loss_price);
+                double unreal_d = (price_d - entry_d) * qty_d;
+                const char* strat = (s < state.registered_count && state.cores[s].strategy_id < NUM_STRATEGIES)
+                    ? STRATEGY_SHORT_NAMES[state.cores[s].strategy_id] : "?";
+                fprintf(stdout, "  " SH_FG " %2d    " SH_PEACH "%-5s" SH_RESET
+                        "  " SH_FG "$%10.2f   %10.6f   " SH_BOLD "%s$%+8.4f" SH_RESET
+                        "   " SH_GREEN "$%.2f" SH_RESET "   " SH_RED "$%.2f" SH_RESET "\033[K\n",
+                        s, strat, entry_d, qty_d,
+                        SH_PNL(unreal_d), unreal_d,
+                        tp_d, sl_d);
+            }
+        }
+        fprintf(stdout, "\033[K\n");
+
+        // Order latency line — only meaningful in live mode, but always shown
+        // so paper users see the placeholder. all values in microseconds.
+        uint64_t ord_count    = g_sharded_order_lat.count.load(std::memory_order_relaxed);
+        uint64_t ord_failures = g_sharded_order_lat.failures.load(std::memory_order_relaxed);
+        uint64_t ord_total_us = g_sharded_order_lat.total_us.load(std::memory_order_relaxed);
+        uint64_t ord_min_us   = g_sharded_order_lat.min_us.load(std::memory_order_relaxed);
+        uint64_t ord_max_us   = g_sharded_order_lat.max_us.load(std::memory_order_relaxed);
+        fprintf(stdout, "\033[K\n");
+        if (live_trading) {
+            if (ord_count > 0) {
+                double ord_avg_us = (double)ord_total_us / (double)ord_count;
+                fprintf(stdout, " " SH_BOLD SH_PEACH "ORDER LATENCY" SH_RESET SH_DIM " (live)" SH_RESET
+                        "  " SH_DIM "orders" SH_RESET " " SH_FG "%lu" SH_RESET
+                        "  " SH_DIM "fail" SH_RESET " " SH_FG "%lu" SH_RESET
+                        "  " SH_DIM "min" SH_RESET " " SH_FG "%lu µs" SH_RESET
+                        "  " SH_DIM "avg" SH_RESET " " SH_FG "%.0f µs" SH_RESET
+                        "  " SH_DIM "max" SH_RESET " " SH_FG "%lu µs" SH_RESET "\033[K\n",
+                        (unsigned long)ord_count, (unsigned long)ord_failures,
+                        (unsigned long)ord_min_us, ord_avg_us, (unsigned long)ord_max_us);
+            } else {
+                fprintf(stdout, " " SH_BOLD SH_PEACH "ORDER LATENCY" SH_RESET SH_DIM " (live, no orders yet)" SH_RESET "\033[K\n");
+            }
+        } else {
+            fprintf(stdout, " " SH_DIM "ORDER LATENCY: paper mode (no orders submitted)" SH_RESET "\033[K\n");
+        }
+
+        // OMS counter line. shows the OrderManager-side view: submissions
+        // it received from the drainer, fills it observed (paper mode bumps
+        // both immediately, live mode bumps filled when the adapter callback
+        // comes back), rejections, and how many orders are still in flight
+        // in the OMS table. orthogonal to the per-core latency above.
+        uint64_t oms_sub      = OrderManager_TotalSubmitted(&oms);
+        uint64_t oms_fill     = OrderManager_TotalFilled(&oms);
+        uint64_t oms_rej      = OrderManager_TotalRejected(&oms);
+        int      oms_inflight = OrderManager_InflightCount(&oms);
+        fprintf(stdout, " " SH_BOLD SH_PEACH "OMS" SH_RESET
+                "          " SH_DIM "submitted" SH_RESET " " SH_FG "%lu" SH_RESET
+                "  " SH_DIM "filled" SH_RESET " " SH_FG "%lu" SH_RESET
+                "  " SH_DIM "rejected" SH_RESET " " SH_FG "%lu" SH_RESET
+                "  " SH_DIM "inflight" SH_RESET " " SH_FG "%d" SH_RESET "\033[K\n",
+                (unsigned long)oms_sub, (unsigned long)oms_fill,
+                (unsigned long)oms_rej, oms_inflight);
+
+        // User data WS status line (phase 04)
+        if (live_trading) {
+            int ws_conn = g_user_data.ws_connected.load(std::memory_order_relaxed);
+            uint64_t ws_fills = g_user_data.fills_received.load(std::memory_order_relaxed);
+            uint64_t ws_events = g_user_data.events_received.load(std::memory_order_relaxed);
+            fprintf(stdout, " " SH_BOLD SH_PEACH "WS FILLS" SH_RESET
+                    "     " SH_DIM "status" SH_RESET " %s"
+                    "  " SH_DIM "fills" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "events" SH_RESET " " SH_FG "%lu" SH_RESET "\033[K\n",
+                    ws_conn ? (SH_GREEN "CONNECTED" SH_RESET)
+                            : (SH_RED "DISCONNECTED" SH_RESET),
+                    (unsigned long)ws_fills, (unsigned long)ws_events);
+            // Reconciler status
+            uint64_t rc_polls = g_reconciler.total_polls.load(std::memory_order_relaxed);
+            uint64_t rc_corr  = g_reconciler.drift_corrections.load(std::memory_order_relaxed);
+            double   rc_drift = g_reconciler.last_drift_usdt.load(std::memory_order_relaxed);
+            fprintf(stdout, " " SH_BOLD SH_PEACH "RECONCILE" SH_RESET
+                    "    " SH_DIM "polls" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "corrections" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "drift" SH_RESET " %s$%.4f" SH_RESET "\033[K\n",
+                    (unsigned long)rc_polls, (unsigned long)rc_corr,
+                    SH_PNL(rc_drift), rc_drift);
+        }
+
+        // Footer
+        fprintf(stdout, "\033[K\n");
+        fprintf(stdout, " " SH_DIM "Press Ctrl+C to stop and dump final stats. Subtract ~25-30ns rdtsc floor for actual work cost." SH_RESET "\033[K\n");
+        // Clear any trailing rows from a previous render with more cores
+        for (int i = 0; i < 4; ++i) fprintf(stdout, "\033[K\n");
+        fflush(stdout);
+    }
+
+    fprintf(stdout, "\033[?25h");  // show cursor
+    fprintf(stdout, "\n");
+    fflush(stdout);
+
+    #undef SH_RESET
+    #undef SH_BOLD
+    #undef SH_WHEAT
+    #undef SH_SAND
+    #undef SH_PEACH
+    #undef SH_FG
+    #undef SH_DIM
+    #undef SH_GREEN
+    #undef SH_RED
+    #undef SH_PNL
 #endif  // USE_IMGUI_GUI else (ANSI TUI)
 
     fprintf(stderr, "[sharded] shutdown requested, joining threads...\n");
 
-    // Pre-join shutdown helpers hoisted to tt::EngineSharded_Shutdown_PreJoin<F>
-    // in EngineSharded/Run/Shutdown.hpp at v5.15.5.F.4d.1.B.6 Phase B Step B.4.1
-    // (~76 LOC moved out). Final snapshot save (paper mode) + per-core bandit
-    // state save + position-still-open advisory.
-    EngineSharded_Shutdown_PreJoin<F>(live_trading, num_cores, cfg, state, oms);
+    // Phase 4 — final snapshot save BEFORE force-close. Captures the
+    // pre-close state so a restart can resume regime hysteresis +
+    // pnl_feeder + kill switch peak. Force-close mutates portfolio +
+    // realized_pnl; we save first so the persisted state matches the
+    // engine's "intent" rather than an in-progress liquidation.
+    // Paper mode only — live mode treats exchange state as truth.
+    if (!live_trading) {
+        // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
+        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
+                                      BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED))) {
+            fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
+        } else {
+            fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
+        }
+    }
+
+    // v5.10.0a.G.9 — final bandit state save. Each active ensemble core
+    // flushes to its own <core_model_dir>/bandit_state.json. Survives
+    // restart so weights resume rather than re-learn from uniform.
+    // Live AND paper modes both save (live: deployed weights inform
+    // next session; paper: same thing for backtest-style sessions).
+    // Reaches the ezoo via ctx.ensemble_handle (registered at
+    // line ~853) since the static array's name is scope-limited
+    // to the init for-loop.
+    for (int i = 0; i < num_cores; ++i) {
+        auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
+            state.cores[i].ensemble_handle);
+        if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
+            cfg.core_model_dir[i][0]) {
+            int saved = EnsembleModelZoo_SaveBanditState(
+                ezoo, cfg.core_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved) {
+                fprintf(stderr, "[sharded] core %d: saved bandit state to "
+                                "%s/bandit_state.json\n",
+                        i, cfg.core_model_dir[i]);
+            }
+            // v5.13.4.C — sell-side bandit shutdown save. Skips silently
+            // when initialized_exit_bandits=0 (no exit models loaded).
+            int saved_exit = EnsembleModelZoo_SaveExitBanditState(
+                ezoo, cfg.core_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved_exit) {
+                fprintf(stderr, "[sharded] core %d: saved exit_bandit "
+                                "state to %s/exit_bandit_state.json\n",
+                        i, cfg.core_model_dir[i]);
+            }
+        }
+    }
+
+    // v5.4.5 (recurring-bugs Class 9 — shutdown UX): positions PERSIST
+    // across restart. Engine is designed to run 24/7; on operator-initiated
+    // shutdown (Ctrl+C, GUI close), the snapshot saved above captures open
+    // positions and the next session resumes management.
+    //
+    // Pre-fix: this site called EngineSharded_ForceCloseOnShutdown with a
+    // 30s timeout, which submitted market SELLs for every open position
+    // and blocked the join sequence waiting for fills. Symptom on shutdown
+    // with positions open: terminal hung for up to 30s after Ctrl+C with
+    // no output, because force-close runs BEFORE the
+    // "[sharded] joining threads..." prints. User reported this as
+    // "engine doesn't exit cleanly when positions are open."
+    //
+    // Force-close logic preserved in the codebase (EngineSharded_ForceCloseOnShutdown)
+    // for callers that explicitly want it (e.g. risk-managed live shutdown
+    // sequences). The default 24/7 paper/live operation just persists.
+    {
+        int still_open = __builtin_popcount(oms.portfolio.active_bitmap);
+        if (still_open > 0) {
+            fprintf(stderr,
+                "[sharded] %d position(s) open on shutdown — persisting via "
+                "snapshot for next session (force-close disabled by default; "
+                "see EngineSharded_ForceCloseOnShutdown if you need exchange "
+                "flatten on exit).\n",
+                still_open);
+        }
+    }
     // Per-stage shutdown logging — when the process refuses to exit on close,
     // these tell us WHICH thread is hung. Without them every shutdown bug
     // looks the same from outside ("the engine doesn't die"). Each stage
@@ -1475,20 +2313,124 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // return 0 and `delete` would run on already-unmapped memory.
     // Closes parity-check 2026-05-07 v5.11.6 sprint-exit Finding 7b.
 
-    // Post-join shutdown helpers hoisted to tt::EngineSharded_Shutdown_PostJoin<F, BENCH>
-    // in EngineSharded/Run/Shutdown.hpp at v5.15.5.F.4d.1.B.6 Phase B Step B.4.1
-    // (~117 LOC moved out). Final counter dump + DumpLatency + ORDER LATENCY dump
-    // + OMS COUNTERS dump + reconciler/userdata/adapter shutdown +
-    // Strategy_FreePerCore loop + InitArena destroy + BENCH-gated drainer cycle
-    // histogram dump + signal handler restore. Block-scope statics passed by
-    // reference per B.2 hoist discipline.
-    EngineSharded_Shutdown_PostJoin<F, BENCH>(
-        live_trading, num_cores, tsc_ghz,
-        ticks_produced, ticks_consumed_total,
-        state, oms, cores,
-        g_reconciler, g_sharded_binance_adapter, g_user_data,
-        g_init_arena, g_sharded_order_lat,
-        prev_int, prev_term);
+    fprintf(stderr, "[sharded] all threads joined.\n");
+    fprintf(stderr, "[sharded] final: produced=%lu consumed=%lu entries=%lu exits=%lu balance=%.4f\n",
+            (unsigned long)ticks_produced.load(),
+            (unsigned long)ticks_consumed_total.load(),
+            (unsigned long)state.total_entries,
+            (unsigned long)state.total_exits,
+            FPN_ToDouble(state.oms->balance));
+
+    EngineSharded_DumpLatency<F>(cores, num_cores, tsc_ghz);
+
+    // Order latency final dump (only meaningful in live mode)
+    if (live_trading) {
+        uint64_t ord_count    = g_sharded_order_lat.count.load(std::memory_order_relaxed);
+        uint64_t ord_failures = g_sharded_order_lat.failures.load(std::memory_order_relaxed);
+        uint64_t ord_total_us = g_sharded_order_lat.total_us.load(std::memory_order_relaxed);
+        uint64_t ord_min_us   = g_sharded_order_lat.min_us.load(std::memory_order_relaxed);
+        uint64_t ord_max_us   = g_sharded_order_lat.max_us.load(std::memory_order_relaxed);
+        fprintf(stderr, "\n");
+        fprintf(stderr, "================================================================\n");
+        fprintf(stderr, "[sharded] ORDER LATENCY (BinanceOrderAPI round trip, microseconds)\n");
+        fprintf(stderr, "================================================================\n");
+        if (ord_count > 0) {
+            double ord_avg_us = (double)ord_total_us / (double)ord_count;
+            fprintf(stderr, "  orders submitted : %lu\n", (unsigned long)ord_count);
+            fprintf(stderr, "  failures         : %lu\n", (unsigned long)ord_failures);
+            fprintf(stderr, "  min              : %lu µs\n", (unsigned long)ord_min_us);
+            fprintf(stderr, "  avg              : %.0f µs\n", ord_avg_us);
+            fprintf(stderr, "  max              : %lu µs\n", (unsigned long)ord_max_us);
+        } else {
+            fprintf(stderr, "  no orders submitted during this run.\n");
+        }
+        fprintf(stderr, "================================================================\n");
+    }
+
+    // OMS counter final dump. always shown (paper mode + live mode both
+    // bump these). zero in paper mode if no entries fired during the run.
+    {
+        uint64_t oms_sub      = OrderManager_TotalSubmitted(&oms);
+        uint64_t oms_fill     = OrderManager_TotalFilled(&oms);
+        uint64_t oms_rej      = OrderManager_TotalRejected(&oms);
+        int      oms_inflight = OrderManager_InflightCount(&oms);
+        fprintf(stderr, "\n");
+        fprintf(stderr, "================================================================\n");
+        fprintf(stderr, "[sharded] OMS COUNTERS (OrderManager state at shutdown)\n");
+        fprintf(stderr, "================================================================\n");
+        fprintf(stderr, "  total submitted  : %lu\n", (unsigned long)oms_sub);
+        fprintf(stderr, "  total filled     : %lu\n", (unsigned long)oms_fill);
+        fprintf(stderr, "  total rejected   : %lu\n", (unsigned long)oms_rej);
+        fprintf(stderr, "  in-flight at end : %d\n", oms_inflight);
+        fprintf(stderr, "================================================================\n");
+    }
+
+    // Shut down the reconciler first (it queries balances via REST — needs
+    // to stop before the REST instances are cleaned up).
+    if (live_trading) {
+        ReconciliationLoop_Shutdown(&g_reconciler);
+    }
+
+    // Shut down the user data websocket BEFORE the adapter (the WS thread
+    // may still be issuing REST calls for listen key refresh).
+    if (live_trading) {
+        g_sharded_binance_adapter.ws_active.store(0, std::memory_order_relaxed);
+        BinanceUserData_Shutdown(&g_user_data);
+    }
+
+    // Tear down the BinanceAdapter (joins worker threads, cleans up each
+    // worker's BinanceOrderAPI instance). No-op if live_trading was 0
+    // since BinanceAdapter_Init was never called — worker_count stays 0.
+    if (live_trading) {
+        BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
+    }
+
+    // v5.4.0 Phase 1.3 — release per-strategy state. Symmetric with the
+    // Strategy_InitPerCore call above. Pre-v5.4 this was missing because
+    // strategy state was never allocated; post-v5.4 it must be released
+    // to avoid LeakSanitizer noise (and good hygiene anyway).
+    for (int c = 0; c < state.registered_count; ++c) {
+        tt::Strategy_FreePerCore(&state, c);
+    }
+
+    // v5.11.6.D — destroy the init-time arena AFTER all per-struct frees
+    // (above + EventLoopState_Free path). The arena's munmap reclaims
+    // the entire mmap'd region in one syscall. Reset the global FIRST
+    // so any caller that observes the global post-shutdown sees nullptr
+    // (clean fallback). Closes parity-check 2026-05-07 v5.11.6
+    // sprint-exit Finding 7b — the prior ordering ran arena Destroy
+    // BEFORE Strategy_FreePerCore, which would have caused
+    // InitArena_Owns to return 0 and `delete` to run on already-unmapped
+    // memory. Restart path was the trigger; main shutdown path was
+    // OK because process-exit reclaims everything.
+    fprintf(stderr, "[sharded]   destroying init arena (%zu/%zu bytes used)...\n",
+            tt::InitArena_Used(&g_init_arena),
+            g_init_arena.capacity);
+    tt::InitArena_Global() = nullptr;
+    tt::InitArena_Destroy(&g_init_arena);
+
+    // v5.15.5.C.3 Phase 7.B — emit drainer-cycle bench histogram summary at
+    // engine shutdown. Compile-time elided when BENCH=false (production);
+    // no output. When BENCH=true, single stderr line with p50/p99/max +
+    // total samples — operator sees the slow-path drainer latency profile
+    // for this run.
+    if constexpr (BENCH) {
+        const uint64_t p50 = LatencyHistogram_Percentile(&g_engine_drainer_cycle_hist, 0.50);
+        const uint64_t p99 = LatencyHistogram_Percentile(&g_engine_drainer_cycle_hist, 0.99);
+        const uint64_t max = g_engine_drainer_cycle_hist.max_observed;
+        const uint64_t total = g_engine_drainer_cycle_hist.total_count.load(std::memory_order_relaxed);
+        std::fprintf(stderr,
+            "[OMS_BENCH] drainer cycle: p50=%llu cy, p99=%llu cy, max=%llu cy "
+            "(samples=%llu)\n",
+            (unsigned long long)p50, (unsigned long long)p99, (unsigned long long)max,
+            (unsigned long long)total);
+    }
+
+    // Restore previous signal handlers so subsequent code paths see the
+    // original behavior (legacy engine doesn't install one, so this resets
+    // to SIG_DFL).
+    std::signal(SIGINT,  prev_int);
+    std::signal(SIGTERM, prev_term);
 }
 
 }  // namespace tt
