@@ -5,8 +5,35 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.8"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.D"
 
+// .F.4d.1.D (v5.15.5.F.4d.1.D) — Forward-promise verification CI (Check 11 Python detection
+// logic IMPLEMENTED) + post-.B.8 ledger cleanup (2026-05-28). NEW `tools/check_forward_promise_audit.py`
+// ~870 LOC (24 sentinel patterns + 24 verifier functions + ScanSpec dataclass + section parser +
+// exemption mechanism + --since/--strict/--json/--include-archived modes). M7 7th canonical
+// structural enforcement application. Phase D retroactive ledger writes: 9 TECH_DEBT entries to
+// closed.md (-029/-105/-106/-107/-114/-116/-117/-118/-139) + PARITY-024 status flip + Class 18
+// catalog recurrence_count 6→8 + TECH_DEBT-111 trigger update (v5.16+ FOREACH_CLI_MODE alignment).
+// Phase F deterministic skill-tool integration cohort: pre-commit hook extension + 5 SKILL.md
+// amendments (/capture-audit + /handoff + /close-session + /sync-workspace + /accept-handoff)
+// — replaces LLM-orchestrated Check 11 invocation with explicit Python tool calls per
+// `feedback_structural_enforcement_when_memory_insufficient`. Phase E DESIGN_SPECS amendments:
+// M7 spec v1.3→v1.4 + canonical-sister-extension v1.0→v1.2 + memory Stage 2→3 promotion +
+// worked_examples extension + Class 33 sub-shape catalog amendment. Long-term visions captured at
+// `plans/_future/`: docs-as-meta-code (structured doc → tool consumption) + context-aware-CLAUDE.md
+// (multi-file loaded by harness based on work context). Operator-collaboration cleanup:
+// `feedback_address_user_as_caramel.md` memory file created (long-cited going-forward rule
+// finally has canonical body). CLAUDE.md + CLAUDE.local.md compressed for cleaner always-loaded
+// orientation (CLAUDE.md 514→423 lines; sprint state cells consolidated). Dogfood loop closure
+// verified: Check 11 catches its OWN forward-promises mechanically at .D ship close. Sister to
+// 2-cycle audit convergence at v1.0→v1.1 amendments + Phase F deterministic skill-tool integration
+// cohort closes the LLM-non-determinism gap at handoff-related skill surfaces. Tests baseline
+// preserved (3239/0 + 17/0; no engine code touched). Hot path UNTOUCHED. 5-binary build verify
+// preserved baseline (no engine changes). 12 CI structural checks PASS (existing 10 in
+// check_per_core_registry_integrity + 3 in check_meta_registry + B-Plus pre-commit hook + 5
+// sister tools + NEW Check 11). Postmortem at
+// `plans/v5.15-live-readiness/postmortems/2026-05-28-v5.15.5.F.4d.1.D-postmortem.md`.
+//
 // .F.4d.1.B.8 (v5.15.5.F.4d.1.B.8) — Class 26 sub-shape B (UNINDEXED-GLOBAL) accounting cohort
 // closure + Stage 6 Check 10 (M7 6th canonical) + Phase H anti-pattern codification + skill amendments
 // (2026-05-27). Mixed-ship: 4 HIGH consumer-site fixes + 1 MED display fix + 1 LOW dead-state cleanup
