@@ -5,7 +5,61 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.7"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.8"
+
+// .F.4d.1.B.8 (v5.15.5.F.4d.1.B.8) — Class 26 sub-shape B (UNINDEXED-GLOBAL) accounting cohort
+// closure + Stage 6 Check 10 (M7 6th canonical) + Phase H anti-pattern codification + skill amendments
+// (2026-05-27). Mixed-ship: 4 HIGH consumer-site fixes + 1 MED display fix + 1 LOW dead-state cleanup
+// + NEW CI check + 2 NEW Stage 2 DRAFT memory codifications + NEW Stage 2 DRAFT DESIGN_SPEC +
+// 3 skill amendments (/accounting-audit + /capture-audit + /dod-audit).
+//
+// CRITICAL — Class 26 sub-shape B silent realized-P&L drift CLOSED structurally + mechanically:
+//   - 4 HIGH consumer-site fixes (per-core fee_rate_taker substitution + H20 branchless ternary +
+//     pre-resolved core_cfg ref per StrategyParameters.hpp:1762 sister-canonical):
+//     * ControllerEventLoop.hpp:3605-3606 — EventLoop_TrailingSLRatchetOneCore
+//     * ControllerEventLoop.hpp:3670-3671 — EventLoop_BreakevenOnProfitOneCore
+//     * StrategyLifecycle.hpp:272-273 — Strategy_WriteRatchetSL (5 callers: MR/Momentum/EmaCross/
+//       MLStrategy/ControllerEventLoop)
+//     * ControllerEventLoop.hpp:3042-3043 — EventLoop_RebuildOneCore GUI diag (resolved_cfg aliased)
+//   - 1 MED display fix: ShardedSnapshot.hpp:249-250 (TUI per-position net_pnl per-core fee_taker)
+//   - 3 KEEP-AS-GLOBAL display sites annotated: ShardedSnapshot.hpp:139 + 330 + 331 (Settings panel
+//     operator-facing semantic; per-core deviations surfaced via per_core_count panel)
+//   - REGRESSION TESTS: tests/controller_test.cpp NEW "Class 26 sub-shape B: UNINDEXED-GLOBAL
+//     accounting cohort closure" section (16 NEW assertions; 4 slots × 4 consumer patterns).
+//     Tests 3223 → 3239.
+//   - STAGE 6 STRUCTURAL ENFORCEMENT: tools/check_per_core_registry_integrity.py NEW Check 10
+//     (UNINDEXED-GLOBAL detector for cfg.X / cfg->X / resolved_cfg.X UNINDEXED on per-core-with-global-
+//     sister fields). Sister to Check 9 per canonical-sister-extension-discipline.md v1.1
+//     CI-tooling-surface axis 2nd canonical. M7 6th canonical structural enforcement.
+//   - Class 26 recurrence_count bumped 13 → 17.
+//   - DOCUMENTED-RISK PARITY entry at ship close retroactively closes .B.7 forward-promise.
+//
+// LOW-1 Class 27 vestigial state cleanup: DELETED DrainerConstants.fee_rate_taker_d (B14
+// leaves-first ordering; sizeof 24→16; alignof 8→4). TECH_DEBT-138 NEW + CLOSED same ship.
+//
+// SISTER-COHORT amendments (Phase D per /blindspot-scan HIGH-3): Class 26 + Class 27 + Class 25
+// catalog cross-refs distinguishing sub-shapes A vs B; canonical-sister-extension-discipline.md
+// v1.0→v1.1 (CI-tooling-surface axis); structural-enforcement-when-memory-insufficient.md
+// v1.2→v1.3 (Check 9 retroactive + Check 10 added to canonical_applications).
+//
+// PHASE H — NEW anti-pattern codification + skill amendments (per Caramel directive "no defer"):
+//   - 2 NEW Stage 2 DRAFT memories: sister-cohort-amendment-completeness + forward-promise-auto-write-verification
+//   - NEW Stage 2 DRAFT DESIGN_SPEC: sister-cohort-amendment-completeness-discipline.md
+//     (AMENDMENT-layer sister to canonical-sister-extension-discipline CREATION layer; recursive
+//     enumeration with fixpoint termination criterion per B19 Option C fold)
+//   - SKILL amendments: /accounting-audit category 2 sub-shape A/B + /capture-audit NEW Check 11
+//     (forward-promise auto-write verification) + /dod-audit per-core surface sub-shape A/B
+//   - CLAUDE.local.md going-forward rules: 2 NEW entries + MEMORY.md index updated
+//
+// AUDIT-DRIVEN 3-CYCLE CONVERGENCE: cycle 1 = 5-agent /precoding-audit-gate (13 findings →
+// v1.1); cycle 2 = /readiness GREEN + /blindspot-scan YELLOW recursive (4 findings → v1.2);
+// cycle 3 = /blindspot-scan inflection GREEN CONVERGED. Iteration trajectory 9→4→0 findings.
+//
+// VERIFICATION at ship close: 5 binaries clean / 3239 tests pass / hot path UNTOUCHED /
+// 9 CI structural checks PASS (Check 10 NEW sanity-verified via revert-detect-reapply) /
+// H4/H6/H7/H12/H15/H20 all PRESERVED per /dod-audit GREEN.
+//
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-05-27-v5.15.5.F.4d.1.B.8-postmortem.md.
 
 // .F.4d.1.B.7 (v5.15.5.F.4d.1.B.7) — Folded bugfix + cleanup + C1 file-size umbrella close-out
 // (2026-05-27). Mixed-ship per operator directive ("fold .B.8 into .7 i thnk").

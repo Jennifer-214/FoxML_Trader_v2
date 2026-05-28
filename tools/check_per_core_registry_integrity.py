@@ -417,6 +417,150 @@ CHECK_9_SCAN_FILES = [
 CHECK_9_PROXIMITY_LINES = 5  # how far to look for paired cfg.cores[Y] after cfg.core_overrides[X]
 
 
+# ============================================================================
+# Check 10 — Class 26 sub-shape B detection: UNINDEXED-GLOBAL per-core-migrated
+# field reads at per-core consumer sites (M7 6th canonical structural enforcement)
+# ============================================================================
+# Per RECURRING_BUG_PATTERNS Class 26 sub-shape B + DESIGN_SPECS/meta-disciplines/
+# structural-enforcement-when-memory-insufficient.md M7 6th canonical.
+# Codified at v5.15.5.F.4d.1.B.8 (2026-05-27) after /accounting-audit surfaced 4 HIGH instances
+# (ControllerEventLoop.hpp:3605+3670+3042 + StrategyLifecycle.hpp:272 + ShardedSnapshot.hpp:249).
+#
+# Sister to Check 9: same tool / same surface family (per-core cfg consumer discipline) /
+# different detection signature (UNINDEXED-GLOBAL vs PAIRED-ACCESS-MISMATCH). Check 9 catches
+# `cfg.core_overrides[X]` + `cfg.cores[Y]` with X != Y; Check 10 catches `cfg.X` UNINDEXED
+# where X is per-core-migrated AND has global sister in ControllerConfig<F>.
+#
+# Per-core surface files to scan. Operator extends as new per-core surface files land.
+CHECK_10_SCAN_FILES = [
+    "CoreFrameworks/ControllerEventLoop.hpp",
+    "CoreFrameworks/EngineSharded/Async.hpp",
+    "CoreFrameworks/EngineSharded/SlowPath.hpp",
+    "CoreFrameworks/EngineSharded/Run.hpp",
+    "CoreFrameworks/EngineSharded/Boot.hpp",
+    "CoreFrameworks/EngineCommon.hpp",
+    "CoreFrameworks/OrderManager.hpp",
+    "CoreFrameworks/ShardedSnapshot.hpp",
+    "Strategies/StrategyLifecycle.hpp",
+    "Strategies/private/EmaCross.hpp",  # has both per-core sharded (covered) + legacy single_core (exempt)
+    "Strategies/Momentum.hpp",
+    "Strategies/MeanReversion.hpp",
+    "Strategies/MLStrategy.hpp",
+    "Strategies/SimpleDip.hpp",
+    "Backtest/BacktestSharded.hpp",
+    "CoreFrameworks/ShardedBacktestDriver.hpp",
+]
+
+# Per-core fields with GLOBAL sister in ControllerConfig<F> — reads UNINDEXED at per-core
+# consumer sites = Class 26 sub-shape B violation. Operator extends as new per-core-migrated
+# fields land with global sisters. Future enhancement: derive from
+# FOREACH_PER_CORE_CFG_FIELD ∩ ControllerConfig<F> manual decl set programmatically.
+CHECK_10_PER_CORE_FIELDS_WITH_GLOBAL_SISTER = {
+    "fee_rate",
+    "fee_rate_taker",
+    "fee_rate_maker",
+    "slippage_pct",
+}
+
+# Section D exemptions — legitimate UNINDEXED-GLOBAL reads at per-core consumer sites.
+# Format: (file_rel_path, line_num) tuples.
+# Operator extends via MANUAL_FIELDS_INVENTORY.md Section D when new legitimate cases surface.
+CHECK_10_SECTION_D_EXEMPTIONS = {
+    # LEGACY single_core paths (per .B.7 audit Cat 8 LEGACY-KEEP verdict; caller is single_core PortfolioController)
+    ("Strategies/private/EmaCross.hpp", 143),  # EmaCross_ExitAdjust legacy single_core fee_rate_taker
+    ("Strategies/private/EmaCross.hpp", 144),  # sister fallback fee_rate
+    # KEEP-AS-GLOBAL display sites (Settings panel operator-facing semantic; per-core deviations
+    # surfaced via per_core_count panel instead). Line numbers reflect post-.B.8 Phase B
+    # KEEP-AS-GLOBAL comment additions (lines shifted from original 139/330/331 to 142/343/344).
+    ("CoreFrameworks/ShardedSnapshot.hpp", 142),  # engine-wide headline fee_rate_pct display
+    ("CoreFrameworks/ShardedSnapshot.hpp", 343),  # Settings panel cfg_fee display
+    ("CoreFrameworks/ShardedSnapshot.hpp", 344),  # Settings panel cfg_slippage display
+}
+
+# Boot-time / parse-time fn-name patterns excluded from Check 10 (legitimate global cfg reads)
+CHECK_10_BOOT_TIME_FN_NAME_PATTERNS = {"Boot", "Init", "Default", "Parse", "Normalize"}
+
+
+def scan_check_10_violations(text: str, file_rel_path: str) -> list:
+    """Class 26 sub-shape B detection: UNINDEXED-GLOBAL per-core-migrated field reads at per-core consumer sites.
+
+    Catches `cfg.X` / `cfg->X` / `resolved_cfg.X` UNINDEXED reads on per-core fields with global
+    sister (fee_rate / fee_rate_taker / fee_rate_maker / slippage_pct). Per-core consumer should
+    read `cfg.cores[core_id].X` instead. Pre-fix HIGH-1/2/3/4 at .B.8 audit findings:
+    ControllerEventLoop.hpp:3605+3670+3042 + StrategyLifecycle.hpp:272 + ShardedSnapshot.hpp:249.
+
+    Per v1.2 amendment: handles `resolved_cfg.X` aliased reads (stack-local copy from
+    ControllerConfig_ResolveForCore) in addition to direct cfg.X / cfg->X reads.
+
+    Tracks #define multi-line continuations inline (skip macro body lines) WITHOUT using
+    strip_macro_definitions — preserves ORIGINAL source line numbers for accurate Section D
+    exemption matching + finding citation. Applies Section D exemption + boot-time fn-name
+    heuristic filters.
+
+    Returns list of (file_rel_path, line_num, container, accessor, field, current_fn) tuples.
+    """
+    findings = []
+
+    # Build regex for per-core fields (escaped + alternation)
+    field_alt = '|'.join(re.escape(f) for f in CHECK_10_PER_CORE_FIELDS_WITH_GLOBAL_SISTER)
+    if not field_alt:
+        return findings
+
+    # Match: cfg.X / cfg->X / resolved_cfg.X where X is per-core-with-global-sister field
+    # Negative lookahead (?!\s*[\[.]) excludes cfg.X[Y] (indexed) and cfg.X.subfield (nested)
+    cfg_unindexed_re = re.compile(
+        r'\b(cfg|resolved_cfg)(\.|->)(' + field_alt + r')\b(?!\s*[\[.])'
+    )
+
+    # Track current enclosing fn name (heuristic for Boot/Init/Parse/Default exclusion)
+    # Simple regex: catches `inline ... fn_name(...)` style patterns at top-level fn declarations
+    fn_decl_re = re.compile(r'^\s*(?:inline\s+|template\s*<[^>]+>\s*)*(?:[\w<>:&*\s,]+\s+)?(\w+)\s*\([^)]*\)\s*[{|\n]')
+    current_fn = ""
+    in_macro = False
+
+    for line_num, line in enumerate(text.split('\n'), start=1):
+        # Track #define multi-line continuations (skip macro body lines; preserve line_num)
+        if in_macro:
+            if not line.rstrip().endswith('\\'):
+                in_macro = False
+            continue
+        stripped = line.strip()
+        if stripped.startswith('#define '):
+            if line.rstrip().endswith('\\'):
+                in_macro = True
+            continue
+
+        # Update current_fn heuristic (loose; covers most fn-def patterns)
+        fn_match = fn_decl_re.match(line)
+        if fn_match:
+            candidate = fn_match.group(1)
+            # Skip common non-fn keywords + control flow
+            if candidate not in ("if", "while", "for", "switch", "return", "sizeof", "alignof", "static_assert"):
+                current_fn = candidate
+
+        # Check Section D exemption (uses ORIGINAL source line_num for accurate match)
+        if (file_rel_path, line_num) in CHECK_10_SECTION_D_EXEMPTIONS:
+            continue
+
+        # Boot-time / parse-time fn-name heuristic
+        if any(pattern in current_fn for pattern in CHECK_10_BOOT_TIME_FN_NAME_PATTERNS):
+            continue
+
+        # Strip single-line // comments before regex match — avoids false positives where comment
+        # text mentions cfg.X pattern (e.g., explanatory comments above a fix site).
+        # Doesn't handle string literals containing //, but those are rare in cfg-consumer code.
+        line_no_comments = re.sub(r'//.*$', '', line)
+
+        # Find UNINDEXED-GLOBAL matches on per-core fields
+        for m in cfg_unindexed_re.finditer(line_no_comments):
+            container = m.group(1)  # 'cfg' or 'resolved_cfg'
+            accessor = m.group(2)   # '.' or '->'
+            field = m.group(3)      # the per-core field name
+            findings.append((file_rel_path, line_num, container, accessor, field, current_fn))
+
+    return findings
+
+
 def scan_check_9_violations(text: str, file_rel_path: str) -> list:
     """Class 26 detection: cfg.core_overrides[X] + cfg.cores[Y] with X != Y within proximity.
 
@@ -636,11 +780,41 @@ def main() -> int:
     else:
         info(f"Check 9 PASS: {len(CHECK_9_SCAN_FILES)} file(s) scanned; no Class 26 paired-access mismatches (proximity={CHECK_9_PROXIMITY_LINES})")
 
+    # --- Check 10: Class 26 sub-shape B detection — UNINDEXED-GLOBAL per-core-migrated field reads
+    # at per-core consumer sites (M7 6th canonical; v5.15.5.F.4d.1.B.8). ---
+    # Per RECURRING_BUG_PATTERNS Class 26 sub-shape B + DESIGN_SPECS/meta-disciplines/
+    # structural-enforcement-when-memory-insufficient.md M7 6th canonical.
+    # Sister to Check 9: same tool, same surface family, different detection signature.
+    # Catches cfg.X / cfg->X / resolved_cfg.X UNINDEXED on per-core-with-global-sister fields
+    # (fee_rate / fee_rate_taker / fee_rate_maker / slippage_pct). Per-core consumer should
+    # read cfg.cores[core_id].X instead.
+    # Sister: tests/controller_test.cpp Class 26 sub-shape B regression test section (added at .B.8 Phase E).
+    check_10_violations = []
+    for rel_path in CHECK_10_SCAN_FILES:
+        full_path = REPO_ROOT / rel_path
+        if not full_path.exists():
+            warn(f"Check 10 WARN: scan target not found: {rel_path} — skipping")
+            continue
+        file_text = read_file(full_path)
+        check_10_violations.extend(scan_check_10_violations(file_text, rel_path))
+    if check_10_violations:
+        fail(f"Check 10 FAIL: {len(check_10_violations)} Class 26 sub-shape B UNINDEXED-GLOBAL violation(s) — per-core consumer sites reading global cfg field without core_id index:")
+        for rel_path, line_num, container, accessor, field, fn_name in check_10_violations:
+            fn_ctx = f" in fn '{fn_name}'" if fn_name else ""
+            fail(f"  → {rel_path}:{line_num}{fn_ctx}: '{container}{accessor}{field}' UNINDEXED at per-core consumer site")
+            fail(f"     Class 26 sub-shape B anti-pattern — per-core consumer must read per-core slot")
+            fail(f"     Fix: change {container}{accessor}{field} → {container}{accessor}cores[<core_id>].{field}")
+            fail(f"     OR if legitimately global (Settings panel display / legacy single_core / boot-time): add to CHECK_10_SECTION_D_EXEMPTIONS at tools/check_per_core_registry_integrity.py")
+            fail(f"     See: DOCS/recurring-bug-patterns/class-26-global-consumer-reading-per-core-field.md § Sub-shape B")
+        failures += 1
+    else:
+        info(f"Check 10 PASS: {len(CHECK_10_SCAN_FILES)} file(s) scanned; no Class 26 sub-shape B UNINDEXED-GLOBAL violations ({len(CHECK_10_SECTION_D_EXEMPTIONS)} Section D exemption(s) on file)")
+
     # --- Final verdict ---
     if failures > 0:
         fail(f"per-core cfg integrity check FAILED with {failures} violations — see errors above")
         return 1
-    info(f"all 8 structural checks PASS — per-core cfg discipline intact (Check 6 informational; Check 7 Class 27 prevention; Check 8 pending mechanical impl per cfg-field-categorization-discipline.md Stage 3 sister ship; Check 9 Class 26 paired-access mismatch detection)")
+    info(f"all 9 structural checks PASS — per-core cfg discipline intact (Check 6 informational; Check 7 Class 27 prevention; Check 8 pending mechanical impl per cfg-field-categorization-discipline.md Stage 3 sister ship; Check 9 Class 26 sub-shape A paired-access mismatch detection; Check 10 Class 26 sub-shape B UNINDEXED-GLOBAL detection)")
     return 0
 
 

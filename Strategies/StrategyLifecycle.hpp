@@ -269,8 +269,11 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
 
     // Cap proposal at entry × (1 - 3 × fee_rate_taker). Same formula as the
     // generic ratcheter (ControllerEventLoop.hpp:2244 v5.1.7 commentary).
-    FPN<F> fee_taker = !FPN_IsZero(cfg->fee_rate_taker)
-        ? cfg->fee_rate_taker : cfg->fee_rate;
+    // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
+    // (UNINDEXED-GLOBAL closure). 5 callers (MeanReversion + MLStrategy +
+    // EmaCross + Momentum + ControllerEventLoop) all pass per-core slot.
+    FPN<F> fee_taker = !FPN_IsZero(cfg->cores[slot].fee_rate_taker)
+        ? cfg->cores[slot].fee_rate_taker : cfg->cores[slot].fee_rate;
     FPN<F> three     = FPN_FromDouble<F>(3.0);
     FPN<F> floor_pct = FPN_Mul(fee_taker, three);
     FPN<F> floor_mult = FPN_Sub(FPN_FromDouble<F>(1.0), floor_pct);

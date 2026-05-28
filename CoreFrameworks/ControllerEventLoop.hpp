@@ -3039,8 +3039,14 @@ inline void EventLoop_RebuildOneCore(
         // collapsing-header readout shows actual vs floor regardless
         // of whether BUY_BLOCKED fired.
         {
-            FPN<F> fee_taker = !FPN_IsZero(resolved_cfg.fee_rate_taker)
-                ? resolved_cfg.fee_rate_taker : resolved_cfg.fee_rate;
+            // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
+            // (UNINDEXED-GLOBAL closure for display↔execution divergence at fee-floor diag).
+            // resolved_cfg.fee_rate_taker stays at GLOBAL post-ResolveForCore (fee_rate_taker NOT
+            // in PER_CORE_OVERRIDE_FIELDS at ControllerConfig.hpp:119); per-core value lives at
+            // resolved_cfg.cores[slot].fee_rate_taker. Sister-pattern at line 3061 (Strategy_TpFloor)
+            // correctly uses &resolved_cfg.cores[slot] — proven right shape.
+            FPN<F> fee_taker = !FPN_IsZero(resolved_cfg.cores[slot].fee_rate_taker)
+                ? resolved_cfg.cores[slot].fee_rate_taker : resolved_cfg.cores[slot].fee_rate;
             state->display_meta[slot].diag_tp_pct_actual =
                 state->cores[slot].pending_params.tp_pct;
             state->display_meta[slot].diag_tp_pct_floor =
@@ -3602,8 +3608,13 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
     // round-trip fees. Cap the ratchet at entry × (1 - 3 × fee_rate_taker)
     // to guarantee any SG-fired exit clears fees with at least 1× fee_rate
     // of margin.
-    double fee_taker_d = FPN_ToDouble(cfg.fee_rate_taker);
-    if (fee_taker_d <= 0.0) fee_taker_d = FPN_ToDouble(cfg.fee_rate);
+    // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker (UNINDEXED-GLOBAL closure).
+    // cfg.fee_rate_taker is GLOBAL; per-core consumers MUST read cfg.cores[core_id].fee_rate_taker.
+    // H20 branchless: pre-resolve core_cfg ref (single array index via CSE) + ternary select (cmov-lowerable).
+    // Sister-canonical: StrategyParameters.hpp:1762 (core_cfg->X pattern).
+    const auto& core_cfg = cfg.cores[core_id];
+    double fee_taker_d = FPN_ToDouble(!FPN_IsZero(core_cfg.fee_rate_taker)
+        ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
     double fee_floor_pct = 3.0 * fee_taker_d;
 
     while (bm) {
@@ -3667,8 +3678,11 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
     // this, the ratchet would close the position at net-negative; the
     // fee floor on the ratchet_sl prevents that, but skipping the math
     // when gain_pct < 2*fee saves the FPN_FromDouble + compare per cycle.
-    double fee_taker_d = FPN_ToDouble(cfg.fee_rate_taker);
-    if (fee_taker_d <= 0.0) fee_taker_d = FPN_ToDouble(cfg.fee_rate);
+    // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker (UNINDEXED-GLOBAL closure).
+    // H20 branchless: pre-resolve core_cfg ref + ternary select (sister to HIGH-1 above + StrategyParameters.hpp:1762).
+    const auto& core_cfg = cfg.cores[core_id];
+    double fee_taker_d = FPN_ToDouble(!FPN_IsZero(core_cfg.fee_rate_taker)
+        ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
     double net_profit_threshold = 2.0 * fee_taker_d;
     double fee_floor_pct        = 3.0 * fee_taker_d;
 

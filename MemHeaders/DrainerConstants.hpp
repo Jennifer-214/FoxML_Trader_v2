@@ -13,15 +13,17 @@
 // predicate values.
 //
 // Replaces the prior ad-hoc pattern of scattered `BITMAP_IS_SET(...)` reads
-// + repeated `FPN_ToDouble(cfg.fee_rate_taker)` conversions across multiple
-// drainer cycle sites (6 sites for partial_on alone per cycle in the prior
-// code).
+// (6 sites for partial_on alone per cycle in the prior code).
+//
+// v5.15.5.F.4d.1.B.8 — `fee_rate_taker_d` field DELETED (Class 27 vestigial
+// post-`.F.4c.3` WIP2d-1.B.1 cache deletion; UNREAD by production code;
+// per-core fee_rate captured at decision-time on Order.pre_resolved.fee_rate).
 //
 // LAYOUT (per `function-struct-alignment-for-single-mov-access.md`):
 //   - Size-descending field order (no middle padding waste)
-//   - Total 24B → fits comfortably within 1 cache line
+//   - Total 16B → fits comfortably within 1 cache line
 //   - 7B trailing pad for future field additions without size growth
-//   - alignas(8) implicit from `double` field (sufficient for single-mov access)
+//   - alignof(4) implicit from `int` field (sufficient for single-mov access)
 //   - No `alignas(64)` — struct is drainer-thread-local; not cross-thread; not
 //     in hot-inner-loop; per-cycle init cost is amortized across all internal
 //     sites that use the cached values
@@ -62,16 +64,19 @@ namespace tt {
 // aligned; single-mov access for all fields when passed by const ref.
 //======================================================================================================
 struct DrainerConstants {
-    double  fee_rate_taker_d;   // 8B, offset 0  — FPN_ToDouble(cfg.fee_rate_taker); boot-set immutable
-    int     registered_count;   // 4B, offset 8  — state.registered_count
-    int     drain_count;        // 4B, offset 12 — partial_on ? registered_count*2 : registered_count
-    bool    partial_on;         // 1B, offset 16 — BITMAP_IS_SET(oms_state_flags, PARTIAL_EXIT_ENABLED)
-    uint8_t _pad[7];            // 7B, offset 17-23 — trailing slack for future fields
+    // v5.15.5.F.4d.1.B.8 — fee_rate_taker_d field DELETED (Class 27 vestigial sub-instance closure;
+    // UNREAD post-.F.4c.3 WIP2d-1.B.1 cache deletion; verified 0 production consumers via grep + /trace-deps).
+    // Per-core fee_rate is captured at decision-time on Order.pre_resolved.fee_rate (Class 27 closure pattern).
+    int     registered_count;   // 4B, offset 0  — state.registered_count
+    int     drain_count;        // 4B, offset 4  — partial_on ? registered_count*2 : registered_count
+    bool    partial_on;         // 1B, offset 8  — BITMAP_IS_SET(oms_state_flags, PARTIAL_EXIT_ENABLED)
+    uint8_t _pad[7];            // 7B, offset 9-15 — trailing slack for future fields
 };
 
-// Verify layout assumptions hold (catches silent struct-layout regressions):
-static_assert(sizeof(DrainerConstants) == 24, "DrainerConstants size changed; cache/single-mov analysis may be stale");
-static_assert(alignof(DrainerConstants) == 8, "DrainerConstants alignment changed");
+// Verify layout assumptions hold (catches silent struct-layout regressions).
+// v5.15.5.F.4d.1.B.8: size 24→16 + alignof 8→4 post fee_rate_taker_d deletion (Class 27 vestigial).
+static_assert(sizeof(DrainerConstants) == 16, "DrainerConstants size changed; cache/single-mov analysis may be stale");
+static_assert(alignof(DrainerConstants) == 4, "DrainerConstants alignment changed");
 
 //======================================================================================================
 // Initialize DrainerConstants from current state + cfg + oms.
@@ -81,23 +86,22 @@ static_assert(alignof(DrainerConstants) == 8, "DrainerConstants alignment change
 // Cost: ~5-10 cycles (4 field assignments + 1 BITMAP_IS_SET + 1 multiply).
 //
 // All field values are SAFE TO CACHE FOR ONE CYCLE:
-//   - fee_rate_taker_d: cfg field is boot-set immutable (per agent investigation
-//     2026-05-13). Could be cached for entire drainer thread lifetime if desired;
-//     per-cycle caching is simpler + still gives consistency-within-cycle.
 //   - registered_count: boot-set; immutable post-Init.
 //   - partial_on: cfg field; can mutate via operator GUI mid-session, but
 //     per-cycle caching gives consistency-within-cycle (prior code re-read 6×
 //     per cycle, accepting per-read drift as harmless; per-cycle caching is
 //     strictly stricter discipline).
 //   - drain_count: derived from partial_on + registered_count.
+//
+// v5.15.5.F.4d.1.B.8 — `cfg` parameter retained for future drainer-thread-stable
+// cfg fields; currently unused after fee_rate_taker_d deletion.
 //======================================================================================================
 template <unsigned F>
 inline DrainerConstants DrainerConstants_Init(
     int registered_count,
-    const ControllerConfig<F>& cfg,
+    const ControllerConfig<F>& /*cfg*/,
     const OrderManagerState<F>& oms) {
     DrainerConstants dc;
-    dc.fee_rate_taker_d = FPN_ToDouble(cfg.fee_rate_taker);
     dc.registered_count = registered_count;
     dc.partial_on       = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     dc.drain_count      = dc.partial_on ? (dc.registered_count * 2) : dc.registered_count;

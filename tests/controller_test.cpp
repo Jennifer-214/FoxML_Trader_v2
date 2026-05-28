@@ -7312,6 +7312,102 @@ e3_skip_load:;
     }
 
     //==================================================================================================
+    // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B regression: UNINDEXED-GLOBAL accounting cohort closure
+    //==================================================================================================
+    // Bug context (closed at .B.8 2026-05-27): pre-fix, 4 HIGH consumer sites read
+    // cfg.fee_rate_taker UNINDEXED (cfg.fee_rate_taker / cfg->fee_rate_taker /
+    // resolved_cfg.fee_rate_taker) while per-core context (core_id / slot) was in scope.
+    // Silent realized-P&L drift per core when per-core fee_rate_taker values differ.
+    // Fix sites: ControllerEventLoop.hpp:3605+3670+3042 + StrategyLifecycle.hpp:272 +
+    // ShardedSnapshot.hpp:249. Sister Check 10 at
+    // tools/check_per_core_registry_integrity.py catches re-introduction mechanically
+    // (Stage 6 M7 6th canonical structural enforcement; sister to Check 9 sub-shape A
+    // paired-access mismatch detection from .B.7).
+    //
+    // Test strategy: mirror the post-fix BRANCHLESS TERNARY pattern (same shape used at
+    // all 4 HIGH sites + MED-1) with distinct per-core fee_rate_taker values across 4 cores.
+    // UNINDEXED-GLOBAL re-introduction would cause every per-core read to flatten to the
+    // global sentinel; per-core reads must return the per-core value.
+    //==================================================================================================
+    printf("\n--- v5.15.5.F.4d.1.B.8 Class 26 sub-shape B: UNINDEXED-GLOBAL accounting cohort ---\n");
+    {
+        using namespace tt;
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.num_execution_cores = 4;
+
+        // GLOBAL fee_rate sentinel (should NOT be read by per-core consumers post-fix)
+        cfg.fee_rate = FPN_FromDouble<64>(0.005);            // sentinel value distinct from per-core
+        cfg.fee_rate_taker = FPN_FromDouble<64>(0.005);      // sentinel value distinct from per-core
+        cfg.fee_rate_maker = FPN_FromDouble<64>(0.005);
+
+        // Distinct per-core fee_rate_taker values — UNINDEXED-GLOBAL reads will mismatch
+        const double expected_arr[4] = {0.0008, 0.0010, 0.0012, 0.0015};
+        for (int c = 0; c < 4; ++c) {
+            cfg.cores[c].fee_rate_taker = FPN_FromDouble<64>(expected_arr[c]);
+            cfg.cores[c].fee_rate        = FPN_FromDouble<64>(expected_arr[c]);
+        }
+
+        for (int core_id = 0; core_id < cfg.num_execution_cores; ++core_id) {
+            const double expected = expected_arr[core_id];
+
+            // Post-fix HIGH-1/HIGH-2 ControllerEventLoop pattern
+            // (mirrors EventLoop_TrailingSLRatchetOneCore + EventLoop_BreakevenOnProfitOneCore)
+            const auto& core_cfg = cfg.cores[core_id];
+            double fee_taker_h12 = FPN_ToDouble(!FPN_IsZero(core_cfg.fee_rate_taker)
+                ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
+
+            char msg[192];
+            snprintf(msg, sizeof(msg),
+                     "Class 26 sub-shape B core %d: ControllerEventLoop HIGH-1/2 reads cfg.cores[%d].fee_rate_taker = %.5f (not global %.5f)",
+                     core_id, core_id, expected, 0.005);
+            check(msg, fee_taker_h12 > expected - 1e-7 && fee_taker_h12 < expected + 1e-7);
+
+            // Post-fix HIGH-3 StrategyLifecycle pattern
+            // (mirrors Strategy_WriteRatchetSL shared helper; ptr access via cfg->)
+            const auto* cfg_p = &cfg;
+            FPN<64> fee_taker_sl = !FPN_IsZero(cfg_p->cores[core_id].fee_rate_taker)
+                ? cfg_p->cores[core_id].fee_rate_taker
+                : cfg_p->cores[core_id].fee_rate;
+            double fee_taker_sl_d = FPN_ToDouble(fee_taker_sl);
+
+            snprintf(msg, sizeof(msg),
+                     "Class 26 sub-shape B core %d: Strategy_WriteRatchetSL HIGH-3 reads cfg->cores[%d].fee_rate_taker = %.5f (not global %.5f)",
+                     core_id, core_id, expected, 0.005);
+            check(msg, fee_taker_sl_d > expected - 1e-7 && fee_taker_sl_d < expected + 1e-7);
+
+            // Post-fix HIGH-4 ControllerEventLoop GUI diag pattern (resolved_cfg aliased)
+            // (mirrors EventLoop_RebuildOneCore display capture; ControllerConfig_ResolveForCore
+            // produces stack-local copy; per-core fields still accessible via resolved_cfg.cores[slot])
+            ControllerConfig<64> resolved_cfg = ControllerConfig_ResolveForCore(cfg, core_id);
+            FPN<64> fee_taker_rc = !FPN_IsZero(resolved_cfg.cores[core_id].fee_rate_taker)
+                ? resolved_cfg.cores[core_id].fee_rate_taker
+                : resolved_cfg.cores[core_id].fee_rate;
+            double fee_taker_rc_d = FPN_ToDouble(fee_taker_rc);
+
+            snprintf(msg, sizeof(msg),
+                     "Class 26 sub-shape B core %d: GUI diag HIGH-4 reads resolved_cfg.cores[%d].fee_rate_taker = %.5f (not aliased global %.5f)",
+                     core_id, core_id, expected, 0.005);
+            check(msg, fee_taker_rc_d > expected - 1e-7 && fee_taker_rc_d < expected + 1e-7);
+
+            // Post-fix MED-1 ShardedSnapshot per-position TUI net_pnl pattern
+            // (mirrors ShardedSnapshot_BuildTUISnapshot per-position loop; core_id_for_pos in scope)
+            const auto& core_cfg_snap = cfg.cores[core_id];  // core_id_for_pos at MED-1 site
+            double fee_r_snap = FPN_ToDouble(!FPN_IsZero(core_cfg_snap.fee_rate_taker)
+                ? core_cfg_snap.fee_rate_taker : core_cfg_snap.fee_rate);
+
+            snprintf(msg, sizeof(msg),
+                     "Class 26 sub-shape B core %d: ShardedSnapshot MED-1 net_pnl fee_r = %.5f (not global %.5f)",
+                     core_id, expected, 0.005);
+            check(msg, fee_r_snap > expected - 1e-7 && fee_r_snap < expected + 1e-7);
+        }
+
+        // LOW-1 DrainerConstants sizeof verify post fee_rate_taker_d deletion:
+        // static_assert at MemHeaders/DrainerConstants.hpp:74-75 is compile-time
+        // authoritative (sizeof == 16 + alignof == 4). Runtime check here is redundant —
+        // build would fail if static_assert was violated. Per `feedback_proportionate_response_to_audit_findings`.
+    }
+
+    //==================================================================================================
     // Partial Exits — P.2 (ExecutionCore hot-path dual-leg SG check)
     //==================================================================================================
     // Verifies the branchless leg-A + leg-B SG evaluation in

@@ -1333,6 +1333,20 @@ template <unsigned F> struct ControllerConfig {
 //
 // In legacy cfg mode (only fee_rate set, mirrored to maker+taker), both
 // branches return identical values → behavior matches pre-Phase-8.
+//
+// SCOPE — GLOBAL ONLY (v5.15.5.F.4d.1.B.8 annotation):
+// This helper reads cfg->fee_rate_{maker,taker} which are GLOBAL fields, NOT
+// per-core. Sharded per-core code paths MUST NOT call Fee_Compute() expecting
+// per-core fee rates — instead read from o->pre_resolved.fee_rate (decision-time
+// data binding pattern; captured at submit per Order.hpp:358-361). Class 26
+// sub-shape B prevention. Fee_Compute() remains canonical for:
+//   - tests (Phase 8 Maker/Taker Fee Accuracy invariant verification at
+//     tests/controller_test.cpp:5051-5052)
+//   - legacy single_core PortfolioController paths
+//   - global accounting display
+// New per-core consumer MUST NOT introduce a Fee_Compute() call site without
+// switching to o->pre_resolved.fee_rate. Check 10 detects via UNINDEXED-GLOBAL
+// pattern at per-core consumer sites.
 template <unsigned F>
 inline FPN<F> Fee_Compute(const ControllerConfig<F>* cfg, FPN<F> notional, int is_maker) {
     FPN<F> rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;

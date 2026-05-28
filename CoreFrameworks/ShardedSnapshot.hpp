@@ -136,6 +136,9 @@ static inline void TUI_CopySnapshotSharded(
     snap->max_dd       = agg.max_drawdown;
     snap->max_drawdown = agg.max_drawdown;
     snap->max_drawdown_pct = agg.max_drawdown_pct * 100.0;
+    // KEEP-AS-GLOBAL: engine-wide headline display shows GLOBAL fee_rate default;
+    // per-core deviations are surfaced via per_core_count panel + per-position
+    // net_pnl computation at line 249 (per-core fee_taker). Operator-facing summary.
     snap->fee_rate_pct = FPN_ToDouble(cfg->fee_rate) * 100.0;
 
     // v4.0.4: warmup progress display. min_warmup_samples is what the
@@ -246,7 +249,14 @@ static inline void TUI_CopySnapshotSharded(
         ps->value    = price_d * ps->qty;
         if (ps->entry > 0.0) {
             ps->gross_pnl = ((price_d - ps->entry) / ps->entry) * 100.0;
-            double fee_r = FPN_ToDouble(cfg->fee_rate);
+            // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
+            // (UNINDEXED-GLOBAL closure). TUI net_pnl now reflects per-core fee tier;
+            // matches execution path which reads o->pre_resolved.fee_rate per-core.
+            // H20 branchless: pre-resolve core_cfg ref + ternary select (cmov-lowerable;
+            // sister to ControllerEventLoop HIGH-1/2 fix + StrategyParameters.hpp:1762).
+            const auto& core_cfg = cfg->cores[core_id_for_pos];
+            double fee_r = FPN_ToDouble(!FPN_IsZero(core_cfg.fee_rate_taker)
+                ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
             ps->net_pnl   = ps->gross_pnl - (fee_r * 200.0);
         }
         ps->is_trailing = (ps->tp != ps->orig_tp) ? 1 : 0;
@@ -324,7 +334,10 @@ static inline void TUI_CopySnapshotSharded(
     int      any_ml_active       = 0;
     int      any_model_loaded    = 0;
 
-    // config display
+    // config display — KEEP-AS-GLOBAL: Settings panel shows GLOBAL cfg defaults;
+    // per-core deviations surfaced via per_core_count panel at line 339.
+    // Operator-facing summary semantic; per-core values are visible in the
+    // dedicated per-core view rather than headline Settings.
     snap->cfg_tp  = FPN_ToDouble(cfg->take_profit_pct) * 100.0;
     snap->cfg_sl  = FPN_ToDouble(cfg->stop_loss_pct) * 100.0;
     snap->cfg_fee = FPN_ToDouble(cfg->fee_rate) * 100.0;
