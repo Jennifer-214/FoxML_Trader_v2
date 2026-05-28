@@ -117,6 +117,11 @@ DEFAULT_EXCLUDE = [
     "FEATURE_LOOKUP.md",         # operator-facing feature inventory (tracks current per-core code)
     "MANUAL_FIELDS_INVENTORY.md", # cfg-field inventory (tracks current per-core code)
     "KNOWN_ISSUES.md",           # current-limitations ledger (point-in-time entries)
+    # Bug-pattern CATALOG = historical-record: class identities + worked examples are tied
+    # to the per-core era (Class 26 IS "global consumer reading per-core field"). Preserve +
+    # bridge via glossary, don't sweep (per feedback_terminology_evolution_bridge_not_history_rewrite).
+    "/recurring-bug-patterns/",  # per-class sub-files (catalog bodies)
+    "RECURRING_BUG_PATTERNS.md", # catalog index
 ]
 
 # Default scope = FORWARD-LOOKING timeless canonical docs only.
@@ -130,7 +135,8 @@ DEFAULT_EXCLUDE = [
 DEFAULT_SCOPE = [
     "CLAUDE.md",
     "CLAUDE.local.md",
-    "DOCS/",
+    "DOCS/",                                                          # engine DOCS (incl. symlinked subset)
+    "/home/caramel/code/tick-trader-percore-workspace/DOCS/",         # workspace DOCS (DESIGN_PHILOSOPHY etc. — NOT engine-symlinked; was missed in first pass)
     "/home/caramel/code/tick-trader-percore-workspace/DESIGN_SPECS/",
 ]
 
