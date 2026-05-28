@@ -1426,7 +1426,7 @@ inline void ML_BuildParameters(
             // v5.14.1.B.2 (PARITY-001) — now_us passed in by caller. Live:
             // clock_gettime at slow-path entry (non-deterministic OK; live
             // has no determinism contract). Backtest: tick.timestamp via
-            // EventLoop_RebuildAllParameters_PerCore (deterministic; same
+            // per-core RebuildOneCore call chain (deterministic; same
             // CSV → same now_us across replays).
             // Composite formula reads freshness from last UpdateAndMark
             // + capacity from current_adv + stability normalized vs

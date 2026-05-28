@@ -85,19 +85,16 @@ namespace tt {
 // decouple.md for the full design.
 //
 // SINGLE-WRITER RULE per engine:
-//   - centralized arch:    Producer thread writes ALL N cores at fan_out
-//                          + slow-path body, looping c=0..N
 //   - per_core_slow arch:  Producer writes per-tick (ema_price) to all N
 //                          cores in fan_out; per-cadence updates done by
 //                          per-core slow-path c on its OWN slow_state
-//   - backtest:            Single thread; loops c=0..N like centralized
+//   - backtest:            Single thread; loops c=0..N
 //
-// READ PATTERN: per-core slow-path body (centralized: producer; per_core_
-// slow: per-core thread) reads state.cores[c].slow_state. In per_core_
-// slow, ema_price is producer-written; per-cadence fields are written by
-// the per-core thread itself (no cross-thread for those). ema_price has
-// eventual-consistency cross-thread reads (relaxed loads — same as
-// pre-v5.1.0 shared design but now per-core targets).
+// READ PATTERN: per-core slow-path body (per-core thread) reads
+// state.cores[c].slow_state. ema_price is producer-written; per-cadence
+// fields are written by the per-core thread itself (no cross-thread for
+// those). ema_price has eventual-consistency cross-thread reads (relaxed
+// loads — same as pre-v5.1.0 shared design but now per-core targets).
 //
 // Window sizes are template-fixed (RollingStats<F, 128> etc.). Per-core
 // override of window size is a future enhancement requiring runtime-
@@ -2166,14 +2163,13 @@ inline int EventLoop_RebuildAllParameters(
 // Pushes (price, volume, timestamp, depth) into ONE engine's slow_state.
 // Single-writer rule: caller must be the sole writer of state.cores[c].slow_state
 // for the duration of this call:
-//   - centralized: producer iterates c=0..N
 //   - per_core_slow: per-core slow-path c writes own only
 //   - backtest: linear iteration, single-thread
 //
 // Mirrors the cadence-update logic that v5.0.x had in producer's fan_out
 // (lines ~881-915 of EngineSharded.hpp pre-v5.1.2). Centralized in this
-// helper so all 3 callers do exactly the same work — train-serve parity
-// is structural.
+// helper so both callers (per_core_slow + backtest) do exactly the same
+// work — train-serve parity is structural.
 //
 // Inputs:
 //   price, volume          — current tick (slow-path-cadence sample)
@@ -2219,22 +2215,6 @@ inline void EventLoop_UpdateRollingStateOneCore(
     }
 }
 
-// Multi-core variant. Loops c=0..N calling OneCore. Used by centralized
-// arch and backtest. per_core_slow lambdas call OneCore directly.
-template <unsigned F>
-inline void EventLoop_UpdateRollingStateAllCores(
-    EventLoopState<F>* state,
-    FPN<F> price, FPN<F> volume, uint64_t timestamp_us,
-    int is_buyer_maker,
-    FPN<F> depth_imbalance, FPN<F> depth_spread,
-    int depth_enabled) {
-    for (int c = 0; c < state->registered_count; ++c) {
-        EventLoop_UpdateRollingStateOneCore(state, c,
-            price, volume, timestamp_us, is_buyer_maker,
-            depth_imbalance, depth_spread, depth_enabled);
-    }
-}
-
 // Per-tick replication of ema_price across all engines' slow_state.
 // Producer thread is sole writer; loops cheaply (one FPN copy per engine).
 template <unsigned F>
@@ -2245,52 +2225,6 @@ inline void EventLoop_UpdateEmaPriceAllCores(
             state->cores[c].slow_state->ema_price = ema_price;
         }
     }
-}
-
-//======================================================================================================
-// [PER-CORE REBUILD WRAPPER — v5.1.2]
-//======================================================================================================
-// Iterates RebuildOneCore for each c using THAT engine's slow_state as
-// the read source. Replaces RebuildAllParameters in centralized arch +
-// backtest. per_core_slow's lambda already calls OneCore directly with
-// per-core pointers.
-//======================================================================================================
-template <unsigned F>
-inline int EventLoop_RebuildAllParameters_PerCore(
-    EventLoopState<F>* state,
-    const ControllerConfig<F>* config,
-    const FPN<F>* current_price,    // const FPN<F>* — Phase 3 MTM (nullptr if disabled)
-    uint64_t timestamp_us,
-    const FPN<F>* book_imbalance,   // nullptr if depth disabled
-    double current_spread,
-    double current_mid_price,
-    uint64_t now_us = 0) {  // v5.12.1.B clock hoist; 0 = compute internally
-    int rebuilt = 0;
-    int book_imbalance_blocked = 0;
-    if (book_imbalance && !FPN_IsZero(config->min_book_imbalance)) {
-        book_imbalance_blocked = FPN_LessThan(*book_imbalance,
-            config->min_book_imbalance) ? 1 : 0;
-    }
-    for (int slot = 0; slot < state->registered_count; ++slot) {
-        if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
-        const auto* sst = state->cores[slot].slow_state;
-        if (!sst) continue;  // defensive (shouldn't happen post-Init)
-        EventLoop_RebuildOneCore(
-            state, slot,
-            &sst->rolling_short, config, &sst->rolling_long,
-            &sst->regime_ror, &sst->ema_price,
-            current_price,
-            &sst->rolling_medium, &sst->rolling_baseline,
-            &sst->cumdelta_state, &sst->tick_rate_state,
-            timestamp_us,
-            book_imbalance,
-            &sst->book_imb_history, &sst->flow_state,
-            &sst->large_trade_state, &sst->spread_state,
-            current_spread, current_mid_price, book_imbalance_blocked,
-            now_us);  // v5.12.1.B clock hoist
-        ++rebuilt;
-    }
-    return rebuilt;
 }
 
 // v4.7.38 (Phase C.1): single-core variant of RebuildAllParameters.

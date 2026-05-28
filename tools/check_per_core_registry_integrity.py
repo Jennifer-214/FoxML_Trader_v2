@@ -398,6 +398,57 @@ def scan_anti_pattern_1(text: str) -> list:
     return findings
 
 
+# Files scanned for Check 9 (Class 26 paired-access mismatch detection).
+# Add new source files here as they accumulate cfg.core_overrides[X] + cfg.cores[Y] paired patterns.
+# Per RECURRING_BUG_PATTERNS Class 26 + DESIGN_SPECS/meta-disciplines/structural-enforcement-when-memory-insufficient.md M7 4th canonical.
+# Codified at v5.15.5.F.4d.1.B.7 (2026-05-27) after pre-fix Async.hpp:814+853 silent trading-logic bug.
+CHECK_9_SCAN_FILES = [
+    "CoreFrameworks/EngineSharded/Async.hpp",
+    "CoreFrameworks/EngineSharded/SlowPath.hpp",
+    "CoreFrameworks/EngineSharded/Run.hpp",
+    "CoreFrameworks/EngineSharded/Boot.hpp",
+    "CoreFrameworks/ControllerEventLoop.hpp",
+    "CoreFrameworks/EngineCommon.hpp",
+    "CoreFrameworks/OrderManager.hpp",
+    "Backtest/BacktestSharded.hpp",
+    "CoreFrameworks/ShardedBacktestDriver.hpp",
+]
+
+CHECK_9_PROXIMITY_LINES = 5  # how far to look for paired cfg.cores[Y] after cfg.core_overrides[X]
+
+
+def scan_check_9_violations(text: str, file_rel_path: str) -> list:
+    """Class 26 detection: cfg.core_overrides[X] + cfg.cores[Y] with X != Y within proximity.
+
+    The paired-access pattern `... ov.field ? ov.field : cfg.cores[Y].field` is
+    semantically broken if Y != the override's X — both MUST reference the SAME
+    per-core slot. Pre-fix Async.hpp:814 + :853 had this exact shape (override
+    slot=slot, fallback slot=i where i was the inner ring-pop counter).
+
+    Strips macro definitions first to avoid X-macro callback false positives.
+    Returns list of (line_num_ov, ov_symbol, line_num_base, base_symbol) tuples.
+    """
+    findings = []
+    code = strip_macro_definitions(text)
+    lines = code.split('\n')
+
+    override_pattern = re.compile(r'cfg\.core_overrides\[(\w+)\]')
+    base_pattern = re.compile(r'cfg\.cores\[(\w+)\]')
+
+    for line_num, line in enumerate(lines, start=1):
+        for ov_match in override_pattern.finditer(line):
+            ov_symbol = ov_match.group(1)
+            # Look forward + backward PROXIMITY lines for cfg.cores[Y] pair
+            start = max(0, line_num - 1 - CHECK_9_PROXIMITY_LINES)
+            end = min(len(lines), line_num + CHECK_9_PROXIMITY_LINES)
+            for j in range(start, end):
+                for base_match in base_pattern.finditer(lines[j]):
+                    base_symbol = base_match.group(1)
+                    if base_symbol != ov_symbol:
+                        findings.append((file_rel_path, line_num, ov_symbol, j + 1, base_symbol))
+    return findings
+
+
 def main() -> int:
     info("running per-core cfg registry integrity check...")
 
@@ -560,11 +611,36 @@ def main() -> int:
     if check_8_skipped:
         info("Check 8 PENDING: cfg field categorization integrity (M7 4th canonical) — scaffold landed at v1.7.6 Cx-G; mechanical detection patterns at sister ship implementation. Decision tree + 5-step migration discipline ENFORCED at /readiness Check 44 (plan-time); CI mechanical enforcement at sister ship.")
 
+    # --- Check 9: Class 26 paired-access mismatch detection (M7 4th canonical; v5.15.5.F.4d.1.B.7) ---
+    # Per RECURRING_BUG_PATTERNS Class 26 + DESIGN_SPECS/meta-disciplines/structural-enforcement-when-memory-insufficient.md M7.
+    # The paired pattern `ov.field ? ov.field : cfg.cores[Y].field` is broken if Y != the override's X.
+    # Pre-fix Async.hpp:814+853 had exactly this bug (override slot=slot, fallback slot=i where i was
+    # the inner ring-pop counter from an enclosing for-loop). Silent per-core trading-logic miscalibration.
+    # Sister: tests/controller_test.cpp Class 26 regression test (added at .B.7).
+    check_9_violations = []
+    for rel_path in CHECK_9_SCAN_FILES:
+        full_path = REPO_ROOT / rel_path
+        if not full_path.exists():
+            warn(f"Check 9 WARN: scan target not found: {rel_path} — skipping")
+            continue
+        file_text = read_file(full_path)
+        check_9_violations.extend(scan_check_9_violations(file_text, rel_path))
+    if check_9_violations:
+        fail(f"Check 9 FAIL: {len(check_9_violations)} Class 26 paired-access mismatch(es) — cfg.core_overrides[X] and cfg.cores[Y] with X != Y within {CHECK_9_PROXIMITY_LINES} lines:")
+        for rel_path, ov_line, ov_sym, base_line, base_sym in check_9_violations:
+            fail(f"  → {rel_path}:{ov_line} uses cfg.core_overrides[{ov_sym}] but {rel_path}:{base_line} uses cfg.cores[{base_sym}]")
+            fail(f"     Class 26 anti-pattern — paired access MUST share index symbol")
+            fail(f"     Fix: change cfg.cores[{base_sym}] → cfg.cores[{ov_sym}] OR rename loop variable for scope clarity")
+            fail(f"     See: DOCS/recurring-bug-patterns/class-26-global-consumer-reading-per-core-field.md")
+        failures += 1
+    else:
+        info(f"Check 9 PASS: {len(CHECK_9_SCAN_FILES)} file(s) scanned; no Class 26 paired-access mismatches (proximity={CHECK_9_PROXIMITY_LINES})")
+
     # --- Final verdict ---
     if failures > 0:
         fail(f"per-core cfg integrity check FAILED with {failures} violations — see errors above")
         return 1
-    info(f"all 7 structural checks PASS — per-core cfg discipline intact (Check 6 informational; Check 7 Class 27 prevention; Check 8 pending mechanical impl per cfg-field-categorization-discipline.md Stage 3 sister ship)")
+    info(f"all 8 structural checks PASS — per-core cfg discipline intact (Check 6 informational; Check 7 Class 27 prevention; Check 8 pending mechanical impl per cfg-field-categorization-discipline.md Stage 3 sister ship; Check 9 Class 26 paired-access mismatch detection)")
     return 0
 
 

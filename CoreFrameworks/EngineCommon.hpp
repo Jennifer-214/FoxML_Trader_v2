@@ -9,7 +9,7 @@
 // PURPOSE
 // -------
 // Both `EngineSharded_Run` (live; per_core_slow arch) and `BacktestSharded_Run`
-// (backtest; centralized arch via AllCores wrapper) delegate per-core boot +
+// (backtest; iterates per-core via SlowPathCycleOneCore) delegate per-core boot +
 // per-core slow-path-cycle work to the helpers declared here. This collapses the
 // Class 18 mirror between EngineSharded.hpp + BacktestSharded.hpp at the
 // execution layer; closes PARITY-026/027/028/029/030/031/032 by-construction.
@@ -811,8 +811,8 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                                 uint64_t ts_us,
                                                 uint64_t now_tick,
                                                 const BookSnapshot<F>& depth) {
-    // Fan wrapper: BACKTEST (centralized arch) calls this ONCE per tick;
-    // loops over registered cores firing SlowPathCycleOneCore per-core.
+    // Fan wrapper: BACKTEST calls this ONCE per tick; loops over registered
+    // cores firing SlowPathCycleOneCore per-core.
     // LIVE per_core_slow does NOT call this (each per-core thread invokes
     // OneCore directly). Per Option D future-orientation for v6.0 viewer
     // decoupling boundary — viewer reuses this wrapper as natural per-tick

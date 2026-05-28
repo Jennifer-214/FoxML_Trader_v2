@@ -5,7 +5,121 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.6"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.7"
+
+// .F.4d.1.B.7 (v5.15.5.F.4d.1.B.7) — Folded bugfix + cleanup + C1 file-size umbrella close-out
+// (2026-05-27). Mixed-ship per operator directive ("fold .B.8 into .7 i thnk").
+//
+// CRITICAL — Class 26 silent trading-logic bug CLOSED structurally + mechanically:
+//   - HOTFIX: CoreFrameworks/EngineSharded/Async.hpp:814+853 — `cfg.cores[i]` → `cfg.cores[slot]`
+//     (`i` was ring-pop counter from inner `for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_CORE; ++i)`
+//     at Async.hpp:768; should have been outer per-core `slot` at Async.hpp:765). Silent
+//     miscalibration of per-core partial_exit_pct + tp2_mult when overrides not set;
+//     introduced at mechanical migration commit ea08210 (.F.4c.3 WIP2d-1 Phase 2).
+//   - REGRESSION TEST: tests/controller_test.cpp NEW "Class 26: drainer per-core cfg slot integrity"
+//     section (8 new assertions; 4 slots × 2 fields). Tests 3215 → 3223.
+//   - STAGE 6 STRUCTURAL ENFORCEMENT: tools/check_per_core_registry_integrity.py NEW Check 9
+//     (paired-access mismatch detector flags `cfg.core_overrides[X]` + `cfg.cores[Y]` co-located
+//     within 5 lines where X != Y). Sanity-verified by reverting fix + tool catching exact site;
+//     re-applied fix; tool CLEAN post-fix. M7 4th canonical structural enforcement.
+//   - Class 26 recurrence_count bumped 11 → 13; catalog amendment includes detection-signature note.
+//   - FORWARD ADVISORY: prior partial_exit_pct/tp2_mult calibration sweeps may have produced
+//     tainted results (operators tuned against silently-miscalibrated behavior). DOCUMENTED-RISK
+//     PARITY entry at ship close; verification deferred to .F professionalization audit sweep.
+//
+// CLEANUP (TECH_DEBT-132 + -134 + -131 partial):
+//   - TECH_DEBT-132 NEW + CLOSED: 2 dead helpers deleted from CoreFrameworks/ControllerEventLoop.hpp:2225+2259
+//     (EventLoop_UpdateRollingStateAllCores + EventLoop_RebuildAllParameters_PerCore; zero production
+//     callers post-.B.4 SHARDED full-surface deletion). 2 sister stale comment refs cleaned up at
+//     EngineSharded/Run.hpp:872 + Strategies/StrategyParameters.hpp:1429.
+//   - TECH_DEBT-134 NEW + CLOSED: 5 stale "centralized arch" comments cleaned up at
+//     EngineCommon.hpp:12+814 + ControllerEventLoop.hpp:88+95+2169 + 1 sister "all 3 callers"
+//     reference fix.
+//   - TECH_DEBT-131 PARTIAL_CLOSURE: operator-facing-doc cohort (8 line-anchor citations across
+//     KNOWN_ISSUES.md:143+319 + PARITY_ISSUES.md:544+553+610+655+697+798+803+810) updated with
+//     post-.B.6 sub-file path annotations preserving original refs for historical context.
+//     Scope expansion documented as Class 33 recurrence (operator-facing-doc cohort missed at
+//     .B.6 close despite codified `feedback_operator_facing_doc_cohort_at_cfg_deletion`).
+//     Source-file cohort (original 8 sites) STILL OPEN — next stale-comment audit triggers.
+//   - tools/calls_graph_diff.sh fix: SHARDED_FILES list updated to include EngineSharded/{Boot,
+//     SlowPath,Async,Run}.hpp sub-files (post-.B.6 INDEX shim made tool blind to subfolder content).
+//
+// DOC-SYSTEM AMENDMENTS:
+//   - doc-tag-vocabulary.md: +12 CONCERN tags (ssot/cpp17/header-only/shared-state/etc) +
+//     7 SURFACE tags (doc-pipeline/plan-pipeline/header-split/etc). Closes 24 /metadata-audit
+//     HIGH undefined-tag findings.
+//   - structural-enforcement-when-memory-insufficient.md: ci-tools → ci-tooling (consumer
+//     alignment with canonical vocab).
+//   - implementation-layer-blindspot-taxonomy.md: B17 (forward-decl namespace shadow) Stage
+//     2 DRAFT → Stage 3 first canonical (Class 34 recurrence_count = 2 threshold met).
+//   - cpp17-inline-variable-for-header-shared-state.md: tags axis-correction (remove
+//     `data-discipline` from CONCERN).
+//   - cfg-field-categorization-discipline.md: tags axis-correction + sister_specs YAML
+//     single-line for rg greppability.
+//
+// C1 CLOSE-OUT (file-size discipline umbrella cancellation per operator 2026-05-27):
+//   - 5 TECH_DEBT entries CLOSED as `wontfix-per-ai-workflow`:
+//     - TECH_DEBT-029 (Source file length reduction)
+//     - TECH_DEBT-114 (controller_test.cpp split; TECH_DEBT-127 stays open as test-reliability surface)
+//     - TECH_DEBT-116 (TECH_DEBT.md split)
+//     - TECH_DEBT-117 (RECURRING_BUG_PATTERNS.md split — closed as `done-incidentally`)
+//     - TECH_DEBT-118 (/readiness SKILL.md split)
+//   - RATIONALE: AI-driven solo workflow removes navigation-cost motivation. Test 5K rule
+//     RETAINED for test-reliability concern. Subfolder pattern (`.B.6` first canonical) stays
+//     Stage 3 FROZEN for future cohort use if human contributors join project OR AI tooling
+//     changes meaningfully.
+//   - 6 plan body drafts DELETED: subplans/2026-05-25-v5.15.5.F.4d.1.B.{7,8,9,10,11}-*.md +
+//     subplans/2026-05-25-v5.15.5.F.4d.1.B-file-size-maintenance.md
+//   - CLAUDE.md File-size split discipline section SCOPED ("applied selectively per workflow").
+//   - CLAUDE.local.md going-forward rule AMENDED with AI-workflow scoping note.
+//   - file-size-split-discipline.md v1.3 → v1.4: NEW "AI-driven workflow scoping" section
+//     (self-contained 3-5 paragraph rationale per /dod-audit F3 finding; preserves existing
+//     discipline body + threshold table for future re-activation).
+//
+// NEW SPRINT SCAFFOLDS (forward planning per `feedback_plan_right_not_fast`):
+//   - .E NEW: v5.15.5.F.4d.1.E per-core drainer architecture sub-sprint umbrella (3 sub-ships
+//     .E.1 Foundation + .E.2 Migration + .E.3 Cleanup per future-roadmap doc; ~5-10 days
+//     focused; HIGH-RISK; CLOSES Class 26 surface at drainer body STRUCTURALLY per recurrence_count
+//     13 MANDATORY structural fix policy). Scaffold at subplans/2026-05-27-v5.15.5.F.4d.1.E-
+//     per-core-drainer-architecture-SCAFFOLD.md.
+//   - .F (formerly proposed as .E): v5.15.5.F.4d.1.F comprehensive professionalization audit
+//     sweep + triage. Placement reordered to AFTER .E per-core drainer (audit catches per-core
+//     drainer issues + verifies framework consolidation across NEW architecture). Scaffold at
+//     subplans/2026-05-27-v5.15.5.F.4d.1.F-professionalization-audit-sweep-SCAFFOLD.md.
+//
+// AUDITS FIRED PRE-CODING (Option C 3-agent gate per operator "better safe than sorry"):
+//   - /parity-check GREEN — zero parity surfaces touched (partial_exit_pct + tp2_mult not
+//     STAMP_BOUND); fix corrects bug without drift; replay determinism IMPROVED post-fix.
+//   - /trace-deps GREEN — TECH_DEBT-132 dead-helper delete CONFIRMED SAFE; B17 promotion
+//     eligibility VERIFIED; Class 26 sister-bug surface CONFIRMED 2 sites only.
+//   - /dod-audit YELLOW — F1 ci-tools reframing (APPLIED inline; consumer alignment fix);
+//     F2 calls_graph_diff.sh fix shape (Option a glob expand per operator decision); F3-F6
+//     non-blocking polish APPLIED inline.
+//
+// VERIFICATION at ship close:
+//   - Build: 5 binaries (test + gui + suite + tsan + asan) clean.
+//   - Tests: 3223 controller_test pass / 0 fail (+8 from .B.6 baseline; new Class 26
+//     regression test section). depth_recorder_test 17/0.
+//   - Hot path UNTOUCHED — tools/calls_graph_diff.sh verify GREEN (post-fix; tool now
+//     scans EngineSharded sub-files).
+//   - CI: check_per_core_registry_integrity.py 8 PASS (Check 9 NEW CLEAN; sanity-verified
+//     by revert-detect-reapply test).
+//   - /latency-track on Async.hpp fix: NONE (2-char index swap; zero latency impact;
+//     HOT_PATH_CHANGELOG entry not needed).
+//
+// FOLLOWUP queued (post-`.B.7` triage / future ships):
+//   - DEFERRED Phase D polish: D.3 B15 promotion eligibility decision / D.5 decision-log-template
+//     type fix / D.7 bidirectional sister-link sweep (4 confirmed + estimated ~10-20 likely;
+//     blocked on permission grant for tools/check_doc_metadata.py --bidirectional) /
+//     D.8 11 Stage 2→3 promotion candidates triage (per /metadata-audit findings)
+//   - TECH_DEBT-131 source-file cohort cleanup (original 8 sites STILL OPEN; partial-closure
+//     status; next stale-comment audit OR /metadata-audit quarterly cadence triggers)
+//   - DOCUMENTED-RISK PARITY entry for partial_exit_pct/tp2_mult historical calibration
+//     tainted-results advisory (verification deferred to .F audit sweep)
+//   - Stage 6 escalation candidates surfaced (queued for .D or .E): B-Plus v0.5 mechanical-
+//     migration audit (flag commits with ≥10 search-replace migrations w/o /dod-audit re-fire)
+//
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-05-27-v5.15.5.F.4d.1.B.7-postmortem.md.
 
 // .F.4d.1.B.6 (v5.15.5.F.4d.1.B.6) — EngineSharded.hpp subfolder split (first canonical of
 // subfolder pattern at source-code level) + 2 NEW DESIGN_SPECs + 2 NEW anti-pattern Classes +

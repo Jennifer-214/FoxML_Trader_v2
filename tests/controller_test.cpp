@@ -7258,6 +7258,60 @@ e3_skip_load:;
     }
 
     //==================================================================================================
+    // v5.15.5.F.4d.1.B.7 — Class 26 regression: drainer per-core cfg slot integrity
+    //==================================================================================================
+    // Bug context (closed at .B.7 2026-05-27): pre-fix, Async.hpp:814+853
+    // used cfg.cores[i] where i is the ring-pop counter (inner for-loop,
+    // 0..MAX_EVENTS_PER_DRAIN_PER_CORE), NOT the per-core slot (outer
+    // for-loop, 0..registered_count). Silent miscalibration for per-core
+    // partial_exit_pct + tp2_mult when overrides not set. Fix: i → slot at
+    // both sites. Sister Check 7 extension at
+    // tools/check_per_core_registry_integrity.py catches re-introduction
+    // mechanically (Stage 6 M7 escalation).
+    //==================================================================================================
+    printf("\n--- v5.15.5.F.4d.1.B.7 Class 26: drainer per-core cfg slot integrity ---\n");
+    {
+        using namespace tt;
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.num_execution_cores = 4;
+        BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
+        cfg.partial_exit_pct = FPN_FromDouble<64>(0.5);  // legacy global default
+
+        // Distinct per-core values — wrong-slot reads will mismatch
+        cfg.cores[0].partial_exit_pct = FPN_FromDouble<64>(0.10);
+        cfg.cores[1].partial_exit_pct = FPN_FromDouble<64>(0.20);
+        cfg.cores[2].partial_exit_pct = FPN_FromDouble<64>(0.30);
+        cfg.cores[3].partial_exit_pct = FPN_FromDouble<64>(0.40);
+        cfg.cores[0].tp2_mult = FPN_FromDouble<64>(1.1);
+        cfg.cores[1].tp2_mult = FPN_FromDouble<64>(1.2);
+        cfg.cores[2].tp2_mult = FPN_FromDouble<64>(1.3);
+        cfg.cores[3].tp2_mult = FPN_FromDouble<64>(1.4);
+        // NO core_overrides set (all default-zero) → triggers fallback branch
+
+        // Mirror drainer's per-core slot iteration (Async.hpp:765+ outer for-slot loop):
+        for (int slot = 0; slot < cfg.num_execution_cores; ++slot) {
+            const auto& ov_slot = cfg.core_overrides[slot];
+            FPN<64> partial_pct_eff = !FPN_IsZero(ov_slot.partial_exit_pct)
+                ? ov_slot.partial_exit_pct : cfg.cores[slot].partial_exit_pct;  // post-fix Async.hpp:814
+            FPN<64> tp2_mult_eff = !FPN_IsZero(ov_slot.tp2_mult)
+                ? ov_slot.tp2_mult : cfg.cores[slot].tp2_mult;  // post-fix Async.hpp:853
+
+            double expected_pct = 0.10 * (slot + 1);
+            double expected_tp2 = 1.0 + 0.1 * (slot + 1);
+            double actual_pct = FPN_ToDouble(partial_pct_eff);
+            double actual_tp2 = FPN_ToDouble(tp2_mult_eff);
+
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Class 26 slot %d: partial_exit_pct reads cfg.cores[%d] = %.2f",
+                     slot, slot, expected_pct);
+            check(msg, actual_pct > expected_pct - 0.01 && actual_pct < expected_pct + 0.01);
+            snprintf(msg, sizeof(msg), "Class 26 slot %d: tp2_mult reads cfg.cores[%d] = %.2f",
+                     slot, slot, expected_tp2);
+            check(msg, actual_tp2 > expected_tp2 - 0.01 && actual_tp2 < expected_tp2 + 0.01);
+        }
+    }
+
+    //==================================================================================================
     // Partial Exits — P.2 (ExecutionCore hot-path dual-leg SG check)
     //==================================================================================================
     // Verifies the branchless leg-A + leg-B SG evaluation in

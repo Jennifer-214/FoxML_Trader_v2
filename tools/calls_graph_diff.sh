@@ -22,7 +22,11 @@ cd "$REPO_ROOT"
 LEGACY_FILE="CoreFrameworks/PortfolioController.hpp"
 SHARDED_FILES=(
     "CoreFrameworks/ControllerEventLoop.hpp"
-    "CoreFrameworks/EngineSharded.hpp"
+    "CoreFrameworks/EngineSharded.hpp"                # post-`.B.6` INDEX shim (96 LOC); sub-files below
+    "CoreFrameworks/EngineSharded/Boot.hpp"           # v5.15.5.F.4d.1.B.6 subfolder split (added .B.7 per F2 fix)
+    "CoreFrameworks/EngineSharded/SlowPath.hpp"       # v5.15.5.F.4d.1.B.6 subfolder split
+    "CoreFrameworks/EngineSharded/Async.hpp"          # v5.15.5.F.4d.1.B.6 subfolder split
+    "CoreFrameworks/EngineSharded/Run.hpp"            # v5.15.5.F.4d.1.B.6 subfolder split
     "CoreFrameworks/ShardedBacktestDriver.hpp"
     "Strategies/StrategyParameters.hpp"
     "Strategies/StrategyLifecycle.hpp"  # v5.4.0+ per-core dispatch

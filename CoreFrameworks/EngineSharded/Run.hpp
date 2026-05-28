@@ -867,11 +867,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static ExecutionCore<F> cores[MAX_EXECUTION_CORES];
     // v5.1.2 — full per-core data plane. All rolling stats, regime, flow,
     // depth-history state lives in EACH engine's `state.cores[c].slow_state`
-    // (heap-allocated by EventLoopState_Init). Three callers update them:
-    //   - centralized:    producer's fan_out + slow-path body via
-    //                     EventLoop_UpdateRollingStateAllCores helper
-    //   - per_core_slow:  per-core slow-path lambda updates own slow_state
-    //   - backtest:       same helper, single-thread, linear iteration
+    // (heap-allocated by EventLoopState_Init). Per-core slow-path lambda
+    // updates its own slow_state on each cycle.
     //
     // Pre-v5.1.2 the producer maintained ONE shared copy at function scope.
     // Removed in v5.1.2; readers now use state.cores[c].slow_state pointers.

@@ -811,7 +811,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 double full_qty = FPN_ToDouble(state.cores[slot].intended_qty);
                 const auto& ov_slot = cfg.core_overrides[slot];
                 FPN<F> partial_pct = !FPN_IsZero(ov_slot.partial_exit_pct)
-                    ? ov_slot.partial_exit_pct : cfg.cores[i].partial_exit_pct;
+                    ? ov_slot.partial_exit_pct : cfg.cores[slot].partial_exit_pct;
                 if (partial_on && event.leg == PARTIAL_LEG_A) {
                     order_qty_d = full_qty * FPN_ToDouble(partial_pct);
                 } else if (partial_on && event.leg == PARTIAL_LEG_B) {
@@ -850,7 +850,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                     // sites need it.
                     const auto& ov_tp2 = cfg.core_overrides[slot];
                     FPN<F> tp2_mult_eff = !FPN_IsZero(ov_tp2.tp2_mult)
-                        ? ov_tp2.tp2_mult : cfg.cores[i].tp2_mult;
+                        ? ov_tp2.tp2_mult : cfg.cores[slot].tp2_mult;
                     FPN<F> tp_dist_b = FPN_Mul(tp_dist_a, tp2_mult_eff);
                     leg_tp = FPN_Add(event.price, tp_dist_b);
                 }
