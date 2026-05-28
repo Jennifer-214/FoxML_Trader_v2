@@ -27,7 +27,7 @@ def test_narrative_renames():
 
 
 def test_code_fence_cite_left():
-    body = "Currently:\n```cpp\nstate.cores[i].field = x;\n```\n"
+    body = "Currently:\n```cpp\n// per-core dispatch happens here\nx = 1;\n```\n"
     hits = _classify_single(body)
     assert any(c == "code-fence-cite" and a == "LEAVE" for _, c, a in hits), hits
 
@@ -87,6 +87,58 @@ def mod_classify_path(file_path: str, body: str):
 def test_current_changelog_row_left():
     hits = mod_classify_path("DOCS/CHANGELOG.md", "| **5.10.0** | 2026 | per-core sharding landed |\n")
     assert all(a == "LEAVE" for _, c, a in hits), hits
+
+
+def test_file_path_reference_left():
+    # Regression for Class 36 sub-shape B — per-core inside a file PATH must be LEFT
+    # (renaming it breaks links to the actual per-core-named file).
+    hits = _classify_single(
+        "See `DOCS/recurring-bug-patterns/class-25-scope-erosion-per-core-consumer.md` for detail.\n"
+    )
+    assert hits, "expected a hit on the path"
+    assert all(c == "file-path-reference" and a == "LEAVE" for _, c, a in hits), hits
+
+
+def test_file_path_reference_slug_left():
+    hits = _classify_single("Pattern at type-erased-per-core-resource-handle-pattern.md applies.\n")
+    assert all(a == "LEAVE" for _, c, a in hits), hits
+
+
+def test_narrative_per_core_still_renames_near_paths():
+    # A real narrative per-core (NOT in a path) still renames even on a line that also has paths
+    hits = _classify_single("The per-core design is documented.\n")
+    assert any(c == "narrative-current-state" and a == "RENAME" for _, c, a in hits), hits
+
+
+def test_apply_no_overlap_corruption():
+    # Regression for Class 36 — overlap-resolution must prevent double-substitution corruption.
+    # .D.1's production token scope is conceptual-only (no overlapping tokens), so this test
+    # INJECTS an overlapping pair (simulating .E.1 code-symbol tokens where PER_CORE is a
+    # substring of FOREACH_PER_CORE_CFG_FIELD) to verify the defensive logic that .E.1 reuses.
+    orig_tokens, orig_map = mod.DEFAULT_TOKENS, mod.RENAME_MAP
+    mod.DEFAULT_TOKENS = ["FOREACH_PER_CORE_CFG_FIELD", "PER_CORE", "state.cores", "per-core"]
+    mod.RENAME_MAP = {
+        "FOREACH_PER_CORE_CFG_FIELD": "FOREACH_PER_NODE_CFG_FIELD",
+        "PER_CORE": "PER_NODE",
+        "state.cores": "state.nodes",
+        "per-core": "per-node",
+    }
+    body = "The per-core path uses FOREACH_PER_CORE_CFG_FIELD and state.cores access.\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, dir="/tmp") as f:
+        f.write(body)
+        tmp = f.name
+    try:
+        mod.apply_file(tmp, mod.DEFAULT_TOKENS, write=True)
+        with open(tmp) as fr:
+            result = fr.read()
+    finally:
+        os.unlink(tmp)
+        mod.DEFAULT_TOKENS, mod.RENAME_MAP = orig_tokens, orig_map
+    # Outer (longer) FOREACH match wins; inner PER_CORE skipped → clean, not corrupted
+    assert "FOREACH_PER_NODE_CFG_FIELD" in result, result
+    assert "per-node path" in result, result
+    assert "state.nodes" in result, result
+    assert "PER_NODEORE" not in result and "_NODE_CORE_" not in result, result
 
 
 def run_all():

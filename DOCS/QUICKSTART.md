@@ -10,7 +10,7 @@ For ML training + backtesting workflow, see [`ML_USAGE.md`](ML_USAGE.md) +
 
 ## What this is
 
-`FoxML_Trader_v2` is a per-core sharded crypto trading engine in C++20.
+`FoxML_Trader_v2` is a per-node sharded crypto trading engine in C++20.
 Each execution core runs a self-contained strategy unit (slow + hot pthread
 pair); a producer thread fans real Binance ticks across SPSC rings. Hot
 path is branchless / lock-free with a 40-400ns p99 budget.
@@ -99,14 +99,14 @@ The GUI opens. Out of the box you'll see:
 - **Header** — engine version, build registry hash, cfg path
 - **Top Bar** — KB/s + RAM + GPU + perf indicators
 - **Market** — live BTCUSDT price + tick rate
-- **Account** — paper balance + per-core allocation table
-- **Risk** — per-core kill switch state (peak / current / drawdown%)
-- **Buy Gate** — per-core gate price + threshold + status
+- **Account** — paper balance + per-node allocation table
+- **Risk** — per-node kill switch state (peak / current / drawdown%)
+- **Buy Gate** — per-node gate price + threshold + status
 - **Position** — empty until first fill
 - **Stats / Latency / Trade History / Engine Log / Engine Topology /
-  Per-Core Latency / Strategy Quality** — diagnostic tabs
+  Per-Node Latency / Strategy Quality** — diagnostic tabs
 
-**The engine starts in WARMUP.** Per-core gates show `WARMUP` until
+**The engine starts in WARMUP.** Per-node gates show `WARMUP` until
 `warmup_ticks` raw ticks accumulate AND `min_warmup_samples` rolling
 samples fill (default both 128; ~10-30 minutes at typical BTC tick
 rates depending on volatility / time of day).
@@ -119,7 +119,7 @@ window to shut down — snapshot saves to `data/sharded_snapshot.dat`.
 
 ## Reading the GUI
 
-### Per-core summary table (Buy Gate panel)
+### Per-node summary table (Buy Gate panel)
 
 | Column | Meaning |
 |---|---|
@@ -132,7 +132,7 @@ window to shut down — snapshot saves to `data/sharded_snapshot.dat`.
 
 - **`WARMUP`** — engine collecting initial samples. Resolves automatically
   when `warmup_ticks` + `min_warmup_samples` complete.
-- **`KILL`** — per-core kill switch tripped (drawdown exceeded
+- **`KILL`** — per-node kill switch tripped (drawdown exceeded
   `kill_switch_drawdown_pct`). Reset via Risk panel → Reset button.
 - **`AUTO RES`** — core configured as AUTO but regime classifier hasn't
   resolved a concrete strategy. Resolves on first slow-path cycle.
@@ -169,7 +169,7 @@ marked startup-only):
 | `spacing_multiplier` | Min distance between entries (× stddev) | yes |
 | `risk_pct` | % of balance per position | yes |
 | `max_drawdown_pct` / `max_exposure_pct` | Risk caps | yes |
-| `core_N_strategy` | Per-core strategy override | startup-only |
+| `core_N_strategy` | Per-node strategy override | startup-only |
 | `num_execution_cores` | How many sharded cores | startup-only |
 
 Full reference: [`CONFIGURATION.md`](CONFIGURATION.md).
@@ -183,7 +183,7 @@ sites. Adding a new strategy = appending one row to `FOREACH_STRATEGY(X)`
 in `Strategies/StrategyInterface.hpp` + implementing the 5 lifecycle
 functions:
 
-1. `_Init` — per-core state allocation
+1. `_Init` — per-node state allocation
 2. `_BuildParameters` — gate parameter emit (hot-path contract)
 3. `_Adapt` — per-cadence feedback adjustment
 4. `_ExitAdjustSharded` — trailing TP/SL on existing positions
@@ -267,7 +267,7 @@ edit `/etc/security/limits.conf` for persistent), or set
 `require_mlockall=0` in `engine.cfg` (laptop-dev only — accepts
 page-fault tail latency).
 
-### Per-core gates stuck at WARMUP forever
+### Per-node gates stuck at WARMUP forever
 
 The warmup gate is `warmup_ticks` raw ticks AND `min_warmup_samples`
 slow-path cycles. With default 128 + 128 and a quiet market, that's

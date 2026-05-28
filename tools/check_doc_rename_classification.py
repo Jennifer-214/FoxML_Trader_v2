@@ -64,20 +64,26 @@ from pathlib import Path
 from typing import List, NamedTuple, Tuple
 
 
-# Default token inventory per .D.1 plan body Site classification matrix.
-# Each entry: (pattern, case-sensitive). Patterns are word-boundary anchored when possible.
+# Default token inventory — .D.1 sweeps CONCEPTUAL terminology ONLY.
+#
+# CODE SYMBOLS (CoreContext / MAX_CORES / state.cores / FOREACH_PER_CORE_CFG_FIELD /
+# core_strategy / core_risk_pct / per_core_slow) are deliberately ABSENT. They are CODE
+# IDENTIFIERS still named Core*/per_core until v5.15.5.F.4d.1.E.1 — they rename WITH the
+# code at .E.1 (doc-citations + code together as a sister-cohort), NOT at this doc sweep.
+# Reasons (per .D.1 Phase A proof finding 2026-05-28):
+#   1. Renaming `CoreContext`→`NodeContext` in prose NOW cites a symbol that won't exist in
+#      code until .E.1 (Class-14-flavored fabricated-symbol-in-docs).
+#   2. Produces half-renamed phrases ("cores[16] × NodeContext" — array still `cores`, type
+#      now `NodeContext`).
+#   3. Underscore/identifier tokens (per_core, MAX_CORES) match INSIDE larger identifiers
+#      (FOREACH_PER_CORE_CFG_FIELD, per_core_slow) → substring mangling
+#      (sister: feedback_avoid_substring_replace_all_on_member_access + Class 36).
+# The conceptual hyphenated `per-core` adjective is safe (hyphens can't be inside a C
+# identifier) + is the high-value vision-language reframe ("per-core sharded platform" →
+# "per-node sharded platform").
 DEFAULT_TOKENS = [
-    "per-core",
-    "per_core",
-    "Per-Core",
-    "PER-CORE",
-    "state.cores",
-    "MAX_CORES",
-    "CoreContext",
-    "FOREACH_PER_CORE_CFG_FIELD",
-    "core_strategy",
-    "core_risk_pct",
-    "single_core",
+    "per-core",      # conceptual adjective; case-insensitive match covers Per-Core / PER-CORE
+    "single_core",   # deprecated-mode concept; .D.1 DELETES refs (manual; not a mechanical rename)
 ]
 
 # Tokens that LOOK like rename candidates but should be PRESERVED (per plan body Glossary anchor).
@@ -94,6 +100,7 @@ KEEP_TOKENS = ["ExecutionCore", "CPU core", "isolcpus", "nohz_full"]
 DEFAULT_EXCLUDE = [
     "DOCS/changelogs/",          # archived per-sprint changelog write-ups
     "DOCS/CHANGELOG.md",         # current changelog: per-ship rows are historical-once-committed
+    "HOT_PATH_CHANGELOG.md",     # changelog: per-entry historical (per archived-changelog-preservation)
     "/legacy/",
     "/_archive/",
     "/postmortems/",             # historical per-ship retrospectives
@@ -101,6 +108,15 @@ DEFAULT_EXCLUDE = [
     "/plan_checks/",             # ephemeral audit-report output
     "/capture-audit-reports/",   # ephemeral audit-report output
     "/decision-logs/",           # historical decision capture (active log gets entries APPENDED, not swept)
+    # LEDGERS + code-state inventories: accumulating-historical-record. Their entries are
+    # point-in-time findings about per-core CODE that is still per-core until .E.1; they
+    # update WITH the code at .E.1, not at the .D.1 doc sweep. Preserve+bridge, don't sweep.
+    "PARITY_ISSUES.md",          # parity-finding ledger (entries are point-in-time findings)
+    "TECH_DEBT.md",              # tech-debt ledger
+    "/tech-debt/",               # tech-debt open.md / closed.md sub-ledgers
+    "FEATURE_LOOKUP.md",         # operator-facing feature inventory (tracks current per-core code)
+    "MANUAL_FIELDS_INVENTORY.md", # cfg-field inventory (tracks current per-core code)
+    "KNOWN_ISSUES.md",           # current-limitations ledger (point-in-time entries)
 ]
 
 # Default scope = FORWARD-LOOKING timeless canonical docs only.
@@ -117,6 +133,27 @@ DEFAULT_SCOPE = [
     "DOCS/",
     "/home/caramel/code/tick-trader-percore-workspace/DESIGN_SPECS/",
 ]
+
+
+# --apply mode: EXACT case-variant → target map for AUTO-APPLICABLE mechanical renames.
+# Only these exact matched strings auto-apply (case-preserving by explicit enumeration —
+# safer than algorithmic case-folding for hyphenated/compound tokens). Anything matched but
+# NOT in this map is reported as NEEDS-MANUAL (never auto-edited). single_core is
+# deliberately ABSENT — its action is "delete/rephrase references," not a mechanical rename.
+RENAME_MAP = {
+    # CONCEPTUAL hyphenated per-core adjective ONLY (the .D.1 scope). Code-symbol renames
+    # (CoreContext→NodeContext, MAX_CORES→MAX_NODES, state.cores→state.nodes,
+    # FOREACH_PER_CORE_CFG_FIELD→…, core_strategy→…, per_core→per_node) are DEFERRED to .E.1
+    # where they rename alongside the code. single_core is ABSENT (its action is delete/rephrase,
+    # handled manually). The overlap-resolution logic below stays as defensive infrastructure
+    # for .E.1 reuse (when code-symbol tokens with overlapping spans get added) + Class 36.
+    "per-core": "per-node", "Per-core": "Per-node", "Per-Core": "Per-Node", "PER-CORE": "PER-NODE",
+}
+
+# Classes whose hits are eligible for auto-apply (the RENAME-action narrative classes).
+# code-fence-target (RENAME-WITH-CONFIRM), memory-link-crossref, claude-md-section-crossref,
+# and all LEAVE classes are NEVER auto-applied.
+AUTO_APPLY_CLASSES = {"narrative-current-state", "narrative-aspirational"}
 
 
 class Hit(NamedTuple):
@@ -179,6 +216,37 @@ ASPIRATIONAL_PATTERN = re.compile(
 )
 
 
+_PATH_TOKEN_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-")
+_FILE_EXT_RE = re.compile(r"\.(md|hpp|cpp|py|sh|txt|h|c|yaml|yml|json|cfg)$", re.IGNORECASE)
+
+
+def is_in_path_like_token(content: str, token_start: int, token_end: int) -> bool:
+    """True if the matched per-core span is part of a FILESYSTEM-PATH-LIKE token.
+
+    Per .D.1 Phase A post-write finding (2026-05-28): the doc-rename write renamed `per-core`
+    inside file-PATH references (e.g., `DOCS/recurring-bug-patterns/class-25-...-per-core-
+    consumer.md`, `type-erased-per-core-resource-handle-pattern.md`), breaking links to the
+    actual per-core-NAMED files (which keep their names until .E.1 renames the FILES). File
+    paths + filename slugs are STABLE IDENTIFIERS — never rename them in a doc-terminology
+    sweep; they rename only when the file itself is deliberately renamed.
+
+    Detection: expand to the maximal run of path-token chars [A-Za-z0-9_./-] containing the
+    match; it is path-like if that run contains '/' OR ends in a known file extension.
+    """
+    lo = token_start
+    while lo > 0 and content[lo - 1] in _PATH_TOKEN_CHARS:
+        lo -= 1
+    hi = token_end
+    while hi < len(content) and content[hi] in _PATH_TOKEN_CHARS:
+        hi += 1
+    token = content[lo:hi]
+    if "/" in token:
+        return True
+    if _FILE_EXT_RE.search(token):
+        return True
+    return False
+
+
 def is_in_keep_token_context(content: str, token_start: int, token_end: int) -> bool:
     """Check if the matched token span is actually inside a KEEP_TOKEN (e.g., 'core' inside 'ExecutionCore')."""
     # Expand outward to check ~30 chars on each side
@@ -213,6 +281,12 @@ def classify_hit(
     # 0. Keep-token context — false-positive (token matched inside ExecutionCore / CPU core / etc.)
     if is_in_keep_token_context(content, token_start, token_end):
         return ("keep-token-context", "LEAVE", "HIGH")
+
+    # 0.5. FILE-PATH / FILENAME-SLUG reference — stable identifier; never rename in a
+    # terminology sweep (renames only when the FILE itself is renamed at .E.1).
+    # Per .D.1 Phase A post-write broken-link finding.
+    if is_in_path_like_token(content, token_start, token_end):
+        return ("file-path-reference", "LEAVE", "HIGH")
 
     # 1. ARCHIVED FILES — never touch
     if any(pat in file_path for pat in DEFAULT_EXCLUDE):
@@ -357,6 +431,105 @@ def parse_md_file(file_path: str, tokens: List[str]) -> List[Hit]:
     return hits
 
 
+def apply_file(file_path: str, tokens: List[str], write: bool) -> Tuple[int, int, List[str]]:
+    """Apply auto-applicable renames to one file.
+
+    Re-parses the file (positions are authoritative), and for each line applies
+    substitutions RIGHT-TO-LEFT (so earlier positions don't shift) for hits that are:
+      - classified in AUTO_APPLY_CLASSES, AND
+      - whose matched text is an exact key in RENAME_MAP.
+    Everything else (single_core, not-in-map, confirm, sister, all LEAVE) is left untouched
+    and counted as NEEDS-MANUAL.
+
+    Returns (applied_count, needs_manual_count, manual_samples).
+    If write=False, computes counts + samples WITHOUT writing (preview/dry-run).
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw_lines = f.readlines()
+    except (IOError, UnicodeDecodeError) as e:
+        print(f"WARN: could not read {file_path}: {e}", file=sys.stderr)
+        return (0, 0, [])
+
+    lines = [l.rstrip("\n") for l in raw_lines]
+
+    # Dedupe tokens by lowercase (same as parse_md_file)
+    seen_lc: set = set()
+    unique_tokens: List[str] = []
+    for t in tokens:
+        if t.lower() not in seen_lc:
+            seen_lc.add(t.lower())
+            unique_tokens.append(t)
+
+    applied = 0
+    needs_manual = 0
+    manual_samples: List[str] = []
+    inside_fence = False
+    new_lines: List[str] = []
+
+    for line_num, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("```"):
+            inside_fence = not inside_fence
+            new_lines.append(line)
+            continue
+
+        # Collect auto-applicable substitutions on this line: (start, end, replacement)
+        subs: List[Tuple[int, int, str]] = []
+        seen_positions: set = set()
+        for token in unique_tokens:
+            token_re = re.compile(re.escape(token), re.IGNORECASE)
+            for m in token_re.finditer(line):
+                if m.start() in seen_positions:
+                    continue
+                seen_positions.add(m.start())
+                cls, action, _conf = classify_hit(
+                    line, inside_fence, file_path, line_num, lines, token, m.start(), m.end()
+                )
+                matched = m.group()
+                if cls in AUTO_APPLY_CLASSES and matched in RENAME_MAP:
+                    subs.append((m.start(), m.end(), RENAME_MAP[matched]))
+                elif cls in AUTO_APPLY_CLASSES or action in ("RENAME", "RENAME-WITH-CONFIRM",
+                                                             "SISTER-RENAME-CANDIDATE",
+                                                             "SISTER-COHORT-XREF"):
+                    # Wanted-to-change-but-can't-auto: needs manual (single_core, not-in-map,
+                    # confirm-needed, sister handling)
+                    needs_manual += 1
+                    if len(manual_samples) < 12:
+                        manual_samples.append(
+                            f"{file_path}:{line_num} [{cls}/{action}] '{matched}': {line.strip()[:90]}"
+                        )
+
+        # Resolve OVERLAPS before applying (per .D.1 Phase A apply-preview finding):
+        # e.g. FOREACH_PER_CORE_CFG_FIELD (0,26) and its inner PER_CORE (8,16) both match.
+        # Two overlapping subs on one span = corruption if replacement lengths differ.
+        # Greedily accept non-overlapping subs preferring the LONGER (outer) match:
+        # sort by start asc, then by span length desc; accept if start >= last accepted end.
+        if subs:
+            subs.sort(key=lambda s: (s[0], -(s[1] - s[0])))
+            accepted: List[Tuple[int, int, str]] = []
+            last_end = -1
+            for start, end, repl in subs:
+                if start >= last_end:
+                    accepted.append((start, end, repl))
+                    last_end = end
+                # else: overlaps a longer/earlier accepted sub → skip (inner substring)
+            new_line = line
+            for start, end, repl in sorted(accepted, key=lambda s: -s[0]):
+                new_line = new_line[:start] + repl + new_line[end:]
+            new_lines.append(new_line)
+            applied += len(accepted)
+        else:
+            new_lines.append(line)
+
+    if write and applied > 0:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(new_lines))
+            if raw_lines and raw_lines[-1].endswith("\n"):
+                f.write("\n")
+
+    return (applied, needs_manual, manual_samples)
+
+
 def find_md_files(scope: List[str], exclude_patterns: List[str]) -> List[str]:
     """Find all .md files in scope; exclude matching patterns."""
     md_files: List[str] = []
@@ -413,9 +586,48 @@ def main() -> int:
         action="store_true",
         help="Print only summary; don't write TSV (useful for spot-checks)",
     )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply auto-applicable renames (narrative classes + exact RENAME_MAP variants). "
+        "PREVIEW by default (writes nothing); add --write to actually edit files.",
+    )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="With --apply: actually write edits (else preview-only).",
+    )
     args = parser.parse_args()
 
     md_files = find_md_files(args.scope, args.exclude)
+
+    # --apply mode (preview unless --write)
+    if args.apply:
+        total_applied = 0
+        total_manual = 0
+        all_manual_samples: List[str] = []
+        per_file: List[Tuple[str, int, int]] = []
+        for md_file in md_files:
+            applied, manual, samples = apply_file(md_file, args.tokens, write=args.write)
+            if applied or manual:
+                per_file.append((md_file, applied, manual))
+            total_applied += applied
+            total_manual += manual
+            all_manual_samples.extend(samples[: max(0, 12 - len(all_manual_samples))])
+
+        mode = "WROTE" if args.write else "PREVIEW (no files written; add --write to apply)"
+        print(f"=== --apply {mode} ===", file=sys.stderr)
+        print(f"Files scanned: {len(md_files)}", file=sys.stderr)
+        print(f"Auto-applied renames: {total_applied}", file=sys.stderr)
+        print(f"NEEDS-MANUAL (single_core / not-in-map / confirm / sister): {total_manual}", file=sys.stderr)
+        print("\nTop files by auto-applied count:", file=sys.stderr)
+        for fp, a, mn in sorted(per_file, key=lambda x: -x[1])[:15]:
+            print(f"  {a:4d} applied / {mn:3d} manual  {fp}", file=sys.stderr)
+        if all_manual_samples:
+            print("\nSample NEEDS-MANUAL hits (handle by hand):", file=sys.stderr)
+            for s in all_manual_samples:
+                print(f"  - {s}", file=sys.stderr)
+        return 0
 
     all_hits: List[Hit] = []
     for md_file in md_files:

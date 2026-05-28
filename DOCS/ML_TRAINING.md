@@ -268,7 +268,7 @@ In foxml_suite Training panel:
 
 ### Engine deployment
 
-Set in `engine.cfg` (or per-core override):
+Set in `engine.cfg` (or per-node override):
 ```
 core_0_model_dir = models/classification/btc_5min_v1
 ```
