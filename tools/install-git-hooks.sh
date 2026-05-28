@@ -1,13 +1,22 @@
 #!/bin/bash
 # install-git-hooks.sh — install local-repo git hooks (NOT tracked by git natively).
 #
-# Run after fresh clone OR after pulling hook changes to keep .git/hooks/ in sync
-# with versioned hook scripts at tools/hooks/.
+# Run after fresh clone OR after editing a versioned hook to keep .git/hooks/ in sync
+# with the versioned hook scripts at tools/hooks/.
 #
-# Idempotent: replaces existing hooks of the same name (warns first if differ).
+# CANONICAL-SOURCE DISCIPLINE: tools/hooks/<name> is the SINGLE SOURCE OF TRUTH.
+# .git/hooks/<name> is a COPY installed from it. NEVER edit .git/hooks/ directly —
+# edit tools/hooks/<name> then re-run this script. (Drift between the two went
+# undetected from .D to .D.1: Check 11 was added to the installed pre-commit hook but
+# not synced back to the versioned source, so a fresh clone would have installed an
+# outdated hook. Closed at .D.1 Phase A.3; cmp-parity now verified at install time.)
 #
-# Codified at v5.15.5.F.4d.1.B.4 v1.7.4 with the B-Plus CI tool pre-commit hook;
-# extends naturally if more hooks land later.
+# Idempotent: replaces existing hooks of the same name (backs up to .bak if differ).
+#
+# Codified at v5.15.5.F.4d.1.B.4 v1.7.4 with the B-Plus CI tool pre-commit hook.
+# The pre-commit hook now runs a multi-check suite (see tools/hooks/pre-commit header
+# for the per-check codification history); this installer copies whatever is in
+# tools/hooks/ verbatim, so new checks land by editing the versioned hook + re-running.
 
 set -euo pipefail
 

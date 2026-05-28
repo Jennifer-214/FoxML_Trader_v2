@@ -127,3 +127,7 @@ CLAUDE.md
 # v5.15.5.C.3 — session-local artifacts (regenerated automatically)
 .foxml_index.json
 context_cont.md
+
+# Python build artifacts (tools/)
+__pycache__/
+*.pyc
