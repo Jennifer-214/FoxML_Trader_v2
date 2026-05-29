@@ -19,6 +19,7 @@ models/
 *.o
 *.d
 plans
+DESIGN_SPECS
 .claude/
 .chart-venv/
 secrets.cfg
