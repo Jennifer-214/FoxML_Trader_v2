@@ -5,7 +5,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.D"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.D.1"
 
 // .F.4d.1.D (v5.15.5.F.4d.1.D) — Forward-promise verification CI (Check 11 Python detection
 // logic IMPLEMENTED) + post-.B.8 ledger cleanup (2026-05-28). NEW `tools/check_forward_promise_audit.py`

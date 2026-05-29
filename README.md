@@ -1,6 +1,6 @@
-# Tick Trader — Per-Core Sharded Engine
+# Tick Trader — Per-Node Sharded Engine
 
-per-core risk-sharded crypto trading engine in C++17. one position per pinned CPU, branchless fixed-point math, lock-free queues, seqlock-cached parameters. the hot path runs at single-digit ns/tick algorithmic floor — the slow path can do whatever (ML inference, regression, regime detection) without the executors ever paying for it.
+per-node risk-sharded crypto trading engine in C++17. one position per pinned CPU, branchless fixed-point math, lock-free queues, seqlock-cached parameters. the hot path runs at single-digit ns/tick algorithmic floor — the slow path can do whatever (ML inference, regression, regime detection) without the executors ever paying for it.
 
 ![per-core latency panel](assets/per-core-latency.png)
 
