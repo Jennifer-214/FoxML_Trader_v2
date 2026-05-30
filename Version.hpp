@@ -5,8 +5,22 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.4"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.5"
 
+// .F.4d.1.E.0.5 (v5.15.5.F.4d.1.E.0.5 — = the .E.0.2 meta-error-tracking subsystem; tags
+// monotonically as E.0.5 because D-88 sequenced .E.0.4 ahead of it; plan keeps its semantic
+// .E.0.2 name + provenance markers) — Ship-close G: formal close of the 4-piece meta-error
+// subsystem (the META parallel of RECURRING_BUG_PATTERNS + /bug-check). Pieces verified coherent
+// at close: P1 = DESIGN_SPECS/meta-disciplines/meta-anti-pattern-index.md (first-canonical v1.0;
+// 7 rows AR-1/2 + CP-1 + WH-1/2 + PL-1/2; Decision A = INDEX not new class-series). P2 =
+// /capture-audit Check 12 (amendment-cascade; READS CP rows). P3 = /close-session Stage 4.5
+// harvest (WRITES rows) + Stage 5.5 independent review. P4 = /precoding-audit-gate hardened
+// (HEAVIER-default D-77 + Stage-2.5 deterministic pre-gate + Stage-3.5 quorum/verification; READS
+// all rows). The memory→catalog→gate→harvest loop closed BEFORE the .E pipeline (D-76). CP-1
+// mechanization for the memory corpus landed at .E.0.4 (red build); catalog CP-1 row + self-count
+// reconciled here. META/no engine code; apparatus-complete DoD (D-78) gates .E.1.
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-05-30-v5.15.5.F.4d.1.E.0.5-postmortem.md.
+//
 // .F.4d.1.E.0.4 (v5.15.5.F.4d.1.E.0.4) — Doc/meta-system rollout: memories → structured
 // tag/frontmatter system (TECH_DEBT-115 memory slice; D-89). 85 memories migrated to
 // metadata-nested tags + symmetric sister_specs (CP-1/WH-1 closed mechanically); check_doc_metadata
