@@ -12,12 +12,14 @@
 #  - Check A (B-Plus, plan body symbol existence)    at v5.15.5.F.4d.1.B.4 v1.7.4
 #  - Check B (Check 11, forward-promise auto-write)   at v5.15.5.F.4d.1.D    Phase F.1
 #  - Check C (doc-rename classification)              at v5.15.5.F.4d.1.D.1  Phase A.3
+#  - Check E (doc-floor: bidirectional memories + capture-audit-mechanical) at v5.15.5.F.4d.1.E Session-4 (D-112/D-115)
 #  - Check D (plan body Tests-changed section)        at v5.15.5.F.4d.1.D.1  Phase A.6
 #
 # Bypass via env vars (use sparingly):
 #   SKIP_PLAN_BODY_CHECK=1     — bypass Check A (B-Plus)
 #   SKIP_CHECK_11=1            — bypass Check B (forward-promise)
 #   SKIP_DOC_RENAME_CHECK=1    — bypass Check C (doc-rename classification)
+#   SKIP_DOC_FLOOR_CHECK=1     — bypass Check E (doc-floor: bidirectional memories + capture-audit-mechanical)
 #   SKIP_TESTS_SECTION_CHECK=1 — bypass Check D (Tests-changed section)
 #   SKIP_ALL_CHECKS=1          — bypass all
 
@@ -156,6 +158,40 @@ if [ "${SKIP_TESTS_SECTION_CHECK:-0}" != "1" ]; then
     fi
 else
     echo "[pre-commit] SKIP_TESTS_SECTION_CHECK=1; skipping Tests-section check"
+fi
+
+# ============================================================================
+# CHECK E: doc/plan mechanical floor (bidirectional memories + capture-audit-mechanical)
+# Codified at .E Session-4 (D-112/D-115). Closes the gap where a one-way memory
+# sister-link / orphan memory / unindexed skill could slip through a commit:
+# Checks A-D cover plan-body symbols + forward-promise + doc-rename + tests-section,
+# but NOT memory bidirectionality or index-sync. The two mechanizing tools
+# (check_doc_metadata --bidirectional --memories + check_capture_audit) are the
+# HARD half of check_session_docs.sh; fire them when a memory / skill / index doc is staged.
+# ============================================================================
+if [ "${SKIP_DOC_FLOOR_CHECK:-0}" != "1" ]; then
+    STAGED_DOCFLOOR=$(git diff --cached --name-only --diff-filter=ACM | grep -E 'MEMORY\.md$|memory/.*\.md$|memory\.backup/.*\.md$|claude-skills/.*SKILL\.md$|CLAUDE\.md$|CLAUDE\.local\.md$|decision-logs/.*\.md$' || true)
+    if [ -n "$STAGED_DOCFLOOR" ]; then
+        echo "[pre-commit] Doc-floor: bidirectional-memories + capture-audit-mechanical (staged doc/skill/memory change):"
+        DOCFLOOR_FAIL=0
+        BIDIR_TOOL="${REPO_ROOT}/tools/check_doc_metadata.py"
+        CAPA_TOOL="${REPO_ROOT}/tools/check_capture_audit.py"
+        if [ -f "$BIDIR_TOOL" ]; then
+            if ! python3 "$BIDIR_TOOL" --bidirectional --memories 2>&1 | tail -5; then DOCFLOOR_FAIL=1; fi
+        fi
+        if [ -f "$CAPA_TOOL" ]; then
+            if ! python3 "$CAPA_TOOL" --quiet 2>&1; then DOCFLOOR_FAIL=1; fi
+        fi
+        if [ "$DOCFLOOR_FAIL" = "1" ]; then
+            echo "[pre-commit] Doc-floor FAIL: one-way sister / orphan memory / unindexed skill / unmatched sentinel."
+            echo "[pre-commit] Fix the drift OR bypass with SKIP_DOC_FLOOR_CHECK=1"
+            OVERALL_FAIL=1
+        else
+            echo "[pre-commit] Doc-floor PASS"
+        fi
+    fi
+else
+    echo "[pre-commit] SKIP_DOC_FLOOR_CHECK=1; skipping doc-floor check"
 fi
 
 # ============================================================================
