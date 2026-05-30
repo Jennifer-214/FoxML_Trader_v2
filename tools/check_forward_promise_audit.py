@@ -46,6 +46,7 @@ Output-privacy discipline (tool public / outputs private):
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import json
@@ -58,8 +59,24 @@ from typing import Optional, Callable, List, Tuple
 # ============================================================================
 # Repo path constants
 # ============================================================================
-ENGINE_ROOT = Path("/home/caramel/code/FoxML_Trader_v2")
-WORKSPACE_ROOT = Path("/home/caramel/code/tick-trader-percore-workspace")
+# Machine-portable roots (per feedback_machine_portable_resolver_for_committed_tool_paths):
+# ENGINE_ROOT derives from this file's location; WORKSPACE_ROOT + MEMORY_DIR via
+# env-override -> derived-default -> .exists()-guard. No $HOME hardcode in a committed,
+# public-AGPL tool — runs on any clone / any PC / SSH-grid node.
+ENGINE_ROOT = Path(os.environ.get("FOXML_ENGINE") or Path(__file__).resolve().parent.parent)
+def _resolve_workspace_root():
+    env = os.environ.get("FOXML_WORKSPACE")
+    if env and Path(env).exists():
+        return Path(env)
+    sibling = ENGINE_ROOT.parent / "tick-trader-percore-workspace"
+    return sibling if sibling.exists() else ENGINE_ROOT
+WORKSPACE_ROOT = _resolve_workspace_root()
+def _resolve_memory_dir():
+    env = os.environ.get("FOXML_MEMORY_DIR")
+    if env and Path(env).exists():
+        return Path(env)
+    project_id = str(ENGINE_ROOT).replace("/", "-").replace("_", "-")
+    return Path.home() / ".claude" / "projects" / project_id / "memory"
 
 ACTIVE_SPRINT = "v5.15-live-readiness"
 PLANS_DIR = ENGINE_ROOT / f"plans/{ACTIVE_SPRINT}"
@@ -71,7 +88,7 @@ TECH_DEBT_INFLIGHT = WORKSPACE_ROOT / "DOCS/tech-debt/in-flight.md"
 PARITY_ISSUES = WORKSPACE_ROOT / "DOCS/PARITY_ISSUES.md"
 RECURRING_BUG_PATTERNS_DIR = WORKSPACE_ROOT / "DOCS/recurring-bug-patterns"
 DESIGN_SPECS_DIR = WORKSPACE_ROOT / "DESIGN_SPECS"
-MEMORY_DIR = Path.home() / ".claude/projects/-home-caramel-code-FoxML-Trader-v2/memory"
+MEMORY_DIR = _resolve_memory_dir()
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 CLAUDE_MD = ENGINE_ROOT / "CLAUDE.md"
 CLAUDE_LOCAL_MD = ENGINE_ROOT / "CLAUDE.local.md"

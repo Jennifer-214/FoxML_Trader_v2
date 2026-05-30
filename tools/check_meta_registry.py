@@ -66,8 +66,14 @@ def info(msg: str) -> None:
 
 
 def scan_codebase_foreach_macros() -> set:
-    """Grep all #define FOREACH_<NAME>(X) macro definitions in scan dirs. Returns set of names."""
-    pattern = re.compile(r'^#define\s+(FOREACH_\w+)\s*\(\s*X\s*\)', re.MULTILINE)
+    """Grep all #define FOREACH_<NAME>(<param>) macro definitions in scan dirs. Returns set of names."""
+    # Match ANY single-identifier macro param, not just literal `X`: action-parameterized
+    # meta-walkers like FOREACH_<COHORT>_COHORT(BASE_X) are real X-macro registries enrolled
+    # in FOREACH_REGISTRY, so the finder must see them too — else Check 2 false-positives a
+    # registered-and-real macro as "no matching #define". Fixed .E Session-4 2026-05-30:
+    # FOREACH_STAMP_BOUND_DERIVED_COHORT(BASE_X) (CfgGateRegistry.hpp:227; used at 8 sites)
+    # was a FALSE orphan under the old `\(X\)`-only regex (the TD-150 finding).
+    pattern = re.compile(r'^#define\s+(FOREACH_\w+)\s*\(\s*\w+\s*\)', re.MULTILINE)
     macros = set()
     for d in SCAN_DIRS:
         d_path = REPO_ROOT / d

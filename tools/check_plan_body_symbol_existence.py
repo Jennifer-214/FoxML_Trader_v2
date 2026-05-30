@@ -49,8 +49,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-ENGINE = Path("/home/caramel/code/FoxML_Trader_v2")
-WORKSPACE = Path("/home/caramel/code/tick-trader-percore-workspace")
+# Machine-portable roots (per feedback_machine_portable_resolver_for_committed_tool_paths):
+# ENGINE derives from this file's location; WORKSPACE via env-override -> sibling-default ->
+# .exists()-guard. No $HOME hardcode in a committed public-AGPL tool (runs on any clone/PC).
+ENGINE = Path(os.environ.get("FOXML_ENGINE") or Path(__file__).resolve().parent.parent)
+def _resolve_workspace_root():
+    env = os.environ.get("FOXML_WORKSPACE")
+    if env and Path(env).exists():
+        return Path(env)
+    sibling = ENGINE.parent / "tick-trader-percore-workspace"
+    return sibling if sibling.exists() else ENGINE
+WORKSPACE = _resolve_workspace_root()
 PLANS_DIR = WORKSPACE / "plans"
 
 COMPILER = "g++"
