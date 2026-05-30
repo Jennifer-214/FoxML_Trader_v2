@@ -34,6 +34,50 @@ ENGINE = Path("/home/caramel/code/FoxML_Trader_v2")
 VOCAB_PATH = WORKSPACE / "DESIGN_SPECS" / "meta-disciplines" / "doc-tag-vocabulary.md"
 CONVENTION_PATH = WORKSPACE / "DESIGN_SPECS" / "meta-disciplines" / "doc-frontmatter-convention.md"
 
+
+def _resolve_memory_dir():
+    """Resolve the Claude Code institutional-memory dir (machine-portable; D-89 fork 1).
+
+    Order: $FOXML_MEMORY_DIR override -> the local Claude Code projects store
+    derived from the engine repo path -> None if absent. Designed so the guard
+    runs today on one machine AND a multi-machine / SSH-grid node just exports
+    FOXML_MEMORY_DIR (no $HOME hardcode baked into a committed tool). Cross-node
+    memory *sync* itself is a separate concern (forward-promise).
+
+    NOTE: memory doc-system fields (tags/sister_specs) live nested under the
+    harness-native `metadata:` block (harness-durable). parse_frontmatter is a
+    FLAT line parser, so it already surfaces those indented keys as top-level --
+    no metadata-aware parsing needed. If parse_frontmatter is ever upgraded to
+    real nested YAML, teach it to flatten memory `metadata.*` (D-89).
+    """
+    override = os.environ.get("FOXML_MEMORY_DIR")
+    if override:
+        p = Path(override)
+        return p if p.exists() else None
+    # Claude Code keys its per-project memory dir by the project's absolute path
+    # with '/' and '_' both mapped to '-'. Derive from ENGINE; do not hardcode $HOME.
+    project_id = str(ENGINE).replace("/", "-").replace("_", "-")
+    p = Path.home() / ".claude" / "projects" / project_id / "memory"
+    return p if p.exists() else None
+
+
+MEMORY_DIR = _resolve_memory_dir()
+
+
+def _memory_ref_exists(ref_clean):
+    """True if a sister_specs ref resolves to a memory file (D-89 fork 2 -- dual-tree).
+
+    Memories cross-link to OTHER memories by filename (e.g. `feedback_x` or
+    `feedback_x.md`) in the same unified `sister_specs:` field they use for
+    DESIGN_SPECS paths. validate_doc tries DESIGN_SPECS/ first, then this.
+    """
+    if MEMORY_DIR is None:
+        return False
+    name = Path(ref_clean).name
+    if not name.endswith(".md"):
+        name += ".md"
+    return (MEMORY_DIR / name).exists()
+
 VALID_TYPES = {
     "refactor-pattern", "feature-pattern", "framework-pattern",
     "audit-methodology", "data-discipline", "concurrency-pattern",
@@ -67,18 +111,35 @@ def parse_frontmatter(path):
         return None
     fm_body = content[4:end_marker]
     fields = {}
-    for line in fm_body.split("\n"):
-        line = line.strip()
+    last_list_key = None   # block-style list parent: a `key:` line followed by "  - item" lines
+    for raw in fm_body.split("\n"):
+        line = raw.strip()
         if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):          # block-list item -> append to the parent key.
+            # R6 robustness (D-89): the Claude Code harness re-serializes agent-written
+            # memory frontmatter, converting inline `[a,b]` to block style; read both so
+            # normalization can't silently drop tags/sister_specs. Orphan items after an
+            # inline list (malformed) are ignored (last_list_key resets to None on inline).
+            if last_list_key is not None:
+                cur = fields.get(last_list_key)
+                if not isinstance(cur, list):
+                    cur = []
+                    fields[last_list_key] = cur
+                cur.append(line[2:].strip())
             continue
         if ":" in line:
             key, _, val = line.partition(":")
-            val = val.strip()
+            key, val = key.strip(), val.strip()
             if val.startswith("[") and val.endswith("]"):
-                items = val[1:-1].split(",")
-                fields[key.strip()] = [i.strip() for i in items if i.strip()]
+                fields[key] = [i.strip() for i in val[1:-1].split(",") if i.strip()]
+                last_list_key = None
+            elif val == "":                # empty value -> possible block-list parent
+                fields[key] = ""
+                last_list_key = key
             else:
-                fields[key.strip()] = val
+                fields[key] = val
+                last_list_key = None
     return fields
 
 
@@ -171,31 +232,45 @@ def validate_doc(path, concern_vocab, surface_vocab, strict=False):
                                 break
                     if not found:
                         ref_path = WORKSPACE / "DESIGN_SPECS" / ref_clean
-            if not ref_path.exists():
+            if not ref_path.exists() and not _memory_ref_exists(ref_clean):
                 violations.append(f"BROKEN sister_specs ref '{ref_clean}': {path}")
 
     return violations
 
 
+def _norm_sister(ref):
+    """Normalize a sister_specs ref to a comparable filename (basename + `.md`).
+
+    Handles DESIGN_SPECS paths (`meta-disciplines/x.md` -> `x.md`), memory
+    filenames (`feedback_x.md` -> `feedback_x.md`), and bare inline-link forms
+    (`feedback_x` -> `feedback_x.md`). Lets memory<->memory + memory<->spec links
+    compare uniformly (D-89 fork 2).
+    """
+    n = Path(ref.strip('"').strip("'")).name
+    return n if n.endswith(".md") else n + ".md"
+
+
 def check_bidirectional_sisters(files_with_fm):
-    """Verify: if A.sister_specs = [B], then B.sister_specs should contain A."""
+    """Verify: if A.sister_specs = [B], then B.sister_specs should contain A.
+
+    Covers DESIGN_SPECS, skills, AND memories (memories enter files_with_fm via
+    the memory scan root -- D-89 fork 1). Names compared via _norm_sister so a
+    bare `feedback_x` and a `feedback_x.md` match the same file.
+    """
     violations = []
     by_name = {}
     for path, fm in files_with_fm:
         by_name[Path(path).name] = (path, fm)
     for path, fm in files_with_fm:
         my_name = Path(path).name
-        sisters = fm.get("sister_specs", [])
-        for sister in sisters:
-            sister_clean = sister.strip('"').strip("'")
-            if not sister_clean:
+        for sister in fm.get("sister_specs", []):
+            if not sister.strip('"').strip("'"):
                 continue
-            sister_name = Path(sister_clean).name
+            sister_name = _norm_sister(sister)
             if sister_name not in by_name:
                 continue
             _, sister_fm = by_name[sister_name]
-            sister_sisters = sister_fm.get("sister_specs", [])
-            back_refs = [Path(s.strip('"').strip("'")).name for s in sister_sisters]
+            back_refs = [_norm_sister(s) for s in sister_fm.get("sister_specs", []) if s.strip('"').strip("'")]
             if my_name not in back_refs:
                 violations.append(
                     f"BIDIR sister-doc asymmetry: {path} → {sister_name} "
@@ -209,6 +284,7 @@ def main():
     parser.add_argument("--strict", action="store_true", help="enforce SHOULD-HAVE frontmatter on docs")
     parser.add_argument("--paths", nargs="*", help="specific files to check (default: all)")
     parser.add_argument("--bidirectional", action="store_true", help="verify sister_specs is bidirectional")
+    parser.add_argument("--memories", action="store_true", help="scan ONLY the memory dir (cadence guard scope; D-89)")
     args = parser.parse_args()
 
     concern_vocab, surface_vocab = load_vocabulary()
@@ -218,9 +294,14 @@ def main():
 
     if args.paths:
         files_to_check = [Path(p) for p in args.paths]
+    elif args.memories:                     # D-89: memory-scoped cadence guard
+        files_to_check = sorted(MEMORY_DIR.glob("*.md")) if MEMORY_DIR else []
     else:
         files_to_check = []
-        for root in [WORKSPACE / "DESIGN_SPECS", WORKSPACE / "claude-skills"]:
+        scan_roots = [WORKSPACE / "DESIGN_SPECS", WORKSPACE / "claude-skills"]
+        if MEMORY_DIR is not None:          # D-89 fork 1: cover memories in the default scan
+            scan_roots.append(MEMORY_DIR)
+        for root in scan_roots:
             if root.exists():
                 files_to_check.extend(root.rglob("*.md"))
 

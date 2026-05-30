@@ -30,6 +30,10 @@ SPECS_DIR = WORKSPACE / "DESIGN_SPECS"
 SKILLS_DIR = WORKSPACE / "claude-skills"
 CLAUDE_MD = WORKSPACE / "CLAUDE.md"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_doc_metadata import _resolve_memory_dir  # SSoT memory-dir resolver (D-89)
+MEMORY_DIR = _resolve_memory_dir()
+
 CONCERN_LABEL = {
     "pre-coding-gate": "Pre-coding plan verification",
     "shape-audit": "SHAPE audits (design-layer)",
@@ -104,6 +108,20 @@ def collect_specs():
     return specs
 
 
+def collect_memories():
+    """Memories (machine-portable dir; D-89). Flat parser surfaces metadata.tags."""
+    mems = {}
+    if MEMORY_DIR is None:
+        return mems
+    for md in sorted(MEMORY_DIR.glob("*.md")):
+        if md.name == "MEMORY.md":
+            continue
+        fm = parse_frontmatter(md)
+        if fm:
+            mems[f"memory/{md.name}"] = fm
+    return mems
+
+
 def gen_skill_suite_table(skills):
     by_concern = defaultdict(list)
     for name, fm in skills.items():
@@ -174,9 +192,12 @@ def gen_design_specs_readme(specs):
     return "\n".join(lines)
 
 
-def gen_tag_index(specs, skills):
+def gen_tag_index(specs, skills, memories=None):
     by_tag = defaultdict(set)
     by_surface = defaultdict(set)
+    for path, fm in (memories or {}).items():   # memories: concern tags only (no surface axis)
+        for t in fm.get("tags", []):
+            by_tag[t].add(path)
     for path, fm in specs.items():
         for t in fm.get("tags", []):
             by_tag[t].add(path)
@@ -230,7 +251,8 @@ def main():
 
     skills = collect_skills()
     specs = collect_specs()
-    print(f"Loaded {len(skills)} skills + {len(specs)} DESIGN_SPECS")
+    memories = collect_memories()
+    print(f"Loaded {len(skills)} skills + {len(specs)} DESIGN_SPECS + {len(memories)} memories")
 
     if args.target in ("claude-md", "all"):
         ok, result = update_claude_md_skill_table(skills)
@@ -256,7 +278,7 @@ def main():
             print(f"Wrote {readme_path}")
 
     if args.target in ("tag-index", "all"):
-        tag_content = gen_tag_index(specs, skills)
+        tag_content = gen_tag_index(specs, skills, memories)
         tag_path = SPECS_DIR / "TAG_INDEX.md"
         if args.dry_run:
             print("\n=== TAG_INDEX.md (first 50 lines) ===")

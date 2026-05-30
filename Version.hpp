@@ -5,8 +5,17 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.D.1"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.4"
 
+// .F.4d.1.E.0.4 (v5.15.5.F.4d.1.E.0.4) — Doc/meta-system rollout: memories → structured
+// tag/frontmatter system (TECH_DEBT-115 memory slice; D-89). 85 memories migrated to
+// metadata-nested tags + symmetric sister_specs (CP-1/WH-1 closed mechanically); check_doc_metadata
+// extended (machine-portable memory-dir resolver + dual-tree sister resolution + --memories guard,
+// wired into /capture-audit Check 12); NEW tools/migrate_memory_frontmatter.py (idempotent,
+// undirected-graph, R6-void by preserve-all) + memory template + /doc-create memory type +
+// 10 new concern tags + TAG_INDEX/find memory inclusion. META/no engine code; bodies byte-identical.
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-05-30-v5.15.5.F.4d.1.E.0.4-postmortem.md.
+//
 // .F.4d.1.D (v5.15.5.F.4d.1.D) — Forward-promise verification CI (Check 11 Python detection
 // logic IMPLEMENTED) + post-.B.8 ledger cleanup (2026-05-28). NEW `tools/check_forward_promise_audit.py`
 // ~870 LOC (24 sentinel patterns + 24 verifier functions + ScanSpec dataclass + section parser +
