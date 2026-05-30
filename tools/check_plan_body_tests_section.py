@@ -148,6 +148,13 @@ def main() -> int:
     )
     parser.add_argument("--plan-body", help="Single plan body path to check")
     parser.add_argument(
+        "plan_body_pos",
+        nargs="?",
+        help="Plan body path as a positional arg (alias for --plan-body). Matches the "
+        "interface of sibling check_plan_body_symbol_existence.py + the positional "
+        "invocation in /precoding-audit-gate Stage 2.5.",
+    )
+    parser.add_argument(
         "--scope",
         nargs="+",
         help="Multiple plan body paths or dirs to check",
@@ -162,6 +169,8 @@ def main() -> int:
     targets: List[str] = []
     if args.plan_body:
         targets.append(args.plan_body)
+    if args.plan_body_pos:
+        targets.append(args.plan_body_pos)
     if args.scope:
         for s in args.scope:
             p = Path(s)
