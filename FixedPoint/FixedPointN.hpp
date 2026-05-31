@@ -1216,13 +1216,17 @@ template <unsigned F> inline FPN<F> FPN_SmoothStep(FPN<F> edge0, FPN<F> edge1, F
 //======================================================================================================
 #ifdef USE_NATIVE_128
 #include "FixedPoint64.hpp"
+#include <cstring>  // F-058: memcpy for type-pun-free FP64<->FPN<64> conversion
 
-// zero-cost conversions (identical memory layout on little-endian x86)
+// zero-cost conversions (identical memory layout on little-endian x86).
+// F-058: memcpy (not a `*(__uint128_t*)` pointer-pun) — the pun is strict-aliasing
+// + alignment UB under -O3 -flto; memcpy is the standard-blessed type-pun and lowers
+// to the same MOV at -O2+ (zero cost), byte-preserving on x86.
 static inline FP64 _to_fp64(FPN<64> v) {
-    FP64 r; r.magnitude = *((__uint128_t*)v.w); r.sign = v.sign; return r;
+    FP64 r; __uint128_t m; memcpy(&m, v.w, sizeof(m)); r.magnitude = m; r.sign = v.sign; return r;
 }
 static inline FPN<64> _from_fp64(FP64 v) {
-    FPN<64> r; *((__uint128_t*)r.w) = v.magnitude; r.sign = v.sign; return r;
+    FPN<64> r; memcpy(r.w, &v.magnitude, sizeof(v.magnitude)); r.sign = v.sign; return r;
 }
 
 // arithmetic
@@ -1250,8 +1254,11 @@ template<> inline FPN<64> FPN_Max<64>(FPN<64> a, FPN<64> b) { return _from_fp64(
 template<> inline FPN<64> FPN_FromDouble<64>(double d) { return _from_fp64(FP64_FromDouble(d)); }
 template<> inline double FPN_ToDouble<64>(FPN<64> v)   { return FP64_ToDouble(_to_fp64(v)); }
 
-// math (slow path, but still smaller code)
-template<> inline FPN<64> FPN_Sqrt<64>(FPN<64> v) { return _from_fp64(FP64_Sqrt(_to_fp64(v))); }
+// math (slow path): FPN_Sqrt<64> deliberately NOT specialized — it falls through to
+// the generic bytewise-deterministic Newton-Raphson (:873). F-056: the native FP64_Sqrt
+// is a sqrt(double) round-trip → non-deterministic across compilers (breaks H10
+// cross-binary determinism); the generic NR is integer-FPN-only + deterministic. The
+// exact-integer native specializations above stay. (Incidentally closes F-078.)
 
 #endif // USE_NATIVE_128
 

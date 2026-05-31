@@ -218,6 +218,11 @@ target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 # unconditionally references TUISnapshot, which is only defined under
 # MULTICORE_TUI. Match the production engine target.
 target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
+# F-057: tests must build the SHIPPED FP path (USE_NATIVE_128 default ON) so the suite
+# exercises the native specializations, not the generic fallback (tested==shipped).
+if(USE_NATIVE_128)
+    target_compile_definitions(controller_test PRIVATE USE_NATIVE_128)
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(controller_test PRIVATE Threads::Threads ssl crypto)
 
@@ -239,6 +244,10 @@ add_executable(parity_harness tests/parity_harness.cpp)
 target_compile_options(parity_harness PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(parity_harness PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_compile_definitions(parity_harness PRIVATE MULTICORE_TUI)
+# F-057: tested==shipped — parity_harness must build the native FP path too.
+if(USE_NATIVE_128)
+    target_compile_definitions(parity_harness PRIVATE USE_NATIVE_128)
+endif()
 target_link_libraries(parity_harness PRIVATE Threads::Threads ssl crypto)
 
 # v5.11.14 — standalone CLI that diffs two FeatureStandardizer .scaler
