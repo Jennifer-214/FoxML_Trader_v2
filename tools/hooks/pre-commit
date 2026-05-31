@@ -14,6 +14,7 @@
 #  - Check C (doc-rename classification)              at v5.15.5.F.4d.1.D.1  Phase A.3
 #  - Check E (doc-floor: bidirectional memories + capture-audit-mechanical) at v5.15.5.F.4d.1.E Session-4 (D-112/D-115)
 #  - Check D (plan body Tests-changed section)        at v5.15.5.F.4d.1.D.1  Phase A.6
+#  - Check F (determinism net: FP golden + locale guard + replay-locale)    at v5.15.5.F.4d.1.E.0.1
 #
 # Bypass via env vars (use sparingly):
 #   SKIP_PLAN_BODY_CHECK=1     — bypass Check A (B-Plus)
@@ -21,6 +22,7 @@
 #   SKIP_DOC_RENAME_CHECK=1    — bypass Check C (doc-rename classification)
 #   SKIP_DOC_FLOOR_CHECK=1     — bypass Check E (doc-floor: bidirectional memories + capture-audit-mechanical)
 #   SKIP_TESTS_SECTION_CHECK=1 — bypass Check D (Tests-changed section)
+#   SKIP_DETERMINISM_CHECK=1   — bypass Check F (determinism net)
 #   SKIP_ALL_CHECKS=1          — bypass all
 
 if [ "${SKIP_ALL_CHECKS:-0}" = "1" ]; then
@@ -28,7 +30,7 @@ if [ "${SKIP_ALL_CHECKS:-0}" = "1" ]; then
     exit 0
 fi
 
-REPO_ROOT="/home/caramel/code/FoxML_Trader_v2"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "/home/caramel/code/FoxML_Trader_v2")"  # .E.0.1: derive (machine-portable per D-114) with hardcode fallback
 OVERALL_FAIL=0
 
 # ============================================================================
@@ -192,6 +194,31 @@ if [ "${SKIP_DOC_FLOOR_CHECK:-0}" != "1" ]; then
     fi
 else
     echo "[pre-commit] SKIP_DOC_FLOOR_CHECK=1; skipping doc-floor check"
+fi
+
+# ============================================================================
+# CHECK F: determinism net (FP golden + locale guard + replay-locale gate)
+# Codified at .E.0.1 — the standing net #11 (FixedPoint<RADIX,FRAC>) + .E.1 run under.
+# Scoped to FP / parse / locale / recorder paths so unrelated commits stay fast.
+# Robust rc-capture (NOT `cmd | tail`, which would mask the tool's exit).
+# ============================================================================
+if [ "${SKIP_DETERMINISM_CHECK:-0}" != "1" ]; then
+    DET_TOOL="$REPO_ROOT/tools/check_determinism.sh"
+    STAGED_DET=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^(FixedPoint/|Backtest/BacktestEngine\.hpp|DataStream/(DepthReplayState|TickRecorder|DepthRecorder)\.hpp|CoreFrameworks/ParseFast\.hpp|main\.cpp|foxml_suite\.cpp|tools/(compare_scalers|fp_determinism_golden|replay_locale_gate)\.|GUI/(GuiThread|StrategyQualityPanel)\.hpp|tools/check_(fp_determinism|locale_determinism|determinism)\.sh)' || true)
+    if [ -n "$STAGED_DET" ] && [ -x "$DET_TOOL" ]; then
+        echo "[pre-commit] Check F: determinism net (staged FP/parse/locale change detected)"
+        DET_OUT=$("$DET_TOOL" 2>&1); DET_RC=$?
+        echo "$DET_OUT" | tail -20
+        if [ "$DET_RC" -ne 0 ]; then
+            echo "[pre-commit] Check F FAIL: determinism net violation (FP golden drift / stray setlocale / new raw parse / replay-locale)."
+            echo "[pre-commit] Fix the drift — or, if this is a DELIBERATE epoch transition, regenerate the golden — OR bypass with SKIP_DETERMINISM_CHECK=1"
+            OVERALL_FAIL=1
+        else
+            echo "[pre-commit] Check F PASS"
+        fi
+    fi
+else
+    echo "[pre-commit] SKIP_DETERMINISM_CHECK=1; skipping determinism net"
 fi
 
 # ============================================================================
