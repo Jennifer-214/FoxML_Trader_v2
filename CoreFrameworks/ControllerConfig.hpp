@@ -357,7 +357,7 @@ static_assert(sizeof(PerCoreCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
 // [CONFIG]
 //======================================================================================================
 template <unsigned F> struct ControllerConfig {
-  // F-076 / PARITY-027: zero-init the WHOLE struct (fields + inter-field padding) at
+  // F-076 / PARITY-035: zero-init the WHOLE struct (fields + inter-field padding) at
   // construction. The model fingerprint hashes this struct RAW (BacktestPanels.hpp:3157
   // -> Fingerprint.hpp:180, SHA-256 over &cfg, sizeof(cfg)); the hash is embedded in the
   // trained model + re-checked at serve (ModelInference.hpp). Inter-field padding around

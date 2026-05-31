@@ -21,6 +21,7 @@ cd "$REPO_ROOT"
 
 LEGACY_FILE="CoreFrameworks/PortfolioController.hpp"
 SHARDED_FILES=(
+    "CoreFrameworks/EngineCommon.hpp"                 # shared BootPerCore/SlowPathCycle helpers (.B.4); was MISSING -> Regime_Init read as a false orphan -> rc=1 (.E.0.6 fix; caught by independent ship-verifier)
     "CoreFrameworks/ControllerEventLoop.hpp"
     "CoreFrameworks/EngineSharded.hpp"                # post-`.B.6` INDEX shim (96 LOC); sub-files below
     "CoreFrameworks/EngineSharded/Boot.hpp"           # v5.15.5.F.4d.1.B.6 subfolder split (added .B.7 per F2 fix)
@@ -117,8 +118,8 @@ fi
 # more broadly; here we just check the strategy/regime families.
 DEFINED_FNS=$(
     grep -hE '^(inline|template|static).*[A-Z][A-Za-z0-9]+_[A-Z][A-Za-z0-9]+\s*\(' \
-        /home/caramel/code/tick-trader-percore/Strategies/*.hpp \
-        /home/caramel/code/tick-trader-percore/Strategies/private/*.hpp \
+        "$REPO_ROOT"/Strategies/*.hpp \
+        "$REPO_ROOT"/Strategies/private/*.hpp \
         2>/dev/null \
     | grep -oE '[A-Z][A-Za-z0-9]+_[A-Z][A-Za-z0-9]+' \
     | grep -E "$PATTERN_RE" \

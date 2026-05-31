@@ -15,6 +15,7 @@
 #       tools/fp_determinism_golden.cpp -o /tmp/g && /tmp/g > tools/fp_determinism_golden.txt
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec </dev/null   # .E.0.1 hang-class close: detached runs (run_in_background / CI / git hook) get /dev/null stdin so no stdin-reader can hang it.
 H="$ROOT/tools/fp_determinism_golden.cpp"
 GOLDEN="$ROOT/tools/fp_determinism_golden.txt"
 rc=0

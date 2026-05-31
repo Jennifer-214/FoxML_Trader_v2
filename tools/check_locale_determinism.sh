@@ -15,6 +15,7 @@
 # Exit 0 = GREEN. Exit 1 = violation. First run SEEDS the baseline.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
+exec </dev/null   # .E.0.1 hang-class close: the rg's below pass explicit paths, but belt-and-suspenders — a detached run (run_in_background / CI / git hook) gets /dev/null stdin so no stdin-reader can hang it.
 BASE="tools/locale_determinism_known_pending.txt"
 rc=0
 

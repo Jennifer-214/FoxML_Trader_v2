@@ -8,6 +8,7 @@
 # fingerprint canonicalize).
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
+exec </dev/null   # .E.0.1 hang-class close: detached runs (run_in_background / CI / git hook) must never block on a stdin-reading child (path-less rg); /dev/null = instant EOF.
 rc=0
 
 echo "============================================================"

@@ -33,6 +33,12 @@ if [ "${SKIP_ALL_CHECKS:-0}" = "1" ]; then
     exit 0
 fi
 
+# .E.0.1 hang-class close (sister to the 74bd77b rg-path fix): a git hook runs DETACHED, so any
+# stdin-reading child — a path-less `rg`/`grep`, an interactive prompt — blocks the COMMIT forever at
+# 0% CPU. Redirect the whole hook's stdin to /dev/null: every check it spawns inherits it and gets
+# instant EOF. Structural close for the entire commit-time suite, independent of any one script's rg paths.
+exec </dev/null
+
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"  # .E.0.1: machine-portable, zero hardcoded path (git runs the hook from the repo root)
 OVERALL_FAIL=0
 

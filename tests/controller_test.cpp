@@ -1433,7 +1433,7 @@ static void test_v5_15_5_F4b_cfg_field_dispatch() {
     // === .E.0.1 F-076: cfg fingerprint determinism (zero-init ctor) ===
     // The model fingerprint SHA-256s ControllerConfig RAW (BacktestPanels -> Fingerprint),
     // so its zero-init default ctor must make inter-field padding deterministic — else equal
-    // cfg VALUES hash differently across runs (silent train-serve lineage drift; PARITY-027).
+    // cfg VALUES hash differently across runs (silent train-serve lineage drift; PARITY-035).
     {
         ControllerConfig<64> di;     // default-init -> the F-076 zero-init ctor runs
         ControllerConfig<64> vi{};   // value-init -> all-zero incl padding
