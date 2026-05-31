@@ -3,7 +3,7 @@
 #
 # Runs every determinism/locale gate in one shot. THIS is the standing net that #11
 # (FixedPoint<RADIX,FRAC>) + .E.1 (Core->Node rename) run under: any drift = red build.
-# Wired into the engine pre-commit hook (Check F, scoped to FP/parse/locale paths) and
+# Wired into the canonical pre-commit hook .githooks/pre-commit (Check F, scoped to FP/parse/locale paths) and
 # runnable on demand. Add a gate here when a new determinism cluster lands (e.g. F-076
 # fingerprint canonicalize).
 set -u
