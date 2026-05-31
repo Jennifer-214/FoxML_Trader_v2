@@ -37,6 +37,7 @@
 #define DEPTH_REPLAY_STATE_HPP
 
 #include "BinanceDepth.hpp"  // BookSnapshot<F>, BookSnapshot_Init
+#include "../CoreFrameworks/ParseFast.hpp"  // F-055: tt::parse_double_fast_advance (locale-immune replay parse)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -219,12 +220,13 @@ static inline int DepthReplayState_LoadDay(DepthReplayState<F>* s, int date_int)
 
         // Parse: timestamp_us,last_update_id,bid_price,bid_qty,ask_price,ask_qty
         char* p = buf;
+        const char* e;  // F-055: locale-immune float parse advances a const cursor; bridge back to p (buf[] is mutable). Integer strtoull is locale-immune → unchanged (TECH_DEBT-144).
         uint64_t ts_us  = strtoull(p, &p, 10); if (*p == ',') p++;
         uint64_t upd_id = strtoull(p, &p, 10); if (*p == ',') p++;
-        double bid_p    = strtod(p, &p);       if (*p == ',') p++;
-        double bid_q    = strtod(p, &p);       if (*p == ',') p++;
-        double ask_p    = strtod(p, &p);       if (*p == ',') p++;
-        double ask_q    = strtod(p, &p);
+        double bid_p    = tt::parse_double_fast_advance(p, &e); p = (char*)e; if (*p == ',') p++;
+        double bid_q    = tt::parse_double_fast_advance(p, &e); p = (char*)e; if (*p == ',') p++;
+        double ask_p    = tt::parse_double_fast_advance(p, &e); p = (char*)e; if (*p == ',') p++;
+        double ask_q    = tt::parse_double_fast_advance(p, &e);
 
         BookSnapshot<F>& row = s->rows[n];
         row = BookSnapshot_Init<F>();  // zero everything

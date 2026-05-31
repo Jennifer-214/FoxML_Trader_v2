@@ -18,6 +18,7 @@
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
+#include "../CoreFrameworks/ParseFast.hpp"      // F-054: tt::parse_double_fast_advance (locale-immune replay parse)
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() for auto-stamp
@@ -84,16 +85,18 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
         if (format == 1) {
             // TickRecorder: timestamp_us,price,quantity,is_buyer_maker
             char *p = line;
+            const char *e;  // F-054: locale-immune float parse advances a const cursor; bridge back to p (line[] is mutable). Integer strtoll/strtol are locale-immune → unchanged (TECH_DEBT-144).
             t->timestamp_us = strtoll(p, &p, 10); if (*p == ',') p++;
-            t->price = strtod(p, &p); if (*p == ',') p++;
-            t->qty = strtod(p, &p); if (*p == ',') p++;
+            t->price = tt::parse_double_fast_advance(p, &e); p = (char*)e; if (*p == ',') p++;
+            t->qty   = tt::parse_double_fast_advance(p, &e); p = (char*)e; if (*p == ',') p++;
             t->is_buyer_maker = (int)strtol(p, &p, 10);
         } else {
             // Binance aggTrades: id,price,qty,first_id,last_id,timestamp,is_buyer_maker
             char *p = line;
+            const char *e;  // F-054 (see format==1 note): float parses locale-immune; integer skips unchanged
             strtoll(p, &p, 10); if (*p == ',') p++;                     // skip id
-            t->price = strtod(p, &p); if (*p == ',') p++;
-            t->qty = strtod(p, &p); if (*p == ',') p++;
+            t->price = tt::parse_double_fast_advance(p, &e); p = (char*)e; if (*p == ',') p++;
+            t->qty   = tt::parse_double_fast_advance(p, &e); p = (char*)e; if (*p == ',') p++;
             strtoll(p, &p, 10); if (*p == ',') p++;                     // skip first_id
             strtoll(p, &p, 10); if (*p == ',') p++;                     // skip last_id
             t->timestamp_us = strtoll(p, &p, 10); if (*p == ',') p++;

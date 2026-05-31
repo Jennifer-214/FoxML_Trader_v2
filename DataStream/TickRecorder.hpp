@@ -27,6 +27,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <charconv>  // F-054/PARITY-036: std::to_chars locale-immune lossless emit
 
 struct TickRecorder {
     FILE *file;
@@ -183,8 +184,15 @@ static inline void TickRecorder_Push(TickRecorder *rec, double price, double qty
 
     if (!rec->file) return;
 
-    fprintf(rec->file, "%lld,%.8f,%.8f,%d\n",
-            (long long)timestamp_us, price, qty, is_buyer_maker);
+    // F-054/PARITY-036: locale-immune + lossless emit (std::to_chars shortest round-trip).
+    // %.8f is LOSSY for a double AND LC_NUMERIC-fragile; to_chars completes the
+    // write∧read replay loop (read side = tt::parse_double_fast_advance).
+    char row[96]; char* o = row; char* const rend = row + sizeof(row);
+    o = std::to_chars(o, rend, (long long)timestamp_us).ptr; *o++ = ',';
+    o = std::to_chars(o, rend, price).ptr;                   *o++ = ',';
+    o = std::to_chars(o, rend, qty).ptr;                     *o++ = ',';
+    o = std::to_chars(o, rend, is_buyer_maker).ptr;          *o++ = '\n';
+    fwrite(row, 1, (size_t)(o - row), rec->file);
     rec->count++;
 
     // flush every 1000 ticks (balance I/O and data safety)

@@ -41,6 +41,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <charconv>  // F-055/PARITY-036: std::to_chars locale-immune lossless emit
 #include "BinanceDepth.hpp" // BookSnapshot<F>
 
 struct DepthRecorder {
@@ -246,13 +247,16 @@ static inline void DepthRecorder_Write(DepthRecorder *rec, const BookSnapshot<F>
     }
 
     // CSV row: timestamp_us,last_update_id,bid_price,bid_qty,ask_price,ask_qty
-    fprintf(rec->file, "%llu,%llu,%.8f,%.8f,%.8f,%.8f\n",
-            (unsigned long long)cur_us,
-            (unsigned long long)cur_id,
-            FPN_ToDouble(snap->bids[0].price),
-            FPN_ToDouble(snap->bids[0].qty),
-            FPN_ToDouble(snap->asks[0].price),
-            FPN_ToDouble(snap->asks[0].qty));
+    // F-055/PARITY-036: locale-immune + lossless emit (std::to_chars shortest round-trip)
+    // — replaces lossy/LC_NUMERIC-fragile %.8f; completes the write∧read replay loop.
+    char row[160]; char* o = row; char* const rend = row + sizeof(row);
+    o = std::to_chars(o, rend, (unsigned long long)cur_us).ptr;          *o++ = ',';
+    o = std::to_chars(o, rend, (unsigned long long)cur_id).ptr;          *o++ = ',';
+    o = std::to_chars(o, rend, FPN_ToDouble(snap->bids[0].price)).ptr;   *o++ = ',';
+    o = std::to_chars(o, rend, FPN_ToDouble(snap->bids[0].qty)).ptr;     *o++ = ',';
+    o = std::to_chars(o, rend, FPN_ToDouble(snap->asks[0].price)).ptr;   *o++ = ',';
+    o = std::to_chars(o, rend, FPN_ToDouble(snap->asks[0].qty)).ptr;     *o++ = '\n';
+    fwrite(row, 1, (size_t)(o - row), rec->file);
     rec->count++;
 
     // flush every 256 snapshots (~26 sec at 10Hz, balance I/O and durability)
