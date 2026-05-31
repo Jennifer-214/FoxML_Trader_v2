@@ -234,6 +234,11 @@ add_executable(depth_recorder_test tests/depth_recorder_test.cpp)
 target_compile_options(depth_recorder_test PRIVATE -O2 -march=native)
 target_include_directories(depth_recorder_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(depth_recorder_test PRIVATE ssl crypto pthread)
+# F-057: depth_recorder_test exercises the FPN ops (24 FPN_Sqrt/FromDouble calls) -> build the
+# shipped native FP path so tested==shipped. (compare_scalers stays generic: 0 divergent FP calls.)
+if(USE_NATIVE_128)
+    target_compile_definitions(depth_recorder_test PRIVATE USE_NATIVE_128)
+endif()
 
 # Track E.6 — parity validation harness. Runs the legacy + sharded backtest
 # paths on the same tick file and diffs feature_matrix output. Final gate
