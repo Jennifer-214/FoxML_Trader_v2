@@ -468,6 +468,13 @@ namespace tt {
             // FPN equality via byte comparison (H4 — never float math on accounting types).
             // memcmp on POD struct compares the underlying integer limb array bit-exactly;
             // FPN<F> doesn't define operator== directly so we go through the byte layer.
+            // .E.0.1 F-076 guard: this raw memcmp is byte-deterministic ONLY if StampT has no
+            // padding. FPN<F> is padding-free today (probed); this static_assert FAILS the build
+            // if a future layout change adds padding (which would make this memcmp false-drift).
+            // Sister to the ControllerConfig zero-init ctor (same H12 byte-equivalence class).
+            static_assert(std::has_unique_object_representations_v<StampT>,
+                          "F-076/H12: StampT (FPN) gained padding -> raw memcmp would false-drift; "
+                          "make it padding-free or compare field-wise.");
             return memcmp(&stamp_val, &cfg_val, sizeof(StampT)) != 0;
         } else if constexpr (std::is_floating_point_v<StampT> && std::is_floating_point_v<CfgT>) {
             return stamp_val != cfg_val;

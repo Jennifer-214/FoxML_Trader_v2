@@ -1430,6 +1430,20 @@ inline void print_layout_fingerprint() {
 static void test_v5_15_5_F4b_cfg_field_dispatch() {
     printf("\n[v5.15.5.F.4b CfgFieldRegistry + tt:: dispatch]\n");
 
+    // === .E.0.1 F-076: cfg fingerprint determinism (zero-init ctor) ===
+    // The model fingerprint SHA-256s ControllerConfig RAW (BacktestPanels -> Fingerprint),
+    // so its zero-init default ctor must make inter-field padding deterministic — else equal
+    // cfg VALUES hash differently across runs (silent train-serve lineage drift; PARITY-027).
+    {
+        ControllerConfig<64> di;     // default-init -> the F-076 zero-init ctor runs
+        ControllerConfig<64> vi{};   // value-init -> all-zero incl padding
+        check("F-076: default-init ControllerConfig == value-init (padding zeroed -> deterministic fingerprint)",
+              memcmp(&di, &vi, sizeof(di)) == 0);
+        ControllerConfig<64> g; memset(&g, 0xA5, sizeof(g));  // simulate pre-fix garbage padding
+        check("F-076: a byte-dirtied cfg differs from a clean one (the non-determinism the ctor closes)",
+              memcmp(&di, &g, sizeof(di)) != 0);
+    }
+
     // === T1: FPN<F> dispatch — KIND_DOUBLE_PCT roundtrip ===
     // .F.4c.3 — take_profit_pct now lives in FOREACH_PER_CORE_CFG_FIELD.
     {
