@@ -23,9 +23,10 @@ if ./tools/check_locale_determinism.sh; then :; else rc=1; fi
 
 echo ""
 echo "## (3) replay-locale gate (decimal-point honored; C == non-C when available) ##"
-if g++ -std=c++17 -O2 -march=native -I"$ROOT" tools/replay_locale_gate.cpp -o "$ROOT/.det_rlg" 2>/tmp/det_rlg.err; then
-  "$ROOT/.det_rlg" || rc=1; rm -f "$ROOT/.det_rlg"
-else echo "  FAIL replay_locale_gate build:"; head -15 /tmp/det_rlg.err; rc=1; fi
+if g++ -std=c++17 -O2 -march=native -I"$ROOT" tools/replay_locale_gate.cpp -o "$ROOT/.det_rlg_$$" 2>"/tmp/det_rlg_$$.err"; then
+  "$ROOT/.det_rlg_$$" || rc=1; rm -f "$ROOT/.det_rlg_$$"
+else echo "  FAIL replay_locale_gate build:"; head -15 "/tmp/det_rlg_$$.err"; rc=1; fi
+rm -f "/tmp/det_rlg_$$.err"
 
 echo ""
 echo "============================================================"

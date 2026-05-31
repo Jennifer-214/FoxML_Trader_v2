@@ -23,11 +23,13 @@ rc=0
 [ -f "$H" ]      || { echo "FAIL: harness missing ($H)"; exit 1; }
 
 # Compile into $ROOT (exec-capable; /tmp is often noexec); write outputs to /tmp.
+# Temp names carry $$ (PID) so concurrent runs (e.g. a backgrounded run racing the
+# pre-commit hook) can't clobber each other's scratch — .E.0.1 determinism-gate hardening.
 check() {  # $1=label  $2=defs  $3=opt
   local label="$1" defs="$2" opt="$3"
-  local bin="$ROOT/.fpdet_$label" out="/tmp/fpdet_$label.txt" err="/tmp/fpdet_$label.err"
+  local bin="$ROOT/.fpdet_${label}_$$" out="/tmp/fpdet_${label}_$$.txt" err="/tmp/fpdet_${label}_$$.err"
   if ! g++ -std=c++17 $defs "$opt" -march=native -I"$ROOT" "$H" -o "$bin" 2>"$err"; then
-    echo "  ❌ $label BUILD ERROR:"; head -15 "$err"; rc=1; return
+    echo "  ❌ $label BUILD ERROR:"; head -15 "$err"; rm -f "$err"; rc=1; return
   fi
   "$bin" > "$out"; rm -f "$bin"
   if diff -q "$GOLDEN" "$out" >/dev/null; then
@@ -35,6 +37,7 @@ check() {  # $1=label  $2=defs  $3=opt
   else
     echo "  ❌ $label DRIFTS from golden:"; diff "$GOLDEN" "$out" | head -20; rc=1
   fi
+  rm -f "$out" "$err"
 }
 
 echo "=== FP-determinism gate (vs tools/fp_determinism_golden.txt) ==="

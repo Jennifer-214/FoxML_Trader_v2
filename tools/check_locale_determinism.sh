@@ -18,6 +18,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 BASE="tools/locale_determinism_known_pending.txt"
 rc=0
 
+# NOTE: every rg below passes an EXPLICIT path ('.' or "$f"). A path-LESS rg reads
+# stdin when stdin isn't a tty (detached / run_in_background / git pre-commit hook) and
+# HANGS the gate forever (.E.0.1 close: a backgrounded run slept ~15min at 0% CPU in
+# this exact spot). Keep the '.' — it also keeps the check non-vacuous (searches the tree).
 BOOT_FILES='main.cpp foxml_suite.cpp GUI/GuiThread.hpp tools/compare_scalers.cpp'
 # files excluded from (b)/(c): the boot pins themselves + tests (deliberate flips) + the gates.
 EXCLUDE='main\.cpp|foxml_suite\.cpp|GuiThread\.hpp|compare_scalers\.cpp|tests/|controller_test|parity_harness|test_common|replay_locale_gate|fp_determinism|ParseFast'
@@ -28,14 +32,14 @@ for f in $BOOT_FILES; do
 done
 
 echo "== (b) no stray GLOBAL setlocale (outside boot pins + tests) =="
-stray=$(rg -n 'setlocale\s*\(' -g '*.cpp' -g '*.hpp' 2>/dev/null | grep -vE "$EXCLUDE")
+stray=$(rg -n 'setlocale\s*\(' -g '*.cpp' -g '*.hpp' . 2>/dev/null | sed 's|^\./||' | grep -vE "$EXCLUDE")
 if [ -n "$stray" ]; then
   echo "  FAIL stray global setlocale (use thread-local uselocale, or rely on the boot pin):"
   echo "$stray" | sed 's/^/    /'; rc=1
 else echo "  OK   none"; fi
 
 echo "== (c) raw atof/strtod/atoi manifest (KNOWN-PENDING baseline; new = violation) =="
-cur=$(rg -c '\b(atof|strtod|strtof|atoi|atol|atoll)\s*\(' -g '*.cpp' -g '*.hpp' 2>/dev/null | grep -vE "$EXCLUDE" | sort)
+cur=$(rg -c '\b(atof|strtod|strtof|atoi|atol|atoll)\s*\(' -g '*.cpp' -g '*.hpp' . 2>/dev/null | sed 's|^\./||' | grep -vE "$EXCLUDE" | sort)
 if [ ! -f "$BASE" ]; then
   { echo "# .E.0.1 locale-determinism KNOWN-PENDING baseline (file:count of raw atof/strtod/atoi)."
     echo "# .F-paced migration to the tt:: parse family. This list SHRINKS, never grows."
