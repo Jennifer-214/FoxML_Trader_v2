@@ -357,6 +357,19 @@ static_assert(sizeof(PerCoreCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
 // [CONFIG]
 //======================================================================================================
 template <unsigned F> struct ControllerConfig {
+  // F-076 / PARITY-027: zero-init the WHOLE struct (fields + inter-field padding) at
+  // construction. The model fingerprint hashes this struct RAW (BacktestPanels.hpp:3157
+  // -> Fingerprint.hpp:180, SHA-256 over &cfg, sizeof(cfg)); the hash is embedded in the
+  // trained model + re-checked at serve (ModelInference.hpp). Inter-field padding around
+  // the alignas(64)/H6 fields is otherwise indeterminate -> identical cfg VALUES would
+  // hash differently across runs (silent train-serve lineage non-determinism; H9/H12).
+  // A default CONSTRUCTOR (not per-site `{}`) makes padding=0 a PROPERTY OF THE TYPE: no
+  // creation path can re-introduce garbage, and it propagates through every trivial copy.
+  // Preserves is_trivially_copyable (snapshot/persist memcpy unaffected); the struct has
+  // NO in-class field initializers, so this clobbers nothing -- real defaults are set by
+  // ControllerConfig_Default() after construction.
+  ControllerConfig() { memset(this, 0, sizeof(*this)); }
+
   FPN<F> r2_threshold;     // min R^2 to trust regression
   FPN<F> slope_scale_buy;  // how much slope shifts buy price threshold
   FPN<F> max_shift;        // max drift from initial buy conditions
@@ -366,8 +379,10 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
                            // Phase 8: legacy field. Pre-Phase-8 behavior preserved
                            // when fee_rate_maker == fee_rate_taker == fee_rate.
-                           // Backtest fingerprint hashes this field (NOT the new
-                           // maker/taker fields) — preserves bundle compatibility.
+                           // (.E.0.1 F-076: a prior comment here claimed the fingerprint
+                           // hashes ONLY this field, not maker/taker — STALE. The
+                           // fingerprint SHA-256s the WHOLE struct raw, so every field
+                           // incl. fee_rate_maker/taker is hashed.)
   // Phase 8 — bifurcated maker/taker fee rates. Live engine uses these per fill
   // based on order->is_maker (set from Binance executionReport "m" field).
   // Backtest simulates as all-taker (is_maker=0 always). Documented divergence.
