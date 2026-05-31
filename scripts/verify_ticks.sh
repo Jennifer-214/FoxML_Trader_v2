@@ -71,12 +71,14 @@ for f in *.csv; do
         continue
     fi
 
-    # 4. timestamp span check — first vs last row.
-    # Tick CSV format: id,price,qty,first_match_id,last_match_id,timestamp_us,is_buyer_maker,is_best_match
-    # column 6 is the microsecond timestamp.
+    # 4. timestamp span check — first vs last DATA row.
+    # .E.0.1: TickRecorder CSV is "timestamp_us,price,quantity,is_buyer_maker" (4 cols, ts =
+    # column 1) with a header row — NOT the 8-col aggTrades format the old col-6 reference
+    # assumed. Reading col 6 of a 4-col file returned empty, so this span check SILENTLY never
+    # ran. Fixed: ts is column 1; the awk skips the header by taking the first numeric-col-1 row.
     if [[ -z "$fail_reason" ]]; then
-        first_ts=$(head -1 "$f" | awk -F',' '{print $6}')
-        last_ts=$(tail -1 "$f" | awk -F',' '{print $6}')
+        first_ts=$(awk -F',' '$1 ~ /^[0-9]/ {print $1; exit}' "$f")
+        last_ts=$(tail -1 "$f" | awk -F',' '{print $1}')
         if [[ -n "$first_ts" && -n "$last_ts" ]]; then
             # span in hours = (last - first) / 1e6 / 3600
             span_h=$(awk -v a="$first_ts" -v b="$last_ts" 'BEGIN { printf "%.1f", (b-a)/1e6/3600 }')
