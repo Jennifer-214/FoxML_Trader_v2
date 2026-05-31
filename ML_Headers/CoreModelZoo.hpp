@@ -2841,9 +2841,11 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
 // bandit_update_count; when count crosses interval threshold, flush
 // state to bandit_save_path. No-op if path empty or interval==0.
 //
-// Locale: fprintf in Bandit_SaveJSON uses "C" locale via global
-// LC_NUMERIC; engine boot pins this. Render-thread safety: this fires
-// on the slow-path / drainer threads, never in hot path.
+// Locale: Bandit_SaveJSON emits under LC_NUMERIC=C. The process is pinned
+// LC_NUMERIC=C at boot (.E.0.1: main.cpp / GuiThread post-SDL) — the single
+// locale authority — and Bandit_SaveJSON additionally pins thread-local
+// (uselocale) for defense-in-depth on the HMAC/stamp-adjacent path. Render-thread
+// safety: this fires on the slow-path / drainer threads, never in hot path.
 template <unsigned F>
 inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
     EnsembleModelZoo<F>* ezoo, int updates_this_call) {

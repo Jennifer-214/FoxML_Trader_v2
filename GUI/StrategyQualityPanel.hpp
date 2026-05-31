@@ -181,9 +181,10 @@ inline void StrategyQuality_Refresh(StrategyQualityState* state,
     int n = sq_tail_read(health_log_path, MAX_LINES, LINE_CAP, lines,
                           state->last_error, sizeof(state->last_error));
     state->lines_parsed = n;
-    // LC_NUMERIC=C around strtod calls so locale flips can't corrupt
-    // numeric parsing (matches writer-side LC_NUMERIC pinning).
-    char* prev_locale = setlocale(LC_NUMERIC, "C");
+    // .E.0.1 locale-determinism class close: the strtod calls below rely on the
+    // PROCESS-WIDE LC_NUMERIC=C boot pin (main.cpp + GuiThread post-SDL re-pin) — the
+    // single locale authority (SSoT). Removed the former global setlocale here: it
+    // mutated the process locale from the GUI render thread (race vs HP/SP parse threads).
     for (int i = 0; i < n; ++i) {
         const char* line = lines + (size_t)i * LINE_CAP;
         char buf[64];
@@ -229,7 +230,6 @@ inline void StrategyQuality_Refresh(StrategyQualityState* state,
             (void)0;
         }
     }
-    setlocale(LC_NUMERIC, prev_locale);
     free(lines);
     state->loaded = (n > 0);
 }

@@ -28,6 +28,7 @@
 //======================================================================================================
 
 #include <cstdio>
+#include <clocale>   // .E.0.1: LC_NUMERIC=C boot pin (before std::atof)
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -56,6 +57,7 @@ static int print_usage(const char* prog) {
 }
 
 int main(int argc, char** argv) {
+    std::setlocale(LC_NUMERIC, "C");  // .E.0.1 locale-determinism: pin before std::atof (:66) parses --threshold
     if (argc < 3) return print_usage(argv[0]);
 
     const char* path_a = argv[1];

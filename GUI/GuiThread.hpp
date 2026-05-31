@@ -11,6 +11,7 @@
 // chart and dashboard are independent — either can be hidden/moved
 
 #include <SDL.h>
+#include <locale.h>   // .E.0.1: LC_NUMERIC=C re-pin after SDL_Init
 #include <SDL_opengl.h>
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -86,6 +87,11 @@ static inline bool Gui_Init(GuiContext *gui, const char *title, int w, int h) {
         fprintf(stderr, "[gui] SDL_Init error: %s\n", SDL_GetError());
         return false;
     }
+
+    // .E.0.1 locale-determinism: SDL/X11 init can reset LC_* process-wide → re-pin
+    // LC_NUMERIC=C after SDL_Init so the engine_gui GUI thread (+ all threads) parse
+    // floats under C. Complements the main.cpp boot pin (which SDL may have clobbered).
+    setlocale(LC_NUMERIC, "C");
 
     // OpenGL 3.3 core
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);

@@ -18,6 +18,7 @@
 // session lifecycle: 24-hour cycle with clean wind-down, position close, and reconnect
 // reconnect procedure is airtight - verifies bitmap is zero before proceeding
 //======================================================================================================
+#include <locale.h>   // .E.0.1: LC_NUMERIC=C boot pin (locale-determinism class close)
 #include "DataStream/BinanceCrypto.hpp"
 #include "DataStream/BinanceOrderAPI.hpp"
 #include "DataStream/BinanceDepth.hpp"
@@ -127,6 +128,13 @@ int main(int argc, char *argv[]) {
     // determinism. Linux pthread_create inherits MXCSR, so this covers all
     // slow-path threads. Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.3.
     tt::engine_set_mxcsr_ftz_daz();
+
+    // .E.0.1 locale-determinism class close: pin LC_NUMERIC=C process-wide at boot,
+    // BEFORE any float parse (cfg load at :139+). setlocale is process-global so every
+    // pthread inherits it — makes the formerly-phantom "engine boot pins this"
+    // (CoreModelZoo.hpp:2845) actually TRUE. Headless engine: sole pin. engine_gui:
+    // re-pinned after SDL_Init (GuiThread) since SDL/X11 can reset LC_*.
+    setlocale(LC_NUMERIC, "C");
 
     fprintf(stderr, "FoxML_Trader_v2 — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
     fprintf(stderr, "Licensed under AGPL-3.0-or-later. Commercial license: jenn.lewis5789@gmail.com\n\n");

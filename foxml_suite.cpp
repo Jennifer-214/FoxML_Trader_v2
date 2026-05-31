@@ -13,6 +13,7 @@
 //======================================================================================================
 
 #include <SDL.h>
+#include <locale.h>   // .E.0.1: LC_NUMERIC=C boot pin (re-pinned after SDL_Init)
 #include <SDL_opengl.h>
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -139,6 +140,10 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "[suite] SDL_Init error: %s\n", SDL_GetError());
         return 1;
     }
+
+    // .E.0.1 locale-determinism: SDL/X11 init can reset LC_* process-wide → pin
+    // LC_NUMERIC=C after SDL_Init so all suite threads parse floats under C.
+    setlocale(LC_NUMERIC, "C");
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);

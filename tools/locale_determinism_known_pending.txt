@@ -1,0 +1,20 @@
+# .E.0.1 locale-determinism KNOWN-PENDING baseline (file:count of raw atof/strtod/atoi).
+# .F-paced migration to the tt:: parse family. This list SHRINKS, never grows.
+# Regenerate deliberately when migrating a file (lower/remove its line).
+Backtest/BacktestPanels.hpp:24
+CoreFrameworks/CfgFieldDispatch.hpp:3
+CoreFrameworks/ControllerConfig.hpp:60
+CoreFrameworks/Reconcile.hpp:1
+DataStream/BinanceCrypto.hpp:6
+DataStream/BinanceOrderAPI.hpp:3
+GUI/SettingsPanel.hpp:6
+GUI/StrategyQualityPanel.hpp:6
+GUI/TradeHistoryPanel.hpp:6
+Licensing.hpp:4
+MemHeaders/CfgGateRegistry.hpp:4
+ML_Headers/BanditAlgorithmRegistry.hpp:1
+ML_Headers/BarrierBlendModeRegistry.hpp:1
+ML_Headers/ConfidenceScore.hpp:1
+ML_Headers/CoreModelZoo.hpp:5
+ML_Headers/ModelInference.hpp:7
+ML_Headers/StampBoundModelConstRegistry.hpp:3

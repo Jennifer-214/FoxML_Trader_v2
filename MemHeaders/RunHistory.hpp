@@ -69,8 +69,10 @@ struct RunHistoryEntry {
 // Append one line to the history file. Returns 1 on success, 0 on i/o failure.
 // `path` may not exist yet — file is created on first append.
 //
-// Locale-agnostic: %g/%f are wrapped in setlocale(LC_NUMERIC, "C") for the
-// duration so a comma-decimal locale doesn't break JSON-numeric parsers.
+// Locale-agnostic: %g/%f emit under a thread-local uselocale(LC_NUMERIC=C) pin
+// (Layer 2, below) so a comma-decimal locale can't break JSON-numeric round-trip.
+// (.E.0.1 also pins LC_NUMERIC=C process-wide at boot; this per-emit pin is
+// defense-in-depth for the HMAC/stamp-adjacent byte-equivalence path.)
 static inline int RunHistory_Append(const char* path, const RunHistoryEntry& e) {
     if (!path || !path[0]) return 0;
 
