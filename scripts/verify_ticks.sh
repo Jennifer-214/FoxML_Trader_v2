@@ -78,7 +78,11 @@ for f in *.csv; do
     # ran. Fixed: ts is column 1; the awk skips the header by taking the first numeric-col-1 row.
     if [[ -z "$fail_reason" ]]; then
         first_ts=$(awk -F',' '$1 ~ /^[0-9]/ {print $1; exit}' "$f")
-        last_ts=$(tail -1 "$f" | awk -F',' '{print $1}')
+        # last_ts uses the SAME numeric-col-1 guard as first_ts (tac = scan from the
+        # end, exit at first data row) so a trailing header/blank can't masquerade as a
+        # timestamp. Was `tail -1 | $1`, which lacked first_ts's guard (the two checks
+        # must be symmetric — .E.0.1 independent-review LOW).
+        last_ts=$(tac "$f" | awk -F',' '$1 ~ /^[0-9]/ {print $1; exit}')
         if [[ -n "$first_ts" && -n "$last_ts" ]]; then
             # span in hours = (last - first) / 1e6 / 3600
             span_h=$(awk -v a="$first_ts" -v b="$last_ts" 'BEGIN { printf "%.1f", (b-a)/1e6/3600 }')
