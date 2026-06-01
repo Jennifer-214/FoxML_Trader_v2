@@ -1368,19 +1368,43 @@ inline FixedPoint<2,64> fp2_sub(FixedPoint<2,64> a, FixedPoint<2,64> b) {
 }
 inline FixedPoint<2,64> fp2_min(FixedPoint<2,64> a, FixedPoint<2,64> b) { return { a.v < b.v ? a.v : b.v }; }
 inline FixedPoint<2,64> fp2_max(FixedPoint<2,64> a, FixedPoint<2,64> b) { return { a.v > b.v ? a.v : b.v }; }
+// (a_mag << 64) / b_mag → 128-bit quotient magnitude, bit-by-bit long division. This IS the certified
+// FPN_DivNoAssert algorithm (shift remainder, compare top half ≥ divisor, conditional-subtract, MSB-first
+// quotient bit) lifted to the magnitude level on __int128 — same proven math, no FPN<64> dependency.
+// Fixed 128-trip loop (fixed-trip branch = 100% predicted, not data-dependent — per the generic's note);
+// cmov inside, no data-dependent branch. b_mag==0 → all-ones (caller saturates).
+inline unsigned __int128 udiv_q64(unsigned __int128 a_mag, unsigned __int128 b_mag) {
+    unsigned __int128 rem_hi = a_mag >> 64, rem_lo = a_mag << 64, q = 0;   // dividend = a_mag << 64 (256-bit rem_hi:rem_lo)
+    for (int bit = 0; bit < 128; bit++) {
+        rem_hi = (rem_hi << 1) | (rem_lo >> 127);   // shift the 256-bit remainder left 1
+        rem_lo <<= 1;
+        int ge = (rem_hi >= b_mag);
+        rem_hi = ge ? (rem_hi - b_mag) : rem_hi;     // conditional subtract (cmov)
+        q = (q << 1) | (unsigned __int128)ge;        // quotient bit, MSB-first
+    }
+    return q;
+}
 inline FixedPoint<2,64> fp2_div(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     bool neg = (a.v < 0) ^ (b.v < 0);
     unsigned __int128 am = a.v<0?(unsigned __int128)(-a.v):(unsigned __int128)a.v;
     unsigned __int128 bm = b.v<0?(unsigned __int128)(-b.v):(unsigned __int128)b.v;
-    FPN<64> q = FPN_DivNoAssert<64>(fp2_to_mag_fpn(am), fp2_to_mag_fpn(bm));   // certified unsigned long-division
-    unsigned __int128 qm = ((unsigned __int128)q.w[1]<<64) | q.w[0];
+    unsigned __int128 qm = udiv_q64(am, bm);                           // certified long-division core (native 16B)
+    unsigned __int128 of_m = -(unsigned __int128)(int)(qm >> 127);     // bit127 set ⇒ result ≥ 2^63 (range cap) OR zero-div
+    qm = (qm & ~of_m) | (of_m >> 1);                                   // saturate to 2^127-1 (R2), branchless — same as mul
     __int128 v = (__int128)qm;
-    return { (neg && qm!=0) ? -v : v };
+    unsigned __int128 neg_m = -(unsigned __int128)((int)neg & (int)(qm != 0));
+    return { (__int128)(((unsigned __int128)(-v) & neg_m) | ((unsigned __int128)v & ~neg_m)) };  // branchless sign
 }
-inline FixedPoint<2,64> fp2_sqrt(FixedPoint<2,64> a) {                          // sqrt domain: a >= 0
-    unsigned __int128 am = a.v<0?(unsigned __int128)(-a.v):(unsigned __int128)a.v;
-    FPN<64> s = FPN_Sqrt<64>(fp2_to_mag_fpn(am));                               // certified generic NR (F-056 carve-out)
-    return { (__int128)(((unsigned __int128)s.w[1]<<64) | s.w[0]) };
+inline FixedPoint<2,64> fp2_sqrt(FixedPoint<2,64> a) {                          // sqrt domain: a > 0 else 0 (matches generic)
+    if (a.v <= 0) return { (__int128)0 };
+    unsigned __int128 m = (unsigned __int128)a.v;                              // |v| (a > 0 here)
+    uint64_t hi = (uint64_t)(m >> 64), lo = (uint64_t)m;                       // top set bit of the magnitude (clz, not w[]-scan)
+    int top = hi ? (127 - __builtin_clzll(hi)) : (63 - __builtin_clzll(lo));
+    FixedPoint<2,64> y    { (__int128)((unsigned __int128)1 << ((top + 64) / 2)) };  // seed 2^((top_bit+F)/2), F=64
+    FixedPoint<2,64> half { (__int128)((unsigned __int128)1 << 63) };          // 0.5 in Q64.64
+    for (int i = 0; i < 12; i++)                                               // 12 Newton-Raphson: y = (y + a/y)/2
+        y = fp2_mul(fp2_addsat(y, fp2_div(a, y)), half);
+    return y;
 }
 
 #endif // FIXED_POINT_N_H

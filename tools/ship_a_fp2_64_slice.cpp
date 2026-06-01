@@ -84,19 +84,28 @@ static FPN<64> fp_from_mag(unsigned __int128 m) {
 // long-division / FPN_Sqrt generic-NR) on the abs'd magnitudes + the two's-complement sign-wrap.
 // This is the same C1-hoist shape as Mul: the new representation changes only the wrapping, never
 // the unsigned core, so value-equivalence reduces to "is the wrap correct" — which these exercise.
+// udiv_q64 comes from the included FixedPointN.hpp (the production helper) — the slice tests THAT, not a copy.
 static FP2_64 fp2_div(FP2_64 a, FP2_64 b) {
     bool neg = (a.v < 0) ^ (b.v < 0);
     unsigned __int128 am = a.v<0?(unsigned __int128)(-a.v):(unsigned __int128)a.v;
     unsigned __int128 bm = b.v<0?(unsigned __int128)(-b.v):(unsigned __int128)b.v;
-    FPN<64> q = FPN_DivNoAssert<64>(fp_from_mag(am), fp_from_mag(bm));   // certified unsigned division
-    unsigned __int128 qm = ((unsigned __int128)q.w[1]<<64) | q.w[0];
+    unsigned __int128 qm = udiv_q64(am, bm);                           // certified long-division core (native 16B)
+    unsigned __int128 of_m = -(unsigned __int128)(int)(qm >> 127);     // saturate to 2^127-1 (R2), branchless
+    qm = (qm & ~of_m) | (of_m >> 1);
     __int128 v = (__int128)qm;
-    return { (neg && qm!=0) ? -v : v };
+    unsigned __int128 neg_m = -(unsigned __int128)((int)neg & (int)(qm != 0));
+    return { (__int128)(((unsigned __int128)(-v) & neg_m) | ((unsigned __int128)v & ~neg_m)) };
 }
-static FP2_64 fp2_sqrt(FP2_64 a) {                                       // sqrt domain: a >= 0, result >= 0
-    unsigned __int128 am = a.v<0?(unsigned __int128)(-a.v):(unsigned __int128)a.v;
-    FPN<64> s = FPN_Sqrt<64>(fp_from_mag(am));                           // certified generic NR (F-056 carve-out)
-    return { (__int128)(((unsigned __int128)s.w[1]<<64) | s.w[0]) };
+static FP2_64 fp2_sqrt(FP2_64 a) {                                       // sqrt domain: a > 0 else 0 (matches generic)
+    if (a.v <= 0) return { (__int128)0 };
+    unsigned __int128 m = (unsigned __int128)a.v;                        // |v| (a > 0 here)
+    uint64_t hi = (uint64_t)(m >> 64), lo = (uint64_t)m;                 // top set bit of the magnitude (clz, not w[]-scan)
+    int top = hi ? (127 - __builtin_clzll(hi)) : (63 - __builtin_clzll(lo));
+    FP2_64 y    { (__int128)((unsigned __int128)1 << ((top + 64) / 2)) };// seed 2^((top_bit+F)/2), F=64
+    FP2_64 half { (__int128)((unsigned __int128)1 << 63) };              // 0.5 in Q64.64
+    for (int i = 0; i < 12; i++)                                         // 12 Newton-Raphson: y = (y + a/y)/2
+        y = fp2_mul(fp2_addsat(y, fp2_div(a, y)), half);
+    return y;
 }
 
 // Extract (sign, 128-bit magnitude) from each rep for an exact VALUE comparison.
