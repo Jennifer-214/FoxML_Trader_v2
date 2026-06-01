@@ -40,12 +40,15 @@ static FP2_64 fp2_mul(FP2_64 a, FP2_64 b) {
     unsigned __int128 mid     = lh + hl + (ll >> 64);
     unsigned __int128 shifted = hh + (mid >> 64);
     unsigned __int128 mag     = (shifted << 64) | (uint64_t)mid;
-    // saturate: overflow past 128 bits, OR past the 127-bit two's-complement magnitude range
-    if ((shifted >> 64) != 0 || (mag >> 127) != 0)
-        mag = ((unsigned __int128)1 << 127) - 1;   // saturate to 2^127 - 1
+    // BRANCHLESS saturate (R2 — same of_mask discipline as FPN_Mul/FP64_Mul; no data-dependent control flow).
+    unsigned __int128 ovf  = (shifted >> 64) | (mag >> 127);     // overflow past the 127-bit magnitude range
+    unsigned __int128 nz   = ovf | (~ovf + 1);                   // top bit set iff ovf != 0 (no compare → no branch)
+    unsigned __int128 of_m = -(unsigned __int128)(int)(nz >> 127);       // 0 / all-ones
+    mag = (mag & ~of_m) | (of_m >> 1);                           // saturate to 2^127-1 = (all-ones >> 1), derived from the mask
 
     __int128 v = (__int128)mag;
-    return { (neg && mag != 0) ? -v : v };          // canonicalize -0 -> +0
+    unsigned __int128 neg_m = -(unsigned __int128)((int)neg & (int)(mag != 0));   // canonicalize -0 -> +0
+    return { (__int128)(((unsigned __int128)(-v) & neg_m) | ((unsigned __int128)v & ~neg_m)) };
 }
 
 // --- radix-agnostic ops in two's-complement (trivial vs sign-magnitude; native +/-/compare).
@@ -55,16 +58,20 @@ static const __int128 FP2_MAX = ((unsigned __int128)1 << 127) - 1;  // +2^127-1
 static FP2_64 fp2_neg(FP2_64 a) { __int128 v = -a.v; return { v }; }   // (INT_MIN guard in prod)
 static FP2_64 fp2_abs(FP2_64 a) { return { a.v < 0 ? -a.v : a.v }; }
 static FP2_64 fp2_addsat(FP2_64 a, FP2_64 b) {
-    __int128 s = (__int128)((unsigned __int128)a.v + (unsigned __int128)b.v);  // wrap, then detect
-    if ((a.v > 0 && b.v > 0 && s < 0)) return { FP2_MAX };
-    if ((a.v < 0 && b.v < 0 && s >= 0)) return { -FP2_MAX };
-    return { s };
+    __int128 s = (__int128)((unsigned __int128)a.v + (unsigned __int128)b.v);     // wrapping add
+    // BRANCHLESS: overflow ⇔ a,b same sign AND s differs → (~(a^b) & (a^s)) top bit; saturate by a's sign.
+    unsigned __int128 of_m  = -(unsigned __int128)(int)((unsigned __int128)(~(a.v ^ b.v) & (a.v ^ s)) >> 127);
+    __int128 sgn = a.v >> 127;                       // arithmetic: 0 (a>=0) / -1 (a<0) — a shift, no compare → no branch
+    __int128 sat = (FP2_MAX ^ sgn) - sgn;            // branchless conditional-negate: +MAX / -MAX
+    return { (__int128)(((unsigned __int128)s & ~of_m) | ((unsigned __int128)sat & of_m)) };
 }
 static FP2_64 fp2_sub(FP2_64 a, FP2_64 b) {
-    __int128 s = (__int128)((unsigned __int128)a.v - (unsigned __int128)b.v);
-    if (a.v >= 0 && b.v < 0 && s < 0) return { FP2_MAX };
-    if (a.v < 0 && b.v >= 0 && s >= 0) return { -FP2_MAX };
-    return { s };
+    __int128 s = (__int128)((unsigned __int128)a.v - (unsigned __int128)b.v);     // wrapping sub
+    // BRANCHLESS: overflow ⇔ a,b differ in sign AND s differs from a → ((a^b) & (a^s)) top bit.
+    unsigned __int128 of_m  = -(unsigned __int128)(int)((unsigned __int128)((a.v ^ b.v) & (a.v ^ s)) >> 127);
+    __int128 sgn = a.v >> 127;                       // arithmetic: 0 (a>=0) / -1 (a<0) — a shift, no compare → no branch
+    __int128 sat = (FP2_MAX ^ sgn) - sgn;            // branchless conditional-negate: +MAX / -MAX
+    return { (__int128)(((unsigned __int128)s & ~of_m) | ((unsigned __int128)sat & of_m)) };
 }
 static FP2_64 fp2_min(FP2_64 a, FP2_64 b) { return { a.v < b.v ? a.v : b.v }; }
 static FP2_64 fp2_max(FP2_64 a, FP2_64 b) { return { a.v > b.v ? a.v : b.v }; }

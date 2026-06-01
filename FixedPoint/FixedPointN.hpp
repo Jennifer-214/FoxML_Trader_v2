@@ -79,6 +79,38 @@ template <unsigned F_ARG>       struct is_FPN<FPN<F_ARG>>    : std::true_type  {
 template <typename T> inline constexpr bool is_FPN_v = is_FPN<T>::value;
 
 //======================================================================================================
+// [UNIFIED RADIX-PARAMETRIZED FIXED-POINT — v5.15.5.F.4d.1.E Ship A]
+//======================================================================================================
+// FixedPoint<RADIX,FRAC>: value = stored_integer / RADIX^FRAC. Two concrete instantiations (D-99 —
+// NOT speculative generality; two real types, not hypotheticals):
+//   <2,64>  binary  — the 16B two's-complement core (THIS ship; replaces 24B sign-magnitude FPN<64>).
+//   <10,8>  decimal — money, scale 10^8 (Ship B).
+// Storage is radix-independent (a signed scaled integer); radix appears only in the mul-reduce + div.
+// The 16B form keeps the sign in the TOP BIT (no sign field) → 16B, 16-aligned, NO padding (vs
+// sign-magnitude's 24B w[2]+sign+_padding). Value-equivalent to FPN<64> BY CONSTRUCTION (same unsigned
+// product, same sign rule) — proven 258/258 by tools/ship_a_fp2_64_slice.cpp (D-125/D-139).
+template <int RADIX, int FRAC> struct FixedPoint;   // generic; only <2,64> specialized this ship
+
+template <> struct FixedPoint<2, 64> {
+    __int128 v;                              // value = v / 2^64
+    static constexpr int RADIX = 2;
+    static constexpr int FRAC  = 64;
+};
+static_assert(sizeof(FixedPoint<2,64>) == 16,
+              "Ship A: the binary core is a bare 16B __int128 two's-complement (no sign field, no padding)");
+
+// Disjoint domain traits (B6 mechanical guard): binary <2,FRAC> vs decimal <10,FRAC>. At the FPN<64>
+// flip, is_FPN_v becomes a binary-only alias = is_fp_binary_v. Every tt:: wire dispatcher will
+// static_assert exhaustively over these (binary || decimal || float || ...) → a missing decimal branch
+// becomes a COMPILE ERROR, which is what turns the silent-lossy-emit risk into a build break.
+template <typename T>  struct is_fp_binary                     : std::false_type {};
+template <int F>       struct is_fp_binary<FixedPoint<2, F>>   : std::true_type  {};
+template <typename T> inline constexpr bool is_fp_binary_v  = is_fp_binary<T>::value;
+template <typename T>  struct is_fp_decimal                    : std::false_type {};
+template <int F>       struct is_fp_decimal<FixedPoint<10, F>> : std::true_type  {};
+template <typename T> inline constexpr bool is_fp_decimal_v = is_fp_decimal<T>::value;
+
+//======================================================================================================
 // [N-WORD HELPERS]
 //======================================================================================================
 // all loops are over compile-time N so the compiler fully unrolls them
@@ -1264,4 +1296,91 @@ template<> inline double FPN_ToDouble<64>(FPN<64> v)   { return FP64_ToDouble(_t
 
 //======================================================================================================
 //======================================================================================================
+//======================================================================================================
+// [16B BINARY CORE OPS — v5.15.5.F.4d.1.E Ship A; PROVEN value-equivalent to FPN<64> (slice 258/258)]
+//======================================================================================================
+// Transitional free functions on FixedPoint<2,64>, lifted (logic-verbatim) from the proven slice
+// tools/ship_a_fp2_64_slice.cpp. At the FPN<64> flip these FOLD INTO the FPN_*<64> specializations,
+// replacing the FP64-forwarding block above. The #2 multiply pattern is [extract sign + abs] ->
+// [unsigned 128x128->256 product = FP64_Mul's exact reduce, the C1 HOIST] -> [reduce >>64] ->
+// [reapply sign] -> [of_mask saturate-on-overflow, R2]. Div/Sqrt delegate to the certified generic
+// FPN bodies on a rebuilt positive magnitude (abs-in / certified-unsigned-core / sign-out).
+// NOTE (B1): -2^63 (INT128_MIN) abs/negate is two's-complement UB; the production fold adds the
+// saturate/flag guard + the `build.sh ubsan` lane covers the whole signed-overflow class. The feature
+// input domain never reaches it, so these slice bodies abs directly (as the proof did).
+inline constexpr __int128 FP2_64_MAX = (__int128)(((unsigned __int128)1 << 127) - 1);  // +2^127-1 (R2 ceiling)
+
+// decode FPN<64> (sign-magnitude w[1]:w[0] + sign flag) to the SAME value as a 16B two's-complement.
+inline FixedPoint<2,64> fp2_from_fpn(FPN<64> x) {
+    unsigned __int128 mag = ((unsigned __int128)x.w[1] << 64) | (unsigned __int128)x.w[0];
+    __int128 v = (__int128)mag;
+    return { x.sign ? -v : v };
+}
+// rebuild a POSITIVE FPN<64> from a 128-bit magnitude (to drive the certified unsigned Div/Sqrt bodies).
+inline FPN<64> fp2_to_mag_fpn(unsigned __int128 m) {
+    FPN<64> r{}; r.w[0]=(uint64_t)m; r.w[1]=(uint64_t)(m>>64); r.sign=0; return r;
+}
+
+inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
+    bool neg = (a.v < 0) ^ (b.v < 0);
+    unsigned __int128 amag = a.v < 0 ? (unsigned __int128)(-a.v) : (unsigned __int128)a.v;
+    unsigned __int128 bmag = b.v < 0 ? (unsigned __int128)(-b.v) : (unsigned __int128)b.v;
+    // FP64_Mul's exact reduce (bits[191:64] of amag*bmag) — the C1 hoist.
+    uint64_t a_lo = (uint64_t)amag, a_hi = (uint64_t)(amag >> 64);
+    uint64_t b_lo = (uint64_t)bmag, b_hi = (uint64_t)(bmag >> 64);
+    unsigned __int128 ll = (unsigned __int128)a_lo * b_lo;
+    unsigned __int128 lh = (unsigned __int128)a_lo * b_hi;
+    unsigned __int128 hl = (unsigned __int128)a_hi * b_lo;
+    unsigned __int128 hh = (unsigned __int128)a_hi * b_hi;
+    unsigned __int128 mid     = lh + hl + (ll >> 64);
+    unsigned __int128 shifted = hh + (mid >> 64);
+    unsigned __int128 mag     = (shifted << 64) | (uint64_t)mid;
+    // BRANCHLESS saturate (R2 — same of_mask discipline as FPN_Mul:616-622 / FP64_Mul): no data-dependent
+    // control flow. ovf nonzero iff the product exceeds the 127-bit magnitude range; of_m is 0 or all-ones.
+    unsigned __int128 ovf  = (shifted >> 64) | (mag >> 127);
+    unsigned __int128 nz   = ovf | (~ovf + 1);                            // top bit set iff ovf != 0 (no compare → no branch)
+    unsigned __int128 of_m = -(unsigned __int128)(int)(nz >> 127);        // 0 / all-ones
+    mag = (mag & ~of_m) | (of_m >> 1);                                    // saturate to 2^127-1 = (all-ones >> 1): the SAT
+                                                                          // constant is DERIVED from the mask, so there is no
+                                                                          // compile-constant for GCC to turn into a conditional-load
+    __int128 v = (__int128)mag;
+    unsigned __int128 neg_m = -(unsigned __int128)((int)neg & (int)(mag != 0));   // canonicalize -0 -> +0
+    return { (__int128)(((unsigned __int128)(-v) & neg_m) | ((unsigned __int128)v & ~neg_m)) };
+}
+inline FixedPoint<2,64> fp2_neg(FixedPoint<2,64> a) { __int128 v = -a.v; return { v }; }   // (INT_MIN guard in prod fold)
+inline FixedPoint<2,64> fp2_abs(FixedPoint<2,64> a) { return { a.v < 0 ? -a.v : a.v }; }
+inline FixedPoint<2,64> fp2_addsat(FixedPoint<2,64> a, FixedPoint<2,64> b) {
+    __int128 s = (__int128)((unsigned __int128)a.v + (unsigned __int128)b.v);     // wrapping add
+    // BRANCHLESS: signed overflow ⇔ a,b same sign AND s differs → (~(a^b) & (a^s)) top bit. On overflow
+    // a,b share a sign → saturate by a's sign (+MAX / −MAX). All mask-select, no data-dependent branch.
+    unsigned __int128 of_m  = -(unsigned __int128)(int)((unsigned __int128)(~(a.v ^ b.v) & (a.v ^ s)) >> 127);
+    __int128 sgn = a.v >> 127;                       // arithmetic: 0 (a>=0) / -1 (a<0) — a shift, no compare → no branch
+    __int128 sat = (FP2_64_MAX ^ sgn) - sgn;         // branchless conditional-negate: +MAX / -MAX
+    return { (__int128)(((unsigned __int128)s & ~of_m) | ((unsigned __int128)sat & of_m)) };
+}
+inline FixedPoint<2,64> fp2_sub(FixedPoint<2,64> a, FixedPoint<2,64> b) {
+    __int128 s = (__int128)((unsigned __int128)a.v - (unsigned __int128)b.v);     // wrapping sub
+    // BRANCHLESS: signed overflow ⇔ a,b differ in sign AND s differs from a → ((a^b) & (a^s)) top bit.
+    unsigned __int128 of_m  = -(unsigned __int128)(int)((unsigned __int128)((a.v ^ b.v) & (a.v ^ s)) >> 127);
+    __int128 sgn = a.v >> 127;                       // arithmetic: 0 (a>=0) / -1 (a<0) — a shift, no compare → no branch
+    __int128 sat = (FP2_64_MAX ^ sgn) - sgn;         // branchless conditional-negate: +MAX / -MAX
+    return { (__int128)(((unsigned __int128)s & ~of_m) | ((unsigned __int128)sat & of_m)) };
+}
+inline FixedPoint<2,64> fp2_min(FixedPoint<2,64> a, FixedPoint<2,64> b) { return { a.v < b.v ? a.v : b.v }; }
+inline FixedPoint<2,64> fp2_max(FixedPoint<2,64> a, FixedPoint<2,64> b) { return { a.v > b.v ? a.v : b.v }; }
+inline FixedPoint<2,64> fp2_div(FixedPoint<2,64> a, FixedPoint<2,64> b) {
+    bool neg = (a.v < 0) ^ (b.v < 0);
+    unsigned __int128 am = a.v<0?(unsigned __int128)(-a.v):(unsigned __int128)a.v;
+    unsigned __int128 bm = b.v<0?(unsigned __int128)(-b.v):(unsigned __int128)b.v;
+    FPN<64> q = FPN_DivNoAssert<64>(fp2_to_mag_fpn(am), fp2_to_mag_fpn(bm));   // certified unsigned long-division
+    unsigned __int128 qm = ((unsigned __int128)q.w[1]<<64) | q.w[0];
+    __int128 v = (__int128)qm;
+    return { (neg && qm!=0) ? -v : v };
+}
+inline FixedPoint<2,64> fp2_sqrt(FixedPoint<2,64> a) {                          // sqrt domain: a >= 0
+    unsigned __int128 am = a.v<0?(unsigned __int128)(-a.v):(unsigned __int128)a.v;
+    FPN<64> s = FPN_Sqrt<64>(fp2_to_mag_fpn(am));                               // certified generic NR (F-056 carve-out)
+    return { (__int128)(((unsigned __int128)s.w[1]<<64) | s.w[0]) };
+}
+
 #endif // FIXED_POINT_N_H
