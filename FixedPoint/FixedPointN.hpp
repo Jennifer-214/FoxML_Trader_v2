@@ -1407,4 +1407,30 @@ inline FixedPoint<2,64> fp2_sqrt(FixedPoint<2,64> a) {                          
     return y;
 }
 
+// --- Conversions: replicate FPN_FromDouble<64>/FPN_ToDouble<64>'s F=64 arithmetic on __int128.
+// Bit-identical by construction (same floor / (uint64_t) casts / 2^64 scale) → value-equivalent.
+inline FixedPoint<2,64> fp2_from_double(double input) {
+    int neg = (input < 0.0);
+    double abs_input = input * (1.0 - 2.0 * neg);
+    double int_part = floor(abs_input);
+    double frac_part = abs_input - int_part;
+    unsigned __int128 mag = ((unsigned __int128)(uint64_t)int_part << 64)
+                          | (unsigned __int128)(uint64_t)floor(frac_part * 18446744073709551616.0);
+    __int128 v = (__int128)mag;
+    return { (neg && mag != 0) ? -v : v };
+}
+inline double fp2_to_double(FixedPoint<2,64> a) {
+    unsigned __int128 m = a.v < 0 ? (unsigned __int128)(-a.v) : (unsigned __int128)a.v;
+    double mag = (double)(uint64_t)(m >> 64) + (double)(uint64_t)m / 18446744073709551616.0;
+    return a.v < 0 ? -mag : mag;
+}
+// --- Feature-only transcendentals that round-trip through double (match FPN_Log/InvSqrt/Tan/Pow/Atan2
+// by construction: same FromDouble(stdlib(ToDouble)) shape on value-equivalent conversions). Slow-path,
+// feature-domain. Exp/Sin/Cos (the FPN-native Taylor ops) port separately.
+inline FixedPoint<2,64> fp2_log(FixedPoint<2,64> a)     { return fp2_from_double(log(fp2_to_double(a))); }
+inline FixedPoint<2,64> fp2_invsqrt(FixedPoint<2,64> a) { return fp2_from_double(1.0 / sqrt(fp2_to_double(a))); }
+inline FixedPoint<2,64> fp2_tan(FixedPoint<2,64> a)     { return fp2_from_double(tan(fp2_to_double(a))); }
+inline FixedPoint<2,64> fp2_pow(FixedPoint<2,64> a, FixedPoint<2,64> b)   { return fp2_from_double(pow(fp2_to_double(a), fp2_to_double(b))); }
+inline FixedPoint<2,64> fp2_atan2(FixedPoint<2,64> y, FixedPoint<2,64> x) { return fp2_from_double(atan2(fp2_to_double(y), fp2_to_double(x))); }
+
 #endif // FIXED_POINT_N_H
