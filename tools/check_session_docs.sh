@@ -14,6 +14,8 @@
 # It CALLS existing tools (no logic duplication — SSoT for "full doc sweep"):
 #   check_doc_metadata.py --bidirectional --memories   [HARD — exit 1 on asymmetry/broken-ref]
 #   check_plan_body_symbol_existence.py (B-Plus)        [HARD — exit 1 on fabrication]
+#   check_capture_audit.py --quiet                      [HARD — index/sentinels/skill-linkage]
+#   check_tools_inventory.py                            [HARD — every tools/*.{sh,py} enrolled in DOCS/TOOLS.md]
 #   check_forward_promise_audit.py                      [ADVISORY — MED/LOW expected]
 #   check_meta_registry.py                              [ADVISORY — engine-structural; pre-existing orphans surfaced]
 #
@@ -115,6 +117,14 @@ if [ "${SKIP_CAPTURE_AUDIT_CHECK:-0}" != "1" ]; then
         python3 "$REPO_ROOT/tools/check_capture_audit.py" --quiet
 else
     RESULTS+=("  ⏭  HARD  capture-audit mechanical (SKIP_CAPTURE_AUDIT_CHECK=1)")
+fi
+
+# --- HARD 4: tools-inventory enrollment (every tools/*.{sh,py} has a row in DOCS/TOOLS.md) ---
+if [ "${SKIP_TOOLS_INVENTORY_CHECK:-0}" != "1" ]; then
+    run_hard "tools-inventory enrollment (DOCS/TOOLS.md)" \
+        python3 "$REPO_ROOT/tools/check_tools_inventory.py"
+else
+    RESULTS+=("  ⏭  HARD  tools-inventory enrollment (SKIP_TOOLS_INVENTORY_CHECK=1)")
 fi
 
 # --- ADVISORY: forward-promise (MED/LOW backlog expected) ---

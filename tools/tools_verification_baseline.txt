@@ -1,0 +1,28 @@
+# tools_verification_baseline.txt — load-bearing tools KNOWN-PENDING a negative self-test (D-137).
+#
+# check_tools_inventory.py Check 3: a load-bearing (STANDING-CI / SKILL-WIRED) tool with NO negative
+# self-test = red build, EXCEPT those listed here (the shrinking known-pending baseline). This is the
+# close-the-class mechanism (feedback_close_the_class_vs_migrate_every_site): NEW load-bearing tools must
+# ship a test; the existing fleet is migrated paced — REMOVE a tool from this list when you add its
+# test_<name>.py / <name>_selftest.sh. The goal is to drive this file to empty.
+#
+# One tool name per line; # comments + blank lines ignored.
+calls_graph_diff.sh
+check_capture_audit.py
+check_doc_metadata.py
+check_field_name_uniqueness.py
+check_forward_promise_audit.py
+check_fp_determinism.sh
+check_locale_determinism.sh
+check_meta_registry.py
+check_per_core_registry_integrity.py
+check_plan_body_symbol_existence.py
+check_session_docs.sh
+check_storage_t_coverage.py
+check_struct_field_uniqueness.py
+dedupe_findings.py
+gen_code_map.sh
+migrate_memory_frontmatter.py
+rebuild_doc_indexes.py
+scan_class_27_full.py
+validate_feature_mask.sh
