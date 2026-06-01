@@ -1,4 +1,6 @@
-# Tick Trader — Per-Node Sharded Engine
+# FoxML Trader — Per-Node Sharded Engine
+
+**release v0.3** · pre-1.0 (live-trading + headless decoupling are the road to 1.0)
 
 per-node risk-sharded crypto trading engine in C++17. one position per pinned CPU, branchless fixed-point math, lock-free queues, seqlock-cached parameters. the hot path runs at single-digit ns/tick algorithmic floor — the slow path can do whatever (ML inference, regression, regime detection) without the executors ever paying for it.
 
