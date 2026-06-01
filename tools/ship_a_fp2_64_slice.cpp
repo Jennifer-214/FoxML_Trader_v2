@@ -49,6 +49,9 @@ int main() {
         snprintf(t,sizeof t,"Log[%d]",i);    miss += check(t, FPN_Log<64>(x),     fp2_log(fx));     tested++;
         snprintf(t,sizeof t,"InvSqrt[%d]",i);miss += check(t, FPN_InvSqrt<64>(x), fp2_invsqrt(fx)); tested++;
         snprintf(t,sizeof t,"Tan[%d]",i);    miss += check(t, FPN_Tan<64>(x),     fp2_tan(fx));     tested++;
+        snprintf(t,sizeof t,"Exp[%d]",i);    miss += check(t, FPN_Exp<64>(x),     fp2_exp(fx));     tested++;
+        snprintf(t,sizeof t,"Sin[%d]",i);    miss += check(t, FPN_Sin<64>(x),     fp2_sin(fx));     tested++;
+        snprintf(t,sizeof t,"Cos[%d]",i);    miss += check(t, FPN_Cos<64>(x),     fp2_cos(fx));     tested++;
         if (FPN_ToDouble<64>(x) != fp2_to_double(fx)) { printf("  MISMATCH ToDbl[%d] %.17g vs %.17g\n", i, FPN_ToDouble<64>(x), fp2_to_double(fx)); miss++; } tested++;
     }
     for (int i = 0; i + 1 < N; ++i) {                   // binary
@@ -80,9 +83,14 @@ int main() {
         snprintf(t,sizeof t,"Pow[%d]",i);   miss += check(t, FPN_Pow<64>(a,b),   fp2_pow(fa,fb));   tested++;
         snprintf(t,sizeof t,"Atan2[%d]",i); miss += check(t, FPN_Atan2<64>(a,b), fp2_atan2(fa,fb)); tested++;
     }
+    // FromInt across sign + magnitude edges (exercised internally by Exp/Sin via k_abs; also direct).
+    static const int64_t KI[] = { 0, 1, -1, 5, -7, 100, -1000000, 9000000000000000LL, -9000000000000000LL };
+    for (int i = 0; i < (int)(sizeof(KI)/sizeof(KI[0])); ++i) {
+        snprintf(t,sizeof t,"FromInt[%d]",i); miss += check(t, FPN_FromInt<64>(KI[i]), fp2_from_int(KI[i])); tested++;
+    }
     printf("\nop VALUE-equivalence (16B two's-comp vs 24B sign-mag) — PRODUCTION header fns:\n");
     printf("  %d checks, %d mismatches -> %s\n", tested, miss, miss==0 ? "PASS" : "FAIL");
-    printf("  ops proven: Mul Abs Negate AddSat SubSat Sub Min Max Div Sqrt + From/ToDouble Log InvSqrt Tan Pow Atan2 + sign-XOR\n");
-    printf("  remaining (FPN-native Taylor transcendentals, per-op port next): Exp Sin Cos\n");
+    printf("  ops proven: Mul Abs Negate AddSat SubSat Sub Min Max Div Sqrt FromInt From/ToDouble\n");
+    printf("              Log InvSqrt Tan Pow Atan2 Exp Sin Cos + sign-XOR — FULL feature op surface.\n");
     return miss == 0 ? 0 : 1;
 }

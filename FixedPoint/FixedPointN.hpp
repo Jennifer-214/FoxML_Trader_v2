@@ -1433,4 +1433,80 @@ inline FixedPoint<2,64> fp2_tan(FixedPoint<2,64> a)     { return fp2_from_double
 inline FixedPoint<2,64> fp2_pow(FixedPoint<2,64> a, FixedPoint<2,64> b)   { return fp2_from_double(pow(fp2_to_double(a), fp2_to_double(b))); }
 inline FixedPoint<2,64> fp2_atan2(FixedPoint<2,64> y, FixedPoint<2,64> x) { return fp2_from_double(atan2(fp2_to_double(y), fp2_to_double(x))); }
 
+// --- FPN-native Taylor transcendentals (Exp/Sin/Cos), ported to 16B. Mul/Add/Sub are native; the
+// layout-specific bits adapt: integer-word read q.w[FW] → (|v|>>64); set-1.0 w[FW]=1 → (1<<64);
+// 2^k bit-set w[k/64]=1<<k%64 → (1<<k). The generic's sign-FLAG ops map to two's-complement:
+// `.sign=0` → abs(v); `.sign=1` (on a positive) → -v; `.sign=1-.sign` (flip) → -v. Same algorithm,
+// same constants → value-equivalent (verified by the slice net).
+inline FixedPoint<2,64> fp2_from_int(int64_t input) {       // == FPN_FromInt<64>: integer in the high word
+    int neg = (input < 0);
+    uint64_t mag = neg ? (uint64_t)(-(input + 1)) + 1u : (uint64_t)input;   // careful -INT64_MIN-safe negate
+    __int128 v = (__int128)((unsigned __int128)mag << 64);
+    return { neg ? -v : v };
+}
+inline FixedPoint<2,64> fp2_exp(FixedPoint<2,64> value) {
+    if (value.v == 0) return { (__int128)1 << 64 };                         // exp(0) = 1
+    FixedPoint<2,64> ln2 = fp2_from_double(0.6931471805599453);
+    FixedPoint<2,64> inv_ln2 = fp2_from_double(1.4426950408889634);
+    FixedPoint<2,64> q = fp2_mul(value, inv_ln2);
+    FixedPoint<2,64> half_const = fp2_from_double(0.5);
+    FixedPoint<2,64> q_rounded = (q.v < 0) ? fp2_sub(q, half_const) : fp2_addsat(q, half_const);
+    unsigned __int128 qm = (q_rounded.v < 0) ? (unsigned __int128)(-q_rounded.v) : (unsigned __int128)q_rounded.v;
+    int64_t k = (int64_t)(uint64_t)(qm >> 64);
+    if (q_rounded.v < 0) k = -k;
+    FixedPoint<2,64> k_abs = fp2_from_int(k < 0 ? -k : k);
+    FixedPoint<2,64> k_ln2 = fp2_mul(k_abs, ln2);
+    if (k < 0) k_ln2.v = -k_ln2.v;                                          // generic: k_ln2.sign = 1
+    FixedPoint<2,64> r = fp2_sub(value, k_ln2);
+    FixedPoint<2,64> result { (__int128)1 << 64 };                         // 1.0 (term n=0)
+    FixedPoint<2,64> r_pow = result;
+    static const double inv_fact[9] = { 1.0,1.0,0.5,1.0/6.0,1.0/24.0,1.0/120.0,1.0/720.0,1.0/5040.0,1.0/40320.0 };
+    for (int n = 1; n < 9; n++) {
+        r_pow = fp2_mul(r_pow, r);
+        FixedPoint<2,64> term = fp2_mul(r_pow, fp2_from_double(inv_fact[n]));
+        result = fp2_addsat(result, term);
+    }
+    int seed_bit = 64 + (int)k;                                            // F=64; 2^k position
+    if (seed_bit < 0) return { (__int128)0 };
+    if (seed_bit >= 128) return result;
+    FixedPoint<2,64> two_k { (__int128)((unsigned __int128)1 << seed_bit) };
+    return fp2_mul(result, two_k);
+}
+inline FixedPoint<2,64> fp2_sin(FixedPoint<2,64> value) {
+    if (value.v == 0) return { (__int128)0 };
+    FixedPoint<2,64> pi         = fp2_from_double(3.141592653589793);
+    FixedPoint<2,64> two_pi     = fp2_from_double(6.283185307179586);
+    FixedPoint<2,64> half_pi    = fp2_from_double(1.5707963267948966);
+    FixedPoint<2,64> inv_two_pi = fp2_from_double(0.15915494309189535);
+    FixedPoint<2,64> half_const = fp2_from_double(0.5);
+    FixedPoint<2,64> q = fp2_mul(value, inv_two_pi);                        // step 1: reduce to [-pi, pi]
+    FixedPoint<2,64> q_rounded = (q.v < 0) ? fp2_sub(q, half_const) : fp2_addsat(q, half_const);
+    unsigned __int128 qm = (q_rounded.v < 0) ? (unsigned __int128)(-q_rounded.v) : (unsigned __int128)q_rounded.v;
+    int64_t n_int = (int64_t)(uint64_t)(qm >> 64);
+    if (q_rounded.v < 0) n_int = -n_int;
+    FixedPoint<2,64> n_abs = fp2_from_int(n_int < 0 ? -n_int : n_int);
+    FixedPoint<2,64> n_two_pi = fp2_mul(n_abs, two_pi);
+    if (n_int < 0) n_two_pi.v = -n_two_pi.v;                                // generic: n_two_pi.sign = 1
+    FixedPoint<2,64> x = fp2_sub(value, n_two_pi);
+    int sign_flip = (x.v < 0);                                             // step 2: sin is odd
+    if (x.v < 0) x.v = -x.v;                                               // generic: x.sign = 0  (make x >= 0)
+    if (x.v >= half_pi.v) x = fp2_sub(pi, x);                              // step 3: if x >= pi/2, use sin(pi-x)=sin(x). x in [0,pi/2].
+    FixedPoint<2,64> result = x;                                          // step 4: Taylor (odd powers)
+    FixedPoint<2,64> x_pow = x;
+    FixedPoint<2,64> x_sq = fp2_mul(x, x);
+    static const double inv_fact_odd[8] = {
+        -1.0/6.0, 1.0/120.0, -1.0/5040.0, 1.0/362880.0,
+        -1.0/39916800.0, 1.0/6227020800.0, -1.0/1307674368000.0, 1.0/355687428096000.0 };
+    for (int k = 0; k < 8; k++) {
+        x_pow = fp2_mul(x_pow, x_sq);
+        FixedPoint<2,64> term = fp2_mul(x_pow, fp2_from_double(inv_fact_odd[k]));
+        result = fp2_addsat(result, term);
+    }
+    if (sign_flip) result.v = -result.v;                                   // generic: result.sign = 1 - result.sign
+    return result;
+}
+inline FixedPoint<2,64> fp2_cos(FixedPoint<2,64> value) {                   // cos(x) = sin(x + pi/2)
+    return fp2_sin(fp2_addsat(value, fp2_from_double(1.5707963267948966)));
+}
+
 #endif // FIXED_POINT_N_H
