@@ -1310,6 +1310,12 @@ template<> inline double FPN_ToDouble<64>(FPN<64> v)   { return FP64_ToDouble(_t
 // input domain never reaches it, so these slice bodies abs directly (as the proof did).
 inline constexpr __int128 FP2_64_MAX = (__int128)(((unsigned __int128)1 << 127) - 1);  // +2^127-1 (R2 ceiling)
 
+// Branchless __int128 sign helpers (the (v^sgn)-sgn conditional-negate trick) — so 128-bit abs / negate /
+// compare never lower to data-dependent jumps (GCC's __int128-conditional codegen otherwise emits branches).
+// Reused by the transcendentals below + Ship B's decimal math. (INT128_MIN abs is UB — bounded inputs never hit it.)
+inline __int128 i128_abs(__int128 v)           { __int128 s = v >> 127; return (v ^ s) - s; }
+inline __int128 i128_cneg(__int128 v, int neg) { __int128 m = -(__int128)(neg & 1); return (v ^ m) - m; }  // neg ? -v : v
+
 // decode FPN<64> (sign-magnitude w[1]:w[0] + sign flag) to the SAME value as a 16B two's-complement.
 inline FixedPoint<2,64> fp2_from_fpn(FPN<64> x) {
     unsigned __int128 mag = ((unsigned __int128)x.w[1] << 64) | (unsigned __int128)x.w[0];
@@ -1417,7 +1423,7 @@ inline FixedPoint<2,64> fp2_from_double(double input) {
     unsigned __int128 mag = ((unsigned __int128)(uint64_t)int_part << 64)
                           | (unsigned __int128)(uint64_t)floor(frac_part * 18446744073709551616.0);
     __int128 v = (__int128)mag;
-    return { (neg && mag != 0) ? -v : v };
+    return { i128_cneg(v, neg & (int)(mag != 0)) };
 }
 inline double fp2_to_double(FixedPoint<2,64> a) {
     unsigned __int128 m = a.v < 0 ? (unsigned __int128)(-a.v) : (unsigned __int128)a.v;
@@ -1442,67 +1448,73 @@ inline FixedPoint<2,64> fp2_from_int(int64_t input) {       // == FPN_FromInt<64
     int neg = (input < 0);
     uint64_t mag = neg ? (uint64_t)(-(input + 1)) + 1u : (uint64_t)input;   // careful -INT64_MIN-safe negate
     __int128 v = (__int128)((unsigned __int128)mag << 64);
-    return { neg ? -v : v };
+    return { i128_cneg(v, neg) };
 }
-inline FixedPoint<2,64> fp2_exp(FixedPoint<2,64> value) {
-    if (value.v == 0) return { (__int128)1 << 64 };                         // exp(0) = 1
+inline FixedPoint<2,64> fp2_exp(FixedPoint<2,64> value) {                   // value==0 needs no guard: full path → 1.0
     FixedPoint<2,64> ln2 = fp2_from_double(0.6931471805599453);
     FixedPoint<2,64> inv_ln2 = fp2_from_double(1.4426950408889634);
     FixedPoint<2,64> q = fp2_mul(value, inv_ln2);
     FixedPoint<2,64> half_const = fp2_from_double(0.5);
-    FixedPoint<2,64> q_rounded = (q.v < 0) ? fp2_sub(q, half_const) : fp2_addsat(q, half_const);
-    unsigned __int128 qm = (q_rounded.v < 0) ? (unsigned __int128)(-q_rounded.v) : (unsigned __int128)q_rounded.v;
-    int64_t k = (int64_t)(uint64_t)(qm >> 64);
-    if (q_rounded.v < 0) k = -k;
+    // round-half-away (q<0 ? q-0.5 : q+0.5): compute both, mask-select on sign — no data-dependent branch.
+    FixedPoint<2,64> qa = fp2_addsat(q, half_const), qs = fp2_sub(q, half_const);
+    unsigned __int128 qneg = (unsigned __int128)(q.v >> 127);              // all-ones iff q<0
+    FixedPoint<2,64> q_rounded { (__int128)(((unsigned __int128)qs.v & qneg) | ((unsigned __int128)qa.v & ~qneg)) };
+    unsigned __int128 qm = (unsigned __int128)i128_abs(q_rounded.v);
+    int64_t qint = (int64_t)(uint64_t)(qm >> 64);
+    int64_t k = (q_rounded.v < 0) ? -qint : qint;                          // cmov, not a branch
     FixedPoint<2,64> k_abs = fp2_from_int(k < 0 ? -k : k);
     FixedPoint<2,64> k_ln2 = fp2_mul(k_abs, ln2);
-    if (k < 0) k_ln2.v = -k_ln2.v;                                          // generic: k_ln2.sign = 1
+    k_ln2.v = i128_cneg(k_ln2.v, k < 0);                                   // branchless (was: if(k<0) sign=1)
     FixedPoint<2,64> r = fp2_sub(value, k_ln2);
     FixedPoint<2,64> result { (__int128)1 << 64 };                         // 1.0 (term n=0)
     FixedPoint<2,64> r_pow = result;
     static const double inv_fact[9] = { 1.0,1.0,0.5,1.0/6.0,1.0/24.0,1.0/120.0,1.0/720.0,1.0/5040.0,1.0/40320.0 };
-    for (int n = 1; n < 9; n++) {
+    for (int n = 1; n < 9; n++) {                                          // fixed-trip
         r_pow = fp2_mul(r_pow, r);
-        FixedPoint<2,64> term = fp2_mul(r_pow, fp2_from_double(inv_fact[n]));
-        result = fp2_addsat(result, term);
+        result = fp2_addsat(result, fp2_mul(r_pow, fp2_from_double(inv_fact[n])));
     }
-    int seed_bit = 64 + (int)k;                                            // F=64; 2^k position
-    if (seed_bit < 0) return { (__int128)0 };
-    if (seed_bit >= 128) return result;
+    int seed_bit = 64 + (int)k;                                            // 2^k position (F=64)
+    // Cold range guards (H20 __builtin_expect-rare exception): they prevent the out-of-range 1<<seed_bit UB
+    // on the extreme-exp tail — forcing these branchless would compute an undefined shift (worse).
+    if (__builtin_expect(seed_bit < 0, 0))   return { (__int128)0 };       // 2^k underflows FP precision
+    if (__builtin_expect(seed_bit >= 128, 0)) return result;              // 2^k overflows; skip the scale
     FixedPoint<2,64> two_k { (__int128)((unsigned __int128)1 << seed_bit) };
     return fp2_mul(result, two_k);
 }
-inline FixedPoint<2,64> fp2_sin(FixedPoint<2,64> value) {
-    if (value.v == 0) return { (__int128)0 };
+inline FixedPoint<2,64> fp2_sin(FixedPoint<2,64> value) {                   // value==0 needs no guard: full path → 0
     FixedPoint<2,64> pi         = fp2_from_double(3.141592653589793);
     FixedPoint<2,64> two_pi     = fp2_from_double(6.283185307179586);
     FixedPoint<2,64> half_pi    = fp2_from_double(1.5707963267948966);
     FixedPoint<2,64> inv_two_pi = fp2_from_double(0.15915494309189535);
     FixedPoint<2,64> half_const = fp2_from_double(0.5);
     FixedPoint<2,64> q = fp2_mul(value, inv_two_pi);                        // step 1: reduce to [-pi, pi]
-    FixedPoint<2,64> q_rounded = (q.v < 0) ? fp2_sub(q, half_const) : fp2_addsat(q, half_const);
-    unsigned __int128 qm = (q_rounded.v < 0) ? (unsigned __int128)(-q_rounded.v) : (unsigned __int128)q_rounded.v;
-    int64_t n_int = (int64_t)(uint64_t)(qm >> 64);
-    if (q_rounded.v < 0) n_int = -n_int;
+    FixedPoint<2,64> qa = fp2_addsat(q, half_const), qs = fp2_sub(q, half_const);   // round-half-away, mask-select
+    unsigned __int128 qneg = (unsigned __int128)(q.v >> 127);
+    FixedPoint<2,64> q_rounded { (__int128)(((unsigned __int128)qs.v & qneg) | ((unsigned __int128)qa.v & ~qneg)) };
+    unsigned __int128 qm = (unsigned __int128)i128_abs(q_rounded.v);
+    int64_t nint = (int64_t)(uint64_t)(qm >> 64);
+    int64_t n_int = (q_rounded.v < 0) ? -nint : nint;                      // cmov
     FixedPoint<2,64> n_abs = fp2_from_int(n_int < 0 ? -n_int : n_int);
     FixedPoint<2,64> n_two_pi = fp2_mul(n_abs, two_pi);
-    if (n_int < 0) n_two_pi.v = -n_two_pi.v;                                // generic: n_two_pi.sign = 1
+    n_two_pi.v = i128_cneg(n_two_pi.v, n_int < 0);                          // branchless
     FixedPoint<2,64> x = fp2_sub(value, n_two_pi);
-    int sign_flip = (x.v < 0);                                             // step 2: sin is odd
-    if (x.v < 0) x.v = -x.v;                                               // generic: x.sign = 0  (make x >= 0)
-    if (x.v >= half_pi.v) x = fp2_sub(pi, x);                              // step 3: if x >= pi/2, use sin(pi-x)=sin(x). x in [0,pi/2].
-    FixedPoint<2,64> result = x;                                          // step 4: Taylor (odd powers)
+    int sign_flip = (int)((unsigned __int128)x.v >> 127);                  // step 2: sin is odd (sign bit, branchless)
+    x.v = i128_abs(x.v);                                                   // make x >= 0 (branchless abs)
+    // step 3: if x >= pi/2, use sin(pi-x)=sin(x). Compute pi-x always, mask-select — no data-dependent branch.
+    FixedPoint<2,64> xr = fp2_sub(pi, x);
+    unsigned __int128 ge = (unsigned __int128)(~((x.v - half_pi.v) >> 127));        // all-ones iff x>=pi/2 (diff sign, no 128-bit compare)
+    x.v = (__int128)(((unsigned __int128)xr.v & ge) | ((unsigned __int128)x.v & ~ge));
+    FixedPoint<2,64> result = x;                                          // step 4: Taylor (odd powers), x in [0,pi/2]
     FixedPoint<2,64> x_pow = x;
     FixedPoint<2,64> x_sq = fp2_mul(x, x);
     static const double inv_fact_odd[8] = {
         -1.0/6.0, 1.0/120.0, -1.0/5040.0, 1.0/362880.0,
         -1.0/39916800.0, 1.0/6227020800.0, -1.0/1307674368000.0, 1.0/355687428096000.0 };
-    for (int k = 0; k < 8; k++) {
+    for (int k = 0; k < 8; k++) {                                          // fixed-trip
         x_pow = fp2_mul(x_pow, x_sq);
-        FixedPoint<2,64> term = fp2_mul(x_pow, fp2_from_double(inv_fact_odd[k]));
-        result = fp2_addsat(result, term);
+        result = fp2_addsat(result, fp2_mul(x_pow, fp2_from_double(inv_fact_odd[k])));
     }
-    if (sign_flip) result.v = -result.v;                                   // generic: result.sign = 1 - result.sign
+    result.v = i128_cneg(result.v, sign_flip);                            // branchless (sin odd: flip sign back)
     return result;
 }
 inline FixedPoint<2,64> fp2_cos(FixedPoint<2,64> value) {                   // cos(x) = sin(x + pi/2)
