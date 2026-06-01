@@ -37,6 +37,10 @@ namespace tt {
 // nullptr (legacy callers), only the 3 build-time fields render.
 inline void EngineHeader_Render(const struct TUISnapshot* snap = nullptr) {
     if (ImGui::Begin("Engine")) {
+        ImGui::TextColored(FoxmlColors::sand, "release:");
+        ImGui::SameLine();
+        ImGui::Text("v%s", RELEASE_VERSION_STRING);
+        ImGui::SameLine(0, 14);
         ImGui::TextColored(FoxmlColors::sand, "engine:");
         ImGui::SameLine();
         ImGui::Text("%s", ENGINE_VERSION_STRING);

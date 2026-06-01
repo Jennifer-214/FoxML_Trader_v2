@@ -338,7 +338,7 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
     y++;
     ab_goto(ab, y, 3);
     ab_printf(ab, A_BOLD A_PEACH "( °_ ° 7" A_RESET);
-    ab_printf(ab, "\033[20G" A_WHEAT "engine v" ENGINE_VERSION_STRING A_RESET);
+    ab_printf(ab, "\033[20G" A_WHEAT "v" RELEASE_VERSION_STRING "  (engine " ENGINE_VERSION_STRING ")" A_RESET);
     y++;
     ab_goto(ab, y, 4);
     ab_printf(ab, A_BOLD A_PEACH "ド  ヘ" A_RESET);

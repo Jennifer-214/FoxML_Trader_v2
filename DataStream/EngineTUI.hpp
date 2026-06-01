@@ -304,7 +304,7 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     /\\_/\\   FOXML TRADER" C_RESET
            C_RESET "\n"); row++;
-    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v" ENGINE_VERSION_STRING C_RESET "\n"); row++;
+    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "v" RELEASE_VERSION_STRING "  (engine " ENGINE_VERSION_STRING ")" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     > ^ <" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     int is_paused = FPN_IsZero(ctrl->buy_conds.price) && (ctrl->state == CONTROLLER_ACTIVE);
@@ -1951,7 +1951,7 @@ static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
     int row = 1;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     /\\_/\\   FOXML TRADER" C_RESET "\n"); row++;
-    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v" ENGINE_VERSION_STRING C_RESET "\n"); row++;
+    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "v" RELEASE_VERSION_STRING "  (engine " ENGINE_VERSION_STRING ")" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     > ^ <" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_SAND "  STATE: " C_FG "%-8s" C_RESET C_DIM "  |  " C_SAND "UPTIME: " C_FG "%02u:%02u:%02u" C_RESET "%s\n",

@@ -7,6 +7,16 @@
 #define ENGINE_VERSION_PATCH 5
 #define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.6"
 
+// PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
+// WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
+// in model stamps / fingerprints for reproducibility + HMAC — StampHelper/CoreModelZoo/ModelInference),
+// so it can't double as a clean public label. The release version is the public face (boot banner / GUI),
+// bumped MANUALLY at MAJOR changes. It is NEVER written into a stamp/fingerprint/wire body (re-tagging a
+// release must never perturb determinism — H9). Pre-1.0 until live-trading + the headless decoupling land.
+#define RELEASE_VERSION_MAJOR 0
+#define RELEASE_VERSION_MINOR 3
+#define RELEASE_VERSION_STRING "0.3"
+
 // .F.4d.1.E.0.6 (v5.15.5.F.4d.1.E.0.6 — tag monotonic after E.0.5 per D-88; plan keeps its semantic
 // .E.0.1 name = the FP+replay+locale determinism NET, Net-2 of D-73). Ships the deterministic-input
 // foundation that gates #11 (decimal numeric core) + .E.1 (Core→Node rename): F-056/57/58
