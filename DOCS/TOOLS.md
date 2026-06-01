@@ -51,6 +51,8 @@
 | `check_determinism_selftest.sh` | SKILL-WIRED | /post-ship-audit | ✓ | the net's NEGATIVE self-test — verifies each gate goes RED on its injected regression (the net has teeth) |
 | `scan_class_27_full.py` | SKILL-WIRED | /bug-check (Step 3) | ✓ | full Class-27 (scalar cfg-mirror) mechanical scan |
 | `validate_feature_mask.sh` | SKILL-WIRED | /ml-audit (Section B) | ✓ | feature-mask e2e validation |
+| `check_plan_enumeration_completeness.py` | SKILL-WIRED | precoding-audit-gate (Stage 2.5) | NEEDS (#24) | plan's claimed enumeration SET ⊇ the code-intel tool output (catches AR-1 summarize-and-drop — the tool was run, the summary lost members; D-141 / `.E` Session-8) |
+| `test_check_plan_enumeration_completeness.py` | TEST-HARNESS | test runner | — | NEGATIVE self-test — proves the under-enumeration guard goes RED on a dropped-file plan + names it (teeth) |
 
 *Non-executable helpers (not in the guard's scope): `replay_locale_gate.cpp` / `fp_determinism_golden.cpp` / `compare_scalers.cpp` (compiled by the `.sh` gates), `*_baseline.txt` / `*_golden.txt` (frozen data).*
 

@@ -241,6 +241,19 @@ build_asan() {
     link_cfg build_asan
 }
 
+build_ubsan() {
+    # signed-overflow + UB sanitizer lane (sister to asan/tsan). Catches the whole
+    # signed-integer-overflow UB class at runtime — e.g. two's-complement abs(INT128_MIN)
+    # (#11 16B core, blindspot B1) — that no compile error or memcmp surfaces.
+    # -fno-sanitize-recover makes the FIRST UB ABORT (so a test run goes red, CI-friendly).
+    [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_ubsan
+    cmake -B build_ubsan -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS="-fsanitize=signed-integer-overflow,undefined -fno-sanitize-recover=all -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON" \
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined"
+    cmake --build build_ubsan -j"$JOBS"
+    link_cfg build_ubsan
+}
+
 run_tests() {
     build_engine
     echo "--- running controller_test ---"
@@ -304,18 +317,21 @@ case "$TARGET" in
     asan)
         build_asan
         ;;
+    ubsan)
+        build_ubsan
+        ;;
     debug)
         build_debug
         ;;
     clean)
         rm -rf build build_gui build_gui_lite build_suite build_lat \
                build_pgo_gen build_pgo pgo_profile \
-               build_tsan build_asan build_debug bin
+               build_tsan build_asan build_ubsan build_debug bin
         echo "all build dirs + bin/ symlinks removed"
         ;;
     *)
         echo "unknown target: $TARGET" >&2
-        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|pgo|tsan|asan|debug|clean} [--clean]" >&2
+        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|pgo|tsan|asan|ubsan|debug|clean} [--clean]" >&2
         exit 1
         ;;
 esac
