@@ -270,7 +270,7 @@ run_tests() {
 # See tools/check_per_core_registry_integrity.py for full check list.
 check_per_core_cfg_integrity() {
     echo "--- per-core cfg integrity check (WIP2d-0) ---"
-    if ! python3 tools/check_per_core_registry_integrity.py; then
+    if [ -f tools/check_per_core_registry_integrity.py ] && ! python3 tools/check_per_core_registry_integrity.py; then
         echo "[build] ABORT: per-core cfg integrity check FAILED — fix violations above before build"
         exit 1
     fi

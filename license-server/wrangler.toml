@@ -1,7 +1,0 @@
-name = "foxml-license"
-main = "src/index.js"
-compatibility_date = "2024-01-01"
-
-[[kv_namespaces]]
-binding = "LICENSES"
-id = "8dfcf970c5e1462eb7a710bfa22ac029"

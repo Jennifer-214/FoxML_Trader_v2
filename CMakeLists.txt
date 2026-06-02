@@ -208,8 +208,11 @@ if(USE_IMGUI_GUI)
 endif()
 
 #===============================================================================
-# tests
+# tests  (private: tests/ is gitignored for the code-only public surface)
 #===============================================================================
+# Skip the dev/test targets on a public clone where tests/ is absent; build them
+# locally (the dir is present, symlinked from the private workspace).
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 add_executable(controller_test tests/controller_test.cpp)
 target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
@@ -254,15 +257,19 @@ if(USE_NATIVE_128)
     target_compile_definitions(parity_harness PRIVATE USE_NATIVE_128)
 endif()
 target_link_libraries(parity_harness PRIVATE Threads::Threads ssl crypto)
+endif()  # tests/ present
 
 # v5.11.14 — standalone CLI that diffs two FeatureStandardizer .scaler
 # binaries per-feature. Reports |Δmean|, |Δstddev|, and percent change.
 # Linked against ssl + crypto for the SHA-256 verifier the loader runs
 # on each sidecar. No MULTICORE_TUI / no test framework — pure CLI tool.
+# compare_scalers is a private dev tool (tools/ gitignored); skip on a code-only public clone
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/compare_scalers.cpp)
 add_executable(compare_scalers tools/compare_scalers.cpp)
 target_compile_options(compare_scalers PRIVATE -O2 -march=native)
 target_include_directories(compare_scalers PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(compare_scalers PRIVATE ssl crypto)
+endif()
 
 # v5.15.5.F.4d.1.B.3 Phase L REVERTED — stamp_model_cli target REMOVED. Operator workflow shifts to
 # foxml_suite GUI auto-stamp via Backtest_RunFullValidation → Stamp_AssembleAndEmit (in-process).

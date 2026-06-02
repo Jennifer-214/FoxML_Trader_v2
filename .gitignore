@@ -139,3 +139,19 @@ __pycache__/
 /tools
 /tests
 DOCS/TOOLS.md
+
+# code-only public surface (2026-06-02): public = ONLY what's needed to COMPILE
+# the engine (source + build system + LICENSE + README). Everything below is
+# present-locally-but-gitignored (dev tooling/workflow/experiments/runtime state).
+/claude-skills
+/experiments
+/build_latency
+/OPS
+/license-server
+/.githooks
+/portfolio.snapshot
+/BOUNTY.md
+/CODE_OF_CONDUCT.md
+/engine.cfg.example
+/engine_sharded.cfg
+/DOCS
