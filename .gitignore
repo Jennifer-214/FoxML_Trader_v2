@@ -132,3 +132,10 @@ context_cont.md
 # Python build artifacts (tools/)
 __pycache__/
 *.pyc
+
+# tools-privacy (2026-06-02): tools/ + tests/ + the tool inventory live in the private
+# workspace (symlinks here -> ../tick-trader-percore-workspace/; gitignored). Public
+# surface = trading code only; the dev/CI apparatus is the private workspace.
+/tools
+/tests
+DOCS/TOOLS.md
