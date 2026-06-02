@@ -88,7 +88,7 @@ template <typename T> inline constexpr bool is_FPN_v = is_FPN<T>::value;
 // Storage is radix-independent (a signed scaled integer); radix appears only in the mul-reduce + div.
 // The 16B form keeps the sign in the TOP BIT (no sign field) → 16B, 16-aligned, NO padding (vs
 // sign-magnitude's 24B w[2]+sign+_padding). Value-equivalent to FPN<64> BY CONSTRUCTION (same unsigned
-// product, same sign rule) — proven 258/258 by tools/ship_a_fp2_64_slice.cpp (D-125/D-139).
+// product, same sign rule) — proven 423/0 by tools/ship_a_fp2_64_slice.cpp (D-125/D-139).
 template <int RADIX, int FRAC> struct FixedPoint;   // generic; only <2,64> specialized this ship
 
 template <> struct FixedPoint<2, 64> {
@@ -1297,7 +1297,7 @@ template<> inline double FPN_ToDouble<64>(FPN<64> v)   { return FP64_ToDouble(_t
 //======================================================================================================
 //======================================================================================================
 //======================================================================================================
-// [16B BINARY CORE OPS — v5.15.5.F.4d.1.E Ship A; PROVEN value-equivalent to FPN<64> (slice 258/258)]
+// [16B BINARY CORE OPS — v5.15.5.F.4d.1.E Ship A; PROVEN value-equivalent to FPN<64> (slice 423/0)]
 //======================================================================================================
 // Transitional free functions on FixedPoint<2,64>, lifted (logic-verbatim) from the proven slice
 // tools/ship_a_fp2_64_slice.cpp. At the FPN<64> flip these FOLD INTO the FPN_*<64> specializations,
@@ -1321,10 +1321,6 @@ inline FixedPoint<2,64> fp2_from_fpn(FPN<64> x) {
     unsigned __int128 mag = ((unsigned __int128)x.w[1] << 64) | (unsigned __int128)x.w[0];
     __int128 v = (__int128)mag;
     return { x.sign ? -v : v };
-}
-// rebuild a POSITIVE FPN<64> from a 128-bit magnitude (to drive the certified unsigned Div/Sqrt bodies).
-inline FPN<64> fp2_to_mag_fpn(unsigned __int128 m) {
-    FPN<64> r{}; r.w[0]=(uint64_t)m; r.w[1]=(uint64_t)(m>>64); r.sign=0; return r;
 }
 
 inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
