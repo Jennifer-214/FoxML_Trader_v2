@@ -55,6 +55,8 @@
 | `validate_feature_mask.sh` | SKILL-WIRED | /ml-audit (Section B) | ✓ | feature-mask e2e validation |
 | `check_plan_enumeration_completeness.py` | SKILL-WIRED | precoding-audit-gate (Stage 2.5) | NEEDS (#24) | plan's claimed enumeration SET ⊇ the code-intel tool output (catches AR-1 summarize-and-drop — the tool was run, the summary lost members; D-141 / `.E` Session-8) |
 | `test_check_plan_enumeration_completeness.py` | TEST-HARNESS | test runner | — | NEGATIVE self-test — proves the under-enumeration guard goes RED on a dropped-file plan + names it (teeth) |
+| `check_identifier_retirement_selftest.sh` | TEST-HARNESS | post-ship-audit; manual | — | NEGATIVE self-test — proves the H21 tombstone guard goes RED on renumber / version-decrease / silent-removal (teeth) |
+| `check_tech_debt_selftest.sh` | TEST-HARNESS | post-ship-audit; manual | — | NEGATIVE self-test — proves the tech-debt advisory DETECTS overlaps (+ no false positives) + `--stale --strict` goes RED (teeth) |
 
 *Non-executable helpers (not in the guard's scope): `replay_locale_gate.cpp` / `fp_determinism_golden.cpp` / `compare_scalers.cpp` (compiled by the `.sh` gates), `*_baseline.txt` / `*_golden.txt` / `identifier_ledger.txt` (frozen data).*
 
