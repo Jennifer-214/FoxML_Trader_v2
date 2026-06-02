@@ -31,6 +31,8 @@
 | `check_doc_rename_classification.py` | STANDING-CI | hook | — | B19 prose-token rename-classification guard |
 | `check_meta_registry.py` | STANDING-CI | `check_session_docs`; capture/registry-fit | ✓ | `FOREACH_REGISTRY` meta-registry coverage (H15) |
 | `check_tools_inventory.py` | STANDING-CI | hook (via `check_session_docs`) | ✓ (this doc) | THE tool-rot guard — every `tools/*.{sh,py}` has a row here (D-136) |
+| `check_identifier_retirement.py` | STANDING-CI | pre-commit (Check H); readiness (Check 46); post-ship-audit | ✓ | H21 tombstone guard — persistence/wire identifiers (snapshot/format VERSIONs + persisted enum CODES) append-only + immutable vs the golden `identifier_ledger.txt` (Class 40; `.E` #11 guard-hardening) |
+| `check_tech_debt.py` | STANDING-CI | pre-commit (Check J, advisory); post-ship-audit; readiness (Check 25) | — | tech-debt surface advisory — surfaces OPEN TECH_DEBT overlapping the staged/ship files (classify subsume/adjacent/defer per `feedback_opportunistic_tech_debt_closure`); also `--stale` / `--close` modes (`.E` #11) |
 | `check_per_core_registry_integrity.py` | SKILL-WIRED | accounting/capture/dod/readiness | ✓ | `PerCoreCfg` X-macro integrity (H17 Check 2) |
 | `calls_graph_diff.sh` | SKILL-WIRED | dust/post-ship-audit/readiness/ship | ✓ | strategy/regime orphan-diff (legacy vs sharded) |
 | `check_field_name_uniqueness.py` | SKILL-WIRED | blindspot-scan | ✓ | cfg field-name uniqueness |
@@ -54,7 +56,7 @@
 | `check_plan_enumeration_completeness.py` | SKILL-WIRED | precoding-audit-gate (Stage 2.5) | NEEDS (#24) | plan's claimed enumeration SET ⊇ the code-intel tool output (catches AR-1 summarize-and-drop — the tool was run, the summary lost members; D-141 / `.E` Session-8) |
 | `test_check_plan_enumeration_completeness.py` | TEST-HARNESS | test runner | — | NEGATIVE self-test — proves the under-enumeration guard goes RED on a dropped-file plan + names it (teeth) |
 
-*Non-executable helpers (not in the guard's scope): `replay_locale_gate.cpp` / `fp_determinism_golden.cpp` / `compare_scalers.cpp` (compiled by the `.sh` gates), `*_baseline.txt` / `*_golden.txt` (frozen data).*
+*Non-executable helpers (not in the guard's scope): `replay_locale_gate.cpp` / `fp_determinism_golden.cpp` / `compare_scalers.cpp` (compiled by the `.sh` gates), `*_baseline.txt` / `*_golden.txt` / `identifier_ledger.txt` (frozen data).*
 
 ## Planned / retired (tracked off-disk — Check 2 accounts for references)
 
