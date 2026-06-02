@@ -261,6 +261,35 @@ else
 fi
 
 # ============================================================================
+# CHECK H: identifier-retirement (tombstone guard — Knight-Capital defense, H21)
+# Persistence/wire-visible identifiers (snapshot/format VERSIONs + persisted enum CODES)
+# are append-only + immutable; a renumber / value-reuse / silent-drop is a Power-Peg-class
+# reactivation risk (old state/messages/un-updated nodes carry the old meaning). Golden
+# ledger: tools/identifier_ledger.txt. Fires when a registry/version-bearing source is staged
+# (the enrolled dirs auto-cover future enrollment; the tool is cheap).
+# Spec: DESIGN_SPECS/meta-disciplines/dead-code-and-identifier-retirement-discipline.md
+# ============================================================================
+if [ "${SKIP_IDENTIFIER_CHECK:-0}" != "1" ]; then
+    ID_TOOL="${REPO_ROOT}/tools/check_identifier_retirement.py"
+    STAGED_ID=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^(CoreFrameworks/|ML_Headers/|Strategies/|MemHeaders/|tools/(identifier_ledger\.txt|check_identifier_retirement\.py))' || true)
+    if [ -n "$STAGED_ID" ] && [ -f "$ID_TOOL" ]; then
+        echo "[pre-commit] Check H: identifier-retirement (tombstone guard; staged registry/version change)"
+        ID_OUT=$(python3 "$ID_TOOL" 2>&1); ID_RC=$?
+        echo "$ID_OUT" | tail -12
+        if [ "$ID_RC" -ne 0 ]; then
+            echo "[pre-commit] Check H FAIL: a persisted/wire identifier was renumbered/reused/dropped (Knight-Capital reuse)."
+            echo "[pre-commit] Tombstone the slot (never reassign the number) — or, if this is an intentional ADD/version-bump,"
+            echo "[pre-commit]   re-run: python3 tools/check_identifier_retirement.py --update — OR bypass with SKIP_IDENTIFIER_CHECK=1"
+            OVERALL_FAIL=1
+        else
+            echo "[pre-commit] Check H PASS"
+        fi
+    fi
+else
+    echo "[pre-commit] SKIP_IDENTIFIER_CHECK=1; skipping identifier-retirement check"
+fi
+
+# ============================================================================
 # Overall exit
 # ============================================================================
 if [ "$OVERALL_FAIL" = "1" ]; then
