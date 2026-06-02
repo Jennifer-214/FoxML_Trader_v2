@@ -1,0 +1,29 @@
+# identifier_ledger.txt — the tombstone golden (check_identifier_retirement.py).
+# Persistence/wire-visible identifier -> value. NEVER renumber/reuse/drop a row;
+# tombstone retired slots (RESERVED/LEGACY_/DEPRECATED) and keep the row. ADD = append.
+# Regenerate after an intentional ADD/tombstone: tools/check_identifier_retirement.py --update
+# format: category|identifier|value
+
+enum:BanditAlgorithm|BANDIT_ALGO_EXP3|0
+enum:BanditAlgorithm|BANDIT_ALGO_THOMPSON|1
+enum:BanditAlgorithm|BANDIT_ALGO_EXP3_OP_THOMPSON_GHOST|2
+enum:BanditAlgorithm|BANDIT_ALGO_THOMPSON_OP_EXP3_GHOST|3
+enum:BanditAlgorithm|BANDIT_ALGO_BLENDED|4
+
+enum:RegimeId|REGIME_RANGING|0
+enum:RegimeId|REGIME_TRENDING|1
+enum:RegimeId|REGIME_VOLATILE|2
+enum:RegimeId|REGIME_TRENDING_DOWN|3
+enum:RegimeId|REGIME_MILD_TREND|4
+
+enum:StrategyId|STRATEGY_MEAN_REVERSION|0
+enum:StrategyId|STRATEGY_MOMENTUM|1
+enum:StrategyId|STRATEGY_SIMPLE_DIP|2
+enum:StrategyId|STRATEGY_ML|3
+
+version|BANDIT_STATE_FORMAT_VERSION|1
+version|STAMP_FORMAT_VERSION_CURRENT|2
+version|PORTFOLIO_SNAPSHOT_VERSION|5
+version|MODEL_FORMAT_VERSION|6
+version|SHARDED_SNAPSHOT_VERSION|8
+version|CONTROLLER_SNAPSHOT_VERSION|12
