@@ -151,6 +151,9 @@ template <unsigned F> struct Portfolio {
     uint16_t _pad0;
     uint32_t _pad1;         // align positions to 8 bytes
     Position<F> positions[MAX_PORTFOLIO_POSITIONS];
+    static_assert(MAX_PORTFOLIO_POSITIONS <= 16,
+                  "active_bitmap is uint16_t (16 bits); MAX_PORTFOLIO_POSITIONS must fit it — raising it "
+                  "past 16 silently truncates the bitmap (bitmap-overflow-protection-discipline; H21-sibling).");
 };
 //======================================================================================================
 // [EXIT STRUCTS]

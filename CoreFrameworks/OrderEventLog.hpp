@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>      // errno - made explicit (was transitively included; header self-sufficiency, .E.1-reshuffle-protective)
 #include <atomic>      // v5.11.3.C — async writer thread coordination
 #include <pthread.h>   // v5.11.3.C — async writer pthread
 #include <unistd.h>    // v5.11.3.C — usleep in writer idle path

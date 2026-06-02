@@ -233,6 +233,9 @@ struct OrderManagerState {
     // ════════════════════════════════════════════════════════════════════
     Order<F> orders[MAX_INFLIGHT_ORDERS];
     uint16_t order_bitmap;       // 1 = slot in use, 0 = free. uint16_t caps at 16 slots.
+    static_assert(MAX_INFLIGHT_ORDERS <= 16,
+                  "order_bitmap is uint16_t (16 bits) AND the order-id encodes the slot in 4 bits; "
+                  "MAX_INFLIGHT_ORDERS must fit both — raising it past 16 silently overflows (bitmap-overflow-protection-discipline).");
     uint16_t _pad0;
     uint32_t _pad1;
     uint64_t next_order_id;      // monotonic id counter; 0 reserved for "no id"
