@@ -290,6 +290,18 @@ else
 fi
 
 # ============================================================================
+# CHECK J: tech-debt surface advisory (ADVISORY — NEVER blocks the commit; H21-sister automation)
+# When staged files touch a surface tracked in an OPEN TECH_DEBT entry, surface the overlapping
+# items so debt is managed without a standing manual scan (mechanizes /readiness Check 25). The
+# DECISION stays human: subsume / adjacent / defer (feedback_opportunistic_tech_debt_closure).
+# (Check I is reserved for the calls_graph orphan-guard, TECH_DEBT-151 #8.)
+# ============================================================================
+if [ "${SKIP_TECH_DEBT_CHECK:-0}" != "1" ]; then
+    TD_TOOL="${REPO_ROOT}/tools/check_tech_debt.py"
+    [ -f "$TD_TOOL" ] && python3 "$TD_TOOL" --staged 2>&1 || true   # advisory: surfaces matches, never fails
+fi
+
+# ============================================================================
 # Overall exit
 # ============================================================================
 if [ "$OVERALL_FAIL" = "1" ]; then
