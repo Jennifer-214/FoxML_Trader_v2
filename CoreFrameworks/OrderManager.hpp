@@ -1128,6 +1128,22 @@ inline void OrderManager_AccountMakerTakerFee(
     oms->total_taker_fees    = maker ? oms->total_taker_fees : FPN_AddSat(oms->total_taker_fees, fee);
 }
 
+// GUARD — maker/taker fee-desync (DORMANT; the reactivatable-assumption shape, Class-40 sibling).
+// pre_resolved.fee_rate is bound at SUBMIT as TAKER (the engine is MARKET-only — OrderManager_Submit refuses
+// non-MARKET, and MARKET fills are always taker). So a maker fill CANNOT occur today: this is a NEVER-TAKEN
+// branch (zero behavior change now). If it ever fires, LIMIT orders were enabled WITHOUT re-resolving
+// fee_rate from is_maker at fill time → the taker-rate fee is charged + bucketed as maker (a live fee
+// over-charge + wrong P&L split). Fail LOUD so it can't ship silently. The real fix: re-resolve
+// pre_resolved.fee_rate from is_maker BEFORE enabling LIMIT orders (TECH_DEBT-154). __builtin_expect-rare
+// per H20 exception (cold capital-check; matches the file's existing FILE*-null guard convention).
+template <unsigned F>
+inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
+    if (__builtin_expect(Order_GetIsMaker(o) != 0, 0)) {
+        fprintf(stderr, "[FATAL] OrderManager fee-desync: maker fill on a TAKER-bound fee_rate — LIMIT orders "
+                        "were enabled without re-resolving fee_rate from is_maker at fill (TECH_DEBT-154).\n");
+    }
+}
+
 //======================================================================================================
 // [PATTERN 1 1D TYPE DISPATCH HANDLERS — v5.15.5.F.4c.3 WIP2d-1.B.1]
 //======================================================================================================
@@ -1145,6 +1161,7 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, FPN<F> fill_
     const FPN<F> notional   = FPN_Mul(fill_price, fill_qty);
     const FPN<F> entry_rate = o->pre_resolved.fee_rate;
     const FPN<F> entry_fee  = FPN_Mul(notional, entry_rate);
+    OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
     OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), entry_fee);
     Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                        fill_price, fill_qty,
@@ -1190,6 +1207,7 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, FPN<F> fill
     const FPN<F> exit_notional = FPN_Mul(fill_price, qty_snap);
     const FPN<F> exit_rate     = o->pre_resolved.fee_rate;
     const FPN<F> exit_fee      = FPN_Mul(exit_notional, exit_rate);
+    OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
     OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), exit_fee);
     const FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
     const FPN<F> net           = FPN_Sub(gross, total_fee);
