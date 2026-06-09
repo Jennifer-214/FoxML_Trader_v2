@@ -61,7 +61,7 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
     FPN<F> vwap;               // pv_sum / vol_sum
     FPN<F> vwap_deviation;     // (price - vwap) / vwap (negative = below VWAP)
-    // 13 × FPN<64>=24B = 312 bytes ≈ 5 cache lines (0-4)
+    // 13 × FPN<64>=16B = 208 bytes ≈ 4 cache lines (0-3) (Ship-A 16B flip; was 24B/312B/5 lines)
 
     // ── WRITE-HEAVY INTERNAL STATE (cache-line-isolated from outputs) ──
     // alignas(64) on `head` forces it to start on a fresh cache line. The
