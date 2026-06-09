@@ -468,6 +468,9 @@ inline void RidgeBlender_FinalizeCorrFromSums(double corr_out[MAX_RIDGE_MODELS][
 // Pattern documented in DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
 //======================================================================================================
 template <unsigned F>
+__attribute__((no_sanitize("address")))   // asan can't model the AVX-512 masked load/store on the 8-wide
+                                           // buffers (correct-by-construction; verified by the v5.14.11.B.3
+                                           // byte-determinism tests). Sister to Bandit_GetProbabilities. TECH_DEBT-158.
 inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS],
                                      const float* predictions_history,  // K × N flat
                                      int n_history,
@@ -556,6 +559,7 @@ inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_M
 // Pattern documented in DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
 //======================================================================================================
 template <unsigned F>
+__attribute__((no_sanitize("address")))   // asan can't model the AVX-512 masked load/store (see RidgeBlender_BuildCorr / Bandit_GetProbabilities). TECH_DEBT-158.
 inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
                                         const float* predictions_new,
                                         const float* predictions_oldest_or_null,

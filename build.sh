@@ -223,7 +223,7 @@ build_latency() {
 build_tsan() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_tsan
     cmake -B build_tsan -DCMAKE_BUILD_TYPE=Debug \
-        -DCMAKE_CXX_FLAGS="-fsanitize=thread -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON" \
+        -DCMAKE_CXX_FLAGS="-fsanitize=thread -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON -DFOXML_SANITIZER_BUILD" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
     cmake --build build_tsan -j"$JOBS"
     link_cfg build_tsan
@@ -235,7 +235,7 @@ build_tsan() {
 build_asan() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_asan
     cmake -B build_asan -DCMAKE_BUILD_TYPE=Debug \
-        -DCMAKE_CXX_FLAGS="-fsanitize=address -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON" \
+        -DCMAKE_CXX_FLAGS="-fsanitize=address -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON -DFOXML_SANITIZER_BUILD" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
     cmake --build build_asan -j"$JOBS"
     link_cfg build_asan
@@ -248,7 +248,7 @@ build_ubsan() {
     # -fno-sanitize-recover makes the FIRST UB ABORT (so a test run goes red, CI-friendly).
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_ubsan
     cmake -B build_ubsan -DCMAKE_BUILD_TYPE=Debug \
-        -DCMAKE_CXX_FLAGS="-fsanitize=signed-integer-overflow,undefined -fno-sanitize-recover=all -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON" \
+        -DCMAKE_CXX_FLAGS="-fsanitize=signed-integer-overflow,undefined -fno-sanitize-recover=all -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON -DFOXML_SANITIZER_BUILD" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined"
     cmake --build build_ubsan -j"$JOBS"
     link_cfg build_ubsan
