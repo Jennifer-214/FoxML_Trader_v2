@@ -604,12 +604,14 @@ inline void EmaCross_BuildParameters(
     // Crossover gate: ref must sit above short SMA by at least
     // emacross_crossover_min stddevs. Same geometry as the legacy
     // EmaCross_BuySignal.
-    int uptrend = 0;
-    if (!FPN_IsZero(rolling->price_avg) && !FPN_IsZero(rolling->price_stddev)) {
+    // branchless compute-guard: compute always (zero divisor → safe saturate), gate by `valid`.
+    int uptrend;
+    {
+        int valid = !FPN_IsZero(rolling->price_avg) & !FPN_IsZero(rolling->price_stddev);
         FPN<F> diff = FPN_Sub(ref, rolling->price_avg);
-        int ema_above = (diff.sign == 0) && !FPN_IsZero(diff);
+        int ema_above = (diff.v > 0);   // positive diff (was sign==0 && !IsZero; 16B two's-comp)
         FPN<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
-        uptrend = ema_above & FPN_GreaterThan(spread_stddevs, core_cfg->emacross_crossover_min);
+        uptrend = valid & ema_above & FPN_GreaterThan(spread_stddevs, core_cfg->emacross_crossover_min);
     }
 
     // Buy price = ref - stddev * emacross_dip_mult (dip below EMA)

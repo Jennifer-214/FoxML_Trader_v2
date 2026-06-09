@@ -127,8 +127,8 @@ namespace detail { using RollingStats_64_128 = RollingStats<64, 128>; }
 static_assert((offsetof(detail::RollingStats_64_128, head) % 64) == 0,
               "head must be cache-line-aligned (alignas(64) on field) — "
               "see plans/2026-05-06-latency-path-discipline.md Rule 1");
-static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 5,
-              "head must come AFTER the 5-cache-line output cluster — "
+static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 4,
+              "head must come AFTER the 4-cache-line output cluster (Ship-A 16B FPN; was 5 lines) — "
               "outputs (price_avg through vwap_deviation) read by GUI thread; "
               "head writes by engine must not share line with them");
 

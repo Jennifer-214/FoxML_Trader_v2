@@ -95,7 +95,6 @@ inline void Momentum_Adapt(MomentumState<F> *state,
                             uint16_t active_bitmap,
                             const BuySideGateConditions<F> *buy_conds,
                             const ControllerConfig<F> *cfg) {
-    constexpr unsigned N = FPN<F>::N;
 
     //==================================================================================================
     // IDLE SQUEEZE: lower breakout threshold when no positions and price above buy gate
@@ -107,17 +106,13 @@ inline void Momentum_Adapt(MomentumState<F> *state,
         // that already happened while we were too defensive)
         int trailing = FPN_LessThan(current_price, buy_conds->price);
         int should_squeeze = is_empty & trailing;
-        uint64_t sq_mask = -(uint64_t)should_squeeze;
+        unsigned __int128 sq_mask = -(unsigned __int128)(unsigned)should_squeeze;
 
         // squeeze breakout_mult toward minimum (breakout_min stddevs)
         FPN<F> breakout_min = cfg->breakout_min;
         FPN<F> gap = FPN_Sub(state->live_breakout_mult, breakout_min);
         FPN<F> step = FPN_Mul(gap, cfg->squeeze_decay);
-        FPN<F> masked_step;
-        for (unsigned i = 0; i < N; i++) {
-            masked_step.w[i] = step.w[i] & sq_mask;
-        }
-        masked_step.sign = step.sign & should_squeeze;
+        FPN<F> masked_step { (__int128)((unsigned __int128)step.v & sq_mask) };
         state->live_breakout_mult = FPN_SubSat(state->live_breakout_mult, masked_step);
         state->live_breakout_mult = FPN_Max(state->live_breakout_mult, breakout_min);
 
@@ -125,11 +120,7 @@ inline void Momentum_Adapt(MomentumState<F> *state,
         FPN<F> one = FPN_FromDouble<F>(1.0);
         FPN<F> vmult_gap = FPN_Sub(state->live_vol_mult, one);
         FPN<F> vmult_step = FPN_Mul(vmult_gap, cfg->squeeze_decay);
-        FPN<F> masked_vmult;
-        for (unsigned i = 0; i < N; i++) {
-            masked_vmult.w[i] = vmult_step.w[i] & sq_mask;
-        }
-        masked_vmult.sign = vmult_step.sign & should_squeeze;
+        FPN<F> masked_vmult { (__int128)((unsigned __int128)vmult_step.v & sq_mask) };
         state->live_vol_mult = FPN_SubSat(state->live_vol_mult, masked_vmult);
         state->live_vol_mult = FPN_Max(state->live_vol_mult, one);
     }
@@ -155,12 +146,7 @@ inline void Momentum_Adapt(MomentumState<F> *state,
         // negate: positive P&L → lower breakout_mult (negative shift to subtract)
         FPN<F> neg_shift = FPN_Negate(shift);
 
-        FPN<F> masked_shift;
-        uint64_t conf_mask = -(uint64_t)confident;
-        for (unsigned i = 0; i < N; i++) {
-            masked_shift.w[i] = neg_shift.w[i] & conf_mask;
-        }
-        masked_shift.sign = neg_shift.sign & confident;
+        FPN<F> masked_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)confident) };
 
         FPN<F> scaled_shift = FPN_Mul(masked_shift, cfg->stddev_adapt_scale);
         state->live_breakout_mult = FPN_AddSat(state->live_breakout_mult, scaled_shift);
@@ -214,13 +200,9 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
         shift = FPN_Min(shift, max_shift_abs);
         shift = FPN_Max(shift, FPN_Negate(max_shift_abs));
 
-        FPN<F> masked_shift;
-        uint64_t conf_mask = -(uint64_t)confident;
-        constexpr unsigned N = FPN<F>::N;
-        for (unsigned i = 0; i < N; i++) {
-            masked_shift.w[i] = shift.w[i] & conf_mask;
-        }
-        masked_shift.sign = shift.sign & confident;
+        // branchless: masked_shift = confident ? shift : 0 (16B → mask the whole .v)
+        unsigned __int128 conf_mask = -(unsigned __int128)(unsigned)confident;
+        FPN<F> masked_shift { (__int128)((unsigned __int128)shift.v & conf_mask) };
 
         conds.price = FPN_AddSat(conds.price, masked_shift);
 

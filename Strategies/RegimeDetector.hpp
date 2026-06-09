@@ -296,14 +296,13 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
 
     // EMA/SMA crossover: (ema - sma) / sma
     // normalized so threshold is asset-independent (same value works for BTC and ETH)
-    if (!FPN_IsZero(rolling->price_avg) && !FPN_IsZero(ema_price)) {
-        sig->ema_sma_spread = FPN_DivNoAssert(
-            FPN_Sub(ema_price, rolling->price_avg), rolling->price_avg);
-        sig->ema_above_sma = !sig->ema_sma_spread.sign & !FPN_IsZero(sig->ema_sma_spread);
-    } else {
-        sig->ema_sma_spread = FPN_Zero<F>();
-        sig->ema_above_sma = 0;
-    }
+    // branchless: compute the spread always (FPN_DivNoAssert by zero safely saturates → deterministic), then
+    // mask to 0 when either operand is zero. H20: branchless even if slower — a mispredict's variance cascades.
+    int valid = !FPN_IsZero(rolling->price_avg) & !FPN_IsZero(ema_price);
+    unsigned __int128 vmask = -(unsigned __int128)(unsigned)valid;
+    FPN<F> spread = FPN_DivNoAssert(FPN_Sub(ema_price, rolling->price_avg), rolling->price_avg);
+    sig->ema_sma_spread = { (__int128)((unsigned __int128)spread.v & vmask) };   // spread if valid, else 0
+    sig->ema_above_sma  = (sig->ema_sma_spread.v > 0);                           // 0 when masked to 0
 
     if (!FPN_IsZero(rolling_long->price_avg) && !FPN_IsZero(ema_price)) {
         sig->ema_sma_spread_long = FPN_DivNoAssert(
@@ -535,7 +534,7 @@ inline int Regime_Classify(RegimeState<F> *state,
     // signal 2: long crossover — EMA vs 512-sample SMA (multi-timeframe confirmation)
     FPN<F> abs_spread_long = FPN_Abs(sig->ema_sma_spread_long);
     int long_has_data = (sig->long_count >= 64);
-    int long_ema_above = !sig->ema_sma_spread_long.sign & !FPN_IsZero(sig->ema_sma_spread_long);
+    int long_ema_above = (sig->ema_sma_spread_long.v > 0);   // strictly positive (was !sign & !IsZero; 16B)
     int long_crossover_strong = long_has_data &
         FPN_GreaterThan(abs_spread_long, cfg->regime_crossover_threshold);
     trending_score += long_crossover_strong;

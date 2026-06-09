@@ -29,30 +29,19 @@
 //======================================================================================================
 // [FIXED-POINT NUMBER REPRESENTATION]
 //======================================================================================================
-template <unsigned FRAC_BITS> struct FPN {
-    static_assert(FRAC_BITS >= 64, "minimum 64 fractional bits, use FixedPoint16/32 for smaller");
-    static_assert((FRAC_BITS & (FRAC_BITS - 1)) == 0, "FRAC_BITS must be a power of 2");
-
-    // v5.15.5.F.4b — expose template parameter as member for T::F access in
-    // templated dispatchers. tt::cfg_parse_field<T> needs FPN_FromDouble<T::F>(v)
-    // to instantiate the correct FPN<F> specialization given a deduced T = FPN<F>.
-    // Mirrors the existing TOTAL_BITS/N/FRAC_WORDS exposure pattern below.
-    static constexpr unsigned F          = FRAC_BITS;
-    static constexpr unsigned TOTAL_BITS = FRAC_BITS * 2;
-    static constexpr unsigned N          = TOTAL_BITS / 64; // number of uint64_t words
-    static constexpr unsigned FRAC_WORDS = FRAC_BITS / 64;  // words that are fractional
-
-    uint64_t w[N]; // little-endian: w[0] = least significant
-    int32_t sign;  // 0 = positive/zero, 1 = negative
-    int32_t _padding = 0;  // v5.14.11.B.2 — explicit zero-init padding eliminates UB
-                           // bytes in memcmp/SHA-256/wire-format contexts. Same struct
-                           // size (24B at F=64; was 24B with implicit padding). Default
-                           // member init guarantees deterministic 0 for all FPN
-                           // constructions + copies. Pattern documented in
-                           // DESIGN_SPECS/struct-padding-determinism-pattern.md.
-                           // FracDiff bytewise-identity regression (exposed by
-                           // v5.14.11.B stack-layout shift) eliminated by this fix.
+// v5.15.5.F.4d.1.E Ship A (D-143 intent: FPN<64> = the 16B binary core). MECHANISM = full-specialization,
+// NOT an alias: an alias template `using FPN = FixedPoint<2,F>` makes FPN<F> a NON-DEDUCED context, breaking
+// `FPN_Op(args)` template-arg deduction across the F-generic engine (red-build caught it at CfgFieldDispatch).
+// So FPN<64> is a concrete 16B specialization (layout-identical to FixedPoint<2,64>: bare __int128 v), and
+// is_fp_binary is EXTENDED to cover it below (so the B6 wire-dispatchers see it as binary). The 24B
+// sign-magnitude generic body is SHED — only <64> is defined; F=128 was trait-test-only (rewritten this ship).
+// The old `.w[]`/`.sign` aggregate-access sites red-build → ported to `.v`.
+template <unsigned F> struct FPN;                         // primary: declaration only (arbitrary width shed)
+template <> struct FPN<64> {
+    __int128 v;                                           // value = v / 2^64 (two's-complement; sign in the top bit)
+    static constexpr unsigned F = 64;                     // T::F access for templated dispatchers (tt::cfg_*_field<T>)
 };
+static_assert(sizeof(FPN<64>) == 16, "Ship A: FPN<64> is the 16B two's-complement binary core (was 24B sign-mag)");
 
 // v5.15.5.F.4b — type trait for FPN<F> detection in templated dispatchers.
 // Used by tt::cfg_parse_field<T> / tt::cfg_save_field<T> / tt::cfg_render_field<T>
@@ -74,9 +63,8 @@ template <unsigned FRAC_BITS> struct FPN {
 //
 // Pattern: parallel to std::is_floating_point_v / std::is_array_v / std::is_unsigned_v
 // from <type_traits>. Codebase-specific traits live next to the type they describe.
-template <typename T>           struct is_FPN                : std::false_type {};
-template <unsigned F_ARG>       struct is_FPN<FPN<F_ARG>>    : std::true_type  {};
-template <typename T> inline constexpr bool is_FPN_v = is_FPN<T>::value;
+// is_FPN_v is redefined as a binary-only alias of is_fp_binary_v at the FPN alias below (D-143) — so the
+// 21 existing is_FPN_v consumers + the B6 wire-dispatchers share ONE binary-domain trait (no divergence).
 
 //======================================================================================================
 // [UNIFIED RADIX-PARAMETRIZED FIXED-POINT — v5.15.5.F.4d.1.E Ship A]
@@ -109,6 +97,12 @@ template <typename T> inline constexpr bool is_fp_binary_v  = is_fp_binary<T>::v
 template <typename T>  struct is_fp_decimal                    : std::false_type {};
 template <int F>       struct is_fp_decimal<FixedPoint<10, F>> : std::true_type  {};
 template <typename T> inline constexpr bool is_fp_decimal_v = is_fp_decimal<T>::value;
+
+// FPN<64> (the concrete 16B binary core, defined above) is is_fp_binary — EXTEND the trait so the B6 wire-
+// dispatchers (which gate on is_fp_binary_v) treat it as binary, and unify is_FPN_v onto is_fp_binary_v (the
+// 21 is_FPN_v consumers + the dispatchers now share ONE binary-domain trait — D-143/B6).
+template <> struct is_fp_binary<FPN<64>> : std::true_type {};
+template <typename T> inline constexpr bool is_FPN_v = is_fp_binary_v<T>;   // binary-only (D-143; was is_FPN<T>)
 
 //======================================================================================================
 // [N-WORD HELPERS]
@@ -1250,47 +1244,9 @@ template <unsigned F> inline FPN<F> FPN_SmoothStep(FPN<F> edge0, FPN<F> edge1, F
 #include "FixedPoint64.hpp"
 #include <cstring>  // F-058: memcpy for type-pun-free FP64<->FPN<64> conversion
 
-// zero-cost conversions (identical memory layout on little-endian x86).
-// F-058: memcpy (not a `*(__uint128_t*)` pointer-pun) — the pun is strict-aliasing
-// + alignment UB under -O3 -flto; memcpy is the standard-blessed type-pun and lowers
-// to the same MOV at -O2+ (zero cost), byte-preserving on x86.
-static inline FP64 _to_fp64(FPN<64> v) {
-    FP64 r; __uint128_t m; memcpy(&m, v.w, sizeof(m)); r.magnitude = m; r.sign = v.sign; return r;
-}
-static inline FPN<64> _from_fp64(FP64 v) {
-    FPN<64> r; memcpy(r.w, &v.magnitude, sizeof(v.magnitude)); r.sign = v.sign; return r;
-}
-
-// arithmetic
-template<> inline FPN<64> FPN_AddSat<64>(FPN<64> a, FPN<64> b) { return _from_fp64(FP64_AddSat(_to_fp64(a), _to_fp64(b))); }
-template<> inline FPN<64> FPN_SubSat<64>(FPN<64> a, FPN<64> b) { return _from_fp64(FP64_SubSat(_to_fp64(a), _to_fp64(b))); }
-template<> inline FPN<64> FPN_Mul<64>(FPN<64> a, FPN<64> b)    { return _from_fp64(FP64_Mul(_to_fp64(a), _to_fp64(b))); }
-template<> inline FPN<64> FPN_DivNoAssert<64>(FPN<64> a, FPN<64> b) { return _from_fp64(FP64_DivNoAssert(_to_fp64(a), _to_fp64(b))); }
-template<> inline FPN<64> FPN_Sub<64>(FPN<64> a, FPN<64> b)    { return _from_fp64(FP64_SubSat(_to_fp64(a), _to_fp64(b))); }
-
-// comparisons
-template<> inline int FPN_Equal<64>(FPN<64> a, FPN<64> b)              { return FP64_Equal(_to_fp64(a), _to_fp64(b)); }
-template<> inline int FPN_LessThan<64>(FPN<64> a, FPN<64> b)           { return FP64_LessThan(_to_fp64(a), _to_fp64(b)); }
-template<> inline int FPN_LessThanOrEqual<64>(FPN<64> a, FPN<64> b)    { return FP64_LessThanOrEqual(_to_fp64(a), _to_fp64(b)); }
-template<> inline int FPN_GreaterThan<64>(FPN<64> a, FPN<64> b)        { return FP64_GreaterThan(_to_fp64(a), _to_fp64(b)); }
-template<> inline int FPN_GreaterThanOrEqual<64>(FPN<64> a, FPN<64> b) { return FP64_GreaterThanOrEqual(_to_fp64(a), _to_fp64(b)); }
-
-// utility
-template<> inline FPN<64> FPN_Negate<64>(FPN<64> v)  { return _from_fp64(FP64_Negate(_to_fp64(v))); }
-template<> inline int FPN_IsZero<64>(FPN<64> v)       { return FP64_IsZero(_to_fp64(v)); }
-template<> inline FPN<64> FPN_Abs<64>(FPN<64> v)      { return _from_fp64(FP64_Abs(_to_fp64(v))); }
-template<> inline FPN<64> FPN_Min<64>(FPN<64> a, FPN<64> b) { return _from_fp64(FP64_Min(_to_fp64(a), _to_fp64(b))); }
-template<> inline FPN<64> FPN_Max<64>(FPN<64> a, FPN<64> b) { return _from_fp64(FP64_Max(_to_fp64(a), _to_fp64(b))); }
-
-// conversion
-template<> inline FPN<64> FPN_FromDouble<64>(double d) { return _from_fp64(FP64_FromDouble(d)); }
-template<> inline double FPN_ToDouble<64>(FPN<64> v)   { return FP64_ToDouble(_to_fp64(v)); }
-
-// math (slow path): FPN_Sqrt<64> deliberately NOT specialized — it falls through to
-// the generic bytewise-deterministic Newton-Raphson (:873). F-056: the native FP64_Sqrt
-// is a sqrt(double) round-trip → non-deterministic across compilers (breaks H10
-// cross-binary determinism); the generic NR is integer-FPN-only + deterministic. The
-// exact-integer native specializations above stay. (Incidentally closes F-078.)
+// (FP64-forwarding block REMOVED — Ship A flip. FPN<64> is now the 16B two's-complement core, so its ops
+//  ARE the proven fp2_* bodies; the FPN<64> op specializations live after the fp2_* defs, at the bottom of
+//  this header. FixedPoint64.hpp stays included [FP64 still backs FPN_FromFP64/ToFP64] until the D-99 absorb.)
 
 #endif // USE_NATIVE_128
 
@@ -1316,12 +1272,8 @@ inline constexpr __int128 FP2_64_MAX = (__int128)(((unsigned __int128)1 << 127) 
 inline __int128 i128_abs(__int128 v)           { __int128 s = v >> 127; return (v ^ s) - s; }
 inline __int128 i128_cneg(__int128 v, int neg) { __int128 m = -(__int128)(neg & 1); return (v ^ m) - m; }  // neg ? -v : v
 
-// decode FPN<64> (sign-magnitude w[1]:w[0] + sign flag) to the SAME value as a 16B two's-complement.
-inline FixedPoint<2,64> fp2_from_fpn(FPN<64> x) {
-    unsigned __int128 mag = ((unsigned __int128)x.w[1] << 64) | (unsigned __int128)x.w[0];
-    __int128 v = (__int128)mag;
-    return { x.sign ? -v : v };
-}
+// (fp2_from_fpn REMOVED — the 24B-sign-mag → 16B decoder is obsolete now that FPN<64> IS the 16B type;
+//  D-143 + Class-40 dead-code removal. The slice that used it retires at this flip.)
 
 inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     bool neg = (a.v < 0) ^ (b.v < 0);
@@ -1412,6 +1364,15 @@ inline FixedPoint<2,64> fp2_sqrt(FixedPoint<2,64> a) {                          
 // --- Conversions: replicate FPN_FromDouble<64>/FPN_ToDouble<64>'s F=64 arithmetic on __int128.
 // Bit-identical by construction (same floor / (uint64_t) casts / 2^64 scale) → value-equivalent.
 inline FixedPoint<2,64> fp2_from_double(double input) {
+    // Ship-A: non-finite / out-of-range input → DETERMINISTIC saturate. The conversion below does
+    // (uint64_t)floor(|input|), which is UB for NaN/Inf/|input|>2^63 — and the UB result VARIES by
+    // optimization level (an -O3 NaN slipped past FPN_IsValidFinite + std::isnan in Features_PackAll
+    // where -O2 caught it; the 24B path relied on the same UB happening to propagate NaN→ToDouble).
+    // Saturating to ±MAX makes FPN_IsValidFinite ALWAYS reject it, identically across every build.
+    // __builtin_expect-rare (H20 sanctioned error-path branch): legit price/feature values sit far
+    // inside ±9e18 (2^63); -FP2_64_MAX (not FP2_64_MIN, defined later) dodges the INT128_MIN edge.
+    if (__builtin_expect(!(input >= -9.0e18 && input <= 9.0e18), 0))
+        return { input < 0.0 ? -FP2_64_MAX : FP2_64_MAX };
     int neg = (input < 0.0);
     double abs_input = input * (1.0 - 2.0 * neg);
     double int_part = floor(abs_input);
@@ -1516,5 +1477,131 @@ inline FixedPoint<2,64> fp2_sin(FixedPoint<2,64> value) {                   // v
 inline FixedPoint<2,64> fp2_cos(FixedPoint<2,64> value) {                   // cos(x) = sin(x + pi/2)
     return fp2_sin(fp2_addsat(value, fp2_from_double(1.5707963267948966)));
 }
+
+//======================================================================================================
+// [FPN<64> OP SPECIALIZATIONS — Ship A flip: FPN<64> = the concrete 16B core; ops = the proven fp2_* bodies]
+//======================================================================================================
+// Replaces the obsolete USE_NATIVE_128 FP64-forwarding block. FPN<64> is layout-identical to FixedPoint<2,64>
+// (both bare __int128 v), so each op feeds .v into the PROVEN fp2_* body (slice 423/0, value-equivalent to the
+// old 24B sign-magnitude) and re-wraps. Comparisons are native on .v (two's-complement total order — value-
+// equivalent in the |value|<2^63 bounded range, R2). Negate/Abs carry the D-147 branchless INT_MIN→MAX
+// saturate (magnitude in unsigned space = UB-free; the `== FP2_64_MIN` mask lowers to setcc, NO data-dependent
+// jump → zero variable latency). Ops the engine calls that aren't here yet (Add/Sign/Floor/Ceil/Round/
+// FromString/ToString/FromFP64/ToFP64/Zero/DivWithAssert) red-build → added next.
+inline constexpr __int128 FP2_64_MIN = (__int128)((unsigned __int128)1 << 127);   // -2^127 (INT128_MIN)
+
+template<> inline FPN<64> FPN_Mul<64>(FPN<64> a, FPN<64> b)         { return { fp2_mul({a.v}, {b.v}).v }; }
+template<> inline FPN<64> FPN_AddSat<64>(FPN<64> a, FPN<64> b)      { return { fp2_addsat({a.v}, {b.v}).v }; }
+template<> inline FPN<64> FPN_SubSat<64>(FPN<64> a, FPN<64> b)      { return { fp2_sub({a.v}, {b.v}).v }; }
+template<> inline FPN<64> FPN_Sub<64>(FPN<64> a, FPN<64> b)         { return { fp2_sub({a.v}, {b.v}).v }; }
+template<> inline FPN<64> FPN_DivNoAssert<64>(FPN<64> a, FPN<64> b) { return { fp2_div({a.v}, {b.v}).v }; }
+template<> inline FPN<64> FPN_Min<64>(FPN<64> a, FPN<64> b)         { return { fp2_min({a.v}, {b.v}).v }; }
+template<> inline FPN<64> FPN_Max<64>(FPN<64> a, FPN<64> b)         { return { fp2_max({a.v}, {b.v}).v }; }
+
+template<> inline int FPN_Equal<64>(FPN<64> a, FPN<64> b)              { return a.v == b.v; }
+template<> inline int FPN_LessThan<64>(FPN<64> a, FPN<64> b)           { return a.v <  b.v; }
+template<> inline int FPN_LessThanOrEqual<64>(FPN<64> a, FPN<64> b)    { return a.v <= b.v; }
+template<> inline int FPN_GreaterThan<64>(FPN<64> a, FPN<64> b)        { return a.v >  b.v; }
+template<> inline int FPN_GreaterThanOrEqual<64>(FPN<64> a, FPN<64> b) { return a.v >= b.v; }
+template<> inline int FPN_IsZero<64>(FPN<64> v)                        { return v.v == 0; }
+
+template<> inline FPN<64> FPN_Negate<64>(FPN<64> a) {
+    unsigned __int128 neg  = -(unsigned __int128)a.v;                             // wrapping -v (UB-free)
+    unsigned __int128 minm = -(unsigned __int128)(a.v == FP2_64_MIN);            // all-ones iff v == INT_MIN
+    return { (__int128)((neg & ~minm) | ((unsigned __int128)FP2_64_MAX & minm)) };
+}
+template<> inline FPN<64> FPN_Abs<64>(FPN<64> a) {
+    __int128 s = a.v >> 127;                                                     // 0 / -1 (arithmetic)
+    unsigned __int128 mag  = ((unsigned __int128)a.v ^ (unsigned __int128)s) - (unsigned __int128)s;   // |v| (UB-free)
+    unsigned __int128 minm = -(unsigned __int128)(a.v == FP2_64_MIN);
+    return { (__int128)((mag & ~minm) | ((unsigned __int128)FP2_64_MAX & minm)) };
+}
+
+template<> inline FPN<64> FPN_FromDouble<64>(double d) { return { fp2_from_double(d).v }; }
+template<> inline double   FPN_ToDouble<64>(FPN<64> v)  { return fp2_to_double({v.v}); }
+template<> inline FPN<64> FPN_FromInt<64>(int64_t i)    { return { fp2_from_int(i).v }; }
+
+template<> inline FPN<64> FPN_Sqrt<64>(FPN<64> v)             { return { fp2_sqrt({v.v}).v }; }
+template<> inline FPN<64> FPN_Exp<64>(FPN<64> v)              { return { fp2_exp({v.v}).v }; }
+template<> inline FPN<64> FPN_Sin<64>(FPN<64> v)              { return { fp2_sin({v.v}).v }; }
+template<> inline FPN<64> FPN_Cos<64>(FPN<64> v)              { return { fp2_cos({v.v}).v }; }
+template<> inline FPN<64> FPN_Log<64>(FPN<64> v)              { return { fp2_log({v.v}).v }; }
+template<> inline FPN<64> FPN_Tan<64>(FPN<64> v)              { return { fp2_tan({v.v}).v }; }
+template<> inline FPN<64> FPN_InvSqrt<64>(FPN<64> v)          { return { fp2_invsqrt({v.v}).v }; }
+template<> inline FPN<64> FPN_Atan2<64>(FPN<64> y, FPN<64> x) { return { fp2_atan2({y.v}, {x.v}).v }; }
+template<> inline FPN<64> FPN_Pow<64>(FPN<64> b, FPN<64> e)   { return { fp2_pow({b.v}, {e.v}).v }; }
+
+template<> inline FPN<64> FPN_Zero<64>() { return { (__int128)0 }; }
+
+// Branchless mask-blend: caller forms `mask = -(uint64_t)cond` (0 / all-ones-64). Sign-extend to 128b + blend .v.
+template<> inline FPN<64> FPN_BlendOnMask<64>(FPN<64> if_true, FPN<64> if_false, uint64_t mask) {
+    unsigned __int128 m = (unsigned __int128)(__int128)(int64_t)mask;            // 0 / all-ones-128 (sign-extended)
+    return { (__int128)(((unsigned __int128)if_true.v & m) | ((unsigned __int128)if_false.v & ~m)) };
+}
+
+// Decimal string <-> 16B. Value-equivalent to the generic at F=64: the integer part is the high 64b word
+// (old w[1]), the fraction is the low 64b word (old w[0]); same per-word base-10 divmod/mul-by-10.
+template<> inline unsigned FPN_ToString<64>(FPN<64> value, char *buf, unsigned buf_size, unsigned decimal_places) {
+    if (decimal_places == 0) decimal_places = FPN_MaxDecimalDigits<64>();
+    unsigned pos = 0;
+    int neg = (value.v < 0);
+    unsigned __int128 mag = neg ? -(unsigned __int128)value.v : (unsigned __int128)value.v;
+    if (neg && mag != 0) { if (pos < buf_size - 1) buf[pos++] = '-'; }
+    uint64_t int_part  = (uint64_t)(mag >> 64);                                  // integer word (old w[1])
+    uint64_t frac_part = (uint64_t)mag;                                          // fractional word (old w[0])
+    char int_digits[21]; unsigned n_int = 0;
+    if (int_part == 0) int_digits[n_int++] = '0';
+    else while (int_part) { int_digits[n_int++] = (char)('0' + (int)(int_part % 10)); int_part /= 10; }
+    for (int i = (int)n_int - 1; i >= 0 && pos < buf_size - 1; i--) buf[pos++] = int_digits[i];
+    if (decimal_places > 0 && pos < buf_size - 1) {
+        buf[pos++] = '.';
+        for (unsigned d = 0; d < decimal_places && pos < buf_size - 1; d++) {
+            unsigned __int128 t = (unsigned __int128)frac_part * 10;             // ×10, overflow word = next digit
+            buf[pos++] = (char)('0' + (int)(uint64_t)(t >> 64));
+            frac_part  = (uint64_t)t;
+        }
+    }
+    buf[pos] = '\0';
+    return pos;
+}
+// BRANCHLESS body (mask-based, no per-char dispatch if/else; unified int/frac accumulation), ONE safe
+// null-bounded loop — the loop-exit is safe-termination, NOT a data-dependent dispatch branch (a fixed-trip
+// scan would over-read past the null on untrusted producer input). Value-equivalent to the digit-by-digit
+// generic: diff-tested byte-identical across the venue string domain (build_probe/fromstring_difftest.cpp,
+// 297/0). frac_low = floor((frac_int<<64)/10^n) IS the generic's right-to-left divmod for n≤19 (venue
+// precision). Full fixed-width SWAR throughput stays task #5; this is the branchless-where-it-counts form.
+template<> inline FPN<64> FPN_FromString<64>(const char *str) {
+    static const uint64_t POW10[20] = {
+        1ull,10ull,100ull,1000ull,10000ull,100000ull,1000000ull,10000000ull,100000000ull,1000000000ull,
+        10000000000ull,100000000000ull,1000000000000ull,10000000000000ull,100000000000000ull,
+        1000000000000000ull,10000000000000000ull,100000000000000000ull,1000000000000000000ull,
+        10000000000000000000ull };
+    int neg = (str[0] == '-');
+    unsigned i = (unsigned)(neg | (str[0] == '+'));
+    uint64_t int_part = 0, frac_int = 0;
+    unsigned n_frac = 0;
+    int seen_dot = 0;
+    for (; str[i] != '\0'; i++) {                                   // safe: stop at null (no over-read)
+        char c = str[i];
+        int is_digit = ((unsigned char)(c - '0') <= 9u);
+        int is_dot   = (c == '.');
+        unsigned dig = (unsigned)(unsigned char)(c - '0');
+        int in_int  = is_digit & !seen_dot;
+        int in_frac = is_digit &  seen_dot;
+        int_part += (uint64_t)in_int  * (int_part * 9 + dig);       // branchless: in_int ? int_part*10+dig : int_part
+        frac_int += (uint64_t)in_frac * (frac_int * 9 + dig);
+        n_frac   += (unsigned)in_frac;
+        seen_dot |= is_dot;
+    }
+    unsigned nf = n_frac < 20u ? n_frac : 19u;                      // clamp (cmov); >19 frac digits is beyond venue precision
+    unsigned __int128 frac_low = ((unsigned __int128)frac_int << 64) / POW10[nf];
+    unsigned __int128 mag = ((unsigned __int128)int_part << 64) | (uint64_t)frac_low;
+    int s = neg & (mag != 0);
+    return { (__int128)(s ? -mag : mag) };
+}
+
+// (FPN_FromFP64<64>/FPN_ToFP64<64> NOT specialized — their generic is `#ifdef FIXED_POINT_64_H`-gated at a
+//  point where the macro isn't defined yet, and the engine red-build never instantiates them for <64>. If a
+//  build ever flags them, specialize at a point after FixedPoint64.hpp is included.)
 
 #endif // FIXED_POINT_N_H

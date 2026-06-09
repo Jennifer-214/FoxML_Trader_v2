@@ -2290,9 +2290,8 @@ inline void EventLoop_RebuildOneCore(
             FPN<F> price_now = rolling->price_avg;
             FPN<F> price_last = sst_lazy->price_at_last_rebuild;
             FPN<F> delta = FPN_Sub(price_now, price_last);
-            // |delta| via direct sign-bit clear (FPN is sign-magnitude).
-            FPN<F> abs_delta = delta;
-            abs_delta.sign = 0;
+            // |delta| (was a direct sign-bit clear on sign-magnitude; 16B two's-comp → FPN_Abs, branchless).
+            FPN<F> abs_delta = FPN_Abs(delta);
             FPN<F> rel_delta = FPN_DivNoAssert(abs_delta, price_last);
             int price_force = FPN_GreaterThan(rel_delta,
                 config->lazy_rebuild_price_threshold_pct);
@@ -2405,7 +2404,7 @@ inline void EventLoop_RebuildOneCore(
             if (FPN_GreaterThan(reg.r_squared, FPN_FromDouble<F>(0.20))) {
                 // shift = -slope × filter_scale  (negative slope → positive shift = tighter)
                 FPN<F> shift = FPN_Mul(slope, resolved_cfg.filter_scale);
-                shift.sign = !shift.sign;  // negate
+                shift = FPN_Negate(shift);  // negate (was a sign-bit flip; 16B two's-comp)
                 // Apply to entry_offset_pct, clamped to [offset_min, offset_max]
                 FPN<F> new_offset = FPN_Add(resolved_cfg.entry_offset_pct, shift);
                 if (FPN_LessThan(new_offset, resolved_cfg.offset_min))

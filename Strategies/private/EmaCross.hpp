@@ -74,13 +74,14 @@ inline BuySideGateConditions<F> EmaCross_BuySignal(
     // (normalized spread is too tiny when EMA and SMA converge in ranging markets)
     FPN<F> short_sma = rolling->price_avg;
     int short_cross = 0;
-    if (!FPN_IsZero(short_sma) && !FPN_IsZero(rolling->price_stddev)) {
+    {
+        // branchless compute-guard: compute always (zero divisor → safe saturate), gate the result by `valid`.
+        int valid = !FPN_IsZero(short_sma) & !FPN_IsZero(rolling->price_stddev);
         FPN<F> diff = FPN_Sub(ref, short_sma);
-        // EMA must be above SMA (positive diff = sign==0 and not zero)
-        int ema_above = (diff.sign == 0) && !FPN_IsZero(diff);
+        int ema_above = (diff.v > 0);   // EMA above SMA: positive diff (was sign==0 && !IsZero; 16B two's-comp)
         // spread as fraction of stddev — more meaningful than % of price
         FPN<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
-        short_cross = ema_above & FPN_GreaterThan(spread_stddevs, cfg->emacross_crossover_min);
+        short_cross = valid & ema_above & FPN_GreaterThan(spread_stddevs, cfg->emacross_crossover_min);
     }
 
     int uptrend = short_cross;
@@ -112,8 +113,9 @@ inline void EmaCross_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
     FPN<F> stddev = rolling->price_stddev;
     if (FPN_IsZero(stddev)) return;
 
-    // is EMA rising? (positive slope = trend continuation)
-    int ema_rising = (state->last_ema_slope.sign == 0) && !FPN_IsZero(state->last_ema_slope);
+    // is EMA rising? (strictly-positive slope = trend continuation)
+    // Ship-A 16B two's-comp: (sign==0 && !IsZero) [non-negative AND non-zero] == strictly positive == v > 0.
+    int ema_rising = (state->last_ema_slope.v > 0);
 
     uint16_t active = portfolio->active_bitmap;
     while (active) {
@@ -191,7 +193,7 @@ inline void EmaCross_ExitAdjustSharded(
 
     // EmaCross-specific gate: only trail when EMA is rising (uptrend
     // continuation). Same geometry as the legacy EmaCross_ExitAdjust.
-    int ema_rising = (es->last_ema_slope.sign == 0) && !FPN_IsZero(es->last_ema_slope);
+    int ema_rising = (es->last_ema_slope.v > 0);   // EMA rising: positive slope (was sign==0 && !IsZero; 16B)
     if (!ema_rising) return;
 
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.

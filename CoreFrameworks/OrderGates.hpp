@@ -60,23 +60,16 @@ template <unsigned F> struct SellSideGateConditions {
 // keeping volume lets the TUI display the actual volume threshold for diagnostics.
 template <unsigned F>
 inline void Gate_Zero(BuySideGateConditions<F> *conds, int pass) {
-    uint64_t mask = -(uint64_t)pass;
-    for (unsigned w = 0; w < FPN<F>::N; w++) {
-        conds->price.w[w] &= mask;
-    }
-    conds->price.sign &= pass;
+    unsigned __int128 mask = -(unsigned __int128)(unsigned)pass;   // 16B: mask the whole .v (no word loop / sign field)
+    conds->price.v &= (__int128)mask;
 }
 
 // Gate_ZeroAll: zeros both price AND volume (used by momentum where both must block)
 template <unsigned F>
 inline void Gate_ZeroAll(BuySideGateConditions<F> *conds, int pass) {
-    uint64_t mask = -(uint64_t)pass;
-    for (unsigned w = 0; w < FPN<F>::N; w++) {
-        conds->price.w[w]  &= mask;
-        conds->volume.w[w] &= mask;
-    }
-    conds->price.sign  &= pass;
-    conds->volume.sign &= pass;
+    unsigned __int128 mask = -(unsigned __int128)(unsigned)pass;   // 16B: mask the whole .v (no word loop / sign field)
+    conds->price.v  &= (__int128)mask;
+    conds->volume.v &= (__int128)mask;
 }
 
 //======================================================================================================
@@ -101,21 +94,15 @@ inline void Gate_ZeroAll(BuySideGateConditions<F> *conds, int pass) {
 template <unsigned F> inline void BuyGate(const BuySideGateConditions<F> *conditions, const DataStream<F> *stream, OrderPool<F> *pool) {
     // inline positive-FPN comparisons: skip sign machinery (crypto prices always positive)
     // same pattern as PositionExitGate — saves ~70ns vs FPN_LessThanOrEqual
-    constexpr unsigned NW = FPN<F>::N;
-
-    // below: price <= gate  (equivalent to gate >= price for positive values)
-    int below = (conditions->price.w[NW-1] > stream->price.w[NW-1]) |
-                ((conditions->price.w[NW-1] == stream->price.w[NW-1]) & (conditions->price.w[0] >= stream->price.w[0]));
-
-    // above: price >= gate
-    int above = (stream->price.w[NW-1] > conditions->price.w[NW-1]) |
-                ((stream->price.w[NW-1] == conditions->price.w[NW-1]) & (stream->price.w[0] >= conditions->price.w[0]));
+    // 16B two's-comp: crypto price/volume are always >= 0 and << 2^127, so .v compares NATIVELY — value-
+    // equivalent to the old 2-word unsigned magnitude compare on non-negative values, and branchless (a single
+    // __int128 cmp → setcc, no jump; also faster than the 2-word logic this replaces).
+    int below = (conditions->price.v >= stream->price.v);   // below: price <= gate  (gate >= price)
+    int above = (stream->price.v >= conditions->price.v);   // above: price >= gate
 
     int price_pass  = (below & !conditions->gate_direction) | (above & conditions->gate_direction);
 
-    // volume: stream volume >= threshold
-    int volume_pass = (stream->volume.w[NW-1] > conditions->volume.w[NW-1]) |
-                      ((stream->volume.w[NW-1] == conditions->volume.w[NW-1]) & (stream->volume.w[0] >= conditions->volume.w[0]));
+    int volume_pass = (stream->volume.v >= conditions->volume.v);   // volume: stream volume >= threshold
 
     int pass = price_pass & volume_pass;
 

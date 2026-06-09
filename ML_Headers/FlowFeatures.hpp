@@ -96,16 +96,16 @@ struct alignas(64) BookImbalanceHistory {
 // Typedef wraps the template instantiation so the comma in <64, 1024> isn't
 // parsed as a macro-arg separator inside offsetof().
 using BookImbHistDefaultT = BookImbalanceHistory<64, 1024>;
-static_assert(sizeof(BookImbHistDefaultT) == 24640,
-    "BookImbalanceHistory<64,1024> sizeof MUST be 24,640 B (385 cache lines).");
+static_assert(sizeof(BookImbHistDefaultT) == 16448,
+    "BookImbalanceHistory<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN, was 24,640).");
 static_assert(offsetof(BookImbHistDefaultT, sum) == 0,
     "BookImbalanceHistory HOT scalar `sum` MUST sit at offset 0.");
-static_assert(offsetof(BookImbHistDefaultT, short_sum) == 24,
-    "BookImbalanceHistory HOT scalar `short_sum` MUST sit at offset 24 "
-    "(immediately after sum in HOT cluster). Pattern: sliding-window-online-"
+static_assert(offsetof(BookImbHistDefaultT, short_sum) == 16,
+    "BookImbalanceHistory HOT scalar `short_sum` MUST sit at offset 16 "
+    "(immediately after sum in HOT cluster; Ship-A 16B FPN, was 24). Pattern: sliding-window-online-"
     "statistics-pattern.md Multi-window variant.");
-static_assert(offsetof(BookImbHistDefaultT, samples) == 56,
-    "BookImbalanceHistory COLD `samples` MUST sit at offset 56 (after HOT cluster).");
+static_assert(offsetof(BookImbHistDefaultT, samples) == 48,
+    "BookImbalanceHistory COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN, was 56).");
 static_assert(alignof(BookImbHistDefaultT) == 64,
     "BookImbalanceHistory MUST be cache-line aligned.");
 
@@ -272,9 +272,10 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
     FPN<64> hl_1m  = FPN_FromDouble<64>(60.0);
     FPN<64> hl_5m  = FPN_FromDouble<64>(300.0);
 
-    FPN<64> arg_10s = FPN_DivNoAssert(dt_fpn, hl_10s); arg_10s.sign = 1;
-    FPN<64> arg_1m  = FPN_DivNoAssert(dt_fpn, hl_1m);  arg_1m.sign  = 1;
-    FPN<64> arg_5m  = FPN_DivNoAssert(dt_fpn, hl_5m);  arg_5m.sign  = 1;
+    // -dt/halflife for the decay exponent (was `.sign = 1` on the positive div; 16B two's-comp → negate).
+    FPN<64> arg_10s = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_10s));
+    FPN<64> arg_1m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_1m));
+    FPN<64> arg_5m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_5m));
 
     double decay_10s = FPN_ToDouble(FPN_Exp(arg_10s));
     double decay_1m  = FPN_ToDouble(FPN_Exp(arg_1m));
@@ -319,12 +320,12 @@ struct alignas(64) LargeTradeState {
 // = 24,640 B = 385 cache lines exact. Typedef wraps template instantiation
 // for offsetof macro-arg parsing.
 using LargeTradeStateDefaultT = LargeTradeState<64, 1024>;
-static_assert(sizeof(LargeTradeStateDefaultT) == 24640,
-    "LargeTradeState<64,1024> sizeof MUST be 24,640 B (385 cache lines).");
+static_assert(sizeof(LargeTradeStateDefaultT) == 16448,
+    "LargeTradeState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN, was 24,640).");
 static_assert(offsetof(LargeTradeStateDefaultT, sum) == 0,
     "LargeTradeState HOT scalar `sum` MUST sit at offset 0.");
-static_assert(offsetof(LargeTradeStateDefaultT, sizes) == 56,
-    "LargeTradeState COLD `sizes` MUST sit at offset 56 (after HOT cluster).");
+static_assert(offsetof(LargeTradeStateDefaultT, sizes) == 48,
+    "LargeTradeState COLD `sizes` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN, was 56).");
 static_assert(alignof(LargeTradeStateDefaultT) == 64,
     "LargeTradeState MUST be cache-line aligned.");
 
@@ -368,7 +369,7 @@ static inline double LargeTradeState_ZScore(const LargeTradeState<F, W> *s, FPN<
     FPN<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
     FPN<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
     FPN<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
-    if (FPN_IsZero(var) || var.sign != 0) return 0.0;  // var <= 0 → degenerate
+    if (var.v <= 0) return 0.0;  // var <= 0 → degenerate (was IsZero || sign!=0; 16B two's-comp)
 
     FPN<F> stddev = FPN_Sqrt(var);
     if (FPN_IsZero(stddev)) return 0.0;
@@ -416,12 +417,12 @@ struct alignas(64) SpreadState {
 
 // v5.15.5.D.A — Layout lock for SpreadState<64, 1024>.
 using SpreadStateDefaultT = SpreadState<64, 1024>;
-static_assert(sizeof(SpreadStateDefaultT) == 24640,
-    "SpreadState<64,1024> sizeof MUST be 24,640 B (385 cache lines).");
+static_assert(sizeof(SpreadStateDefaultT) == 16448,
+    "SpreadState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN, was 24,640).");
 static_assert(offsetof(SpreadStateDefaultT, sum) == 0,
     "SpreadState HOT scalar `sum` MUST sit at offset 0.");
-static_assert(offsetof(SpreadStateDefaultT, samples) == 56,
-    "SpreadState COLD `samples` MUST sit at offset 56 (after HOT cluster).");
+static_assert(offsetof(SpreadStateDefaultT, samples) == 48,
+    "SpreadState COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN, was 56).");
 static_assert(alignof(SpreadStateDefaultT) == 64,
     "SpreadState MUST be cache-line aligned.");
 
@@ -460,7 +461,7 @@ static inline double SpreadState_ZScore(const SpreadState<F, W> *s, FPN<F> curre
     FPN<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
     FPN<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
     FPN<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
-    if (FPN_IsZero(var) || var.sign != 0) return 0.0;
+    if (var.v <= 0) return 0.0;   // var <= 0 → degenerate (was IsZero || sign!=0; 16B two's-comp)
 
     FPN<F> stddev = FPN_Sqrt(var);
     if (FPN_IsZero(stddev)) return 0.0;

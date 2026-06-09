@@ -91,7 +91,7 @@ namespace tt {
 // rejected on load with version-mismatch — paper-mode data only;
 // operator restarts a fresh paper session. No live data is lost
 // (live mode never persists via this path; reconciles from exchange).
-#define SHARDED_SNAPSHOT_VERSION  8u
+#define SHARDED_SNAPSHOT_VERSION  9u   // Ship-A 16B FPN: embedded Position/FPN-struct byte layouts changed; v8 version-rejected (H21/D-144)
 
 //======================================================================================================
 // [SAVE]

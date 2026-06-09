@@ -42,8 +42,8 @@
 //   - 8B trailing alignas pad (cost: 128B per OMS); savings: ~50% reduction in
 //     hot-path cache misses at sparse-iteration access patterns
 //
-// Wire format: PORTFOLIO_SNAPSHOT_VERSION=5 byte-identical (PERSIST_BYTES=184
-// unchanged; alignas pad NOT in wire format; Save/Load writes 184B per position).
+// Wire format: PORTFOLIO_SNAPSHOT_VERSION=6 (Ship-A 16B FPN; PERSIST_BYTES=128,
+// was 184; alignas pad NOT in wire format; Save/Load writes 128B per position).
 //
 // POS.2's SKIP_PERSIST infrastructure (FOREACH_POSITION_FIELD_SKIP_PERSIST registry +
 // PERSIST_KIND filter dispatch in Portfolio_Save/Load) RETAINED as future-extension
@@ -52,7 +52,7 @@
 template <unsigned F> struct alignas(64) Position {
     // Auto-generated fields from FOREACH_POSITION_FIELD (PositionFieldRegistry.hpp):
     //   take_profit_price (FPN<F>)   ← hot; offset 0
-    //   stop_loss_price   (FPN<F>)   ← hot; offset 24
+    //   stop_loss_price   (FPN<F>)   ← hot; offset 16  (Ship-A 16B FPN, was 24)
     //   quantity          (FPN<F>)
     //   entry_price       (FPN<F>)
     //   entry_fee         (FPN<F>)
@@ -65,34 +65,34 @@ template <unsigned F> struct alignas(64) Position {
     #undef POSITION_EMIT_FIELD
 
     // Manual padding to align Position to 8 bytes after int8_t pair_index.
-    // Part of wire format (PORTFOLIO_SNAPSHOT_VERSION=5 byte layout).
-    // POSITION_PERSIST_BYTES = offsetof(_pad_pos) + sizeof(_pad_pos) = 184.
+    // Part of wire format (PORTFOLIO_SNAPSHOT_VERSION=6 byte layout; Ship-A 16B FPN).
+    // POSITION_PERSIST_BYTES = offsetof(_pad_pos) + sizeof(_pad_pos) = 128 (was 184).
     uint8_t _pad_pos[7];
 
     // SKIP_PERSIST fields would expand here. Empty today per C.5 revert.
-    // The `alignas(64)` decorator above implicitly adds 8B trailing pad
-    // to round sizeof(Position) to 192B = 3 cache lines exact.
+    // Ship-A 16B FPN: PERSIST data fills 128B = 2 cache lines exact, so the
+    // `alignas(64)` decorator adds NO trailing pad (was 8B at 24B FPN / 192B).
 };
 
 // v5.15.5.C.4 Phase POS — static_assert layout locks per the design spec
 // `function-struct-alignment-for-single-mov-access.md` + wire-format byte
 // preservation discipline. Catches accidental field-reorder that would
-// invalidate PORTFOLIO_SNAPSHOT_VERSION=5 wire format.
+// invalidate PORTFOLIO_SNAPSHOT_VERSION=6 wire format.
 //
-// Reference layout (FPN<64> = 24B; PORTFOLIO_SNAPSHOT_VERSION=5):
-//   offset 0:   take_profit_price   (24B)
-//   offset 24:  stop_loss_price     (24B)
-//   offset 48:  quantity            (24B)
-//   offset 72:  entry_price         (24B)
-//   offset 96:  entry_fee           (24B)
-//   offset 120: original_tp         (24B)
-//   offset 144: original_sl         (24B)
-//   offset 168: entry_timestamp_us  (8B)
-//   offset 176: pair_index          (1B)
-//   offset 177: _pad_pos            (7B)
-//   total:      184 bytes
-// v5.15.5.C.5 — sizeof locked at 192B (alignas(64) padded to 3 cache lines).
-// PERSIST prefix size stays at 184 — wire format unchanged.
+// Reference layout (Ship-A 16B FPN<64>; PORTFOLIO_SNAPSHOT_VERSION=6; was 24B/v5):
+//   offset 0:   take_profit_price   (16B)
+//   offset 16:  stop_loss_price     (16B)
+//   offset 32:  quantity            (16B)
+//   offset 48:  entry_price         (16B)
+//   offset 64:  entry_fee           (16B)
+//   offset 80:  original_tp         (16B)
+//   offset 96:  original_sl         (16B)
+//   offset 112: entry_timestamp_us  (8B)
+//   offset 120: pair_index          (1B)
+//   offset 121: _pad_pos            (7B)
+//   total:      128 bytes
+// Ship-A 16B FPN — sizeof locked at 128B (= 2 cache lines exact; NO alignas trailing pad).
+// PERSIST prefix = 128 bytes; v5 (184B/position) snapshots version-rejected (H21/D-144).
 //
 // Per DESIGN_SPECS/hot-side-array-element-alignment-for-sparse-access.md:
 // - sizeof(Position) % 64 == 0 → each Position[N] starts on cache-line boundary
@@ -112,34 +112,36 @@ template <unsigned F> struct alignas(64) Position {
 //   offset 177-183: _pad_pos          (7B; wire-format alignment pad)
 //   offset 184-191: alignas(64) trailing pad (8B)
 //   Total: 192B = 3 cache lines exact
-static_assert(sizeof(Position<64>) == 192,
-              "Position<64> size must be 192B (alignas(64) on 184B PERSIST struct = 3 cache lines exact); "
+// Ship A (16B FPN): Position re-derived 192B→128B. HOT fields (TP@0, SL@16) still share cache-line 0;
+// COLD (original_tp@80, original_sl@96) in line 1. 128B = 2 cache lines exact, no trailing pad.
+static_assert(sizeof(Position<64>) == 128,
+              "Position<64> size must be 128B (Ship A 16B FPN: 2 cache lines exact, no trailing pad; was 192B at 24B FPN); "
               "see DESIGN_SPECS/hot-side-array-element-alignment-for-sparse-access.md");
 static_assert(alignof(Position<64>) == 64,
               "Position<64> must have 64B alignment for hot-path single-cache-line-per-slot access");
 static_assert(offsetof(Position<64>, take_profit_price)  == 0,   "Position layout: take_profit_price offset (HOT)");
-static_assert(offsetof(Position<64>, stop_loss_price)    == 24,  "Position layout: stop_loss_price offset (HOT)");
-static_assert(offsetof(Position<64>, quantity)           == 48,  "Position layout: quantity offset");
-static_assert(offsetof(Position<64>, entry_price)        == 72,  "Position layout: entry_price offset");
-static_assert(offsetof(Position<64>, entry_fee)          == 96,  "Position layout: entry_fee offset");
-static_assert(offsetof(Position<64>, original_tp)        == 120, "Position layout: original_tp offset");
-static_assert(offsetof(Position<64>, original_sl)        == 144, "Position layout: original_sl offset");
-static_assert(offsetof(Position<64>, entry_timestamp_us) == 168, "Position layout: entry_timestamp_us offset");
-static_assert(offsetof(Position<64>, pair_index)         == 176, "Position layout: pair_index offset");
+static_assert(offsetof(Position<64>, stop_loss_price)    == 16,  "Position layout: stop_loss_price offset (HOT)");
+static_assert(offsetof(Position<64>, quantity)           == 32,  "Position layout: quantity offset");
+static_assert(offsetof(Position<64>, entry_price)        == 48,  "Position layout: entry_price offset");
+static_assert(offsetof(Position<64>, entry_fee)          == 64,  "Position layout: entry_fee offset");
+static_assert(offsetof(Position<64>, original_tp)        == 80,  "Position layout: original_tp offset");
+static_assert(offsetof(Position<64>, original_sl)        == 96,  "Position layout: original_sl offset");
+static_assert(offsetof(Position<64>, entry_timestamp_us) == 112, "Position layout: entry_timestamp_us offset");
+static_assert(offsetof(Position<64>, pair_index)         == 120, "Position layout: pair_index offset");
 
-// PERSIST byte count — first 184 bytes of Position go to wire format.
-// Save/Load writes exactly POSITION_PERSIST_BYTES per position (16 positions × 184 = 2944 bytes
-// payload; matches PORTFOLIO_SNAPSHOT_VERSION=5 byte-identical to all prior versions).
-// The trailing 8B alignas pad is NOT written/read (sizeof(Position) - POSITION_PERSIST_BYTES = 8).
+// PERSIST byte count — first 128 bytes of Position go to wire format (Ship A 16B FPN; was 184B).
+// Save/Load writes exactly POSITION_PERSIST_BYTES per position (16 positions × 128 = 2048 bytes payload).
+// PORTFOLIO_SNAPSHOT_VERSION bumped 5→6 (D-144) — old 184B-per-Position snapshots are version-rejected.
+// At 16B the PERSIST data fills the 2 cache lines exactly → NO trailing alignas pad.
 template <unsigned F>
 constexpr size_t POSITION_PERSIST_BYTES() {
-    // 9 PERSIST value fields (168B FPN + 8B uint64 + 1B int8) + 7B _pad_pos = 184B
+    // 9 PERSIST value fields (112B FPN + 8B uint64 + 1B int8) + 7B _pad_pos = 128B (Ship A 16B FPN)
     return offsetof(Position<F>, _pad_pos) + 7;
 }
-static_assert(POSITION_PERSIST_BYTES<64>() == 184,
-              "Position PERSIST byte count must equal 184 — wire format (PORTFOLIO_SNAPSHOT_VERSION=5) byte-identical");
-static_assert(sizeof(Position<64>) - POSITION_PERSIST_BYTES<64>() == 8,
-              "alignas(64) trailing pad must be 8B (rounds 184B to 192B = 3 cache lines)");
+static_assert(POSITION_PERSIST_BYTES<64>() == 128,
+              "Position PERSIST byte count must equal 128 — wire format (PORTFOLIO_SNAPSHOT_VERSION=6, Ship A 16B) byte-identical");
+static_assert(sizeof(Position<64>) - POSITION_PERSIST_BYTES<64>() == 0,
+              "16B FPN: PERSIST fills 128B = 2 cache lines exact, NO trailing alignas pad (was 8B at 24B FPN)");
 //======================================================================================================
 // [PORTFOLIO]
 //======================================================================================================
@@ -462,30 +464,13 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN<F> current_price, Exit
     while (active) {
         int idx = __builtin_ctz(active);
 
-        // full multi-word positive-FPN comparison (MSW to LSW, short-circuit on first difference)
-        // crypto prices always positive so sign check skipped
-        constexpr unsigned NW = FPN<F>::N;
+        // positive-FPN comparison; crypto prices always positive so sign check skipped. 16B two's-comp →
+        // native .v compares: value-equivalent to the old MSW-to-LSW magnitude compare for non-negative values
+        // (== triggers exit, matching the old all-words-equal case). Branchless, replaces the word-loop short-circuit.
         const FPN<F> &tp = portfolio->positions[idx].take_profit_price;
         const FPN<F> &sl = portfolio->positions[idx].stop_loss_price;
-        // hit_tp: price >= TP, hit_sl: price <= SL
-        int hit_tp = 0, hit_sl = 0;
-        {
-          int decided_tp = 0, decided_sl = 0;
-          for (int w = NW - 1; w >= 0; w--) {
-            if (!decided_tp) {
-              if (current_price.w[w] > tp.w[w]) { hit_tp = 1; decided_tp = 1; }
-              else if (current_price.w[w] < tp.w[w]) { decided_tp = 1; }
-            }
-            if (!decided_sl) {
-              if (current_price.w[w] < sl.w[w]) { hit_sl = 1; decided_sl = 1; }
-              else if (current_price.w[w] > sl.w[w]) { decided_sl = 1; }
-            }
-            if (decided_tp & decided_sl) break;
-          }
-          // all words equal → price == TP/SL → triggers exit
-          if (!decided_tp) hit_tp = 1;
-          if (!decided_sl) hit_sl = 1;
-        }
+        int hit_tp = (current_price.v >= tp.v);   // price >= TP
+        int hit_sl = (current_price.v <= sl.v);   // price <= SL
 
         // skip positions with no exit prices set (legacy adds, zero TP/SL)
         int has_exits = !FPN_IsZero(tp);
@@ -530,7 +515,7 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN<F> current_price, Exit
 //   [sizeof(FPN<F>)] balance
 //======================================================================================================
 #define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian
-#define PORTFOLIO_SNAPSHOT_VERSION 5
+#define PORTFOLIO_SNAPSHOT_VERSION 6   // Ship-A 16B FPN: Position PERSIST 184->128 B; v5 snapshots version-rejected (H21/D-144)
 
 template <unsigned F>
 static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN<F> realized_pnl,
@@ -551,11 +536,11 @@ static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN<F> realized_
     fwrite(&portfolio->active_bitmap, 2, 1, f);
     uint16_t pad = 0;
     fwrite(&pad, 2, 1, f);
-    // v5.15.5.C.4 Phase POS.2 — write only PERSIST prefix (184 bytes per position).
+    // v5.15.5.C.4 Phase POS.2 — write only PERSIST prefix (128 bytes per position; Ship-A 16B FPN, was 184).
     // SKIP_PERSIST fields (exit_fill_price, is_maker) live in the Position struct
     // for cache locality but are NOT in the wire format. Per-position loop with
-    // explicit POSITION_PERSIST_BYTES() count preserves PORTFOLIO_SNAPSHOT_VERSION=5
-    // byte-identity with pre-POS.2 snapshots.
+    // explicit POSITION_PERSIST_BYTES() count defines the PORTFOLIO_SNAPSHOT_VERSION=6
+    // wire layout (v5 184B-per-position snapshots are version-rejected, H21/D-144).
     constexpr size_t pos_persist_bytes = POSITION_PERSIST_BYTES<F>();
     for (int i = 0; i < 16; i++) {
         fwrite(&portfolio->positions[i], pos_persist_bytes, 1, f);

@@ -622,7 +622,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     // actual = 1.0 if profitable, 0.0 if not (matches binary classification target)
     if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) && strat == STRATEGY_ML) {
         double pred = ctrl->entry_prediction[slot];
-        double actual = (!pos_pnl.sign & !FPN_IsZero(pos_pnl)) ? 1.0 : 0.0;
+        double actual = (pos_pnl.v > 0) ? 1.0 : 0.0;   // profitable (was !sign & !IsZero; 16B two's-comp)
         // v5.14.1.B.1 (PARITY-002) — UpdateAndMark sets RollingFreshness so
         // composite confidence path works when enabled. Wall-clock now_us
         // is fine for legacy single_core (deprecated; not used in
@@ -646,7 +646,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     // NOTE: paired positions (pair_index >= 0) count as separate wins/losses.
     // total_buys counts each buy event (1 buy = 2 paired positions = 2 exits).
     // trade count in stats = total_buys, not wins + losses.
-    int is_profitable = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
+    int is_profitable = (pos_pnl.v > 0);   // strictly positive (was !sign & !IsZero; 16B two's-comp)
     ctrl->wins += ((reason == 0) & is_profitable);
     ctrl->losses += !((reason == 0) & is_profitable);
 
@@ -684,22 +684,16 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
         }
     }
 
-    // branchless gross win/loss accumulation
+    // branchless gross win/loss accumulation (16B two's-comp: mask .v directly — no word loop, no sign field)
     {
-        int is_win = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
-        int is_loss = pos_pnl.sign;
-        constexpr unsigned N2 = FPN<F>::N;
-        uint64_t win_mask = -(uint64_t)is_win;
-        uint64_t loss_mask = -(uint64_t)is_loss;
-        FPN<F> neg_pnl = FPN_Negate(pos_pnl);
-        FPN<F> win_add, loss_add;
-        for (unsigned w = 0; w < N2; w++) {
-            win_add.w[w] = pos_pnl.w[w] & win_mask;
-            loss_add.w[w] = neg_pnl.w[w] & loss_mask;
-        }
-        win_add.sign = 0;
-        loss_add.sign = 0;
-        ctrl->gross_wins = FPN_AddSat(ctrl->gross_wins, win_add);
+        int is_win  = (pos_pnl.v > 0);                  // strictly positive (was !sign & !IsZero)
+        int is_loss = (pos_pnl.v < 0);                  // strictly negative (was .sign — drops the 24B -0 artifact; see note)
+        unsigned __int128 win_mask  = -(unsigned __int128)(unsigned)is_win;     // 0 / all-ones
+        unsigned __int128 loss_mask = -(unsigned __int128)(unsigned)is_loss;
+        FPN<F> neg_pnl = FPN_Negate(pos_pnl);           // |pos_pnl| when pos_pnl < 0
+        FPN<F> win_add  { (__int128)((unsigned __int128)pos_pnl.v & win_mask) };   // win amount, else 0
+        FPN<F> loss_add { (__int128)((unsigned __int128)neg_pnl.v & loss_mask) };  // loss amount (positive), else 0
+        ctrl->gross_wins   = FPN_AddSat(ctrl->gross_wins, win_add);
         ctrl->gross_losses = FPN_AddSat(ctrl->gross_losses, loss_add);
         if (strat >= 0 && strat < NUM_STRATEGIES) {
             ctrl->strategy_stats[strat].wins += (1 & (uint32_t)is_win);
@@ -845,12 +839,7 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
   // feed signal strength to Welford tracker (before no-trade band may zero it)
   if (!FPN_IsZero(ctrl->buy_conds.price) && !FPN_IsZero(ctrl->rolling.price_avg)) {
     FPN<F> sd = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
-    FPN<F> neg = FPN_Negate(sd);
-    uint64_t m = -(uint64_t)(sd.sign);
-    FPN<F> abs_s;
-    for (unsigned w = 0; w < FPN<F>::N; w++)
-      abs_s.w[w] = (neg.w[w] & m) | (sd.w[w] & ~m);
-    abs_s.sign = 0;
+    FPN<F> abs_s = FPN_Abs(sd);   // |sd| (was a manual sign-mask blend; 16B two's-comp → FPN_Abs, branchless)
     Welford_Push(&ctrl->signal_tracker, FPN_DivNoAssert(abs_s, ctrl->rolling.price_avg));
   }
 
@@ -861,13 +850,7 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
     // charge on a fill. Leave as fee_rate (not fee_rate_taker) intentionally.
     FPN<F> min_signal = FPN_Mul(ctrl->config.fee_rate, ctrl->config.no_trade_band_mult);
     FPN<F> signal_dist = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
-    // absolute value
-    FPN<F> neg_sd = FPN_Negate(signal_dist);
-    uint64_t neg_m = -(uint64_t)(signal_dist.sign);
-    FPN<F> abs_sd;
-    for (unsigned w = 0; w < FPN<F>::N; w++)
-      abs_sd.w[w] = (neg_sd.w[w] & neg_m) | (signal_dist.w[w] & ~neg_m);
-    abs_sd.sign = 0;
+    FPN<F> abs_sd = FPN_Abs(signal_dist);   // |signal_dist| (was a manual sign-mask blend; 16B → FPN_Abs)
     FPN<F> signal_pct = FPN_DivNoAssert(abs_sd, ctrl->rolling.price_avg);
     if (FPN_LessThan(signal_pct, min_signal)) {
       ctrl->buy_conds.price = FPN_Zero<F>();
@@ -943,14 +926,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     FPN<F> ema_new = FPN_Add(
       FPN_Mul(ctrl->ema_price, ctrl->config.gate_ema_alpha),
       FPN_Mul(current_price, ctrl->config.gate_ema_one_minus_alpha));
-    // mask: all-ones if ema is zero (first tick), all-zeros otherwise
-    uint64_t first_tick = -(uint64_t)(FPN_IsZero(ctrl->ema_price));
-    // branchless select: first tick → current_price, otherwise → ema_new
-    FPN<F> selected;
-    for (unsigned i = 0; i < FPN<F>::N; i++)
-      selected.w[i] = (current_price.w[i] & first_tick) | (ema_new.w[i] & ~first_tick);
-    selected.sign = (current_price.sign & (int)first_tick) | (ema_new.sign & (int)~first_tick);
-    ctrl->ema_price = selected;
+    // branchless select: first tick (ema==0) → current_price, otherwise → ema_new (16B → blend the whole .v)
+    unsigned __int128 first_tick = -(unsigned __int128)(unsigned)(FPN_IsZero(ctrl->ema_price));
+    ctrl->ema_price = { (__int128)(((unsigned __int128)current_price.v & first_tick) | ((unsigned __int128)ema_new.v & ~first_tick)) };
   }
 
   // hot-path kill: catches equity drops between slow-path cycles
@@ -1170,20 +1148,17 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // volume spike: reduce spacing requirement for high-conviction entries
     // a 5x+ volume spike on a dip is a stronger signal — allow tighter clustering
     // compute fresh ratio from current tick volume (not stale slow-path value)
-    FPN<F> live_spike_ratio = (!FPN_IsZero(ctrl->rolling.volume_max))
-        ? FPN_DivNoAssert(current_volume, ctrl->rolling.volume_max)
-        : FPN_Zero<F>();
+    // branchless compute-guard: divide always (zero divisor → safe saturate), mask to 0 when volume_max == 0.
+    unsigned __int128 vm_mask = -(unsigned __int128)(unsigned)(!FPN_IsZero(ctrl->rolling.volume_max));
+    FPN<F> spike_div = FPN_DivNoAssert(current_volume, ctrl->rolling.volume_max);
+    FPN<F> live_spike_ratio { (__int128)((unsigned __int128)spike_div.v & vm_mask) };
     ctrl->volume_spike_ratio = live_spike_ratio;  // update for TUI display
     int is_spike = FPN_GreaterThanOrEqual(live_spike_ratio,
                                            ctrl->config.spike_threshold);
     FPN<F> spike_spacing = FPN_Mul(min_spacing, ctrl->config.spike_spacing_reduction);
-    uint64_t spike_mask = -(uint64_t)is_spike;
-    for (unsigned w = 0; w < FPN<F>::N; w++) {
-        min_spacing.w[w] = (spike_spacing.w[w] & spike_mask) |
-                           (min_spacing.w[w] & ~spike_mask);
-    }
-    min_spacing.sign = (spike_spacing.sign & is_spike) |
-                       (min_spacing.sign & !is_spike);
+    // branchless select: min_spacing = is_spike ? spike_spacing : min_spacing (16B → blend the whole .v)
+    unsigned __int128 spike_mask = -(unsigned __int128)(unsigned)is_spike;
+    min_spacing = { (__int128)(((unsigned __int128)spike_spacing.v & spike_mask) | ((unsigned __int128)min_spacing.v & ~spike_mask)) };
 
     int too_close = 0;
     {
@@ -1192,15 +1167,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         int pidx = __builtin_ctz(active_pos);
         FPN<F> dist =
             FPN_Sub(fill_price, ctrl->portfolio.positions[pidx].entry_price);
-        // branchless absolute value: mask-select between dist and negated dist
-        // neg_mask is all 1s if negative, all 0s if positive
-        FPN<F> neg_dist = FPN_Negate(dist);
-        uint64_t neg_mask = -(uint64_t)(dist.sign);
-        FPN<F> abs_dist;
-        for (unsigned w = 0; w < FPN<F>::N; w++) {
-          abs_dist.w[w] = (neg_dist.w[w] & neg_mask) | (dist.w[w] & ~neg_mask);
-        }
-        abs_dist.sign = 0; // absolute value is always positive
+        FPN<F> abs_dist = FPN_Abs(dist);   // |dist| (was a manual sign-mask blend; 16B two's-comp → FPN_Abs, branchless)
         too_close |= FPN_LessThan(abs_dist, min_spacing);
         active_pos &= active_pos - 1;
       }
@@ -1328,16 +1295,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       FPN<F> vol_tp = FPN_AddSat(fill_price, tp_offset);
       FPN<F> vol_sl = FPN_SubSat(fill_price, sl_offset);
 
-      uint64_t stats_mask = -(uint64_t)has_stats;
-      FPN<F> tp_price, sl_price;
-      for (unsigned w = 0; w < FPN<F>::N; w++) {
-        tp_price.w[w] =
-            (vol_tp.w[w] & stats_mask) | (tp_pct_up.w[w] & ~stats_mask);
-        sl_price.w[w] =
-            (vol_sl.w[w] & stats_mask) | (sl_pct_dn.w[w] & ~stats_mask);
-      }
-      tp_price.sign = (vol_tp.sign & has_stats) | (tp_pct_up.sign & !has_stats);
-      sl_price.sign = (vol_sl.sign & has_stats) | (sl_pct_dn.sign & !has_stats);
+      // branchless select: has_stats ? vol-based : pct-based (16B → blend the whole .v)
+      unsigned __int128 stats_mask = -(unsigned __int128)(unsigned)has_stats;
+      FPN<F> tp_price { (__int128)(((unsigned __int128)vol_tp.v & stats_mask) | ((unsigned __int128)tp_pct_up.v & ~stats_mask)) };
+      FPN<F> sl_price { (__int128)(((unsigned __int128)vol_sl.v & stats_mask) | ((unsigned __int128)sl_pct_dn.v & ~stats_mask)) };
 
       // TP FLOOR: ensure TP is above the round-trip fee breakeven point
       // min_tp = entry + entry * fee_rate * fee_floor_mult
@@ -1604,13 +1565,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // track peak equity and max drawdown (branchless, all FPN)
   {
     FPN<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
-    // branchless first-tick select: zero → set to equity, nonzero → keep
-    uint64_t first = -(uint64_t)FPN_IsZero(ctrl->session_start_equity);
-    FPN<F> sse;
-    for (unsigned w = 0; w < FPN<F>::N; w++)
-      sse.w[w] = (equity.w[w] & first) | (ctrl->session_start_equity.w[w] & ~first);
-    sse.sign = (equity.sign & (int)first) | (ctrl->session_start_equity.sign & (int)~first);
-    ctrl->session_start_equity = sse;
+    // branchless first-tick select: zero → set to equity, nonzero → keep (16B → blend the whole .v)
+    unsigned __int128 first = -(unsigned __int128)(unsigned)FPN_IsZero(ctrl->session_start_equity);
+    ctrl->session_start_equity = { (__int128)(((unsigned __int128)equity.v & first) | ((unsigned __int128)ctrl->session_start_equity.v & ~first)) };
     ctrl->peak_equity = FPN_Max(ctrl->peak_equity, equity);
     FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
     ctrl->max_drawdown = FPN_Max(ctrl->max_drawdown, dd);
@@ -2062,7 +2019,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
 //
 // LEGACY_CONFIDENCE_VERSION marks the last version using raw struct fwrite.
 // Used by LoadSnapshot to dispatch on shadow-load vs fieldwise read.
-#define CONTROLLER_SNAPSHOT_VERSION       12
+#define CONTROLLER_SNAPSHOT_VERSION       13   // Ship-A 16B FPN: embedded FPN-struct byte layouts changed; v12 version-rejected (H21/D-144)
 #define LEGACY_CONFIDENCE_VERSION         11
 
 template <unsigned F>

@@ -73,8 +73,6 @@ template <unsigned F>
 inline void MeanReversion_Init(MeanReversionState<F> *state,
                                const RollingStats<F> *rolling,
                                BuySideGateConditions<F> *buy_conds) {
-  constexpr unsigned N = FPN<F>::N;
-
   // compute initial buy price in both modes, select based on which is active
   int use_stddev = !FPN_IsZero(state->live_stddev_mult);
 
@@ -83,14 +81,9 @@ inline void MeanReversion_Init(MeanReversionState<F> *state,
       FPN_Mul(rolling->price_stddev, state->live_stddev_mult);
   FPN<F> stddev_price = FPN_Sub(rolling->price_avg, stddev_offset);
 
-  // branchless select
-  uint64_t sm = -(uint64_t)use_stddev;
-  FPN<F> buy_price;
-  for (unsigned i = 0; i < N; i++) {
-    buy_price.w[i] = (stddev_price.w[i] & sm) | (pct_price.w[i] & ~sm);
-  }
-  buy_price.sign =
-      (stddev_price.sign & use_stddev) | (pct_price.sign & !use_stddev);
+  // branchless select: buy_price = use_stddev ? stddev_price : pct_price (16B → blend the whole .v)
+  unsigned __int128 sm = -(unsigned __int128)(unsigned)use_stddev;
+  FPN<F> buy_price { (__int128)(((unsigned __int128)stddev_price.v & sm) | ((unsigned __int128)pct_price.v & ~sm)) };
 
   // volume gate uses rolling avg * multiplier so only significant trades pass
   FPN<F> buy_vol = FPN_Mul(rolling->volume_avg, state->live_vol_mult);
@@ -127,8 +120,6 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
                                 uint16_t active_bitmap,
                                 const BuySideGateConditions<F> *buy_conds,
                                 const ControllerConfig<F> *cfg) {
-  constexpr unsigned N = FPN<F>::N;
-
   // mode detection: stddev if offset_stddev_mult > 0 in config
   int use_stddev = !FPN_IsZero(cfg->offset_stddev_mult);
 
@@ -151,21 +142,17 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 
     // squeeze fires when: portfolio empty AND current price above buy gate
     int should_squeeze = is_empty & trailing;
-    uint64_t sq_mask = -(uint64_t)should_squeeze;
+    unsigned __int128 sq_mask = -(unsigned __int128)(unsigned)should_squeeze;
 
-    // mode-conditional squeeze masks
-    uint64_t pct_sq_mask = sq_mask & -(uint64_t)(!use_stddev);
-    uint64_t stddev_sq_mask = sq_mask & -(uint64_t)use_stddev;
+    // mode-conditional squeeze masks (16B → 128-bit)
+    unsigned __int128 pct_sq_mask = sq_mask & -(unsigned __int128)(unsigned)(!use_stddev);
+    unsigned __int128 stddev_sq_mask = sq_mask & -(unsigned __int128)(unsigned)use_stddev;
 
     // PERCENTAGE MODE: squeeze offset toward zero (not offset_min — go all the
     // way)
     FPN<F> zero = FPN_Zero<F>();
     FPN<F> squeeze_step = FPN_Mul(state->live_offset_pct, cfg->squeeze_decay);
-    FPN<F> masked_squeeze;
-    for (unsigned i = 0; i < N; i++) {
-      masked_squeeze.w[i] = squeeze_step.w[i] & pct_sq_mask;
-    }
-    masked_squeeze.sign = squeeze_step.sign & (should_squeeze & !use_stddev);
+    FPN<F> masked_squeeze { (__int128)((unsigned __int128)squeeze_step.v & pct_sq_mask) };  // pct-mode mask (16B .v)
 
     state->live_offset_pct = FPN_SubSat(state->live_offset_pct, masked_squeeze);
     state->live_offset_pct =
@@ -176,11 +163,7 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
     FPN<F> stddev_gap =
         FPN_Sub(state->live_stddev_mult, cfg->offset_stddev_min);
     FPN<F> stddev_step = FPN_Mul(stddev_gap, cfg->squeeze_decay);
-    FPN<F> masked_stddev;
-    for (unsigned i = 0; i < N; i++) {
-      masked_stddev.w[i] = stddev_step.w[i] & stddev_sq_mask;
-    }
-    masked_stddev.sign = stddev_step.sign & (should_squeeze & use_stddev);
+    FPN<F> masked_stddev { (__int128)((unsigned __int128)stddev_step.v & stddev_sq_mask) };  // stddev-mode mask (16B .v)
 
     state->live_stddev_mult =
         FPN_SubSat(state->live_stddev_mult, masked_stddev);
@@ -191,11 +174,7 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
     FPN<F> one = FPN_FromDouble<F>(1.0);
     FPN<F> vmult_gap = FPN_Sub(state->live_vol_mult, one);
     FPN<F> vmult_step = FPN_Mul(vmult_gap, cfg->squeeze_decay);
-    FPN<F> masked_vmult;
-    for (unsigned i = 0; i < N; i++) {
-      masked_vmult.w[i] = vmult_step.w[i] & sq_mask;
-    }
-    masked_vmult.sign = vmult_step.sign & should_squeeze;
+    FPN<F> masked_vmult { (__int128)((unsigned __int128)vmult_step.v & sq_mask) };  // squeeze mask (16B .v)
 
     state->live_vol_mult = FPN_SubSat(state->live_vol_mult, masked_vmult);
     state->live_vol_mult = FPN_Max(state->live_vol_mult, one); // floor at 1.0x
@@ -235,11 +214,6 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
     state->has_regression = 1;
 
     int confident = FPN_GreaterThanOrEqual(inner.r_squared, cfg->r2_threshold);
-    uint64_t conf_mask = -(uint64_t)confident;
-
-    // mode-conditional regression masks
-    uint64_t pct_reg_mask = conf_mask & -(uint64_t)(!use_stddev);
-    uint64_t stddev_reg_mask = conf_mask & -(uint64_t)use_stddev;
 
     // compute filter shift from slope: negate because positive P&L -> loosen
     // (decrease)
@@ -249,11 +223,7 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
     // PERCENTAGE MODE: apply shift to offset_pct, scale 0.001, clamp
     // [offset_min, offset_max]
     {
-      FPN<F> masked_pct_shift;
-      for (unsigned i = 0; i < N; i++) {
-        masked_pct_shift.w[i] = neg_shift.w[i] & pct_reg_mask;
-      }
-      masked_pct_shift.sign = neg_shift.sign & (confident & !use_stddev);
+      FPN<F> masked_pct_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)(confident & !use_stddev)) };
 
       FPN<F> offset_scale = cfg->offset_adapt_scale;
       FPN<F> offset_shift = FPN_Mul(masked_pct_shift, offset_scale);
@@ -267,11 +237,7 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
     // ranges 0.5-4.0 while offset_pct ranges 0.0005-0.005 (~1000x difference in
     // magnitude)
     {
-      FPN<F> masked_stddev_shift;
-      for (unsigned i = 0; i < N; i++) {
-        masked_stddev_shift.w[i] = neg_shift.w[i] & stddev_reg_mask;
-      }
-      masked_stddev_shift.sign = neg_shift.sign & (confident & use_stddev);
+      FPN<F> masked_stddev_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)(confident & use_stddev)) };
 
       FPN<F> stddev_adapt_scale = cfg->stddev_adapt_scale;
       FPN<F> stddev_shift = FPN_Mul(masked_stddev_shift, stddev_adapt_scale);
@@ -285,11 +251,7 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 
     // apply shift to volume multiplier and clamp to [vol_mult_min,
     // vol_mult_max] — both modes
-    FPN<F> masked_shift;
-    for (unsigned i = 0; i < N; i++) {
-      masked_shift.w[i] = neg_shift.w[i] & conf_mask;
-    }
-    masked_shift.sign = neg_shift.sign & confident;
+    FPN<F> masked_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)confident) };
 
     FPN<F> vol_shift = FPN_Mul(masked_shift, cfg->vol_adapt_scale);
     state->live_vol_mult = FPN_AddSat(state->live_vol_mult, vol_shift);
@@ -312,7 +274,6 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     MeanReversionState<F> *state, const RollingStats<F> *rolling,
     const RollingStats<F, 512> *rolling_long, const ControllerConfig<F> *cfg,
     FPN<F> ema_price = FPN_Zero<F>()) {
-  constexpr unsigned N = FPN<F>::N;
   BuySideGateConditions<F> conds;
 
   // base average: EMA when provided (nonzero), rolling avg otherwise
@@ -331,12 +292,9 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
       FPN_Mul(rolling->price_stddev, state->live_stddev_mult);
   FPN<F> stddev_price = FPN_Sub(base_avg, stddev_offset);
 
-  uint64_t sm = -(uint64_t)use_stddev;
-  for (unsigned i = 0; i < N; i++) {
-    conds.price.w[i] = (stddev_price.w[i] & sm) | (pct_price.w[i] & ~sm);
-  }
-  conds.price.sign =
-      (stddev_price.sign & use_stddev) | (pct_price.sign & !use_stddev);
+  // branchless select: use_stddev ? stddev_price : pct_price (16B → blend the whole .v)
+  unsigned __int128 sm = -(unsigned __int128)(unsigned)use_stddev;
+  conds.price = { (__int128)(((unsigned __int128)stddev_price.v & sm) | ((unsigned __int128)pct_price.v & ~sm)) };
 
   conds.volume = FPN_Mul(rolling->volume_avg, state->live_vol_mult);
 
@@ -364,13 +322,9 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     shift = FPN_Max(shift, FPN_Negate(max_shift_abs));
 
     // mask shift to zero if not confident - word-level branchless mask
-    FPN<F> masked_shift;
-    uint64_t conf_mask = -(uint64_t)confident;
-#pragma GCC unroll 65534
-    for (unsigned i = 0; i < N; i++) {
-      masked_shift.w[i] = shift.w[i] & conf_mask;
-    }
-    masked_shift.sign = shift.sign & confident;
+    // branchless: masked_shift = confident ? shift : 0 (16B → mask the whole .v)
+    unsigned __int128 conf_mask = -(unsigned __int128)(unsigned)confident;
+    FPN<F> masked_shift { (__int128)((unsigned __int128)shift.v & conf_mask) };
 
     // apply shift
     FPN<F> new_price = FPN_AddSat(conds.price, masked_shift);
