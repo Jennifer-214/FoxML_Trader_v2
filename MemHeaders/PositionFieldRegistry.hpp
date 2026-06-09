@@ -48,13 +48,13 @@
 //======================================================================================================
 #define FOREACH_POSITION_FIELD(X)                                                                                       \
     /* PERSIST fields (current wire format) — DO NOT REORDER */                                                          \
-    X(take_profit_price,   FPN<F>,   FPN_Zero<F>(),    PERSIST,      "hot: TP; modified by trailing TP on slow path")    \
-    X(stop_loss_price,     FPN<F>,   FPN_Zero<F>(),    PERSIST,      "hot: SL; modified by trailing SL on slow path")    \
-    X(quantity,            FPN<F>,   FPN_Zero<F>(),    PERSIST,      "warm: +long, -short")                              \
-    X(entry_price,         FPN<F>,   FPN_Zero<F>(),    PERSIST,      "warm: fill price at open")                         \
-    X(entry_fee,           FPN<F>,   FPN_Zero<F>(),    PERSIST,      "warm: fee paid at fill")                           \
-    X(original_tp,         FPN<F>,   FPN_Zero<F>(),    PERSIST,      "cold: TP at fill; never modified")                 \
-    X(original_sl,         FPN<F>,   FPN_Zero<F>(),    PERSIST,      "cold: SL at fill; never modified")                 \
+    X(take_profit_price,   FPN_Binary<F>,   FPN_Zero<F>(),    PERSIST,      "hot: TP; modified by trailing TP on slow path")    \
+    X(stop_loss_price,     FPN_Binary<F>,   FPN_Zero<F>(),    PERSIST,      "hot: SL; modified by trailing SL on slow path")    \
+    X(quantity,            FPN_Binary<F>,   FPN_Zero<F>(),    PERSIST,      "warm: +long, -short")                              \
+    X(entry_price,         FPN_Binary<F>,   FPN_Zero<F>(),    PERSIST,      "warm: fill price at open")                         \
+    X(entry_fee,           FPN_Binary<F>,   FPN_Zero<F>(),    PERSIST,      "warm: fee paid at fill")                           \
+    X(original_tp,         FPN_Binary<F>,   FPN_Zero<F>(),    PERSIST,      "cold: TP at fill; never modified")                 \
+    X(original_sl,         FPN_Binary<F>,   FPN_Zero<F>(),    PERSIST,      "cold: SL at fill; never modified")                 \
     X(entry_timestamp_us,  uint64_t, 0,                PERSIST,      "v5.11.65 wall-clock entry time (microseconds)")    \
     X(pair_index,          int8_t,   -1,               PERSIST,      "partial-exit pairing; -1=unpaired, 0-15=pair idx")
 

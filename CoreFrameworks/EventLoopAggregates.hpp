@@ -57,7 +57,7 @@ namespace tt {
 // [STRUCT]
 //======================================================================================================
 // All fields are doubles because the TUI consumes doubles. The conversion from
-// FPN happens once here, in the adapter, instead of being scattered across
+// FPN_Binary happens once here, in the adapter, instead of being scattered across
 // every panel. realized + unrealized = total_pnl. balance + unrealized = equity.
 //======================================================================================================
 struct EventLoopAggregates {
@@ -101,7 +101,7 @@ struct EventLoopAggregates {
 //======================================================================================================
 template <unsigned F>
 inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* state,
-                                                    FPN<F> mark_price) {
+                                                    FPN_Binary<F> mark_price) {
     EventLoopAggregates agg;
 
     // realized side from OMS (financial state lives there since chunk 1B)
@@ -117,7 +117,7 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
     agg.kill_switch_tripped = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
 
     // walk the active bitmap once for unrealized P&L and active count
-    FPN<F> unreal = FPN_Zero<F>();
+    FPN_Binary<F> unreal = FPN_Zero<F>();
     int active = 0;
     uint16_t bm = state->oms->portfolio.active_bitmap;
     bool have_mark = !FPN_IsZero(mark_price);
@@ -128,8 +128,8 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
             const Position<F>* pos = &state->oms->portfolio.positions[slot];
             // unrealized = qty * (mark - entry). Long-only for now; if quantity
             // were ever negative this still produces the correct sign.
-            FPN<F> diff = FPN_Sub(mark_price, pos->entry_price);
-            FPN<F> pnl  = FPN_Mul(pos->quantity, diff);
+            FPN_Binary<F> diff = FPN_Sub(mark_price, pos->entry_price);
+            FPN_Binary<F> pnl  = FPN_Mul(pos->quantity, diff);
             unreal = FPN_Add(unreal, pnl);
         }
     }

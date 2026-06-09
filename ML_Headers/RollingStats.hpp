@@ -48,20 +48,20 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     //
     // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 2.4
     // Discipline: plans/2026-05-06-latency-path-discipline.md Rule 1 + Rule 7
-    FPN<F> price_avg;          // mean price over window
-    FPN<F> price_slope;        // least-squares regression slope (positive = rising)
-    FPN<F> price_r_squared;    // regression R² (0-1, trend consistency)
-    FPN<F> price_variance;     // real variance (sum((p-avg)²)/n, no sqrt)
-    FPN<F> price_stddev;       // range/4 approximation (kept for config compatibility)
-    FPN<F> price_min;          // min price in window
-    FPN<F> price_max;          // max price in window
-    FPN<F> volume_avg;         // mean volume over window
-    FPN<F> volume_slope;       // least-squares regression slope of volume
-    FPN<F> volume_max;         // max volume in window (for spike detection)
-    FPN<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
-    FPN<F> vwap;               // pv_sum / vol_sum
-    FPN<F> vwap_deviation;     // (price - vwap) / vwap (negative = below VWAP)
-    // 13 × FPN<64>=16B = 208 bytes ≈ 4 cache lines (0-3) (Ship-A 16B flip; was 24B/312B/5 lines)
+    FPN_Binary<F> price_avg;          // mean price over window
+    FPN_Binary<F> price_slope;        // least-squares regression slope (positive = rising)
+    FPN_Binary<F> price_r_squared;    // regression R² (0-1, trend consistency)
+    FPN_Binary<F> price_variance;     // real variance (sum((p-avg)²)/n, no sqrt)
+    FPN_Binary<F> price_stddev;       // range/4 approximation (kept for config compatibility)
+    FPN_Binary<F> price_min;          // min price in window
+    FPN_Binary<F> price_max;          // max price in window
+    FPN_Binary<F> volume_avg;         // mean volume over window
+    FPN_Binary<F> volume_slope;       // least-squares regression slope of volume
+    FPN_Binary<F> volume_max;         // max volume in window (for spike detection)
+    FPN_Binary<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
+    FPN_Binary<F> vwap;               // pv_sum / vol_sum
+    FPN_Binary<F> vwap_deviation;     // (price - vwap) / vwap (negative = below VWAP)
+    // 13 × FPN_Binary<64>=16B = 208 bytes ≈ 4 cache lines (0-3) (Ship-A 16B flip; was 24B/312B/5 lines)
 
     // ── WRITE-HEAVY INTERNAL STATE (cache-line-isolated from outputs) ──
     // alignas(64) on `head` forces it to start on a fresh cache line. The
@@ -72,24 +72,24 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     // v5.11.2.C running sums: price_sum_running / price_sum_y2_running /
     // price_sum_xy_running / volume_sum_running / vol_sum_xy_running replace
     // the per-Push O(W) accumulator loop with O(1) slide-in/slide-out updates.
-    // FPN<F=64> is exact integer math so no periodic resync is needed for drift
+    // FPN_Binary<F=64> is exact integer math so no periodic resync is needed for drift
     // bounding (the standard floating-point concern doesn't apply).
     alignas(64) int head;
     int count;
-    FPN<F> buy_volume_sum;     // running sum of buyer-initiated volume
-    FPN<F> sell_volume_sum;    // running sum of seller-initiated volume
-    FPN<F> pv_sum;             // running sum(price * volume)
-    FPN<F> vol_sum;            // running sum(volume)
-    FPN<F> price_sum_running;     // v5.11.2.C — running sum of prices
-    FPN<F> price_sum_y2_running;  // v5.11.2.C — running sum of prices²
-    FPN<F> price_sum_xy_running;  // v5.11.2.C — running sum of i * price[i] (i = window position)
-    FPN<F> volume_sum_running;    // v5.11.2.C — running sum of volumes (separate from vol_sum which is for VWAP)
-    FPN<F> vol_sum_xy_running;    // v5.11.2.C — running sum of i * volume[i]
+    FPN_Binary<F> buy_volume_sum;     // running sum of buyer-initiated volume
+    FPN_Binary<F> sell_volume_sum;    // running sum of seller-initiated volume
+    FPN_Binary<F> pv_sum;             // running sum(price * volume)
+    FPN_Binary<F> vol_sum;            // running sum(volume)
+    FPN_Binary<F> price_sum_running;     // v5.11.2.C — running sum of prices
+    FPN_Binary<F> price_sum_y2_running;  // v5.11.2.C — running sum of prices²
+    FPN_Binary<F> price_sum_xy_running;  // v5.11.2.C — running sum of i * price[i] (i = window position)
+    FPN_Binary<F> volume_sum_running;    // v5.11.2.C — running sum of volumes (separate from vol_sum which is for VWAP)
+    FPN_Binary<F> vol_sum_xy_running;    // v5.11.2.C — running sum of i * volume[i]
 
     // ── RING BUFFERS (large; only read during eviction, not iterated per Push) ──
-    FPN<F> price_buf[W];
-    FPN<F> volume_buf[W];
-    FPN<F> pv_buf[W];          // price*volume per sample (for eviction)
+    FPN_Binary<F> price_buf[W];
+    FPN_Binary<F> volume_buf[W];
+    FPN_Binary<F> pv_buf[W];          // price*volume per sample (for eviction)
     int side_buf[W];           // is_buyer_maker flags for directional volume eviction
 
     // ── MONOTONIC DEQUES for O(1) sliding-window min/max (v5.11.2.C) ──
@@ -128,7 +128,7 @@ static_assert((offsetof(detail::RollingStats_64_128, head) % 64) == 0,
               "head must be cache-line-aligned (alignas(64) on field) — "
               "see plans/2026-05-06-latency-path-discipline.md Rule 1");
 static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 4,
-              "head must come AFTER the 4-cache-line output cluster (Ship-A 16B FPN; was 5 lines) — "
+              "head must come AFTER the 4-cache-line output cluster (Ship-A 16B FPN_Binary; was 5 lines) — "
               "outputs (price_avg through vwap_deviation) read by GUI thread; "
               "head writes by engine must not share line with them");
 
@@ -191,7 +191,7 @@ template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_I
 // x-values are time indices 0..count-1, so sum_x and sum_x2 are computed from count alone
 //======================================================================================================
 template <unsigned F, unsigned W>
-inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volume, int is_buyer_maker = 0) {
+inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_Binary<F> volume, int is_buyer_maker = 0) {
     // ── v5.11.2.C — O(1) Push: running sums + monotonic deques replace the
     //               per-Push O(W) accumulator loop. See RollingStats struct
     //               docstring for the running-sum + deque storage rationale.
@@ -213,46 +213,46 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
     int evict_int = (rs->count >= (int)W);
     uint64_t evict_mask = -(uint64_t)evict_int;
     int slot = rs->head;
-    FPN<F> oldest_price  = rs->price_buf[slot];   // garbage when count==0; masked to zero by evict_mask
-    FPN<F> oldest_volume = rs->volume_buf[slot];
-    FPN<F> oldest_pv     = rs->pv_buf[slot];
+    FPN_Binary<F> oldest_price  = rs->price_buf[slot];   // garbage when count==0; masked to zero by evict_mask
+    FPN_Binary<F> oldest_volume = rs->volume_buf[slot];
+    FPN_Binary<F> oldest_pv     = rs->pv_buf[slot];
     int oldest_side      = rs->side_buf[slot];
-    FPN<F> sum_y_snapshot = rs->price_sum_running;   // for sum_xy formula (uses pre-update sum_y)
-    FPN<F> sum_v_snapshot = rs->volume_sum_running;  // for vol_sum_xy formula
+    FPN_Binary<F> sum_y_snapshot = rs->price_sum_running;   // for sum_xy formula (uses pre-update sum_y)
+    FPN_Binary<F> sum_v_snapshot = rs->volume_sum_running;  // for vol_sum_xy formula
     int count_old = rs->count;
 
     // ── 2. Common eviction terms (zero when warmup, real when full) ──
-    FPN<F> evict_p   = FPN_BlendOnMask(oldest_price,  FPN_Zero<F>(), evict_mask);
-    FPN<F> evict_v   = FPN_BlendOnMask(oldest_volume, FPN_Zero<F>(), evict_mask);
-    FPN<F> evict_pv  = FPN_BlendOnMask(oldest_pv,     FPN_Zero<F>(), evict_mask);
-    FPN<F> oldest_p2 = FPN_Mul(oldest_price, oldest_price);
-    FPN<F> evict_p2  = FPN_BlendOnMask(oldest_p2, FPN_Zero<F>(), evict_mask);
+    FPN_Binary<F> evict_p   = FPN_BlendOnMask(oldest_price,  FPN_Zero<F>(), evict_mask);
+    FPN_Binary<F> evict_v   = FPN_BlendOnMask(oldest_volume, FPN_Zero<F>(), evict_mask);
+    FPN_Binary<F> evict_pv  = FPN_BlendOnMask(oldest_pv,     FPN_Zero<F>(), evict_mask);
+    FPN_Binary<F> oldest_p2 = FPN_Mul(oldest_price, oldest_price);
+    FPN_Binary<F> evict_p2  = FPN_BlendOnMask(oldest_p2, FPN_Zero<F>(), evict_mask);
 
     // Directional volume eviction: mask is (evict & matching_side).
     int sell_evict_int = evict_int & oldest_side;
     int buy_evict_int  = evict_int & (1 - oldest_side);
-    FPN<F> sell_evict_v = FPN_BlendOnMask(oldest_volume, FPN_Zero<F>(), -(uint64_t)sell_evict_int);
-    FPN<F> buy_evict_v  = FPN_BlendOnMask(oldest_volume, FPN_Zero<F>(), -(uint64_t)buy_evict_int);
+    FPN_Binary<F> sell_evict_v = FPN_BlendOnMask(oldest_volume, FPN_Zero<F>(), -(uint64_t)sell_evict_int);
+    FPN_Binary<F> buy_evict_v  = FPN_BlendOnMask(oldest_volume, FPN_Zero<F>(), -(uint64_t)buy_evict_int);
 
     // Directional volume add: mask is is_buyer_maker (sell side gets the volume when set).
     uint64_t is_sell_mask = -(uint64_t)is_buyer_maker;
-    FPN<F> add_to_sell = FPN_BlendOnMask(volume,        FPN_Zero<F>(), is_sell_mask);
-    FPN<F> add_to_buy  = FPN_BlendOnMask(FPN_Zero<F>(), volume,        is_sell_mask);
+    FPN_Binary<F> add_to_sell = FPN_BlendOnMask(volume,        FPN_Zero<F>(), is_sell_mask);
+    FPN_Binary<F> add_to_buy  = FPN_BlendOnMask(FPN_Zero<F>(), volume,        is_sell_mask);
 
     rs->buy_volume_sum  = FPN_AddSat(FPN_SubSat(rs->buy_volume_sum,  buy_evict_v),  add_to_buy);
     rs->sell_volume_sum = FPN_AddSat(FPN_SubSat(rs->sell_volume_sum, sell_evict_v), add_to_sell);
 
     // ── pv_sum + vol_sum ──
-    FPN<F> new_pv = FPN_Mul(price, volume);
+    FPN_Binary<F> new_pv = FPN_Mul(price, volume);
     rs->pv_sum  = FPN_AddSat(FPN_SubSat(rs->pv_sum,  evict_pv), new_pv);
     rs->vol_sum = FPN_AddSat(FPN_SubSat(rs->vol_sum, evict_v),  volume);
 
     // ── 3. VWAP outputs (mask-blend on vol_sum != 0) ──
     uint64_t vol_nz_mask = -(uint64_t)(!FPN_IsZero(rs->vol_sum));
-    FPN<F> safe_vol = FPN_BlendOnMask(rs->vol_sum, FPN_FromDouble<F>(1.0), vol_nz_mask);
-    FPN<F> new_vwap = FPN_DivNoAssert(rs->pv_sum, safe_vol);
-    FPN<F> safe_vwap = FPN_BlendOnMask(new_vwap, FPN_FromDouble<F>(1.0), vol_nz_mask);
-    FPN<F> new_vwap_dev = FPN_DivNoAssert(FPN_Sub(price, new_vwap), safe_vwap);
+    FPN_Binary<F> safe_vol = FPN_BlendOnMask(rs->vol_sum, FPN_FromDouble<F>(1.0), vol_nz_mask);
+    FPN_Binary<F> new_vwap = FPN_DivNoAssert(rs->pv_sum, safe_vol);
+    FPN_Binary<F> safe_vwap = FPN_BlendOnMask(new_vwap, FPN_FromDouble<F>(1.0), vol_nz_mask);
+    FPN_Binary<F> new_vwap_dev = FPN_DivNoAssert(FPN_Sub(price, new_vwap), safe_vwap);
     rs->vwap           = FPN_BlendOnMask(new_vwap,     rs->vwap,           vol_nz_mask);
     rs->vwap_deviation = FPN_BlendOnMask(new_vwap_dev, rs->vwap_deviation, vol_nz_mask);
 
@@ -266,24 +266,24 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
     // Position of new sample in the window: full → W-1; warmup → count_old.
     // Branchless: position = count_old + evict_int * (W - 1 - count_old).
     int position_int = count_old + evict_int * ((int)W - 1 - count_old);
-    FPN<F> position_fp = FPN_FromInt<F>((int64_t)position_int);
+    FPN_Binary<F> position_fp = FPN_FromInt<F>((int64_t)position_int);
 
     // sum_xy update via formula: sum_xy_new = sum_xy_old - subtracted_term + position * new
     //   warmup: subtracted_term = 0,                  position = count_old
     //   full:   subtracted_term = sum_y_old - oldest, position = W - 1
-    FPN<F> sum_y_excl  = FPN_SubSat(sum_y_snapshot, oldest_price);
-    FPN<F> evict_xy    = FPN_BlendOnMask(sum_y_excl, FPN_Zero<F>(), evict_mask);
-    FPN<F> contrib_xy  = FPN_Mul(position_fp, price);
+    FPN_Binary<F> sum_y_excl  = FPN_SubSat(sum_y_snapshot, oldest_price);
+    FPN_Binary<F> evict_xy    = FPN_BlendOnMask(sum_y_excl, FPN_Zero<F>(), evict_mask);
+    FPN_Binary<F> contrib_xy  = FPN_Mul(position_fp, price);
     rs->price_sum_xy_running = FPN_AddSat(FPN_SubSat(rs->price_sum_xy_running, evict_xy), contrib_xy);
 
-    FPN<F> sum_v_excl    = FPN_SubSat(sum_v_snapshot, oldest_volume);
-    FPN<F> evict_v_xy    = FPN_BlendOnMask(sum_v_excl, FPN_Zero<F>(), evict_mask);
-    FPN<F> contrib_v_xy  = FPN_Mul(position_fp, volume);
+    FPN_Binary<F> sum_v_excl    = FPN_SubSat(sum_v_snapshot, oldest_volume);
+    FPN_Binary<F> evict_v_xy    = FPN_BlendOnMask(sum_v_excl, FPN_Zero<F>(), evict_mask);
+    FPN_Binary<F> contrib_v_xy  = FPN_Mul(position_fp, volume);
     rs->vol_sum_xy_running = FPN_AddSat(FPN_SubSat(rs->vol_sum_xy_running, evict_v_xy), contrib_v_xy);
 
     // sum_y / sum_y2 / sum_v: standard slide-in/slide-out
     rs->price_sum_running    = FPN_AddSat(FPN_SubSat(rs->price_sum_running,    evict_p),  price);
-    FPN<F> new_p2 = FPN_Mul(price, price);
+    FPN_Binary<F> new_p2 = FPN_Mul(price, price);
     rs->price_sum_y2_running = FPN_AddSat(FPN_SubSat(rs->price_sum_y2_running, evict_p2), new_p2);
     rs->volume_sum_running   = FPN_AddSat(FPN_SubSat(rs->volume_sum_running,   evict_v),  volume);
 
@@ -348,21 +348,21 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
     rs->count += (rs->count < (int)W);
 
     // ── 8. Volume delta = (buy - sell) / (buy + sell), branchless via mask-blend ──
-    FPN<F> total_dir_vol = FPN_AddSat(rs->buy_volume_sum, rs->sell_volume_sum);
+    FPN_Binary<F> total_dir_vol = FPN_AddSat(rs->buy_volume_sum, rs->sell_volume_sum);
     uint64_t total_nz_mask = -(uint64_t)(!FPN_IsZero(total_dir_vol));
-    FPN<F> safe_total_dir = FPN_BlendOnMask(total_dir_vol, FPN_FromDouble<F>(1.0), total_nz_mask);
-    FPN<F> diff = FPN_Sub(rs->buy_volume_sum, rs->sell_volume_sum);
-    FPN<F> raw_delta = FPN_DivNoAssert(diff, safe_total_dir);
+    FPN_Binary<F> safe_total_dir = FPN_BlendOnMask(total_dir_vol, FPN_FromDouble<F>(1.0), total_nz_mask);
+    FPN_Binary<F> diff = FPN_Sub(rs->buy_volume_sum, rs->sell_volume_sum);
+    FPN_Binary<F> raw_delta = FPN_DivNoAssert(diff, safe_total_dir);
     rs->volume_delta = FPN_BlendOnMask(raw_delta, FPN_Zero<F>(), total_nz_mask);
 
     if (rs->count < 2) return;  // need at least 2 samples for regression
 
     // ── 9. Regression outputs from running sums (no loop) ──
     int n = rs->count;
-    FPN<F> n_fp = FPN_FromInt<F>(n);
+    FPN_Binary<F> n_fp = FPN_FromInt<F>(n);
     int64_t n_l = (int64_t)n;
-    FPN<F> sum_x  = FPN_FromInt<F>(n_l * (n_l - 1) / 2);
-    FPN<F> sum_x2 = FPN_FromInt<F>(n_l * (n_l - 1) * (2 * n_l - 1) / 6);
+    FPN_Binary<F> sum_x  = FPN_FromInt<F>(n_l * (n_l - 1) / 2);
+    FPN_Binary<F> sum_x2 = FPN_FromInt<F>(n_l * (n_l - 1) * (2 * n_l - 1) / 6);
 
     // v5.11.2.A: branchless 1/n via reciprocal LUT (FPN_Mul, not FPN_DivNoAssert)
     const auto& recip = tt::GetReciprocalLUT<F, W>();
@@ -370,33 +370,33 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
     rs->volume_avg = FPN_Mul(rs->volume_sum_running, recip.values[n]);
 
     // stddev approximation: range / 4
-    FPN<F> range = FPN_Sub(rs->price_max, rs->price_min);
+    FPN_Binary<F> range = FPN_Sub(rs->price_max, rs->price_min);
     rs->price_stddev = FPN_DivNoAssert(range, FPN_FromDouble<F>(4.0));
 
     // real variance: var = (n*sum_y2 - sum_y²) / n²
-    FPN<F> ss_total = FPN_SubSat(FPN_Mul(n_fp, rs->price_sum_y2_running),
+    FPN_Binary<F> ss_total = FPN_SubSat(FPN_Mul(n_fp, rs->price_sum_y2_running),
                                   FPN_Mul(rs->price_sum_running, rs->price_sum_running));
-    FPN<F> recip_n_sq = FPN_Mul(recip.values[n], recip.values[n]);
+    FPN_Binary<F> recip_n_sq = FPN_Mul(recip.values[n], recip.values[n]);
     rs->price_variance = FPN_Mul(ss_total, recip_n_sq);
 
     // OLS slope = (n*sum_xy - sum_x*sum_y) / (n*sum_x2 - sum_x²); R² = slope * num / ss_total
-    FPN<F> numerator   = FPN_Sub(FPN_Mul(n_fp, rs->price_sum_xy_running),
+    FPN_Binary<F> numerator   = FPN_Sub(FPN_Mul(n_fp, rs->price_sum_xy_running),
                                   FPN_Mul(sum_x, rs->price_sum_running));
-    FPN<F> denominator = FPN_Sub(FPN_Mul(n_fp, sum_x2), FPN_Mul(sum_x, sum_x));
+    FPN_Binary<F> denominator = FPN_Sub(FPN_Mul(n_fp, sum_x2), FPN_Mul(sum_x, sum_x));
 
     uint64_t denom_nz_mask = -(uint64_t)(!FPN_IsZero(denominator));
-    FPN<F> safe_denom = FPN_BlendOnMask(denominator, FPN_FromDouble<F>(1.0), denom_nz_mask);
-    FPN<F> raw_slope  = FPN_DivNoAssert(numerator, safe_denom);
+    FPN_Binary<F> safe_denom = FPN_BlendOnMask(denominator, FPN_FromDouble<F>(1.0), denom_nz_mask);
+    FPN_Binary<F> raw_slope  = FPN_DivNoAssert(numerator, safe_denom);
     rs->price_slope   = FPN_BlendOnMask(raw_slope, FPN_Zero<F>(), denom_nz_mask);
 
     uint64_t total_xn_mask = denom_nz_mask & -(uint64_t)(!FPN_IsZero(ss_total));
-    FPN<F> safe_total = FPN_BlendOnMask(ss_total, FPN_FromDouble<F>(1.0), total_xn_mask);
-    FPN<F> raw_r2     = FPN_Mul(rs->price_slope, FPN_DivNoAssert(numerator, safe_total));
+    FPN_Binary<F> safe_total = FPN_BlendOnMask(ss_total, FPN_FromDouble<F>(1.0), total_xn_mask);
+    FPN_Binary<F> raw_r2     = FPN_Mul(rs->price_slope, FPN_DivNoAssert(numerator, safe_total));
     rs->price_r_squared = FPN_BlendOnMask(raw_r2, FPN_Zero<F>(), total_xn_mask);
 
-    FPN<F> vol_num   = FPN_Sub(FPN_Mul(n_fp, rs->vol_sum_xy_running),
+    FPN_Binary<F> vol_num   = FPN_Sub(FPN_Mul(n_fp, rs->vol_sum_xy_running),
                                 FPN_Mul(sum_x, rs->volume_sum_running));
-    FPN<F> vol_slope = FPN_DivNoAssert(vol_num, safe_denom);
+    FPN_Binary<F> vol_slope = FPN_DivNoAssert(vol_num, safe_denom);
     rs->volume_slope = FPN_BlendOnMask(vol_slope, FPN_Zero<F>(), denom_nz_mask);
 }
 
@@ -407,8 +407,8 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
 // branchless - produces a mask value the caller can AND with other conditions
 //======================================================================================================
 template <unsigned F, unsigned W>
-inline int RollingStats_VolumeSignificant(const RollingStats<F, W> *rs, FPN<F> tick_volume, FPN<F> multiplier) {
-    FPN<F> threshold = FPN_Mul(rs->volume_avg, multiplier);
+inline int RollingStats_VolumeSignificant(const RollingStats<F, W> *rs, FPN_Binary<F> tick_volume, FPN_Binary<F> multiplier) {
+    FPN_Binary<F> threshold = FPN_Mul(rs->volume_avg, multiplier);
     return FPN_GreaterThanOrEqual(tick_volume, threshold);
 }
 
@@ -417,15 +417,15 @@ inline int RollingStats_VolumeSignificant(const RollingStats<F, W> *rs, FPN<F> t
 //======================================================================================================
 // computes the minimum price distance between entries based on rolling volatility
 // spacing = stddev * spacing_multiplier
-// returns the FPN spacing value - caller compares against nearest existing position
+// returns the FPN_Binary spacing value - caller compares against nearest existing position
 //======================================================================================================
 template <unsigned F, unsigned W>
-inline FPN<F> RollingStats_EntrySpacing(const RollingStats<F, W> *rs, FPN<F> spacing_multiplier) {
+inline FPN_Binary<F> RollingStats_EntrySpacing(const RollingStats<F, W> *rs, FPN_Binary<F> spacing_multiplier) {
     // floor: at least 0.03% of avg price — prevents tight clustering when stddev is low
     // (e.g. right after warmup or during calm markets with compressed volatility)
     // 0.03% of $70k = ~$21, comparable to steady-state spacing with stddev ~$10
-    FPN<F> vol_spacing = FPN_Mul(rs->price_stddev, spacing_multiplier);
-    FPN<F> min_floor = FPN_Mul(rs->price_avg, FPN_FromDouble<F>(0.0003));
+    FPN_Binary<F> vol_spacing = FPN_Mul(rs->price_stddev, spacing_multiplier);
+    FPN_Binary<F> min_floor = FPN_Mul(rs->price_avg, FPN_FromDouble<F>(0.0003));
     return FPN_Max(vol_spacing, min_floor);
 }
 
@@ -437,8 +437,8 @@ inline FPN<F> RollingStats_EntrySpacing(const RollingStats<F, W> *rs, FPN<F> spa
 // this means "only buy when price dips offset_pct below the rolling average"
 //======================================================================================================
 template <unsigned F, unsigned W>
-inline FPN<F> RollingStats_BuyPrice(const RollingStats<F, W> *rs, FPN<F> offset_pct) {
-    FPN<F> offset = FPN_Mul(rs->price_avg, offset_pct);
+inline FPN_Binary<F> RollingStats_BuyPrice(const RollingStats<F, W> *rs, FPN_Binary<F> offset_pct) {
+    FPN_Binary<F> offset = FPN_Mul(rs->price_avg, offset_pct);
     return FPN_Sub(rs->price_avg, offset);
 }
 

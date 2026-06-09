@@ -91,7 +91,7 @@ namespace tt {
 // rejected on load with version-mismatch — paper-mode data only;
 // operator restarts a fresh paper session. No live data is lost
 // (live mode never persists via this path; reconciles from exchange).
-#define SHARDED_SNAPSHOT_VERSION  9u   // Ship-A 16B FPN: embedded Position/FPN-struct byte layouts changed; v8 version-rejected (H21/D-144)
+#define SHARDED_SNAPSHOT_VERSION  9u   // Ship-A 16B FPN_Binary: embedded Position/FPN_Binary-struct byte layouts changed; v8 version-rejected (H21/D-144)
 
 //======================================================================================================
 // [SAVE]
@@ -177,14 +177,14 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
             uint8_t pad8 = 0;  // was uint16_t pad16 in v3; one byte stolen for state_kind
             if (fwrite(&pad8, 1, 1, f) != 1) goto fail;
         }
-        if (fwrite(&ctx.allocated_balance,   sizeof(FPN<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.allocated_balance,   sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
 
         // Counters
         if (fwrite(&ctx.entries_processed,   8, 1, f) != 1) goto fail;
         if (fwrite(&ctx.exits_processed,     8, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_realized,       sizeof(FPN<F>), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_fees,           sizeof(FPN<F>), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_open_notional,  sizeof(FPN<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_realized,       sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_fees,           sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_open_notional,  sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
         if (fwrite(&ctx.core_wins,           4, 1, f) != 1) goto fail;
         if (fwrite(&ctx.core_losses,         4, 1, f) != 1) goto fail;
         // v5.4.3 (recurring-bugs Class 4): core_gross_wins/losses were
@@ -192,18 +192,18 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         // avg_loss, profit_factor, expectancy all read $0.00 after
         // restart until the next post-restart trade. idle_cycles is
         // the death-spiral counter — also persisted for continuity.
-        if (fwrite(&ctx.core_gross_wins,     sizeof(FPN<F>), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_gross_losses,   sizeof(FPN<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_gross_wins,     sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_gross_losses,   sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
         if (fwrite(&ctx.idle_cycles,         4, 1, f) != 1) goto fail;
 
         // Spacing state
-        if (fwrite(&ctx.last_entry_price,    sizeof(FPN<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.last_entry_price,    sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
         if (fwrite(&ctx.last_entry_tick,     8, 1, f) != 1) goto fail;
         if (fwrite(&ctx.sl_cooldown_remaining, 4, 1, f) != 1) goto fail;
 
         // Kill switch
-        if (fwrite(&ctx.core_peak_balance,   sizeof(FPN<F>), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_dd_pct,         sizeof(FPN<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_peak_balance,   sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_dd_pct,         sizeof(FPN_Binary<F>), 1, f) != 1) goto fail;
         // v5.15.5.B.3 — core_kill_tripped migrated to core_state_flags bitmap
         // bit. Format preservation: write as 1-byte 0/1 the same way pre-.B.3
         // saved the uint8_t field. Bytewise-identical wire format (no
@@ -228,8 +228,8 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         if (fwrite(&ctx.regime_state.regime_start_tick,     sizeof(uint64_t), 1, f) != 1) goto fail;
         if (fwrite(&ctx.regime_state.regime_start_time,     sizeof(time_t), 1, f) != 1) goto fail;
 
-        // pnl_feeder ring buffer (size MAX_WINDOW = 8 FPN entries + 2 ints)
-        if (fwrite(ctx.pnl_feeder.price_samples, sizeof(FPN<F>), MAX_WINDOW, f) != MAX_WINDOW) goto fail;
+        // pnl_feeder ring buffer (size MAX_WINDOW = 8 FPN_Binary entries + 2 ints)
+        if (fwrite(ctx.pnl_feeder.price_samples, sizeof(FPN_Binary<F>), MAX_WINDOW, f) != MAX_WINDOW) goto fail;
         if (fwrite(&ctx.pnl_feeder.head,  sizeof(int), 1, f) != 1) goto fail;
         if (fwrite(&ctx.pnl_feeder.count, sizeof(int), 1, f) != 1) goto fail;
 
@@ -392,18 +392,18 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         uint8_t  strategy_id;
         uint8_t  resolved_strategy_id;
         uint8_t  strategy_state_kind;  // v5.4.0 — used by load to dispatch Strategy_InitPerCore
-        FPN<F>   allocated_balance;
+        FPN_Binary<F>   allocated_balance;
         uint64_t entries_processed;
         uint64_t exits_processed;
-        FPN<F>   core_realized, core_fees, core_open_notional;
+        FPN_Binary<F>   core_realized, core_fees, core_open_notional;
         uint32_t core_wins, core_losses;
         // v5.4.3 (snapshot v5): gross accumulators + idle counter
-        FPN<F>   core_gross_wins, core_gross_losses;
+        FPN_Binary<F>   core_gross_wins, core_gross_losses;
         uint32_t idle_cycles;
-        FPN<F>   last_entry_price;
+        FPN_Binary<F>   last_entry_price;
         uint64_t last_entry_tick;
         uint32_t sl_cooldown_remaining;
-        FPN<F>   core_peak_balance, core_dd_pct;
+        FPN_Binary<F>   core_peak_balance, core_dd_pct;
         uint8_t  core_kill_tripped;
         uint32_t core_ks_trips_total;
         // regime
@@ -411,7 +411,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         uint64_t rs_start_tick;
         time_t   rs_start_time;
         // feeder
-        FPN<F>   feeder_samples[MAX_WINDOW];
+        FPN_Binary<F>   feeder_samples[MAX_WINDOW];
         int      feeder_head, feeder_count;
         // confidence (v1)
         double   staged, active, last_confidence;
@@ -440,23 +440,23 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
             uint8_t pad8_kind = 0;
             if (fread(&pad8_kind, 1, 1, f) != 1) { fclose(f); return 0; }
         }
-        if (fread(&s.allocated_balance, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.allocated_balance, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.entries_processed, 8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.exits_processed,   8, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_realized,     sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_fees,         sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_open_notional,sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_realized,     sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_fees,         sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_open_notional,sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.core_wins,         4, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.core_losses,       4, 1, f) != 1) { fclose(f); return 0; }
         // v5.4.3 (snapshot v5): gross accumulators + idle_cycles.
-        if (fread(&s.core_gross_wins,   sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_gross_losses, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_gross_wins,   sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_gross_losses, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.idle_cycles,       4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.last_entry_price,  sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.last_entry_price,  sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_entry_tick,   8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.sl_cooldown_remaining, 4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_peak_balance, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_dd_pct,       sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_peak_balance, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_dd_pct,       sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.core_kill_tripped, 1, 1, f) != 1) { fclose(f); return 0; }
         if (fread(pad8,                 3, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.core_ks_trips_total, 4, 1, f) != 1) { fclose(f); return 0; }
@@ -467,7 +467,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         if (fread(&s.rs_last_strat, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.rs_start_tick, sizeof(uint64_t), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.rs_start_time, sizeof(time_t), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(s.feeder_samples, sizeof(FPN<F>), MAX_WINDOW, f) != MAX_WINDOW) { fclose(f); return 0; }
+        if (fread(s.feeder_samples, sizeof(FPN_Binary<F>), MAX_WINDOW, f) != MAX_WINDOW) { fclose(f); return 0; }
         if (fread(&s.feeder_head,   sizeof(int), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.feeder_count,  sizeof(int), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.staged,         8, 1, f) != 1) { fclose(f); return 0; }
@@ -633,23 +633,23 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // prices for tiny gains that lost to fees. Now compute live_tp
         // the same way ExecutionCore_Tick does on a fresh entry, using
         // per-core resolved tp_pct/sl_pct from cfg.
-        FPN<F> entry = pos.entry_price;
+        FPN_Binary<F> entry = pos.entry_price;
         // When cfg is provided (production caller), recompute live_tp/sl
         // from entry × (1 ± pct) so it matches the fresh-entry hot path.
         // When cfg is nullptr (legacy callers, tests), fall back to the
         // pre-fix pos.* path.
-        FPN<F> live_tp_a = pos.take_profit_price;
-        FPN<F> live_sl_a = pos.stop_loss_price;
-        FPN<F> live_tp_b_val = pos.take_profit_price;
+        FPN_Binary<F> live_tp_a = pos.take_profit_price;
+        FPN_Binary<F> live_sl_a = pos.stop_loss_price;
+        FPN_Binary<F> live_tp_b_val = pos.take_profit_price;
         if (cfg) {
             ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, core_id);
-            FPN<F> tp_pct_a = resolved.take_profit_pct;
-            FPN<F> sl_pct_a = resolved.stop_loss_pct;
+            FPN_Binary<F> tp_pct_a = resolved.take_profit_pct;
+            FPN_Binary<F> sl_pct_a = resolved.stop_loss_pct;
             if (!FPN_IsZero(tp_pct_a))
                 live_tp_a = FPN_Add(entry, FPN_Mul(entry, tp_pct_a));
             if (!FPN_IsZero(sl_pct_a))
                 live_sl_a = FPN_Sub(entry, FPN_Mul(entry, sl_pct_a));
-            FPN<F> tp_pct_b = !FPN_IsZero(resolved.tp2_mult) && !FPN_IsZero(tp_pct_a)
+            FPN_Binary<F> tp_pct_b = !FPN_IsZero(resolved.tp2_mult) && !FPN_IsZero(tp_pct_a)
                 ? FPN_Mul(tp_pct_a, resolved.tp2_mult)
                 : tp_pct_a;
             if (!FPN_IsZero(tp_pct_b))

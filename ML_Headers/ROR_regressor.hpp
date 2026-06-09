@@ -24,8 +24,8 @@
 //======================================================================================================
 template<unsigned F>
 struct RORRegressor {
-    FPN<F> slope_samples[MAX_WINDOW];
-    FPN<F> r_squared_samples[MAX_WINDOW];
+    FPN_Binary<F> slope_samples[MAX_WINDOW];
+    FPN_Binary<F> r_squared_samples[MAX_WINDOW];
     int head;
     int count;
 };
@@ -73,8 +73,8 @@ inline void RORRegressor_Push(RORRegressor<F> *reg, LinearRegression3XResult<F> 
 //======================================================================================================
 template<unsigned F>
 inline LinearRegression3XResult<F> RORRegressor_Compute(RORRegressor<F> *reg) {
-    FPN<F> linearized[MAX_WINDOW];
-    FPN<F> time_index[MAX_WINDOW];
+    FPN_Binary<F> linearized[MAX_WINDOW];
+    FPN_Binary<F> time_index[MAX_WINDOW];
 
     for (int i = 0; i < reg->count; i++) {
         int idx       = (reg->head - reg->count + i + MAX_WINDOW) & (MAX_WINDOW - 1);

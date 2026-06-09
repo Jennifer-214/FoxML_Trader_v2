@@ -14,21 +14,21 @@
 // no branch" version of conditional division).
 //
 // ULP drift trade-off:
-//   FPN<F> reciprocals for n in {3, 5, 6, 7, 9, 10, 11, ...} (non-power-of-2)
-//   have a finite truncation in the FPN<F>=128-bit representation. The
+//   FPN_Binary<F> reciprocals for n in {3, 5, 6, 7, 9, 10, 11, ...} (non-power-of-2)
+//   have a finite truncation in the FPN_Binary<F>=128-bit representation. The
 //   resulting FPN_Mul(sum, recip[n]) differs from FPN_DivNoAssert(sum, n)
 //   by at most 1 LSB in the result's magnitude.
 //
-//   Real-value impact: 1 LSB in FPN<64> = 1 / 2^64 ≈ 5.4e-20. Cascades to
+//   Real-value impact: 1 LSB in FPN_Binary<64> = 1 / 2^64 ≈ 5.4e-20. Cascades to
 //   ~1e-15 in derived values — well below all downstream consumer precision
 //   (XGBoost float32 = ~1e-7, cfg-tuned thresholds = ~1e-4).
 //
-//   Replay-determinism (tests/controller_test.cpp:10258) uses memcmp on FPN
+//   Replay-determinism (tests/controller_test.cpp:10258) uses memcmp on FPN_Binary
 //   bytes — the LUT changes the output bytewise. Baseline is regenerated as
 //   part of v5.11.2.A; documented in DOCS/PARITY_LIFECYCLE.md.
 //
 // For power-of-2 n (n in {2, 4, 8, 16, 32, 64, 128}), 1/n is exact in
-// FPN<F=64> — no drift. Steady state of RollingStats has n=W (128 by default,
+// FPN_Binary<F=64> — no drift. Steady state of RollingStats has n=W (128 by default,
 // power-of-2 enforced by static_assert) → exact reciprocal.
 //
 // Init cost: W FPN_DivNoAssert calls at engine boot (one-time, ~ms).
@@ -41,7 +41,7 @@ namespace tt {
 
 template <unsigned F, unsigned W>
 struct ReciprocalLUT {
-    FPN<F> values[W + 1];  // values[n] = 1.0 / n; values[0] = sentinel zero
+    FPN_Binary<F> values[W + 1];  // values[n] = 1.0 / n; values[0] = sentinel zero
 };
 
 // Meyer's singleton — thread-safe init in C++11+ (the underlying static
@@ -51,7 +51,7 @@ template <unsigned F, unsigned W>
 inline const ReciprocalLUT<F, W>& GetReciprocalLUT() {
     static const ReciprocalLUT<F, W> lut = []() {
         ReciprocalLUT<F, W> l{};
-        FPN<F> one = FPN_FromDouble<F>(1.0);
+        FPN_Binary<F> one = FPN_FromDouble<F>(1.0);
         l.values[0] = FPN_Zero<F>();  // sentinel (n=0 should never be used)
         for (unsigned i = 1; i <= W; ++i) {
             l.values[i] = FPN_DivNoAssert(one, FPN_FromInt<F>((int64_t)i));

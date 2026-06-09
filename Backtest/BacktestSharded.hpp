@@ -315,7 +315,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // Re-init each call so backtests are deterministic from a clean state.
     //----------------------------------------------------------------------
     static RORRegressor<BACKTEST_FP> regime_ror   = RORRegressor_Init<BACKTEST_FP>();
-    static FPN<BACKTEST_FP>          ema_price    = FPN_Zero<BACKTEST_FP>();
+    static FPN_Binary<BACKTEST_FP>          ema_price    = FPN_Zero<BACKTEST_FP>();
     static RollingStats<BACKTEST_FP, 256>  rolling_medium   = RollingStats_Init<BACKTEST_FP, 256>();
     static RollingStats<BACKTEST_FP, 1024> rolling_baseline = RollingStats_Init<BACKTEST_FP, 1024>();
     static CumDeltaState<BACKTEST_FP>      cumdelta_state;
@@ -337,15 +337,15 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // v4.6 Wave 2 — D.3 spread state + holders updated per-tick from
     // depth_replay.current.spread / mid_price.
     static SpreadState<BACKTEST_FP, 1024> spread_state;
-    static FPN<BACKTEST_FP>               spread_holder    = FPN_Zero<BACKTEST_FP>();
-    static FPN<BACKTEST_FP>               mid_price_holder = FPN_Zero<BACKTEST_FP>();
+    static FPN_Binary<BACKTEST_FP>               spread_holder    = FPN_Zero<BACKTEST_FP>();
+    static FPN_Binary<BACKTEST_FP>               mid_price_holder = FPN_Zero<BACKTEST_FP>();
     SpreadState_Init(&spread_state);
     spread_holder    = FPN_Zero<BACKTEST_FP>();
     mid_price_holder = FPN_Zero<BACKTEST_FP>();
-    FPN<BACKTEST_FP> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
+    FPN_Binary<BACKTEST_FP> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
                                  ? cfg.gate_ema_alpha
                                  : FPN_FromDouble<BACKTEST_FP>(0.1);
-    FPN<BACKTEST_FP> one_minus_alpha =
+    FPN_Binary<BACKTEST_FP> one_minus_alpha =
         FPN_Sub(FPN_FromDouble<BACKTEST_FP>(1.0), ema_alpha);
 
     //----------------------------------------------------------------------
@@ -375,7 +375,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // Holder for the current book_imbalance value passed to the driver.
     // Driver reads via pointer so updates between RunTick calls land
     // automatically.
-    static FPN<BACKTEST_FP> book_imbalance_holder = FPN_Zero<BACKTEST_FP>();
+    static FPN_Binary<BACKTEST_FP> book_imbalance_holder = FPN_Zero<BACKTEST_FP>();
     book_imbalance_holder = FPN_Zero<BACKTEST_FP>();
 
     ShardedBacktestDriver<BACKTEST_FP, 128, 512> drv;
@@ -639,7 +639,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // PortfolioController_Tick. Driver reads the resulting value via
             // drv.ema_price on slow-path firings; without per-tick updates
             // sig->ema_sma_spread + sig->ema_above_sma stay stale or zero.
-            FPN<BACKTEST_FP> ema_new = FPN_Add(
+            FPN_Binary<BACKTEST_FP> ema_new = FPN_Add(
                 FPN_Mul(ema_price, ema_alpha),
                 FPN_Mul(t.price,    one_minus_alpha));
             if (FPN_IsZero(ema_price)) ema_price = t.price;

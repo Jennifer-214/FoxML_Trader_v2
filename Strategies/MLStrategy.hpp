@@ -32,7 +32,7 @@
 template <unsigned F> struct MLStrategyState {
     ModelHandle<F> buy_model;           // buy signal model (loaded from config path)
     float feature_buf[MODEL_MAX_FEATURES]; // scratch space for feature packing
-    FPN<F> last_prediction;             // last model output (for display)
+    FPN_Binary<F> last_prediction;             // last model output (for display)
     BuySideGateConditions<F> buy_conds_initial; // anchor from warmup init
     int model_ready;                    // 1 if model loaded and features available
     // v5.10.0a.G.4 — optional ensemble dispatch. nullptr default = single-
@@ -84,8 +84,8 @@ inline void MLStrategy_Init(MLStrategyState<F> *state, const RollingStats<F> *ro
 // future: online learning, feature drift detection, model hot-swap.
 //======================================================================================================
 template <unsigned F>
-inline void MLStrategy_Adapt(MLStrategyState<F> *state, FPN<F> current_price,
-                              FPN<F> portfolio_delta, uint16_t active_bitmap,
+inline void MLStrategy_Adapt(MLStrategyState<F> *state, FPN_Binary<F> current_price,
+                              FPN_Binary<F> portfolio_delta, uint16_t active_bitmap,
                               const BuySideGateConditions<F> *buy_conds,
                               const void *cfg) {
     // intentionally empty — model weights don't change at runtime
@@ -103,8 +103,8 @@ inline void MLStrategy_Adapt(MLStrategyState<F> *state, FPN<F> current_price,
 template <unsigned F> struct ControllerConfig;
 template <unsigned F>
 inline void MLStrategy_Adapt_Canonical(
-    MLStrategyState<F> *state, FPN<F> current_price,
-    FPN<F> portfolio_delta, uint16_t active_bitmap,
+    MLStrategyState<F> *state, FPN_Binary<F> current_price,
+    FPN_Binary<F> portfolio_delta, uint16_t active_bitmap,
     const BuySideGateConditions<F> *buy_conds,
     const ControllerConfig<F> *cfg) {
     MLStrategy_Adapt(state, current_price, portfolio_delta, active_bitmap,
@@ -196,7 +196,7 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     if (prediction > threshold) {
         // buy signal: use rolling avg as gate price (model says WHEN, gate says WHERE)
         // offset below avg by 1 stddev to catch dips (like SimpleDip)
-        FPN<F> offset = rolling->price_stddev;
+        FPN_Binary<F> offset = rolling->price_stddev;
         conds.price = FPN_Sub(rolling->price_avg, offset);
         conds.volume = rolling->volume_avg; // minimum volume = average
         conds.gate_direction = 0; // buy below
@@ -216,7 +216,7 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 // ratchets TP/SL upward when price runs past original TP in a strong trend.
 // uses tp_trail_mult / sl_trail_mult from config with R² gating.
 template <unsigned F>
-inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
+inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, FPN_Binary<F> current_price,
                                    const RollingStats<F> *rolling,
                                    MLStrategyState<F> *state,
                                    const ControllerConfig<F> *cfg) {
@@ -224,7 +224,7 @@ inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
     if (FPN_IsZero(rolling->price_stddev)) return;
 
     // R² from rolling stats (no separate feeder needed — rolling already has it)
-    FPN<F> r_squared = rolling->price_r_squared;
+    FPN_Binary<F> r_squared = rolling->price_r_squared;
     int r2_ok = FPN_GreaterThan(r_squared, FPN_FromDouble<F>(0.5));
 
     uint16_t active = portfolio->active_bitmap;
@@ -235,19 +235,19 @@ inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
         int above_tp = FPN_GreaterThan(current_price, pos->original_tp);
 
         if (above_tp & r2_ok) {
-            FPN<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
-            FPN<F> trailing_tp = FPN_Sub(current_price, tp_offset);
+            FPN_Binary<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
+            FPN_Binary<F> trailing_tp = FPN_Sub(current_price, tp_offset);
             pos->take_profit_price = FPN_Max(pos->take_profit_price, trailing_tp);
 
-            FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-            FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+            FPN_Binary<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
+            FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
             pos->stop_loss_price = FPN_Max(pos->stop_loss_price, trailing_sl);
 
             // SL floor: 2:1 min reward/risk (only when SL below entry)
             if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
-                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
-                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
+                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
         }
@@ -277,7 +277,7 @@ namespace tt {
 template <unsigned F> struct EventLoopState;
 template <unsigned F>
 bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
-                              FPN<F> proposed_sl, FPN<F> entry_price,
+                              FPN_Binary<F> proposed_sl, FPN_Binary<F> entry_price,
                               const ControllerConfig<F>* cfg);
 
 template <unsigned F, unsigned W>
@@ -285,7 +285,7 @@ inline void MLStrategy_ExitAdjustSharded(
     EventLoopState<F>* state,
     int slot,
     MLStrategyState<F>* /*ml*/,            // reserved — see comment above
-    FPN<F> current_price,
+    FPN_Binary<F> current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {
@@ -301,15 +301,15 @@ inline void MLStrategy_ExitAdjustSharded(
         : (uint16_t)(1u << slot);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
-    FPN<F> sl_offset   = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-    FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+    FPN_Binary<F> sl_offset   = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
+    FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
 
     while (bm) {
         int pidx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        FPN<F> entry = state->oms->portfolio.positions[pidx].entry_price;
+        FPN_Binary<F> entry = state->oms->portfolio.positions[pidx].entry_price;
         if (FPN_IsZero(entry)) continue;
-        FPN<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
+        FPN_Binary<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
         if (!FPN_IsZero(orig_tp) && !FPN_GreaterThan(current_price, orig_tp)) continue;
         Strategy_WriteRatchetSL(state, slot, trailing_sl, entry, cfg);
     }

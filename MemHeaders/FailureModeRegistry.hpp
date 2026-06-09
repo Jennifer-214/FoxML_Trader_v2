@@ -142,7 +142,7 @@ enum FailureModeGroupId : int {
     X(ml_nan_feature_events,    COUNTER_U32, SEV_YELLOW, "feat: %u",                                    \
       "Total feature-pack NaN/Inf events on this core.\n"                                               \
       "Triggers when Features_PackAll's two-layer guard catches NaN/Inf\n"                              \
-      "(FPN saturation past 1e15 OR IEEE-754 isnan/isinf post-cast).\n"                                 \
+      "(FPN_Binary saturation past 1e15 OR IEEE-754 isnan/isinf post-cast).\n"                                 \
       "Counter increments per skipped prediction cycle.",                                               \
       tt::GROUP_NAN_EVENTS)                                                                             \
     X(ml_nan_prediction_events, COUNTER_U32, SEV_YELLOW, "pred: %u",                                    \

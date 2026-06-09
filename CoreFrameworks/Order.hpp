@@ -134,19 +134,19 @@ static constexpr uint32_t MASK_ORDER_BANDIT_3BIT          = 0x7u;
 // Future per-resolved fields extend HERE (single-line addition) + Order_BindPreResolved
 // extends concurrently. Consumer sites unchanged.
 //
-// Sized at 32 B (2 × FPN<F=64> = 16 B each; Ship-A 16B FPN, was 48 B). Placed at end of Order<F> HOT cluster.
+// Sized at 32 B (2 × FPN_Binary<F=64> = 16 B each; Ship-A 16B FPN_Binary, was 48 B). Placed at end of Order<F> HOT cluster.
 //======================================================================================================
 template <unsigned F>
 struct OrderPreResolved {
-    FPN<F> fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
-    FPN<F> slippage_pct;   // pre-resolved per-core
+    FPN_Binary<F> fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
+    FPN_Binary<F> slippage_pct;   // pre-resolved per-core
     // Future per-resolved fields (extend in lockstep with Order_BindPreResolved):
     //   - effective_kill_switch_threshold (per-core risk envelope at submit time)
     //   - effective_min_holding_ticks (per-core time-exit floor)
     //   - effective_intended_strategy_dispatch (pre-resolved dispatch arm)
 };
 static_assert(sizeof(OrderPreResolved<64>) == 32,
-              "OrderPreResolved<64> size locked at 32 B (Ship-A 16B FPN, was 48); if changing, update Order<64> size_assert.");
+              "OrderPreResolved<64> size locked at 32 B (Ship-A 16B FPN_Binary, was 48); if changing, update Order<64> size_assert.");
 
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order<F> bit-packed flags + OrderPreResolved sub-struct.
 // Closes Class 27 (OMS scalar cfg-mirror cluster) via Order pre-resolve at submit.
@@ -160,7 +160,7 @@ static_assert(sizeof(OrderPreResolved<64>) == 32,
 // logging — drainer + Submit hot paths never read it. Stays in COLD tail.
 template <unsigned F>
 struct Order {
-    // ────────── HOT cluster — exactly 3 cache lines (192 B; Ship-A 16B FPN, was 4 lines / 256 B) ──────────
+    // ────────── HOT cluster — exactly 3 cache lines (192 B; Ship-A 16B FPN_Binary, was 4 lines / 256 B) ──────────
     uint64_t              id;             // 8 B  @ 0    local monotonic id, assigned by OMS
     uint64_t              client_id;      // 8 B  @ 8    idempotency key (== id for first attempt; phase 06 may decouple)
     // Bit-packed flags: type[2] + state[4] + is_maker[1] + leg[1] + retry_count[8] + pre_resolved_bound[1] @bit16.
@@ -169,33 +169,33 @@ struct Order {
     uint32_t              flags_packed;   // 4 B  @ 16
     int16_t               core_id;        // 2 B  @ 20   which executor core, -1 for non-core orders
     uint8_t               strategy_id;    // 1 B  @ 22   STRATEGY_* constant, for trade log CSV
-    // Ship-A 16B FPN: FPN<64> is now __int128 (alignof 16, was 8). The scalar prefix ends @ 23, so the FPN
+    // Ship-A 16B FPN_Binary: FPN_Binary<64> is now __int128 (alignof 16, was 8). The scalar prefix ends @ 23, so the FPN_Binary
     // block can't start until the next 16 B boundary (@ 32) — an 8 B alignment hole. _pad_hot1 grew 1→9 B to
     // make that hole EXPLICIT (no hidden compiler padding; DOD/H12). Layout-neutral: sizeof stays 256 either way.
-    uint8_t               _pad_hot1[9];   // 9 B  @ 23   explicit pad to FPN<64> 16 B alignment (__int128)
-    FPN<F>                requested_qty;            // 16 B @ 32
-    FPN<F>                requested_price;          // 16 B @ 48  limit only, ignored for MARKET (phase 08 forward-compat)
-    FPN<F>                filled_qty;               // 16 B @ 64  running total across partials
-    FPN<F>                avg_fill_price;           // 16 B @ 80  weighted across partials
+    uint8_t               _pad_hot1[9];   // 9 B  @ 23   explicit pad to FPN_Binary<64> 16 B alignment (__int128)
+    FPN_Binary<F>                requested_qty;            // 16 B @ 32
+    FPN_Binary<F>                requested_price;          // 16 B @ 48  limit only, ignored for MARKET (phase 08 forward-compat)
+    FPN_Binary<F>                filled_qty;               // 16 B @ 64  running total across partials
+    FPN_Binary<F>                avg_fill_price;           // 16 B @ 80  weighted across partials
     // phase 03 chunk 3: context fields for the OMS fill handler. when event_log_mode == 1,
     // the OMS opens portfolio slots on fill and needs the TP/SL/strategy the controller
     // intended at entry time. Also carries event_price for paper mode fills (no adapter
     // callback to supply a fill price, so we use the market price at submit time).
-    FPN<F>                intended_tp;              // 16 B @ 96  TP to apply when this order fills (entry only)
-    FPN<F>                intended_sl;              // 16 B @ 112 SL to apply when this order fills (entry only)
-    FPN<F>                event_price;              // 16 B @ 128 market price at submit time (paper fill price)
+    FPN_Binary<F>                intended_tp;              // 16 B @ 96  TP to apply when this order fills (entry only)
+    FPN_Binary<F>                intended_sl;              // 16 B @ 112 SL to apply when this order fills (entry only)
+    FPN_Binary<F>                event_price;              // 16 B @ 128 market price at submit time (paper fill price)
     uint64_t              submitted_at_us;          // 8 B  @ 144 wall-clock microseconds since epoch
     uint64_t              last_update_us;           // 8 B  @ 152 last state transition timestamp
     // Decision-time-bound values, pre-resolved at Order submit via Order_BindPreResolved().
     // HandleFill reads o->pre_resolved.fee_rate directly — zero OMS cache lookup.
     // Per DESIGN_SPECS/decision-time-data-binding-pattern.md § Sub-struct refinement.
     OrderPreResolved<F>   pre_resolved;             // 32 B @ 160 — sub-struct, future extension point (Ship-A 16B: 48→32)
-    // HOT subtotal: 192 B (exactly 3 cache lines; incl. the 8 B FPN-align pad inside _pad_hot1 @ 23)
+    // HOT subtotal: 192 B (exactly 3 cache lines; incl. the 8 B FPN_Binary-align pad inside _pad_hot1 @ 23)
 
     // ────────── COLD cluster — exactly 1 cache line (64 B) ──────────
     // exchange_id is only set on adapter-side ACK (terminal-or-near-terminal) and read on
     // REJECTED logging / reconcile audit. Per-fill drainer hot path never touches this.
-    char                  exchange_id[64];          // 64 B @ 192 (Ship-A 16B FPN, was @ 256)
+    char                  exchange_id[64];          // 64 B @ 192 (Ship-A 16B FPN_Binary, was @ 256)
 };
 
 //======================================================================================================
@@ -306,7 +306,7 @@ inline void MBS_OrderSetBanditContext(Order<F>* o, int state, int regime, int ar
 }
 
 // Initialize an order to PENDING state with the given identifying fields.
-// FPN amounts are zeroed; the caller fills in requested_qty (and optionally requested_price
+// FPN_Binary amounts are zeroed; the caller fills in requested_qty (and optionally requested_price
 // for limit orders) BEFORE calling OrderManager_Submit. Caller calls Order_SetIsMaker +
 // Order_BindPreResolved BEFORE submit when fee/slippage accounting matters.
 //
@@ -402,7 +402,7 @@ inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
 // Per-instantiation: F=64 is the live-engine + suite default.
 static_assert(sizeof(Order<64>) == 256,
               "Order<64> size locked at 256 B (HOT 192 B + COLD 64 B = exactly 4 cache lines, "
-              "HOT/COLD cluster-aligned). Ship-A 16B FPN: 320->256 (HOT 256->192 as the 7 FPN fields "
+              "HOT/COLD cluster-aligned). Ship-A 16B FPN_Binary: 320->256 (HOT 256->192 as the 7 FPN_Binary fields "
               "+ OrderPreResolved compacted 24->16 B / 48->32 B; COLD exchange_id[64] unchanged). Prior "
               "v5.15.5.F.4c.3 WIP2d-1.B.1: 280->320 for OrderPreResolved sub-struct + bit-packed flags. "
               "If changing, verify OrderPool slot assumptions + decision-time-data-binding-pattern.md "

@@ -43,7 +43,7 @@
 #include <pthread.h>     // v5.10.0a.F — parallel hyperparam sweep workers
 #include <functional>    // v5.10.0a.F — std::function holder for sweep cell lambda
 
-// FPN width — must match the engine build
+// FPN_Binary width — must match the engine build
 #ifndef BACKTEST_FP
 #define BACKTEST_FP 64
 #endif
@@ -2235,13 +2235,13 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
 //======================================================================================================
 // sets a config field by key name + double value. used by optimizer to sweep parameters.
 // returns 1 if field was found and set, 0 if unknown key.
-// handles both FPN and PCT fields (PCT keys are stored as decimal, value comes in as %).
+// handles both FPN_Binary and PCT fields (PCT keys are stored as decimal, value comes in as %).
 //======================================================================================================
 static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char *key, double value) {
     // percentage fields (config says 4.0, stored as 0.04)
     #define OPT_SET_PCT(name) \
         if (strcmp(key, #name) == 0) { cfg->name = FPN_FromDouble<BACKTEST_FP>(value / 100.0); return 1; }
-    // raw FPN fields
+    // raw FPN_Binary fields
     #define OPT_SET_FPN(name) \
         if (strcmp(key, #name) == 0) { cfg->name = FPN_FromDouble<BACKTEST_FP>(value); return 1; }
     // uint32 fields

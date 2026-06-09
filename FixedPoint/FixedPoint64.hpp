@@ -300,7 +300,7 @@ static inline FP64 FP64_Sign(FP64 value) {
 // ("old stub would assert"). Production builds NDEBUG'd the assert so
 // negative input → sqrt(negative double) → NaN → silent contamination
 // of features/labels via Welford-style variance underflow paths
-// (sum_sq / n - (sum/n)² mathematically ≥ 0, but FPN finite precision
+// (sum_sq / n - (sum/n)² mathematically ≥ 0, but FPN_Binary finite precision
 // can underflow into a tiny negative). Suspected cause of the v5.11.x
 // WF + held-out 0% accuracy regression — degenerate-variance samples
 // got NaN'd and dropped from training, biasing the train set against

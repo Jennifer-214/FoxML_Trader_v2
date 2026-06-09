@@ -143,7 +143,7 @@ struct MLBuildContext {
     // (ror_slope, ema_sma_spread, ema_above_sma) match what the legacy
     // backtest path produces during training.
     void*               ror_regressor;   // const RORRegressor<F>*
-    void*               ema_price;       // const FPN<F>*
+    void*               ema_price;       // const FPN_Binary<F>*
     // v4.3 — feature-pack expansion. Same pattern: engine maintains the
     // state, ML_BuildParameters threads it into Regime_ComputeSignals so
     // sharded live and legacy backtest produce identical features.
@@ -159,8 +159,8 @@ struct MLBuildContext {
     // v4.6 Wave 2 — D.3 spread dynamics state + current spread/mid (from
     // depth state's BookSnapshot). FlowFeatures.hpp exposes SpreadState.
     void*               spread_state;       // const SpreadState<F, 1024>*
-    double              current_spread;     // BookSnapshot::spread (FPN→double)
-    double              current_mid_price;  // BookSnapshot::mid_price (FPN→double)
+    double              current_spread;     // BookSnapshot::spread (FPN_Binary→double)
+    double              current_mid_price;  // BookSnapshot::mid_price (FPN_Binary→double)
     // v5.10.0a.G.5 — multi-horizon ensemble dispatch. nullptr default =
     // single-model path (CoreModelZoo via model_handle, existing); when
     // engine boot auto-detects N horizon siblings on disk, populates this
@@ -235,8 +235,8 @@ struct MLBuildContext {
 // fee_floor_mult of 5 means TP must clear ~2.5× round-trip fees.
 //======================================================================================================
 template <unsigned F, unsigned W = 128>
-inline bool Strategy_SpacingOk(FPN<F> proposed_entry,
-                                FPN<F> last_entry,
+inline bool Strategy_SpacingOk(FPN_Binary<F> proposed_entry,
+                                FPN_Binary<F> last_entry,
                                 const RollingStats<F, W>* rolling,
                                 const PerCoreCfg<F>* core_cfg) {
     // No prior entry → spacing irrelevant.
@@ -245,23 +245,23 @@ inline bool Strategy_SpacingOk(FPN<F> proposed_entry,
     if (FPN_IsZero(core_cfg->spacing_multiplier)) return true;
     if (FPN_IsZero(rolling->price_stddev))      return true;
     // Required min distance between entries
-    FPN<F> min_dist = FPN_Mul(rolling->price_stddev, core_cfg->spacing_multiplier);
+    FPN_Binary<F> min_dist = FPN_Mul(rolling->price_stddev, core_cfg->spacing_multiplier);
     // |proposed - last|
-    FPN<F> diff = FPN_GreaterThanOrEqual(proposed_entry, last_entry)
+    FPN_Binary<F> diff = FPN_GreaterThanOrEqual(proposed_entry, last_entry)
         ? FPN_Sub(proposed_entry, last_entry)
         : FPN_Sub(last_entry, proposed_entry);
     return FPN_GreaterThanOrEqual(diff, min_dist);
 }
 
 template <unsigned F>
-inline FPN<F> Strategy_TpFloor(FPN<F> entry_price,
-                                FPN<F> tp_amount,
+inline FPN_Binary<F> Strategy_TpFloor(FPN_Binary<F> entry_price,
+                                FPN_Binary<F> tp_amount,
                                 const PerCoreCfg<F>* core_cfg) {
     if (FPN_IsZero(core_cfg->fee_floor_mult) || FPN_IsZero(core_cfg->fee_rate))
         return tp_amount;
     // Required floor = entry × fee_rate × fee_floor_mult
-    FPN<F> fee_per_side = FPN_Mul(entry_price, core_cfg->fee_rate);
-    FPN<F> floor = FPN_Mul(fee_per_side, core_cfg->fee_floor_mult);
+    FPN_Binary<F> fee_per_side = FPN_Mul(entry_price, core_cfg->fee_rate);
+    FPN_Binary<F> floor = FPN_Mul(fee_per_side, core_cfg->fee_floor_mult);
     return FPN_GreaterThanOrEqual(tp_amount, floor) ? tp_amount : floor;
 }
 
@@ -300,7 +300,7 @@ template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void SimpleDip_BuildParameters(
     const RollingStats<F, W>* rolling,
     const PerCoreCfg<F>* core_cfg,
-    FPN<F> allocated_balance,
+    FPN_Binary<F> allocated_balance,
     GateParameters<F>* out,
     const RollingStats<F, WL>* rolling_long = nullptr,
     SimpleDipState<F>* state = nullptr
@@ -310,7 +310,7 @@ inline void SimpleDip_BuildParameters(
     // legacy `_BuySignal` contract is preserved (state is the source of truth
     // for "where the dip reference is"). Tests + legacy paths still pass
     // nullptr and get the inline behavior — same numerics as pre-Phase 2.1.
-    FPN<F> recent_high = rolling->price_max;
+    FPN_Binary<F> recent_high = rolling->price_max;
     if (rolling_long && FPN_GreaterThan(rolling_long->price_max, recent_high)) {
         recent_high = rolling_long->price_max;
     }
@@ -319,27 +319,27 @@ inline void SimpleDip_BuildParameters(
     }
 
     // expected_entry = recent_high * (1 - entry_offset_pct)
-    FPN<F> dip_offset = FPN_Mul(recent_high, core_cfg->entry_offset_pct);
-    FPN<F> expected_entry = FPN_Sub(recent_high, dip_offset);
+    FPN_Binary<F> dip_offset = FPN_Mul(recent_high, core_cfg->entry_offset_pct);
+    FPN_Binary<F> expected_entry = FPN_Sub(recent_high, dip_offset);
 
     // Per-strategy TP/SL: use simpledip-specific override if set, else shared
-    FPN<F> tp_pct = !FPN_IsZero(core_cfg->simpledip_tp_pct) ? core_cfg->simpledip_tp_pct : core_cfg->take_profit_pct;
-    FPN<F> sl_pct = !FPN_IsZero(core_cfg->simpledip_sl_pct) ? core_cfg->simpledip_sl_pct : core_cfg->stop_loss_pct;
+    FPN_Binary<F> tp_pct = !FPN_IsZero(core_cfg->simpledip_tp_pct) ? core_cfg->simpledip_tp_pct : core_cfg->take_profit_pct;
+    FPN_Binary<F> sl_pct = !FPN_IsZero(core_cfg->simpledip_sl_pct) ? core_cfg->simpledip_sl_pct : core_cfg->stop_loss_pct;
 
     // tp = expected_entry * (1 + tp_pct)
-    FPN<F> tp_amount = FPN_Mul(expected_entry, tp_pct);
-    FPN<F> take_profit_price = FPN_Add(expected_entry, tp_amount);
+    FPN_Binary<F> tp_amount = FPN_Mul(expected_entry, tp_pct);
+    FPN_Binary<F> take_profit_price = FPN_Add(expected_entry, tp_amount);
 
     // sl = expected_entry * (1 - sl_pct)
-    FPN<F> sl_amount = FPN_Mul(expected_entry, sl_pct);
-    FPN<F> stop_loss_price = FPN_Sub(expected_entry, sl_amount);
+    FPN_Binary<F> sl_amount = FPN_Mul(expected_entry, sl_pct);
+    FPN_Binary<F> stop_loss_price = FPN_Sub(expected_entry, sl_amount);
 
     // volume gate: tick volume must exceed rolling avg * multiplier
-    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
 
     // sizing: allocated_balance / expected_entry_price (notional ÷ price = qty)
     // guard against zero entry to avoid divide-by-zero (rolling stats uninit)
-    FPN<F> trade_size = FPN_Zero<F>();
+    FPN_Binary<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(expected_entry)) {
         trade_size = FPN_DivNoAssert(allocated_balance, expected_entry);
     }
@@ -379,7 +379,7 @@ template <unsigned F, unsigned W = 128>
 inline void MeanReversion_BuildParameters(
     const RollingStats<F, W>* rolling,
     const PerCoreCfg<F>* core_cfg,
-    FPN<F> allocated_balance,
+    FPN_Binary<F> allocated_balance,
     GateParameters<F>* out,
     MeanReversionState<F>* state = nullptr   // v5.4.0 Phase 2.2 — adaptive filter state
 ) {
@@ -388,16 +388,16 @@ inline void MeanReversion_BuildParameters(
     // — these are seeded from cfg at boot and adapted by MR_Adapt on cadence
     // (P&L regression-driven). When state is nullptr (legacy callers, tests),
     // fall back to cfg defaults — preserves pre-Phase 2.2 numerics.
-    FPN<F> live_offset = state ? state->live_offset_pct  : core_cfg->entry_offset_pct;
-    FPN<F> live_vmult  = state ? state->live_vol_mult    : core_cfg->volume_multiplier;
-    FPN<F> live_smult  = state ? state->live_stddev_mult : core_cfg->offset_stddev_mult;
+    FPN_Binary<F> live_offset = state ? state->live_offset_pct  : core_cfg->entry_offset_pct;
+    FPN_Binary<F> live_vmult  = state ? state->live_vol_mult    : core_cfg->volume_multiplier;
+    FPN_Binary<F> live_smult  = state ? state->live_stddev_mult : core_cfg->offset_stddev_mult;
 
     // BUG FIX (v4.0.3): pre-fix used `bg_threshold = rolling->price_avg`
     // with no depth requirement — gate fired on EVERY tick price < avg
     // (statistically half of all ticks during noise). Real MR buys on
     // meaningful DIPS below mean. Now matches SimpleDip's pattern: gate
     // sits at `avg - (avg × entry_offset_pct)` so it requires a true dip.
-    FPN<F> avg = rolling->price_avg;
+    FPN_Binary<F> avg = rolling->price_avg;
     if (FPN_IsZero(avg)) avg = rolling->price_max;
 
     // v5.4.0 Phase 2.2: dual-mode entry price like the legacy MR_BuySignal.
@@ -405,22 +405,22 @@ inline void MeanReversion_BuildParameters(
     // stddev mode: entry = avg - (stddev * live_stddev_mult)
     // Mode toggle is `live_smult > 0` (cfg.offset_stddev_mult is the global
     // toggle; state mirrors at boot, may drift via Adapt within bounds).
-    FPN<F> entry_price;
+    FPN_Binary<F> entry_price;
     if (!FPN_IsZero(live_smult)) {
-        FPN<F> stddev_offset = FPN_Mul(rolling->price_stddev, live_smult);
+        FPN_Binary<F> stddev_offset = FPN_Mul(rolling->price_stddev, live_smult);
         entry_price = FPN_Sub(avg, stddev_offset);
     } else {
-        FPN<F> dip_offset = FPN_Mul(avg, live_offset);
+        FPN_Binary<F> dip_offset = FPN_Mul(avg, live_offset);
         entry_price = FPN_Sub(avg, dip_offset);
     }
 
-    FPN<F> tp_pct = !FPN_IsZero(core_cfg->mr_tp_pct) ? core_cfg->mr_tp_pct : core_cfg->take_profit_pct;
-    FPN<F> sl_pct = !FPN_IsZero(core_cfg->mr_sl_pct) ? core_cfg->mr_sl_pct : core_cfg->stop_loss_pct;
-    FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
-    FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
-    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, live_vmult);
+    FPN_Binary<F> tp_pct = !FPN_IsZero(core_cfg->mr_tp_pct) ? core_cfg->mr_tp_pct : core_cfg->take_profit_pct;
+    FPN_Binary<F> sl_pct = !FPN_IsZero(core_cfg->mr_sl_pct) ? core_cfg->mr_sl_pct : core_cfg->stop_loss_pct;
+    FPN_Binary<F> tp_amount = FPN_Mul(entry_price, tp_pct);
+    FPN_Binary<F> sl_amount = FPN_Mul(entry_price, sl_pct);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, live_vmult);
 
-    FPN<F> trade_size = FPN_Zero<F>();
+    FPN_Binary<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(entry_price)) {
         trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
     }
@@ -450,7 +450,7 @@ template <unsigned F, unsigned W = 128>
 inline void Momentum_BuildParameters(
     const RollingStats<F, W>* rolling,
     const PerCoreCfg<F>* core_cfg,
-    FPN<F> allocated_balance,
+    FPN_Binary<F> allocated_balance,
     GateParameters<F>* out,
     MomentumState<F>* state = nullptr   // v5.4.0 Phase 2.3 — adaptive breakout state
 ) {
@@ -462,36 +462,36 @@ inline void Momentum_BuildParameters(
     // sharded stub used entry_offset_pct (a percentage); state-aware path
     // uses momentum_breakout_mult (a stddev multiplier), which is the
     // legacy single-core convention.
-    FPN<F> live_breakout = state ? state->live_breakout_mult : FPN_Zero<F>();
-    FPN<F> live_vmult    = state ? state->live_vol_mult      : core_cfg->volume_multiplier;
+    FPN_Binary<F> live_breakout = state ? state->live_breakout_mult : FPN_Zero<F>();
+    FPN_Binary<F> live_vmult    = state ? state->live_vol_mult      : core_cfg->volume_multiplier;
 
     // BUG FIX (v4.0.3): same family as MR — pre-fix used `bg_threshold = avg`
     // with no breakout depth. Gate fired on every tick price > avg (with the
     // BUY_ABOVE flag). Real momentum buys on confirmed BREAKOUTS above the
     // mean, not infinitesimal upticks. Now requires a breakout of
     // `entry_offset_pct` above the rolling mean before the gate arms.
-    FPN<F> avg = rolling->price_avg;
+    FPN_Binary<F> avg = rolling->price_avg;
     if (FPN_IsZero(avg)) avg = rolling->price_max;
     // v5.4.0 Phase 2.3: stddev * live_breakout_mult when state provides it
     // (matches legacy Momentum_BuySignal: avg + stddev * breakout_mult). When
     // state is null OR live_breakout is zero, fall back to entry_offset_pct
     // (the pre-Phase 2.3 sharded behavior).
-    FPN<F> breakout_offset;
+    FPN_Binary<F> breakout_offset;
     if (state && !FPN_IsZero(live_breakout) && !FPN_IsZero(rolling->price_stddev)) {
         breakout_offset = FPN_Mul(rolling->price_stddev, live_breakout);
     } else {
         breakout_offset = FPN_Mul(avg, core_cfg->entry_offset_pct);
     }
-    FPN<F> entry_price = FPN_Add(avg, breakout_offset);
+    FPN_Binary<F> entry_price = FPN_Add(avg, breakout_offset);
 
     // STDDEV-floor guard: in early warmup or dead-flat markets,
     // rolling->price_stddev can be near-zero, which made tp_amount basically
     // zero and produced TP=SL=entry positions (caught visually in v4.0.2).
     // Require a minimum stddev relative to price (1bp) before trusting the
     // stddev-mult path; otherwise fall back to percentage.
-    FPN<F> min_stddev_floor = FPN_Mul(avg, FPN_FromDouble<F>(0.0001));
+    FPN_Binary<F> min_stddev_floor = FPN_Mul(avg, FPN_FromDouble<F>(0.0001));
     int stddev_usable = FPN_GreaterThan(rolling->price_stddev, min_stddev_floor);
-    FPN<F> tp_amount, sl_amount;
+    FPN_Binary<F> tp_amount, sl_amount;
     if (!FPN_IsZero(core_cfg->momentum_tp_mult) && stddev_usable) {
         tp_amount = FPN_Mul(rolling->price_stddev, core_cfg->momentum_tp_mult);
         sl_amount = FPN_Mul(rolling->price_stddev, core_cfg->momentum_sl_mult);
@@ -501,9 +501,9 @@ inline void Momentum_BuildParameters(
     }
     // v5.4.0 Phase 2.3: live_vmult from state when present (adaptive),
     // else cfg.volume_multiplier (legacy).
-    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, live_vmult);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, live_vmult);
 
-    FPN<F> trade_size = FPN_Zero<F>();
+    FPN_Binary<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(entry_price)) {
         trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
     }
@@ -564,7 +564,7 @@ template <unsigned F, unsigned W = 128>
 inline void EmaCross_BuildParameters(
     const RollingStats<F, W>* rolling,
     const PerCoreCfg<F>* core_cfg,
-    FPN<F> allocated_balance,
+    FPN_Binary<F> allocated_balance,
     GateParameters<F>* out,
     EmaCrossState<F>* state = nullptr   // v5.4.0 Phase 2.4 — EMA tracking state
 ) {
@@ -585,12 +585,12 @@ inline void EmaCross_BuildParameters(
         out->strategy_id = STRATEGY_EMA_CROSS;
         if (!FPN_IsZero(core_cfg->emacross_tp_pct)) {
             out->tp_pct = core_cfg->emacross_tp_pct;
-            FPN<F> entry = out->bg_price_threshold;
+            FPN_Binary<F> entry = out->bg_price_threshold;
             out->sg_take_profit_price = FPN_Add(entry, FPN_Mul(entry, core_cfg->emacross_tp_pct));
         }
         if (!FPN_IsZero(core_cfg->emacross_sl_pct)) {
             out->sl_pct = core_cfg->emacross_sl_pct;
-            FPN<F> entry = out->bg_price_threshold;
+            FPN_Binary<F> entry = out->bg_price_threshold;
             out->sg_stop_loss_price = FPN_Sub(entry, FPN_Mul(entry, core_cfg->emacross_sl_pct));
         }
         return;
@@ -599,7 +599,7 @@ inline void EmaCross_BuildParameters(
     // State-aware path. ref = state->prev_ema (Adapt populated this from
     // the producer's per-tick EMA replication). Fall back to rolling avg
     // if the state hasn't been seeded yet (cold-start, ema=0).
-    FPN<F> ref = !FPN_IsZero(state->prev_ema) ? state->prev_ema : rolling->price_avg;
+    FPN_Binary<F> ref = !FPN_IsZero(state->prev_ema) ? state->prev_ema : rolling->price_avg;
 
     // Crossover gate: ref must sit above short SMA by at least
     // emacross_crossover_min stddevs. Same geometry as the legacy
@@ -608,27 +608,27 @@ inline void EmaCross_BuildParameters(
     int uptrend;
     {
         int valid = !FPN_IsZero(rolling->price_avg) & !FPN_IsZero(rolling->price_stddev);
-        FPN<F> diff = FPN_Sub(ref, rolling->price_avg);
+        FPN_Binary<F> diff = FPN_Sub(ref, rolling->price_avg);
         int ema_above = (diff.v > 0);   // positive diff (was sign==0 && !IsZero; 16B two's-comp)
-        FPN<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
+        FPN_Binary<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
         uptrend = valid & ema_above & FPN_GreaterThan(spread_stddevs, core_cfg->emacross_crossover_min);
     }
 
     // Buy price = ref - stddev * emacross_dip_mult (dip below EMA)
-    FPN<F> dip = FPN_Mul(rolling->price_stddev, core_cfg->emacross_dip_mult);
-    FPN<F> entry_price = FPN_Sub(ref, dip);
+    FPN_Binary<F> dip = FPN_Mul(rolling->price_stddev, core_cfg->emacross_dip_mult);
+    FPN_Binary<F> entry_price = FPN_Sub(ref, dip);
 
     // TP/SL: use EMA-specific cfg overrides; fall through to shared.
-    FPN<F> tp_pct = !FPN_IsZero(core_cfg->emacross_tp_pct)
+    FPN_Binary<F> tp_pct = !FPN_IsZero(core_cfg->emacross_tp_pct)
         ? core_cfg->emacross_tp_pct : core_cfg->take_profit_pct;
-    FPN<F> sl_pct = !FPN_IsZero(core_cfg->emacross_sl_pct)
+    FPN_Binary<F> sl_pct = !FPN_IsZero(core_cfg->emacross_sl_pct)
         ? core_cfg->emacross_sl_pct : core_cfg->stop_loss_pct;
 
-    FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
-    FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
-    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
+    FPN_Binary<F> tp_amount = FPN_Mul(entry_price, tp_pct);
+    FPN_Binary<F> sl_amount = FPN_Mul(entry_price, sl_pct);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
 
-    FPN<F> trade_size = FPN_Zero<F>();
+    FPN_Binary<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(entry_price)) {
         trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
     }
@@ -672,7 +672,7 @@ inline void ML_BuildParameters(
     const RollingStats<F, W>* rolling,
     const RollingStats<F, WL>* rolling_long,
     const PerCoreCfg<F>* core_cfg,
-    FPN<F> allocated_balance,
+    FPN_Binary<F> allocated_balance,
     GateParameters<F>* out,
     void* ml_ctx_ptr,
     uint64_t now_us = 0,  // v5.14.1.B.2 (PARITY-001) — passed by caller for
@@ -706,7 +706,7 @@ inline void ML_BuildParameters(
     double* out_prediction = nullptr;
     double* out_confidence = nullptr;
     const RORRegressor<F>* ror_in = nullptr;
-    const FPN<F>* ema_in = nullptr;
+    const FPN_Binary<F>* ema_in = nullptr;
     // v5.14.9.B.0 — per-core slow-path gate cache (FOREACH_SLOW_PATH_GATE
     // PER_CORE entries). Wired by EventLoop_RebuildOneCore upstream.
     // Null when caller didn't populate (legacy/test path) — use sites
@@ -718,7 +718,7 @@ inline void ML_BuildParameters(
         out_prediction = mctx->out_prediction;
         out_confidence = mctx->out_confidence;
         ror_in = (const RORRegressor<F>*)mctx->ror_regressor;
-        ema_in = (const FPN<F>*)mctx->ema_price;
+        ema_in = (const FPN_Binary<F>*)mctx->ema_price;
         gate_state = (const SlowPathGateState*)mctx->gate_state;
     }
 
@@ -746,11 +746,11 @@ inline void ML_BuildParameters(
     }
 
     // compute entry price (same as SimpleDip for sizing)
-    FPN<F> recent_high = rolling->price_max;
+    FPN_Binary<F> recent_high = rolling->price_max;
     if (rolling_long && FPN_GreaterThan(rolling_long->price_max, recent_high)) {
         recent_high = rolling_long->price_max;
     }
-    FPN<F> entry_price = rolling->price_avg;
+    FPN_Binary<F> entry_price = rolling->price_avg;
     if (FPN_IsZero(entry_price)) entry_price = recent_high;
 
     // v4.0 train-serve parity: when the engine provides a RORRegressor + EMA
@@ -1346,7 +1346,7 @@ inline void ML_BuildParameters(
     // Master ON/OFF: per_horizon_barrier_blend cohort bit in ml_cfg_flags
     // gates the entire feature; cleared → falls back to LEGACY regardless
     // of mode value.
-    FPN<F> tp_pct, sl_pct;
+    FPN_Binary<F> tp_pct, sl_pct;
     bool feature_enabled = BITMAP_IS_SET(core_cfg->ml_cfg_flags,
                                           MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND);
     int active_mode = feature_enabled ? core_cfg->barrier_blend_mode
@@ -1387,14 +1387,14 @@ inline void ML_BuildParameters(
             (*mctx->barrier_shadow_event_count)++;
         }
     }
-    FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
-    FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
+    FPN_Binary<F> tp_amount = FPN_Mul(entry_price, tp_pct);
+    FPN_Binary<F> sl_amount = FPN_Mul(entry_price, sl_pct);
 
     // volume gate
-    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
 
     // sizing — base trade size before barrier modulation
-    FPN<F> trade_size = FPN_Zero<F>();
+    FPN_Binary<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(entry_price)) {
         trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
     }
@@ -1474,7 +1474,7 @@ inline void ML_BuildParameters(
     }
 
     // gate decision: BarrierGate (continuous modulation) OR binary threshold
-    FPN<F> gate_price = FPN_Zero<F>();  // default: zero-gate (no entry)
+    FPN_Binary<F> gate_price = FPN_Zero<F>();  // default: zero-gate (no entry)
 
     if (BITMAP_IS_SET(core_cfg->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
         BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
@@ -1550,7 +1550,7 @@ inline void ML_BuildParameters(
     }
     // Normal ladder path: scale trade_size by factor (∈ [min_pct, 1.0] when
     // ladder active; 1.0 when inactive). Hard cap at original size; never
-    // upsize. FPN multiply preserves accounting precision.
+    // upsize. FPN_Binary multiply preserves accounting precision.
     trade_size = FPN_Mul(trade_size, FPN_FromDouble<F>(factor));
 
     out->bg_price_threshold   = gate_price;
@@ -1585,7 +1585,7 @@ inline void Strategy_BuildParameters(
     uint8_t strategy_id,
     const RollingStats<F, W>* rolling,
     const PerCoreCfg<F>* core_cfg,
-    FPN<F> allocated_balance,
+    FPN_Binary<F> allocated_balance,
     GateParameters<F>* out,
     const RollingStats<F, WL>* rolling_long = nullptr,
     void* model_ctx = nullptr,
@@ -1761,10 +1761,10 @@ inline void Strategy_BuildParameters(
     // doesn't log). Caller sees the BUY_BLOCKED flag in pending_params
     // and can decide whether to log + how often.
     {
-        FPN<F> fee_taker = !FPN_IsZero(core_cfg->fee_rate_taker)
+        FPN_Binary<F> fee_taker = !FPN_IsZero(core_cfg->fee_rate_taker)
             ? core_cfg->fee_rate_taker : core_cfg->fee_rate;
-        FPN<F> three = FPN_FromDouble<F>(3.0);
-        FPN<F> floor_pct = FPN_Mul(fee_taker, three);
+        FPN_Binary<F> three = FPN_FromDouble<F>(3.0);
+        FPN_Binary<F> floor_pct = FPN_Mul(fee_taker, three);
         // out->tp_pct may be zero if strategy didn't set it (e.g.
         // STRATEGY_NONE fallthrough). Skip the gate in that case —
         // the strategy itself has already produced a no-op result.

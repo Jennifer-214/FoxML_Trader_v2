@@ -10,7 +10,7 @@
 // One ExecutionCore<F> instance per pinned CPU core. Each instance owns:
 //   - permission   (1 bit)   — controller-granted authorization to take new entries
 //   - active       (1 bit)   — currently in a trade
-//   - entry_price  (FPN<F>)  — price of the current trade entry, used by SG check
+//   - entry_price  (FPN_Binary<F>)  — price of the current trade entry, used by SG check
 //   - gate_params  (struct)  — buy/sell gate parameter pack pushed by controller
 //   - event_ring   (SPSC)    — outgoing trade events the controller drains on its slow path
 //   - tick_ring*   (SPSC*)   — incoming tick stream from the market reader
@@ -63,7 +63,7 @@ struct alignas(64) ExecutionCore {
     // ── CACHE LINE 0 (64B): steady-state HOT READS only ──
     // v5.11.1.5 layout reorder: the per-tick CMOV at hot path lines ~287-288
     // reads `live_tp` + `live_sl` every tick. Pre-v5.11.1.5 layout had
-    // `live_sl` spanning offsets 56-80 (cache line 0 → 1) due to FPN<64>=24B
+    // `live_sl` spanning offsets 56-80 (cache line 0 → 1) due to FPN_Binary<64>=24B
     // sizing — every tick loaded 2 cache lines instead of 1.
     //
     // New layout: 2 byte flags + 6 pad + 24 (live_tp) + 24 (live_sl) + 8 pad
@@ -77,18 +77,18 @@ struct alignas(64) ExecutionCore {
     uint8_t  active;           // hot read: core writes and reads
     uint8_t  active_b;         // hot read: 0 in steady state when leg B inactive
     uint8_t  _pad_hot[6];
-    FPN<F>   live_tp;          // 24B at offset 8 — fits in line 0
-    FPN<F>   live_sl;          // 24B at offset 32 — fits in line 0 (Finding A)
+    FPN_Binary<F>   live_tp;          // 24B at offset 8 — fits in line 0
+    FPN_Binary<F>   live_sl;          // 24B at offset 32 — fits in line 0 (Finding A)
     uint8_t  _pad_line0[8];    // pad cache line 0 to 64
 
     // ── CACHE LINE 1+ (cold in steady state — only entry/leg-B paths touch) ──
     // entry_price is WRITE-only on entry events (not read in steady CMOV).
     // leg-B fields gated by `if (__builtin_expect(active_b, 0))` — line never
     // touched when leg B is inactive (steady-state default cfg).
-    FPN<F>   entry_price;      // write-on-entry only; cold in steady state
-    FPN<F>   entry_price_b;
-    FPN<F>   live_tp_b;
-    FPN<F>   live_sl_b;
+    FPN_Binary<F>   entry_price;      // write-on-entry only; cold in steady state
+    FPN_Binary<F>   entry_price_b;
+    FPN_Binary<F>   live_tp_b;
+    FPN_Binary<F>   live_sl_b;
 
     // ── permission isolated to its OWN cache line (audit Part 1.5) ──
     // Controller atomic-stores `permission` from a different CPU than the
@@ -173,7 +173,7 @@ static_assert(!std::is_polymorphic<ExecutionCore<64>>::value,
 // v5.11.1.5 — Cache layout invariants. Future field reorders must preserve
 // these to avoid regressing the hot-path single-cache-line load.
 // See plans/2026-05-06-latency-path-discipline.md Rule 1.
-static_assert(offsetof(ExecutionCore<64>, live_sl) + sizeof(FPN<64>) <= 64,
+static_assert(offsetof(ExecutionCore<64>, live_sl) + sizeof(FPN_Binary<64>) <= 64,
               "live_sl must fit entirely in cache line 0 — see latency-path-discipline.md Rule 1");
 static_assert((offsetof(ExecutionCore<64>, permission) % 64) == 0,
               "permission must be cache-line-aligned to prevent false sharing — audit Part 1.5");
@@ -334,11 +334,11 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     // a CMOV-style ternary so both loads are issued in parallel and the right
     // one is selected — measurably faster than a real branch (verified in
     // bench_batch_floor v2 vs v3 where the branch was 4 ns slower).
-    FPN<F> tp = active ? core->live_tp : core->cached_params.sg_take_profit_price;
-    FPN<F> sl = active ? core->live_sl : core->cached_params.sg_stop_loss_price;
+    FPN_Binary<F> tp = active ? core->live_tp : core->cached_params.sg_take_profit_price;
+    FPN_Binary<F> sl = active ? core->live_sl : core->cached_params.sg_stop_loss_price;
     // Note: leg-B TP/SL are loaded inside the branch-gated block below
     // (P.2 v2). The original P.2 design read them unconditionally; that
-    // cost ~40ns per tick because FPN<64> compares pipeline less than
+    // cost ~40ns per tick because FPN_Binary<64> compares pipeline less than
     // expected on the i5-1035G4. Moving the loads + compares behind
     // `if (__builtin_expect(active_b, 0))` returns steady-state latency
     // to the pre-P.2 baseline. Cost is paid only while a pair is open.
@@ -399,10 +399,10 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     // Leg A: always evaluated (single-position case + when paired). Leg B:
     // BRANCH-GATED on active_b (P.2 v2 — 2026-04-27 measurement showed
     // unconditional leg-B compute cost ~40ns/tick on the i5-1035G4
-    // because FPN<64> compares don't pipeline as cleanly as expected).
+    // because FPN_Binary<64> compares don't pipeline as cleanly as expected).
     // Branch is predicted not-taken in steady state; when no pair is
     // open (the common case, especially with partial_exit_enabled=0),
-    // the leg-B FPN ops + memory loads are skipped entirely. When a
+    // the leg-B FPN_Binary ops + memory loads are skipped entirely. When a
     // pair IS open (rare, only between leg A entry and final leg B
     // exit), branch is taken and we pay the +40ns to evaluate leg B.
     //
@@ -417,14 +417,14 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     // FPN_Zero (default, no ratchet), FPN_Max(sl, 0) = sl so behavior is
     // unchanged. When controller has ratcheted up, the ratchet wins → exit
     // fires when price drops to the trailing level.
-    FPN<F> effective_sl = FPN_Max(sl, core->cached_params.ratchet_sl);
+    FPN_Binary<F> effective_sl = FPN_Max(sl, core->cached_params.ratchet_sl);
     // v5.4.0 Phase 3.3: trailing TP via ratchet_tp — same FPN_Max pattern
     // as SL. When ratchet_tp is FPN_Zero (default), FPN_Max(tp, 0) = tp so
     // behavior is unchanged. When the controller has ratcheted TP up
     // (Regime_AdjustPositionsSharded, future strategy trailing), the higher
     // value wins — TP fires at the new lock-in level. Same ~1ns cost shape
     // as the SL ratchet.
-    FPN<F> effective_tp = FPN_Max(tp, core->cached_params.ratchet_tp);
+    FPN_Binary<F> effective_tp = FPN_Max(tp, core->cached_params.ratchet_tp);
     // Leg A SG (existing pattern, unchanged)
     uint64_t tp_hit_a   = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp);
     uint64_t sl_hit_a   = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl);
@@ -437,14 +437,14 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     //     not-taken branch. ~0ns cost when active_b=0 (the common steady state).
     // Wrapper dispatches via cached_params.flags & GATE_FLAG_PAIR_ACTIVE — one
     // predicted runtime branch per tick (~0ns once predictor warms).
-    // Both code paths produce bytewise-identical output for any (active_b, FPN)
+    // Both code paths produce bytewise-identical output for any (active_b, FPN_Binary)
     // input — the branchless path masks the unconditional compute with active_b.
     uint64_t sg_fires_b = 0;
     if constexpr (PAIR_BRANCHLESS) {
         // Unconditional leg-B compute. Loads live_tp_b + live_sl_b every tick;
         // for always-pair deployments these stay hot in L1d.
-        FPN<F> effective_sl_b = FPN_Max(core->live_sl_b, core->cached_params.ratchet_sl);
-        FPN<F> effective_tp_b = FPN_Max(core->live_tp_b, core->cached_params.ratchet_tp);
+        FPN_Binary<F> effective_sl_b = FPN_Max(core->live_sl_b, core->cached_params.ratchet_sl);
+        FPN_Binary<F> effective_tp_b = FPN_Max(core->live_tp_b, core->cached_params.ratchet_tp);
         uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp_b);
         uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
         // Mask with active_b — when leg B isn't open, mask=0 zeros the result.
@@ -452,10 +452,10 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
                      & -((uint64_t)active_b);
     } else {
         if (__builtin_expect(active_b, 0)) {
-            FPN<F> tp_b           = core->live_tp_b;
-            FPN<F> sl_b           = core->live_sl_b;
-            FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
-            FPN<F> effective_tp_b = FPN_Max(tp_b, core->cached_params.ratchet_tp);
+            FPN_Binary<F> tp_b           = core->live_tp_b;
+            FPN_Binary<F> sl_b           = core->live_sl_b;
+            FPN_Binary<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
+            FPN_Binary<F> effective_tp_b = FPN_Max(tp_b, core->cached_params.ratchet_tp);
             uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp_b);
             uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
             sg_fires_b            = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
@@ -538,13 +538,13 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
             // hot path won't read these fields anyway.
             if (entry_a_pushed) {
                 core->entry_price = tick.price;
-                FPN<F> tp_pct = core->cached_params.tp_pct;
+                FPN_Binary<F> tp_pct = core->cached_params.tp_pct;
                 if (!FPN_IsZero(tp_pct)) {
                     core->live_tp = FPN_Add(tick.price, FPN_Mul(tick.price, tp_pct));
                 } else {
                     core->live_tp = core->cached_params.sg_take_profit_price;
                 }
-                FPN<F> sl_pct = core->cached_params.sl_pct;
+                FPN_Binary<F> sl_pct = core->cached_params.sl_pct;
                 if (!FPN_IsZero(sl_pct)) {
                     core->live_sl = FPN_Sub(tick.price, FPN_Mul(tick.price, sl_pct));
                 } else {
@@ -565,7 +565,7 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
 
                     if (entry_b_pushed) {
                         core->entry_price_b = tick.price;
-                        FPN<F> tp_pct_b = core->cached_params.tp_pct_b;
+                        FPN_Binary<F> tp_pct_b = core->cached_params.tp_pct_b;
                         if (!FPN_IsZero(tp_pct_b)) {
                             core->live_tp_b = FPN_Add(tick.price, FPN_Mul(tick.price, tp_pct_b));
                         } else {

@@ -6,7 +6,7 @@
 // [FOXML SUITE]
 //======================================================================================================
 // standalone backtesting + ML training workstation.
-// separate binary from engine_gui — shares all engine headers, same FPN hot path.
+// separate binary from engine_gui — shares all engine headers, same FPN_Binary hot path.
 // does NOT connect to Binance — replays historical CSV data through identical engine code.
 //
 // build: cmake -B build_suite -DUSE_IMGUI_GUI=ON && cmake --build build_suite --target foxml_suite

@@ -226,14 +226,14 @@ static inline void TUI_CopySnapshotSharded(
                 // Leg-aware live levels: leg B (slot odd under partials)
                 // uses live_tp_b, leg A uses live_tp.
                 bool is_leg_b = BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) && (idx & 1);
-                FPN<F> live_tp = is_leg_b ? xc->live_tp_b : xc->live_tp;
-                FPN<F> live_sl = is_leg_b ? xc->live_sl_b : xc->live_sl;
+                FPN_Binary<F> live_tp = is_leg_b ? xc->live_tp_b : xc->live_tp;
+                FPN_Binary<F> live_sl = is_leg_b ? xc->live_sl_b : xc->live_sl;
                 // active_tp/sl is the per-fill price when set, else the
                 // cached params absolute. Same shape as ExecutionCore_Tick.
-                FPN<F> active_tp = !FPN_IsZero(live_tp) ? live_tp : params.sg_take_profit_price;
-                FPN<F> active_sl = !FPN_IsZero(live_sl) ? live_sl : params.sg_stop_loss_price;
-                FPN<F> effective_tp = FPN_Max(active_tp, params.ratchet_tp);
-                FPN<F> effective_sl = FPN_Max(active_sl, params.ratchet_sl);
+                FPN_Binary<F> active_tp = !FPN_IsZero(live_tp) ? live_tp : params.sg_take_profit_price;
+                FPN_Binary<F> active_sl = !FPN_IsZero(live_sl) ? live_sl : params.sg_stop_loss_price;
+                FPN_Binary<F> effective_tp = FPN_Max(active_tp, params.ratchet_tp);
+                FPN_Binary<F> effective_sl = FPN_Max(active_sl, params.ratchet_sl);
                 ps->tp = FPN_ToDouble(effective_tp);
                 ps->sl = FPN_ToDouble(effective_sl);
                 resolved_effective = true;
@@ -325,8 +325,8 @@ static inline void TUI_CopySnapshotSharded(
     //   fields read by GUI_Panel_MLIntelligence.
     uint32_t total_wins   = 0;
     uint32_t total_losses = 0;
-    FPN<F>   gross_wins   = FPN_Zero<F>();
-    FPN<F>   gross_losses = FPN_Zero<F>();
+    FPN_Binary<F>   gross_wins   = FPN_Zero<F>();
+    FPN_Binary<F>   gross_losses = FPN_Zero<F>();
     int      headline_regime     = REGIME_RANGING;
     bool     headline_regime_set = false;
     int      headline_ml_core    = -1;

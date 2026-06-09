@@ -42,8 +42,8 @@
 template <unsigned F> struct MomentumState {
     RegressionFeederX<F> feeder;       // P&L regression for adaptive filters
     RORRegressor<F> ror;               // slope-of-slopes
-    FPN<F> live_breakout_mult;         // adaptive breakout threshold (stddev multiplier)
-    FPN<F> live_vol_mult;              // adaptive volume multiplier
+    FPN_Binary<F> live_breakout_mult;         // adaptive breakout threshold (stddev multiplier)
+    FPN_Binary<F> live_vol_mult;              // adaptive volume multiplier
     BuySideGateConditions<F> buy_conds_initial; // anchor for max_shift clamp
     LinearRegression3XResult<F> last_regression;
     int has_regression;
@@ -61,11 +61,11 @@ inline void Momentum_Init(MomentumState<F> *state,
                            const RollingStats<F> *rolling,
                            BuySideGateConditions<F> *buy_conds) {
     // breakout price: avg + stddev * breakout_mult
-    FPN<F> breakout_offset = FPN_Mul(rolling->price_stddev, state->live_breakout_mult);
-    FPN<F> buy_price = FPN_AddSat(rolling->price_avg, breakout_offset);
+    FPN_Binary<F> breakout_offset = FPN_Mul(rolling->price_stddev, state->live_breakout_mult);
+    FPN_Binary<F> buy_price = FPN_AddSat(rolling->price_avg, breakout_offset);
 
     // volume gate: same pattern as MR — require significant volume on breakout
-    FPN<F> buy_vol = FPN_Mul(rolling->volume_avg, state->live_vol_mult);
+    FPN_Binary<F> buy_vol = FPN_Mul(rolling->volume_avg, state->live_vol_mult);
 
     buy_conds->price = buy_price;
     buy_conds->volume = buy_vol;
@@ -90,8 +90,8 @@ inline void Momentum_Init(MomentumState<F> *state,
 //======================================================================================================
 template <unsigned F>
 inline void Momentum_Adapt(MomentumState<F> *state,
-                            FPN<F> current_price,
-                            FPN<F> portfolio_delta,
+                            FPN_Binary<F> current_price,
+                            FPN_Binary<F> portfolio_delta,
                             uint16_t active_bitmap,
                             const BuySideGateConditions<F> *buy_conds,
                             const ControllerConfig<F> *cfg) {
@@ -109,18 +109,18 @@ inline void Momentum_Adapt(MomentumState<F> *state,
         unsigned __int128 sq_mask = -(unsigned __int128)(unsigned)should_squeeze;
 
         // squeeze breakout_mult toward minimum (breakout_min stddevs)
-        FPN<F> breakout_min = cfg->breakout_min;
-        FPN<F> gap = FPN_Sub(state->live_breakout_mult, breakout_min);
-        FPN<F> step = FPN_Mul(gap, cfg->squeeze_decay);
-        FPN<F> masked_step { (__int128)((unsigned __int128)step.v & sq_mask) };
+        FPN_Binary<F> breakout_min = cfg->breakout_min;
+        FPN_Binary<F> gap = FPN_Sub(state->live_breakout_mult, breakout_min);
+        FPN_Binary<F> step = FPN_Mul(gap, cfg->squeeze_decay);
+        FPN_Binary<F> masked_step { (__int128)((unsigned __int128)step.v & sq_mask) };
         state->live_breakout_mult = FPN_SubSat(state->live_breakout_mult, masked_step);
         state->live_breakout_mult = FPN_Max(state->live_breakout_mult, breakout_min);
 
         // squeeze volume multiplier toward 1.0 (same as MR)
-        FPN<F> one = FPN_FromDouble<F>(1.0);
-        FPN<F> vmult_gap = FPN_Sub(state->live_vol_mult, one);
-        FPN<F> vmult_step = FPN_Mul(vmult_gap, cfg->squeeze_decay);
-        FPN<F> masked_vmult { (__int128)((unsigned __int128)vmult_step.v & sq_mask) };
+        FPN_Binary<F> one = FPN_FromDouble<F>(1.0);
+        FPN_Binary<F> vmult_gap = FPN_Sub(state->live_vol_mult, one);
+        FPN_Binary<F> vmult_step = FPN_Mul(vmult_gap, cfg->squeeze_decay);
+        FPN_Binary<F> masked_vmult { (__int128)((unsigned __int128)vmult_step.v & sq_mask) };
         state->live_vol_mult = FPN_SubSat(state->live_vol_mult, masked_vmult);
         state->live_vol_mult = FPN_Max(state->live_vol_mult, one);
     }
@@ -142,18 +142,18 @@ inline void Momentum_Adapt(MomentumState<F> *state,
         // (be more selective about which breakouts to enter)
         // POSITIVE slope means lower threshold (enter breakouts earlier)
         // this is OPPOSITE to MR where negative slope tightens (raises) the offset
-        FPN<F> shift = FPN_Mul(reg.model.slope, cfg->slope_scale_buy);
+        FPN_Binary<F> shift = FPN_Mul(reg.model.slope, cfg->slope_scale_buy);
         // negate: positive P&L → lower breakout_mult (negative shift to subtract)
-        FPN<F> neg_shift = FPN_Negate(shift);
+        FPN_Binary<F> neg_shift = FPN_Negate(shift);
 
-        FPN<F> masked_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)confident) };
+        FPN_Binary<F> masked_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)confident) };
 
-        FPN<F> scaled_shift = FPN_Mul(masked_shift, cfg->stddev_adapt_scale);
+        FPN_Binary<F> scaled_shift = FPN_Mul(masked_shift, cfg->stddev_adapt_scale);
         state->live_breakout_mult = FPN_AddSat(state->live_breakout_mult, scaled_shift);
 
         // clamp breakout_mult to reasonable range
-        FPN<F> breakout_min = cfg->breakout_min;
-        FPN<F> breakout_max = FPN_FromDouble<F>(5.0);
+        FPN_Binary<F> breakout_min = cfg->breakout_min;
+        FPN_Binary<F> breakout_max = FPN_FromDouble<F>(5.0);
         state->live_breakout_mult = FPN_Max(state->live_breakout_mult, breakout_min);
         state->live_breakout_mult = FPN_Min(state->live_breakout_mult, breakout_max);
     }
@@ -172,14 +172,14 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
                                                      const RollingStats<F> *rolling,
                                                      const RollingStats<F, 512> *rolling_long,
                                                      const ControllerConfig<F> *cfg,
-                                                     FPN<F> ema_price = FPN_Zero<F>()) {
+                                                     FPN_Binary<F> ema_price = FPN_Zero<F>()) {
     BuySideGateConditions<F> conds;
 
     // base average: EMA when provided (nonzero), rolling avg otherwise
-    FPN<F> base_avg = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
+    FPN_Binary<F> base_avg = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
 
     // breakout price: base + stddev * live_breakout_mult
-    FPN<F> breakout_offset = FPN_Mul(rolling->price_stddev, state->live_breakout_mult);
+    FPN_Binary<F> breakout_offset = FPN_Mul(rolling->price_stddev, state->live_breakout_mult);
     conds.price = FPN_AddSat(base_avg, breakout_offset);
 
     // volume: same pattern as MR
@@ -193,22 +193,22 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
     if (state->has_regression) {
         int confident = FPN_GreaterThanOrEqual(state->last_regression.r_squared,
                                                 cfg->r2_threshold);
-        FPN<F> shift = FPN_Mul(state->last_regression.model.slope, cfg->slope_scale_buy);
+        FPN_Binary<F> shift = FPN_Mul(state->last_regression.model.slope, cfg->slope_scale_buy);
 
         // clamp to max_shift
-        FPN<F> max_shift_abs = FPN_Mul(rolling->price_avg, cfg->max_shift);
+        FPN_Binary<F> max_shift_abs = FPN_Mul(rolling->price_avg, cfg->max_shift);
         shift = FPN_Min(shift, max_shift_abs);
         shift = FPN_Max(shift, FPN_Negate(max_shift_abs));
 
         // branchless: masked_shift = confident ? shift : 0 (16B → mask the whole .v)
         unsigned __int128 conf_mask = -(unsigned __int128)(unsigned)confident;
-        FPN<F> masked_shift { (__int128)((unsigned __int128)shift.v & conf_mask) };
+        FPN_Binary<F> masked_shift { (__int128)((unsigned __int128)shift.v & conf_mask) };
 
         conds.price = FPN_AddSat(conds.price, masked_shift);
 
         // clamp to initial +/- max_shift
-        FPN<F> upper = FPN_AddSat(state->buy_conds_initial.price, max_shift_abs);
-        FPN<F> lower = FPN_SubSat(state->buy_conds_initial.price, max_shift_abs);
+        FPN_Binary<F> upper = FPN_AddSat(state->buy_conds_initial.price, max_shift_abs);
+        FPN_Binary<F> lower = FPN_SubSat(state->buy_conds_initial.price, max_shift_abs);
         conds.price = FPN_Max(conds.price, lower);
         conds.price = FPN_Min(conds.price, upper);
     }
@@ -217,7 +217,7 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
     // for momentum this is especially important — don't buy breakouts in a downtrend
     {
         int long_enabled = !FPN_IsZero(cfg->min_long_slope);
-        FPN<F> relative_long_slope = FPN_IsZero(rolling_long->price_avg)
+        FPN_Binary<F> relative_long_slope = FPN_IsZero(rolling_long->price_avg)
             ? FPN_Zero<F>()
             : FPN_DivNoAssert(rolling_long->price_slope, rolling_long->price_avg);
         int long_pass = FPN_GreaterThanOrEqual(relative_long_slope, cfg->min_long_slope);
@@ -246,7 +246,7 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
 // the key difference: momentum uses cfg->momentum_sl_mult (tighter) instead of cfg->sl_trail_mult
 //======================================================================================================
 template <unsigned F>
-inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
+inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, FPN_Binary<F> current_price,
                                   const RollingStats<F> *rolling,
                                   MomentumState<F> *state,
                                   const ControllerConfig<F> *cfg) {
@@ -255,16 +255,16 @@ inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
     if (FPN_IsZero(rolling->price_stddev)) return;
 
     // compute R² from price regression (same pattern as MR)
-    FPN<F> r_squared = FPN_Zero<F>();
-    FPN<F> reg_slope = FPN_Zero<F>();
+    FPN_Binary<F> r_squared = FPN_Zero<F>();
+    FPN_Binary<F> reg_slope = FPN_Zero<F>();
     if (state->price_feeder.count >= MAX_WINDOW) {
         LinearRegression3XResult<F> price_reg = RegressionFeederX_Compute(&state->price_feeder);
         r_squared = price_reg.r_squared;
         reg_slope = price_reg.model.slope;
     }
 
-    FPN<F> snr = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
-    FPN<F> hold_score = FPN_Mul(snr, r_squared);
+    FPN_Binary<F> snr = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
+    FPN_Binary<F> hold_score = FPN_Mul(snr, r_squared);
     int should_trail = FPN_GreaterThanOrEqual(hold_score, cfg->tp_hold_score);
 
     uint16_t active = portfolio->active_bitmap;
@@ -277,22 +277,22 @@ inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
         if (above_tp & should_trail) {
             // momentum trailing: use tp_trail_mult for TP (same as MR)
             // but use momentum_sl_mult for tighter SL (cut losers faster in trends)
-            FPN<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
-            FPN<F> trailing_tp = FPN_Sub(current_price, tp_offset);
+            FPN_Binary<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
+            FPN_Binary<F> trailing_tp = FPN_Sub(current_price, tp_offset);
             pos->take_profit_price = FPN_Max(pos->take_profit_price, trailing_tp);
 
             // tighter SL: momentum_sl_mult is typically smaller than sl_trail_mult
-            FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->momentum_sl_mult);
-            FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+            FPN_Binary<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->momentum_sl_mult);
+            FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
             pos->stop_loss_price = FPN_Max(pos->stop_loss_price, trailing_sl);
 
             // SL floor: enforce 2:1 min reward/risk after trailing adjustments
             // only applies when SL is still below entry (at-risk position).
             // once SL trails above entry, the position is a guaranteed win — no floor needed
             if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
-              FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-              FPN<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
-              FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+              FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+              FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
+              FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
               pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
         }
@@ -323,7 +323,7 @@ namespace tt {
 template <unsigned F> struct EventLoopState;
 template <unsigned F>
 bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
-                              FPN<F> proposed_sl, FPN<F> entry_price,
+                              FPN_Binary<F> proposed_sl, FPN_Binary<F> entry_price,
                               const ControllerConfig<F>* cfg);
 
 template <unsigned F, unsigned W>
@@ -331,23 +331,23 @@ inline void Momentum_ExitAdjustSharded(
     EventLoopState<F>* state,
     int slot,
     MomentumState<F>* mom,
-    FPN<F> current_price,
+    FPN_Binary<F> current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {
     if (FPN_IsZero(cfg->tp_hold_score))    return;
     if (FPN_IsZero(rolling->price_stddev)) return;
 
-    FPN<F> r_squared = FPN_Zero<F>();
-    FPN<F> reg_slope = FPN_Zero<F>();
+    FPN_Binary<F> r_squared = FPN_Zero<F>();
+    FPN_Binary<F> reg_slope = FPN_Zero<F>();
     if (mom->price_feeder.count >= MAX_WINDOW) {
         LinearRegression3XResult<F> price_reg =
             RegressionFeederX_Compute(&mom->price_feeder);
         r_squared = price_reg.r_squared;
         reg_slope = price_reg.model.slope;
     }
-    FPN<F> snr        = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
-    FPN<F> hold_score = FPN_Mul(snr, r_squared);
+    FPN_Binary<F> snr        = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
+    FPN_Binary<F> hold_score = FPN_Mul(snr, r_squared);
     if (!FPN_GreaterThanOrEqual(hold_score, cfg->tp_hold_score)) return;
 
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
@@ -360,17 +360,17 @@ inline void Momentum_ExitAdjustSharded(
     // Momentum: tighter trail (momentum_sl_mult) — but Strategy_WriteRatchetSL's
     // fee-floor cap prevents inversion. Fall back to sl_trail_mult if the
     // momentum-specific cfg field is zero.
-    FPN<F> trail_mult = !FPN_IsZero(cfg->momentum_sl_mult)
+    FPN_Binary<F> trail_mult = !FPN_IsZero(cfg->momentum_sl_mult)
         ? cfg->momentum_sl_mult : cfg->sl_trail_mult;
-    FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, trail_mult);
-    FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+    FPN_Binary<F> sl_offset = FPN_Mul(rolling->price_stddev, trail_mult);
+    FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
 
     while (bm) {
         int pidx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        FPN<F> entry = state->oms->portfolio.positions[pidx].entry_price;
+        FPN_Binary<F> entry = state->oms->portfolio.positions[pidx].entry_price;
         if (FPN_IsZero(entry)) continue;
-        FPN<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
+        FPN_Binary<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
         if (!FPN_IsZero(orig_tp) && !FPN_GreaterThan(current_price, orig_tp)) continue;
         Strategy_WriteRatchetSL(state, slot, trailing_sl, entry, cfg);
     }

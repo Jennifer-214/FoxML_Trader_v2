@@ -23,7 +23,7 @@
 //     and resets any internal tracking (regression feeders, etc). writes to buy_conds so
 //     the engine can start running BuyGate immediately.
 //
-//   PREFIX_Adapt(PREFIXState<F> *state, FPN<F> current_price, FPN<F> portfolio_delta,
+//   PREFIX_Adapt(PREFIXState<F> *state, FPN_Binary<F> current_price, FPN_Binary<F> portfolio_delta,
 //               uint16_t active_bitmap, const BuySideGateConditions<F> *buy_conds,
 //               const ControllerConfig<F> *cfg)
 //     called every slow-path tick. adjusts adaptive filter parameters based on market

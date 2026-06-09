@@ -41,7 +41,7 @@ namespace tt {
 #define FOREACH_SP_SECTION(X)                                                                       \
     X(ROLLING,   "EventLoop_UpdateRollingStateOneCore + cadence setup (depth read, swap pickup, mtm_price); dominates cycle (~100-300μs steady-state with W=1024)") \
     X(REBUILD,   "EventLoop_RebuildOneCore: regime classify + strategy dispatch + gate compute (~5-30μs typical)") \
-    X(PUSH,      "Seqlock push of pending_params to ExecutionCore (~100-500ns; single FPN copy + atomic)") \
+    X(PUSH,      "Seqlock push of pending_params to ExecutionCore (~100-500ns; single FPN_Binary copy + atomic)") \
     X(TIME_EXIT, "EventLoop_TimeExitOneCore (~100-300ns)")                                          \
     X(TRAIL_SL,  "EventLoop_TrailingSLRatchetOneCore (~100-300ns)")
 

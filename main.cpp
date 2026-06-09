@@ -62,7 +62,7 @@ constexpr unsigned FP = 64;
 // the key guarantee: we NEVER reconnect with orphaned positions
 // if the bitmap isnt zero after force-close, thats a bug and we halt rather than lose track of money
 //======================================================================================================
-static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLog *log, FPN<FP> last_price) {
+static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLog *log, FPN_Binary<FP> last_price) {
     uint16_t active = ctrl->portfolio.active_bitmap;
     while (active) {
         int idx = __builtin_ctz(active);
@@ -907,9 +907,9 @@ int main(int argc, char *argv[]) {
                             fprintf(stderr, "[LIVE] undoing paper position slot %d — no real backing (notional $%.2f)\n", slot, cost);
                             ctrl.portfolio.active_bitmap &= ~(1 << slot);
                             // restore balance: reverse the cost + fee deduction from position sizing
-                            FPN<FP> position_cost = FPN_Mul(ctrl.portfolio.positions[slot].quantity,
+                            FPN_Binary<FP> position_cost = FPN_Mul(ctrl.portfolio.positions[slot].quantity,
                                                             ctrl.portfolio.positions[slot].entry_price);
-                            FPN<FP> fee = FPN_Mul(position_cost, ctrl.config.fee_rate);
+                            FPN_Binary<FP> fee = FPN_Mul(position_cost, ctrl.config.fee_rate);
                             ctrl.balance = FPN_AddSat(ctrl.balance, FPN_AddSat(position_cost, fee));
                             // reverse the entry fee that was counted at buy time — the buy didn't happen
                             ctrl.total_fees = FPN_SubSat(ctrl.total_fees, fee);
@@ -1063,8 +1063,8 @@ int main(int argc, char *argv[]) {
                                     char oid[32]; double fp = 0, fq = 0;
                                     if (BinanceOrderAPI_MarketSell(&order_api, qty_d, oid, &fp, &fq) && fq > 0) {
                                         // book the exit in paper ledger
-                                        FPN<FP> proceeds = FPN_FromDouble<FP>(fp * fq);
-                                        FPN<FP> exit_fee = FPN_Mul(proceeds, ctrl.config.fee_rate);
+                                        FPN_Binary<FP> proceeds = FPN_FromDouble<FP>(fp * fq);
+                                        FPN_Binary<FP> exit_fee = FPN_Mul(proceeds, ctrl.config.fee_rate);
                                         ctrl.balance = FPN_AddSat(ctrl.balance, FPN_SubSat(proceeds, exit_fee));
                                         ctrl.total_fees = FPN_AddSat(ctrl.total_fees, exit_fee);
                                         ctrl.losses++;
@@ -1087,9 +1087,9 @@ int main(int argc, char *argv[]) {
                                     __builtin_popcount(ghost));
                             while (ghost) {
                                 int idx = __builtin_ctz(ghost);
-                                FPN<FP> cost = FPN_Mul(ctrl.portfolio.positions[idx].quantity,
+                                FPN_Binary<FP> cost = FPN_Mul(ctrl.portfolio.positions[idx].quantity,
                                                        ctrl.portfolio.positions[idx].entry_price);
-                                FPN<FP> fee = FPN_Mul(cost, ctrl.config.fee_rate);
+                                FPN_Binary<FP> fee = FPN_Mul(cost, ctrl.config.fee_rate);
                                 ctrl.balance = FPN_AddSat(ctrl.balance, FPN_AddSat(cost, fee));
                                 ctrl.portfolio.active_bitmap &= ~(1 << idx);
                                 ghost &= ghost - 1;

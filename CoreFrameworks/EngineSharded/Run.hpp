@@ -637,7 +637,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // alerts at this point go to stderr only. That's acceptable: stderr is
     // line-buffered to a file (logging/engine.log), and any failure here
     // is fatal anyway — the user will see it on next start.
-    FPN<F> live_starting_balance = cfg.starting_balance;
+    FPN_Binary<F> live_starting_balance = cfg.starting_balance;
     if (live_trading) {
         double usdt_recovered = 0.0, btc_remaining = 0.0;
         if (!EngineSharded_OrphanRecovery(&g_sharded_binance_adapter,
@@ -874,10 +874,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Removed in v5.1.2; readers now use state.cores[c].slow_state pointers.
     // ema_price stays at producer scope since it's per-tick (replicated to
     // all N engines via EventLoop_UpdateEmaPriceAllCores in fan_out).
-    FPN<F> ema_price = FPN_Zero<F>();
+    FPN_Binary<F> ema_price = FPN_Zero<F>();
     // EMA alpha matches PortfolioController_Init's default (gate_ema_alpha
     // is the cfg key). Computed at boot from cfg; updated each tick.
-    FPN<F> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
+    FPN_Binary<F> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
                        ? cfg.gate_ema_alpha
                        : FPN_FromDouble<F>(0.1);
 
@@ -1915,13 +1915,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v1.7.3 HIGH-4).
 
                     // Per-cycle scalar inputs (mtm_price discipline preserved; helper takes
-                    // FPN<F> price = mtm_price, derives double internally via FPN_ToDouble
+                    // FPN_Binary<F> price = mtm_price, derives double internally via FPN_ToDouble
                     // for guard checks).
                     double price_d = last_price.load(std::memory_order_relaxed);
                     double volume_d = last_volume.load(std::memory_order_relaxed);
-                    FPN<F> price = price_d > 0.0
+                    FPN_Binary<F> price = price_d > 0.0
                                  ? FPN_FromDouble<F>(price_d) : FPN_Zero<F>();
-                    FPN<F> volume = volume_d > 0.0
+                    FPN_Binary<F> volume = volume_d > 0.0
                                   ? FPN_FromDouble<F>(volume_d) : FPN_Zero<F>();
                     uint64_t ts_us =
                         (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(

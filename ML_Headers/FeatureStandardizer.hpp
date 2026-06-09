@@ -8,13 +8,13 @@
 // Mean-centering + unit-variance scaling for ML features. Applied between
 // Features_PackAll and Model_Predict on the slow path.
 //
-// Why double, not FPN<F>:
+// Why double, not FPN_Binary<F>:
 //   Training-side reference is Python/numpy/XGBoost which compute mean +
-//   stddev in IEEE-754 double. FPN math produces subtly different bits
-//   for the same inputs. Using FPN at apply-time vs double at compute-time
+//   stddev in IEEE-754 double. FPN_Binary math produces subtly different bits
+//   for the same inputs. Using FPN_Binary at apply-time vs double at compute-time
 //   = guaranteed bytewise mismatch. Standardizer runs on the slow path
 //   (between PackAll + Predict, ~once per slow-path cycle), so the
-//   FPN/branchless rule that protects the hot path doesn't apply.
+//   FPN_Binary/branchless rule that protects the hot path doesn't apply.
 //   See DOCS/CLAUDE_ML_INVARIANTS.md "Train-serve scaler parity" rule.
 //
 // Sidecar binary format (`.scaler` next to the model `.bin`):
@@ -232,7 +232,7 @@ static inline int FeatureStandardizer_Apply(const FeatureStandardizer* sc,
         features[i] = (float)out;
     }
     // Post-apply finite check. Output COULD have non-finite values if
-    // stddev was floored and mean was at FPN saturation (rare edge).
+    // stddev was floored and mean was at FPN_Binary saturation (rare edge).
     // Pre-apply check at Features_PackAll already filters input NaN; this
     // catches anything introduced by the apply math itself.
     for (int i = 0; i < n; ++i) {

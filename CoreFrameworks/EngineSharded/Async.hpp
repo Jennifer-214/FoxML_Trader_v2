@@ -142,7 +142,7 @@ inline bool EngineSharded_Async_FanOut(
     int num_cores,
     int slow_path_interval,
     double tsc_ghz,
-    FPN<F> ema_alpha,
+    FPN_Binary<F> ema_alpha,
     bool live_trading,
     int topo_producer_cpu,
     int topo_drainer_cpu,
@@ -156,7 +156,7 @@ inline bool EngineSharded_Async_FanOut(
     EventLoopState<F>& state,
     OrderManagerState<F>& oms,
     int& slow_path_counter,
-    FPN<F>& ema_price,
+    FPN_Binary<F>& ema_price,
     std::atomic<bool>& paper_reset_in_progress,
     int* topo_hot_cpu,        // array decays to pointer; 16-element
     int* topo_slow_cpu,       // 16-element
@@ -258,15 +258,15 @@ inline bool EngineSharded_Async_FanOut(
     // stay zero in sharded while backtest produces them non-zero.
     // First-tick branchless: if ema is zero, take current price as-is;
     // otherwise standard exponential smoothing.
-    FPN<F> one_minus_alpha = FPN_Sub(FPN_FromDouble<F>(1.0), ema_alpha);
-    FPN<F> ema_new = FPN_Add(
+    FPN_Binary<F> one_minus_alpha = FPN_Sub(FPN_FromDouble<F>(1.0), ema_alpha);
+    FPN_Binary<F> ema_new = FPN_Add(
         FPN_Mul(ema_price, ema_alpha),
         FPN_Mul(t.price, one_minus_alpha));
     if (FPN_IsZero(ema_price)) ema_price = t.price;
     else                       ema_price = ema_new;
     // v5.1.2 (full symmetric decoupling): replicate ema_price to
     // ALL engines' slow_state in BOTH arches. Single-writer is
-    // the producer thread. Cost: N FPN copies per tick — trivial.
+    // the producer thread. Cost: N FPN_Binary copies per tick — trivial.
     EventLoop_UpdateEmaPriceAllCores(&state, ema_price);
 
     // Phase 8a (post-coding c7) — record raw tick to CSV when enabled.
@@ -380,7 +380,7 @@ inline bool EngineSharded_Async_FanOut(
         // Phase 3: pass current_price for MTM kill switch evaluation.
         // Read once from the producer atomic; tracker is realized-only
         // on the first slow path before any tick has been seen.
-        FPN<F> mtm_price = FPN_FromDouble<F>(
+        FPN_Binary<F> mtm_price = FPN_FromDouble<F>(
             last_price.load(std::memory_order_relaxed));
         // v4.3 — pass expanded feature-pack state for the model's
         // medium-horizon features. Same pointers go to both the AUTO
@@ -400,9 +400,9 @@ inline bool EngineSharded_Async_FanOut(
         // RebuildAllParameters' gate check fails closed if cfg.
         // min_book_imbalance>0, which is the desired semantics
         // (no data → no buys, since we can't evaluate the gate).
-        FPN<F> book_imb;
-        FPN<F> book_spread   = FPN_Zero<F>();
-        FPN<F> book_mid      = FPN_Zero<F>();
+        FPN_Binary<F> book_imb;
+        FPN_Binary<F> book_spread   = FPN_Zero<F>();
+        FPN_Binary<F> book_mid      = FPN_Zero<F>();
         if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)) {
             int dactive = __atomic_load_n(&depth_shared.active_idx,
                                            __ATOMIC_ACQUIRE);
@@ -432,11 +432,11 @@ inline bool EngineSharded_Async_FanOut(
         // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
         // oms->balance from this (producer) thread while the drainer
         // thread writes it via OnEvent / OMS_Tick fill handler.
-        // FPN<64> is 64 words — torn reads are possible under
+        // FPN_Binary<64> is 64 words — torn reads are possible under
         // concurrent writes. Probability is low at current event
         // rates (~1 exit/sec vs 5 Hz slow path). Consequence:
         // false-positive or missed kill switch trip from a garbage
-        // FPN comparison. Pre-existing race (sharded engine always
+        // FPN_Binary comparison. Pre-existing race (sharded engine always
         // had producer + drainer on separate threads).
         // TODO: move kill switch eval to drainer thread, or use an
         // atomic balance snapshot for the comparison.
@@ -810,7 +810,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // below (was two separate `const auto&` declarations).
                 double full_qty = FPN_ToDouble(state.cores[slot].intended_qty);
                 const auto& ov_slot = cfg.core_overrides[slot];
-                FPN<F> partial_pct = !FPN_IsZero(ov_slot.partial_exit_pct)
+                FPN_Binary<F> partial_pct = !FPN_IsZero(ov_slot.partial_exit_pct)
                     ? ov_slot.partial_exit_pct : cfg.cores[slot].partial_exit_pct;
                 if (partial_on && event.leg == PARTIAL_LEG_A) {
                     order_qty_d = full_qty * FPN_ToDouble(partial_pct);
@@ -834,12 +834,12 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // the panel display honest AND prevents
                 // snapshot-restore-while-paired from reviving leg B
                 // with TP1 instead of TP2.
-                FPN<F> leg_tp = state.cores[slot].intended_tp;
+                FPN_Binary<F> leg_tp = state.cores[slot].intended_tp;
                 if (is_entry && partial_on && event.leg == PARTIAL_LEG_B) {
                     // v5.15.5.C.4 Phase T1: use leg_tp local (already
                     // captured at line above) instead of re-reading
                     // state.cores[slot].intended_tp; saves 1 indexed read.
-                    FPN<F> tp_dist_a = FPN_Sub(leg_tp, event.price);
+                    FPN_Binary<F> tp_dist_a = FPN_Sub(leg_tp, event.price);
                     // v4.7.32: per-core tp2_mult override (0 = inherit).
                     // v5.15.5.C.4 Phase T1: NOTE — `ov_slot` from earlier
                     // entry branch is NOT in scope here; the entry-qty
@@ -849,9 +849,9 @@ inline int EngineSharded_Async_DrainWithSubmit(
                     // iteration (above is_exit/is_entry split) if more
                     // sites need it.
                     const auto& ov_tp2 = cfg.core_overrides[slot];
-                    FPN<F> tp2_mult_eff = !FPN_IsZero(ov_tp2.tp2_mult)
+                    FPN_Binary<F> tp2_mult_eff = !FPN_IsZero(ov_tp2.tp2_mult)
                         ? ov_tp2.tp2_mult : cfg.cores[slot].tp2_mult;
-                    FPN<F> tp_dist_b = FPN_Mul(tp_dist_a, tp2_mult_eff);
+                    FPN_Binary<F> tp_dist_b = FPN_Mul(tp_dist_a, tp2_mult_eff);
                     leg_tp = FPN_Add(event.price, tp_dist_b);
                 }
                 // v4.7.37 (Phase B reordered): push through OMS_PushSubmit

@@ -155,3 +155,5 @@ DOCS/TOOLS.md
 /engine.cfg.example
 /engine_sharded.cfg
 /DOCS
+/build_probe/
+/build_ubsan/

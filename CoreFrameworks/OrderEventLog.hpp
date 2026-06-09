@@ -84,10 +84,10 @@ struct OrderEvent {
     OrderType      order_type;     // ORDER_MARKET_BUY / ORDER_MARKET_SELL
     int16_t        core_id;        // which executor core (-1 for non-core)
     uint8_t        _pad[4];
-    FPN<F>         price;          // fill price (zero for non-fill events)
-    FPN<F>         qty;            // fill qty (zero for non-fill events)
-    FPN<F>         tp;             // intended TP at fill time (entry only)
-    FPN<F>         sl;             // intended SL at fill time (entry only)
+    FPN_Binary<F>         price;          // fill price (zero for non-fill events)
+    FPN_Binary<F>         qty;            // fill qty (zero for non-fill events)
+    FPN_Binary<F>         tp;             // intended TP at fill time (entry only)
+    FPN_Binary<F>         sl;             // intended SL at fill time (entry only)
     char           reason[32];     // short description for REJECTED/RECONCILED
 };
 
@@ -122,7 +122,7 @@ constexpr size_t ORDER_EVENT_LOG_INIT_CAPACITY = 16384;
 constexpr size_t ORDER_EVENT_LOG_MAX_CAPACITY = 32768;
 
 // Phase 07 file header — written at the start of the event log file.
-// Carries the FPN width and entry size for forward compatibility.
+// Carries the FPN_Binary width and entry size for forward compatibility.
 struct OrderEventLogFileHeader {
     char     magic[8];       // "OMSEL01\0"
     uint32_t fpn_width;      // F template parameter (e.g. 64)
@@ -391,7 +391,7 @@ inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log) {
 //======================================================================================================
 // Like Init, but also opens a binary file for write-through. Events are
 // appended to disk on every OrderEventLog_Append call. The file carries a
-// small header for forward compatibility (magic + FPN width + entry size).
+// small header for forward compatibility (magic + FPN_Binary width + entry size).
 //
 // If the file already exists, LoadFromDisk should be called BEFORE this to
 // replay the events into memory. This function opens the file in append
@@ -477,7 +477,7 @@ inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
 // [LOAD FROM DISK — phase 07 replay on startup]
 //======================================================================================================
 // Reads events from a previously-written event log file and populates the
-// in-memory buffer. Validates the file header for magic + FPN width match.
+// in-memory buffer. Validates the file header for magic + FPN_Binary width match.
 // Returns the number of events loaded, or -1 on error.
 //
 // Call this BEFORE InitWithFile if the file already exists. The loaded
@@ -501,7 +501,7 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
         return -1;
     }
     if (hdr.fpn_width != F) {
-        std::fprintf(stderr, "[OrderEventLog] WARN: %s FPN width mismatch "
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s FPN_Binary width mismatch "
                      "(file=%u, build=%u)\n", path, hdr.fpn_width, F);
         std::fclose(f);
         return -1;
@@ -563,10 +563,10 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
                                           uint64_t timestamp_us,
                                           OrderType order_type,
                                           int16_t core_id,
-                                          FPN<F> price,
-                                          FPN<F> qty,
-                                          FPN<F> tp,
-                                          FPN<F> sl) {
+                                          FPN_Binary<F> price,
+                                          FPN_Binary<F> qty,
+                                          FPN_Binary<F> tp,
+                                          FPN_Binary<F> sl) {
     OrderEvent<F> e;
     std::memset(&e, 0, sizeof(e));
     e.event_id     = 0;  // assigned by Append
@@ -624,16 +624,16 @@ inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
 //======================================================================================================
 template <unsigned F>
 struct FoldResult {
-    FPN<F> balance;
-    FPN<F> realized_pnl;
+    FPN_Binary<F> balance;
+    FPN_Binary<F> realized_pnl;
     Portfolio<F> portfolio;
     int    fills_processed;
 };
 
 template <unsigned F>
 inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
-                                            FPN<F> starting_balance,
-                                            FPN<F> fee_rate) {
+                                            FPN_Binary<F> starting_balance,
+                                            FPN_Binary<F> fee_rate) {
     FoldResult<F> result;
     result.balance         = starting_balance;
     result.realized_pnl    = FPN_Zero<F>();
@@ -653,8 +653,8 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
             // timestamp so hold-time display survives engine restart +
             // replay. Closes the Class-18 mirror between live-entry +
             // replay paths per CLAUDE.md item 19.
-            FPN<F> notional  = FPN_Mul(e.price, e.qty);
-            FPN<F> entry_fee = FPN_Mul(notional, fee_rate);
+            FPN_Binary<F> notional  = FPN_Mul(e.price, e.qty);
+            FPN_Binary<F> entry_fee = FPN_Mul(notional, fee_rate);
             PositionEntryArgs<F> args;
             args.entry_price        = e.price;
             args.quantity           = e.qty;
@@ -669,13 +669,13 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
         } else if (e.order_type == ORDER_MARKET_SELL) {
             // Exit fill: close the slot, compute net P&L, update balance.
             // Same math as EventLoop_OnEvent in ControllerEventLoop.hpp.
-            FPN<F> entry_fee     = result.portfolio.positions[slot].entry_fee;
-            FPN<F> qty_snap      = result.portfolio.positions[slot].quantity;
-            FPN<F> gross         = Portfolio_CloseSlot(&result.portfolio, slot, e.price);
-            FPN<F> exit_notional = FPN_Mul(e.price, qty_snap);
-            FPN<F> exit_fee      = FPN_Mul(exit_notional, fee_rate);
-            FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
-            FPN<F> net           = FPN_Sub(gross, total_fee);
+            FPN_Binary<F> entry_fee     = result.portfolio.positions[slot].entry_fee;
+            FPN_Binary<F> qty_snap      = result.portfolio.positions[slot].quantity;
+            FPN_Binary<F> gross         = Portfolio_CloseSlot(&result.portfolio, slot, e.price);
+            FPN_Binary<F> exit_notional = FPN_Mul(e.price, qty_snap);
+            FPN_Binary<F> exit_fee      = FPN_Mul(exit_notional, fee_rate);
+            FPN_Binary<F> total_fee     = FPN_Add(entry_fee, exit_fee);
+            FPN_Binary<F> net           = FPN_Sub(gross, total_fee);
             result.balance       = FPN_Add(result.balance, net);
             result.realized_pnl  = FPN_Add(result.realized_pnl, net);
         }

@@ -48,7 +48,7 @@
 
 #pragma once
 
-#include "../FixedPoint/FixedPointN.hpp"        // FPN<F>, FPN_ToDouble
+#include "../FixedPoint/FixedPointN.hpp"        // FPN_Binary<F>, FPN_ToDouble
 #include "OmsStateFlagRegistry.hpp"              // MASK_OMS_STATE_PARTIAL_EXIT_ENABLED
 #include "BitmapMacros.hpp"                      // BITMAP_IS_SET
 

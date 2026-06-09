@@ -126,7 +126,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
                 "[manual-close] slot %d: no active position, ignoring\n", slot);
             continue;
         }
-        FPN<F> qty = oms.portfolio.positions[slot].quantity;
+        FPN_Binary<F> qty = oms.portfolio.positions[slot].quantity;
         if (FPN_IsZero(qty)) continue;
         // Map slot → core_id for strategy_id + leg lookup
         // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
@@ -137,7 +137,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         uint8_t strategy_id = state.cores[core_id].strategy_id;
         // Use latest tick price as fill price for paper mode. Live
         // mode would route to a real adapter SELL — same Submit call.
-        FPN<F> fill_px = FPN_FromDouble<F>(
+        FPN_Binary<F> fill_px = FPN_FromDouble<F>(
             last_price.load(std::memory_order_relaxed));
         if (FPN_IsZero(fill_px)) {
             fill_px = oms.portfolio.positions[slot].entry_price;  // safe fallback

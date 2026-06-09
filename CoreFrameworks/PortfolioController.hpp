@@ -138,15 +138,15 @@ template <unsigned F> struct PortfolioController {
   uint64_t prev_bitmap;   // fill detection: pool->bitmap & ~prev_bitmap
   uint64_t last_slow_time; // wall-time floor: run slow path if this many seconds elapsed
   BuySideGateConditions<F> buy_conds;
-  FPN<F> ema_price;             // exponential moving average of price (hot path, ~2ns per tick)
+  FPN_Binary<F> ema_price;             // exponential moving average of price (hot path, ~2ns per tick)
   int ema_initialized;          // 0 until first tick sets it to current price
   int _hot_pad0;                // align gate_offset to 8 bytes
-  FPN<F> gate_offset;           // distance from EMA to gate price (set on slow path)
-  FPN<F> danger_warn;           // price threshold where gradient starts (avg - warn_stddevs * σ)
-  FPN<F> danger_crash;          // price threshold where gate zeroes (avg - crash_stddevs * σ)
-  FPN<F> danger_range_inv;      // 1 / (warn - crash), precomputed for hot-path multiply
-  FPN<F> danger_score;          // current danger score [0, 1] — computed every tick
-  FPN<F> fpn_one;               // precomputed FPN(1.0) — avoids FromDouble conversion on hot path
+  FPN_Binary<F> gate_offset;           // distance from EMA to gate price (set on slow path)
+  FPN_Binary<F> danger_warn;           // price threshold where gradient starts (avg - warn_stddevs * σ)
+  FPN_Binary<F> danger_crash;          // price threshold where gate zeroes (avg - crash_stddevs * σ)
+  FPN_Binary<F> danger_range_inv;      // 1 / (warn - crash), precomputed for hot-path multiply
+  FPN_Binary<F> danger_score;          // current danger score [0, 1] — computed every tick
+  FPN_Binary<F> fpn_one;               // precomputed FPN_Binary(1.0) — avoids FromDouble conversion on hot path
   int buying_halted;            // centralized halt — checked every tick after gate tracking
   int halt_reason;              // 0=none, 1=kill, 2=recovery, 3=volatile, 4=cooldown, 5=wind_down, 6=paused
   int gate_reason;              // GATE_REASON_* — why buy gate is off (set at every zeroing point)
@@ -163,22 +163,22 @@ template <unsigned F> struct PortfolioController {
   // WARM — accessed on fills or slow path, not every tick
   //================================================================================================
   ControllerConfig<F> config;
-  FPN<F> portfolio_delta; // unrealized P&L (current open positions)
-  FPN<F> realized_pnl;    // cumulative realized P&L (closed positions)
-  FPN<F> balance;    // paper trading balance (deducted on buy, added on sell)
-  FPN<F> total_fees; // cumulative fees paid (tracked for display)
+  FPN_Binary<F> portfolio_delta; // unrealized P&L (current open positions)
+  FPN_Binary<F> realized_pnl;    // cumulative realized P&L (closed positions)
+  FPN_Binary<F> balance;    // paper trading balance (deducted on buy, added on sell)
+  FPN_Binary<F> total_fees; // cumulative fees paid (tracked for display)
 
   uint32_t wins;       // TP exits
   uint32_t losses;     // SL exits
   uint32_t total_buys; // total entries
-  FPN<F> gross_wins;   // cumulative dollar gains from TP exits
-  FPN<F> gross_losses; // cumulative dollar losses from SL exits (positive number)
+  FPN_Binary<F> gross_wins;   // cumulative dollar gains from TP exits
+  FPN_Binary<F> gross_losses; // cumulative dollar losses from SL exits (positive number)
   uint64_t total_hold_ticks;     // cumulative ticks held across all closed positions
   uint64_t entry_ticks[MAX_PORTFOLIO_POSITIONS]; // tick at which each position was entered
   time_t entry_time[MAX_PORTFOLIO_POSITIONS];    // wall clock time at entry
   uint8_t entry_strategy[MAX_PORTFOLIO_POSITIONS]; // which strategy_id entered each position
 
-  FPN<F> daily_realized_pnl;        // accumulated realized P&L this session (resets on 24h boundary)
+  FPN_Binary<F> daily_realized_pnl;        // accumulated realized P&L this session (resets on 24h boundary)
   uint32_t kill_recovery_counter;   // slow-path cycles remaining after kill reset before trading resumes
   double last_vol_scale;            // most recent vol scale factor applied (for TUI display)
   double last_cost_bps;             // most recent trade cost estimate in bps (for TUI display)
@@ -195,7 +195,7 @@ template <unsigned F> struct PortfolioController {
 
   // per-strategy reward attribution
   struct StrategyStats {
-    FPN<F> realized_pnl;
+    FPN_Binary<F> realized_pnl;
     uint32_t wins;
     uint32_t losses;
     uint32_t total_trades;
@@ -203,8 +203,8 @@ template <unsigned F> struct PortfolioController {
   StrategyStats strategy_stats[5]; // 0=MR, 1=Momentum, 2=SimpleDip, 3=ML, 4=EmaCross
 
   int state;
-  FPN<F> price_sum;
-  FPN<F> volume_sum;
+  FPN_Binary<F> price_sum;
+  FPN_Binary<F> volume_sum;
   uint64_t warmup_count;
 
   int strategy_id;
@@ -227,16 +227,16 @@ template <unsigned F> struct PortfolioController {
   RegimeSignals<F> last_signals;     // cached for ML strategy BuySignal access
 
   RORRegressor<F> regime_ror;  // slope-of-slopes for trend acceleration detection
-  FPN<F> volume_spike_ratio;   // current_volume / rolling.volume_max (spike detection)
+  FPN_Binary<F> volume_spike_ratio;   // current_volume / rolling.volume_max (spike detection)
   uint32_t sl_cooldown_counter; // remaining slow-path cycles before buy gate re-enables
   double session_high;         // highest price since startup
   double session_low;          // lowest price since startup
-  FPN<F> peak_equity;          // highest equity seen (for max drawdown tracking)
-  FPN<F> max_drawdown;         // largest peak-to-trough equity drop ($)
-  FPN<F> session_start_equity; // equity at engine startup (for session P&L)
+  FPN_Binary<F> peak_equity;          // highest equity seen (for max drawdown tracking)
+  FPN_Binary<F> max_drawdown;         // largest peak-to-trough equity drop ($)
+  FPN_Binary<F> session_start_equity; // equity at engine startup (for session P&L)
   int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
-  FPN<F> session_mult;          // current session gate multiplier
-  FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
+  FPN_Binary<F> session_mult;          // current session gate multiplier
+  FPN_Binary<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
 
   time_t sim_time;              // simulated clock: live=time(NULL), backtest=tick timestamp
                                 // use this instead of time(NULL) for all time-dependent logic
@@ -263,14 +263,14 @@ template <unsigned F> struct PortfolioController {
   WelfordTracker<F> signal_tracker;   // buy signal strength distribution
 
   // Phase 8 — maker/taker accounting. PLACED AT END OF STRUCT per cross-plan
-  // amendment #6: 2× FPN<F=64> = ~1KB; placing earlier could push hot-path
+  // amendment #6: 2× FPN_Binary<F=64> = ~1KB; placing earlier could push hot-path
   // fields (portfolio.active_bitmap, buying_halted, gate_offset) off their
   // cache lines. Confirmed warm-path-only — incremented on fill consumption,
   // read for stats display.
   uint32_t maker_fills_count;
   uint32_t taker_fills_count;
-  FPN<F> total_maker_fees;
-  FPN<F> total_taker_fees;
+  FPN_Binary<F> total_maker_fees;
+  FPN_Binary<F> total_taker_fees;
 };
 
 // v5.11.0.E — Part 3 architectural invariant (LATENCY_OPTIMIZATION_AUDIT.md
@@ -585,19 +585,19 @@ template <unsigned F>
 inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     int slot = rec->position_index;
     int reason = rec->reason;
-    FPN<F> exit_price = rec->exit_price;
+    FPN_Binary<F> exit_price = rec->exit_price;
 
-    // P&L computation (FPN-only, no doubles until display boundary)
+    // P&L computation (FPN_Binary-only, no doubles until display boundary)
     // all position data from record — immune to slot reuse
-    FPN<F> gross_proceeds = FPN_Mul(exit_price, rec->quantity);
+    FPN_Binary<F> gross_proceeds = FPN_Mul(exit_price, rec->quantity);
     // Phase 8: TP/SL exits = market sell = always taker by exchange
     // definition. Use fee_rate_taker. Hybrid execution (Phase 9) would add
     // limit-order exits that need ExitRecord.is_maker; for now, taker.
-    FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate_taker);
-    FPN<F> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
-    FPN<F> entry_cost = FPN_Mul(rec->entry_price, rec->quantity);
-    FPN<F> total_entry_cost = FPN_AddSat(entry_cost, rec->entry_fee);
-    FPN<F> pos_pnl = FPN_Sub(net_proceeds, total_entry_cost);
+    FPN_Binary<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate_taker);
+    FPN_Binary<F> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
+    FPN_Binary<F> entry_cost = FPN_Mul(rec->entry_price, rec->quantity);
+    FPN_Binary<F> total_entry_cost = FPN_AddSat(entry_cost, rec->entry_fee);
+    FPN_Binary<F> pos_pnl = FPN_Sub(net_proceeds, total_entry_cost);
 
     // state updates — complete set, no omissions
     ctrl->realized_pnl = FPN_AddSat(ctrl->realized_pnl, pos_pnl);
@@ -694,9 +694,9 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
         int is_loss = (pos_pnl.v < 0);                  // strictly negative (was .sign — drops the 24B -0 artifact; see note)
         unsigned __int128 win_mask  = -(unsigned __int128)(unsigned)is_win;     // 0 / all-ones
         unsigned __int128 loss_mask = -(unsigned __int128)(unsigned)is_loss;
-        FPN<F> neg_pnl = FPN_Negate(pos_pnl);           // |pos_pnl| when pos_pnl < 0
-        FPN<F> win_add  { (__int128)((unsigned __int128)pos_pnl.v & win_mask) };   // win amount, else 0
-        FPN<F> loss_add { (__int128)((unsigned __int128)neg_pnl.v & loss_mask) };  // loss amount (positive), else 0
+        FPN_Binary<F> neg_pnl = FPN_Negate(pos_pnl);           // |pos_pnl| when pos_pnl < 0
+        FPN_Binary<F> win_add  { (__int128)((unsigned __int128)pos_pnl.v & win_mask) };   // win amount, else 0
+        FPN_Binary<F> loss_add { (__int128)((unsigned __int128)neg_pnl.v & loss_mask) };  // loss amount (positive), else 0
         ctrl->gross_wins   = FPN_AddSat(ctrl->gross_wins, win_add);
         ctrl->gross_losses = FPN_AddSat(ctrl->gross_losses, loss_add);
         if (strat >= 0 && strat < NUM_STRATEGIES) {
@@ -755,7 +755,7 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
 
     // slippage: simulate worse fill on exit (sell at lower price than market)
     if (!FPN_IsZero(ctrl->config.slippage_pct)) {
-        FPN<F> slip = FPN_Mul(rec->exit_price, ctrl->config.slippage_pct);
+        FPN_Binary<F> slip = FPN_Mul(rec->exit_price, ctrl->config.slippage_pct);
         rec->exit_price = FPN_SubSat(rec->exit_price, slip);
     }
 
@@ -776,7 +776,7 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
 // signal-only: compute buy gate without feeding regression (for unpause/init)
 template <unsigned F>
 inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) {
-  FPN<F> gate_avg = BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_GATE_EMA_ENABLED) ? ctrl->ema_price : FPN_Zero<F>();
+  FPN_Binary<F> gate_avg = BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_GATE_EMA_ENABLED) ? ctrl->ema_price : FPN_Zero<F>();
   switch (ctrl->strategy_id) {
   case STRATEGY_MEAN_REVERSION:
     ctrl->buy_conds = MeanReversion_BuySignal(&ctrl->mean_rev, &ctrl->rolling,
@@ -842,8 +842,8 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
 
   // feed signal strength to Welford tracker (before no-trade band may zero it)
   if (!FPN_IsZero(ctrl->buy_conds.price) && !FPN_IsZero(ctrl->rolling.price_avg)) {
-    FPN<F> sd = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
-    FPN<F> abs_s = FPN_Abs(sd);   // |sd| (was a manual sign-mask blend; 16B two's-comp → FPN_Abs, branchless)
+    FPN_Binary<F> sd = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
+    FPN_Binary<F> abs_s = FPN_Abs(sd);   // |sd| (was a manual sign-mask blend; 16B two's-comp → FPN_Abs, branchless)
     Welford_Push(&ctrl->signal_tracker, FPN_DivNoAssert(abs_s, ctrl->rolling.price_avg));
   }
 
@@ -852,10 +852,10 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
   if (BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_NO_TRADE_BAND_ENABLED) && !FPN_IsZero(ctrl->rolling.price_avg)) {
     // Phase 8: pre-trade gate threshold — fee_rate as a quantity, not a fee
     // charge on a fill. Leave as fee_rate (not fee_rate_taker) intentionally.
-    FPN<F> min_signal = FPN_Mul(ctrl->config.fee_rate, ctrl->config.no_trade_band_mult);
-    FPN<F> signal_dist = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
-    FPN<F> abs_sd = FPN_Abs(signal_dist);   // |signal_dist| (was a manual sign-mask blend; 16B → FPN_Abs)
-    FPN<F> signal_pct = FPN_DivNoAssert(abs_sd, ctrl->rolling.price_avg);
+    FPN_Binary<F> min_signal = FPN_Mul(ctrl->config.fee_rate, ctrl->config.no_trade_band_mult);
+    FPN_Binary<F> signal_dist = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
+    FPN_Binary<F> abs_sd = FPN_Abs(signal_dist);   // |signal_dist| (was a manual sign-mask blend; 16B → FPN_Abs)
+    FPN_Binary<F> signal_pct = FPN_DivNoAssert(abs_sd, ctrl->rolling.price_avg);
     if (FPN_LessThan(signal_pct, min_signal)) {
       ctrl->buy_conds.price = FPN_Zero<F>();
       ctrl->buy_conds.volume = FPN_Zero<F>();
@@ -867,7 +867,7 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
 // full dispatch: adapt regression + exit adjust + buy signal (slow path only)
 template <unsigned F>
 inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
-                                                  FPN<F> current_price) {
+                                                  FPN_Binary<F> current_price) {
   switch (ctrl->strategy_id) {
   case STRATEGY_MEAN_REVERSION:
     MeanReversion_Adapt(&ctrl->mean_rev, current_price, ctrl->portfolio_delta,
@@ -913,8 +913,8 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
 //======================================================================================================
 template <unsigned F>
 inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
-                                     OrderPool<F> *pool, FPN<F> current_price,
-                                     FPN<F> current_volume,
+                                     OrderPool<F> *pool, FPN_Binary<F> current_price,
+                                     FPN_Binary<F> current_volume,
                                      TradeLog *trade_log,
                                      int is_buyer_maker = 0) {
   // always increment tick counter (branchless, single add)
@@ -927,7 +927,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // so we also add price * alpha when ema was zero, giving exactly price
   // subsequent ticks: ema is nonzero so the correction term is masked out
   {
-    FPN<F> ema_new = FPN_Add(
+    FPN_Binary<F> ema_new = FPN_Add(
       FPN_Mul(ctrl->ema_price, ctrl->config.gate_ema_alpha),
       FPN_Mul(current_price, ctrl->config.gate_ema_one_minus_alpha));
     // branchless select: first tick (ema==0) → current_price, otherwise → ema_new (16B → blend the whole .v)
@@ -939,19 +939,19 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // runs every 16th tick (~5s at 300ms/tick) — fast enough for 3% daily loss detection
   // Portfolio_ComputeValue is O(popcount) — 1 multiply for single-slot mode
   if ((ctrl->total_ticks & 0xF) == 0 && BITMAP_IS_SET(ctrl->config.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED) && !ctrl->buying_halted) {
-    FPN<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
+    FPN_Binary<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
     // include pending exit proceeds — exit gate clears bitmap before DrainExits credits balance
     // without this, equity appears crashed between exit gate and drain (false kill trigger)
     // uses exact exit_price × qty - slippage - fees (matches what RecordExit will credit)
     // Phase 8: pending proceeds use taker rate (TP/SL exits are market sells).
-    FPN<F> pending = ExitBuffer_PendingProceeds(&ctrl->exit_buf,
+    FPN_Binary<F> pending = ExitBuffer_PendingProceeds(&ctrl->exit_buf,
                                                  ctrl->config.fee_rate_taker, ctrl->config.slippage_pct);
-    FPN<F> equity = FPN_AddSat(FPN_AddSat(ctrl->balance, pv), pending);
+    FPN_Binary<F> equity = FPN_AddSat(FPN_AddSat(ctrl->balance, pv), pending);
     int tripped = 0;
     // daily loss: (equity - start) / start < -threshold
     if (!FPN_IsZero(ctrl->session_start_equity)) {
-      FPN<F> loss = FPN_Sub(ctrl->session_start_equity, equity); // positive when equity dropped
-      FPN<F> limit = FPN_Mul(ctrl->session_start_equity, ctrl->config.kill_switch_daily_loss_pct);
+      FPN_Binary<F> loss = FPN_Sub(ctrl->session_start_equity, equity); // positive when equity dropped
+      FPN_Binary<F> limit = FPN_Mul(ctrl->session_start_equity, ctrl->config.kill_switch_daily_loss_pct);
       if (FPN_GreaterThan(loss, limit)) {
         ctrl->kill_reason = 1;
         tripped = 1;
@@ -959,8 +959,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     }
     // drawdown: (peak - equity) / peak > threshold
     if (!tripped && !FPN_IsZero(ctrl->peak_equity)) {
-      FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
-      FPN<F> limit = FPN_Mul(ctrl->peak_equity, ctrl->config.kill_switch_drawdown_pct);
+      FPN_Binary<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
+      FPN_Binary<F> limit = FPN_Mul(ctrl->peak_equity, ctrl->config.kill_switch_drawdown_pct);
       if (FPN_GreaterThan(dd, limit)) {
         ctrl->kill_reason = 2;
         tripped = 1;
@@ -1028,11 +1028,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // skip entirely when price is above warn threshold (score would be 0, scale would be 1)
     if (ctrl->config.danger_enabled && !FPN_IsZero(ctrl->danger_range_inv)
         && FPN_LessThan(current_price, ctrl->danger_warn)) {
-      FPN<F> depth = FPN_SubSat(ctrl->danger_warn, current_price);
-      FPN<F> raw = FPN_Mul(depth, ctrl->danger_range_inv);
-      FPN<F> zero = FPN_Zero<F>();
+      FPN_Binary<F> depth = FPN_SubSat(ctrl->danger_warn, current_price);
+      FPN_Binary<F> raw = FPN_Mul(depth, ctrl->danger_range_inv);
+      FPN_Binary<F> zero = FPN_Zero<F>();
       ctrl->danger_score = FPN_Min(FPN_Max(raw, zero), ctrl->fpn_one);
-      FPN<F> gate_scale = FPN_SubSat(ctrl->fpn_one, ctrl->danger_score);
+      FPN_Binary<F> gate_scale = FPN_SubSat(ctrl->fpn_one, ctrl->danger_score);
       ctrl->buy_conds.price = FPN_Mul(ctrl->buy_conds.price, gate_scale);
       if (FPN_IsZero(ctrl->buy_conds.price) && ctrl->gate_reason == GATE_REASON_OK)
         ctrl->gate_reason = GATE_REASON_DANGER;
@@ -1125,10 +1125,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   while (fills) {
     uint32_t idx = __builtin_ctzll(fills);
 
-    FPN<F> fill_price = pool->slots[idx].price;
+    FPN_Binary<F> fill_price = pool->slots[idx].price;
     // slippage: simulate worse fill on entry (buy at higher price than market)
     if (!FPN_IsZero(ctrl->config.slippage_pct)) {
-        FPN<F> slip = FPN_Mul(fill_price, ctrl->config.slippage_pct);
+        FPN_Binary<F> slip = FPN_Mul(fill_price, ctrl->config.slippage_pct);
         fill_price = FPN_AddSat(fill_price, slip);
     }
     // ignore stream quantity - we use position sizing based on balance
@@ -1146,7 +1146,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // positions walks the portfolio bitmap to find the minimum distance from
     // fill_price to any entry this spreads the 16 slots across actual price
     // levels instead of clustering
-    FPN<F> min_spacing = RollingStats_EntrySpacing(
+    FPN_Binary<F> min_spacing = RollingStats_EntrySpacing(
         &ctrl->rolling, ctrl->config.spacing_multiplier);
 
     // volume spike: reduce spacing requirement for high-conviction entries
@@ -1154,12 +1154,12 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // compute fresh ratio from current tick volume (not stale slow-path value)
     // branchless compute-guard: divide always (zero divisor → safe saturate), mask to 0 when volume_max == 0.
     unsigned __int128 vm_mask = -(unsigned __int128)(unsigned)(!FPN_IsZero(ctrl->rolling.volume_max));
-    FPN<F> spike_div = FPN_DivNoAssert(current_volume, ctrl->rolling.volume_max);
-    FPN<F> live_spike_ratio { (__int128)((unsigned __int128)spike_div.v & vm_mask) };
+    FPN_Binary<F> spike_div = FPN_DivNoAssert(current_volume, ctrl->rolling.volume_max);
+    FPN_Binary<F> live_spike_ratio { (__int128)((unsigned __int128)spike_div.v & vm_mask) };
     ctrl->volume_spike_ratio = live_spike_ratio;  // update for TUI display
     int is_spike = FPN_GreaterThanOrEqual(live_spike_ratio,
                                            ctrl->config.spike_threshold);
-    FPN<F> spike_spacing = FPN_Mul(min_spacing, ctrl->config.spike_spacing_reduction);
+    FPN_Binary<F> spike_spacing = FPN_Mul(min_spacing, ctrl->config.spike_spacing_reduction);
     // branchless select: min_spacing = is_spike ? spike_spacing : min_spacing (16B → blend the whole .v)
     unsigned __int128 spike_mask = -(unsigned __int128)(unsigned)is_spike;
     min_spacing = { (__int128)(((unsigned __int128)spike_spacing.v & spike_mask) | ((unsigned __int128)min_spacing.v & ~spike_mask)) };
@@ -1169,9 +1169,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       uint16_t active_pos = ctrl->portfolio.active_bitmap;
       while (active_pos) {
         int pidx = __builtin_ctz(active_pos);
-        FPN<F> dist =
+        FPN_Binary<F> dist =
             FPN_Sub(fill_price, ctrl->portfolio.positions[pidx].entry_price);
-        FPN<F> abs_dist = FPN_Abs(dist);   // |dist| (was a manual sign-mask blend; 16B two's-comp → FPN_Abs, branchless)
+        FPN_Binary<F> abs_dist = FPN_Abs(dist);   // |dist| (was a manual sign-mask blend; 16B two's-comp → FPN_Abs, branchless)
         too_close |= FPN_LessThan(abs_dist, min_spacing);
         active_pos &= active_pos - 1;
       }
@@ -1182,8 +1182,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // this replaces the stream quantity - we decide how much to buy, not the
     // stream
     if (FPN_IsZero(fill_price)) return; // guard: no fill at price zero
-    FPN<F> risk_amount = FPN_Mul(ctrl->balance, ctrl->config.risk_pct);
-    FPN<F> sized_qty = FPN_DivNoAssert(risk_amount, fill_price);
+    FPN_Binary<F> risk_amount = FPN_Mul(ctrl->balance, ctrl->config.risk_pct);
+    FPN_Binary<F> sized_qty = FPN_DivNoAssert(risk_amount, fill_price);
 
     // VOL-SCALED SIZING: scale qty inversely with volatility
     // high vol → smaller position, low vol → larger (consistent risk per trade)
@@ -1192,7 +1192,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     if (BITMAP_IS_SET(ctrl->config.risk_cfg_flags, MASK_RISK_CFG_VOL_SIZING_ENABLED)
         && !FPN_IsZero(ctrl->rolling.price_stddev)
         && !FPN_IsZero(ctrl->rolling_long->price_stddev)) {
-      FPN<F> vol_ratio = FPN_DivNoAssert(ctrl->rolling_long->price_stddev,
+      FPN_Binary<F> vol_ratio = FPN_DivNoAssert(ctrl->rolling_long->price_stddev,
                                           ctrl->rolling.price_stddev);
       vol_ratio = FPN_Max(vol_ratio, ctrl->config.vol_scale_min);
       vol_ratio = FPN_Min(vol_ratio, ctrl->config.vol_scale_max);
@@ -1207,36 +1207,36 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     }
 
     // balance check: can we afford this position + entry fee? (branchless)
-    FPN<F> cost = FPN_Mul(fill_price, sized_qty);
+    FPN_Binary<F> cost = FPN_Mul(fill_price, sized_qty);
     // Phase 8: synchronous market BUY entry = taker by exchange definition.
     // Live engine's WS executionReport will book the actual fee with the
     // real is_maker value via the OMS HandleFill path. This synchronous
     // accounting is optimistic — converges to actual on WS confirmation.
-    FPN<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate_taker);
-    FPN<F> total_cost = FPN_AddSat(cost, entry_fee);
+    FPN_Binary<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate_taker);
+    FPN_Binary<F> total_cost = FPN_AddSat(cost, entry_fee);
     int can_afford = FPN_GreaterThanOrEqual(ctrl->balance, total_cost);
 
     // CIRCUIT BREAKER: halt if total P&L has dropped below max_drawdown_pct of
     // starting balance total_pnl = realized + unrealized, drawdown_limit =
     // -(starting_balance * max_drawdown_pct)
-    FPN<F> total_pnl_check =
+    FPN_Binary<F> total_pnl_check =
         FPN_AddSat(ctrl->realized_pnl, ctrl->portfolio_delta);
-    FPN<F> drawdown_limit = FPN_Negate(
+    FPN_Binary<F> drawdown_limit = FPN_Negate(
         FPN_Mul(ctrl->config.starting_balance, ctrl->config.max_drawdown_pct));
     int not_blown = FPN_GreaterThan(total_pnl_check, drawdown_limit);
 
     // EXPOSURE LIMIT: cap total deployed capital at max_exposure_pct of
     // starting balance. deployed = market value of open positions at fill price
     // (NOT starting - balance, which includes realized losses/fees as phantom exposure)
-    FPN<F> deployed = Portfolio_ComputeValue(&ctrl->portfolio, fill_price);
-    FPN<F> max_deployed =
+    FPN_Binary<F> deployed = Portfolio_ComputeValue(&ctrl->portfolio, fill_price);
+    FPN_Binary<F> max_deployed =
         FPN_Mul(ctrl->config.starting_balance, ctrl->config.max_exposure_pct);
     int under_limit =
         FPN_LessThan(FPN_AddSat(deployed, total_cost), max_deployed);
 
     // min volatility filter: skip trades when stddev is too small relative to price
     // prevents entries where fee-floored TP is unreachable by stddev-based SL
-    FPN<F> stddev_ratio = FPN_IsZero(fill_price) ? FPN_Zero<F>()
+    FPN_Binary<F> stddev_ratio = FPN_IsZero(fill_price) ? FPN_Zero<F>()
         : FPN_DivNoAssert(ctrl->rolling.price_stddev, fill_price);
     int vol_sufficient = FPN_IsZero(ctrl->config.min_stddev_pct) |
                          FPN_GreaterThanOrEqual(stddev_ratio, ctrl->config.min_stddev_pct);
@@ -1247,27 +1247,27 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                  can_afford & not_blown & under_limit & vol_sufficient;
     if (is_new) {
       // volatility-based TP/SL with fee floor
-      FPN<F> stddev = ctrl->rolling.price_stddev;
+      FPN_Binary<F> stddev = ctrl->rolling.price_stddev;
       int has_stats = !FPN_IsZero(stddev);
 
       // volatility path: TP = entry + stddev * tp_mult, SL = entry - stddev * sl_mult
       // strategy-aware: momentum uses wider TP / tighter SL than mean reversion
-      FPN<F> hundred = FPN_FromDouble<F>(100.0);
-      FPN<F> tp_mult, sl_mult;
+      FPN_Binary<F> hundred = FPN_FromDouble<F>(100.0);
+      FPN_Binary<F> tp_mult, sl_mult;
       if (ctrl->strategy_id == STRATEGY_MOMENTUM) {
           // adaptive momentum TP/SL — scale by R² from rolling stats
           // R² ∈ [0,1]: high R² = consistent trend → widen TP, tighten SL
           //              low R²  = choppy           → tighten TP, widen SL
-          FPN<F> r2 = ctrl->rolling.price_r_squared;
+          FPN_Binary<F> r2 = ctrl->rolling.price_r_squared;
 
           // TP: base * (tp_r2_min + R²) → range [tp_r2_min, 1+tp_r2_min] of config value
           // strong trend lets winners run, weak trend takes profits early
-          FPN<F> tp_scale = FPN_AddSat(ctrl->config.momentum_tp_r2_min, r2);
+          FPN_Binary<F> tp_scale = FPN_AddSat(ctrl->config.momentum_tp_r2_min, r2);
           tp_mult = FPN_Mul(ctrl->config.momentum_tp_mult, tp_scale);
 
           // SL: base * (sl_r2_max - R²*tp_r2_min) → range [1.0x, sl_r2_max] of config value
           // choppy = wider SL (avoid whipsaw stops), consistent = tighter SL
-          FPN<F> sl_scale = FPN_SubSat(ctrl->config.momentum_sl_r2_max,
+          FPN_Binary<F> sl_scale = FPN_SubSat(ctrl->config.momentum_sl_r2_max,
                                         FPN_Mul(r2, ctrl->config.momentum_tp_r2_min));
           sl_mult = FPN_Mul(ctrl->config.momentum_sl_mult, sl_scale);
 
@@ -1284,25 +1284,25 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           tp_mult = FPN_Mul(ctrl->config.take_profit_pct, hundred);
           sl_mult = FPN_Mul(ctrl->config.stop_loss_pct, hundred);
       }
-      FPN<F> tp_offset = FPN_Mul(stddev, tp_mult);
-      FPN<F> sl_offset = FPN_Mul(stddev, sl_mult);
+      FPN_Binary<F> tp_offset = FPN_Mul(stddev, tp_mult);
+      FPN_Binary<F> sl_offset = FPN_Mul(stddev, sl_mult);
 
       // percentage fallback when rolling stats arent ready
-      FPN<F> one = FPN_FromDouble<F>(1.0);
-      FPN<F> tp_pct_up =
+      FPN_Binary<F> one = FPN_FromDouble<F>(1.0);
+      FPN_Binary<F> tp_pct_up =
           FPN_Mul(fill_price, FPN_AddSat(one, ctrl->config.take_profit_pct));
-      FPN<F> sl_pct_dn =
+      FPN_Binary<F> sl_pct_dn =
           FPN_Mul(fill_price, FPN_SubSat(one, ctrl->config.stop_loss_pct));
 
       // branchless select: volatility-based if stats ready, percentage-based
       // otherwise
-      FPN<F> vol_tp = FPN_AddSat(fill_price, tp_offset);
-      FPN<F> vol_sl = FPN_SubSat(fill_price, sl_offset);
+      FPN_Binary<F> vol_tp = FPN_AddSat(fill_price, tp_offset);
+      FPN_Binary<F> vol_sl = FPN_SubSat(fill_price, sl_offset);
 
       // branchless select: has_stats ? vol-based : pct-based (16B → blend the whole .v)
       unsigned __int128 stats_mask = -(unsigned __int128)(unsigned)has_stats;
-      FPN<F> tp_price { (__int128)(((unsigned __int128)vol_tp.v & stats_mask) | ((unsigned __int128)tp_pct_up.v & ~stats_mask)) };
-      FPN<F> sl_price { (__int128)(((unsigned __int128)vol_sl.v & stats_mask) | ((unsigned __int128)sl_pct_dn.v & ~stats_mask)) };
+      FPN_Binary<F> tp_price { (__int128)(((unsigned __int128)vol_tp.v & stats_mask) | ((unsigned __int128)tp_pct_up.v & ~stats_mask)) };
+      FPN_Binary<F> sl_price { (__int128)(((unsigned __int128)vol_sl.v & stats_mask) | ((unsigned __int128)sl_pct_dn.v & ~stats_mask)) };
 
       // TP FLOOR: ensure TP is above the round-trip fee breakeven point
       // min_tp = entry + entry * fee_rate * fee_floor_mult
@@ -1310,20 +1310,20 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       // Phase 8: pre-trade fee-floor quantity — uses single fee_rate
       // intentionally (not fee_rate_taker), as this is a conservative
       // round-trip estimate that should hold under either fill type.
-      FPN<F> fee_floor_offset =
+      FPN_Binary<F> fee_floor_offset =
           FPN_Mul(fill_price, FPN_Mul(ctrl->config.fee_rate, ctrl->config.fee_floor_mult));
-      FPN<F> tp_floor = FPN_AddSat(fill_price, fee_floor_offset);
+      FPN_Binary<F> tp_floor = FPN_AddSat(fill_price, fee_floor_offset);
       tp_price = FPN_Max(tp_price, tp_floor);
 
       // SL FLOOR: ensure SL distance is at least half the TP distance
       // prevents SL from being so tight that normal price fluctuations trigger
       // it with TP at +$209 (fee floor), SL should be at least -$104.50 this
       // gives a minimum 2:1 reward-to-risk ratio
-      FPN<F> tp_dist =
+      FPN_Binary<F> tp_dist =
           FPN_Sub(tp_price, fill_price); // how far TP is from entry
-      FPN<F> min_sl_dist =
+      FPN_Binary<F> min_sl_dist =
           FPN_Mul(tp_dist, ctrl->config.min_sl_tp_ratio); // SL must be at least this fraction of TP dist
-      FPN<F> sl_floor = FPN_SubSat(fill_price, min_sl_dist);
+      FPN_Binary<F> sl_floor = FPN_SubSat(fill_price, min_sl_dist);
       sl_price = FPN_Min(
           sl_price, sl_floor); // Min because SL is below entry (lower = wider)
 
@@ -1336,16 +1336,16 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       int fill_ok = 0; // track whether any position was actually created
 
       if (do_split) {
-        FPN<F> qty_a = FPN_Mul(sized_qty, ctrl->config.partial_exit_pct);
-        FPN<F> qty_b = FPN_Sub(sized_qty, qty_a);
+        FPN_Binary<F> qty_a = FPN_Mul(sized_qty, ctrl->config.partial_exit_pct);
+        FPN_Binary<F> qty_b = FPN_Sub(sized_qty, qty_a);
 
         // split entry fee proportionally between legs
-        FPN<F> fee_a = FPN_Mul(entry_fee, ctrl->config.partial_exit_pct);
-        FPN<F> fee_b = FPN_Sub(entry_fee, fee_a);
+        FPN_Binary<F> fee_a = FPN_Mul(entry_fee, ctrl->config.partial_exit_pct);
+        FPN_Binary<F> fee_b = FPN_Sub(entry_fee, fee_a);
 
         // TP2 = entry + (tp_dist * tp2_mult)
-        FPN<F> tp_dist_2 = FPN_Mul(FPN_Sub(tp_price, fill_price), ctrl->config.tp2_mult);
-        FPN<F> tp2_price = FPN_AddSat(fill_price, tp_dist_2);
+        FPN_Binary<F> tp_dist_2 = FPN_Mul(FPN_Sub(tp_price, fill_price), ctrl->config.tp2_mult);
+        FPN_Binary<F> tp2_price = FPN_AddSat(fill_price, tp_dist_2);
 
         int slot_a = Portfolio_AddPositionWithExits(&ctrl->portfolio, qty_a,
                                                     fill_price, tp_price, sl_price, fee_a);
@@ -1470,7 +1470,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // v5.15.5.B.5 — branchless SESSION_BY_HOUR[24] table lookup
     // (FOREACH_SESSION_PHASE registry). Replaces legacy 4-way if/else
     // for the deprecated single_core path (kept for backtest parity).
-    const FPN<F> session_mult_lookup[tt::SESSION_PHASE_COUNT] = {
+    const FPN_Binary<F> session_mult_lookup[tt::SESSION_PHASE_COUNT] = {
 #define X(NAME_U, name_l, START, END, MULT, DOC) ctrl->config.session_##name_l##_mult,
         FOREACH_SESSION_PHASE(X)
 #undef X
@@ -1505,15 +1505,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       if (held >= ctrl->config.max_hold_ticks) {
         // check if gain is below threshold — don't time-exit winners
         if (FPN_IsZero(pos->entry_price)) { active_check &= active_check - 1; continue; }
-        FPN<F> gain = FPN_Sub(current_price, pos->entry_price);
-        FPN<F> gain_pct = FPN_DivNoAssert(gain, pos->entry_price);
+        FPN_Binary<F> gain = FPN_Sub(current_price, pos->entry_price);
+        FPN_Binary<F> gain_pct = FPN_DivNoAssert(gain, pos->entry_price);
         int low_gain = FPN_LessThan(gain_pct, ctrl->config.min_hold_gain_pct);
 
         if (low_gain) {
           // slippage: simulate worse fill on time-based exit (sell at lower price)
-          FPN<F> sell_price = current_price;
+          FPN_Binary<F> sell_price = current_price;
           if (!FPN_IsZero(ctrl->config.slippage_pct)) {
-              FPN<F> slip = FPN_Mul(sell_price, ctrl->config.slippage_pct);
+              FPN_Binary<F> slip = FPN_Mul(sell_price, ctrl->config.slippage_pct);
               sell_price = FPN_SubSat(sell_price, slip);
           }
           // build ExitRecord from live position data (slot is still valid here)
@@ -1545,11 +1545,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // precompute danger gradient thresholds for hot-path use
   // warn = avg - warn_stddevs * σ, crash = avg - crash_stddevs * σ
   if (ctrl->config.danger_enabled && !FPN_IsZero(ctrl->rolling.price_stddev)) {
-    FPN<F> avg = ctrl->rolling.price_avg;
-    FPN<F> sd = ctrl->rolling.price_stddev;
+    FPN_Binary<F> avg = ctrl->rolling.price_avg;
+    FPN_Binary<F> sd = ctrl->rolling.price_stddev;
     ctrl->danger_warn = FPN_SubSat(avg, FPN_Mul(sd, ctrl->config.danger_warn_stddevs));
     ctrl->danger_crash = FPN_SubSat(avg, FPN_Mul(sd, ctrl->config.danger_crash_stddevs));
-    FPN<F> range = FPN_SubSat(ctrl->danger_warn, ctrl->danger_crash);
+    FPN_Binary<F> range = FPN_SubSat(ctrl->danger_warn, ctrl->danger_crash);
     if (!FPN_IsZero(range))
       ctrl->danger_range_inv = FPN_DivNoAssert(FPN_FromDouble<F>(1.0), range);
   }
@@ -1558,33 +1558,33 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // gross P&L is what Portfolio_ComputePnL returns (price delta * qty)
   // net P&L subtracts estimated exit fees so the regression optimizes on real
   // profitability
-  FPN<F> gross_pnl = Portfolio_ComputePnL(&ctrl->portfolio, current_price);
-  FPN<F> portfolio_value =
+  FPN_Binary<F> gross_pnl = Portfolio_ComputePnL(&ctrl->portfolio, current_price);
+  FPN_Binary<F> portfolio_value =
       Portfolio_ComputeValue(&ctrl->portfolio, current_price);
   // Phase 8: pre-trade kill-switch estimate — fee_rate as quantity, not a
   // fee charge on a fill. Leave as fee_rate (conservative round-trip).
-  FPN<F> estimated_exit_fees = FPN_Mul(portfolio_value, ctrl->config.fee_rate);
+  FPN_Binary<F> estimated_exit_fees = FPN_Mul(portfolio_value, ctrl->config.fee_rate);
   ctrl->portfolio_delta = FPN_Sub(gross_pnl, estimated_exit_fees);
 
-  // track peak equity and max drawdown (branchless, all FPN)
+  // track peak equity and max drawdown (branchless, all FPN_Binary)
   {
-    FPN<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
+    FPN_Binary<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
     // branchless first-tick select: zero → set to equity, nonzero → keep (16B → blend the whole .v)
     unsigned __int128 first = -(unsigned __int128)(unsigned)FPN_IsZero(ctrl->session_start_equity);
     ctrl->session_start_equity = { (__int128)(((unsigned __int128)equity.v & first) | ((unsigned __int128)ctrl->session_start_equity.v & ~first)) };
     ctrl->peak_equity = FPN_Max(ctrl->peak_equity, equity);
-    FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
+    FPN_Binary<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
     ctrl->max_drawdown = FPN_Max(ctrl->max_drawdown, dd);
   }
 
-  // KILL SWITCH: check daily loss and drawdown limits (all FPN)
+  // KILL SWITCH: check daily loss and drawdown limits (all FPN_Binary)
   // sticky — once triggered, stays active until session reset or manual 'k'
   if (BITMAP_IS_SET(ctrl->config.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED) && !ctrl->kill_switch_active) {
-    FPN<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
+    FPN_Binary<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
     // daily loss: loss = start - equity, limit = start * threshold
     if (!FPN_IsZero(ctrl->session_start_equity)) {
-      FPN<F> loss = FPN_Sub(ctrl->session_start_equity, equity);
-      FPN<F> limit = FPN_Mul(ctrl->session_start_equity, ctrl->config.kill_switch_daily_loss_pct);
+      FPN_Binary<F> loss = FPN_Sub(ctrl->session_start_equity, equity);
+      FPN_Binary<F> limit = FPN_Mul(ctrl->session_start_equity, ctrl->config.kill_switch_daily_loss_pct);
       if (FPN_GreaterThan(loss, limit)) {
         KillSwitch_Activate(ctrl, 1);
         double pct = (FPN_ToDouble(loss) / FPN_ToDouble(ctrl->session_start_equity)) * 100.0;
@@ -1603,8 +1603,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     }
     // drawdown: dd = peak - equity, limit = peak * threshold
     if (!ctrl->kill_switch_active && !FPN_IsZero(ctrl->peak_equity)) {
-      FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
-      FPN<F> limit = FPN_Mul(ctrl->peak_equity, ctrl->config.kill_switch_drawdown_pct);
+      FPN_Binary<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
+      FPN_Binary<F> limit = FPN_Mul(ctrl->peak_equity, ctrl->config.kill_switch_drawdown_pct);
       if (FPN_GreaterThan(dd, limit)) {
         KillSwitch_Activate(ctrl, 2);
         double pct = (FPN_ToDouble(dd) / FPN_ToDouble(ctrl->peak_equity)) * 100.0;
@@ -1748,16 +1748,16 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // back toward initial config values to prevent permanent lockout after losses
   ctrl->idle_cycles++;
   if (ctrl->config.idle_reset_cycles > 0 && ctrl->idle_cycles >= ctrl->config.idle_reset_cycles) {
-    FPN<F> decay = ctrl->config.squeeze_decay; // 10% of gap per cycle
+    FPN_Binary<F> decay = ctrl->config.squeeze_decay; // 10% of gap per cycle
     // MR: decay offset and volume mult toward initial config
-    FPN<F> off_gap = FPN_Sub(ctrl->mean_rev.live_offset_pct, ctrl->config.entry_offset_pct);
+    FPN_Binary<F> off_gap = FPN_Sub(ctrl->mean_rev.live_offset_pct, ctrl->config.entry_offset_pct);
     ctrl->mean_rev.live_offset_pct = FPN_Sub(ctrl->mean_rev.live_offset_pct, FPN_Mul(off_gap, decay));
-    FPN<F> vol_gap = FPN_Sub(ctrl->mean_rev.live_vol_mult, ctrl->config.volume_multiplier);
+    FPN_Binary<F> vol_gap = FPN_Sub(ctrl->mean_rev.live_vol_mult, ctrl->config.volume_multiplier);
     ctrl->mean_rev.live_vol_mult = FPN_Sub(ctrl->mean_rev.live_vol_mult, FPN_Mul(vol_gap, decay));
-    FPN<F> sm_gap = FPN_Sub(ctrl->mean_rev.live_stddev_mult, ctrl->config.offset_stddev_mult);
+    FPN_Binary<F> sm_gap = FPN_Sub(ctrl->mean_rev.live_stddev_mult, ctrl->config.offset_stddev_mult);
     ctrl->mean_rev.live_stddev_mult = FPN_Sub(ctrl->mean_rev.live_stddev_mult, FPN_Mul(sm_gap, decay));
     // Momentum: decay breakout mult toward initial config
-    FPN<F> bk_gap = FPN_Sub(ctrl->momentum.live_breakout_mult, ctrl->config.momentum_breakout_mult);
+    FPN_Binary<F> bk_gap = FPN_Sub(ctrl->momentum.live_breakout_mult, ctrl->config.momentum_breakout_mult);
     ctrl->momentum.live_breakout_mult = FPN_Sub(ctrl->momentum.live_breakout_mult, FPN_Mul(bk_gap, decay));
     // clear stale regression so it doesn't re-tighten immediately
     ctrl->mean_rev.has_regression = 0;
@@ -1774,8 +1774,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // effective_threshold = base * (scale - confidence)
   //   scale=2.0 (default): high conf=base, conf=0 means up to 2x (clamp at 1.0)
   //   scale tunable via cfg.confidence_threshold_scale (Phase 6 prep)
-  // KNOWN FPN-only violation: this formula is in `double` because the existing
-  // ConfidenceScorer is double-only. Documented in CLAUDE.md "FPN-Only
+  // KNOWN FPN_Binary-only violation: this formula is in `double` because the existing
+  // ConfidenceScorer is double-only. Documented in CLAUDE.md "FPN_Binary-Only
   // Accounting / Known violations to fix".
   if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) && ctrl->strategy_id == STRATEGY_ML
       && !FPN_IsZero(ctrl->buy_conds.price)) {
@@ -1953,7 +1953,7 @@ template <unsigned F>
 inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
                                            const ControllerConfig<F> &new_cfg) {
     // save startup-only fields that should survive hot-reload
-    FPN<F> saved_starting_balance = ctrl->config.starting_balance;
+    FPN_Binary<F> saved_starting_balance = ctrl->config.starting_balance;
     uint32_t saved_warmup_ticks = ctrl->config.warmup_ticks;
     uint32_t saved_min_warmup = ctrl->config.min_warmup_samples;
     int saved_use_real_money = ctrl->config.use_real_money;
@@ -2023,7 +2023,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
 //
 // LEGACY_CONFIDENCE_VERSION marks the last version using raw struct fwrite.
 // Used by LoadSnapshot to dispatch on shadow-load vs fieldwise read.
-#define CONTROLLER_SNAPSHOT_VERSION       13   // Ship-A 16B FPN: embedded FPN-struct byte layouts changed; v12 version-rejected (H21/D-144)
+#define CONTROLLER_SNAPSHOT_VERSION       13   // Ship-A 16B FPN_Binary: embedded FPN_Binary-struct byte layouts changed; v12 version-rejected (H21/D-144)
 #define LEGACY_CONFIDENCE_VERSION         11
 
 template <unsigned F>
@@ -2044,21 +2044,21 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
   fwrite(ctrl->portfolio.positions, sizeof(Position<F>), 16, f);
 
   // realized P&L + balance (same as v4)
-  fwrite(&ctrl->realized_pnl, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->balance, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->realized_pnl, sizeof(FPN_Binary<F>), 1, f);
+  fwrite(&ctrl->balance, sizeof(FPN_Binary<F>), 1, f);
 
   // MR state (same as v4 but reordered for clarity)
-  fwrite(&ctrl->mean_rev.live_offset_pct, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->mean_rev.live_vol_mult, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->mean_rev.live_stddev_mult, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->mean_rev.live_offset_pct, sizeof(FPN_Binary<F>), 1, f);
+  fwrite(&ctrl->mean_rev.live_vol_mult, sizeof(FPN_Binary<F>), 1, f);
+  fwrite(&ctrl->mean_rev.live_stddev_mult, sizeof(FPN_Binary<F>), 1, f);
 
   // v5 fields
   fwrite(ctrl->entry_ticks, sizeof(uint64_t), 16, f);
   fwrite(ctrl->entry_strategy, sizeof(uint8_t), 16, f);
   fwrite(&ctrl->strategy_id, sizeof(int), 1, f);
   fwrite(&ctrl->regime.current_regime, sizeof(int), 1, f);
-  fwrite(&ctrl->momentum.live_breakout_mult, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->momentum.live_vol_mult, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->momentum.live_breakout_mult, sizeof(FPN_Binary<F>), 1, f);
+  fwrite(&ctrl->momentum.live_vol_mult, sizeof(FPN_Binary<F>), 1, f);
 
   // v6: wall clock entry times for hold duration display
   fwrite(ctrl->entry_time, sizeof(time_t), 16, f);
@@ -2067,22 +2067,22 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
   fwrite(&ctrl->total_buys, sizeof(uint32_t), 1, f);
   fwrite(&ctrl->wins, sizeof(uint32_t), 1, f);
   fwrite(&ctrl->losses, sizeof(uint32_t), 1, f);
-  fwrite(&ctrl->gross_wins, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->gross_losses, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->gross_wins, sizeof(FPN_Binary<F>), 1, f);
+  fwrite(&ctrl->gross_losses, sizeof(FPN_Binary<F>), 1, f);
   fwrite(&ctrl->total_hold_ticks, sizeof(uint64_t), 1, f);
-  fwrite(&ctrl->total_fees, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->total_fees, sizeof(FPN_Binary<F>), 1, f);
 
   // v8: starting_balance (survives config changes between sessions)
-  fwrite(&ctrl->config.starting_balance, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->config.starting_balance, sizeof(FPN_Binary<F>), 1, f);
 
   // v9: kill switch state + per-strategy stats + session equity baseline
   fwrite(&ctrl->kill_switch_active, sizeof(int), 1, f);
   fwrite(&ctrl->kill_reason, sizeof(int), 1, f);
-  fwrite(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->session_start_equity, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->peak_equity, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->daily_realized_pnl, sizeof(FPN_Binary<F>), 1, f);
+  fwrite(&ctrl->session_start_equity, sizeof(FPN_Binary<F>), 1, f);
+  fwrite(&ctrl->peak_equity, sizeof(FPN_Binary<F>), 1, f);
   for (int i = 0; i < 5; i++) {
-    fwrite(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f);
+    fwrite(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN_Binary<F>), 1, f);
     fwrite(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f);
     fwrite(&ctrl->strategy_stats[i].losses, sizeof(uint32_t), 1, f);
     fwrite(&ctrl->strategy_stats[i].total_trades, sizeof(uint32_t), 1, f);
@@ -2129,12 +2129,12 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
 
   if (version == 4) {
     // v4 format: realized_pnl, live_offset_pct, live_vol_mult, live_stddev_mult, balance
-    FPN<F> realized, offset, vmult, stdmult, bal;
-    if (fread(&realized, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&offset, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&vmult, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&stdmult, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&bal, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+    FPN_Binary<F> realized, offset, vmult, stdmult, bal;
+    if (fread(&realized, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&offset, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&vmult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&stdmult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&bal, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
     ctrl->realized_pnl = realized;
     ctrl->mean_rev.live_offset_pct = offset;
     ctrl->mean_rev.live_vol_mult = vmult;
@@ -2146,17 +2146,17 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
     fprintf(stderr, "[SNAPSHOT] loaded v4 snapshot — defaulting to RANGING/MR\n");
   } else {
     // v5+ format
-    if (fread(&ctrl->realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&ctrl->balance, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&ctrl->mean_rev.live_offset_pct, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&ctrl->mean_rev.live_vol_mult, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&ctrl->mean_rev.live_stddev_mult, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&ctrl->realized_pnl, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&ctrl->balance, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&ctrl->mean_rev.live_offset_pct, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&ctrl->mean_rev.live_vol_mult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&ctrl->mean_rev.live_stddev_mult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
     if (fread(ctrl->entry_ticks, sizeof(uint64_t), 16, f) != 16) { fclose(f); return 0; }
     if (fread(ctrl->entry_strategy, sizeof(uint8_t), 16, f) != 16) { fclose(f); return 0; }
     if (fread(&ctrl->strategy_id, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
     if (fread(&ctrl->regime.current_regime, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&ctrl->momentum.live_breakout_mult, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&ctrl->momentum.live_vol_mult, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&ctrl->momentum.live_breakout_mult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&ctrl->momentum.live_vol_mult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
 
     // v6: wall clock entry times
     if (version >= 6) {
@@ -2168,37 +2168,37 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
       if (fread(&ctrl->total_buys, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->wins, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->losses, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->gross_wins, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->gross_losses, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->gross_wins, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->gross_losses, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->total_hold_ticks, sizeof(uint64_t), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->total_fees, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->total_fees, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
     }
 
     // v8: starting_balance persisted (immune to config edits between sessions)
     if (version >= 8) {
-      if (fread(&ctrl->config.starting_balance, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->config.starting_balance, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
     }
 
     // v9: kill switch state + per-strategy stats + session equity baseline
     if (version >= 9) {
       if (fread(&ctrl->kill_switch_active, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->kill_reason, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->daily_realized_pnl, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
       if (version == 9) {
-        // v9 stored equity fields as double (8 bytes) — convert to FPN
+        // v9 stored equity fields as double (8 bytes) — convert to FPN_Binary
         double sse_d, pe_d;
         if (fread(&sse_d, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&pe_d, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
         ctrl->session_start_equity = FPN_FromDouble<F>(sse_d);
         ctrl->peak_equity = FPN_FromDouble<F>(pe_d);
       } else {
-        // v10+: FPN fields
-        if (fread(&ctrl->session_start_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&ctrl->peak_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        // v10+: FPN_Binary fields
+        if (fread(&ctrl->session_start_equity, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&ctrl->peak_equity, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
       }
       int n_strats = (version == 9) ? 4 : 5;
       for (int i = 0; i < n_strats; i++) {
-        if (fread(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&ctrl->strategy_stats[i].losses, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&ctrl->strategy_stats[i].total_trades, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }

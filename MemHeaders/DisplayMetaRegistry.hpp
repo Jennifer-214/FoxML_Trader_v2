@@ -19,7 +19,7 @@
 // Two registries (mirror the natural type heterogeneity):
 //
 //   FOREACH_GATE_DIAG_PAIR(X)
-//     6 entries producing 12 FPN<F> fields total — each entry generates an
+//     6 entries producing 12 FPN_Binary<F> fields total — each entry generates an
 //     `actual` field + a `threshold/floor/min` field. Field-name suffixes
 //     are encoded per-entry to preserve the v5.6.3+ naming convention
 //     (spacing_actual/_floor, vwap_actual/_threshold, long_slope/_min, etc.)

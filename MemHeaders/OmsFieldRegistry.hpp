@@ -108,7 +108,7 @@
 #include <chrono>
 #include <atomic>
 #include <cstdio>
-#include "../FixedPoint/FixedPointN.hpp"  // FPN<F> — needed for OmsInitCtx<F>/OmsResetCtx<F> fields by value
+#include "../FixedPoint/FixedPointN.hpp"  // FPN_Binary<F> — needed for OmsInitCtx<F>/OmsResetCtx<F> fields by value
 #include "BitmapMacros.hpp"
 #include "OmsStateFlagRegistry.hpp"       // MASK_OMS_STATE_* + SHIFT_OMS_STATE_* constants
 
@@ -158,7 +158,7 @@ struct OmsInitCtx {
     int                       live_trading;          // 0/1 — boolean
     int                       partial_exit_enabled;  // 0/1 — boolean (NEW v5.15.5.C.3 Finding A)
     int                       event_log_mode;        // 0..3 — K-state (NEW MULTI_BIT slot v5.15.5.C.3 Finding A')
-    FPN<F>                    starting_balance;
+    FPN_Binary<F>                    starting_balance;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — fee_rate DELETED. Per-core fee_rate now lives on
     // cfg.cores[c].fee_rate_maker/_taker; flows through Order pre_resolved at submit.
     const char*               event_log_path;
@@ -170,7 +170,7 @@ struct OmsInitCtx {
 // referenced (by balance, ks_peak_balance row resets).
 template <unsigned F>
 struct OmsResetCtx {
-    FPN<F> starting_balance;
+    FPN_Binary<F> starting_balance;
 };
 
 //======================================================================================================
@@ -242,16 +242,16 @@ struct OmsResetCtx {
     /*     Row order in FOREACH determines emission order in PERSIST view's save/load walks.         */                                                  \
     /* ============================================================================================ */                                                  \
     /* Wire position 1-2: bank state (Phase 2.1 P&L leak anchor)                                     */                                                  \
-    X(balance,                FPN<F>,             ctx.starting_balance,         ctx.starting_balance,         DO_RESET,   DIRECT,    PERSIST,      0)    \
-    X(realized_pnl,           FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
+    X(balance,                FPN_Binary<F>,             ctx.starting_balance,         ctx.starting_balance,         DO_RESET,   DIRECT,    PERSIST,      0)    \
+    X(realized_pnl,           FPN_Binary<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
     /* Wire position 3: kill switch peak                                                             */                                                  \
-    X(ks_peak_balance,        FPN<F>,             ctx.starting_balance,         ctx.starting_balance,         DO_RESET,   DIRECT,    PERSIST,      0)    \
+    X(ks_peak_balance,        FPN_Binary<F>,             ctx.starting_balance,         ctx.starting_balance,         DO_RESET,   DIRECT,    PERSIST,      0)    \
     /* Wire position 4: kill_switch_tripped (BIT in oms_state_flags; persisted as int 4 bytes)       */                                                  \
     X(kill_switch_tripped,    int,                0,                            0,                            DO_RESET,   BIT,       PERSIST,      MASK_OMS_STATE_KILL_SWITCH_TRIPPED) \
     /* Wire position 5-7: fee accumulators (v5.5.6 Class-5 recurring-bug close)                      */                                                  \
-    X(total_fees,             FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
-    X(total_maker_fees,       FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
-    X(total_taker_fees,       FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
+    X(total_fees,             FPN_Binary<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
+    X(total_maker_fees,       FPN_Binary<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
+    X(total_taker_fees,       FPN_Binary<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                DO_RESET,   DIRECT,    PERSIST,      0)    \
     /* Wire position 8-9: maker/taker fill counters                                                  */                                                  \
     X(maker_fills_count,      uint32_t,           0,                            0,                            DO_RESET,   DIRECT,    PERSIST,      0)    \
     X(taker_fills_count,      uint32_t,           0,                            0,                            DO_RESET,   DIRECT,    PERSIST,      0)    \
@@ -264,8 +264,8 @@ struct OmsResetCtx {
     /* Per Class 27 closure: scalar cfg-mirror caches eliminated. Per-core values live on cfg.cores[c]; */ \
     /* per-Order via pre_resolved (Order_BindPreResolved at submit). last_exit_fee[pslot] sibling array */ \
     /* stores the authoritative per-fill exit_fee (set by HandleFill SELL; consumed by DrainPostFill). */ \
-    X(ks_min_balance,         FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
-    X(ks_max_drawdown_pct,    FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
+    X(ks_min_balance,         FPN_Binary<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
+    X(ks_max_drawdown_pct,    FPN_Binary<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     X(ks_trips_total,         uint64_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     /* ============================================================================================ */                                                  \
     /* [6] SKIP_PERSIST per-cycle observability masks (cleared inside the tick; no session reset)    */                                                  \
@@ -327,13 +327,13 @@ struct OmsResetCtx {
     X(last_exit_predicted_p[_i],        double,    0.0,            0.0)                        \
     /* v5.15.5.C.5 — exit_fill_price reverted from Position SKIP_PERSIST to OMS sibling SoA   \
      * per slot-state-foreach-registry-with-storage-routing.md decision tree.                 */ \
-    X(last_exit_fill_price[_i],         FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
+    X(last_exit_fill_price[_i],         FPN_Binary<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     /* v5.15.5.F.4d Step 7 (§ N.2 of merged plan body) — last_exit_fee[_i] enrollment closes \
      * Class 30 latent drift (field has existed on OmsState since .F.4c.3 r-4 WIP2d-1.B.1     \
      * but was never enrolled in this registry; per-slot reset/init was hand-maintained).     \
      * NEW CI Check 8 enforces all `\w+[MAX_PORTFOLIO_POSITIONS]` arrays on OmsState are     \
      * either enrolled here OR exempted per manual-fields-inventory-pattern.md Section C.     */ \
-    X(last_exit_fee[_i],                FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
+    X(last_exit_fee[_i],                FPN_Binary<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     /* v5.15.5.F.4d Step 7 (§ N.2) — NEW bandit_reward_bps[_i] sibling. Bandit reward         \
      * attribution: HandleFill SELL writes per-slot reward_bps for downstream DrainPostFill   \
      * consumption (replaces Class 27 cfg-mirror recompute pattern; reward stays bound to    \

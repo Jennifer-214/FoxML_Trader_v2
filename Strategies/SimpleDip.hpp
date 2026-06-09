@@ -21,7 +21,7 @@
 #include "StrategyInterface.hpp"
 
 template <unsigned F> struct SimpleDipState {
-    FPN<F> recent_high;      // rolling max price (updated every slow path)
+    FPN_Binary<F> recent_high;      // rolling max price (updated every slow path)
     int initialized;
 };
 
@@ -40,8 +40,8 @@ inline void SimpleDip_Init(SimpleDipState<F> *state, const RollingStats<F> *roll
 // ADAPT — update rolling high. no regression, no filter shifting.
 //======================================================================================================
 template <unsigned F>
-inline void SimpleDip_Adapt(SimpleDipState<F> *state, FPN<F> current_price,
-                             FPN<F> portfolio_delta, uint16_t active_bitmap,
+inline void SimpleDip_Adapt(SimpleDipState<F> *state, FPN_Binary<F> current_price,
+                             FPN_Binary<F> portfolio_delta, uint16_t active_bitmap,
                              const BuySideGateConditions<F> *buy_conds,
                              const ControllerConfig<F> *cfg) {
     // track the rolling high — just use the max from rolling stats
@@ -57,7 +57,7 @@ template <unsigned F>
 inline BuySideGateConditions<F> SimpleDip_BuySignal(
     SimpleDipState<F> *state, const RollingStats<F> *rolling,
     const RollingStats<F, 512> *rolling_long, const ControllerConfig<F> *cfg,
-    FPN<F> ema_price = FPN_Zero<F>()) {
+    FPN_Binary<F> ema_price = FPN_Zero<F>()) {
 
     BuySideGateConditions<F> conds;
 
@@ -70,7 +70,7 @@ inline BuySideGateConditions<F> SimpleDip_BuySignal(
     // buy price = recent_high * (1 - dip_pct)
     // dip_pct comes from entry_offset_pct (reuse existing config field)
     // e.g. 0.15% dip from high → buy
-    FPN<F> dip_offset = FPN_Mul(state->recent_high, cfg->entry_offset_pct);
+    FPN_Binary<F> dip_offset = FPN_Mul(state->recent_high, cfg->entry_offset_pct);
     conds.price = FPN_Sub(state->recent_high, dip_offset);
 
     // volume gate: same as MR — require minimum volume
@@ -100,7 +100,7 @@ template <unsigned F, unsigned W>
 inline void SimpleDip_ExitAdjustSharded(
     EventLoopState<F>* state, int slot,
     SimpleDipState<F>* strat_state,
-    FPN<F> current_price,
+    FPN_Binary<F> current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg) {
     (void)state; (void)slot; (void)strat_state;

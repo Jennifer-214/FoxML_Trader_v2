@@ -331,7 +331,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     "NaN events: features=%u predictions=%u",
                     pc.ml_nan_feature_events, pc.ml_nan_prediction_events);
                 ImGui::SetItemTooltip(
-                    "Features_PackAll returned -1 sentinel (FPN out-of-range\n"
+                    "Features_PackAll returned -1 sentinel (FPN_Binary out-of-range\n"
                     "or float NaN/Inf at packer boundary), or Model_Predict\n"
                     "produced NaN/Inf. Both cases skip the prediction this\n"
                     "cycle (no entry, fall-through to SimpleDip). Persistent\n"

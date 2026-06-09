@@ -201,7 +201,7 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     // state string
     const char *state_str = (ctrl->state == CONTROLLER_WARMUP) ? "WARMUP" : "ACTIVE";
 
-    // convert FPN values to doubles for display
+    // convert FPN_Binary values to doubles for display
     double price  = FPN_ToDouble(stream->price);
     double volume = FPN_ToDouble(stream->volume);
     double buy_p  = FPN_ToDouble(ctrl->buy_conds.price);
@@ -634,7 +634,7 @@ static inline char TUI_HandleInput(EngineTUI *tui, PortfolioController<F> *ctrl,
 //======================================================================================================
 // [SNAPSHOT STRUCT]
 //======================================================================================================
-// all doubles — no FPN on the TUI thread. engine converts during snapshot copy.
+// all doubles — no FPN_Binary on the TUI thread. engine converts during snapshot copy.
 //======================================================================================================
 struct TUIPositionSnap {
     int idx;
@@ -1448,7 +1448,7 @@ static inline uint64_t TUISnapshot_Sequence(const TUISharedState *shared) {
 //======================================================================================================
 // [SNAPSHOT COPY]
 //======================================================================================================
-// runs on engine thread, every slow-path cycle. converts FPN→double.
+// runs on engine thread, every slow-path cycle. converts FPN_Binary→double.
 //======================================================================================================
 // overload: explicit price/volume (used by backtest — no DataStream available)
 template <unsigned F>
@@ -1901,7 +1901,7 @@ static inline void TUI_PopulateTopology(TUISnapshot *snap,
 //======================================================================================================
 // [RENDER FROM SNAPSHOT]
 //======================================================================================================
-// runs on TUI thread. reads only from snapshot (all doubles, no FPN).
+// runs on TUI thread. reads only from snapshot (all doubles, no FPN_Binary).
 //======================================================================================================
 static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
     if (!tui->enabled) return;

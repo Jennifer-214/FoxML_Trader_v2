@@ -121,9 +121,9 @@
 //           versions (see FeatureRegistry.hpp). Stamps signed under one
 //           registry refuse to load under a different registry. v4 stamps
 //           lack the field and fail format-version check.
-// v6 (v5.10.0b): bytewise-deterministic FPN-end-to-end slow path.
+// v6 (v5.10.0b): bytewise-deterministic FPN_Binary-end-to-end slow path.
 //           Multiple slow-path math primitives migrated from IEEE-754 to
-//           pure-integer FPN: FlowFeatures EWMA decay (FPN_Exp), z-score
+//           pure-integer FPN_Binary: FlowFeatures EWMA decay (FPN_Exp), z-score
 //           sqrt (FPN_Sqrt), RegimeDetector hour_sin/cos (FPN_Sin/Cos),
 //           and FP64 divide (192-by-128 long division replaces long-double
 //           FPU path). All slow-path features now produce bytewise-
@@ -1190,7 +1190,7 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
 // field reads continue as `r.<canonical_name>`.
 struct ModelStampResult {
     // v5.15.5.F.4d.1.B.3 Step 1.6.3 — F=64 brought into struct scope for STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
-    // expansion (master STORAGE_T includes FPN<F>; expansion needs F in scope).
+    // expansion (master STORAGE_T includes FPN_Binary<F>; expansion needs F in scope).
     // Future: when ModelStampResult is templated, replace with template parameter.
     static constexpr unsigned F = 64;
 
@@ -1911,7 +1911,7 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     // `cfg_derived::populate_stamp_cfg_from_derived<F>(buf, cap, cfg)`. Framework walks all 4
     // cfg-derived cohort registries (per-core + global + ml_cfg_flag + gate_cfg_flag) filtered
     // by STAMP_BOUND_CFG_DERIVED bit; per-row cohort gate from cfg_gate::lookup_populate; per-row
-    // emit via tt::cfg_emit_field<T> (handles FPN<F> ↔ %.17g + bitmap-bool ↔ %d correctly).
+    // emit via tt::cfg_emit_field<T> (handles FPN_Binary<F> ↔ %.17g + bitmap-bool ↔ %d correctly).
     //
     // Source-of-truth shift: cfg-derived wire keys now read from cfg AT EMIT TIME (not from
     // caller-populated inf). Wire keys lose `inference_cfg_` prefix at v2 wire format per

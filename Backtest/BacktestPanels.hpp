@@ -296,7 +296,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
             break;
         }
         rc->run_config.label_forward_ticks = horizons[h];
-        // BacktestRunConfig::label_tp_pct is double-typed (not FPN);
+        // BacktestRunConfig::label_tp_pct is double-typed (not FPN_Binary);
         // operator's CSV value is a percent (e.g. 0.030 = 0.03%) so
         // pass through directly without /100.
         rc->run_config.label_tp_pct = (double)tp_pcts[h];

@@ -52,7 +52,7 @@ constexpr int PARTIAL_LEG_B = 1;
 
 template <unsigned F>
 struct alignas(64) TradeEvent {
-    FPN<F>   price;        // fill price for entry or exit (FPN)
+    FPN_Binary<F>   price;        // fill price for entry or exit (FPN_Binary)
     uint64_t timestamp;    // market time of the originating tick (microseconds)
     uint16_t core_id;      // which execution core fired this event
     uint8_t  type;         // bitmask: TRADE_EVENT_ENTRY and/or TRADE_EVENT_EXIT

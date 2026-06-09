@@ -644,7 +644,7 @@ namespace cfg_derived {
     FOREACH_STAMP_BOUND_DERIVED_COHORT(_STAMP_RESULT)
 
 // PARSE_STAMP_CFG_TO_DERIVED: caller-facing macro wrapper. Returns true on match.
-// F hardcoded to 64 (production FPN<F> precision) — ResultT must have matching FPN<64> fields
+// F hardcoded to 64 (production FPN_Binary<F> precision) — ResultT must have matching FPN_Binary<64> fields
 // via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() with `static constexpr unsigned F = 64;` in scope.
 // When ModelStampResult templated in future ship, change to `decltype((r))::F`.
 #define PARSE_STAMP_CFG_TO_DERIVED(r, key, val) \

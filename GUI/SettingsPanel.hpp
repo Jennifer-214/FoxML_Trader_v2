@@ -33,7 +33,7 @@
 #include <dirent.h>     // v5.9.5f — opendir for model directory scan
 #include <sys/stat.h>   // v5.9.5f — stat for role-file detection
 // v5.15.5.F.4c — tt::cfg_render_field<T> dispatch trio completion
-#include "../FixedPoint/FixedPointN.hpp"   // is_FPN_v, FPN_FromDouble, FPN_ToDouble
+#include "../FixedPoint/FixedPointN.hpp"   // is_fp_binary_v, FPN_FromDouble, FPN_ToDouble
 #include <type_traits>                     // is_floating_point_v, is_integral_v, is_array_v, is_unsigned_v
 
 //==========================================================================
@@ -58,7 +58,7 @@ namespace tt {
     // Returns true if the field value changed this frame.
     template <typename T>
     inline bool cfg_render_field(T& field, const CfgFieldDescriptor& desc) {
-        static_assert(is_FPN_v<T>
+        static_assert(is_fp_binary_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -80,7 +80,7 @@ namespace tt {
 
         bool changed = false;
 
-        if constexpr (is_FPN_v<T>) {
+        if constexpr (is_fp_binary_v<T>) {
             double v = FPN_ToDouble(field);
             if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v *= 100.0;
             float vf = static_cast<float>(v);
@@ -139,7 +139,7 @@ namespace tt {
         // v5.15.5.F.4c.1 — Reset/Modified UI deferred to follow-up.
         // tt::cfg_assign_field<T> + tt::cfg_diff_field<T> primitives shipped
         // at .F.4c are READY for consumer wiring. Inline Modified-badge at
-        // this site requires resolving an FPN<F> operator== ambiguity vs
+        // this site requires resolving an FPN_Binary<F> operator== ambiguity vs
         // ImGui's ImTextureRef in engine_gui's main.cpp compile unit (see
         // build error from .F.4c.1 attempt). Resolution + per-section Reset
         // button placement need operator UX input post paper-test of the
@@ -400,7 +400,7 @@ static const CfgFieldDef field_defs[] = {
     // FOREACH_<DOMAIN>_CFG_FLAG (v5.14.9.F.5 LIFECYCLE + OPS + GATE; auto-extended below)
     {"min_book_imbalance",    "Book Imbal",   "Toggles",         CFG_FLOAT, "%.2f", NULL},
     // FoxML integration — engine-wide enable/disable + training-time defaults
-    // (per-core FPN tuning lives in each ML core's "ML" override section).
+    // (per-core FPN_Binary tuning lives in each ML core's "ML" override section).
     // cost_gate_enabled / foxml_vol_scaling_enabled / bandit_enabled / confidence_enabled
     // migrated to FOREACH_<DOMAIN>_CFG_FLAG (v5.14.9.F.5; auto-extended below):
     //   cost_gate_enabled → GATE; bandit_enabled / confidence_enabled / foxml_vol_scaling_enabled → ML
@@ -680,7 +680,7 @@ struct SettingsState {
     int   bool_vals[NUM_FIELDS];   // storage for bool fields
     char  path_vals[NUM_FIELDS][512]; // storage for path fields (Phase 8b: 256→512 to fit notify_command templates)
     // v4.0 per-core override storage. Indexed [core][field]. Floats only —
-    // every per-core override is FPN<F> in the cfg.
+    // every per-core override is FPN_Binary<F> in the cfg.
     float per_core_vals[MAX_GUI_CORES][NUM_PER_CORE_FIELDS];
     // v4.0.4 per-core "core configuration" — strategy / risk / model. These
     // can't share per_core_vals[] because they have heterogeneous types

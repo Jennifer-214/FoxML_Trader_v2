@@ -28,7 +28,7 @@
 #include <cstdio>
 #include <cstring>
 #include <locale.h>           // uselocale + newlocale per Layer 2 discipline
-#include "../FixedPoint/FixedPointN.hpp"     // FPN<F> — required before CfgFieldRegistry.hpp
+#include "../FixedPoint/FixedPointN.hpp"     // FPN_Binary<F> — required before CfgFieldRegistry.hpp
 #include "CfgFieldRegistry.hpp"
 
 // Canonical body emit — locale-pinned per Layer 2.

@@ -39,7 +39,7 @@ constexpr uint64_t bf_fnv1a(const char* s, uint64_t h = BUILD_FLAGS_FNV_OFFSET) 
 // values; reordering existing flags flips hash for everyone.
 //
 // Current flags tracked:
-//   USE_NATIVE_128 — `-DUSE_NATIVE_128=ON` for 128-bit FPN math
+//   USE_NATIVE_128 — `-DUSE_NATIVE_128=ON` for 128-bit FPN_Binary math
 //   USE_XGBOOST    — XGBoost availability
 //   __OPTIMIZE__   — compiler optimization (set when -O > 0)
 //

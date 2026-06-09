@@ -54,47 +54,47 @@
 //======================================================================================================
 template <unsigned F> struct RegimeSignals {
     // short window (128-tick)
-    FPN<F> short_slope;       // relative price slope (slope / avg)
-    FPN<F> short_r2;          // price regression R² (trend consistency)
-    FPN<F> short_variance;    // price variance
+    FPN_Binary<F> short_slope;       // relative price slope (slope / avg)
+    FPN_Binary<F> short_r2;          // price regression R² (trend consistency)
+    FPN_Binary<F> short_variance;    // price variance
     // long window (512-tick)
-    FPN<F> long_slope;        // relative price slope
-    FPN<F> long_r2;           // price regression R²
-    FPN<F> long_variance;     // price variance
+    FPN_Binary<F> long_slope;        // relative price slope
+    FPN_Binary<F> long_r2;           // price regression R²
+    FPN_Binary<F> long_variance;     // price variance
     // derived signals
-    FPN<F> vol_ratio;         // short_variance / long_variance (volatility spike)
-    FPN<F> ror_slope;         // slope-of-slopes (trend acceleration)
-    FPN<F> volume_slope;      // volume trend (confirmation)
-    FPN<F> volume_delta;      // net buy/sell pressure [-1.0, +1.0] (from Binance "m" field)
+    FPN_Binary<F> vol_ratio;         // short_variance / long_variance (volatility spike)
+    FPN_Binary<F> ror_slope;         // slope-of-slopes (trend acceleration)
+    FPN_Binary<F> volume_slope;      // volume trend (confirmation)
+    FPN_Binary<F> volume_delta;      // net buy/sell pressure [-1.0, +1.0] (from Binance "m" field)
     // EMA/SMA crossover signals — primary trending/ranging indicator
     // EMA reacts every tick (~333-tick window), SMA lags (128/512 samples at slow-path rate)
     // spread = (ema - sma) / sma: positive = EMA above SMA = bullish, magnitude = strength
-    FPN<F> ema_sma_spread;    // normalized spread vs 128-sample SMA
-    FPN<F> ema_sma_spread_long; // normalized spread vs 512-sample SMA (multi-timeframe)
+    FPN_Binary<F> ema_sma_spread;    // normalized spread vs 128-sample SMA
+    FPN_Binary<F> ema_sma_spread_long; // normalized spread vs 512-sample SMA (multi-timeframe)
     int    ema_above_sma;     // 1 if ema > short SMA (bullish crossover state)
     // data sufficiency flags
     int short_count;
     int long_count;
     int ror_ready;            // 1 if ROR has enough data for meaningful output
     // ML model output (populated by ModelInference if model loaded, zero otherwise)
-    FPN<F> model_score;       // raw model prediction [0, 1] — higher = more likely trending
+    FPN_Binary<F> model_score;       // raw model prediction [0, 1] — higher = more likely trending
     // v4.3 — medium-horizon feature expansion. All zero-default if the
     // optional state/params aren't supplied to Regime_ComputeSignals.
-    FPN<F> mid_slope;         // 256-tick relative slope (between short and long)
-    FPN<F> mid_r2;            // 256-tick R²
-    FPN<F> cumdelta;          // rolling cumulative buyer-vs-seller aggression
+    FPN_Binary<F> mid_slope;         // 256-tick relative slope (between short and long)
+    FPN_Binary<F> mid_r2;            // 256-tick R²
+    FPN_Binary<F> cumdelta;          // rolling cumulative buyer-vs-seller aggression
     double hour_sin;          // sin(2π × hour_utc / 24), cyclical hour encoding
     double hour_cos;          // cos(2π × hour_utc / 24)
-    FPN<F> vol_regime_ratio;  // short_stddev / baseline_stddev (4096-tick)
+    FPN_Binary<F> vol_regime_ratio;  // short_stddev / baseline_stddev (4096-tick)
     double tick_rate_z;       // current ticks/sec z-score vs trailing baseline
-    FPN<F> dist_to_high;      // (baseline_max - current_price) / current_price
-    FPN<F> dist_to_low;       // (current_price - baseline_min) / current_price
+    FPN_Binary<F> dist_to_high;      // (baseline_max - current_price) / current_price
+    FPN_Binary<F> dist_to_low;       // (current_price - baseline_min) / current_price
     // v4.5 — Wave 1 feature pack expansion (D.1 + D.2 + D.4). All zero-
     // default when the corresponding state isn't supplied to
     // Regime_ComputeSignals.
-    FPN<F>  book_imb_mean_short; // mean of last 64 book_imbalance samples
-    FPN<F>  book_imb_mean_long;  // mean over full BookImbalanceHistory window
-    FPN<F>  book_imb_drift;      // current book_imbalance - mean_long
+    FPN_Binary<F>  book_imb_mean_short; // mean of last 64 book_imbalance samples
+    FPN_Binary<F>  book_imb_mean_long;  // mean over full BookImbalanceHistory window
+    FPN_Binary<F>  book_imb_drift;      // current book_imbalance - mean_long
     double  flow_10s;            // signed-volume EWMA, half-life 10s
     double  flow_1m;             // half-life 60s
     double  flow_5m;             // half-life 300s
@@ -114,8 +114,8 @@ template <unsigned F> struct RegimeSignals {
 //======================================================================================================
 #define CUMDELTA_WINDOW 1024
 template <unsigned F> struct CumDeltaState {
-    FPN<F> sum;               // current window sum
-    FPN<F> samples[CUMDELTA_WINDOW];
+    FPN_Binary<F> sum;               // current window sum
+    FPN_Binary<F> samples[CUMDELTA_WINDOW];
     int    head;
     int    count;
 };
@@ -129,9 +129,9 @@ inline void CumDelta_Init(CumDeltaState<F>* s) {
 }
 
 template <unsigned F>
-inline void CumDelta_Push(CumDeltaState<F>* s, FPN<F> qty, int is_buyer_maker) {
+inline void CumDelta_Push(CumDeltaState<F>* s, FPN_Binary<F> qty, int is_buyer_maker) {
     // is_buyer_maker=1 → seller aggression (negative); =0 → buyer aggression (+).
-    FPN<F> signed_qty = is_buyer_maker ? FPN_Negate(qty) : qty;
+    FPN_Binary<F> signed_qty = is_buyer_maker ? FPN_Negate(qty) : qty;
     if (s->count < CUMDELTA_WINDOW) {
         s->samples[s->head] = signed_qty;
         s->sum = FPN_Add(s->sum, signed_qty);
@@ -139,7 +139,7 @@ inline void CumDelta_Push(CumDeltaState<F>* s, FPN<F> qty, int is_buyer_maker) {
         s->count++;
     } else {
         // evict oldest, add new
-        FPN<F> evict = s->samples[s->head];
+        FPN_Binary<F> evict = s->samples[s->head];
         s->sum = FPN_Sub(s->sum, evict);
         s->samples[s->head] = signed_qty;
         s->sum = FPN_Add(s->sum, signed_qty);
@@ -224,7 +224,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const RollingStats<F> *rolling,
                                    const RollingStats<F, 512> *rolling_long,
                                    const RORRegressor<F> *ror,
-                                   FPN<F> ema_price,
+                                   FPN_Binary<F> ema_price,
                                    const RollingStats<F, 256> *rolling_medium = nullptr,
                                    const RollingStats<F, 1024> *rolling_baseline = nullptr,
                                    const CumDeltaState<F> *cumdelta = nullptr,
@@ -300,7 +300,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     // mask to 0 when either operand is zero. H20: branchless even if slower — a mispredict's variance cascades.
     int valid = !FPN_IsZero(rolling->price_avg) & !FPN_IsZero(ema_price);
     unsigned __int128 vmask = -(unsigned __int128)(unsigned)valid;
-    FPN<F> spread = FPN_DivNoAssert(FPN_Sub(ema_price, rolling->price_avg), rolling->price_avg);
+    FPN_Binary<F> spread = FPN_DivNoAssert(FPN_Sub(ema_price, rolling->price_avg), rolling->price_avg);
     sig->ema_sma_spread = { (__int128)((unsigned __int128)spread.v & vmask) };   // spread if valid, else 0
     sig->ema_above_sma  = (sig->ema_sma_spread.v > 0);                           // 0 when masked to 0
 
@@ -327,7 +327,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     // FEAT_CUMDELTA — rolling buyer-vs-seller aggression
     if (cumdelta && cumdelta->count >= 32) {
         // normalize by window size for scale-invariance
-        FPN<F> n = FPN_FromDouble<F>((double)cumdelta->count);
+        FPN_Binary<F> n = FPN_FromDouble<F>((double)cumdelta->count);
         sig->cumdelta = FPN_DivNoAssert(cumdelta->sum, n);
     } else {
         sig->cumdelta = FPN_Zero<F>();
@@ -344,7 +344,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         gmtime_r(&t, &utc);
         double hour_f = (double)utc.tm_hour + (double)utc.tm_min / 60.0;
         const double TAU = 2.0 * 3.14159265358979323846;
-        FPN<F> arg = FPN_FromDouble<F>(TAU * hour_f / 24.0);
+        FPN_Binary<F> arg = FPN_FromDouble<F>(TAU * hour_f / 24.0);
         sig->hour_sin = FPN_ToDouble(FPN_Sin(arg));
         sig->hour_cos = FPN_ToDouble(FPN_Cos(arg));
     } else {
@@ -366,7 +366,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     // FEAT_DIST_TO_HIGH / FEAT_DIST_TO_LOW — distance from baseline extremes
     if (rolling_baseline && rolling_baseline->count >= 256 &&
         !FPN_IsZero(rolling_baseline->price_avg)) {
-        FPN<F> current = rolling->price_avg;  // using rolling avg as proxy for current price
+        FPN_Binary<F> current = rolling->price_avg;  // using rolling avg as proxy for current price
         if (!FPN_IsZero(current)) {
             sig->dist_to_high = FPN_DivNoAssert(
                 FPN_Sub(rolling_baseline->price_max, current), current);
@@ -394,7 +394,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
             // identical for the K=64 canonical case; verified in controller_test.cpp.
             sig->book_imb_mean_short = BookImbHistory_MeanShortFast(h);
             sig->book_imb_mean_long  = BookImbHistory_MeanLong(h);
-            FPN<F> last = BookImbHistory_Last(h);
+            FPN_Binary<F> last = BookImbHistory_Last(h);
             sig->book_imb_drift = FPN_Sub(last, sig->book_imb_mean_long);
         } else {
             sig->book_imb_mean_short = FPN_Zero<F>();
@@ -427,7 +427,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     if (large_trade_state) {
         const LargeTradeState<F, 1024> *lt =
             (const LargeTradeState<F, 1024> *)large_trade_state;
-        FPN<F> last = LargeTradeState_Last(lt);
+        FPN_Binary<F> last = LargeTradeState_Last(lt);
         sig->large_trade_z = LargeTradeState_ZScore(lt, last);
     } else {
         sig->large_trade_z = 0.0;
@@ -525,14 +525,14 @@ inline int Regime_Classify(RegimeState<F> *state,
     int down_signals = 0;
 
     // signal 1: short crossover — EMA vs 128-sample SMA
-    FPN<F> abs_spread = FPN_Abs(sig->ema_sma_spread);
+    FPN_Binary<F> abs_spread = FPN_Abs(sig->ema_sma_spread);
     int crossover_strong = FPN_GreaterThan(abs_spread, cfg->regime_crossover_threshold);
     trending_score += crossover_strong;
     up_signals += crossover_strong & sig->ema_above_sma;
     down_signals += crossover_strong & !sig->ema_above_sma;
 
     // signal 2: long crossover — EMA vs 512-sample SMA (multi-timeframe confirmation)
-    FPN<F> abs_spread_long = FPN_Abs(sig->ema_sma_spread_long);
+    FPN_Binary<F> abs_spread_long = FPN_Abs(sig->ema_sma_spread_long);
     int long_has_data = (sig->long_count >= 64);
     int long_ema_above = (sig->ema_sma_spread_long.v > 0);   // strictly positive (was !sign & !IsZero; 16B)
     int long_crossover_strong = long_has_data &
@@ -595,7 +595,7 @@ inline int Regime_Classify(RegimeState<F> *state,
             detected = REGIME_TRENDING_DOWN;
         } else {
             // split uptrend: use max of short/long spread for strength assessment
-            FPN<F> max_spread = FPN_Max(abs_spread, abs_spread_long);
+            FPN_Binary<F> max_spread = FPN_Max(abs_spread, abs_spread_long);
             int strong = FPN_GreaterThan(max_spread, cfg->regime_strong_crossover);
             detected = strong ? REGIME_TRENDING : REGIME_MILD_TREND;
         }
@@ -688,13 +688,13 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                                      const uint8_t *entry_strategy,
                                      const ControllerConfig<F> *cfg) {
     int old_strategy = Regime_ToStrategy(old_regime);
-    FPN<F> stddev = rolling->price_stddev;
+    FPN_Binary<F> stddev = rolling->price_stddev;
 
     // guard: flat market (stddev=0) would produce zero offsets → TP=SL=entry → immediate exit
     if (FPN_IsZero(stddev)) return;
 
-    FPN<F> hundred = FPN_FromDouble<F>(100.0);
-    FPN<F> half = cfg->min_sl_tp_ratio;
+    FPN_Binary<F> hundred = FPN_FromDouble<F>(100.0);
+    FPN_Binary<F> half = cfg->min_sl_tp_ratio;
 
     uint16_t active = portfolio->active_bitmap;
     while (active) {
@@ -705,120 +705,120 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
 
             if (old_regime == REGIME_RANGING && new_regime == REGIME_TRENDING) {
                 // momentum_tp/sl_mult are direct stddev multipliers — no ×100
-                FPN<F> wide_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
-                FPN<F> wide_tp = FPN_AddSat(pos->entry_price, wide_tp_offset);
+                FPN_Binary<F> wide_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
+                FPN_Binary<F> wide_tp = FPN_AddSat(pos->entry_price, wide_tp_offset);
                 pos->take_profit_price = FPN_Max(pos->take_profit_price, wide_tp);
 
-                FPN<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
-                FPN<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
+                FPN_Binary<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
+                FPN_Binary<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
 
                 // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
-                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
             // RANGING → MILD_TREND: both buy dips, widen TP slightly (uptrend confirmed)
             else if (old_regime == REGIME_RANGING && new_regime == REGIME_MILD_TREND) {
-                FPN<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
-                FPN<F> mild_widen = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
-                FPN<F> wider_tp = FPN_AddSat(pos->entry_price, mild_widen);
+                FPN_Binary<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
+                FPN_Binary<F> mild_widen = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
+                FPN_Binary<F> wider_tp = FPN_AddSat(pos->entry_price, mild_widen);
                 pos->take_profit_price = FPN_Max(pos->take_profit_price, wider_tp);
 
-                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
             // MILD_TREND → TRENDING: uptrend strengthening, widen TP to momentum levels
             else if (old_regime == REGIME_MILD_TREND && new_regime == REGIME_TRENDING) {
-                FPN<F> wide_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
-                FPN<F> wide_tp = FPN_AddSat(pos->entry_price, wide_tp_offset);
+                FPN_Binary<F> wide_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
+                FPN_Binary<F> wide_tp = FPN_AddSat(pos->entry_price, wide_tp_offset);
                 pos->take_profit_price = FPN_Max(pos->take_profit_price, wide_tp);
 
-                FPN<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
-                FPN<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
+                FPN_Binary<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
+                FPN_Binary<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
 
-                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
             // TRENDING/TRENDING_DOWN/MILD_TREND → RANGING: tighten TP, widen SL for chop
             else if ((old_regime == REGIME_TRENDING || old_regime == REGIME_TRENDING_DOWN
                       || old_regime == REGIME_MILD_TREND)
                      && new_regime == REGIME_RANGING) {
-                FPN<F> tight_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
-                FPN<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
+                FPN_Binary<F> tight_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
+                FPN_Binary<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
                 pos->take_profit_price = FPN_Min(pos->take_profit_price, tight_tp);
 
                 // fee floor: TP must cover round-trip fees even after tightening
-                FPN<F> fee_floor = FPN_AddSat(pos->entry_price,
+                FPN_Binary<F> fee_floor = FPN_AddSat(pos->entry_price,
                     FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
                 pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
 
-                FPN<F> wide_sl_offset = FPN_Mul(stddev, FPN_Mul(cfg->stop_loss_pct, hundred));
-                FPN<F> wide_sl = FPN_SubSat(pos->entry_price, wide_sl_offset);
+                FPN_Binary<F> wide_sl_offset = FPN_Mul(stddev, FPN_Mul(cfg->stop_loss_pct, hundred));
+                FPN_Binary<F> wide_sl = FPN_SubSat(pos->entry_price, wide_sl_offset);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, wide_sl);
 
                 // SL ceiling: if TP was tightened (vol dropped since fill), don't let SL
                 // stay at the old high-vol width. SL distance must not exceed TP distance.
                 // without this, a fill at high σ followed by regime switch at low σ
                 // produces SL > TP (inverted risk/reward)
-                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
+                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN_Binary<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
 
                 // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
-                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
             // TRENDING → MILD_TREND: trend weakening, tighten TP moderately
             else if (old_regime == REGIME_TRENDING && new_regime == REGIME_MILD_TREND) {
-                FPN<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
-                FPN<F> mild_tp = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
-                FPN<F> tighter_tp = FPN_AddSat(pos->entry_price, mild_tp);
+                FPN_Binary<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
+                FPN_Binary<F> mild_tp = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
+                FPN_Binary<F> tighter_tp = FPN_AddSat(pos->entry_price, mild_tp);
                 pos->take_profit_price = FPN_Min(pos->take_profit_price, tighter_tp);
 
                 // fee floor: TP must cover round-trip fees even after tightening
-                FPN<F> fee_floor = FPN_AddSat(pos->entry_price,
+                FPN_Binary<F> fee_floor = FPN_AddSat(pos->entry_price,
                     FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
                 pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
 
                 // SL ceiling + floor
-                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
+                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN_Binary<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
-                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
             // entering downtrend: tighten TP (take profits), tighten SL (cut losses)
             else if (new_regime == REGIME_TRENDING_DOWN) {
-                FPN<F> tight_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
-                FPN<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
+                FPN_Binary<F> tight_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
+                FPN_Binary<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
                 pos->take_profit_price = FPN_Min(pos->take_profit_price, tight_tp);
 
                 // fee floor: TP must cover round-trip fees even after tightening
-                FPN<F> fee_floor = FPN_AddSat(pos->entry_price,
+                FPN_Binary<F> fee_floor = FPN_AddSat(pos->entry_price,
                     FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
                 pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
 
-                FPN<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
-                FPN<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
+                FPN_Binary<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
+                FPN_Binary<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
 
                 // SL ceiling: SL distance must not exceed TP distance (no inverted risk/reward)
-                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
+                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN_Binary<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
 
                 // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
-                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
         }

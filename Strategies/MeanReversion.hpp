@@ -47,11 +47,11 @@
 template <unsigned F> struct MeanReversionState {
   RegressionFeederX<F> feeder; // P&L regression ring buffer
   RORRegressor<F> ror;         // slope-of-slopes (second derivative of P&L)
-  FPN<F>
+  FPN_Binary<F>
       live_offset_pct; // adaptive entry offset (between offset_min..offset_max)
-  FPN<F> live_vol_mult;    // adaptive volume multiplier (between
+  FPN_Binary<F> live_vol_mult;    // adaptive volume multiplier (between
                            // vol_mult_min..vol_mult_max)
-  FPN<F> live_stddev_mult; // adaptive stddev multiplier (between
+  FPN_Binary<F> live_stddev_mult; // adaptive stddev multiplier (between
                            // offset_stddev_min..max)
   BuySideGateConditions<F>
       buy_conds_initial; // anchor for max_shift clamp, tracks rolling avg
@@ -76,17 +76,17 @@ inline void MeanReversion_Init(MeanReversionState<F> *state,
   // compute initial buy price in both modes, select based on which is active
   int use_stddev = !FPN_IsZero(state->live_stddev_mult);
 
-  FPN<F> pct_price = RollingStats_BuyPrice(rolling, state->live_offset_pct);
-  FPN<F> stddev_offset =
+  FPN_Binary<F> pct_price = RollingStats_BuyPrice(rolling, state->live_offset_pct);
+  FPN_Binary<F> stddev_offset =
       FPN_Mul(rolling->price_stddev, state->live_stddev_mult);
-  FPN<F> stddev_price = FPN_Sub(rolling->price_avg, stddev_offset);
+  FPN_Binary<F> stddev_price = FPN_Sub(rolling->price_avg, stddev_offset);
 
   // branchless select: buy_price = use_stddev ? stddev_price : pct_price (16B → blend the whole .v)
   unsigned __int128 sm = -(unsigned __int128)(unsigned)use_stddev;
-  FPN<F> buy_price { (__int128)(((unsigned __int128)stddev_price.v & sm) | ((unsigned __int128)pct_price.v & ~sm)) };
+  FPN_Binary<F> buy_price { (__int128)(((unsigned __int128)stddev_price.v & sm) | ((unsigned __int128)pct_price.v & ~sm)) };
 
   // volume gate uses rolling avg * multiplier so only significant trades pass
-  FPN<F> buy_vol = FPN_Mul(rolling->volume_avg, state->live_vol_mult);
+  FPN_Binary<F> buy_vol = FPN_Mul(rolling->volume_avg, state->live_vol_mult);
 
   buy_conds->price = buy_price;
   buy_conds->volume = buy_vol;
@@ -116,7 +116,7 @@ inline void MeanReversion_Init(MeanReversionState<F> *state,
 //======================================================================================================
 template <unsigned F>
 inline void MeanReversion_Adapt(MeanReversionState<F> *state,
-                                FPN<F> current_price, FPN<F> portfolio_delta,
+                                FPN_Binary<F> current_price, FPN_Binary<F> portfolio_delta,
                                 uint16_t active_bitmap,
                                 const BuySideGateConditions<F> *buy_conds,
                                 const ControllerConfig<F> *cfg) {
@@ -150,9 +150,9 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 
     // PERCENTAGE MODE: squeeze offset toward zero (not offset_min — go all the
     // way)
-    FPN<F> zero = FPN_Zero<F>();
-    FPN<F> squeeze_step = FPN_Mul(state->live_offset_pct, cfg->squeeze_decay);
-    FPN<F> masked_squeeze { (__int128)((unsigned __int128)squeeze_step.v & pct_sq_mask) };  // pct-mode mask (16B .v)
+    FPN_Binary<F> zero = FPN_Zero<F>();
+    FPN_Binary<F> squeeze_step = FPN_Mul(state->live_offset_pct, cfg->squeeze_decay);
+    FPN_Binary<F> masked_squeeze { (__int128)((unsigned __int128)squeeze_step.v & pct_sq_mask) };  // pct-mode mask (16B .v)
 
     state->live_offset_pct = FPN_SubSat(state->live_offset_pct, masked_squeeze);
     state->live_offset_pct =
@@ -160,10 +160,10 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 
     // STDDEV MODE: squeeze stddev_mult toward offset_stddev_min
     // uses gap-based decay: step = (current - min) * 0.10
-    FPN<F> stddev_gap =
+    FPN_Binary<F> stddev_gap =
         FPN_Sub(state->live_stddev_mult, cfg->offset_stddev_min);
-    FPN<F> stddev_step = FPN_Mul(stddev_gap, cfg->squeeze_decay);
-    FPN<F> masked_stddev { (__int128)((unsigned __int128)stddev_step.v & stddev_sq_mask) };  // stddev-mode mask (16B .v)
+    FPN_Binary<F> stddev_step = FPN_Mul(stddev_gap, cfg->squeeze_decay);
+    FPN_Binary<F> masked_stddev { (__int128)((unsigned __int128)stddev_step.v & stddev_sq_mask) };  // stddev-mode mask (16B .v)
 
     state->live_stddev_mult =
         FPN_SubSat(state->live_stddev_mult, masked_stddev);
@@ -171,10 +171,10 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
         FPN_Max(state->live_stddev_mult, cfg->offset_stddev_min);
 
     // squeeze volume multiplier toward 1.0 (accept any trade size) — both modes
-    FPN<F> one = FPN_FromDouble<F>(1.0);
-    FPN<F> vmult_gap = FPN_Sub(state->live_vol_mult, one);
-    FPN<F> vmult_step = FPN_Mul(vmult_gap, cfg->squeeze_decay);
-    FPN<F> masked_vmult { (__int128)((unsigned __int128)vmult_step.v & sq_mask) };  // squeeze mask (16B .v)
+    FPN_Binary<F> one = FPN_FromDouble<F>(1.0);
+    FPN_Binary<F> vmult_gap = FPN_Sub(state->live_vol_mult, one);
+    FPN_Binary<F> vmult_step = FPN_Mul(vmult_gap, cfg->squeeze_decay);
+    FPN_Binary<F> masked_vmult { (__int128)((unsigned __int128)vmult_step.v & sq_mask) };  // squeeze mask (16B .v)
 
     state->live_vol_mult = FPN_SubSat(state->live_vol_mult, masked_vmult);
     state->live_vol_mult = FPN_Max(state->live_vol_mult, one); // floor at 1.0x
@@ -217,16 +217,16 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 
     // compute filter shift from slope: negate because positive P&L -> loosen
     // (decrease)
-    FPN<F> filter_shift = FPN_Mul(inner.model.slope, cfg->filter_scale);
-    FPN<F> neg_shift = FPN_Negate(filter_shift);
+    FPN_Binary<F> filter_shift = FPN_Mul(inner.model.slope, cfg->filter_scale);
+    FPN_Binary<F> neg_shift = FPN_Negate(filter_shift);
 
     // PERCENTAGE MODE: apply shift to offset_pct, scale 0.001, clamp
     // [offset_min, offset_max]
     {
-      FPN<F> masked_pct_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)(confident & !use_stddev)) };
+      FPN_Binary<F> masked_pct_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)(confident & !use_stddev)) };
 
-      FPN<F> offset_scale = cfg->offset_adapt_scale;
-      FPN<F> offset_shift = FPN_Mul(masked_pct_shift, offset_scale);
+      FPN_Binary<F> offset_scale = cfg->offset_adapt_scale;
+      FPN_Binary<F> offset_shift = FPN_Mul(masked_pct_shift, offset_scale);
       state->live_offset_pct = FPN_AddSat(state->live_offset_pct, offset_shift);
       state->live_offset_pct = FPN_Max(state->live_offset_pct, cfg->offset_min);
       state->live_offset_pct = FPN_Min(state->live_offset_pct, cfg->offset_max);
@@ -237,10 +237,10 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
     // ranges 0.5-4.0 while offset_pct ranges 0.0005-0.005 (~1000x difference in
     // magnitude)
     {
-      FPN<F> masked_stddev_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)(confident & use_stddev)) };
+      FPN_Binary<F> masked_stddev_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)(confident & use_stddev)) };
 
-      FPN<F> stddev_adapt_scale = cfg->stddev_adapt_scale;
-      FPN<F> stddev_shift = FPN_Mul(masked_stddev_shift, stddev_adapt_scale);
+      FPN_Binary<F> stddev_adapt_scale = cfg->stddev_adapt_scale;
+      FPN_Binary<F> stddev_shift = FPN_Mul(masked_stddev_shift, stddev_adapt_scale);
       state->live_stddev_mult =
           FPN_AddSat(state->live_stddev_mult, stddev_shift);
       state->live_stddev_mult =
@@ -251,9 +251,9 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 
     // apply shift to volume multiplier and clamp to [vol_mult_min,
     // vol_mult_max] — both modes
-    FPN<F> masked_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)confident) };
+    FPN_Binary<F> masked_shift { (__int128)((unsigned __int128)neg_shift.v & -(unsigned __int128)(unsigned)confident) };
 
-    FPN<F> vol_shift = FPN_Mul(masked_shift, cfg->vol_adapt_scale);
+    FPN_Binary<F> vol_shift = FPN_Mul(masked_shift, cfg->vol_adapt_scale);
     state->live_vol_mult = FPN_AddSat(state->live_vol_mult, vol_shift);
     state->live_vol_mult = FPN_Max(state->live_vol_mult, cfg->vol_mult_min);
     state->live_vol_mult = FPN_Min(state->live_vol_mult, cfg->vol_mult_max);
@@ -273,12 +273,12 @@ template <unsigned F>
 inline BuySideGateConditions<F> MeanReversion_BuySignal(
     MeanReversionState<F> *state, const RollingStats<F> *rolling,
     const RollingStats<F, 512> *rolling_long, const ControllerConfig<F> *cfg,
-    FPN<F> ema_price = FPN_Zero<F>()) {
+    FPN_Binary<F> ema_price = FPN_Zero<F>()) {
   BuySideGateConditions<F> conds;
 
   // base average: EMA when provided (nonzero), rolling avg otherwise
   // no branch — caller passes rolling_avg when EMA is disabled
-  FPN<F> base_avg = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
+  FPN_Binary<F> base_avg = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
 
   // compute base buy price in both modes, branchless select the active one
   // percentage mode: buy_price = base - (base * offset_pct)
@@ -286,11 +286,11 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
   // volatility
   int use_stddev = !FPN_IsZero(cfg->offset_stddev_mult);
 
-  FPN<F> pct_offset = FPN_Mul(base_avg, state->live_offset_pct);
-  FPN<F> pct_price = FPN_Sub(base_avg, pct_offset);
-  FPN<F> stddev_offset =
+  FPN_Binary<F> pct_offset = FPN_Mul(base_avg, state->live_offset_pct);
+  FPN_Binary<F> pct_price = FPN_Sub(base_avg, pct_offset);
+  FPN_Binary<F> stddev_offset =
       FPN_Mul(rolling->price_stddev, state->live_stddev_mult);
-  FPN<F> stddev_price = FPN_Sub(base_avg, stddev_offset);
+  FPN_Binary<F> stddev_price = FPN_Sub(base_avg, stddev_offset);
 
   // branchless select: use_stddev ? stddev_price : pct_price (16B → blend the whole .v)
   unsigned __int128 sm = -(unsigned __int128)(unsigned)use_stddev;
@@ -312,26 +312,26 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     int confident = FPN_GreaterThanOrEqual(state->last_regression.r_squared,
                                            cfg->r2_threshold);
 
-    FPN<F> shift =
+    FPN_Binary<F> shift =
         FPN_Mul(state->last_regression.model.slope, cfg->slope_scale_buy);
 
     // clamp shift magnitude to max_shift (percentage of rolling avg,
     // price-independent)
-    FPN<F> max_shift_abs = FPN_Mul(rolling->price_avg, cfg->max_shift);
+    FPN_Binary<F> max_shift_abs = FPN_Mul(rolling->price_avg, cfg->max_shift);
     shift = FPN_Min(shift, max_shift_abs);
     shift = FPN_Max(shift, FPN_Negate(max_shift_abs));
 
     // mask shift to zero if not confident - word-level branchless mask
     // branchless: masked_shift = confident ? shift : 0 (16B → mask the whole .v)
     unsigned __int128 conf_mask = -(unsigned __int128)(unsigned)confident;
-    FPN<F> masked_shift { (__int128)((unsigned __int128)shift.v & conf_mask) };
+    FPN_Binary<F> masked_shift { (__int128)((unsigned __int128)shift.v & conf_mask) };
 
     // apply shift
-    FPN<F> new_price = FPN_AddSat(conds.price, masked_shift);
+    FPN_Binary<F> new_price = FPN_AddSat(conds.price, masked_shift);
 
     // clamp to initial +/- max_shift (percentage-based, scales with price)
-    FPN<F> upper = FPN_AddSat(state->buy_conds_initial.price, max_shift_abs);
-    FPN<F> lower = FPN_SubSat(state->buy_conds_initial.price, max_shift_abs);
+    FPN_Binary<F> upper = FPN_AddSat(state->buy_conds_initial.price, max_shift_abs);
+    FPN_Binary<F> lower = FPN_SubSat(state->buy_conds_initial.price, max_shift_abs);
     new_price = FPN_Max(new_price, lower);
     new_price = FPN_Min(new_price, upper);
 
@@ -348,7 +348,7 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     int long_enabled = !FPN_IsZero(cfg->min_long_slope);
     // normalize slope by price: relative_slope = slope / price_avg
     // (dimensionless fraction)
-    FPN<F> relative_long_slope =
+    FPN_Binary<F> relative_long_slope =
         FPN_IsZero(rolling_long->price_avg)
             ? FPN_Zero<F>()
             : FPN_DivNoAssert(rolling_long->price_slope,
@@ -382,7 +382,7 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     int vwap_enabled = !FPN_IsZero(cfg->vwap_offset);
     // vwap_deviation is (price - vwap) / vwap — negative means below VWAP
     // pass when deviation <= -vwap_offset (price is sufficiently below VWAP)
-    FPN<F> neg_offset = FPN_Negate(cfg->vwap_offset);
+    FPN_Binary<F> neg_offset = FPN_Negate(cfg->vwap_offset);
     int vwap_pass =
         FPN_LessThanOrEqual(rolling->vwap_deviation, neg_offset);
     int vwap_ok = vwap_pass | !vwap_enabled;
@@ -411,7 +411,7 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
 //======================================================================================================
 template <unsigned F>
 inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
-                                     FPN<F> current_price,
+                                     FPN_Binary<F> current_price,
                                      const RollingStats<F> *rolling,
                                      MeanReversionState<F> *state,
                                      const ControllerConfig<F> *cfg) {
@@ -429,8 +429,8 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
   // min), so trailing reacts to what's happening NOW, not historical trend cold
   // start: R² = 0 for first 8 slow-path cycles after warmup. trailing disabled
   // until then.
-  FPN<F> r_squared = FPN_Zero<F>();
-  FPN<F> reg_slope = FPN_Zero<F>();
+  FPN_Binary<F> r_squared = FPN_Zero<F>();
+  FPN_Binary<F> reg_slope = FPN_Zero<F>();
   if (state->price_feeder.count >= MAX_WINDOW) {
     LinearRegression3XResult<F> price_reg =
         RegressionFeederX_Compute(&state->price_feeder);
@@ -441,12 +441,12 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
   // compute SNR using regression slope (not rolling slope)
   // regression slope = recent ~4 min trend. rolling slope = ~70 min average.
   // for trailing decisions, recent trend is what matters.
-  FPN<F> snr = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
+  FPN_Binary<F> snr = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
 
   // hold_score = SNR * R²
   // negative slope → negative SNR → negative score → never exceeds positive
   // threshold → correct
-  FPN<F> hold_score = FPN_Mul(snr, r_squared);
+  FPN_Binary<F> hold_score = FPN_Mul(snr, r_squared);
 
   int should_trail = FPN_GreaterThanOrEqual(hold_score, cfg->tp_hold_score);
 
@@ -462,23 +462,23 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
     if (above_tp & should_trail) {
       // trailing TP: current_price - (stddev * trail_mult)
       // ratchet up only — FPN_Max ensures TP never decreases, locking in gains
-      FPN<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
-      FPN<F> trailing_tp = FPN_Sub(current_price, tp_offset);
+      FPN_Binary<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
+      FPN_Binary<F> trailing_tp = FPN_Sub(current_price, tp_offset);
       pos->take_profit_price = FPN_Max(pos->take_profit_price, trailing_tp);
 
       // trailing SL: lock in gains alongside TP
       // ratchet up only — prevents "let winners turn into losers"
-      FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-      FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+      FPN_Binary<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
+      FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
       pos->stop_loss_price = FPN_Max(pos->stop_loss_price, trailing_sl);
 
       // SL floor: enforce 2:1 min reward/risk after trailing adjustments
       // only applies when SL is still below entry (at-risk position).
       // once SL trails above entry, the position is a guaranteed win — no floor needed
       if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
-        FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-        FPN<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
-        FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+        FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+        FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
+        FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
         pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
       }
     }
@@ -513,7 +513,7 @@ namespace tt {
 template <unsigned F> struct EventLoopState;
 template <unsigned F>
 bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
-                              FPN<F> proposed_sl, FPN<F> entry_price,
+                              FPN_Binary<F> proposed_sl, FPN_Binary<F> entry_price,
                               const ControllerConfig<F>* cfg);
 
 template <unsigned F, unsigned W>
@@ -521,7 +521,7 @@ inline void MeanReversion_ExitAdjustSharded(
     EventLoopState<F>* state,
     int slot,
     MeanReversionState<F>* mr,
-    FPN<F> current_price,
+    FPN_Binary<F> current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {
@@ -531,16 +531,16 @@ inline void MeanReversion_ExitAdjustSharded(
     // Compute regression-based hold_score from MR state's price feeder.
     // MR_Adapt pushes price_feeder this same cycle; Adapt runs before this
     // function, so we read fresh data.
-    FPN<F> r_squared = FPN_Zero<F>();
-    FPN<F> reg_slope = FPN_Zero<F>();
+    FPN_Binary<F> r_squared = FPN_Zero<F>();
+    FPN_Binary<F> reg_slope = FPN_Zero<F>();
     if (mr->price_feeder.count >= MAX_WINDOW) {
         LinearRegression3XResult<F> price_reg =
             RegressionFeederX_Compute(&mr->price_feeder);
         r_squared = price_reg.r_squared;
         reg_slope = price_reg.model.slope;
     }
-    FPN<F> snr        = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
-    FPN<F> hold_score = FPN_Mul(snr, r_squared);
+    FPN_Binary<F> snr        = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
+    FPN_Binary<F> hold_score = FPN_Mul(snr, r_squared);
     if (!FPN_GreaterThanOrEqual(hold_score, cfg->tp_hold_score)) return;
 
     // For each of this core's active slots, propose a trailing SL and
@@ -552,17 +552,17 @@ inline void MeanReversion_ExitAdjustSharded(
         : (uint16_t)(1u << slot);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
-    FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-    FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+    FPN_Binary<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
+    FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
 
     while (bm) {
         int pidx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        FPN<F> entry = state->oms->portfolio.positions[pidx].entry_price;
+        FPN_Binary<F> entry = state->oms->portfolio.positions[pidx].entry_price;
         // Only trail when position is "running" (price above original_tp)
         // and entry is set (idle slot guard).
         if (FPN_IsZero(entry)) continue;
-        FPN<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
+        FPN_Binary<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
         if (!FPN_IsZero(orig_tp) && !FPN_GreaterThan(current_price, orig_tp)) continue;
         Strategy_WriteRatchetSL(state, slot, trailing_sl, entry, cfg);
     }

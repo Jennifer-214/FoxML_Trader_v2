@@ -6,7 +6,7 @@
 // [FEATURE REGISTRY — v5.8.1b — X-macro driven]
 //======================================================================================================
 // Single source of truth for ML features. Adding a new feature:
-//   1. Implement `ML_Compute_<Name>(ctx)` returning FPN<F>
+//   1. Implement `ML_Compute_<Name>(ctx)` returning FPN_Binary<F>
 //   2. Append one row to FOREACH_FEATURE(X)
 //   3. Recompile — FEATURE_REGISTRY_HASH flips, old stamps reject at load
 //
@@ -28,7 +28,7 @@
 //
 // Canonical signature (do not deviate; see DOCS/FEATURE_INTERFACE.md):
 //   template <unsigned F>
-//   inline FPN<F> ML_Compute_<Name>(const FeatureComputeCtx<F>* ctx);
+//   inline FPN_Binary<F> ML_Compute_<Name>(const FeatureComputeCtx<F>* ctx);
 //
 // FPN_Zero<F>() is the safe "I don't have data yet" return for cold-start /
 // warmup paths.
@@ -113,52 +113,52 @@ struct FeatureComputeCtx {
 //======================================================================================================
 
 template <unsigned F>
-inline FPN<F> ML_Compute_ShortSlope(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_ShortSlope(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->short_slope : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_ShortR2(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_ShortR2(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->short_r2 : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_ShortVariance(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_ShortVariance(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->short_variance : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_LongSlope(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_LongSlope(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->long_slope : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_LongR2(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_LongR2(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->long_r2 : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_LongVariance(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_LongVariance(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->long_variance : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_VolRatio(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_VolRatio(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->vol_ratio : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_RorSlope(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_RorSlope(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->ror_slope : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_VolumeSlope(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_VolumeSlope(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->volume_slope : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->volume_delta : FPN_Zero<F>();
 }
 
@@ -177,124 +177,124 @@ inline FPN<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
 //======================================================================================================
 
 template <unsigned F>
-inline FPN<F> ML_Compute_EmaSmaSpread(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_EmaSmaSpread(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->ema_sma_spread : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_VwapDev(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_VwapDev(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->short_rolling) ? ctx->short_rolling->vwap_deviation : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_PriceStddev(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_PriceStddev(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->short_rolling) ? ctx->short_rolling->price_stddev : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_PriceAvg(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_PriceAvg(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->short_rolling) ? ctx->short_rolling->price_avg : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_VolumeAvg(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_VolumeAvg(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->short_rolling) ? ctx->short_rolling->volume_avg : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_EmaAboveSma(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_EmaAboveSma(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals)
         ? FPN_FromDouble<F>((double)ctx->signals->ema_above_sma)
         : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_MidSlope(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_MidSlope(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->mid_slope : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_MidR2(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_MidR2(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->mid_r2 : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_CumDelta(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_CumDelta(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->cumdelta : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_HourSin(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_HourSin(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->hour_sin) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_HourCos(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_HourCos(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->hour_cos) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_VolRegimeRatio(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_VolRegimeRatio(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->vol_regime_ratio : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_TickRateZ(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_TickRateZ(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->tick_rate_z) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_DistToHigh(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_DistToHigh(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->dist_to_high : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_DistToLow(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_DistToLow(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->dist_to_low : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_BookImbMeanShort(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_BookImbMeanShort(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->book_imb_mean_short : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_BookImbMeanLong(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_BookImbMeanLong(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->book_imb_mean_long : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_BookImbDrift(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_BookImbDrift(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->book_imb_drift : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_Flow10s(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_Flow10s(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->flow_10s) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_Flow1m(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_Flow1m(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->flow_1m) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_Flow5m(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_Flow5m(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->flow_5m) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_LargeTradeZ(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_LargeTradeZ(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->large_trade_z) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_SpreadBps(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_SpreadBps(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->spread_bps) : FPN_Zero<F>();
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->spread_zscore) : FPN_Zero<F>();
 }
 
@@ -325,11 +325,11 @@ inline FPN<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
 // ratio) in that extreme values saturate rather than dominating model
 // gradient. Verify importance vs SHORT_SLOPE post-train (TECH_DEBT-007).
 template <unsigned F>
-inline FPN<F> ML_Compute_RegimeTrendStrength(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_RegimeTrendStrength(const FeatureComputeCtx<F>* ctx) {
     if (!ctx || !ctx->signals) return FPN_Zero<F>();
-    FPN<F> x = ctx->signals->short_slope;
-    FPN<F> one = FPN_FromInt<F>(1);
-    FPN<F> neg_one = FPN_Sub(FPN_Zero<F>(), one);
+    FPN_Binary<F> x = ctx->signals->short_slope;
+    FPN_Binary<F> one = FPN_FromInt<F>(1);
+    FPN_Binary<F> neg_one = FPN_Sub(FPN_Zero<F>(), one);
     if (FPN_GreaterThan(x, one)) return one;
     if (FPN_LessThan(x, neg_one)) return neg_one;
     return x;
@@ -340,13 +340,13 @@ inline FPN<F> ML_Compute_RegimeTrendStrength(const FeatureComputeCtx<F>* ctx) {
 // Differs from VOL_RATIO (positive ratio) in sign + bounded behavior.
 // Verify importance vs VOL_RATIO post-train (TECH_DEBT-007).
 template <unsigned F>
-inline FPN<F> ML_Compute_RegimeVolZscore(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_RegimeVolZscore(const FeatureComputeCtx<F>* ctx) {
     if (!ctx || !ctx->signals) return FPN_Zero<F>();
-    FPN<F> short_var = ctx->signals->short_variance;
-    FPN<F> long_var = ctx->signals->long_variance;
+    FPN_Binary<F> short_var = ctx->signals->short_variance;
+    FPN_Binary<F> long_var = ctx->signals->long_variance;
     if (FPN_IsZero(long_var)) return FPN_Zero<F>();
-    FPN<F> diff = FPN_Sub(short_var, long_var);
-    FPN<F> denom = FPN_Sqrt(long_var);
+    FPN_Binary<F> diff = FPN_Sub(short_var, long_var);
+    FPN_Binary<F> denom = FPN_Sqrt(long_var);
     if (FPN_IsZero(denom)) return FPN_Zero<F>();
     return FPN_DivNoAssert(diff, denom);
 }
@@ -362,7 +362,7 @@ inline FPN<F> ML_Compute_RegimeVolZscore(const FeatureComputeCtx<F>* ctx) {
 // today is the bandwidth-conscious version. Tree-based models (XGBoost)
 // handle integer-valued categorical features natively.
 template <unsigned F>
-inline FPN<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ctx) {
     if (!ctx) return FPN_Zero<F>();
     return FPN_FromInt<F>(ctx->current_regime);
 }
@@ -383,7 +383,7 @@ inline FPN<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ctx) {
 //   Recurrence: C(d, k) = C(d, k-1) * (d-k+1) / k
 //
 // K=50 captures > 99.999% of the infinite-sum weight for d ∈ [0.4, 0.6].
-// Coefficients computed at compile time (constexpr); converted to FPN
+// Coefficients computed at compile time (constexpr); converted to FPN_Binary
 // per-call in Compute fns (50 FPN_FromDouble × 3 fns = ~150 conversions
 // per slow-path cycle ≈ ~50ns total; SLOW-PATH only, well within budget).
 //
@@ -413,18 +413,18 @@ constexpr auto kFracDiff_d06_Coeffs = ComputeFracDiffCoeffs(0.6);
 // Generic Compute helper: walk K=50 most-recent prices, accumulate
 // alternating sum. Branchless wrap relies on W=128 being a power of 2.
 template <unsigned F>
-inline FPN<F> FracDiffPriceCompute(const FeatureComputeCtx<F>* ctx,
+inline FPN_Binary<F> FracDiffPriceCompute(const FeatureComputeCtx<F>* ctx,
                                     const std::array<double, FRAC_DIFF_K>& coeffs) {
     if (!ctx || !ctx->short_rolling) return FPN_Zero<F>();
     const auto* rs = ctx->short_rolling;
     if (rs->count < FRAC_DIFF_K) return FPN_Zero<F>();
     constexpr int W = 128;
     static_assert((W & (W - 1)) == 0, "W must be power of 2 for branchless wrap");
-    FPN<F> sum = FPN_Zero<F>();
+    FPN_Binary<F> sum = FPN_Zero<F>();
     int idx = (rs->head - 1) & (W - 1);
     for (int k = 0; k < FRAC_DIFF_K; k++) {
-        FPN<F> coeff_fpn = FPN_FromDouble<F>(coeffs[k]);
-        FPN<F> term = FPN_Mul(coeff_fpn, rs->price_buf[idx]);
+        FPN_Binary<F> coeff_fpn = FPN_FromDouble<F>(coeffs[k]);
+        FPN_Binary<F> term = FPN_Mul(coeff_fpn, rs->price_buf[idx]);
         // Sign alternates: even k → add, odd k → subtract.
         sum = ((k & 1) == 0) ? FPN_Add(sum, term) : FPN_Sub(sum, term);
         idx = (idx - 1) & (W - 1);
@@ -433,17 +433,17 @@ inline FPN<F> FracDiffPriceCompute(const FeatureComputeCtx<F>* ctx,
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_FracDiffPrice_d04(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_FracDiffPrice_d04(const FeatureComputeCtx<F>* ctx) {
     return FracDiffPriceCompute<F>(ctx, kFracDiff_d04_Coeffs);
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_FracDiffPrice_d05(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_FracDiffPrice_d05(const FeatureComputeCtx<F>* ctx) {
     return FracDiffPriceCompute<F>(ctx, kFracDiff_d05_Coeffs);
 }
 
 template <unsigned F>
-inline FPN<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ctx) {
+inline FPN_Binary<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ctx) {
     return FracDiffPriceCompute<F>(ctx, kFracDiff_d06_Coeffs);
 }
 
@@ -659,13 +659,13 @@ inline uint64_t FEATURE_REGISTRY_HASH() {
 //
 // (1) `FPN_IsValidFinite<F>(val_fpn)` — branchless integer magnitude check.
 //     Catches FPN_DivNoAssert(x, 0) saturation (FPN_MAX, ~3.4e38 in float
-//     space) AND any FPN value > 1e15 (no legitimate feature is this
-//     large). FPN itself can't be NaN/Inf — it's an integer — so the
-//     float-side check below misses "FPN garbage in normal-finite range."
+//     space) AND any FPN_Binary value > 1e15 (no legitimate feature is this
+//     large). FPN_Binary itself can't be NaN/Inf — it's an integer — so the
+//     float-side check below misses "FPN_Binary garbage in normal-finite range."
 //
 // (2) `std::isnan(_v) || std::isinf(_v)` — float-side post-conversion
-//     check. Catches the FPN→float saturation case (FPN_MAX → +Inf in
-//     float because float max is 3.4e38, equal to FPN<64>'s post-conversion
+//     check. Catches the FPN_Binary→float saturation case (FPN_MAX → +Inf in
+//     float because float max is 3.4e38, equal to FPN_Binary<64>'s post-conversion
 //     value). Also catches `FPN_FromDouble(NaN)` paths that propagate
 //     through to the output float.
 //
@@ -701,7 +701,7 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
             } \
         } \
         if (!_stale_skip) { \
-            FPN<F> _fpn = fn(ctx); \
+            FPN_Binary<F> _fpn = fn(ctx); \
             if (!FPN_IsValidFinite(_fpn)) { return -1; } \
             float _v = (float)FPN_ToDouble(_fpn); \
             if (std::isnan(_v) || std::isinf(_v)) { return -1; } \
@@ -770,7 +770,7 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out,
 #define X(id, name, version, enabled, fn, note, staleness) \
     if ((enabled)) { \
         if (m & (1ULL << FEATURE_##id)) { \
-            FPN<F> _fpn = fn(ctx); \
+            FPN_Binary<F> _fpn = fn(ctx); \
             if (!FPN_IsValidFinite(_fpn)) { return -1; } \
             float _v = (float)FPN_ToDouble(_fpn); \
             if (std::isnan(_v) || std::isinf(_v)) { return -1; } \

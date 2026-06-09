@@ -40,7 +40,7 @@
 //   - Helper is `inline` in header → compile-time-resolved offset folding
 //   - Pass OMS by pointer (matches OMS_PushSubmit signature; single
 //     mov-via-register for OMS access)
-//   - FPN<F> + integer args pass via SysV registers; no stack churn
+//   - FPN_Binary<F> + integer args pass via SysV registers; no stack churn
 //   - Templated on <F> for compile-time inlining
 //   - Forwards return bool from OMS_PushSubmit (caller can check)
 //
@@ -53,7 +53,7 @@
 #pragma once
 
 #include "../CoreFrameworks/OrderManager.hpp"  // OrderManagerState<F>, OMS_PushSubmit, OrderType
-#include "../FixedPoint/FixedPointN.hpp"        // FPN<F>, FPN_Zero<F>()
+#include "../FixedPoint/FixedPointN.hpp"        // FPN_Binary<F>, FPN_Zero<F>()
 
 namespace tt {
 
@@ -75,9 +75,9 @@ namespace tt {
 template <unsigned F>
 inline bool OMS_PushExitForSlot(OrderManagerState<F>* oms,
                                  int16_t slot,
-                                 FPN<F> qty,
+                                 FPN_Binary<F> qty,
                                  uint8_t strategy_id,
-                                 FPN<F> event_price,
+                                 FPN_Binary<F> event_price,
                                  uint8_t leg,
                                  const ::PerCoreCfg<F>* core_cfg) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (A refined): required-field ctor + optional assignments.

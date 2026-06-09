@@ -21,7 +21,7 @@
 //
 //   FOREACH_CORE_CTX_INIT_FIELD(X)
 //     ~40 entries. ALL boot-init fields on CoreContext that take a
-//     value-init (FPN<F>=Zero, scalar=0/HALT_OK/STRATEGY_NONE/-1,
+//     value-init (FPN_Binary<F>=Zero, scalar=0/HALT_OK/STRATEGY_NONE/-1,
 //     pointer=nullptr, etc.). Walked at boot only.
 //
 //   FOREACH_CORE_CTX_RESET_FIELD(X)
@@ -80,7 +80,7 @@ namespace tt {
 // Tuple: X(NAME, TYPE, INIT_VALUE)
 //   NAME       — field name on CoreContext (lowercase snake_case)
 //   TYPE       — C++ field type; cast applied at write site via (TYPE)(INIT_VALUE)
-//   INIT_VALUE — initial value at boot; FPN<F>=FPN_Zero<F>(), scalar=numeric, ptr=nullptr
+//   INIT_VALUE — initial value at boot; FPN_Binary<F>=FPN_Zero<F>(), scalar=numeric, ptr=nullptr
 //
 // Order matches the historical EventLoopState_Init body to preserve
 // review-readability + match documentation. Field grouping reflects the
@@ -100,10 +100,10 @@ namespace tt {
     X(strategy_state_kind,        uint8_t,            0xFF)                                         \
     X(core_state_flags,           uint8_t,            0)                                            \
     /* HOT cluster — intended trade values */                                                       \
-    X(intended_tp,                FPN<F>,             FPN_Zero<F>())                                \
-    X(intended_sl,                FPN<F>,             FPN_Zero<F>())                                \
-    X(intended_qty,               FPN<F>,             FPN_Zero<F>())                                \
-    X(allocated_balance,          FPN<F>,             FPN_Zero<F>())                                \
+    X(intended_tp,                FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(intended_sl,                FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(intended_qty,               FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(allocated_balance,          FPN_Binary<F>,             FPN_Zero<F>())                                \
     X(halt_reason,                uint8_t,            HALT_OK)                                      \
     X(strategy_halt_reason,       uint8_t,            SHALT_OK)                                     \
     /* HOT cluster — ML decision state (reset every cycle by RebuildOneCore; init for cold-boot safety) */ \
@@ -118,24 +118,24 @@ namespace tt {
     /* WARM cluster — per-event accounting */                                                       \
     X(entries_processed,          uint64_t,           0)                                            \
     X(exits_processed,            uint64_t,           0)                                            \
-    X(last_entry_price,           FPN<F>,             FPN_Zero<F>())                                \
+    X(last_entry_price,           FPN_Binary<F>,             FPN_Zero<F>())                                \
     X(last_entry_tick,            uint64_t,           0)                                            \
     X(last_entry_wall_us,         uint64_t,           0)                                            \
     X(sl_cooldown_remaining,      uint32_t,           0)                                            \
     X(idle_cycles,                uint32_t,           0)                                            \
     /* WARM cluster — per-core P&L (v4.0.4) */                                                      \
-    X(core_realized,              FPN<F>,             FPN_Zero<F>())                                \
-    X(core_fees,                  FPN<F>,             FPN_Zero<F>())                                \
+    X(core_realized,              FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_fees,                  FPN_Binary<F>,             FPN_Zero<F>())                                \
     X(core_wins,                  uint32_t,           0)                                            \
     X(core_losses,                uint32_t,           0)                                            \
     /* WARM cluster — partner pairing + gross accumulators (v4.7.21/26) */                          \
-    X(partner_pending_pnl,        FPN<F>,             FPN_Zero<F>())                                \
-    X(core_gross_wins,            FPN<F>,             FPN_Zero<F>())                                \
-    X(core_gross_losses,          FPN<F>,             FPN_Zero<F>())                                \
-    X(core_open_notional,         FPN<F>,             FPN_Zero<F>())                                \
+    X(partner_pending_pnl,        FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_gross_wins,            FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_gross_losses,          FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_open_notional,         FPN_Binary<F>,             FPN_Zero<F>())                                \
     /* WARM cluster — per-core kill switch (Phase 3) */                                             \
-    X(core_peak_balance,          FPN<F>,             FPN_Zero<F>())                                \
-    X(core_dd_pct,                FPN<F>,             FPN_Zero<F>())                                \
+    X(core_peak_balance,          FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_dd_pct,                FPN_Binary<F>,             FPN_Zero<F>())                                \
     X(core_ks_trips_total,        uint32_t,           0)
 
 //======================================================================================================
@@ -175,19 +175,19 @@ namespace tt {
     X(entries_processed,          uint64_t,           0)                                            \
     X(exits_processed,            uint64_t,           0)                                            \
     /* Phase 2.1 — P&L + budget leak prevention */                                                  \
-    X(core_realized,              FPN<F>,             FPN_Zero<F>())                                \
-    X(core_fees,                  FPN<F>,             FPN_Zero<F>())                                \
+    X(core_realized,              FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_fees,                  FPN_Binary<F>,             FPN_Zero<F>())                                \
     X(core_wins,                  uint32_t,           0)                                            \
     X(core_losses,                uint32_t,           0)                                            \
-    X(core_open_notional,         FPN<F>,             FPN_Zero<F>())                                \
+    X(core_open_notional,         FPN_Binary<F>,             FPN_Zero<F>())                                \
     /* Phase 3 — kill switch leak prevention */                                                     \
-    X(core_peak_balance,          FPN<F>,             FPN_Zero<F>())                                \
-    X(core_dd_pct,                FPN<F>,             FPN_Zero<F>())                                \
+    X(core_peak_balance,          FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_dd_pct,                FPN_Binary<F>,             FPN_Zero<F>())                                \
     X(core_ks_trips_total,        uint32_t,           0)                                            \
     /* v4.7.21/26 — partner pairing + gross accumulator leak prevention */                          \
-    X(partner_pending_pnl,        FPN<F>,             FPN_Zero<F>())                                \
-    X(core_gross_wins,            FPN<F>,             FPN_Zero<F>())                                \
-    X(core_gross_losses,          FPN<F>,             FPN_Zero<F>())                                \
+    X(partner_pending_pnl,        FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_gross_wins,            FPN_Binary<F>,             FPN_Zero<F>())                                \
+    X(core_gross_losses,          FPN_Binary<F>,             FPN_Zero<F>())                                \
     /* v5.4.3 (recurring-bugs Class 5) — cooldown + idle-cycle leak prevention */                   \
     X(sl_cooldown_remaining,      uint32_t,           0)                                            \
     X(idle_cycles,                uint32_t,           0)

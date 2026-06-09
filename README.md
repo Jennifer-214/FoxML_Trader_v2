@@ -34,7 +34,7 @@ The hot path is **0.4% of the project**. The rest is supporting infrastructure �
 
 ## recent (v5.11.x)
 
-- 🔬 **slow path 30x faster.** v5.11 sprint (9 phases, 65 sub-ships) collapsed slow-path p99 from ~3000µs to ~220µs. AVX-512 Bandit_GetProbabilities, FPN<F=64> end-to-end determinism, locale-immune parsing, allocator eradication, mmap arenas, async log writer, branchless ring buffer commit.
+- 🔬 **slow path 30x faster.** v5.11 sprint (9 phases, 65 sub-ships) collapsed slow-path p99 from ~3000µs to ~220µs. AVX-512 Bandit_GetProbabilities, FPN_Binary<F=64> end-to-end determinism, locale-immune parsing, allocator eradication, mmap arenas, async log writer, branchless ring buffer commit.
 - 🤖 **multi-horizon ML ensemble.** Bandit-Exp3 weighted blend per regime over N horizons. Train multi-horizon at v5.11.41+; live engine auto-detects sibling `_horizon_<N>` dirs + per-regime bandit weights. Runtime IC drift detection auto-demotes degraded horizons.
 - 🎯 **role-agnostic strategy** (v5.11.62). Strategy code never touches role names — adding a new model role is a 5-step procedure that doesn't change the strategy at all. Trains barrier 3-class, regression, binary buy_signal — all work transparently.
 - 🛡 **train-serve parity locked** by FEATURE_REGISTRY_HASH + LABEL_REGISTRY_HASH + scaler_sha256 + HMAC stamp body. Cross-build / cross-cfg / cross-feature drift refused at engine load.

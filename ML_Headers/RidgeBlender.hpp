@@ -30,14 +30,14 @@
 //   - Cholesky failure (any L[i][i] ≤ 0) → graceful fallback to uniform
 //     weights; bandit dispatch path handles this transparently.
 //
-// FPN at boundaries (output weights), double internally for Cholesky
+// FPN_Binary at boundaries (output weights), double internally for Cholesky
 // numerical stability. Boundary-stable refactor pattern per CLAUDE.local.md
 // 2026-05-06 — fixed-point math drives the snapshot/serialization-stable
 // API; matrix decomp uses IEEE-754 double for 12-15 decimal precision.
 //
 // Bytewise determinism: Cholesky on doubles is deterministic given
 // identical input + identical compiler flags. FPN_Sqrt (used at the
-// FPN boundary) is bytewise-deterministic per v5.10.0b's Newton-Raphson
+// FPN_Binary boundary) is bytewise-deterministic per v5.10.0b's Newton-Raphson
 // implementation. Replay-determinism test (v5.9.2) verifies this end-
 // to-end across runs.
 //
@@ -79,7 +79,7 @@ static constexpr int RIDGE_HISTORY_DEPTH = 64;
 //======================================================================================================
 // [RIDGEWEIGHTS STRUCT]
 //======================================================================================================
-// Output (boundary-stable: FPN<F> for snapshot/serialization stability)
+// Output (boundary-stable: FPN_Binary<F> for snapshot/serialization stability)
 // + internal scratch (double for Cholesky numerical stability).
 //
 // Allocated INSIDE EnsembleModelZoo (per-core; already heap-allocated).
@@ -94,11 +94,11 @@ static constexpr int RIDGE_HISTORY_DEPTH = 64;
 //======================================================================================================
 template <unsigned F>
 struct RidgeWeights {
-    // === OUTPUT (boundary; FPN for snapshot stability) ===
+    // === OUTPUT (boundary; FPN_Binary for snapshot stability) ===
     // Final per-model weights, sum-to-1, all ≥ 0. Caller passes to
     // Model_Predict_Ensemble_Weighted as `const double*` after
     // FPN_ToDouble conversion at the call site.
-    FPN<F>  w[MAX_RIDGE_MODELS];
+    FPN_Binary<F>  w[MAX_RIDGE_MODELS];
 
     // === INTERNAL SCRATCH (double; Cholesky numerical stability) ===
     double  corr_matrix[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS];
@@ -276,7 +276,7 @@ inline int Cholesky_Solve(double L_out[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS],
 // Returns 0 on success, -1 on Cholesky failure (uniform weights returned
 // in `out->w[]` regardless; fallback_to_uniform set to 1).
 //
-// Cfg parameters (all FPN<F> on cfg, converted to double here):
+// Cfg parameters (all FPN_Binary<F> on cfg, converted to double here):
 //   - ridge_lambda     (default 0.15; safe for typical N=2..8)
 //   - cost_penalty     (default 0.5; fee-cost weighting in net IC)
 //   - min_ic_floor     (default 0.001; prevents zero-weight starvation)

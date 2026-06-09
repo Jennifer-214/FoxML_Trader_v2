@@ -199,7 +199,7 @@ static inline int EngineSharded_ForceCloseOnShutdown(
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        FPN<F> qty = oms->portfolio.positions[slot].quantity;
+        FPN_Binary<F> qty = oms->portfolio.positions[slot].quantity;
         double qty_d = FPN_ToDouble(qty);
         qty_d = binance_round_qty(qty_d, api->filters.lot_step_size);
         if (qty_d < api->filters.lot_min_qty) {
@@ -207,7 +207,7 @@ static inline int EngineSharded_ForceCloseOnShutdown(
                     slot, qty_d);
             continue;
         }
-        FPN<F> qty_rounded = FPN_FromDouble<F>(qty_d);
+        FPN_Binary<F> qty_rounded = FPN_FromDouble<F>(qty_d);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for Order_BindPreResolved at submit.
         // Under sharded single-position-per-core invariant, slot == core_id; cores[slot] is the
         // originating core's cfg.

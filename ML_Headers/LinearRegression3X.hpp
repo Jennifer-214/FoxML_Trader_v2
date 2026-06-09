@@ -33,8 +33,8 @@
 // this is basically the equation y = mx + b, slope is m, intercept is b, and these numbers give you the slope, we track them in a struct for better organization, and the slope means on average that the price changes by this much per interval
 //======================================================================================================
 template <unsigned F> struct LinearRegression3XModel {
-    FPN<F> slope;
-    FPN<F> intercept;
+    FPN_Binary<F> slope;
+    FPN_Binary<F> intercept;
 };
 //======================================================================================================
 // [FEEDER STRUCT]
@@ -42,7 +42,7 @@ template <unsigned F> struct LinearRegression3XModel {
 // this struct just has where there data lives before the regression takes place, apparently this is called a ring buffer, it holds the last 8 price sampels which is from the [MAX_WINDOW], head is where the next write goes, and count tracks which sample your on within the sample window, you can extend this for more intervals, but then the assert size changes, ill probably look into making that confirgurable outside of the file and based on dynamic observations but for now this works as i learn it, this also means that once the buffer gets full, it will start overwriting the oldest data point, which creates like a moving average for the slope, so basically it gives you the most recent output for the 8 prices
 //======================================================================================================
 template <unsigned F> struct RegressionFeederX {
-    FPN<F> price_samples[MAX_WINDOW];
+    FPN_Binary<F> price_samples[MAX_WINDOW];
     int head;
     int count;
 };
@@ -53,7 +53,7 @@ template <unsigned F> struct RegressionFeederX {
 //======================================================================================================
 template <unsigned F> struct LinearRegression3XResult {
     LinearRegression3XModel<F> model;
-    FPN<F> r_squared;
+    FPN_Binary<F> r_squared;
 };
 //======================================================================================================
 // [LINEAR REGRESSION FUNCTION PROTOTYPES]
@@ -79,7 +79,7 @@ template <unsigned F> inline RegressionFeederX<F> RegressionFeederX_Init() {
 //======================================================================================================
 // this writes the new price at the current head position, and it advances with a wrap,so that after it hits the max window length, it starts wrapping around, the count just increments until youve filled the window, and at 8 it just starts overwriting the older value, in short the data ingestion path
 //======================================================================================================
-template <unsigned F> inline void RegressionFeederX_Push(RegressionFeederX<F> *feeder, FPN<F> price) {
+template <unsigned F> inline void RegressionFeederX_Push(RegressionFeederX<F> *feeder, FPN_Binary<F> price) {
     feeder->price_samples[feeder->head] = price;
     feeder->head                        = (feeder->head + 1) & (MAX_WINDOW - 1); // branchless wrap, power-of-2 bitmask instead of modulo
     feeder->count += (feeder->count < MAX_WINDOW); // branchless saturate, comparison yields 0 or 1, so it stops incrementing at MAX_WINDOW
@@ -97,8 +97,8 @@ template <unsigned F> inline void RegressionFeederX_Push(RegressionFeederX<F> *f
 //
 // ss_total is the total variance in y, which is just how much the prices vary overall, ss_reg is how much of that the variance the regression line explains, and r^2 is just ss_reg / ss_total, which basically means "what fraction of the price movement is explained by the trend", oh thats cool, its literally a ratio of the relationship converted to a percentage, this stuff is neat to finally dig into, its such a shame that college classes feel like funeral processions, this sshit is actually cool when its applied to stuff outside of school, but college is just like "dot your t's and cross your i's and make sure you answer these problems which have no actual meaning", but thats a different tangent, and you arnt reading this for my opinions on how lacking alot of CS education actually is
 //======================================================================================================
-template <unsigned F> inline LinearRegression3XResult<F> LinearRegression3X_Fit(FPN<F> *x_values, FPN<F> *y_values, int count) {
-    using FP = FPN<F>;
+template <unsigned F> inline LinearRegression3XResult<F> LinearRegression3X_Fit(FPN_Binary<F> *x_values, FPN_Binary<F> *y_values, int count) {
+    using FP = FPN_Binary<F>;
 
     LinearRegression3XResult<F> result;
     result.model.slope     = FPN_Zero<F>();
@@ -151,8 +151,8 @@ template <unsigned F> inline LinearRegression3XResult<F> LinearRegression3X_Fit(
 template <unsigned F> inline LinearRegression3XResult<F> RegressionFeederX_Compute(RegressionFeederX<F> *feeder) {
     // no early return needed, _Fit handles count < 2 branchlessly via the zero-denom guard
 
-    FPN<F> linearized[MAX_WINDOW];
-    FPN<F> time_index[MAX_WINDOW];
+    FPN_Binary<F> linearized[MAX_WINDOW];
+    FPN_Binary<F> time_index[MAX_WINDOW];
 
     for (int i = 0; i < feeder->count; i++) {
         int idx       = (feeder->head - feeder->count + i + MAX_WINDOW) & (MAX_WINDOW - 1); // branchless wrap
@@ -167,7 +167,7 @@ template <unsigned F> inline LinearRegression3XResult<F> RegressionFeederX_Compu
 //======================================================================================================
 // this is just given the line what is the y at the assocaited x, literally just y = mx + b, an oldie but a goodie
 //======================================================================================================
-template <unsigned F> inline FPN<F> LinearRegression3X_Predict(LinearRegression3XModel<F> model, FPN<F> x) {
+template <unsigned F> inline FPN_Binary<F> LinearRegression3X_Predict(LinearRegression3XModel<F> model, FPN_Binary<F> x) {
     return FPN_AddSat(FPN_Mul(model.slope, x), model.intercept);
 }
 //======================================================================================================

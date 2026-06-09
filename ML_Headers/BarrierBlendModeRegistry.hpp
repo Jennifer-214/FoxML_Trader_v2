@@ -32,7 +32,7 @@
 //     bool shadow_active   = flags & MODE_F_SHADOW_ACTIVE;    // cmov, no branch
 //
 //   Branchless dispatch via ternary chain (single cmov per output):
-//     FPN<F> tp_pct = blend_drives    ? blend_tp_d
+//     FPN_Binary<F> tp_pct = blend_drives    ? blend_tp_d
 //                   : dominant_drives ? FPN_FromDouble<F>(per_arm_buy_tp_pct[dominant_h])
 //                   : config->ml_tp_pct;
 //

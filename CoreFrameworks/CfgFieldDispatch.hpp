@@ -16,7 +16,7 @@
 //   Barrier 2 — X-macro extractor chokepoint: registry consumer macros call
 //               `tt::cfg_*_field(cfg.name, ...)`; T deduced from cfg field reference.
 //   Barrier 3 — Compile-time type-family static_assert: each tt:: function asserts
-//               T is in the recognized family (is_FPN_v / std::is_floating_point_v /
+//               T is in the recognized family (is_fp_binary_v / std::is_floating_point_v /
 //               std::is_array_v / std::is_integral_v). Adding a cfg field of an
 //               unrecognized type FAILS THE BUILD with actionable error message.
 //
@@ -25,7 +25,7 @@
 //======================================================================================================
 #pragma once
 #include "CfgFieldRegistry.hpp"
-#include "../FixedPoint/FixedPointN.hpp"   // FPN<F>, is_FPN_v, FPN_FromDouble, FPN_ToDouble
+#include "../FixedPoint/FixedPointN.hpp"   // FPN_Binary<F>, is_fp_binary_v, FPN_FromDouble, FPN_ToDouble
 #include <cstdlib>     // strtoull, atoi, atof
 #include <cstring>     // strncpy
 #include <cstdio>      // snprintf
@@ -60,7 +60,7 @@ namespace tt {
         // Adding a cfg field of an unrecognized type FAILS THE BUILD here, forcing
         // a deliberate decision (extend tt::cfg_parse_field<T> with a new branch)
         // rather than silent truncation via type-erased reinterpret_cast.
-        static_assert(is_FPN_v<T>
+        static_assert(is_fp_binary_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -69,9 +69,9 @@ namespace tt {
                       "using this T as a cfg field. See "
                       "DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.");
 
-        if constexpr (is_FPN_v<T>) {
-            // FPN<F>: parse double, apply percent scaling if KIND_DOUBLE_PCT (cfg-file context only),
-            // clamp to descriptor range, convert to FPN<T::F>.
+        if constexpr (is_fp_binary_v<T>) {
+            // FPN_Binary<F>: parse double, apply percent scaling if KIND_DOUBLE_PCT (cfg-file context only),
+            // clamp to descriptor range, convert to FPN_Binary<T::F>.
             double v = parse_double_fast(val);
             if (!wire_context && desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) {
                 v /= 100.0;  // operator types "15.0" → stored as 0.15 (cfg-FILE convention)
@@ -177,7 +177,7 @@ namespace tt {
     // Precedent: MemHeaders/RunHistory.hpp:87-89.
     template <typename T>
     inline int cfg_save_field(const T& src, const CfgFieldDescriptor& desc, char* buf, size_t cap) {
-        static_assert(is_FPN_v<T>
+        static_assert(is_fp_binary_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -190,7 +190,7 @@ namespace tt {
         if (pinned) prev = uselocale(pinned);
 
         int n = 0;
-        if constexpr (is_FPN_v<T>) {
+        if constexpr (is_fp_binary_v<T>) {
             double v = FPN_ToDouble(src);
             if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v *= 100.0;
             const char* fmt = (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) ? "%.2f" : "%.4f";
@@ -230,14 +230,14 @@ namespace tt {
     // defaults GUI button + boot default-fill consumers. Same 3-barrier discipline.
     template <typename T>
     inline void cfg_assign_field(T& dst, const CfgFieldDescriptor& desc) {
-        static_assert(is_FPN_v<T>
+        static_assert(is_fp_binary_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
                       "cfg field type not in recognized family — "
                       "extend tt::cfg_assign_field<T> with a new branch.");
 
-        if constexpr (is_FPN_v<T>) {
+        if constexpr (is_fp_binary_v<T>) {
             // Default is stored as fraction (NOT percent); no PCT scaling needed.
             dst = FPN_FromDouble<T::F>(desc.payload.as_double.default_val);
         } else if constexpr (std::is_floating_point_v<T>) {
@@ -271,15 +271,15 @@ namespace tt {
     // default. Used by GUI "modified" badge + CLI --list-cfg --changed-only consumer.
     template <typename T>
     inline bool cfg_diff_field(const T& current, const CfgFieldDescriptor& desc) {
-        static_assert(is_FPN_v<T>
+        static_assert(is_fp_binary_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
                       "cfg field type not in recognized family — "
                       "extend tt::cfg_diff_field<T> with a new branch.");
 
-        if constexpr (is_FPN_v<T>) {
-            // FPN equality via integer comparison (after FromDouble conversion).
+        if constexpr (is_fp_binary_v<T>) {
+            // FPN_Binary equality via integer comparison (after FromDouble conversion).
             const T default_fpn = FPN_FromDouble<T::F>(desc.payload.as_double.default_val);
             return !(current == default_fpn);
         } else if constexpr (std::is_floating_point_v<T>) {
@@ -320,7 +320,7 @@ namespace tt {
     // in tests/wire_format_invariants.hpp catches violations at test time.
     //
     // FORMAT (per kind):
-    //   FPN<F>:        %.17g (lossless double round-trip; sister to MemHeaders/RunHistory.hpp:87-89)
+    //   FPN_Binary<F>:        %.17g (lossless double round-trip; sister to MemHeaders/RunHistory.hpp:87-89)
     //   integers:      %lld / %llu (signed/unsigned via is_unsigned_v)
     //   bool:          ternary normalized to {0, 1} (H9 byte-equivalence; see cfg_save_field above)
     //   array<T, N>:   %s (string-style; KIND_FILE_PATH / KIND_STRING)
@@ -328,7 +328,7 @@ namespace tt {
     // Returns chars written (snprintf semantics; 0 on encoding error).
     template <typename T>
     inline size_t cfg_emit_field(const T& src, const CfgFieldDescriptor& desc, char* buf, size_t cap) {
-        static_assert(is_FPN_v<T>
+        static_assert(is_fp_binary_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -343,7 +343,7 @@ namespace tt {
         if (pinned) prev = uselocale(pinned);
 
         int n = 0;
-        if constexpr (is_FPN_v<T>) {
+        if constexpr (is_fp_binary_v<T>) {
             // %.17g — lossless double round-trip.
             n = snprintf(buf, cap, "%s=%.17g\n", desc.cfg_field_name, FPN_ToDouble(src));
         } else if constexpr (std::is_floating_point_v<T>) {
@@ -389,15 +389,15 @@ namespace tt {
     // template level; fallback is acceptable since populate is slow-path/stamp-emit cadence).
     //
     // v5.15.5.F.4d.1.B.2 — extended SrcT/DstT/HasT independent templates per coding-time
-    // discovery at Step 1 build verify. Cohort cfg fields are FPN<F> in master registry but
+    // discovery at Step 1 build verify. Cohort cfg fields are FPN_Binary<F> in master registry but
     // inf struct fields are double (per FOREACH_STAMP_BOUND_CFG legacy struct-gen at
-    // ModelInference.hpp:1199 `type name;` where type=double for FPN cohort rows + has_ field
+    // ModelInference.hpp:1199 `type name;` where type=double for FPN_Binary cohort rows + has_ field
     // is uint8_t for StampInferenceCfgInputs OR int for ModelStampResult at :1643). Framework
-    // walker needs to convert SrcT→DstT (FPN_ToDouble for FPN→double) + accept any integral
-    // HasT. Sister precedent: cfg_emit_field already handles FPN→double via FPN_ToDouble inline.
+    // walker needs to convert SrcT→DstT (FPN_ToDouble for FPN_Binary→double) + accept any integral
+    // HasT. Sister precedent: cfg_emit_field already handles FPN_Binary→double via FPN_ToDouble inline.
     template <typename SrcT, typename DstT, typename HasT>
     inline void cfg_populate_inf_field(const SrcT& cfg_src, DstT& inf_dst, HasT& inf_has_dst, bool gate) {
-        static_assert(is_FPN_v<SrcT>
+        static_assert(is_fp_binary_v<SrcT>
                    || std::is_floating_point_v<SrcT>
                    || std::is_integral_v<SrcT>
                    || std::is_array_v<SrcT>,
@@ -417,13 +417,13 @@ namespace tt {
                 inf_dst[0] = '\0';
                 inf_has_dst = static_cast<HasT>(0);
             }
-        } else if constexpr (is_FPN_v<SrcT> && std::is_floating_point_v<DstT>) {
-            // FPN<F> → double via FPN_ToDouble (cohort field common case; sister to
-            // cfg_emit_field FPN→double conversion at line 339).
+        } else if constexpr (is_fp_binary_v<SrcT> && std::is_floating_point_v<DstT>) {
+            // FPN_Binary<F> → double via FPN_ToDouble (cohort field common case; sister to
+            // cfg_emit_field FPN_Binary→double conversion at line 339).
             inf_dst = gate ? FPN_ToDouble(cfg_src) : DstT{};
             inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
-        } else if constexpr (is_FPN_v<SrcT> && is_FPN_v<DstT>) {
-            // FPN<F> → FPN<F> direct (no conversion).
+        } else if constexpr (is_fp_binary_v<SrcT> && is_fp_binary_v<DstT>) {
+            // FPN_Binary<F> → FPN_Binary<F> direct (no conversion).
             inf_dst = gate ? cfg_src : DstT{};
             inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
         } else {
@@ -443,37 +443,37 @@ namespace tt {
     //   cfg_diff_field — compare current vs default → bool (used for GUI "modified" badge)
     //   cfg_drift_compare — compare stamp vs runtime cfg → bool (used for drift detection)
     //
-    // Returns true if values differ (drift detected). Per H4 — FPN<F> compared via integer
+    // Returns true if values differ (drift detected). Per H4 — FPN_Binary<F> compared via integer
     // equality (NEVER float math on accounting types).
     //
     // v5.15.5.F.4d.1.B.2 — extended StampT/CfgT independent templates per coding-time
     // discovery at Step 1 build verify. Stamp's recorded value is at the inf struct's type
-    // (double for FPN cohort rows per ModelInference.hpp:1643 `int has_##name; type name;`
-    // where type=double); cfg runtime value is FPN<F>. Compare in DstT space (the stamp's
+    // (double for FPN_Binary cohort rows per ModelInference.hpp:1643 `int has_##name; type name;`
+    // where type=double); cfg runtime value is FPN_Binary<F>. Compare in DstT space (the stamp's
     // recorded type — what was actually wire-emitted at training time).
     template <typename StampT, typename CfgT>
     inline bool cfg_drift_compare(const StampT& stamp_val, const CfgT& cfg_val) {
-        static_assert(is_FPN_v<StampT>
+        static_assert(is_fp_binary_v<StampT>
                    || std::is_floating_point_v<StampT>
                    || std::is_integral_v<StampT>
                    || std::is_array_v<StampT>,
                       "stamp field type not in recognized family — "
                       "extend tt::cfg_drift_compare<StampT,CfgT> with a new branch.");
 
-        if constexpr (std::is_floating_point_v<StampT> && is_FPN_v<CfgT>) {
-            // stamp is double (legacy struct-gen) vs cfg is FPN<F>. Compare in double space
+        if constexpr (std::is_floating_point_v<StampT> && is_fp_binary_v<CfgT>) {
+            // stamp is double (legacy struct-gen) vs cfg is FPN_Binary<F>. Compare in double space
             // (what was wire-emitted at training time per FPN_ToDouble in cfg_emit_field).
             return stamp_val != FPN_ToDouble(cfg_val);
-        } else if constexpr (is_FPN_v<StampT> && is_FPN_v<CfgT>) {
-            // FPN equality via byte comparison (H4 — never float math on accounting types).
+        } else if constexpr (is_fp_binary_v<StampT> && is_fp_binary_v<CfgT>) {
+            // FPN_Binary equality via byte comparison (H4 — never float math on accounting types).
             // memcmp on POD struct compares the underlying integer limb array bit-exactly;
-            // FPN<F> doesn't define operator== directly so we go through the byte layer.
+            // FPN_Binary<F> doesn't define operator== directly so we go through the byte layer.
             // .E.0.1 F-076 guard: this raw memcmp is byte-deterministic ONLY if StampT has no
-            // padding. FPN<F> is padding-free today (probed); this static_assert FAILS the build
+            // padding. FPN_Binary<F> is padding-free today (probed); this static_assert FAILS the build
             // if a future layout change adds padding (which would make this memcmp false-drift).
             // Sister to the ControllerConfig zero-init ctor (same H12 byte-equivalence class).
             static_assert(std::has_unique_object_representations_v<StampT>,
-                          "F-076/H12: StampT (FPN) gained padding -> raw memcmp would false-drift; "
+                          "F-076/H12: StampT (FPN_Binary) gained padding -> raw memcmp would false-drift; "
                           "make it padding-free or compare field-wise.");
             return memcmp(&stamp_val, &cfg_val, sizeof(StampT)) != 0;
         } else if constexpr (std::is_floating_point_v<StampT> && std::is_floating_point_v<CfgT>) {
@@ -502,7 +502,7 @@ namespace tt {
                                         const char* field_name,
                                         const StampT& stamp_val,
                                         const CfgT& cfg_val) {
-        static_assert(is_FPN_v<StampT>
+        static_assert(is_fp_binary_v<StampT>
                    || std::is_floating_point_v<StampT>
                    || std::is_integral_v<StampT>
                    || std::is_array_v<StampT>,
@@ -511,12 +511,12 @@ namespace tt {
 
         if (!buf || cap == 0) return 0;
 
-        if constexpr (std::is_floating_point_v<StampT> && is_FPN_v<CfgT>) {
-            // Stamp recorded as double (legacy struct-gen); cfg runtime is FPN<F>.
+        if constexpr (std::is_floating_point_v<StampT> && is_fp_binary_v<CfgT>) {
+            // Stamp recorded as double (legacy struct-gen); cfg runtime is FPN_Binary<F>.
             // Format in double-space (matches wire-emit semantic per cfg_emit_field).
             return snprintf(buf, cap, "%s drift: stamp=%g cfg=%g",
                             field_name, (double)stamp_val, FPN_ToDouble(cfg_val));
-        } else if constexpr (is_FPN_v<StampT> && is_FPN_v<CfgT>) {
+        } else if constexpr (is_fp_binary_v<StampT> && is_fp_binary_v<CfgT>) {
             return snprintf(buf, cap, "%s drift: stamp=%g cfg=%g",
                             field_name, FPN_ToDouble(stamp_val), FPN_ToDouble(cfg_val));
         } else if constexpr (std::is_floating_point_v<StampT> && std::is_floating_point_v<CfgT>) {

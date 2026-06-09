@@ -16,7 +16,7 @@
 //     exchange feed), NOT wall clock. This is the canonical time source for the
 //     slow-path gate, snapshot timestamps, and CSV trade log timestamps.
 //
-// FPN<F> price and volume use the engine's existing fixed-point math for
+// FPN_Binary<F> price and volume use the engine's existing fixed-point math for
 // consistency with the rest of the hot path.
 //======================================================================================================
 
@@ -30,8 +30,8 @@ namespace tt {
 
 template <unsigned F>
 struct alignas(64) Tick {
-    FPN<F>   price;        // current trade price (FPN)
-    FPN<F>   volume;       // current trade volume (FPN)
+    FPN_Binary<F>   price;        // current trade price (FPN_Binary)
+    FPN_Binary<F>   volume;       // current trade volume (FPN_Binary)
     uint64_t timestamp;    // market time, microseconds since epoch
     uint64_t sequence;     // monotonic sequence number from the exchange feed
     // v4.3 — Binance "m" field. 1 = buyer was the maker (seller aggressed),

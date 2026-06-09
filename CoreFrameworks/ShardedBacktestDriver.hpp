@@ -95,13 +95,13 @@ struct ShardedBacktestDriver {
     CumDeltaState<F>*      cumdelta_state;
     TickRateState*         tick_rate_state;
     RORRegressor<F>*       regime_ror;
-    const FPN<F>*          ema_price;       // caller updates per-tick before RunTick
+    const FPN_Binary<F>*          ema_price;       // caller updates per-tick before RunTick
     // Track E.3 — depth-derived gate input. Caller updates this pointer (or
     // its target) per-tick from DepthReplayState's current snapshot. Driver
     // threads it to RebuildAllParameters; RebuildAll vetoes buys when
     // *book_imbalance < cfg.min_book_imbalance. NULL = no depth feed
     // (cfg.min_book_imbalance gate stays inert, pre-E.3 behavior).
-    const FPN<F>*          book_imbalance;
+    const FPN_Binary<F>*          book_imbalance;
 
     // v4.5 Wave 1 — D.1/D.2/D.4 state for the new microstructure features.
     // Driver mutates these on slow-path firings (Push functions in
@@ -118,8 +118,8 @@ struct ShardedBacktestDriver {
     // the ring on slow-path; passes current values straight through to
     // RebuildAllParameters.
     void*                  spread_state;       // SpreadState<F, 1024>*
-    const FPN<F>*          current_spread;     // BookSnapshot::spread holder
-    const FPN<F>*          current_mid_price;  // BookSnapshot::mid_price holder
+    const FPN_Binary<F>*          current_spread;     // BookSnapshot::spread holder
+    const FPN_Binary<F>*          current_mid_price;  // BookSnapshot::mid_price holder
 
     // Track E.1 — slow-path completion hook. Fires AFTER slow-path
     // RollingStats pushes / RebuildAllParameters / KillSwitchEvaluate, BEFORE
@@ -352,7 +352,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             // BookSnapshot per v1.7.3 N-6 9-arg signature (sister-canonical reuse from
             // DataStream/BinanceDepth.hpp:29-41 per feedback_audit_canonical_sister_before_new_infra).
             // Field-mapping verified at v1.7.4: drv->book_imbalance / drv->current_spread /
-            // drv->current_mid_price are POINTER types (const FPN<F>*) requiring deref before
+            // drv->current_mid_price are POINTER types (const FPN_Binary<F>*) requiring deref before
             // assign (v1.7.4 NEW-4 closure); null-check each before deref.
             BookSnapshot<F> depth = BookSnapshot_Init<F>();
             if (drv->book_imbalance)    { depth.imbalance = *drv->book_imbalance; }

@@ -344,10 +344,10 @@ template <unsigned F>
 inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
                                          const TradeEvent<F>& event,
                                          uint8_t strategy_id,
-                                         FPN<F> entry_price,
-                                         FPN<F> trade_size,
-                                         FPN<F> entry_fee,
-                                         FPN<F> balance_after,
+                                         FPN_Binary<F> entry_price,
+                                         FPN_Binary<F> trade_size,
+                                         FPN_Binary<F> entry_fee,
+                                         FPN_Binary<F> balance_after,
                                          int regime = -1) {
     if (!log->file) return;
     char row[1024];
@@ -397,12 +397,12 @@ template <unsigned F>
 inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
                                         const TradeEvent<F>& event,
                                         uint8_t strategy_id,
-                                        FPN<F> entry_price,
-                                        FPN<F> exit_price,
-                                        FPN<F> trade_size,
-                                        FPN<F> net_pnl,
-                                        FPN<F> total_fees,
-                                        FPN<F> balance_after,
+                                        FPN_Binary<F> entry_price,
+                                        FPN_Binary<F> exit_price,
+                                        FPN_Binary<F> trade_size,
+                                        FPN_Binary<F> net_pnl,
+                                        FPN_Binary<F> total_fees,
+                                        FPN_Binary<F> balance_after,
                                         int regime = -1) {
     if (!log->file) return;
     char row[1024];

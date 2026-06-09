@@ -22,17 +22,17 @@
 // [BOOK SNAPSHOT]
 //======================================================================================================
 template <unsigned F> struct BookLevel {
-    FPN<F> price;
-    FPN<F> qty;
+    FPN_Binary<F> price;
+    FPN_Binary<F> qty;
 };
 
 template <unsigned F> struct BookSnapshot {
     BookLevel<F> bids[5];
     BookLevel<F> asks[5];
-    FPN<F> spread;           // asks[0].price - bids[0].price
-    FPN<F> mid_price;        // (best_bid + best_ask) / 2
-    FPN<F> imbalance;        // (total_bid_qty - total_ask_qty) / (total_bid_qty + total_ask_qty)
-    FPN<F> top_imbalance;    // same but just top level
+    FPN_Binary<F> spread;           // asks[0].price - bids[0].price
+    FPN_Binary<F> mid_price;        // (best_bid + best_ask) / 2
+    FPN_Binary<F> imbalance;        // (total_bid_qty - total_ask_qty) / (total_bid_qty + total_ask_qty)
+    FPN_Binary<F> top_imbalance;    // same but just top level
     uint64_t update_count;
     uint64_t last_update_id; // Binance "lastUpdateId" — monotonic per-symbol update sequence
                              // (0 if missing from message; set by depth_parse_json)
@@ -182,16 +182,16 @@ static inline int depth_parse_json(const char *json, int len, BookSnapshot<F> *s
         FPN_FromDouble<F>(2.0));
 
     // top-of-book imbalance
-    FPN<F> top_total = FPN_AddSat(snap->bids[0].qty, snap->asks[0].qty);
+    FPN_Binary<F> top_total = FPN_AddSat(snap->bids[0].qty, snap->asks[0].qty);
     if (!FPN_IsZero(top_total))
         snap->top_imbalance = FPN_DivNoAssert(
             FPN_Sub(snap->bids[0].qty, snap->asks[0].qty), top_total);
 
     // full 5-level imbalance
-    FPN<F> total_bid = FPN_Zero<F>(), total_ask = FPN_Zero<F>();
+    FPN_Binary<F> total_bid = FPN_Zero<F>(), total_ask = FPN_Zero<F>();
     for (int i = 0; i < bid_count; i++) total_bid = FPN_AddSat(total_bid, snap->bids[i].qty);
     for (int i = 0; i < ask_count; i++) total_ask = FPN_AddSat(total_ask, snap->asks[i].qty);
-    FPN<F> total = FPN_AddSat(total_bid, total_ask);
+    FPN_Binary<F> total = FPN_AddSat(total_bid, total_ask);
     if (!FPN_IsZero(total))
         snap->imbalance = FPN_DivNoAssert(FPN_Sub(total_bid, total_ask), total);
 

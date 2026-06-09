@@ -22,8 +22,8 @@
 #include "../StrategyInterface.hpp"
 
 template <unsigned F> struct EmaCrossState {
-    FPN<F> prev_ema;        // previous slow-path EMA value (for slope)
-    FPN<F> last_ema_slope;  // ema - prev_ema (positive = rising)
+    FPN_Binary<F> prev_ema;        // previous slow-path EMA value (for slope)
+    FPN_Binary<F> last_ema_slope;  // ema - prev_ema (positive = rising)
     int initialized;
 };
 
@@ -43,8 +43,8 @@ inline void EmaCross_Init(EmaCrossState<F> *state, const RollingStats<F> *rollin
 // ADAPT — no-op. no regression, no idle squeeze, no filter shifting.
 //======================================================================================================
 template <unsigned F>
-inline void EmaCross_Adapt(EmaCrossState<F> *state, FPN<F> current_price,
-                            FPN<F> portfolio_delta, uint16_t active_bitmap,
+inline void EmaCross_Adapt(EmaCrossState<F> *state, FPN_Binary<F> current_price,
+                            FPN_Binary<F> portfolio_delta, uint16_t active_bitmap,
                             const BuySideGateConditions<F> *buy_conds,
                             const ControllerConfig<F> *cfg) {
     (void)state; (void)current_price; (void)portfolio_delta;
@@ -58,12 +58,12 @@ template <unsigned F>
 inline BuySideGateConditions<F> EmaCross_BuySignal(
     EmaCrossState<F> *state, const RollingStats<F> *rolling,
     const RollingStats<F, 512> *rolling_long, const ControllerConfig<F> *cfg,
-    FPN<F> ema_price = FPN_Zero<F>()) {
+    FPN_Binary<F> ema_price = FPN_Zero<F>()) {
 
     BuySideGateConditions<F> conds;
 
     // use EMA if available, fall back to rolling avg
-    FPN<F> ref = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
+    FPN_Binary<F> ref = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
 
     // update EMA slope (for ExitAdjust trailing)
     state->last_ema_slope = FPN_Sub(ref, state->prev_ema);
@@ -72,22 +72,22 @@ inline BuySideGateConditions<F> EmaCross_BuySignal(
     // crossover check: EMA must be above short SMA (128-tick)
     // use absolute difference vs stddev instead of normalized spread
     // (normalized spread is too tiny when EMA and SMA converge in ranging markets)
-    FPN<F> short_sma = rolling->price_avg;
+    FPN_Binary<F> short_sma = rolling->price_avg;
     int short_cross = 0;
     {
         // branchless compute-guard: compute always (zero divisor → safe saturate), gate the result by `valid`.
         int valid = !FPN_IsZero(short_sma) & !FPN_IsZero(rolling->price_stddev);
-        FPN<F> diff = FPN_Sub(ref, short_sma);
+        FPN_Binary<F> diff = FPN_Sub(ref, short_sma);
         int ema_above = (diff.v > 0);   // EMA above SMA: positive diff (was sign==0 && !IsZero; 16B two's-comp)
         // spread as fraction of stddev — more meaningful than % of price
-        FPN<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
+        FPN_Binary<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
         short_cross = valid & ema_above & FPN_GreaterThan(spread_stddevs, cfg->emacross_crossover_min);
     }
 
     int uptrend = short_cross;
 
     // buy price = EMA - (stddev * dip_mult)
-    FPN<F> dip = FPN_Mul(rolling->price_stddev, cfg->emacross_dip_mult);
+    FPN_Binary<F> dip = FPN_Mul(rolling->price_stddev, cfg->emacross_dip_mult);
     conds.price = FPN_Sub(ref, dip);
 
     // volume gate
@@ -106,11 +106,11 @@ inline BuySideGateConditions<F> EmaCross_BuySignal(
 // EXIT ADJUST — trail TP/SL when EMA slope is positive
 //======================================================================================================
 template <unsigned F>
-inline void EmaCross_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
+inline void EmaCross_ExitAdjust(Portfolio<F> *portfolio, FPN_Binary<F> current_price,
                                  const RollingStats<F> *rolling,
                                  EmaCrossState<F> *state,
                                  const ControllerConfig<F> *cfg) {
-    FPN<F> stddev = rolling->price_stddev;
+    FPN_Binary<F> stddev = rolling->price_stddev;
     if (FPN_IsZero(stddev)) return;
 
     // is EMA rising? (strictly-positive slope = trend continuation)
@@ -129,24 +129,24 @@ inline void EmaCross_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
 
         if (ema_rising) {
             // EMA confirms uptrend — trail with wider multiplier (let it run)
-            FPN<F> trail_dist = FPN_Mul(stddev, FPN_Mul(cfg->tp_trail_mult,
+            FPN_Binary<F> trail_dist = FPN_Mul(stddev, FPN_Mul(cfg->tp_trail_mult,
                                                           cfg->emacross_trail_mult));
-            FPN<F> new_tp = FPN_Sub(current_price, trail_dist);
+            FPN_Binary<F> new_tp = FPN_Sub(current_price, trail_dist);
             pos->take_profit_price = FPN_Max(pos->take_profit_price, new_tp);
 
             // trail SL up too — but cap at fee-floor so we don't ratchet
             // into a guaranteed-net-loss exit.
-            FPN<F> sl_dist = FPN_Mul(stddev, cfg->sl_trail_mult);
-            FPN<F> new_sl = FPN_Sub(current_price, sl_dist);
+            FPN_Binary<F> sl_dist = FPN_Mul(stddev, cfg->sl_trail_mult);
+            FPN_Binary<F> new_sl = FPN_Sub(current_price, sl_dist);
 
             // v5.1.7: fee-floor on the SL ratchet. entry × (1 - 3 × fee_rate)
             // is the floor below which any SG-fired exit would be net-
             // negative after round-trip fees.
-            FPN<F> fee_rate = !FPN_IsZero(cfg->fee_rate_taker)
+            FPN_Binary<F> fee_rate = !FPN_IsZero(cfg->fee_rate_taker)
                 ? cfg->fee_rate_taker : cfg->fee_rate;
-            FPN<F> fee_floor_dist = FPN_Mul(pos->entry_price,
+            FPN_Binary<F> fee_floor_dist = FPN_Mul(pos->entry_price,
                 FPN_Mul(fee_rate, FPN_FromDouble<F>(3.0)));
-            FPN<F> sl_floor = FPN_Sub(pos->entry_price, fee_floor_dist);
+            FPN_Binary<F> sl_floor = FPN_Sub(pos->entry_price, fee_floor_dist);
             new_sl = FPN_Min(new_sl, sl_floor);
 
             // only ratchet SL up, never down
@@ -157,9 +157,9 @@ inline void EmaCross_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
 
         // enforce SL floor invariant (2:1 min reward/risk)
         if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
-            FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-            FPN<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
-            FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+            FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+            FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
+            FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
             pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_floor);
         }
     }
@@ -177,7 +177,7 @@ namespace tt {
 template <unsigned F> struct EventLoopState;
 template <unsigned F>
 bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
-                              FPN<F> proposed_sl, FPN<F> entry_price,
+                              FPN_Binary<F> proposed_sl, FPN_Binary<F> entry_price,
                               const ControllerConfig<F>* cfg);
 
 template <unsigned F, unsigned W>
@@ -185,7 +185,7 @@ inline void EmaCross_ExitAdjustSharded(
     EventLoopState<F>* state,
     int slot,
     EmaCrossState<F>* es,
-    FPN<F> current_price,
+    FPN_Binary<F> current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {
@@ -203,17 +203,17 @@ inline void EmaCross_ExitAdjustSharded(
         : (uint16_t)(1u << slot);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
-    FPN<F> sl_offset   = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-    FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+    FPN_Binary<F> sl_offset   = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
+    FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
 
     while (bm) {
         int pidx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        FPN<F> entry = state->oms->portfolio.positions[pidx].entry_price;
+        FPN_Binary<F> entry = state->oms->portfolio.positions[pidx].entry_price;
         if (FPN_IsZero(entry)) continue;
         // Only trail positions that are above their original TP — same
         // gate as the legacy EmaCross_ExitAdjust.
-        FPN<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
+        FPN_Binary<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
         if (!FPN_IsZero(orig_tp) && !FPN_GreaterThan(current_price, orig_tp)) continue;
         Strategy_WriteRatchetSL(state, slot, trailing_sl, entry, cfg);
     }

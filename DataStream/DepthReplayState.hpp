@@ -242,7 +242,7 @@ static inline int DepthReplayState_LoadDay(DepthReplayState<F>* s, int date_int)
         row.mid_price = FPN_DivNoAssert(
             FPN_AddSat(row.bids[0].price, row.asks[0].price),
             FPN_FromDouble<F>(2.0));
-        FPN<F> top_total = FPN_AddSat(row.bids[0].qty, row.asks[0].qty);
+        FPN_Binary<F> top_total = FPN_AddSat(row.bids[0].qty, row.asks[0].qty);
         if (!FPN_IsZero(top_total)) {
             row.top_imbalance = FPN_DivNoAssert(
                 FPN_Sub(row.bids[0].qty, row.asks[0].qty), top_total);

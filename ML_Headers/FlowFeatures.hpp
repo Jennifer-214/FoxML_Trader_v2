@@ -26,13 +26,13 @@
 // inputs.
 //
 // Type discipline:
-//   - BookImbalanceHistory: FPN<F> throughout (book_imbalance is FPN
-//     in BookSnapshot, sum + mean stay FPN).
+//   - BookImbalanceHistory: FPN_Binary<F> throughout (book_imbalance is FPN_Binary
+//     in BookSnapshot, sum + mean stay FPN_Binary).
 //   - FlowState: double internally (EWMA decay uses exp(); double is
 //     natural; values bounded by recent volume so no precision concern).
-//     RegimeSignals.flow_* fields are FPN<F> (converted in
+//     RegimeSignals.flow_* fields are FPN_Binary<F> (converted in
 //     Regime_ComputeSignals) to match the rest of the feature pack.
-//   - LargeTradeState: FPN<F> for sums; double for z-score (matches
+//   - LargeTradeState: FPN_Binary<F> for sums; double for z-score (matches
 //     RegimeSignals.large_trade_z's double type, mirrors tick_rate_z).
 //======================================================================================================
 
@@ -78,14 +78,14 @@ struct alignas(64) BookImbalanceHistory {
     static constexpr int SHORT_K = 64;
 
     // HOT cluster (offset 0; touched every slow-path cycle by Push + read fns)
-    FPN<F> sum;          // running sum over all valid samples (window W)
-    FPN<F> short_sum;    // v5.15.5.D.B — running sum over last SHORT_K samples
+    FPN_Binary<F> sum;          // running sum over all valid samples (window W)
+    FPN_Binary<F> short_sum;    // v5.15.5.D.B — running sum over last SHORT_K samples
     int    count;        // number of valid samples in [0, W]
     int    head;         // next write position
     // COLD cluster (offset 56; samples[head] touched 1× per Push;
     // samples[head - SHORT_K] touched 1× per Push for short-window eviction
     // — typically L1-warm since K=64 cycles ago was visited recently)
-    FPN<F> samples[W];
+    FPN_Binary<F> samples[W];
 };
 
 // v5.15.5.D.A/B — Layout lock for the canonical production instantiation.
@@ -97,15 +97,15 @@ struct alignas(64) BookImbalanceHistory {
 // parsed as a macro-arg separator inside offsetof().
 using BookImbHistDefaultT = BookImbalanceHistory<64, 1024>;
 static_assert(sizeof(BookImbHistDefaultT) == 16448,
-    "BookImbalanceHistory<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN, was 24,640).");
+    "BookImbalanceHistory<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN_Binary, was 24,640).");
 static_assert(offsetof(BookImbHistDefaultT, sum) == 0,
     "BookImbalanceHistory HOT scalar `sum` MUST sit at offset 0.");
 static_assert(offsetof(BookImbHistDefaultT, short_sum) == 16,
     "BookImbalanceHistory HOT scalar `short_sum` MUST sit at offset 16 "
-    "(immediately after sum in HOT cluster; Ship-A 16B FPN, was 24). Pattern: sliding-window-online-"
+    "(immediately after sum in HOT cluster; Ship-A 16B FPN_Binary, was 24). Pattern: sliding-window-online-"
     "statistics-pattern.md Multi-window variant.");
 static_assert(offsetof(BookImbHistDefaultT, samples) == 48,
-    "BookImbalanceHistory COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN, was 56).");
+    "BookImbalanceHistory COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN_Binary, was 56).");
 static_assert(alignof(BookImbHistDefaultT) == 64,
     "BookImbalanceHistory MUST be cache-line aligned.");
 
@@ -120,7 +120,7 @@ static inline void BookImbHistory_Init(BookImbalanceHistory<F, W> *s) {
 }
 
 template <unsigned F, unsigned W = 1024>
-static inline void BookImbHistory_Push(BookImbalanceHistory<F, W> *s, FPN<F> sample) {
+static inline void BookImbHistory_Push(BookImbalanceHistory<F, W> *s, FPN_Binary<F> sample) {
     // Long-window maintenance: evict samples[head] (W-cycles-old) if buffer full
     if (s->count >= (int)W) {
         s->sum = FPN_Sub(s->sum, s->samples[s->head]);
@@ -134,7 +134,7 @@ static inline void BookImbHistory_Push(BookImbalanceHistory<F, W> *s, FPN<F> sam
     // BEFORE the new sample overwrites samples[head]. samples[head - K] is
     // typically L1-warm (visited K=64 cycles ago; small enough to retain).
     // FPN_Add associativity holds for book-imbalance magnitudes (|x| ≤ 1; sum
-    // ≤ 64 ≪ FPN<64>'s ±2^63 range; no saturation → exact integer arithmetic
+    // ≤ 64 ≪ FPN_Binary<64>'s ±2^63 range; no saturation → exact integer arithmetic
     // → bytewise associative). Bytewise parity vs walked MeanShort(64) locked
     // by tests/controller_test.cpp v5.15.5.D.B parity loop.
     if (s->count > BookImbalanceHistory<F, W>::SHORT_K) {
@@ -150,7 +150,7 @@ static inline void BookImbHistory_Push(BookImbalanceHistory<F, W> *s, FPN<F> sam
 
 // Mean over all valid samples — O(1).
 template <unsigned F, unsigned W = 1024>
-static inline FPN<F> BookImbHistory_MeanLong(const BookImbalanceHistory<F, W> *s) {
+static inline FPN_Binary<F> BookImbHistory_MeanLong(const BookImbalanceHistory<F, W> *s) {
     if (s->count <= 0) return FPN_Zero<F>();
     return FPN_DivNoAssert(s->sum, FPN_FromDouble<F>((double)s->count));
 }
@@ -167,7 +167,7 @@ static inline FPN<F> BookImbHistory_MeanLong(const BookImbalanceHistory<F, W> *s
 // Pattern: DESIGN_SPECS/sliding-window-online-statistics-pattern.md Multi-
 // window variant; 2nd canonical application of the sliding-window pattern.
 template <unsigned F, unsigned W = 1024>
-static inline FPN<F> BookImbHistory_MeanShortFast(const BookImbalanceHistory<F, W> *s) {
+static inline FPN_Binary<F> BookImbHistory_MeanShortFast(const BookImbalanceHistory<F, W> *s) {
     if (s->count <= 0) return FPN_Zero<F>();
     int effective_k = (s->count < BookImbalanceHistory<F, W>::SHORT_K)
                           ? s->count
@@ -177,7 +177,7 @@ static inline FPN<F> BookImbHistory_MeanShortFast(const BookImbalanceHistory<F, 
 
 // Most recent pushed sample. Zero when buffer is empty.
 template <unsigned F, unsigned W = 1024>
-static inline FPN<F> BookImbHistory_Last(const BookImbalanceHistory<F, W> *s) {
+static inline FPN_Binary<F> BookImbHistory_Last(const BookImbalanceHistory<F, W> *s) {
     if (s->count <= 0) return FPN_Zero<F>();
     int idx = (s->head - 1 + (int)W) % (int)W;
     return s->samples[idx];
@@ -186,10 +186,10 @@ static inline FPN<F> BookImbHistory_Last(const BookImbalanceHistory<F, W> *s) {
 // Mean over last K samples (K <= count). O(K) — called once per slow path
 // so cost is bounded.
 template <unsigned F, unsigned W = 1024>
-static inline FPN<F> BookImbHistory_MeanShort(const BookImbalanceHistory<F, W> *s, int k) {
+static inline FPN_Binary<F> BookImbHistory_MeanShort(const BookImbalanceHistory<F, W> *s, int k) {
     if (s->count <= 0 || k <= 0) return FPN_Zero<F>();
     if (k > s->count) k = s->count;
-    FPN<F> acc = FPN_Zero<F>();
+    FPN_Binary<F> acc = FPN_Zero<F>();
     // Walk backward from head — newest k samples are at head-1, head-2, ...
     for (int i = 0; i < k; i++) {
         int idx = (s->head - 1 - i + (int)W) % (int)W;
@@ -249,7 +249,7 @@ static inline void FlowState_Init(FlowState *s) {
 // EWMA storage stays double for RegimeSignals compatibility; the
 // bytewise contract is "same input → same stored bytes" guaranteed by
 // FPN_FromDouble + FPN_Exp + FPN_ToDouble all being deterministic.
-// Full RegimeSignals→FPN cascade is a v5.11 ship (large blast radius).
+// Full RegimeSignals→FPN_Binary cascade is a v5.11 ship (large blast radius).
 static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double signed_volume) {
     if (s->last_us == 0) {
         s->ewma_10s = signed_volume;
@@ -266,16 +266,16 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
     }
     double dt = (double)(timestamp_us - s->last_us) / 1e6;  // seconds
 
-    // FPN-native decay: -dt / halflife → exp via Taylor.
-    FPN<64> dt_fpn = FPN_FromDouble<64>(dt);
-    FPN<64> hl_10s = FPN_FromDouble<64>(10.0);
-    FPN<64> hl_1m  = FPN_FromDouble<64>(60.0);
-    FPN<64> hl_5m  = FPN_FromDouble<64>(300.0);
+    // FPN_Binary-native decay: -dt / halflife → exp via Taylor.
+    FPN_Binary<64> dt_fpn = FPN_FromDouble<64>(dt);
+    FPN_Binary<64> hl_10s = FPN_FromDouble<64>(10.0);
+    FPN_Binary<64> hl_1m  = FPN_FromDouble<64>(60.0);
+    FPN_Binary<64> hl_5m  = FPN_FromDouble<64>(300.0);
 
     // -dt/halflife for the decay exponent (was `.sign = 1` on the positive div; 16B two's-comp → negate).
-    FPN<64> arg_10s = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_10s));
-    FPN<64> arg_1m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_1m));
-    FPN<64> arg_5m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_5m));
+    FPN_Binary<64> arg_10s = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_10s));
+    FPN_Binary<64> arg_1m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_1m));
+    FPN_Binary<64> arg_5m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_5m));
 
     double decay_10s = FPN_ToDouble(FPN_Exp(arg_10s));
     double decay_1m  = FPN_ToDouble(FPN_Exp(arg_1m));
@@ -306,13 +306,13 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
 template <unsigned F, unsigned W = 1024>
 struct alignas(64) LargeTradeState {
     // HOT cluster (offset 0; touched every slow-path cycle by Push + read fns)
-    FPN<F> sum;          // running sum
-    FPN<F> sum_sq;       // running sum of squares
+    FPN_Binary<F> sum;          // running sum
+    FPN_Binary<F> sum_sq;       // running sum of squares
     int    count;
     int    head;
     // COLD cluster (offset 56; sizes[head] touched 1× per Push; ZScore is
     // already O(1) using running sum + sum_sq, no walk)
-    FPN<F> sizes[W];     // ring of recent sizes
+    FPN_Binary<F> sizes[W];     // ring of recent sizes
 };
 
 // v5.15.5.D.A — Layout lock for LargeTradeState<64, 1024>.
@@ -321,11 +321,11 @@ struct alignas(64) LargeTradeState {
 // for offsetof macro-arg parsing.
 using LargeTradeStateDefaultT = LargeTradeState<64, 1024>;
 static_assert(sizeof(LargeTradeStateDefaultT) == 16448,
-    "LargeTradeState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN, was 24,640).");
+    "LargeTradeState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN_Binary, was 24,640).");
 static_assert(offsetof(LargeTradeStateDefaultT, sum) == 0,
     "LargeTradeState HOT scalar `sum` MUST sit at offset 0.");
 static_assert(offsetof(LargeTradeStateDefaultT, sizes) == 48,
-    "LargeTradeState COLD `sizes` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN, was 56).");
+    "LargeTradeState COLD `sizes` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN_Binary, was 56).");
 static_assert(alignof(LargeTradeStateDefaultT) == 64,
     "LargeTradeState MUST be cache-line aligned.");
 
@@ -340,9 +340,9 @@ static inline void LargeTradeState_Init(LargeTradeState<F, W> *s) {
 }
 
 template <unsigned F, unsigned W = 1024>
-static inline void LargeTradeState_Push(LargeTradeState<F, W> *s, FPN<F> size) {
+static inline void LargeTradeState_Push(LargeTradeState<F, W> *s, FPN_Binary<F> size) {
     if (s->count >= (int)W) {
-        FPN<F> evicted = s->sizes[s->head];
+        FPN_Binary<F> evicted = s->sizes[s->head];
         s->sum    = FPN_Sub(s->sum, evicted);
         s->sum_sq = FPN_Sub(s->sum_sq, FPN_Mul(evicted, evicted));
     } else {
@@ -356,30 +356,30 @@ static inline void LargeTradeState_Push(LargeTradeState<F, W> *s, FPN<F> size) {
 
 // Z-score of `current_size` against the window's distribution.
 // Returns 0 if count < 2 or stddev == 0 (degenerate / cold start).
-// v5.10.0b.2.5.C: variance + stddev computed in FPN<F> via FPN_Sqrt
+// v5.10.0b.2.5.C: variance + stddev computed in FPN_Binary<F> via FPN_Sqrt
 // (bytewise-deterministic). Return type stays `double` to keep
 // touch-site count low — the RegimeSignals.large_trade_z field stays
 // double, so downstream consumers don't change. The bytewise contract
 // is enforced through deterministic FPN_Sub/Mul/Sqrt/DivNoAssert and
 // the final FPN_ToDouble.
 template <unsigned F, unsigned W = 1024>
-static inline double LargeTradeState_ZScore(const LargeTradeState<F, W> *s, FPN<F> current_size) {
+static inline double LargeTradeState_ZScore(const LargeTradeState<F, W> *s, FPN_Binary<F> current_size) {
     if (s->count < 2) return 0.0;
-    FPN<F> n_fpn   = FPN_FromInt<F>(s->count);
-    FPN<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
-    FPN<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
-    FPN<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
+    FPN_Binary<F> n_fpn   = FPN_FromInt<F>(s->count);
+    FPN_Binary<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
+    FPN_Binary<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
+    FPN_Binary<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
     if (var.v <= 0) return 0.0;  // var <= 0 → degenerate (was IsZero || sign!=0; 16B two's-comp)
 
-    FPN<F> stddev = FPN_Sqrt(var);
+    FPN_Binary<F> stddev = FPN_Sqrt(var);
     if (FPN_IsZero(stddev)) return 0.0;
-    FPN<F> z = FPN_DivNoAssert(FPN_Sub(current_size, mean), stddev);
+    FPN_Binary<F> z = FPN_DivNoAssert(FPN_Sub(current_size, mean), stddev);
     return FPN_ToDouble(z);
 }
 
 // Most recent pushed size. Zero when empty.
 template <unsigned F, unsigned W = 1024>
-static inline FPN<F> LargeTradeState_Last(const LargeTradeState<F, W> *s) {
+static inline FPN_Binary<F> LargeTradeState_Last(const LargeTradeState<F, W> *s) {
     if (s->count <= 0) return FPN_Zero<F>();
     int idx = (s->head - 1 + (int)W) % (int)W;
     return s->sizes[idx];
@@ -407,22 +407,22 @@ static inline FPN<F> LargeTradeState_Last(const LargeTradeState<F, W> *s) {
 template <unsigned F, unsigned W = 1024>
 struct alignas(64) SpreadState {
     // HOT cluster (offset 0; touched every slow-path cycle)
-    FPN<F> sum;
-    FPN<F> sum_sq;
+    FPN_Binary<F> sum;
+    FPN_Binary<F> sum_sq;
     int    count;
     int    head;
     // COLD cluster (offset 56)
-    FPN<F> samples[W];
+    FPN_Binary<F> samples[W];
 };
 
 // v5.15.5.D.A — Layout lock for SpreadState<64, 1024>.
 using SpreadStateDefaultT = SpreadState<64, 1024>;
 static_assert(sizeof(SpreadStateDefaultT) == 16448,
-    "SpreadState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN, was 24,640).");
+    "SpreadState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN_Binary, was 24,640).");
 static_assert(offsetof(SpreadStateDefaultT, sum) == 0,
     "SpreadState HOT scalar `sum` MUST sit at offset 0.");
 static_assert(offsetof(SpreadStateDefaultT, samples) == 48,
-    "SpreadState COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN, was 56).");
+    "SpreadState COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN_Binary, was 56).");
 static_assert(alignof(SpreadStateDefaultT) == 64,
     "SpreadState MUST be cache-line aligned.");
 
@@ -437,9 +437,9 @@ static inline void SpreadState_Init(SpreadState<F, W> *s) {
 }
 
 template <unsigned F, unsigned W = 1024>
-static inline void SpreadState_Push(SpreadState<F, W> *s, FPN<F> sample) {
+static inline void SpreadState_Push(SpreadState<F, W> *s, FPN_Binary<F> sample) {
     if (s->count >= (int)W) {
-        FPN<F> evicted = s->samples[s->head];
+        FPN_Binary<F> evicted = s->samples[s->head];
         s->sum    = FPN_Sub(s->sum, evicted);
         s->sum_sq = FPN_Sub(s->sum_sq, FPN_Mul(evicted, evicted));
     } else {
@@ -451,26 +451,26 @@ static inline void SpreadState_Push(SpreadState<F, W> *s, FPN<F> sample) {
     s->head = (s->head + 1) % W;
 }
 
-// v5.10.0b.2.5.C: variance + stddev computed in FPN<F> via FPN_Sqrt.
+// v5.10.0b.2.5.C: variance + stddev computed in FPN_Binary<F> via FPN_Sqrt.
 // Same boundary-stable shape as LargeTradeState_ZScore — return double
 // to avoid cascading into RegimeSignals.spread_zscore consumers.
 template <unsigned F, unsigned W = 1024>
-static inline double SpreadState_ZScore(const SpreadState<F, W> *s, FPN<F> current_spread) {
+static inline double SpreadState_ZScore(const SpreadState<F, W> *s, FPN_Binary<F> current_spread) {
     if (s->count < 2) return 0.0;
-    FPN<F> n_fpn   = FPN_FromInt<F>(s->count);
-    FPN<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
-    FPN<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
-    FPN<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
+    FPN_Binary<F> n_fpn   = FPN_FromInt<F>(s->count);
+    FPN_Binary<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
+    FPN_Binary<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
+    FPN_Binary<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
     if (var.v <= 0) return 0.0;   // var <= 0 → degenerate (was IsZero || sign!=0; 16B two's-comp)
 
-    FPN<F> stddev = FPN_Sqrt(var);
+    FPN_Binary<F> stddev = FPN_Sqrt(var);
     if (FPN_IsZero(stddev)) return 0.0;
-    FPN<F> z = FPN_DivNoAssert(FPN_Sub(current_spread, mean), stddev);
+    FPN_Binary<F> z = FPN_DivNoAssert(FPN_Sub(current_spread, mean), stddev);
     return FPN_ToDouble(z);
 }
 
 template <unsigned F, unsigned W = 1024>
-static inline FPN<F> SpreadState_Last(const SpreadState<F, W> *s) {
+static inline FPN_Binary<F> SpreadState_Last(const SpreadState<F, W> *s) {
     if (s->count <= 0) return FPN_Zero<F>();
     int idx = (s->head - 1 + (int)W) % (int)W;
     return s->samples[idx];

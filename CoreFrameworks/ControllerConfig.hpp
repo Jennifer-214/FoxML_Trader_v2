@@ -107,7 +107,7 @@ constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
 //
 // PCT(name)  — percentage field; cfg writes 4.0, stored as 0.04. Parser
 //              divides by 100.0 at load.
-// RAW(name)  — raw FPN field; cfg writes 3.0, stored as 3.0. Parser uses
+// RAW(name)  — raw FPN_Binary field; cfg writes 3.0, stored as 3.0. Parser uses
 //              atof directly.
 //
 // Field NAMES MUST MATCH same-named members of ControllerConfig exactly —
@@ -189,7 +189,7 @@ constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
     RAW(risk_min_size_pct)
 
 // v4.7.40: INT-typed per-core overrides. Separate macro because INT fields
-// are uint32_t (not FPN<F>) — different declaration + parser. 0 = inherit
+// are uint32_t (not FPN_Binary<F>) — different declaration + parser. 0 = inherit
 // (caller checks `if (override == 0) use cfg.field`). All sentinel-friendly
 // (cfg INT defaults are non-zero meaningful values).
 #define PER_CORE_OVERRIDE_INT_FIELDS(INT) \
@@ -239,7 +239,7 @@ constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
     X(ops,       OPS,       uint8_t,  FOREACH_OPS_CFG_FLAG)
 
 template <unsigned F> struct PerCoreOverrides {
-#define _DECL_OV_FIELD(name) FPN<F> name;
+#define _DECL_OV_FIELD(name) FPN_Binary<F> name;
     PER_CORE_OVERRIDE_FIELDS(_DECL_OV_FIELD, _DECL_OV_FIELD)
 #undef _DECL_OV_FIELD
 // v4.7.40: INT-typed overrides. uint32_t storage; 0 = inherit.
@@ -296,7 +296,7 @@ struct alignas(64) PerCoreCfg {
     //     (only the 5-field runtime bitmap cluster below is documented exempt)
     //
     // Field types follow DOD discipline per DESIGN_PHILOSOPHY § 3:
-    //   - FPN<F>: accounting math (H4 invariant — 69 fields)
+    //   - FPN_Binary<F>: accounting math (H4 invariant — 69 fields)
     //   - uint32_t / uint64_t: counters, ticks, seeds (12 + 1 fields)
     //   - int: signed enums, signed counters (10 fields)
     //   - double: ML voting threshold exemption (ensemble_min_agreement_pct only)
@@ -370,13 +370,13 @@ template <unsigned F> struct ControllerConfig {
   // ControllerConfig_Default() after construction.
   ControllerConfig() { memset(this, 0, sizeof(*this)); }
 
-  FPN<F> r2_threshold;     // min R^2 to trust regression
-  FPN<F> slope_scale_buy;  // how much slope shifts buy price threshold
-  FPN<F> max_shift;        // max drift from initial buy conditions
-  FPN<F> take_profit_pct;  // per-position take profit (e.g. 0.03 = 3%)
-  FPN<F> stop_loss_pct;    // per-position stop loss (e.g. 0.015 = 1.5%)
-  FPN<F> starting_balance; // paper trading starting balance (e.g. 10000.0)
-  FPN<F> fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
+  FPN_Binary<F> r2_threshold;     // min R^2 to trust regression
+  FPN_Binary<F> slope_scale_buy;  // how much slope shifts buy price threshold
+  FPN_Binary<F> max_shift;        // max drift from initial buy conditions
+  FPN_Binary<F> take_profit_pct;  // per-position take profit (e.g. 0.03 = 3%)
+  FPN_Binary<F> stop_loss_pct;    // per-position stop loss (e.g. 0.015 = 1.5%)
+  FPN_Binary<F> starting_balance; // paper trading starting balance (e.g. 10000.0)
+  FPN_Binary<F> fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
                            // Phase 8: legacy field. Pre-Phase-8 behavior preserved
                            // when fee_rate_maker == fee_rate_taker == fee_rate.
                            // (.E.0.1 F-076: a prior comment here claimed the fingerprint
@@ -386,8 +386,8 @@ template <unsigned F> struct ControllerConfig {
   // Phase 8 — bifurcated maker/taker fee rates. Live engine uses these per fill
   // based on order->is_maker (set from Binance executionReport "m" field).
   // Backtest simulates as all-taker (is_maker=0 always). Documented divergence.
-  FPN<F> fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
-  FPN<F> fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
+  FPN_Binary<F> fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
+  FPN_Binary<F> fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
   // v4.3.2 (Track C.1) — pay fees in BNB on Binance gives a 25% discount
   // on both maker and taker. When set, fee_rate_maker and fee_rate_taker
   // are scaled by 0.75 at engine boot. User must also enable BNB fee
@@ -396,61 +396,61 @@ template <unsigned F> struct ControllerConfig {
   uint32_t pay_fees_in_bnb;
   // Fee_Compute helper — defined after the struct so all fee math sites
   // share one implementation. See note in main file just below struct.
-  FPN<F> risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
+  FPN_Binary<F> risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
   // market microstructure filters (initial values - adapted at runtime by P&L
   // regression)
-  FPN<F> volume_multiplier; // buy only when tick volume >= this * rolling_avg
+  FPN_Binary<F> volume_multiplier; // buy only when tick volume >= this * rolling_avg
                             // (e.g. 3.0)
-  FPN<F> entry_offset_pct;  // buy gate offset below rolling mean (e.g. 0.0015 =
+  FPN_Binary<F> entry_offset_pct;  // buy gate offset below rolling mean (e.g. 0.0015 =
                             // 0.15%)
-  FPN<F> spacing_multiplier; // min entry spacing = stddev * this (e.g. 2.0)
+  FPN_Binary<F> spacing_multiplier; // min entry spacing = stddev * this (e.g. 2.0)
   // adaptation clamps - how far the filters can drift from their initial values
-  FPN<F>
+  FPN_Binary<F>
       offset_min; // min entry_offset_pct (most aggressive, e.g. 0.0005 = 0.05%)
-  FPN<F> offset_max; // max entry_offset_pct (most defensive, e.g. 0.005 = 0.5%)
-  FPN<F> vol_mult_min; // min volume_multiplier (most aggressive, e.g. 1.5)
-  FPN<F> vol_mult_max; // max volume_multiplier (most defensive, e.g. 6.0)
-  FPN<F> filter_scale; // how much P&L slope shifts the filters (e.g. 0.50)
+  FPN_Binary<F> offset_max; // max entry_offset_pct (most defensive, e.g. 0.005 = 0.5%)
+  FPN_Binary<F> vol_mult_min; // min volume_multiplier (most aggressive, e.g. 1.5)
+  FPN_Binary<F> vol_mult_max; // max volume_multiplier (most defensive, e.g. 6.0)
+  FPN_Binary<F> filter_scale; // how much P&L slope shifts the filters (e.g. 0.50)
   // risk management
-  FPN<F> max_drawdown_pct; // halt trading if total P&L drops below this % of
+  FPN_Binary<F> max_drawdown_pct; // halt trading if total P&L drops below this % of
                            // starting balance (e.g. 0.10 = 10%)
-  FPN<F> max_exposure_pct; // max fraction of balance deployed in positions
+  FPN_Binary<F> max_exposure_pct; // max fraction of balance deployed in positions
                            // (e.g. 0.50 = 50%)
   // enhanced buy signal (disabled by default = backward compatible)
-  FPN<F> offset_stddev_mult; // stddev-scaled offset multiplier (0 = use
+  FPN_Binary<F> offset_stddev_mult; // stddev-scaled offset multiplier (0 = use
                              // percentage mode)
-  FPN<F> offset_stddev_min; // adaptation lower bound for stddev mode (e.g. 0.5)
-  FPN<F> offset_stddev_max; // adaptation upper bound for stddev mode (e.g. 4.0)
-  FPN<F> min_long_slope;    // min long-window price slope to allow buys (0 =
+  FPN_Binary<F> offset_stddev_min; // adaptation lower bound for stddev mode (e.g. 0.5)
+  FPN_Binary<F> offset_stddev_max; // adaptation upper bound for stddev mode (e.g. 4.0)
+  FPN_Binary<F> min_long_slope;    // min long-window price slope to allow buys (0 =
                             // disabled)
-  FPN<F> min_buy_delta;     // min volume delta for MR buys (-0.3 = allow mild
+  FPN_Binary<F> min_buy_delta;     // min volume delta for MR buys (-0.3 = allow mild
                             // selling, block heavy)
-  FPN<F> vwap_offset; // buy below VWAP - (VWAP * this) (0 = disabled, 0.001 =
+  FPN_Binary<F> vwap_offset; // buy below VWAP - (VWAP * this) (0 = disabled, 0.001 =
                       // 0.1% below)
-  FPN<F> min_stddev_pct;  // skip trades when stddev/price < this (0 = disabled,
+  FPN_Binary<F> min_stddev_pct;  // skip trades when stddev/price < this (0 = disabled,
                           // 0.0003 = 0.03%)
-  FPN<F> momentum_r2_min; // min R² to enter momentum trades (0 = disabled, 0.4
+  FPN_Binary<F> momentum_r2_min; // min R² to enter momentum trades (0 = disabled, 0.4
                           // recommended)
   // trailing take-profit (disabled by default)
-  FPN<F> tp_hold_score;  // min SNR*R² to hold past TP (0 = disabled, fixed TP)
-  FPN<F> tp_trail_mult;  // trailing distance: stddev * this (e.g. 1.0)
-  FPN<F> sl_trail_mult;  // trailing SL distance: stddev * this (e.g. 2.0)
-  FPN<F> fee_floor_mult; // TP floor = entry × fee_rate × this (default 3.0,
+  FPN_Binary<F> tp_hold_score;  // min SNR*R² to hold past TP (0 = disabled, fixed TP)
+  FPN_Binary<F> tp_trail_mult;  // trailing distance: stddev * this (e.g. 1.0)
+  FPN_Binary<F> sl_trail_mult;  // trailing SL distance: stddev * this (e.g. 2.0)
+  FPN_Binary<F> fee_floor_mult; // TP floor = entry × fee_rate × this (default 3.0,
                          // try 5.0 for wider)
   // risk ratios
-  FPN<F>
+  FPN_Binary<F>
       min_sl_tp_ratio; // min SL/TP distance ratio (0.5 = 2:1 reward/risk floor)
-  FPN<F> ror_tp_bonus; // TP multiplier when ROR positive (1.2 = 20% wider)
-  FPN<F> momentum_tp_r2_min; // TP scale at R²=0 (0.5 = half base TP,
+  FPN_Binary<F> ror_tp_bonus; // TP multiplier when ROR positive (1.2 = 20% wider)
+  FPN_Binary<F> momentum_tp_r2_min; // TP scale at R²=0 (0.5 = half base TP,
                              // conservative on uncertainty)
-  FPN<F>
+  FPN_Binary<F>
       momentum_sl_r2_max; // SL scale at R²=0 (1.5 = wider SL in choppy markets)
   // adaptation speed
-  FPN<F> squeeze_decay;      // idle squeeze rate per cycle (0.10 = 10% of gap)
-  FPN<F> offset_adapt_scale; // P&L regression → offset shift (0.001)
-  FPN<F> stddev_adapt_scale; // P&L regression → stddev/breakout shift (0.1)
-  FPN<F> vol_adapt_scale;    // P&L regression → volume shift (0.1)
-  FPN<F> breakout_min;       // momentum breakout floor in stddevs (0.5)
+  FPN_Binary<F> squeeze_decay;      // idle squeeze rate per cycle (0.10 = 10% of gap)
+  FPN_Binary<F> offset_adapt_scale; // P&L regression → offset shift (0.001)
+  FPN_Binary<F> stddev_adapt_scale; // P&L regression → stddev/breakout shift (0.1)
+  FPN_Binary<F> vol_adapt_scale;    // P&L regression → volume shift (0.1)
+  FPN_Binary<F> breakout_min;       // momentum breakout floor in stddevs (0.5)
   // time-based exit (disabled by default)
   uint32_t
       max_hold_ticks; // close position if held longer than this (0 = disabled)
@@ -461,19 +461,19 @@ template <unsigned F> struct ControllerConfig {
   // or where strategy comparison wants different time horizons per core.
   // Cfg parser pattern: core_<N>_time_exit_ticks=<int>
   // core_time_exit_ticks: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
-  FPN<F>
+  FPN_Binary<F>
       min_hold_gain_pct; // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
-  FPN<F> regime_slope_threshold;     // relative slope magnitude for TRENDING
+  FPN_Binary<F> regime_slope_threshold;     // relative slope magnitude for TRENDING
                                      // (legacy, kept for compat)
-  FPN<F> regime_crossover_threshold; // EMA/SMA spread for mild trend (e.g.
+  FPN_Binary<F> regime_crossover_threshold; // EMA/SMA spread for mild trend (e.g.
                                      // 0.0005 = EMA Cross)
-  FPN<F> regime_strong_crossover;    // EMA/SMA spread for strong trend (e.g.
+  FPN_Binary<F> regime_strong_crossover;    // EMA/SMA spread for strong trend (e.g.
                                      // 0.0015 = Momentum)
-  FPN<F> regime_r2_threshold;        // min R² for TRENDING (e.g. 0.70)
-  FPN<F> regime_volatile_stddev;     // stddev/price ratio for VOLATILE (legacy,
+  FPN_Binary<F> regime_r2_threshold;        // min R² for TRENDING (e.g. 0.70)
+  FPN_Binary<F> regime_volatile_stddev;     // stddev/price ratio for VOLATILE (legacy,
                                      // kept for compat)
-  FPN<F> regime_vol_spike_ratio;     // variance ratio threshold: short/long
+  FPN_Binary<F> regime_vol_spike_ratio;     // variance ratio threshold: short/long
                                      // variance > this = volatile spike
   uint32_t regime_hysteresis;  // slow-path cycles before regime switch (e.g. 5)
                                // use warmup_ticks only). CAPS AT W=128: this
@@ -498,7 +498,7 @@ template <unsigned F> struct ControllerConfig {
   // at line ~1326 per H17 STRONG→HARD progression at global surface (Phase Cx-D extension).
   // Cx-U sister: sl_cooldown_adaptive (was BOOL int) H14-migrated to MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED bit.
   // momentum strategy
-  FPN<F>
+  FPN_Binary<F>
       momentum_breakout_mult; // buy when price > avg + stddev * this (e.g. 1.5)
   // v5.7.5 — MOM quality filters. All default to 0 (filter off,
   // current behavior preserved). Operator opts in after observing
@@ -507,20 +507,20 @@ template <unsigned F> struct ControllerConfig {
   // See DOCS/changelogs/2026-04-30-regime-classifier-audit.md for
   // why these are defensive depth even after Phase 2's hardcoded
   // strategy boot guard.
-  FPN<F> momentum_min_tp_margin_pct;     // SHALT_MOM_TP_TOO_TIGHT — require tp_pct >= this (recommended: 0.0040 = 0.40%)
-  FPN<F> momentum_min_buy_delta_recent;  // SHALT_MOM_NO_FLOW — require recent volume_delta >= this (rec: 0.05)
-  FPN<F> momentum_min_r2;                // SHALT_MOM_LOW_R2 — require short_r2 >= this (rec: 0.30)
+  FPN_Binary<F> momentum_min_tp_margin_pct;     // SHALT_MOM_TP_TOO_TIGHT — require tp_pct >= this (recommended: 0.0040 = 0.40%)
+  FPN_Binary<F> momentum_min_buy_delta_recent;  // SHALT_MOM_NO_FLOW — require recent volume_delta >= this (rec: 0.05)
+  FPN_Binary<F> momentum_min_r2;                // SHALT_MOM_LOW_R2 — require short_r2 >= this (rec: 0.30)
   int momentum_require_last_win;         // SHALT_MOM_LAST_LOST — 1 = block re-entry until previous trade was TP win (rec: 0=off)
-  FPN<F> momentum_tp_mult;    // TP multiplier for momentum (e.g. 3.0 stddevs)
-  FPN<F> momentum_sl_mult;    // SL multiplier for momentum (e.g. 1.0 stddevs)
+  FPN_Binary<F> momentum_tp_mult;    // TP multiplier for momentum (e.g. 3.0 stddevs)
+  FPN_Binary<F> momentum_sl_mult;    // SL multiplier for momentum (e.g. 1.0 stddevs)
   // EMA cross strategy
-  FPN<F> emacross_dip_mult;      // buy this many stddevs below EMA (e.g. 0.5)
-  FPN<F> emacross_crossover_min; // min EMA-SMA spread for uptrend confirmation
-  FPN<F> emacross_trail_mult;    // trailing TP factor when EMA rising
+  FPN_Binary<F> emacross_dip_mult;      // buy this many stddevs below EMA (e.g. 0.5)
+  FPN_Binary<F> emacross_crossover_min; // min EMA-SMA spread for uptrend confirmation
+  FPN_Binary<F> emacross_trail_mult;    // trailing TP factor when EMA rising
   // volume spike detection
-  FPN<F> spike_threshold;         // volume spike ratio (current/max) to trigger
+  FPN_Binary<F> spike_threshold;         // volume spike ratio (current/max) to trigger
                                   // (e.g. 5.0 = 5x)
-  FPN<F> spike_spacing_reduction; // spacing multiplier during spike (e.g. 0.5 =
+  FPN_Binary<F> spike_spacing_reduction; // spacing multiplier during spike (e.g. 0.5 =
                                   // half normal)
   // v5.14.9.F* — DOMAIN CFG FLAG BITMAPS (HOT-CLUSTER per heterogeneous-registry-pattern.md
   // cache-layout discipline). Each bitmap is its own domain registry; adding a new flag
@@ -563,29 +563,29 @@ template <unsigned F> struct ControllerConfig {
               uint16_t ml_cfg_flags;
               uint8_t  risk_cfg_flags;
               uint8_t  ops_cfg_flags;
-  FPN<F>
+  FPN_Binary<F>
       partial_exit_pct; // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
-  FPN<F> tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
-  FPN<F> breakeven_buffer_pct; // SL offset from entry once breakeven ratchet
+  FPN_Binary<F> tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
+  FPN_Binary<F> breakeven_buffer_pct; // SL offset from entry once breakeven ratchet
                                // fires (0.001 = +0.1% above entry, -0.001 =
                                // allow 0.1% loss)
   // slippage simulation
-  FPN<F> slippage_pct; // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
+  FPN_Binary<F> slippage_pct; // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
   // session awareness — session_filter_enabled migrated to ops_cfg_flags
   // (v5.14.9.F.3). The 4 per-session gate multipliers are registry-driven
   // as of v5.15.5.B.5; see FOREACH_SESSION_PHASE in SessionPhaseRegistry.hpp.
   // Adding a 5th session = ONE row in the registry; field decl + parser +
   // default + consumer lookup auto-flow via X-macro expansion.
-#define X(NAME_U, name_l, START, END, MULT, DOC) FPN<F> session_##name_l##_mult;
+#define X(NAME_U, name_l, START, END, MULT, DOC) FPN_Binary<F> session_##name_l##_mult;
   FOREACH_SESSION_PHASE(X)
 #undef X
   // order book (L2 depth) — depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-  FPN<F> min_book_imbalance; // require bid bias to buy (0 = disabled, 0.10 =
+  FPN_Binary<F> min_book_imbalance; // require bid bias to buy (0 = disabled, 0.10 =
                              // 10% bid excess)
   // EMA gate (proactive entry — reacts in 1-2s instead of 5s)
   // gate_ema_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-  FPN<F> gate_ema_alpha; // EMA smoothing factor (0.997 = ~333 tick window)
-  FPN<F> gate_ema_one_minus_alpha; // precomputed 1.0 - alpha (avoid subtraction
+  FPN_Binary<F> gate_ema_alpha; // EMA smoothing factor (0.997 = ~333 tick window)
+  FPN_Binary<F> gate_ema_one_minus_alpha; // precomputed 1.0 - alpha (avoid subtraction
                                    // on hot path)
   // strategy selection
   int default_strategy; // -1=regime auto, 0=MR, 1=Momentum, 2=SimpleDip
@@ -619,9 +619,9 @@ template <unsigned F> struct ControllerConfig {
   // DOCS/OPERATOR_DEPLOYMENT.md for the production-machine recipe.
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
   // kill_switch_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
-  FPN<F>
+  FPN_Binary<F>
       kill_switch_daily_loss_pct; // max daily loss before kill (e.g. 0.03 = 3%)
-  FPN<F> kill_switch_drawdown_pct; // max drawdown from session peak before kill
+  FPN_Binary<F> kill_switch_drawdown_pct; // max drawdown from session peak before kill
                                    // (e.g. 0.05 = 5%)
   // v5.15.5.F.4d.1.B.4 Cx-D extension: kill_recovery_warmup manual decl DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker per H17 STRONG→HARD progression.
   // v5.12.1.A — WS dead-time emergency-flatten policy (live-only).
@@ -704,16 +704,16 @@ template <unsigned F> struct ControllerConfig {
   int    barrier_blend_mode;                  // default 0 (LEGACY)
   // Threshold above which factor=1.0 (full size at high confidence).
   // Default 0.15 matches composite confidence's practical upper bound.
-  FPN<F> risk_full_size_threshold;           // default 0.15
+  FPN_Binary<F> risk_full_size_threshold;           // default 0.15
   // Threshold below which factor=min_pct (or 0 if min_pct=0 = ladder bottom).
   // Default 0.05 matches composite confidence's "low edge" boundary.
-  FPN<F> risk_min_size_threshold;            // default 0.05
+  FPN_Binary<F> risk_min_size_threshold;            // default 0.05
   // Factor at min threshold. ∈ [0, 1]. Below this size, ladder bottom fires
   // (factor=0 → trade_size=0 → BUY_BLOCKED + SHALT_LOW_CONFIDENCE).
   // Default 0.10 = 10% of base size at low edge; operator sets 0.0 for hard
   // ladder bottom even at min_threshold (matches confidence_hard_block
   // behavior but with a smooth ramp above).
-  FPN<F> risk_min_size_pct;                  // default 0.10
+  FPN_Binary<F> risk_min_size_pct;                  // default 0.10
   // v5.14.1 — composite confidence (IC × Freshness × Capacity × Stability)
   // Default 0 = legacy 3-factor ConfidenceScorer_Compute (bytewise-unchanged
   // pre-v5.14.1 behavior). Flip to 1 to swap in the 4-factor formula at the
@@ -722,10 +722,10 @@ template <unsigned F> struct ControllerConfig {
   // confidence_capacity_target_dollars (0=unbounded), confidence_rmse_baseline
   // (training-time RMSE for stability normalization).
   // confidence_composite_enabled migrated to ml_cfg_flags (v5.14.9.F.2; stamp-bound via FOREACH_STAMP_BOUND_CFG emit_source=BITMAP_BIT)
-  FPN<F>   confidence_freshness_tau_secs;       // default 3600.0 (1 hour decay)
-  FPN<F>   confidence_capacity_target_dollars;  // default 0.0 (unbounded)
-  FPN<F>   confidence_capacity_kappa;           // default 0.1 (ADV proportionality)
-  FPN<F>   confidence_rmse_baseline;            // default 1.0 (rebound at training time)
+  FPN_Binary<F>   confidence_freshness_tau_secs;       // default 3600.0 (1 hour decay)
+  FPN_Binary<F>   confidence_capacity_target_dollars;  // default 0.0 (unbounded)
+  FPN_Binary<F>   confidence_capacity_kappa;           // default 0.1 (ADV proportionality)
+  FPN_Binary<F>   confidence_rmse_baseline;            // default 1.0 (rebound at training time)
   // v5.14.1.D — feature winsorization (per-feature percentile clipping
   // applied in FeatureStandardizer_Apply BEFORE mean-center + unit-var).
   // Reduces noise from 5σ outliers (flash crashes, exchange glitches) +
@@ -733,8 +733,8 @@ template <unsigned F> struct ControllerConfig {
   // bound via FOREACH_STAMP_BOUND_CFG → drift between training cfg and
   // inference cfg detected at model load.
   // Setting low=0 + high=1 disables (no clip; identity pass-through).
-  FPN<F>   winsor_pct_low;                      // default 0.005 (lower clip pct)
-  FPN<F>   winsor_pct_high;                     // default 0.995 (upper clip pct)
+  FPN_Binary<F>   winsor_pct_low;                      // default 0.005 (lower clip pct)
+  FPN_Binary<F>   winsor_pct_high;                     // default 0.995 (upper clip pct)
   // v5.12.2.B — lazy slow-path rebuild. Skip RebuildOneCore body when
   // slow_state hasn't changed materially since last rebuild. Estimated
   // 30-50% of cycles become no-ops on stable regimes; per-cycle savings
@@ -764,7 +764,7 @@ template <unsigned F> struct ControllerConfig {
   // via OMS_PushSubmit. Default disabled; opt-in for paper-test.
   // Hot path UNTOUCHED.
   // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
-  FPN<F> exit_threshold;                     // default 0.6 (60% blended exit prob)
+  FPN_Binary<F> exit_threshold;                     // default 0.6 (60% blended exit prob)
   char exit_signal_model_dir[256];           // optional explicit dir; empty = auto-detect
   // v5.13.0.B — calibration log: every exit fill records the predicted
   // exit prob + realized PnL bps + flag indicating whether v5.13.0 exit-
@@ -782,30 +782,30 @@ template <unsigned F> struct ControllerConfig {
   // Hot path UNTOUCHED.
   // ridge_within_horizon migrated to ml_cfg_flags (v5.14.11.C; bit MASK_ML_CFG_RIDGE_WITHIN_HORIZON)
   // ridge_across_horizons migrated to ml_cfg_flags (v5.14.11.C; bit MASK_ML_CFG_RIDGE_ACROSS_HORIZONS)
-  FPN<F> ridge_lambda;               // ridge regularization; default 0.15
-  FPN<F> ridge_cost_penalty;         // cost penalty in net IC = IC - penalty*cost; default 0.5
-  FPN<F> ridge_min_ic_floor;         // min net IC floor (prevents zero-weight starvation); default 0.001
+  FPN_Binary<F> ridge_lambda;               // ridge regularization; default 0.15
+  FPN_Binary<F> ridge_cost_penalty;         // cost penalty in net IC = IC - penalty*cost; default 0.5
+  FPN_Binary<F> ridge_min_ic_floor;         // min net IC floor (prevents zero-weight starvation); default 0.001
   // vol-scaled position sizing
   // vol_sizing_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
-  FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
+  FPN_Binary<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
                         // base qty)
-  FPN<F> vol_scale_max; // max scale factor (e.g. 2.0 = never more than 200% of
+  FPN_Binary<F> vol_scale_max; // max scale factor (e.g. 2.0 = never more than 200% of
                         // base qty)
   // no-trade band (cost-aware signal strength gate)
   // no_trade_band_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-  FPN<F> no_trade_band_mult; // signal must exceed fee_rate * this to trade
+  FPN_Binary<F> no_trade_band_mult; // signal must exceed fee_rate * this to trade
                              // (e.g. 3.0)
   // ML inference
   char ml_model_path[256];     // path to buy-signal model file
-  FPN<F> ml_buy_threshold;     // prediction > this = buy signal (e.g. 0.6)
-  FPN<F> ml_tp_pct;            // TP % for ML positions (e.g. 0.015 = 1.5%)
-  FPN<F> ml_sl_pct;            // SL % for ML positions (e.g. 0.008 = 0.8%)
+  FPN_Binary<F> ml_buy_threshold;     // prediction > this = buy signal (e.g. 0.6)
+  FPN_Binary<F> ml_tp_pct;            // TP % for ML positions (e.g. 0.015 = 1.5%)
+  FPN_Binary<F> ml_sl_pct;            // SL % for ML positions (e.g. 0.008 = 0.8%)
   char regime_model_path[256]; // path to regime enrichment model
-  FPN<F> regime_model_weight;  // score weight in Regime_Classify (e.g. 2)
+  FPN_Binary<F> regime_model_weight;  // score weight in Regime_Classify (e.g. 2)
   // danger gradient (hot-path crash protection)
-  FPN<F> danger_warn_stddevs;  // gradient starts at this many stddevs below avg
+  FPN_Binary<F> danger_warn_stddevs;  // gradient starts at this many stddevs below avg
                                // (e.g. 3.0)
-  FPN<F> danger_crash_stddevs; // full gate kill at this many stddevs below avg
+  FPN_Binary<F> danger_crash_stddevs; // full gate kill at this many stddevs below avg
                                // (e.g. 6.0)
   // tick recording (writes raw ticks to CSV for backtesting/ML training)
                     // data/{symbol}/YYYY-MM-DD.csv
@@ -824,11 +824,11 @@ template <unsigned F> struct ControllerConfig {
                          // suppress if unprofitable
   // foxml_vol_scaling_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
                                   // inverse-vol on slow path
-  FPN<F> foxml_vol_scaling_z_max; // z-score clipping threshold for VolScaler
+  FPN_Binary<F> foxml_vol_scaling_z_max; // z-score clipping threshold for VolScaler
                                   // (default 3.0)
   // bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
                       // weights
-  FPN<F> bandit_blend_ratio; // bandit influence fraction at full ramp (default
+  FPN_Binary<F> bandit_blend_ratio; // bandit influence fraction at full ramp (default
                              // 0.30)
   // confidence_enabled migrated to ml_cfg_flags (v5.14.9.F.2) — original comment: 0=disabled, 1=dynamic ml_buy_threshold from
                              // confidence scoring
@@ -841,7 +841,7 @@ template <unsigned F> struct ControllerConfig {
   // `confidence_freshness_tau_secs` for its own freshness math; legacy
   // 3-factor formula now uses CONFIDENCE_FRESHNESS_TAU_DEFAULT (300.0)
   // hardcoded constant. Closes TECH_DEBT-004.
-  FPN<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
+  FPN_Binary<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
                                        // (default 2.0 — clamps at 1.0 in code)
   // v5.9.1 (V5_9_AUDIT-#21) — hard-block entries when raw confidence is below
   // this threshold, INDEPENDENT of damping. With low IC (noisy predictions),
@@ -850,11 +850,11 @@ template <unsigned F> struct ControllerConfig {
   // Default 0.0 = disabled (preserves pre-v5.9.1 behavior). Operator opts in
   // (audit-recommended value 0.05). Only consulted when confidence_enabled=1.
   // Surfaced via SHALT_LOW_CONFIDENCE on the strategy_halt_reason channel.
-  FPN<F>   confidence_hard_block_threshold;
+  FPN_Binary<F>   confidence_hard_block_threshold;
   // Phase 7 prep — held-out validation infrastructure. Used by foxml_suite
   // when training/evaluating a model. Live engine reads via expected.cfg
   // mismatch checks (CoreModelZoo).
-  // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — manual `FPN<F> held_out_fraction;` decl REMOVED;
+  // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — manual `FPN_Binary<F> held_out_fraction;` decl REMOVED;
   // auto-gen via FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) at line 1338 (Path α)
   // covers the field declaration from the new registry row at CfgFieldRegistry.hpp Validation.
   // v5.2.0 (held-out gate Phase 1) — model attestation infrastructure.
@@ -1039,7 +1039,7 @@ template <unsigned F> struct ControllerConfig {
   // this floor. Without it, a tiny allocation ($10) loses $0.50, dd=5%,
   // and the kill trips on rounding noise. Default $5. Config syntax:
   // min_kill_loss=5.0
-  FPN<F> min_kill_loss;
+  FPN_Binary<F> min_kill_loss;
   // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch H14 migration — moved from `uint32_t`
   // scalar to MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit in cfg.risk_cfg_flags. Default ENABLED
   // (safety-critical; sister to MASK_RISK_CFG_KILL_SWITCH_ENABLED). MTM catches "position riding
@@ -1098,12 +1098,12 @@ template <unsigned F> struct ControllerConfig {
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
-  FPN<F> simpledip_tp_pct;    // SimpleDip TP override (%, stored as decimal)
-  FPN<F> simpledip_sl_pct;    // SimpleDip SL override
-  FPN<F> mr_tp_pct;           // MeanReversion TP override
-  FPN<F> mr_sl_pct;           // MeanReversion SL override
-  FPN<F> emacross_tp_pct;     // EMA Cross TP override
-  FPN<F> emacross_sl_pct;     // EMA Cross SL override
+  FPN_Binary<F> simpledip_tp_pct;    // SimpleDip TP override (%, stored as decimal)
+  FPN_Binary<F> simpledip_sl_pct;    // SimpleDip SL override
+  FPN_Binary<F> mr_tp_pct;           // MeanReversion TP override
+  FPN_Binary<F> mr_sl_pct;           // MeanReversion SL override
+  FPN_Binary<F> emacross_tp_pct;     // EMA Cross TP override
+  FPN_Binary<F> emacross_sl_pct;     // EMA Cross SL override
   // OMS phase 03: which path EventLoop_OnEvent takes when a TradeEvent
   // arrives. mode 0 (legacy): OnEvent mutates the portfolio + balance
   // directly, same as phase 02. mode 1 (event log): OnEvent just bumps
@@ -1140,8 +1140,8 @@ template <unsigned F> struct ControllerConfig {
   // values bytewise. Stamp body records what trained the model
   // (Surface G `has_xgb_hyperparams` flag); engine load-WARN fires
   // when stamp's value differs from cfg's at boot.
-  FPN<F>   xgb_subsample;          // row subsample per tree (0.5-1.0); default 0.8
-  FPN<F>   xgb_colsample_bytree;   // column subsample per tree (0.5-1.0); default 0.8
+  FPN_Binary<F>   xgb_subsample;          // row subsample per tree (0.5-1.0); default 0.8
+  FPN_Binary<F>   xgb_colsample_bytree;   // column subsample per tree (0.5-1.0); default 0.8
   char     xgb_tree_method[16];    // hist | exact | approx | auto; default "hist"
 
   // v5.10.0 Item D — hardware-aware cfg. Operator-tunable thread counts
@@ -1250,7 +1250,7 @@ template <unsigned F> struct ControllerConfig {
   // v5.14.10.B — Bayesian Thompson sampling bandit (alternative bandit weight
   // provider; cfg.bandit_algorithm enum picks Exp3-IX vs Thompson vs Both).
   // Cfg-flag eligibility analysis (per cfg-flag-eligibility-criteria.md):
-  // bandit_algorithm is INT enum (3 values), thompson_*_prior/obs are FPN
+  // bandit_algorithm is INT enum (3 values), thompson_*_prior/obs are FPN_Binary
   // scalars, thompson_rng_seed is uint64 — none are booleans → all REJECT
   // for FOREACH_ML_CFG_FLAG bitmap migration. Stay as direct cfg fields.
   // Stamp-bound via FOREACH_STAMP_BOUND_CFG (drift detection); rng_seed
@@ -1260,11 +1260,11 @@ template <unsigned F> struct ControllerConfig {
   // PARITY-014 contract; see ML_Headers/BanditAlgorithmRegistry.hpp for
   // FOREACH_BANDIT_ALGORITHM dispatch (3 algos: EXP3=0, THOMPSON=1, BOTH=2).
   int      bandit_algorithm;          // 0=EXP3 (default), 1=THOMPSON, 2=BOTH (parallel A/B)
-  FPN<F>   thompson_mu_prior;         // posterior mean prior; default 0.0
-  FPN<F>   thompson_precision_prior;  // posterior precision prior (= 1/variance); default 1.0
-  FPN<F>   thompson_precision_obs;    // observation precision; default 1.0
+  FPN_Binary<F>   thompson_mu_prior;         // posterior mean prior; default 0.0
+  FPN_Binary<F>   thompson_precision_prior;  // posterior precision prior (= 1/variance); default 1.0
+  FPN_Binary<F>   thompson_precision_obs;    // observation precision; default 1.0
   uint64_t thompson_rng_seed;         // splitmix64 seed; default 42
-  FPN<F>   thompson_exp3_blend_alpha; // v5.15.5.F.4d — BLENDED state-4 blend ratio; default 0.5 (only consumed when bandit_algorithm=4)
+  FPN_Binary<F>   thompson_exp3_blend_alpha; // v5.15.5.F.4d — BLENDED state-4 blend ratio; default 0.5 (only consumed when bandit_algorithm=4)
 
   //==================================================================================================
   // [v5.15.5.F.4c.3 — PER-CORE AUTHORITATIVE CONFIG]
@@ -1363,8 +1363,8 @@ template <unsigned F> struct ControllerConfig {
 // switching to o->pre_resolved.fee_rate. Check 10 detects via UNINDEXED-GLOBAL
 // pattern at per-core consumer sites.
 template <unsigned F>
-inline FPN<F> Fee_Compute(const ControllerConfig<F>* cfg, FPN<F> notional, int is_maker) {
-    FPN<F> rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
+inline FPN_Binary<F> Fee_Compute(const ControllerConfig<F>* cfg, FPN_Binary<F> notional, int is_maker) {
+    FPN_Binary<F> rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
     return FPN_Mul(notional, rate);
 }
 
@@ -1490,7 +1490,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // + future-headache reducer for all 48 globals. Manual default lines DELETED below
   // (Python script /tmp/delete_manual_defaults.py).
   //
-  // tt::cfg_assign_field reads descriptor.payload per KIND dispatch (FPN<F> from as_double;
+  // tt::cfg_assign_field reads descriptor.payload per KIND dispatch (FPN_Binary<F> from as_double;
   // int/uint{8,16,32,64}_t from as_int or as_bool; KIND_INT_ENUM from as_int_enum).
   // Defaults baked in registry rows at CfgFieldRegistry.hpp:255-419 — single source of truth.
   FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
@@ -1915,7 +1915,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // regime histogram unchanged within tolerance under enabled mode.
   // lazy_rebuild_enabled migrated to ml_cfg_flags (default 0)
   // v5.15.5.F.4d.1.B.3 Step 8.6: lazy_rebuild_force_period_us MATCH — registry INT(1000000) == manual; DELETED.
-  // v5.15.5.F.4d.1.B.4 Cx-D extension: lazy_rebuild_price_threshold_pct (0.0005) manual init DELETED; auto-populated via FOREACH_GLOBAL_CFG_FIELD walker + tt::cfg_assign_field<FPN<F>> dispatch.
+  // v5.15.5.F.4d.1.B.4 Cx-D extension: lazy_rebuild_price_threshold_pct (0.0005) manual init DELETED; auto-populated via FOREACH_GLOBAL_CFG_FIELD walker + tt::cfg_assign_field<FPN_Binary<F>> dispatch.
   // v5.12.2.D — disabled by default; operator opts in after tooling is wired.
   // v5.15.5.F.4d.1.B.3 Step 8.6: use_aot_inference MATCH — registry BOOL(0) == manual; DELETED.
   // v5.13.0 — sell-side ML defaults: disabled; opt-in for paper-test.
@@ -2105,7 +2105,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     //==================================================================================================
     // For each FOREACH_GLOBAL_CFG_FIELD + FOREACH_PER_CORE_CFG_FIELD entry: if
     // `key` matches the row's name, call tt::cfg_parse_field<T>(cfg.name, descriptor, val)
-    // — T is deduced from cfg.name's actual type (FPN<F> or scalar). 3-barrier
+    // — T is deduced from cfg.name's actual type (FPN_Binary<F> or scalar). 3-barrier
     // structural fix per DOCS/RECURRING_BUG_PATTERNS.md Class 23 +
     // DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.
     //
@@ -2157,7 +2157,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_PARSER_CASE)
     #undef EMIT_PER_CORE_CFG_PARSER_CASE
 
-// table-driven parser: FPN fields parsed as atof(val) directly
+// table-driven parser: FPN_Binary fields parsed as atof(val) directly
 // adding a new field = add ONE line to the matching table below
 #define CFG_PARSE_FPN(name)                                                    \
   if (strcmp(key, #name) == 0) {                                               \
@@ -2165,7 +2165,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     continue;                                                                  \
   }
 
-// FPN fields parsed as atof(val) / 100.0 (percentage: config says 15.0, stored
+// FPN_Binary fields parsed as atof(val) / 100.0 (percentage: config says 15.0, stored
 // as 0.15)
 #define CFG_PARSE_PCT(name)                                                    \
   if (strcmp(key, #name) == 0) {                                               \
@@ -2187,7 +2187,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     continue;                                                                  \
   }
 
-// FPN fields with min-zero clamp
+// FPN_Binary fields with min-zero clamp
 #define CFG_PARSE_FPN_POS(name)                                                \
   if (strcmp(key, #name) == 0) {                                               \
     double v = atof(val);                                                      \
@@ -2197,7 +2197,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     continue;                                                                  \
   }
 
-    //--- FPN raw (value used directly) ---
+    //--- FPN_Binary raw (value used directly) ---
     CFG_PARSE_FPN(r2_threshold)
     CFG_PARSE_FPN(slope_scale_buy)
     CFG_PARSE_FPN(max_shift)
@@ -2243,7 +2243,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     FOREACH_SESSION_PHASE(X)
 #undef X
 
-    //--- FPN percentage (config says 15.0, stored as 0.15) ---
+    //--- FPN_Binary percentage (config says 15.0, stored as 0.15) ---
     CFG_PARSE_PCT(take_profit_pct)
     CFG_PARSE_PCT(stop_loss_pct)
     CFG_PARSE_PCT(fee_rate)
@@ -2375,12 +2375,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.12.2.B — lazy slow-path rebuild
     // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     // v5.15.5.F.4c — lazy_rebuild_force_period_us migrated to FOREACH_CFG_FIELD (KIND_INT; uint64 storage).
-    // v5.15.5.F.4d TECH_DEBT-082 — lazy_rebuild_price_threshold_pct migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE_PCT; FPN<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
+    // v5.15.5.F.4d TECH_DEBT-082 — lazy_rebuild_price_threshold_pct migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE_PCT; FPN_Binary<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     // v5.12.2.D — Treelite AOT backend opt-in (infrastructure-only)
     // v5.15.5.F.4c — use_aot_inference migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
     // v5.13.0 — sell-side ML opt-in (Path 3 architecture)
     // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
-    // v5.15.5.F.4d TECH_DEBT-082 — exit_threshold migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE; FPN<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
+    // v5.15.5.F.4d TECH_DEBT-082 — exit_threshold migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE; FPN_Binary<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     if (strcmp(key, "exit_signal_model_dir") == 0) {
       strncpy(cfg.exit_signal_model_dir, val,
               sizeof(cfg.exit_signal_model_dir) - 1);
@@ -2402,7 +2402,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(ml_tp_pct)
     CFG_PARSE_PCT(ml_sl_pct)
 
-    //--- FPN with min-zero clamp ---
+    //--- FPN_Binary with min-zero clamp ---
     CFG_PARSE_FPN_POS(offset_stddev_mult)
     CFG_PARSE_FPN_POS(offset_stddev_min)
     CFG_PARSE_FPN_POS(offset_stddev_max)
@@ -2516,7 +2516,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // no_trade_band_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     // v5.15.5.F.4c — ml_backend + regime_model_backend migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY; pending TECH_DEBT-068).
 
-    //--- partial exit + depth + EMA FPN ---
+    //--- partial exit + depth + EMA FPN_Binary ---
     CFG_PARSE_FPN(partial_exit_pct)
     CFG_PARSE_FPN(tp2_mult)
     CFG_PARSE_FPN(min_book_imbalance)
@@ -2570,10 +2570,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(confidence_threshold_scale)
     CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — held_out_fraction manual parser removed (was CFG_PARSE_FPN).
-    // Registry auto-parser via FOREACH_GLOBAL_CFG_FIELD walker at line 2110 handles via tt::cfg_parse_field<FPN<F>>.
+    // Registry auto-parser via FOREACH_GLOBAL_CFG_FIELD walker at line 2110 handles via tt::cfg_parse_field<FPN_Binary<F>>.
     // v5.15.5.F.4d.1.B.3 Step 1.6.1 — gap_acceptable_threshold migrated to registry auto-parser
     // (TECH_DEBT-093 closure). HAS_SIDE_EFFECT bit removed at CfgFieldRegistry.hpp registry row;
-    // tt::cfg_parse_field<FPN<F>> handles FPN_FromDouble + clamp via DBL(0.05, 0.0, 1.0) payload.
+    // tt::cfg_parse_field<FPN_Binary<F>> handles FPN_FromDouble + clamp via DBL(0.05, 0.0, 1.0) payload.
     // v5.15.5.F.4c — allow_cross_major_engine migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
     // Registry walker handles parse; manual CFG_PARSE_INT removed.
     // v5.9.5h — XGBoost hyperparam parsers
@@ -2899,7 +2899,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // Per-core overrides (v4.0). Parses `core_N_<field>=<value>` for any
     // PerCoreOverrides field. Empty/0 = inherit global; resolver handles
     // the fallback. Two categories — pct (atof/100, e.g. take_profit_pct)
-    // and raw FPN (atof, e.g. ml_buy_threshold).
+    // and raw FPN_Binary (atof, e.g. ml_buy_threshold).
     //
     // v4.7.24: parser auto-derives from PER_CORE_OVERRIDE_FIELDS macro.
     // Adding a new override field = ONE line in the macro list near the
@@ -3180,7 +3180,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   // Cross-field invariant low < high adds the missing piece per CRIT-4 audit finding.
   // Decision 4 (A) at triage: cross-field invariant only; leverage existing canonical
   // (avoids duplicating individual-bound clamps that WARN_ON_CLAMP already covers).
-  // FPN<F>-native compare per MED-4 audit recommendation (now possible at .B.2 Step 6.5
+  // FPN_Binary<F>-native compare per MED-4 audit recommendation (now possible at .B.2 Step 6.5
   // operator overloads landing in FixedPointN.hpp). Compares in integer-limb domain
   // per H4 (no FPN_ToDouble round-trip for the comparison itself).
   if (!(cfg.winsor_pct_low < cfg.winsor_pct_high)) {

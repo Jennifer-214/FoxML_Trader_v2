@@ -12,7 +12,7 @@
 // Tuple: X(field_name, type, json_key)
 //   field_name — bare identifier on CoreContext<F>; referenced as ctx.field_name
 //   type       — C++ type; dispatched via json_emit_value<T> for per-type
-//                 JSON formatting (FPN<F> → "%.6f" via FPN_ToDouble, uint8/16/32/64 → "%llu",
+//                 JSON formatting (FPN_Binary<F> → "%.6f" via FPN_ToDouble, uint8/16/32/64 → "%llu",
 //                 signed → "%lld", float/double → "%.6f")
 //   json_key   — operator-facing JSON key string literal
 //
@@ -65,13 +65,13 @@ namespace tt {
 namespace tt {
 
 //======================================================================================================
-// [TYPE TRAIT — is_fpn for FPN<F> detection in templated dispatch]
+// [TYPE TRAIT — is_fpn for FPN_Binary<F> detection in templated dispatch]
 //======================================================================================================
-// FPN<F> is a template; std::is_same_v<T, FPN<F>> requires a specific F. To
-// detect any FPN<F> regardless of width, use this custom type trait.
+// FPN_Binary<F> is a template; std::is_same_v<T, FPN_Binary<F>> requires a specific F. To
+// detect any FPN_Binary<F> regardless of width, use this custom type trait.
 //======================================================================================================
 template <typename T> struct is_fpn : std::false_type {};
-template <unsigned F> struct is_fpn<FPN<F>> : std::true_type {};
+template <unsigned F> struct is_fpn<FPN_Binary<F>> : std::true_type {};
 template <typename T> inline constexpr bool is_fpn_v = is_fpn<T>::value;
 
 //======================================================================================================
@@ -83,7 +83,7 @@ template <typename T> inline constexpr bool is_fpn_v = is_fpn<T>::value;
 // supported type = 1 if-constexpr branch.
 //
 // Format choices:
-//   FPN<F>           → "%.6f" via FPN_ToDouble (6 decimal places; sufficient for
+//   FPN_Binary<F>           → "%.6f" via FPN_ToDouble (6 decimal places; sufficient for
 //                       BTC USD prices, fee rates, and P&L)
 //   float / double   → "%.6f" (same precision)
 //   unsigned integer → "%llu" (works for uint8/16/32/64 via cast)
@@ -140,24 +140,24 @@ inline void json_emit_pair(std::FILE* f, const char* key, const T& value, bool& 
     X(halt_reason,           uint8_t,  "halt_reason")                                           \
     X(strategy_halt_reason,  uint8_t,  "strategy_halt_reason")                                  \
     /* Capital allocation */                                                                    \
-    X(allocated_balance,     FPN<F>,   "allocated_balance")                                     \
+    X(allocated_balance,     FPN_Binary<F>,   "allocated_balance")                                     \
     /* Event counters */                                                                        \
     X(entries_processed,     uint64_t, "entries")                                               \
     X(exits_processed,       uint64_t, "exits")                                                 \
     X(sl_cooldown_remaining, uint32_t, "sl_cooldown_remaining")                                 \
     X(idle_cycles,           uint32_t, "idle_cycles")                                           \
     /* P&L (net) */                                                                             \
-    X(core_realized,         FPN<F>,   "realized")                                              \
-    X(core_fees,             FPN<F>,   "fees")                                                  \
+    X(core_realized,         FPN_Binary<F>,   "realized")                                              \
+    X(core_fees,             FPN_Binary<F>,   "fees")                                                  \
     X(core_wins,             uint32_t, "wins")                                                  \
     X(core_losses,           uint32_t, "losses")                                                \
     /* P&L (gross — per-side accumulators for avg_win, avg_loss, profit_factor, expectancy) */  \
-    X(core_gross_wins,       FPN<F>,   "gross_wins")                                            \
-    X(core_gross_losses,     FPN<F>,   "gross_losses")                                          \
-    X(core_open_notional,    FPN<F>,   "open_notional")                                         \
+    X(core_gross_wins,       FPN_Binary<F>,   "gross_wins")                                            \
+    X(core_gross_losses,     FPN_Binary<F>,   "gross_losses")                                          \
+    X(core_open_notional,    FPN_Binary<F>,   "open_notional")                                         \
     /* Kill switch / drawdown */                                                                \
-    X(core_peak_balance,     FPN<F>,   "peak_balance")                                          \
-    X(core_dd_pct,           FPN<F>,   "dd_pct")                                                \
+    X(core_peak_balance,     FPN_Binary<F>,   "peak_balance")                                          \
+    X(core_dd_pct,           FPN_Binary<F>,   "dd_pct")                                                \
     X(core_ks_trips_total,   uint32_t, "ks_trips_total")                                        \
     /* ML observability */                                                                      \
     X(last_confidence,       double,   "last_confidence")
@@ -239,13 +239,13 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, i
         int      present;
         uint64_t entries;
         uint64_t exits;
-        FPN<F>   realized;
-        FPN<F>   fees;
+        FPN_Binary<F>   realized;
+        FPN_Binary<F>   fees;
         uint32_t wins;
         uint32_t losses;
-        FPN<F>   gross_wins;
-        FPN<F>   gross_losses;
-        FPN<F>   open_notional;
+        FPN_Binary<F>   gross_wins;
+        FPN_Binary<F>   gross_losses;
+        FPN_Binary<F>   open_notional;
     };
     StratAgg agg[MAX_STRAT] = {};
     for (int c = 0; c < num_cores; ++c) {
@@ -274,13 +274,13 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, i
         json_emit_pair(f, "strategy_id",   static_cast<uint64_t>(sid), first_field);
         json_emit_pair(f, "entries",       agg[sid].entries,           first_field);
         json_emit_pair(f, "exits",         agg[sid].exits,             first_field);
-        json_emit_pair<FPN<F>>(f, "realized",      agg[sid].realized,      first_field);
-        json_emit_pair<FPN<F>>(f, "fees",          agg[sid].fees,          first_field);
+        json_emit_pair<FPN_Binary<F>>(f, "realized",      agg[sid].realized,      first_field);
+        json_emit_pair<FPN_Binary<F>>(f, "fees",          agg[sid].fees,          first_field);
         json_emit_pair(f, "wins",          static_cast<uint64_t>(agg[sid].wins),   first_field);
         json_emit_pair(f, "losses",        static_cast<uint64_t>(agg[sid].losses), first_field);
-        json_emit_pair<FPN<F>>(f, "gross_wins",    agg[sid].gross_wins,    first_field);
-        json_emit_pair<FPN<F>>(f, "gross_losses",  agg[sid].gross_losses,  first_field);
-        json_emit_pair<FPN<F>>(f, "open_notional", agg[sid].open_notional, first_field);
+        json_emit_pair<FPN_Binary<F>>(f, "gross_wins",    agg[sid].gross_wins,    first_field);
+        json_emit_pair<FPN_Binary<F>>(f, "gross_losses",  agg[sid].gross_losses,  first_field);
+        json_emit_pair<FPN_Binary<F>>(f, "open_notional", agg[sid].open_notional, first_field);
         std::fprintf(f, "}");
     }
     std::fprintf(f, "]");

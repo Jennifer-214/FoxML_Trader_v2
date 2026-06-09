@@ -9,7 +9,7 @@
 // and produces DataStream<F> structs - same interface the pipeline already consumes
 //
 // no API key needed for market data - public endpoint, read-only
-// handles the full network stack: TCP -> TLS -> WebSocket -> JSON -> FPN
+// handles the full network stack: TCP -> TLS -> WebSocket -> JSON -> FPN_Binary
 //
 // the main loop calls BinanceStream_Poll to check for data, then BinanceStream_ReadTick
 // to consume one frame. poll checks SSL_pending FIRST to avoid the SSL-internal-buffer
@@ -743,7 +743,7 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
 
             out->price  = FPN_FromString<F>(price_str);
             out->volume = FPN_FromString<F>(qty_str);
-            // v5.11.19 — derive TUI doubles from the FPN values directly
+            // v5.11.19 — derive TUI doubles from the FPN_Binary values directly
             // instead of running a separate parse_double_fast pass on the
             // same string. Saves one parse per tick (BinanceCrypto's hot
             // ingestion is the only per-tick site) AND eliminates the
@@ -755,7 +755,7 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
             // FPN_ToDouble is a deterministic conversion (uint64_t
             // limb math + ldexp combination), so this is a strict
             // tightening: every TUI double is now provably consistent
-            // with its FPN value.
+            // with its FPN_Binary value.
             out->price_d  = FPN_ToDouble(out->price);
             out->volume_d = FPN_ToDouble(out->volume);
             out->is_buyer_maker = is_buyer_maker;

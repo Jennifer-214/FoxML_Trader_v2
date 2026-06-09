@@ -28,7 +28,7 @@
 //   (phase 05) and startup balance sync, not on every tick.
 //
 // OrderResult is non-templated POD so it can flow through the OMS
-// command queue without depending on the FPN<F> width.
+// command queue without depending on the FPN_Binary<F> width.
 //======================================================================================================
 
 #pragma once
@@ -76,7 +76,7 @@ typedef void (*OrderCallback)(void* user_ctx,
 // the OMS. There is no "optional method" — adapters that don't support
 // query_order should provide a stub that returns 0 with an error code.
 //
-// The template parameter F lets the adapter type-check against FPN<F>
+// The template parameter F lets the adapter type-check against FPN_Binary<F>
 // fields if it needs them. Phase 02 BinanceAdapter doesn't actually use F
 // in its function signatures (it converts at the boundary) but keeping
 // the template makes future adapters easier.

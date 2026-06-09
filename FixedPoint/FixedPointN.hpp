@@ -3,18 +3,18 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FIXED-POINT ARITHMETIC LIBRARY - ARBITRARY WIDTH]
+// [FIXED-POINT ARITHMETIC LIBRARY — THE 16B BINARY CORE]
 //======================================================================================================
-// template parameter FRAC_BITS selects precision: 64, 128, 256, 512, etc
-// storage is uint64_t w[FRAC_BITS/32] - the compiler unrolls all loops since N is compile-time
-// everything decomposes into 64-bit word operations so GCC can use cmov/sbb natively
+// FPN_Binary<64> is the ONLY binary instantiation: 16B two's-complement __int128, value = v / 2^64
+// (sign in the top bit; no sign field, no padding; 4 per cache line). The arbitrary-width uint64_t
+// w[] generic body was SHED at Ship A (v5.15.5.F.4d.1.E.0.7); the spelling FPN -> FPN_Binary landed
+// at A.5 (E.0.8, D-143/D-163). The FRAC template parameter is RETAINED for the D-129 future width work.
 //
 // usage:
-//   using FP256 = FPN<256>;
-//   FP256 a = FPN_FromDouble<256>(3.14);
-//   FP256 b = FPN_FromDouble<256>(2.0);
-//   FP256 c = FPN_Add(a, b);
-//   double result = FPN_ToDouble(c);
+//   FPN_Binary<64> a = FPN_FromDouble<64>(3.14);
+//   FPN_Binary<64> b = FPN_FromDouble<64>(2.0);
+//   FPN_Binary<64> c = FPN_Add(a, b);
+//   double result = FPN_ToDouble(c);   // display-only boundary (H4)
 //
 // compile: g++ -std=c++17 -O2 ...
 //======================================================================================================
@@ -24,35 +24,35 @@
 #include <stdint.h>
 #include <assert.h>
 #include <math.h>
-#include <type_traits>  // v5.15.5.F.4b — std::false_type / std::true_type for is_FPN<T> type trait
+#include <type_traits>  // v5.15.5.F.4b — std::false_type / std::true_type for the binary-domain type trait (is_fp_binary<T> since Ship A)
 
 //======================================================================================================
 // [FIXED-POINT NUMBER REPRESENTATION]
 //======================================================================================================
-// v5.15.5.F.4d.1.E Ship A (D-143 intent: FPN<64> = the 16B binary core). MECHANISM = full-specialization,
-// NOT an alias: an alias template `using FPN = FixedPoint<2,F>` makes FPN<F> a NON-DEDUCED context, breaking
+// v5.15.5.F.4d.1.E Ship A (D-143 intent: FPN_Binary<64> = the 16B binary core). MECHANISM = full-specialization,
+// NOT an alias: an alias template `using FPN_Binary = FixedPoint<2,F>` makes FPN_Binary<F> a NON-DEDUCED context, breaking
 // `FPN_Op(args)` template-arg deduction across the F-generic engine (red-build caught it at CfgFieldDispatch).
-// So FPN<64> is a concrete 16B specialization (layout-identical to FixedPoint<2,64>: bare __int128 v), and
+// So FPN_Binary<64> is a concrete 16B specialization (layout-identical to FixedPoint<2,64>: bare __int128 v), and
 // is_fp_binary is EXTENDED to cover it below (so the B6 wire-dispatchers see it as binary). The 24B
 // sign-magnitude generic body is SHED — only <64> is defined; F=128 was trait-test-only (rewritten this ship).
 // The old `.w[]`/`.sign` aggregate-access sites red-build → ported to `.v`.
-template <unsigned F> struct FPN;                         // primary: declaration only (arbitrary width shed)
-template <> struct FPN<64> {
+template <unsigned F> struct FPN_Binary;                         // primary: declaration only (arbitrary width shed)
+template <> struct FPN_Binary<64> {
     __int128 v;                                           // value = v / 2^64 (two's-complement; sign in the top bit)
     static constexpr unsigned F = 64;                     // T::F access for templated dispatchers (tt::cfg_*_field<T>)
 };
-static_assert(sizeof(FPN<64>) == 16, "Ship A: FPN<64> is the 16B two's-complement binary core (was 24B sign-mag)");
+static_assert(sizeof(FPN_Binary<64>) == 16, "Ship A: FPN_Binary<64> is the 16B two's-complement binary core (was 24B sign-mag)");
 
-// v5.15.5.F.4b — type trait for FPN<F> detection in templated dispatchers.
+// v5.15.5.F.4b — type trait for FPN_Binary<F> detection in templated dispatchers.
 // Used by tt::cfg_parse_field<T> / tt::cfg_save_field<T> / tt::cfg_render_field<T>
-// (and any future templated typed-field dispatcher) to dispatch to FPN-specific
+// (and any future templated typed-field dispatcher) to dispatch to FPN_Binary-specific
 // branches (FPN_FromDouble + clamp + percent scaling) vs. raw double / int / array.
 //
 // Critical for closing DOCS/RECURRING_BUG_PATTERNS.md Class 23 (type-erased
 // reinterpret_cast through char*+offset dispatch). Without this trait, registry-
-// driven cfg dispatch can't safely distinguish FPN<F> fields from raw double
+// driven cfg dispatch can't safely distinguish FPN_Binary<F> fields from raw double
 // fields, leading to silent mantissa corruption when 8-byte double is punned
-// through a 24-byte FPN<F> address.
+// through the fixed-point address (24B at the Class-23 origin; 16B since Ship A).
 //
 // 3-barrier structural fix per DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md:
 //   Barrier 1: API surface (no void*+offset entry; tt:: takes T& destination)
@@ -63,20 +63,22 @@ static_assert(sizeof(FPN<64>) == 16, "Ship A: FPN<64> is the 16B two's-complemen
 //
 // Pattern: parallel to std::is_floating_point_v / std::is_array_v / std::is_unsigned_v
 // from <type_traits>. Codebase-specific traits live next to the type they describe.
-// is_FPN_v is redefined as a binary-only alias of is_fp_binary_v at the FPN alias below (D-143) — so the
-// 21 existing is_FPN_v consumers + the B6 wire-dispatchers share ONE binary-domain trait (no divergence).
+// The legacy trait spelling is_FPN_v (pre-A.5) was first unified onto is_fp_binary_v at the 16B flip,
+// then RETIRED at A.5 (E.0.8): every consumer + the B6 wire-dispatchers gate on is_fp_binary_v
+// directly — ONE binary-domain trait, no divergence, no alias.
 
 //======================================================================================================
 // [UNIFIED RADIX-PARAMETRIZED FIXED-POINT — v5.15.5.F.4d.1.E Ship A]
 //======================================================================================================
 // FixedPoint<RADIX,FRAC>: value = stored_integer / RADIX^FRAC. Two concrete instantiations (D-99 —
 // NOT speculative generality; two real types, not hypotheticals):
-//   <2,64>  binary  — the 16B two's-complement core (THIS ship; replaces 24B sign-magnitude FPN<64>).
+//   <2,64>  binary  — the 16B two's-complement core (Ship A; replaced the 24B sign-magnitude predecessor).
 //   <10,8>  decimal — money, scale 10^8 (Ship B).
 // Storage is radix-independent (a signed scaled integer); radix appears only in the mul-reduce + div.
 // The 16B form keeps the sign in the TOP BIT (no sign field) → 16B, 16-aligned, NO padding (vs
-// sign-magnitude's 24B w[2]+sign+_padding). Value-equivalent to FPN<64> BY CONSTRUCTION (same unsigned
-// product, same sign rule) — proven 423/0 by tools/ship_a_fp2_64_slice.cpp (D-125/D-139).
+// sign-magnitude's 24B w[2]+sign+_padding). Value-equivalent to the retired 24B core BY CONSTRUCTION
+// (same unsigned product, same sign rule) — proven 423/0 at the Ship-A acceptance (op-slice since
+// retired at close, workspace 84caea6; see the E.0.7 acceptance record; D-125/D-139).
 template <int RADIX, int FRAC> struct FixedPoint;   // generic; only <2,64> specialized this ship
 
 template <> struct FixedPoint<2, 64> {
@@ -87,10 +89,11 @@ template <> struct FixedPoint<2, 64> {
 static_assert(sizeof(FixedPoint<2,64>) == 16,
               "Ship A: the binary core is a bare 16B __int128 two's-complement (no sign field, no padding)");
 
-// Disjoint domain traits (B6 mechanical guard): binary <2,FRAC> vs decimal <10,FRAC>. At the FPN<64>
-// flip, is_FPN_v becomes a binary-only alias = is_fp_binary_v. Every tt:: wire dispatcher will
-// static_assert exhaustively over these (binary || decimal || float || ...) → a missing decimal branch
-// becomes a COMPILE ERROR, which is what turns the silent-lossy-emit risk into a build break.
+// Disjoint domain traits (B6 mechanical guard): binary <2,FRAC> vs decimal <10,FRAC>. Since A.5 the
+// binary domain has exactly ONE trait spelling: is_fp_binary_v (legacy is_FPN_v retired). Every tt::
+// wire dispatcher will static_assert exhaustively over these (binary || decimal || float || ...) →
+// a missing decimal branch becomes a COMPILE ERROR, which is what turns the silent-lossy-emit risk
+// into a build break.
 template <typename T>  struct is_fp_binary                     : std::false_type {};
 template <int F>       struct is_fp_binary<FixedPoint<2, F>>   : std::true_type  {};
 template <typename T> inline constexpr bool is_fp_binary_v  = is_fp_binary<T>::value;
@@ -98,11 +101,10 @@ template <typename T>  struct is_fp_decimal                    : std::false_type
 template <int F>       struct is_fp_decimal<FixedPoint<10, F>> : std::true_type  {};
 template <typename T> inline constexpr bool is_fp_decimal_v = is_fp_decimal<T>::value;
 
-// FPN<64> (the concrete 16B binary core, defined above) is is_fp_binary — EXTEND the trait so the B6 wire-
-// dispatchers (which gate on is_fp_binary_v) treat it as binary, and unify is_FPN_v onto is_fp_binary_v (the
-// 21 is_FPN_v consumers + the dispatchers now share ONE binary-domain trait — D-143/B6).
-template <> struct is_fp_binary<FPN<64>> : std::true_type {};
-template <typename T> inline constexpr bool is_FPN_v = is_fp_binary_v<T>;   // binary-only (D-143; was is_FPN<T>)
+// FPN_Binary<64> (the concrete 16B binary core, defined above) is is_fp_binary — EXTEND the trait so the
+// B6 wire-dispatchers (which gate on is_fp_binary_v) treat it as binary. ONE binary-domain trait
+// (D-143/B6; the legacy is_FPN_v alias that briefly lived here was retired at A.5 — D-163).
+template <> struct is_fp_binary<FPN_Binary<64>> : std::true_type {};
 
 //======================================================================================================
 // [N-WORD HELPERS]
@@ -111,19 +113,19 @@ template <typename T> inline constexpr bool is_FPN_v = is_fp_binary_v<T>;   // b
 //======================================================================================================
 
 // is magnitude zero
-template <unsigned F> inline int FPN_MagIsZero(FPN<F> v) {
+template <unsigned F> inline int FPN_MagIsZero(FPN_Binary<F> v) {
     uint64_t acc = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; i++)
+    for (unsigned i = 0; i < FPN_Binary<F>::N; i++)
         acc |= v.w[i];
     return acc == 0;
 }
 
 // a >= b unsigned, branchless, built from LSB up
-template <unsigned F> inline int FPN_MagGe(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_MagGe(FPN_Binary<F> a, FPN_Binary<F> b) {
     int ge = (a.w[0] >= b.w[0]);
 #pragma GCC unroll 65534
-    for (unsigned i = 1; i < FPN<F>::N; i++) {
+    for (unsigned i = 1; i < FPN_Binary<F>::N; i++) {
         int gt = (a.w[i] > b.w[i]);
         int eq = (a.w[i] == b.w[i]);
         ge     = gt | (eq & ge);
@@ -132,16 +134,16 @@ template <unsigned F> inline int FPN_MagGe(FPN<F> a, FPN<F> b) {
 }
 
 // a == b
-template <unsigned F> inline int FPN_MagEq(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_MagEq(FPN_Binary<F> a, FPN_Binary<F> b) {
     uint64_t diff = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; i++)
+    for (unsigned i = 0; i < FPN_Binary<F>::N; i++)
         diff |= (a.w[i] ^ b.w[i]);
     return diff == 0;
 }
 
 // a > b
-template <unsigned F> inline int FPN_MagGt(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_MagGt(FPN_Binary<F> a, FPN_Binary<F> b) {
     return FPN_MagGe(a, b) & !FPN_MagEq(a, b);
 }
 
@@ -149,7 +151,7 @@ template <unsigned F> inline int FPN_MagGt(FPN<F> a, FPN<F> b) {
 template <unsigned F> inline void FPN_MagAddN(const uint64_t *a, const uint64_t *b, uint64_t *r) {
     uint64_t carry = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; i++) {
+    for (unsigned i = 0; i < FPN_Binary<F>::N; i++) {
         uint64_t t  = a[i] + b[i];
         uint64_t c1 = (t < a[i]);
         r[i]        = t + carry;
@@ -162,7 +164,7 @@ template <unsigned F> inline void FPN_MagAddN(const uint64_t *a, const uint64_t 
 template <unsigned F> inline void FPN_MagSubN(const uint64_t *a, const uint64_t *b, uint64_t *r) {
     uint64_t borrow = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; i++) {
+    for (unsigned i = 0; i < FPN_Binary<F>::N; i++) {
         uint64_t t   = a[i] - b[i];
         uint64_t bw1 = (a[i] < b[i]);
         r[i]         = t - borrow;
@@ -171,10 +173,10 @@ template <unsigned F> inline void FPN_MagSubN(const uint64_t *a, const uint64_t 
     }
 }
 
-template <unsigned F> inline FPN<F> FPN_Zero() {
-    FPN<F> result;
+template <unsigned F> inline FPN_Binary<F> FPN_Zero() {
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; i++)
+    for (unsigned i = 0; i < FPN_Binary<F>::N; i++)
         result.w[i] = 0;
     result.sign = 0;
     return result;
@@ -185,14 +187,14 @@ template <unsigned F> inline FPN<F> FPN_Zero() {
 //======================================================================================================
 // precision is limited by double (~52 bits) but these are for getting data in and out
 //======================================================================================================
-template <unsigned F> inline FPN<F> FPN_FromDouble(double input) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_FromDouble(double input) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
 
     int32_t neg      = (input < 0.0);
     double abs_input = input * (1.0 - 2.0 * neg);
 
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < N; i++)
         result.w[i] = 0;
@@ -216,9 +218,9 @@ template <unsigned F> inline FPN<F> FPN_FromDouble(double input) {
     return result;
 }
 
-template <unsigned F> inline double FPN_ToDouble(FPN<F> value) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline double FPN_ToDouble(FPN_Binary<F> value) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
 
     // double only has ~52 bits of mantissa, so we only need the most significant
     // non-zero words. processing all words at large N causes scale to hit inf
@@ -267,15 +269,15 @@ template <unsigned F> inline double FPN_ToDouble(FPN<F> value) {
 // [INTEGER CONVERSION — pure integer, no double round-trip]
 //======================================================================================================
 // FPN_FromInt avoids the IEEE-754 reorderings that FPN_FromDouble<F>((double)int)
-// can introduce across compilers / -O levels. Use this for any FPN value
+// can introduce across compilers / -O levels. Use this for any FPN_Binary value
 // derived from an integer (loop indices, sample counts, precomputed sums like
 // n*(n-1)/2). Bytewise-deterministic across builds. v5.10.0b prerequisite.
 //======================================================================================================
-template <unsigned F> inline FPN<F> FPN_FromInt(int64_t input) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_FromInt(int64_t input) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
 
-    FPN<F> result = FPN_Zero<F>();
+    FPN_Binary<F> result = FPN_Zero<F>();
     int neg = (input < 0);
     // careful negation: avoid -INT64_MIN UB by going through unsigned
     uint64_t mag = neg ? (uint64_t)(-(input + 1)) + 1u : (uint64_t)input;
@@ -332,9 +334,9 @@ template <unsigned F> inline constexpr unsigned FPN_MaxDecimalDigits() {
 // convert to decimal string, returns number of chars written (excluding null terminator)
 // buf must be large enough: sign + integer digits + '.' + decimal_places + '\0'
 // if decimal_places is 0, uses max meaningful precision
-template <unsigned F> inline unsigned FPN_ToString(FPN<F> value, char *buf, unsigned buf_size, unsigned decimal_places = 0) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline unsigned FPN_ToString(FPN_Binary<F> value, char *buf, unsigned buf_size, unsigned decimal_places = 0) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
     constexpr unsigned IW = N - FW;
 
     if (decimal_places == 0)
@@ -389,12 +391,12 @@ template <unsigned F> inline unsigned FPN_ToString(FPN<F> value, char *buf, unsi
 
 // parse decimal string to fixed-point
 // accepts optional sign, integer digits, optional '.', fractional digits
-template <unsigned F> inline FPN<F> FPN_FromString(const char *str) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_FromString(const char *str) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
     constexpr unsigned IW = N - FW;
 
-    FPN<F> result = FPN_Zero<F>();
+    FPN_Binary<F> result = FPN_Zero<F>();
     unsigned i        = 0;
 
     // sign
@@ -461,25 +463,25 @@ template <unsigned F> inline FPN<F> FPN_FromString(const char *str) {
 // [FP64 CONVERSION]
 //======================================================================================================
 #ifdef FIXED_POINT_64_H
-template <unsigned F> inline FPN<F> FPN_FromFP64(FP64 value) {
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
-    // FP64 has 64 frac bits, FPN has F frac bits
+template <unsigned F> inline FPN_Binary<F> FPN_FromFP64(FP64 value) {
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
+    // FP64 has 64 frac bits, FPN_Binary has F frac bits
     // FP64 magnitude is __uint128_t = two uint64_t words
     // place them at word (FW-1) and word (FW) to shift left by (F-64) bits
-    FPN<F> result = FPN_Zero<F>();
+    FPN_Binary<F> result = FPN_Zero<F>();
     if (FW >= 1)
         result.w[FW - 1] = (uint64_t)value.magnitude;
-    if (FW < FPN<F>::N)
+    if (FW < FPN_Binary<F>::N)
         result.w[FW] = (uint64_t)(value.magnitude >> 64);
     result.sign = value.sign;
     return result;
 }
 
-template <unsigned F> inline FP64 FPN_ToFP64(FPN<F> value) {
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FP64 FPN_ToFP64(FPN_Binary<F> value) {
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
     FP64 result;
     uint64_t lo      = (FW >= 1) ? value.w[FW - 1] : 0;
-    uint64_t hi      = (FW < FPN<F>::N) ? value.w[FW] : 0;
+    uint64_t hi      = (FW < FPN_Binary<F>::N) ? value.w[FW] : 0;
     result.magnitude = ((__uint128_t)hi << 64) | (__uint128_t)lo;
     result.sign      = value.sign & (result.magnitude != 0);
     return result;
@@ -497,14 +499,14 @@ template <unsigned F> inline FP64 FPN_ToFP64(FPN<F> value) {
 // Used by slow-path running-sum maintenance (v5.11.2.C) where the "warmup vs
 // full-window" eviction term is data-dependent on count >= W.
 //
-// FPN<64> hits this template directly (N=2 limbs); no FP64 specialization needed
+// FPN_Binary<64> hits this template directly (N=2 limbs); no FP64 specialization needed
 // since two AND-OR pairs compile to ~6 instructions, comparable to cmov on the
 // __uint128_t magnitude.
 template <unsigned F>
-inline FPN<F> FPN_BlendOnMask(FPN<F> if_true, FPN<F> if_false, uint64_t mask) {
-    FPN<F> r;
+inline FPN_Binary<F> FPN_BlendOnMask(FPN_Binary<F> if_true, FPN_Binary<F> if_false, uint64_t mask) {
+    FPN_Binary<F> r;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; ++i) {
+    for (unsigned i = 0; i < FPN_Binary<F>::N; ++i) {
         r.w[i] = (if_true.w[i] & mask) | (if_false.w[i] & ~mask);
     }
     // Sign is 0 or 1; sign-extend mask to int32 so the AND preserves that range.
@@ -513,7 +515,7 @@ inline FPN<F> FPN_BlendOnMask(FPN<F> if_true, FPN<F> if_false, uint64_t mask) {
     return r;
 }
 
-template <unsigned F> inline FPN<F> FPN_Min(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline FPN_Binary<F> FPN_Min(FPN_Binary<F> a, FPN_Binary<F> b) {
     int diff_sign = a.sign ^ b.sign;
     int a_lt_mag  = FPN_MagGt(b, a);
     int a_lt_same = (a_lt_mag ^ a.sign) & !FPN_MagEq(a, b);
@@ -521,24 +523,24 @@ template <unsigned F> inline FPN<F> FPN_Min(FPN<F> a, FPN<F> b) {
     int a_lt      = ((a.sign & diff_sign) | (a_lt_same & (!diff_sign))) & !both_zero;
 
     uint64_t mask = -(uint64_t)a_lt;
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; i++)
+    for (unsigned i = 0; i < FPN_Binary<F>::N; i++)
         result.w[i] = (a.w[i] & mask) | (b.w[i] & ~mask);
     result.sign = (int32_t)((a.sign & a_lt) | (b.sign & (1 - a_lt)));
     return result;
 }
 
-template <unsigned F> inline FPN<F> FPN_Max(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline FPN_Binary<F> FPN_Max(FPN_Binary<F> a, FPN_Binary<F> b) {
     int diff_sign = a.sign ^ b.sign;
     int a_gt_mag  = FPN_MagGt(a, b);
     int a_gt_same = (a_gt_mag ^ a.sign) & !FPN_MagEq(a, b);
     int a_gt      = (((!a.sign) & diff_sign) | (a_gt_same & (!diff_sign)));
 
     uint64_t mask = -(uint64_t)a_gt;
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::N; i++)
+    for (unsigned i = 0; i < FPN_Binary<F>::N; i++)
         result.w[i] = (a.w[i] & mask) | (b.w[i] & ~mask);
     result.sign = (int32_t)((a.sign & a_gt) | (b.sign & (1 - a_gt)));
     return result;
@@ -549,8 +551,8 @@ template <unsigned F> inline FPN<F> FPN_Max(FPN<F> a, FPN<F> b) {
 //======================================================================================================
 // branchless sign-magnitude add: compute both paths, mask-select with 64-bit ops
 //======================================================================================================
-template <unsigned F> inline FPN<F> FPN_AddSat(FPN<F> a, FPN<F> b) {
-    constexpr unsigned N = FPN<F>::N;
+template <unsigned F> inline FPN_Binary<F> FPN_AddSat(FPN_Binary<F> a, FPN_Binary<F> b) {
+    constexpr unsigned N = FPN_Binary<F>::N;
     int diff             = a.sign ^ b.sign;
 
     // same sign: add magnitudes
@@ -566,7 +568,7 @@ template <unsigned F> inline FPN<F> FPN_AddSat(FPN<F> a, FPN<F> b) {
     uint64_t ge_mask = -(uint64_t)ge;
     uint64_t d_mask  = -(uint64_t)diff;
 
-    FPN<F> result;
+    FPN_Binary<F> result;
     uint64_t or_all = 0;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < N; i++) {
@@ -582,17 +584,17 @@ template <unsigned F> inline FPN<F> FPN_AddSat(FPN<F> a, FPN<F> b) {
     return result;
 }
 
-template <unsigned F> inline FPN<F> FPN_SubSat(FPN<F> a, FPN<F> b) {
-    FPN<F> neg_b = b;
+template <unsigned F> inline FPN_Binary<F> FPN_SubSat(FPN_Binary<F> a, FPN_Binary<F> b) {
+    FPN_Binary<F> neg_b = b;
     neg_b.sign       = b.sign ^ (!FPN_MagIsZero(b));
     return FPN_AddSat(a, neg_b);
 }
 
 // also provide non-sat versions (identical for now since 2*FRAC_BITS of headroom is massive)
-template <unsigned F> inline FPN<F> FPN_Add(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline FPN_Binary<F> FPN_Add(FPN_Binary<F> a, FPN_Binary<F> b) {
     return FPN_AddSat(a, b);
 }
-template <unsigned F> inline FPN<F> FPN_Sub(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline FPN_Binary<F> FPN_Sub(FPN_Binary<F> a, FPN_Binary<F> b) {
     return FPN_SubSat(a, b);
 }
 
@@ -606,9 +608,9 @@ template <unsigned F> inline FPN<F> FPN_Sub(FPN<F> a, FPN<F> b) {
 //
 // full product is 2N words, we shift right by FRAC_WORDS to get back to Q(F.F)
 //======================================================================================================
-template <unsigned F> inline FPN<F> FPN_Mul(FPN<F> a, FPN<F> b) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_Mul(FPN_Binary<F> a, FPN_Binary<F> b) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
 
     // 2N-word product
     uint64_t p[2 * N] = {0};
@@ -641,7 +643,7 @@ template <unsigned F> inline FPN<F> FPN_Mul(FPN<F> a, FPN<F> b) {
         overflow |= p[i];
     uint64_t of_mask = -(uint64_t)(overflow != 0);
 
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < N; i++) {
         result.w[i] = (p[FW + i] & ~of_mask) | (UINT64_MAX & of_mask);
@@ -666,7 +668,7 @@ template <unsigned F> inline FPN<F> FPN_Mul(FPN<F> a, FPN<F> b) {
 
 // helper: shift a 2N-word value left by 1 bit
 template <unsigned F> inline void FPN_ShiftLeft1_2N(uint64_t *v) {
-    constexpr unsigned W = 2 * FPN<F>::N;
+    constexpr unsigned W = 2 * FPN_Binary<F>::N;
 #pragma GCC unroll 65534
     for (int i = (int)W - 1; i > 0; i--) {
         v[i] = (v[i] << 1) | (v[i - 1] >> 63);
@@ -676,7 +678,7 @@ template <unsigned F> inline void FPN_ShiftLeft1_2N(uint64_t *v) {
 
 // helper: is N-word a >= N-word b (branchless, from LSB up)
 template <unsigned F> inline int FPN_NWordGe(const uint64_t *a, const uint64_t *b) {
-    constexpr unsigned N = FPN<F>::N;
+    constexpr unsigned N = FPN_Binary<F>::N;
     int ge               = (a[0] >= b[0]);
 #pragma GCC unroll 65534
     for (unsigned i = 1; i < N; i++) {
@@ -690,7 +692,7 @@ template <unsigned F> inline int FPN_NWordGe(const uint64_t *a, const uint64_t *
 // helper: N-word conditional subtract: r = ge ? (a - b) : a
 // branchless: always computes both, mask-selects
 template <unsigned F> inline void FPN_CondSub(uint64_t *a, const uint64_t *b, int ge) {
-    constexpr unsigned N = FPN<F>::N;
+    constexpr unsigned N = FPN_Binary<F>::N;
     uint64_t mask        = -(uint64_t)ge;
 
     uint64_t diff[N];
@@ -710,9 +712,9 @@ template <unsigned F> inline void FPN_CondSub(uint64_t *a, const uint64_t *b, in
     }
 }
 
-template <unsigned F> inline FPN<F> FPN_DivNoAssert(FPN<F> a, FPN<F> b) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_DivNoAssert(FPN_Binary<F> a, FPN_Binary<F> b) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
 
     // branchless zero-divisor saturation: if b is zero, safe_b = 1, result gets masked to MAX
     int b_zero       = FPN_MagIsZero(b);
@@ -759,7 +761,7 @@ template <unsigned F> inline FPN<F> FPN_DivNoAssert(FPN<F> a, FPN<F> b) {
     }
 
     // build result: quotient is the magnitude, saturate if b was zero
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < N; i++) {
         result.w[i] = (quotient[i] & ~bz_mask) | (UINT64_MAX & bz_mask);
@@ -773,7 +775,7 @@ template <unsigned F> inline FPN<F> FPN_DivNoAssert(FPN<F> a, FPN<F> b) {
     return result;
 }
 
-template <unsigned F> inline FPN<F> FPN_DivWithAssert(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline FPN_Binary<F> FPN_DivWithAssert(FPN_Binary<F> a, FPN_Binary<F> b) {
     assert(!FPN_MagIsZero(b));
     return FPN_DivNoAssert(a, b);
 }
@@ -781,16 +783,16 @@ template <unsigned F> inline FPN<F> FPN_DivWithAssert(FPN<F> a, FPN<F> b) {
 //======================================================================================================
 // [FIXED-POINT COMPARISON OPERATIONS]
 //======================================================================================================
-template <unsigned F> inline int FPN_Equal(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_Equal(FPN_Binary<F> a, FPN_Binary<F> b) {
     int both_zero = FPN_MagIsZero(a) & FPN_MagIsZero(b);
     return both_zero | (FPN_MagEq(a, b) & (a.sign == b.sign));
 }
 
-template <unsigned F> inline int FPN_NotEqual(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_NotEqual(FPN_Binary<F> a, FPN_Binary<F> b) {
     return !FPN_Equal(a, b);
 }
 
-template <unsigned F> inline int FPN_LessThan(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_LessThan(FPN_Binary<F> a, FPN_Binary<F> b) {
     int both_zero   = FPN_MagIsZero(a) & FPN_MagIsZero(b);
     int diff_sign   = a.sign ^ b.sign;
     int diff_result = a.sign & !both_zero;
@@ -799,15 +801,15 @@ template <unsigned F> inline int FPN_LessThan(FPN<F> a, FPN<F> b) {
     return (diff_result & diff_sign) | (same_result & (!diff_sign));
 }
 
-template <unsigned F> inline int FPN_LessThanOrEqual(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_LessThanOrEqual(FPN_Binary<F> a, FPN_Binary<F> b) {
     return FPN_LessThan(a, b) | FPN_Equal(a, b);
 }
 
-template <unsigned F> inline int FPN_GreaterThan(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_GreaterThan(FPN_Binary<F> a, FPN_Binary<F> b) {
     return FPN_LessThan(b, a);
 }
 
-template <unsigned F> inline int FPN_GreaterThanOrEqual(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline int FPN_GreaterThanOrEqual(FPN_Binary<F> a, FPN_Binary<F> b) {
     return !FPN_LessThan(a, b);
 }
 
@@ -826,39 +828,39 @@ template <unsigned F> inline int FPN_GreaterThanOrEqual(FPN<F> a, FPN<F> b) {
 // Per H4 — these operators compare in the integer-limb domain (no float math on
 // accounting types); same backend semantics as the FPN_* free functions they wrap.
 
-template <unsigned F> inline bool operator==(FPN<F> a, FPN<F> b) { return FPN_Equal(a, b) != 0; }
-template <unsigned F> inline bool operator!=(FPN<F> a, FPN<F> b) { return !FPN_Equal(a, b); }
-template <unsigned F> inline bool operator< (FPN<F> a, FPN<F> b) { return FPN_LessThan(a, b) != 0; }
-template <unsigned F> inline bool operator<=(FPN<F> a, FPN<F> b) { return FPN_LessThanOrEqual(a, b) != 0; }
-template <unsigned F> inline bool operator> (FPN<F> a, FPN<F> b) { return FPN_GreaterThan(a, b) != 0; }
-template <unsigned F> inline bool operator>=(FPN<F> a, FPN<F> b) { return FPN_GreaterThanOrEqual(a, b) != 0; }
+template <unsigned F> inline bool operator==(FPN_Binary<F> a, FPN_Binary<F> b) { return FPN_Equal(a, b) != 0; }
+template <unsigned F> inline bool operator!=(FPN_Binary<F> a, FPN_Binary<F> b) { return !FPN_Equal(a, b); }
+template <unsigned F> inline bool operator< (FPN_Binary<F> a, FPN_Binary<F> b) { return FPN_LessThan(a, b) != 0; }
+template <unsigned F> inline bool operator<=(FPN_Binary<F> a, FPN_Binary<F> b) { return FPN_LessThanOrEqual(a, b) != 0; }
+template <unsigned F> inline bool operator> (FPN_Binary<F> a, FPN_Binary<F> b) { return FPN_GreaterThan(a, b) != 0; }
+template <unsigned F> inline bool operator>=(FPN_Binary<F> a, FPN_Binary<F> b) { return FPN_GreaterThanOrEqual(a, b) != 0; }
 
 //======================================================================================================
 // [FIXED-POINT UTILITY FUNCTIONS]
 //======================================================================================================
-template <unsigned F> inline FPN<F> FPN_Negate(FPN<F> value) {
-    FPN<F> result = value;
+template <unsigned F> inline FPN_Binary<F> FPN_Negate(FPN_Binary<F> value) {
+    FPN_Binary<F> result = value;
     result.sign       = value.sign ^ (!FPN_MagIsZero(value));
     return result;
 }
 
-template <unsigned F> inline int FPN_IsZero(FPN<F> value) {
+template <unsigned F> inline int FPN_IsZero(FPN_Binary<F> value) {
     return FPN_MagIsZero(value);
 }
 
-template <unsigned F> inline FPN<F> FPN_Abs(FPN<F> value) {
-    FPN<F> result = value;
+template <unsigned F> inline FPN_Binary<F> FPN_Abs(FPN_Binary<F> value) {
+    FPN_Binary<F> result = value;
     result.sign       = 0;
     return result;
 }
 
-// v5.9.0 — FPN garbage / saturation sanity check.
-// FPN itself can't be NaN/Inf (integer type), but FPN_DivNoAssert(x, 0)
+// v5.9.0 — FPN_Binary garbage / saturation sanity check.
+// FPN_Binary itself can't be NaN/Inf (integer type), but FPN_DivNoAssert(x, 0)
 // saturates to FPN_MAX silently (per CLAUDE_INVARIANTS.md), and
 // FPN_FromDouble<F>(NaN/Inf) is undefined behavior that can produce
 // integer values in any range. Float-side std::isnan/isinf catches
-// the cases where FPN→float conversion produces NaN/Inf, but a
-// "wrong but float-finite" FPN value would slip through.
+// the cases where FPN_Binary→float conversion produces NaN/Inf, but a
+// "wrong but float-finite" FPN_Binary value would slip through.
 //
 // FPN_IsValidFinite<F>(val) catches that gap with a branchless
 // magnitude check. Threshold 1e15 is a global "no legitimate feature
@@ -868,19 +870,19 @@ template <unsigned F> inline FPN<F> FPN_Abs(FPN<F> value) {
 //
 // Returns 1 if |val| < 1e15 (sane), 0 if saturation/garbage suspected.
 // Branchless after FPN_Abs + FPN_LessThan compile down to integer cmp.
-template <unsigned F> inline int FPN_IsValidFinite(FPN<F> value) {
+template <unsigned F> inline int FPN_IsValidFinite(FPN_Binary<F> value) {
     // Threshold computed once per type-instantiation (constexpr-eligible
     // when FPN_FromDouble specializes; otherwise hoisted by the compiler).
-    FPN<F> threshold = FPN_FromDouble<F>(1e15);
+    FPN_Binary<F> threshold = FPN_FromDouble<F>(1e15);
     return FPN_LessThan(FPN_Abs(value), threshold);
 }
 
-template <unsigned F> inline FPN<F> FPN_Sign(FPN<F> value) {
+template <unsigned F> inline FPN_Binary<F> FPN_Sign(FPN_Binary<F> value) {
     // branchless: compute +/-1.0, then mask to zero if input is zero
     int is_nonzero                   = !FPN_MagIsZero(value);
     uint64_t nz_mask                 = -(uint64_t)is_nonzero;
-    FPN<F> result                = FPN_Zero<F>();
-    result.w[FPN<F>::FRAC_WORDS] = 1 & nz_mask;
+    FPN_Binary<F> result                = FPN_Zero<F>();
+    result.w[FPN_Binary<F>::FRAC_WORDS] = 1 & nz_mask;
     result.sign                      = value.sign & is_nonzero;
     return result;
 }
@@ -890,77 +892,77 @@ template <unsigned F> inline FPN<F> FPN_Sign(FPN<F> value) {
 //======================================================================================================
 // all go through double conversion - precision limited but these are convenience functions
 //======================================================================================================
-// v5.10.0b.2.5.A: FPN-native Newton-Raphson square root.
+// v5.10.0b.2.5.A: FPN_Binary-native Newton-Raphson square root.
 // Bytewise-deterministic across compilers — bit-scan seed + integer
-// FPN ops only; no IEEE-754 round-trip. Converges quadratically;
-// 12 NR iterations from the bit-scan seed reach FPN<64> precision
+// FPN_Binary ops only; no IEEE-754 round-trip. Converges quadratically;
+// 12 NR iterations from the bit-scan seed reach FPN_Binary<64> precision
 // for any positive input. Returns 0 for zero or negative input
 // (matches stub-era assert behavior in release builds).
-template <unsigned F> inline FPN<F> FPN_Sqrt(FPN<F> value) {
+template <unsigned F> inline FPN_Binary<F> FPN_Sqrt(FPN_Binary<F> value) {
     if (FPN_MagIsZero(value) || value.sign != 0) return FPN_Zero<F>();
 
     // Find highest set bit position in the integer magnitude.
-    // FPN<F> has F fractional bits; bit position k corresponds to value 2^(k - F).
-    // sqrt(2^(k - F)) = 2^((k - F) / 2), which in FPN bit position is (k + F) / 2.
+    // FPN_Binary<F> has F fractional bits; bit position k corresponds to value 2^(k - F).
+    // sqrt(2^(k - F)) = 2^((k - F) / 2), which in FPN_Binary bit position is (k + F) / 2.
     int top_bit = -1;
     #pragma GCC unroll 65534
-    for (int i = (int)FPN<F>::N - 1; i >= 0; i--) {
+    for (int i = (int)FPN_Binary<F>::N - 1; i >= 0; i--) {
         if (value.w[i] != 0 && top_bit < 0) {
             int hi  = 63 - __builtin_clzll(value.w[i]);
             top_bit = i * 64 + hi;
         }
     }
     int seed_bit = (top_bit + (int)F) / 2;
-    FPN<F> y = FPN_Zero<F>();
+    FPN_Binary<F> y = FPN_Zero<F>();
     int word_idx = seed_bit / 64;
     int bit_idx  = seed_bit % 64;
-    if (word_idx < (int)FPN<F>::N) y.w[word_idx] = (uint64_t)1 << bit_idx;
+    if (word_idx < (int)FPN_Binary<F>::N) y.w[word_idx] = (uint64_t)1 << bit_idx;
 
     // 12 Newton-Raphson iterations: y_{n+1} = (y_n + x/y_n) / 2.
-    // Quadratic convergence; 12 is well past the precision cliff for FPN<64>.
-    FPN<F> half = FPN_FromDouble<F>(0.5);  // 0.5 is bytewise-exact in IEEE-754
+    // Quadratic convergence; 12 is well past the precision cliff for FPN_Binary<64>.
+    FPN_Binary<F> half = FPN_FromDouble<F>(0.5);  // 0.5 is bytewise-exact in IEEE-754
     #pragma GCC unroll 65534
     for (int i = 0; i < 12; i++) {
-        FPN<F> q = FPN_DivNoAssert(value, y);
+        FPN_Binary<F> q = FPN_DivNoAssert(value, y);
         y = FPN_Mul(FPN_Add(y, q), half);
     }
     return y;
 }
 
-template <unsigned F> inline FPN<F> FPN_InvSqrt(FPN<F> value) {
+template <unsigned F> inline FPN_Binary<F> FPN_InvSqrt(FPN_Binary<F> value) {
     assert(value.sign == 0 && !FPN_MagIsZero(value));
     return FPN_FromDouble<F>(1.0 / sqrt(FPN_ToDouble(value)));
 }
 
-// v5.10.0b.2.5.D: FPN-native Taylor sin via range reduction to [0, π/2].
+// v5.10.0b.2.5.D: FPN_Binary-native Taylor sin via range reduction to [0, π/2].
 // 1. Reduce x to [-π, π] by x = x - n*2π where n = round(x / 2π).
 // 2. Use sin oddness to make x ≥ 0; track sign flip for later.
 // 3. If x > π/2, use sin(π - x) = sin(x) to bring into [0, π/2].
 // 4. Taylor: sin(x) = x - x³/6 + x⁵/120 - ... (8 odd-power terms past x).
-// At |x| ≤ π/2 ≈ 1.57, the 17! term hits ~3e-13 — past FPN<64> noise.
+// At |x| ≤ π/2 ≈ 1.57, the 17! term hits ~3e-13 — past FPN_Binary<64> noise.
 // Bytewise-deterministic across compilers; no IEEE-754 round-trip.
-template <unsigned F> inline FPN<F> FPN_Sin(FPN<F> value) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_Sin(FPN_Binary<F> value) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
 
     if (FPN_IsZero(value)) return FPN_Zero<F>();
 
     // Constants (bytewise-stable IEEE-754 literals)
-    FPN<F> pi         = FPN_FromDouble<F>(3.141592653589793);
-    FPN<F> two_pi     = FPN_FromDouble<F>(6.283185307179586);
-    FPN<F> half_pi    = FPN_FromDouble<F>(1.5707963267948966);
-    FPN<F> inv_two_pi = FPN_FromDouble<F>(0.15915494309189535);
-    FPN<F> half_const = FPN_FromDouble<F>(0.5);
+    FPN_Binary<F> pi         = FPN_FromDouble<F>(3.141592653589793);
+    FPN_Binary<F> two_pi     = FPN_FromDouble<F>(6.283185307179586);
+    FPN_Binary<F> half_pi    = FPN_FromDouble<F>(1.5707963267948966);
+    FPN_Binary<F> inv_two_pi = FPN_FromDouble<F>(0.15915494309189535);
+    FPN_Binary<F> half_const = FPN_FromDouble<F>(0.5);
 
     // Step 1: reduce to [-π, π] via x = value - n*2π, n = round(value/2π)
-    FPN<F> q = FPN_Mul(value, inv_two_pi);
-    FPN<F> q_rounded = q.sign ? FPN_Sub(q, half_const) : FPN_Add(q, half_const);
+    FPN_Binary<F> q = FPN_Mul(value, inv_two_pi);
+    FPN_Binary<F> q_rounded = q.sign ? FPN_Sub(q, half_const) : FPN_Add(q, half_const);
     int64_t n_int = (FW < N) ? (int64_t)q_rounded.w[FW] : 0;
     if (q_rounded.sign) n_int = -n_int;
-    FPN<F> n_abs    = FPN_FromInt<F>(n_int < 0 ? -n_int : n_int);
-    FPN<F> n_two_pi = FPN_Mul(n_abs, two_pi);
+    FPN_Binary<F> n_abs    = FPN_FromInt<F>(n_int < 0 ? -n_int : n_int);
+    FPN_Binary<F> n_two_pi = FPN_Mul(n_abs, two_pi);
     if (n_int < 0) n_two_pi.sign = 1;
-    FPN<F> x = FPN_Sub(value, n_two_pi);
+    FPN_Binary<F> x = FPN_Sub(value, n_two_pi);
 
     // Step 2: sin is odd — make x ≥ 0, remember to flip the result
     int sign_flip = (int)x.sign;
@@ -971,9 +973,9 @@ template <unsigned F> inline FPN<F> FPN_Sin(FPN<F> value) {
 
     // Step 4: Taylor — sin(x) = x - x³/6 + x⁵/120 - x⁷/5040 + ...
     // 8 odd-power terms past the x term: stops at x^17/17!.
-    FPN<F> result = x;             // x term (k=0)
-    FPN<F> x_pow  = x;
-    FPN<F> x_sq   = FPN_Mul(x, x);
+    FPN_Binary<F> result = x;             // x term (k=0)
+    FPN_Binary<F> x_pow  = x;
+    FPN_Binary<F> x_sq   = FPN_Mul(x, x);
     static const double inv_fact_odd[8] = {
         -1.0 / 6.0,                   // 3!
          1.0 / 120.0,                 // 5!
@@ -987,7 +989,7 @@ template <unsigned F> inline FPN<F> FPN_Sin(FPN<F> value) {
     #pragma GCC unroll 65534
     for (int k = 0; k < 8; k++) {
         x_pow = FPN_Mul(x_pow, x_sq);
-        FPN<F> term = FPN_Mul(x_pow, FPN_FromDouble<F>(inv_fact_odd[k]));
+        FPN_Binary<F> term = FPN_Mul(x_pow, FPN_FromDouble<F>(inv_fact_odd[k]));
         result = FPN_Add(result, term);
     }
 
@@ -996,32 +998,32 @@ template <unsigned F> inline FPN<F> FPN_Sin(FPN<F> value) {
 }
 
 // FPN_Cos via identity cos(x) = sin(x + π/2). Trivially deterministic.
-template <unsigned F> inline FPN<F> FPN_Cos(FPN<F> value) {
-    FPN<F> half_pi = FPN_FromDouble<F>(1.5707963267948966);
+template <unsigned F> inline FPN_Binary<F> FPN_Cos(FPN_Binary<F> value) {
+    FPN_Binary<F> half_pi = FPN_FromDouble<F>(1.5707963267948966);
     return FPN_Sin(FPN_Add(value, half_pi));
 }
 
-template <unsigned F> inline FPN<F> FPN_Tan(FPN<F> value) {
+template <unsigned F> inline FPN_Binary<F> FPN_Tan(FPN_Binary<F> value) {
     return FPN_FromDouble<F>(tan(FPN_ToDouble(value)));
 }
 
-template <unsigned F> inline FPN<F> FPN_Atan2(FPN<F> y, FPN<F> x) {
+template <unsigned F> inline FPN_Binary<F> FPN_Atan2(FPN_Binary<F> y, FPN_Binary<F> x) {
     return FPN_FromDouble<F>(atan2(FPN_ToDouble(y), FPN_ToDouble(x)));
 }
 
-// v5.10.0b.2.5.B: FPN-native exponential via range reduction + Taylor.
+// v5.10.0b.2.5.B: FPN_Binary-native exponential via range reduction + Taylor.
 // x = k*ln(2) + r where k = trunc(x / ln(2)), |r| < ln(2).
 // exp(x) = 2^k * exp(r); 2^k is a bit-shift, exp(r) Taylor-expands fast.
 // Bytewise-deterministic across builds. Designed for EWMA decay range
-// [-30, 0]: typical exp(-30) ≈ 9.36e-14 (representable in FPN<64>'s
+// [-30, 0]: typical exp(-30) ≈ 9.36e-14 (representable in FPN_Binary<64>'s
 // 64 fractional bits as ~2^-43.6).
-template <unsigned F> inline FPN<F> FPN_Exp(FPN<F> value) {
-    constexpr unsigned N  = FPN<F>::N;
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_Exp(FPN_Binary<F> value) {
+    constexpr unsigned N  = FPN_Binary<F>::N;
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
 
     // exp(0) = 1
     if (FPN_IsZero(value)) {
-        FPN<F> one = FPN_Zero<F>();
+        FPN_Binary<F> one = FPN_Zero<F>();
         if (FW < N) one.w[FW] = 1ULL;
         return one;
     }
@@ -1031,32 +1033,32 @@ template <unsigned F> inline FPN<F> FPN_Exp(FPN<F> value) {
     // literals (the round-trip happens once per call at known constants;
     // determinism preserved as long as the literal bytes match across
     // compilers, which they do per IEEE-754).
-    FPN<F> ln2     = FPN_FromDouble<F>(0.6931471805599453);
-    FPN<F> inv_ln2 = FPN_FromDouble<F>(1.4426950408889634);
+    FPN_Binary<F> ln2     = FPN_FromDouble<F>(0.6931471805599453);
+    FPN_Binary<F> inv_ln2 = FPN_FromDouble<F>(1.4426950408889634);
 
     // k = round(value / ln(2)) (round-to-nearest, half-away-from-zero).
     // Round-to-nearest bounds |r| ≤ ln(2)/2 ≈ 0.347; Taylor with 9 terms
     // then gives |error| ≈ 0.347^9 / 9! ≈ 1.5e-10 relative — past 1e-9.
     // Truncation (the prior approach) left |r| up to ln(2) ≈ 0.69, which
     // failed the 1e-9 bound for inputs with q ≈ ±0.5 ± k.
-    FPN<F> q = FPN_Mul(value, inv_ln2);
-    FPN<F> half_const = FPN_FromDouble<F>(0.5);
-    FPN<F> q_rounded  = q.sign ? FPN_Sub(q, half_const) : FPN_Add(q, half_const);
+    FPN_Binary<F> q = FPN_Mul(value, inv_ln2);
+    FPN_Binary<F> half_const = FPN_FromDouble<F>(0.5);
+    FPN_Binary<F> q_rounded  = q.sign ? FPN_Sub(q, half_const) : FPN_Add(q, half_const);
     int64_t k = (FW < N) ? (int64_t)q_rounded.w[FW] : 0;
     if (q_rounded.sign) k = -k;
 
     // r = value - k * ln(2)
-    FPN<F> k_abs = FPN_FromInt<F>(k < 0 ? -k : k);
-    FPN<F> k_ln2 = FPN_Mul(k_abs, ln2);
+    FPN_Binary<F> k_abs = FPN_FromInt<F>(k < 0 ? -k : k);
+    FPN_Binary<F> k_ln2 = FPN_Mul(k_abs, ln2);
     if (k < 0) k_ln2.sign = 1;
-    FPN<F> r = FPN_Sub(value, k_ln2);
+    FPN_Binary<F> r = FPN_Sub(value, k_ln2);
 
     // Taylor: exp(r) = sum_{n=0}^{8} r^n / n!
     // 9 terms is past the precision cliff for |r| < ln(2)/2 ≈ 0.347.
-    // r^8 / 8! ≈ 0.347^8 / 40320 ≈ 5e-9; r^9 way past FPN<64> noise floor.
-    FPN<F> result = FPN_Zero<F>();
+    // r^8 / 8! ≈ 0.347^8 / 40320 ≈ 5e-9; r^9 way past FPN_Binary<64> noise floor.
+    FPN_Binary<F> result = FPN_Zero<F>();
     if (FW < N) result.w[FW] = 1ULL;       // term n=0: 1
-    FPN<F> r_pow = result;                 // r^0
+    FPN_Binary<F> r_pow = result;                 // r^0
     static const double inv_fact[9] = {
         1.0, 1.0, 0.5, 1.0/6.0, 1.0/24.0,
         1.0/120.0, 1.0/720.0, 1.0/5040.0, 1.0/40320.0
@@ -1064,15 +1066,15 @@ template <unsigned F> inline FPN<F> FPN_Exp(FPN<F> value) {
     #pragma GCC unroll 65534
     for (int n = 1; n < 9; n++) {
         r_pow = FPN_Mul(r_pow, r);
-        FPN<F> term = FPN_Mul(r_pow, FPN_FromDouble<F>(inv_fact[n]));
+        FPN_Binary<F> term = FPN_Mul(r_pow, FPN_FromDouble<F>(inv_fact[n]));
         result = FPN_Add(result, term);
     }
 
-    // Multiply by 2^k via bit position: 1.0 in FPN is at bit F, so
+    // Multiply by 2^k via bit position: 1.0 in FPN_Binary is at bit F, so
     // 2^k value = bit position F + k.
     int seed_bit = (int)F + (int)k;
     if (seed_bit < 0) {
-        // 2^k underflows below FPN precision → result rounds to 0
+        // 2^k underflows below FPN_Binary precision → result rounds to 0
         return FPN_Zero<F>();
     }
     if (seed_bit >= (int)(N * 64)) {
@@ -1080,25 +1082,25 @@ template <unsigned F> inline FPN<F> FPN_Exp(FPN<F> value) {
         // should not feed in inputs that overflow exp range
         return result;
     }
-    FPN<F> two_k = FPN_Zero<F>();
+    FPN_Binary<F> two_k = FPN_Zero<F>();
     two_k.w[seed_bit / 64] = (uint64_t)1 << (seed_bit % 64);
     return FPN_Mul(result, two_k);
 }
 
-template <unsigned F> inline FPN<F> FPN_Log(FPN<F> value) {
+template <unsigned F> inline FPN_Binary<F> FPN_Log(FPN_Binary<F> value) {
     assert(value.sign == 0 && !FPN_MagIsZero(value));
     return FPN_FromDouble<F>(log(FPN_ToDouble(value)));
 }
 
-template <unsigned F> inline FPN<F> FPN_Pow(FPN<F> base, FPN<F> exponent) {
+template <unsigned F> inline FPN_Binary<F> FPN_Pow(FPN_Binary<F> base, FPN_Binary<F> exponent) {
     return FPN_FromDouble<F>(pow(FPN_ToDouble(base), FPN_ToDouble(exponent)));
 }
 
 //======================================================================================================
 // [FIXED-POINT MISCELLANEOUS FUNCTIONS]
 //======================================================================================================
-template <unsigned F> inline FPN<F> FPN_Floor(FPN<F> value) {
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_Floor(FPN_Binary<F> value) {
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
     // check if any fractional word is nonzero
     uint64_t frac_or = 0;
 #pragma GCC unroll 65534
@@ -1106,19 +1108,19 @@ template <unsigned F> inline FPN<F> FPN_Floor(FPN<F> value) {
         frac_or |= value.w[i];
     int has_frac = (frac_or != 0);
 
-    FPN<F> result;
+    FPN_Binary<F> result;
 // zero out fractional words
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < FW; i++)
         result.w[i] = 0;
 // copy integer words
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++)
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++)
         result.w[i] = value.w[i];
     // if negative and had fraction, bump integer part by 1 with carry chain
     uint64_t bump = (uint64_t)(value.sign & has_frac);
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++) {
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++) {
         uint64_t old = result.w[i];
         result.w[i] += bump;
         bump = (result.w[i] < old);
@@ -1127,104 +1129,104 @@ template <unsigned F> inline FPN<F> FPN_Floor(FPN<F> value) {
     return result;
 }
 
-template <unsigned F> inline FPN<F> FPN_Ceil(FPN<F> value) {
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_Ceil(FPN_Binary<F> value) {
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
     uint64_t frac_or      = 0;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < FW; i++)
         frac_or |= value.w[i];
     int has_frac = (frac_or != 0);
 
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < FW; i++)
         result.w[i] = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++)
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++)
         result.w[i] = value.w[i];
     // if positive and had fraction, bump integer part by 1
     uint64_t bump = (uint64_t)((!value.sign) & has_frac);
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++) {
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++) {
         uint64_t old = result.w[i];
         result.w[i] += bump;
         bump = (result.w[i] < old);
     }
     uint64_t int_or = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++)
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++)
         int_or |= result.w[i];
     result.sign = value.sign & (int_or != 0);
     return result;
 }
 
-template <unsigned F> inline FPN<F> FPN_Round(FPN<F> value) {
-    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+template <unsigned F> inline FPN_Binary<F> FPN_Round(FPN_Binary<F> value) {
+    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
     // half = MSB of the top fractional word
     int round_up = (FW >= 1) ? ((value.w[FW - 1] >> 63) & 1) : 0;
 
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < FW; i++)
         result.w[i] = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++)
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++)
         result.w[i] = value.w[i];
     uint64_t bump = (uint64_t)round_up;
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++) {
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++) {
         uint64_t old = result.w[i];
         result.w[i] += bump;
         bump = (result.w[i] < old);
     }
     uint64_t int_or = 0;
 #pragma GCC unroll 65534
-    for (unsigned i = FW; i < FPN<F>::N; i++)
+    for (unsigned i = FW; i < FPN_Binary<F>::N; i++)
         int_or |= result.w[i];
     result.sign = value.sign & (int_or != 0);
     return result;
 }
 
-template <unsigned F> inline FPN<F> FPN_Mod(FPN<F> a, FPN<F> b) {
+template <unsigned F> inline FPN_Binary<F> FPN_Mod(FPN_Binary<F> a, FPN_Binary<F> b) {
     assert(!FPN_MagIsZero(b));
-    FPN<F> quotient = FPN_DivNoAssert(a, b);
+    FPN_Binary<F> quotient = FPN_DivNoAssert(a, b);
     // truncate: zero out fractional words
-    FPN<F> truncated = quotient;
+    FPN_Binary<F> truncated = quotient;
 #pragma GCC unroll 65534
-    for (unsigned i = 0; i < FPN<F>::FRAC_WORDS; i++)
+    for (unsigned i = 0; i < FPN_Binary<F>::FRAC_WORDS; i++)
         truncated.w[i] = 0;
     return FPN_SubSat(a, FPN_Mul(truncated, b));
 }
 
-template <unsigned F> inline FPN<F> FPN_Lerp(FPN<F> a, FPN<F> b, FPN<F> t) {
-    FPN<F> diff   = FPN_SubSat(b, a);
-    FPN<F> scaled = FPN_Mul(diff, t);
+template <unsigned F> inline FPN_Binary<F> FPN_Lerp(FPN_Binary<F> a, FPN_Binary<F> b, FPN_Binary<F> t) {
+    FPN_Binary<F> diff   = FPN_SubSat(b, a);
+    FPN_Binary<F> scaled = FPN_Mul(diff, t);
     return FPN_AddSat(a, scaled);
 }
 
-template <unsigned F> inline FPN<F> FPN_SmoothStep(FPN<F> edge0, FPN<F> edge1, FPN<F> x) {
-    constexpr unsigned N = FPN<F>::N;
+template <unsigned F> inline FPN_Binary<F> FPN_SmoothStep(FPN_Binary<F> edge0, FPN_Binary<F> edge1, FPN_Binary<F> x) {
+    constexpr unsigned N = FPN_Binary<F>::N;
 
     // always compute the polynomial: t = (x - edge0) / (edge1 - edge0), result = t*t*(3 - 2*t)
-    FPN<F> t     = FPN_DivNoAssert(FPN_SubSat(x, edge0), FPN_SubSat(edge1, edge0));
-    FPN<F> three = FPN_FromDouble<F>(3.0);
-    FPN<F> two   = FPN_FromDouble<F>(2.0);
-    FPN<F> poly  = FPN_Mul(FPN_Mul(t, t), FPN_SubSat(three, FPN_Mul(two, t)));
+    FPN_Binary<F> t     = FPN_DivNoAssert(FPN_SubSat(x, edge0), FPN_SubSat(edge1, edge0));
+    FPN_Binary<F> three = FPN_FromDouble<F>(3.0);
+    FPN_Binary<F> two   = FPN_FromDouble<F>(2.0);
+    FPN_Binary<F> poly  = FPN_Mul(FPN_Mul(t, t), FPN_SubSat(three, FPN_Mul(two, t)));
 
     // clamp conditions
     int below = FPN_LessThanOrEqual(x, edge0);    // -> 0.0
     int above = FPN_GreaterThanOrEqual(x, edge1); // -> 1.0
 
     // 1.0 constant
-    FPN<F> one                = FPN_Zero<F>();
-    one.w[FPN<F>::FRAC_WORDS] = 1;
+    FPN_Binary<F> one                = FPN_Zero<F>();
+    one.w[FPN_Binary<F>::FRAC_WORDS] = 1;
 
     // mask-select: below -> zero, above -> one, else -> poly
     uint64_t bm = -(uint64_t)below;
     uint64_t am = -(uint64_t)above;
     uint64_t pm = ~bm & ~am; // middle region
 
-    FPN<F> result;
+    FPN_Binary<F> result;
 #pragma GCC unroll 65534
     for (unsigned i = 0; i < N; i++)
         result.w[i] = (poly.w[i] & pm) | (one.w[i] & am);
@@ -1236,16 +1238,16 @@ template <unsigned F> inline FPN<F> FPN_SmoothStep(FPN<F> edge0, FPN<F> edge1, F
 //======================================================================================================
 // [NATIVE 128-BIT SPECIALIZATIONS FOR F=64]
 //======================================================================================================
-// when USE_NATIVE_128 is defined, FPN<64> operations forward to FixedPoint64.hpp
+// when USE_NATIVE_128 is defined, FPN_Binary<64> operations forward to FixedPoint64.hpp
 // which uses __uint128_t — single native instructions instead of 2-word loops
 // reduces instruction cache footprint on the hot path
 //======================================================================================================
 #ifdef USE_NATIVE_128
 #include "FixedPoint64.hpp"
-#include <cstring>  // F-058: memcpy for type-pun-free FP64<->FPN<64> conversion
+#include <cstring>  // F-058: memcpy for type-pun-free FP64<->FPN_Binary<64> conversion
 
-// (FP64-forwarding block REMOVED — Ship A flip. FPN<64> is now the 16B two's-complement core, so its ops
-//  ARE the proven fp2_* bodies; the FPN<64> op specializations live after the fp2_* defs, at the bottom of
+// (FP64-forwarding block REMOVED — Ship A flip. FPN_Binary<64> is now the 16B two's-complement core, so its ops
+//  ARE the proven fp2_* bodies; the FPN_Binary<64> op specializations live after the fp2_* defs, at the bottom of
 //  this header. FixedPoint64.hpp stays included [FP64 still backs FPN_FromFP64/ToFP64] until the D-99 absorb.)
 
 #endif // USE_NATIVE_128
@@ -1253,14 +1255,14 @@ template <unsigned F> inline FPN<F> FPN_SmoothStep(FPN<F> edge0, FPN<F> edge1, F
 //======================================================================================================
 //======================================================================================================
 //======================================================================================================
-// [16B BINARY CORE OPS — v5.15.5.F.4d.1.E Ship A; PROVEN value-equivalent to FPN<64> (slice 423/0)]
+// [16B BINARY CORE OPS — v5.15.5.F.4d.1.E Ship A; PROVEN value-equivalent to FPN_Binary<64> (slice 423/0)]
 //======================================================================================================
 // Transitional free functions on FixedPoint<2,64>, lifted (logic-verbatim) from the proven slice
-// tools/ship_a_fp2_64_slice.cpp. At the FPN<64> flip these FOLD INTO the FPN_*<64> specializations,
+// tools/ship_a_fp2_64_slice.cpp. At the FPN_Binary<64> flip these FOLD INTO the FPN_*<64> specializations,
 // replacing the FP64-forwarding block above. The #2 multiply pattern is [extract sign + abs] ->
 // [unsigned 128x128->256 product = FP64_Mul's exact reduce, the C1 HOIST] -> [reduce >>64] ->
 // [reapply sign] -> [of_mask saturate-on-overflow, R2]. Div/Sqrt delegate to the certified generic
-// FPN bodies on a rebuilt positive magnitude (abs-in / certified-unsigned-core / sign-out).
+// FPN_Binary bodies on a rebuilt positive magnitude (abs-in / certified-unsigned-core / sign-out).
 // NOTE (B1): -2^63 (INT128_MIN) abs/negate is two's-complement UB; the production fold adds the
 // saturate/flag guard + the `build.sh ubsan` lane covers the whole signed-overflow class. The feature
 // input domain never reaches it, so these slice bodies abs directly (as the proof did).
@@ -1272,7 +1274,7 @@ inline constexpr __int128 FP2_64_MAX = (__int128)(((unsigned __int128)1 << 127) 
 inline __int128 i128_abs(__int128 v)           { __int128 s = v >> 127; return (v ^ s) - s; }
 inline __int128 i128_cneg(__int128 v, int neg) { __int128 m = -(__int128)(neg & 1); return (v ^ m) - m; }  // neg ? -v : v
 
-// (fp2_from_fpn REMOVED — the 24B-sign-mag → 16B decoder is obsolete now that FPN<64> IS the 16B type;
+// (fp2_from_fpn REMOVED — the 24B-sign-mag → 16B decoder is obsolete now that FPN_Binary<64> IS the 16B type;
 //  D-143 + Class-40 dead-code removal. The slice that used it retires at this flip.)
 
 inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
@@ -1328,7 +1330,7 @@ inline FixedPoint<2,64> fp2_min(FixedPoint<2,64> a, FixedPoint<2,64> b) { return
 inline FixedPoint<2,64> fp2_max(FixedPoint<2,64> a, FixedPoint<2,64> b) { return { a.v > b.v ? a.v : b.v }; }
 // (a_mag << 64) / b_mag → 128-bit quotient magnitude, bit-by-bit long division. This IS the certified
 // FPN_DivNoAssert algorithm (shift remainder, compare top half ≥ divisor, conditional-subtract, MSB-first
-// quotient bit) lifted to the magnitude level on __int128 — same proven math, no FPN<64> dependency.
+// quotient bit) lifted to the magnitude level on __int128 — same proven math, no FPN_Binary<64> dependency.
 // Fixed 128-trip loop (fixed-trip branch = 100% predicted, not data-dependent — per the generic's note);
 // cmov inside, no data-dependent branch. b_mag==0 → all-ones (caller saturates).
 inline unsigned __int128 udiv_q64(unsigned __int128 a_mag, unsigned __int128 b_mag) {
@@ -1393,14 +1395,14 @@ inline double fp2_to_double(FixedPoint<2,64> a) {
 }
 // --- Feature-only transcendentals that round-trip through double (match FPN_Log/InvSqrt/Tan/Pow/Atan2
 // by construction: same FromDouble(stdlib(ToDouble)) shape on value-equivalent conversions). Slow-path,
-// feature-domain. Exp/Sin/Cos (the FPN-native Taylor ops) port separately.
+// feature-domain. Exp/Sin/Cos (the FPN_Binary-native Taylor ops) port separately.
 inline FixedPoint<2,64> fp2_log(FixedPoint<2,64> a)     { return fp2_from_double(log(fp2_to_double(a))); }
 inline FixedPoint<2,64> fp2_invsqrt(FixedPoint<2,64> a) { return fp2_from_double(1.0 / sqrt(fp2_to_double(a))); }
 inline FixedPoint<2,64> fp2_tan(FixedPoint<2,64> a)     { return fp2_from_double(tan(fp2_to_double(a))); }
 inline FixedPoint<2,64> fp2_pow(FixedPoint<2,64> a, FixedPoint<2,64> b)   { return fp2_from_double(pow(fp2_to_double(a), fp2_to_double(b))); }
 inline FixedPoint<2,64> fp2_atan2(FixedPoint<2,64> y, FixedPoint<2,64> x) { return fp2_from_double(atan2(fp2_to_double(y), fp2_to_double(x))); }
 
-// --- FPN-native Taylor transcendentals (Exp/Sin/Cos), ported to 16B. Mul/Add/Sub are native; the
+// --- FPN_Binary-native Taylor transcendentals (Exp/Sin/Cos), ported to 16B. Mul/Add/Sub are native; the
 // layout-specific bits adapt: integer-word read q.w[FW] → (|v|>>64); set-1.0 w[FW]=1 → (1<<64);
 // 2^k bit-set w[k/64]=1<<k%64 → (1<<k). The generic's sign-FLAG ops map to two's-complement:
 // `.sign=0` → abs(v); `.sign=1` (on a positive) → -v; `.sign=1-.sign` (flip) → -v. Same algorithm,
@@ -1483,9 +1485,9 @@ inline FixedPoint<2,64> fp2_cos(FixedPoint<2,64> value) {                   // c
 }
 
 //======================================================================================================
-// [FPN<64> OP SPECIALIZATIONS — Ship A flip: FPN<64> = the concrete 16B core; ops = the proven fp2_* bodies]
+// [FPN_Binary<64> OP SPECIALIZATIONS — Ship A flip: FPN_Binary<64> = the concrete 16B core; ops = the proven fp2_* bodies]
 //======================================================================================================
-// Replaces the obsolete USE_NATIVE_128 FP64-forwarding block. FPN<64> is layout-identical to FixedPoint<2,64>
+// Replaces the obsolete USE_NATIVE_128 FP64-forwarding block. FPN_Binary<64> is layout-identical to FixedPoint<2,64>
 // (both bare __int128 v), so each op feeds .v into the PROVEN fp2_* body (slice 423/0, value-equivalent to the
 // old 24B sign-magnitude) and re-wraps. Comparisons are native on .v (two's-complement total order — value-
 // equivalent in the |value|<2^63 bounded range, R2). Negate/Abs carry the D-147 branchless INT_MIN→MAX
@@ -1494,58 +1496,58 @@ inline FixedPoint<2,64> fp2_cos(FixedPoint<2,64> value) {                   // c
 // FromString/ToString/FromFP64/ToFP64/Zero/DivWithAssert) red-build → added next.
 inline constexpr __int128 FP2_64_MIN = (__int128)((unsigned __int128)1 << 127);   // -2^127 (INT128_MIN)
 
-template<> inline FPN<64> FPN_Mul<64>(FPN<64> a, FPN<64> b)         { return { fp2_mul({a.v}, {b.v}).v }; }
-template<> inline FPN<64> FPN_AddSat<64>(FPN<64> a, FPN<64> b)      { return { fp2_addsat({a.v}, {b.v}).v }; }
-template<> inline FPN<64> FPN_SubSat<64>(FPN<64> a, FPN<64> b)      { return { fp2_sub({a.v}, {b.v}).v }; }
-template<> inline FPN<64> FPN_Sub<64>(FPN<64> a, FPN<64> b)         { return { fp2_sub({a.v}, {b.v}).v }; }
-template<> inline FPN<64> FPN_DivNoAssert<64>(FPN<64> a, FPN<64> b) { return { fp2_div({a.v}, {b.v}).v }; }
-template<> inline FPN<64> FPN_Min<64>(FPN<64> a, FPN<64> b)         { return { fp2_min({a.v}, {b.v}).v }; }
-template<> inline FPN<64> FPN_Max<64>(FPN<64> a, FPN<64> b)         { return { fp2_max({a.v}, {b.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Mul<64>(FPN_Binary<64> a, FPN_Binary<64> b)         { return { fp2_mul({a.v}, {b.v}).v }; }
+template<> inline FPN_Binary<64> FPN_AddSat<64>(FPN_Binary<64> a, FPN_Binary<64> b)      { return { fp2_addsat({a.v}, {b.v}).v }; }
+template<> inline FPN_Binary<64> FPN_SubSat<64>(FPN_Binary<64> a, FPN_Binary<64> b)      { return { fp2_sub({a.v}, {b.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Sub<64>(FPN_Binary<64> a, FPN_Binary<64> b)         { return { fp2_sub({a.v}, {b.v}).v }; }
+template<> inline FPN_Binary<64> FPN_DivNoAssert<64>(FPN_Binary<64> a, FPN_Binary<64> b) { return { fp2_div({a.v}, {b.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Min<64>(FPN_Binary<64> a, FPN_Binary<64> b)         { return { fp2_min({a.v}, {b.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Max<64>(FPN_Binary<64> a, FPN_Binary<64> b)         { return { fp2_max({a.v}, {b.v}).v }; }
 
-template<> inline int FPN_Equal<64>(FPN<64> a, FPN<64> b)              { return a.v == b.v; }
-template<> inline int FPN_LessThan<64>(FPN<64> a, FPN<64> b)           { return a.v <  b.v; }
-template<> inline int FPN_LessThanOrEqual<64>(FPN<64> a, FPN<64> b)    { return a.v <= b.v; }
-template<> inline int FPN_GreaterThan<64>(FPN<64> a, FPN<64> b)        { return a.v >  b.v; }
-template<> inline int FPN_GreaterThanOrEqual<64>(FPN<64> a, FPN<64> b) { return a.v >= b.v; }
-template<> inline int FPN_IsZero<64>(FPN<64> v)                        { return v.v == 0; }
+template<> inline int FPN_Equal<64>(FPN_Binary<64> a, FPN_Binary<64> b)              { return a.v == b.v; }
+template<> inline int FPN_LessThan<64>(FPN_Binary<64> a, FPN_Binary<64> b)           { return a.v <  b.v; }
+template<> inline int FPN_LessThanOrEqual<64>(FPN_Binary<64> a, FPN_Binary<64> b)    { return a.v <= b.v; }
+template<> inline int FPN_GreaterThan<64>(FPN_Binary<64> a, FPN_Binary<64> b)        { return a.v >  b.v; }
+template<> inline int FPN_GreaterThanOrEqual<64>(FPN_Binary<64> a, FPN_Binary<64> b) { return a.v >= b.v; }
+template<> inline int FPN_IsZero<64>(FPN_Binary<64> v)                        { return v.v == 0; }
 
-template<> inline FPN<64> FPN_Negate<64>(FPN<64> a) {
+template<> inline FPN_Binary<64> FPN_Negate<64>(FPN_Binary<64> a) {
     unsigned __int128 neg  = -(unsigned __int128)a.v;                             // wrapping -v (UB-free)
     unsigned __int128 minm = -(unsigned __int128)(a.v == FP2_64_MIN);            // all-ones iff v == INT_MIN
     return { (__int128)((neg & ~minm) | ((unsigned __int128)FP2_64_MAX & minm)) };
 }
-template<> inline FPN<64> FPN_Abs<64>(FPN<64> a) {
+template<> inline FPN_Binary<64> FPN_Abs<64>(FPN_Binary<64> a) {
     __int128 s = a.v >> 127;                                                     // 0 / -1 (arithmetic)
     unsigned __int128 mag  = ((unsigned __int128)a.v ^ (unsigned __int128)s) - (unsigned __int128)s;   // |v| (UB-free)
     unsigned __int128 minm = -(unsigned __int128)(a.v == FP2_64_MIN);
     return { (__int128)((mag & ~minm) | ((unsigned __int128)FP2_64_MAX & minm)) };
 }
 
-template<> inline FPN<64> FPN_FromDouble<64>(double d) { return { fp2_from_double(d).v }; }
-template<> inline double   FPN_ToDouble<64>(FPN<64> v)  { return fp2_to_double({v.v}); }
-template<> inline FPN<64> FPN_FromInt<64>(int64_t i)    { return { fp2_from_int(i).v }; }
+template<> inline FPN_Binary<64> FPN_FromDouble<64>(double d) { return { fp2_from_double(d).v }; }
+template<> inline double   FPN_ToDouble<64>(FPN_Binary<64> v)  { return fp2_to_double({v.v}); }
+template<> inline FPN_Binary<64> FPN_FromInt<64>(int64_t i)    { return { fp2_from_int(i).v }; }
 
-template<> inline FPN<64> FPN_Sqrt<64>(FPN<64> v)             { return { fp2_sqrt({v.v}).v }; }
-template<> inline FPN<64> FPN_Exp<64>(FPN<64> v)              { return { fp2_exp({v.v}).v }; }
-template<> inline FPN<64> FPN_Sin<64>(FPN<64> v)              { return { fp2_sin({v.v}).v }; }
-template<> inline FPN<64> FPN_Cos<64>(FPN<64> v)              { return { fp2_cos({v.v}).v }; }
-template<> inline FPN<64> FPN_Log<64>(FPN<64> v)              { return { fp2_log({v.v}).v }; }
-template<> inline FPN<64> FPN_Tan<64>(FPN<64> v)              { return { fp2_tan({v.v}).v }; }
-template<> inline FPN<64> FPN_InvSqrt<64>(FPN<64> v)          { return { fp2_invsqrt({v.v}).v }; }
-template<> inline FPN<64> FPN_Atan2<64>(FPN<64> y, FPN<64> x) { return { fp2_atan2({y.v}, {x.v}).v }; }
-template<> inline FPN<64> FPN_Pow<64>(FPN<64> b, FPN<64> e)   { return { fp2_pow({b.v}, {e.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Sqrt<64>(FPN_Binary<64> v)             { return { fp2_sqrt({v.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Exp<64>(FPN_Binary<64> v)              { return { fp2_exp({v.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Sin<64>(FPN_Binary<64> v)              { return { fp2_sin({v.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Cos<64>(FPN_Binary<64> v)              { return { fp2_cos({v.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Log<64>(FPN_Binary<64> v)              { return { fp2_log({v.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Tan<64>(FPN_Binary<64> v)              { return { fp2_tan({v.v}).v }; }
+template<> inline FPN_Binary<64> FPN_InvSqrt<64>(FPN_Binary<64> v)          { return { fp2_invsqrt({v.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Atan2<64>(FPN_Binary<64> y, FPN_Binary<64> x) { return { fp2_atan2({y.v}, {x.v}).v }; }
+template<> inline FPN_Binary<64> FPN_Pow<64>(FPN_Binary<64> b, FPN_Binary<64> e)   { return { fp2_pow({b.v}, {e.v}).v }; }
 
-template<> inline FPN<64> FPN_Zero<64>() { return { (__int128)0 }; }
+template<> inline FPN_Binary<64> FPN_Zero<64>() { return { (__int128)0 }; }
 
 // Branchless mask-blend: caller forms `mask = -(uint64_t)cond` (0 / all-ones-64). Sign-extend to 128b + blend .v.
-template<> inline FPN<64> FPN_BlendOnMask<64>(FPN<64> if_true, FPN<64> if_false, uint64_t mask) {
+template<> inline FPN_Binary<64> FPN_BlendOnMask<64>(FPN_Binary<64> if_true, FPN_Binary<64> if_false, uint64_t mask) {
     unsigned __int128 m = (unsigned __int128)(__int128)(int64_t)mask;            // 0 / all-ones-128 (sign-extended)
     return { (__int128)(((unsigned __int128)if_true.v & m) | ((unsigned __int128)if_false.v & ~m)) };
 }
 
 // Decimal string <-> 16B. Value-equivalent to the generic at F=64: the integer part is the high 64b word
 // (old w[1]), the fraction is the low 64b word (old w[0]); same per-word base-10 divmod/mul-by-10.
-template<> inline unsigned FPN_ToString<64>(FPN<64> value, char *buf, unsigned buf_size, unsigned decimal_places) {
+template<> inline unsigned FPN_ToString<64>(FPN_Binary<64> value, char *buf, unsigned buf_size, unsigned decimal_places) {
     if (decimal_places == 0) decimal_places = FPN_MaxDecimalDigits<64>();
     unsigned pos = 0;
     int neg = (value.v < 0);
@@ -1574,7 +1576,7 @@ template<> inline unsigned FPN_ToString<64>(FPN<64> value, char *buf, unsigned b
 // generic: diff-tested byte-identical across the venue string domain (build_probe/fromstring_difftest.cpp,
 // 297/0). frac_low = floor((frac_int<<64)/10^n) IS the generic's right-to-left divmod for n≤19 (venue
 // precision). Full fixed-width SWAR throughput stays task #5; this is the branchless-where-it-counts form.
-template<> inline FPN<64> FPN_FromString<64>(const char *str) {
+template<> inline FPN_Binary<64> FPN_FromString<64>(const char *str) {
     static const uint64_t POW10[20] = {
         1ull,10ull,100ull,1000ull,10000ull,100000ull,1000000ull,10000000ull,100000000ull,1000000000ull,
         10000000000ull,100000000000ull,1000000000000ull,10000000000000ull,100000000000000ull,

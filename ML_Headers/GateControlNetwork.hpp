@@ -20,24 +20,24 @@
 // [STRUCTS]
 //======================================================================================================
 template <unsigned F> struct GCN_input {
-    FPN<F> volume;
-    FPN<F> price;
-    FPN<F> portfolio_value;
-    FPN<F> portolio_delta;
-    FPN<F> slope;
-    FPN<F> slope_of_slopes;
-    FPN<F> &operator[](unsigned i) { return (&volume)[i]; }
+    FPN_Binary<F> volume;
+    FPN_Binary<F> price;
+    FPN_Binary<F> portfolio_value;
+    FPN_Binary<F> portolio_delta;
+    FPN_Binary<F> slope;
+    FPN_Binary<F> slope_of_slopes;
+    FPN_Binary<F> &operator[](unsigned i) { return (&volume)[i]; }
 };
-static_assert(sizeof(GCN_input<64>) == 6 * sizeof(FPN<64>), "GCN_input size mismatch");
+static_assert(sizeof(GCN_input<64>) == 6 * sizeof(FPN_Binary<64>), "GCN_input size mismatch");
 
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS> struct GCN_network {
-    FPN<F> w_hidden[INPUTS * HIDDEN];
-    FPN<F> b_hidden[HIDDEN];
-    FPN<F> hidden_out[HIDDEN];
+    FPN_Binary<F> w_hidden[INPUTS * HIDDEN];
+    FPN_Binary<F> b_hidden[HIDDEN];
+    FPN_Binary<F> hidden_out[HIDDEN];
 
-    FPN<F> w_output[HIDDEN * OUTPUTS];
-    FPN<F> b_output[OUTPUTS];
-    FPN<F> output[OUTPUTS];
+    FPN_Binary<F> w_output[HIDDEN * OUTPUTS];
+    FPN_Binary<F> b_output[OUTPUTS];
+    FPN_Binary<F> output[OUTPUTS];
 };
 
 //======================================================================================================
@@ -60,7 +60,7 @@ void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &inp
             net.hidden_out[i] = FPN_Add(net.hidden_out[i], FPN_Mul(net.w_hidden[i * INPUTS + j], input[j]));
         }
         // Apply activation function (e.g., ReLU)
-        FPN<F> zero   = FPN_Zero<F>();
+        FPN_Binary<F> zero   = FPN_Zero<F>();
         net.hidden_out[i] = FPN_Max(net.hidden_out[i], zero);
     }
 
@@ -80,16 +80,16 @@ void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &inp
 //this apparently is just the if you know what the output was, and you know what you wanted it to be, you have the error difference, and then you push that back through it to figure out how much each weight contrinbuted to the error, and then you can nudge them in the opposite direction, by the learning rate
 //======================================================================================================
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS>
-void GCN_backward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &input, FPN<F> &target, FPN<F> learning_rate) {
+void GCN_backward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &input, FPN_Binary<F> &target, FPN_Binary<F> learning_rate) {
     // Compute output layer error
-    FPN<F> output_error[OUTPUTS];
+    FPN_Binary<F> output_error[OUTPUTS];
     for (unsigned i = 0; i < OUTPUTS; ++i) {
         output_error[i] = FPN_Sub(net.output[i], target); // error = output - target
     }
 
     // Compute hidden layer error and update weights/biases
     for (unsigned i = 0; i < HIDDEN; ++i) {
-        FPN<F> hidden_error = FPN_Zero<F>();
+        FPN_Binary<F> hidden_error = FPN_Zero<F>();
         for (unsigned j = 0; j < OUTPUTS; ++j) {
             hidden_error = FPN_Add(hidden_error, FPN_Mul(net.w_output[i * OUTPUTS + j], output_error[j]));
             // Update output weights and biases

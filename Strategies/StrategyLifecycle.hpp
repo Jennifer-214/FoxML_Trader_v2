@@ -74,7 +74,7 @@ inline void Strategy_SeedFromCfg(MomentumState<F>* s, const ControllerConfig<F>*
     // seed Momentum_Adapt has nothing to ratchet against and
     // breakout_mult collapses to breakout_min.
     if (!cfg) return;
-    FPN<F> seed_mult = !FPN_IsZero(cfg->momentum_breakout_mult)
+    FPN_Binary<F> seed_mult = !FPN_IsZero(cfg->momentum_breakout_mult)
         ? cfg->momentum_breakout_mult
         : FPN_FromDouble<F>(2.0);  // 2σ default
     s->live_breakout_mult = seed_mult;
@@ -179,11 +179,11 @@ inline void Strategy_AdaptPerCore(
     EventLoopState<F>* state,
     int slot,
     uint8_t effective_strategy_id,
-    FPN<F> current_price,
-    FPN<F> portfolio_delta,
+    FPN_Binary<F> current_price,
+    FPN_Binary<F> portfolio_delta,
     uint16_t active_bitmap,
     const ControllerConfig<F>* cfg,
-    const FPN<F>* ema_price = nullptr   // v5.4.0 Phase 2.4 — EmaCross uses this; others ignore
+    const FPN_Binary<F>* ema_price = nullptr   // v5.4.0 Phase 2.4 — EmaCross uses this; others ignore
 ) {
     if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
     auto& ctx = state->cores[slot];
@@ -262,7 +262,7 @@ inline void Strategy_AdaptPerCore(
 //======================================================================================================
 template <unsigned F>
 inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
-                                     FPN<F> proposed_sl, FPN<F> entry_price,
+                                     FPN_Binary<F> proposed_sl, FPN_Binary<F> entry_price,
                                      const ControllerConfig<F>* cfg) {
     if (slot < 0 || slot >= MAX_EXECUTION_CORES) return false;
     if (FPN_IsZero(entry_price)) return false;
@@ -272,13 +272,13 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
     // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
     // (UNINDEXED-GLOBAL closure). 5 callers (MeanReversion + MLStrategy +
     // EmaCross + Momentum + ControllerEventLoop) all pass per-core slot.
-    FPN<F> fee_taker = !FPN_IsZero(cfg->cores[slot].fee_rate_taker)
+    FPN_Binary<F> fee_taker = !FPN_IsZero(cfg->cores[slot].fee_rate_taker)
         ? cfg->cores[slot].fee_rate_taker : cfg->cores[slot].fee_rate;
-    FPN<F> three     = FPN_FromDouble<F>(3.0);
-    FPN<F> floor_pct = FPN_Mul(fee_taker, three);
-    FPN<F> floor_mult = FPN_Sub(FPN_FromDouble<F>(1.0), floor_pct);
-    FPN<F> sl_floor  = FPN_Mul(entry_price, floor_mult);
-    FPN<F> capped    = FPN_LessThan(proposed_sl, sl_floor) ? proposed_sl : sl_floor;
+    FPN_Binary<F> three     = FPN_FromDouble<F>(3.0);
+    FPN_Binary<F> floor_pct = FPN_Mul(fee_taker, three);
+    FPN_Binary<F> floor_mult = FPN_Sub(FPN_FromDouble<F>(1.0), floor_pct);
+    FPN_Binary<F> sl_floor  = FPN_Mul(entry_price, floor_mult);
+    FPN_Binary<F> capped    = FPN_LessThan(proposed_sl, sl_floor) ? proposed_sl : sl_floor;
 
     auto& ctx = state->cores[slot];
     if (FPN_GreaterThan(capped, ctx.pending_params.ratchet_sl)) {
@@ -302,7 +302,7 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
 //======================================================================================================
 template <unsigned F>
 inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
-                                     FPN<F> proposed_tp) {
+                                     FPN_Binary<F> proposed_tp) {
     if (slot < 0 || slot >= MAX_EXECUTION_CORES) return false;
     if (FPN_IsZero(proposed_tp)) return false;
 
@@ -337,7 +337,7 @@ inline void Strategy_ExitAdjustPerCore(
     EventLoopState<F>* state,
     int slot,
     uint8_t effective_strategy_id,
-    FPN<F> current_price,
+    FPN_Binary<F> current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {

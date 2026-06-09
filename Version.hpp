@@ -5,7 +5,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.7"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.8"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -17,6 +17,41 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// .F.4d.1.E.0.8 (v5.15.5.F.4d.1.E.0.8 — tag monotonic after E.0.7 per D-88) — SHIP A.5: the cosmetic
+// FPN -> FPN_Binary type+trait rename against the stable 16B anchor (D-143/D-163; deferred OUT of Ship A
+// to preserve the flip's diff-anchor). ZERO-SEMANTIC: type spelling + is_FPN_v retirement (-> is_fp_binary_v;
+// alias deleted at FixedPointN.hpp) ONLY; the FPN_* op family (~40 names / ~2.8k refs) + the FixedPoint64
+// absorb are EXPLICIT non-goals (Ship B reshapes the op surface; do-it-twice avoidance; D-163/D-165).
+// 77 files mechanical \bFPN\b pass; compiler red-build = totality oracle for C++ tokens; the TOOL-REGEX
+// cohort (Python guards the compiler can't see — check_storage_t_coverage.py variant/trait matchers +
+// the doc-size guard CANON_RE) updated in the SAME commit + teeth-proofed RED->GREEN.
+//
+// ACCEPTANCE: controller_test 3246/0 on the FIRST post-flip build (value assertions byte-unchanged) +
+// gui ok + asan 3246/0 + ubsan 3246/0 + codegen A/B oracle (check_fp_determinism output pre==post
+// IDENTICAL = zero codegen change, PROVEN) + run-to-run determinism spot-verified + calls_graph_diff
+// CLEAN + H21 re-verified ZERO wire-visible identifier changes (R3 snapshot constants untouched; NO
+// operator migration impact). Hot path UNTOUCHED. Golden refreeze still DEFERRED post-Ship-B (D-157).
+// Sanitizer run-conditions surfaced UNPINNED ambient state (asan stack-overflow at 12.5MB ulimit from
+// main's huge stack locals + ASan redzones; LSan exit-leak noise from the no-teardown harness) — gate
+// ran ulimit-unlimited + detect_leaks=0; pinning + leak audit = TECH_DEBT-161; gui -Wstringop FP audit
+// = TECH_DEBT-160 (both pre-existing classes, NOT rename artifacts).
+//
+// GUARDS HARDENED in-ship: check_fpn_doc_size_currency.py canon-missing blind-green (WARN/exit-0) ->
+// RED/exit-1 (S-4) + SCAN_GLOBS widened to plans/_cross-cutting + claude-skills + FEATURE_LOOKUP (S-2 —
+// caught latency-path-discipline still teaching "FPN<64>=24B", survived the Ship-A sweep; FIXED) + both
+// spellings accepted across the rename boundary. Doc sweep via the .D.1 classifier (S-7 sister reuse) —
+// which produced a REAL incident: UNANCHORED token matching double-renamed already-renamed text
+// (FPN inside FPN_Binary => non-idempotent --apply => "FPN_Binary_Binary") AND corrupted FPN_* fn-name
+// doc mentions (FPN_DivNoAssert -> FPN_Binary_DivNoAssert). STRUCTURAL FIX: lookaround boundary anchoring
+// in the executor + idempotency PROVEN (2nd apply = 0 new) + 28 doc files repaired + the lesson into
+// rename-ship-methodology.md ("verify the EXECUTOR against the substring matrix — the grep and the tool
+// are different matchers"). Sister harvest: the rg -rln flag-bundling display-replacement phantom
+// (-r consumed "ln" as a --replace value => verification output lied; verify the VERIFIER's invocation).
+// NEW: DESIGN_SPECS/refactor-patterns/rename-ship-methodology.md (Stage 2->3 at close; .E.1 Core->Node =
+// 2nd application; TECH_DEBT-142 cross-linked, closes at .E.1) + DOCS/GLOSSARY.md "Numeric core types"
+// + DESIGN_PHILOSOPHY §15 spelling-bridge note. Decision log D-163..D-166 (Session 12).
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-06-09-v5.15.5.F.4d.1.E.0.8-postmortem.md.
+//
 // .F.4d.1.E.0.7 (v5.15.5.F.4d.1.E.0.7 — tag monotonic after E.0.6 per D-88) — SHIP A: the 16B
 // binary-core storage flip. FPN<64> compacted 24B sign-magnitude (uint64_t w[2] + int32_t sign + pad)
 // → 16B two's-complement (bare __int128 v), VALUE-equivalent — NOT byte-identical (bytes change by

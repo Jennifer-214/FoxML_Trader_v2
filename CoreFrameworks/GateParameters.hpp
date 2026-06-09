@@ -66,7 +66,7 @@ constexpr uint8_t GATE_FLAG_BUY_BLOCKED      = 0x20;
 // flag set, ExecutionCore_Tick branchlessly evaluates SG on both legs;
 // either or both can fire on a given tick. With it clear, leg-B fields
 // are never written and active_b stays 0 → leg-B SG result is masked
-// out, hot path costs ~1ns extra (the unused FPN comparisons pipeline
+// out, hot path costs ~1ns extra (the unused FPN_Binary comparisons pipeline
 // into otherwise-idle CPU slots).
 constexpr uint8_t GATE_FLAG_PAIR_ACTIVE      = 0x40;
 // v5.12.1.B.3 (2026-05-08): hot-path staleness gate. When set, the
@@ -85,44 +85,44 @@ constexpr uint8_t GATE_FLAG_STALENESS_ENABLED = 0x80;
 template <unsigned F>
 struct alignas(64) GateParameters {
     // --- Buy gate inputs ---
-    FPN<F> bg_price_threshold;       // tick.price must be < this to enter
-    FPN<F> bg_volume_threshold;      // tick.volume must be > this (when GATE_FLAG_VOLUME_REQUIRED)
+    FPN_Binary<F> bg_price_threshold;       // tick.price must be < this to enter
+    FPN_Binary<F> bg_volume_threshold;      // tick.volume must be > this (when GATE_FLAG_VOLUME_REQUIRED)
 
     // --- Sell gate inputs (PRECOMPUTED — backward compatibility / tests) ---
     // The execution core uses these absolute prices directly when both
     // tp_pct AND sl_pct are zero. When either pct is non-zero, the core
     // computes TP/SL from the actual fill price using the percentages
     // instead — this is the "per-fill" path from phase 14.
-    FPN<F> sg_take_profit_price;     // legacy absolute TP
-    FPN<F> sg_stop_loss_price;       // legacy absolute SL
+    FPN_Binary<F> sg_take_profit_price;     // legacy absolute TP
+    FPN_Binary<F> sg_stop_loss_price;       // legacy absolute SL
 
     // --- Sell gate inputs (PER-FILL, phase 14 — the right way) ---
     // Strategies set tp_pct and sl_pct as percentages of fill price. The
     // execution core computes absolute TP/SL on entry against the actual
     // fill price, not the controller's expected entry. Fixes the structural
     // loss bias from phase 13 head-to-head.
-    FPN<F> tp_pct;                   // 0.005 = 0.5% TP. zero → use sg_take_profit_price
-    FPN<F> sl_pct;                   // 0.0025 = 0.25% SL. zero → use sg_stop_loss_price
+    FPN_Binary<F> tp_pct;                   // 0.005 = 0.5% TP. zero → use sg_take_profit_price
+    FPN_Binary<F> sl_pct;                   // 0.0025 = 0.25% SL. zero → use sg_stop_loss_price
     // Partial exits P.2: leg-B TP percentage (used only when
     // GATE_FLAG_PAIR_ACTIVE is set). Strategy_BuildParameters typically
     // sets tp_pct_b = tp_pct * cfg.tp2_mult (TP2 farther than TP1). Leg B
     // shares the same live_sl as leg A. Zero-defaults when partials
     // disabled, in which case the entry path won't activate leg B
     // regardless.
-    FPN<F> tp_pct_b;
+    FPN_Binary<F> tp_pct_b;
 
     // --- Sizing (controller-set, not used by gate evaluation directly) ---
-    FPN<F> trade_size;               // size for the next entry, written to Position by controller
+    FPN_Binary<F> trade_size;               // size for the next entry, written to Position by controller
 
     // --- v4.0.3 D9 trailing SL ratchet ---
     // Controller writes via standard slow-path PushParameters (seqlock-protected).
     // Hot path uses effective_sl = FPN_Max(active_sl, ratchet_sl) — branchless,
-    // FPN-pure. When zero (default), FPN_Max(sl, 0) = sl so no behavior change.
+    // FPN_Binary-pure. When zero (default), FPN_Max(sl, 0) = sl so no behavior change.
     // When non-zero, acts as a floor for SL — exit fires when price drops to
     // this level even if the original live_sl was lower. Mirrors legacy
     // PortfolioController trailing behavior; reaction time bounded by
     // slow_path_interval (~100-200ms) for the SET, microseconds for the FIRE.
-    FPN<F> ratchet_sl;
+    FPN_Binary<F> ratchet_sl;
 
     // --- v5.4.0 Phase 3.3 trailing TP ratchet ---
     // Parallel channel to ratchet_sl. For LONG positions, ratcheting TP UP
@@ -133,7 +133,7 @@ struct alignas(64) GateParameters {
     // strategy-specific TP trailing in Phase 4+. Pre-v5.4 sharded had no TP
     // ratchet field; the legacy Regime_AdjustPositions writes to pos->take_profit_price
     // were dead — postmortem F4.
-    FPN<F> ratchet_tp;
+    FPN_Binary<F> ratchet_tp;
 
     // --- Identification ---
     uint8_t strategy_id;             // STRATEGY_* constant
@@ -186,15 +186,15 @@ static inline bool BG_Evaluate(const Tick<F>& tick, const GateParameters<F>* par
 
 template <unsigned F>
 __attribute__((always_inline))
-static inline bool SG_Evaluate(const FPN<F>& current_price, const FPN<F>& entry_price, const GateParameters<F>* params) {
+static inline bool SG_Evaluate(const FPN_Binary<F>& current_price, const FPN_Binary<F>& entry_price, const GateParameters<F>* params) {
     // Stub: TP hit OR SL hit (each gated by its enable flag)
     (void)entry_price;  // unused in stub; real implementation may use for trailing
     uint64_t tp_enabled = (uint64_t)((params->flags & GATE_FLAG_TP_ENABLED) != 0);
     uint64_t sl_enabled = (uint64_t)((params->flags & GATE_FLAG_SL_ENABLED) != 0);
     // v5.4.0 Phase 3.3: ratchet_tp / ratchet_sl raise the effective exit
     // levels (max-only). Zero defaults preserve pre-v5.4 numerics.
-    FPN<F> effective_tp = FPN_Max(params->sg_take_profit_price, params->ratchet_tp);
-    FPN<F> effective_sl = FPN_Max(params->sg_stop_loss_price,   params->ratchet_sl);
+    FPN_Binary<F> effective_tp = FPN_Max(params->sg_take_profit_price, params->ratchet_tp);
+    FPN_Binary<F> effective_sl = FPN_Max(params->sg_stop_loss_price,   params->ratchet_sl);
     uint64_t tp_hit = (uint64_t)FPN_GreaterThanOrEqual(current_price, effective_tp);
     uint64_t sl_hit = (uint64_t)FPN_LessThanOrEqual(current_price, effective_sl);
     return ((tp_enabled & tp_hit) | (sl_enabled & sl_hit)) != 0;

@@ -414,7 +414,7 @@ static inline void BinanceAdapter_ShutdownImpl(void* ctx) {
 // [GET — return the ExchangeAdapter<F> struct wired to this concrete state]
 //======================================================================================================
 // Build the function-pointer vtable that the OMS uses to call into this
-// adapter. F is the FPN width — the concrete adapter doesn't use F
+// adapter. F is the FPN_Binary width — the concrete adapter doesn't use F
 // (everything goes through `double` at the BinanceOrderAPI boundary) but
 // the template parameter matches the OMS's ExchangeAdapter<F> field type.
 //======================================================================================================

@@ -15,14 +15,14 @@
 // [LINEAR REGRESSION STRUCTURES]
 //======================================================================================================
 template <unsigned F> struct LinearRegressionModel {
-    FPN<F> slope;
-    FPN<F> intercept;
+    FPN_Binary<F> slope;
+    FPN_Binary<F> intercept;
 };
 //======================================================================================================
 // [LINEAR REGRESSION FUNCTION PROTOTYPES]
 //======================================================================================================
-template <unsigned F> inline LinearRegressionModel<F> LinearRegression_Fit(FPN<F> *x_values, FPN<F> *y_values, int count) {
-    using FP = FPN<F>;
+template <unsigned F> inline LinearRegressionModel<F> LinearRegression_Fit(FPN_Binary<F> *x_values, FPN_Binary<F> *y_values, int count) {
+    using FP = FPN_Binary<F>;
     LinearRegressionModel<F> model;
 
     FP sum_x = FPN_Zero<F>(), sum_y = FPN_Zero<F>();
@@ -52,7 +52,7 @@ template <unsigned F> inline LinearRegressionModel<F> LinearRegression_Fit(FPN<F
     return model;
 }
 
-template <unsigned F> inline FPN<F> LinearRegression_Predict(LinearRegressionModel<F> model, FPN<F> x) {
+template <unsigned F> inline FPN_Binary<F> LinearRegression_Predict(LinearRegressionModel<F> model, FPN_Binary<F> x) {
     return FPN_Add(FPN_Mul(model.slope, x), model.intercept);
 }
 

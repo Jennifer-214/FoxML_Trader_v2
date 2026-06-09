@@ -83,14 +83,14 @@
 #include <x86intrin.h>  // __rdtsc (slow-path latency sampling — sister to EngineSharded.hpp:82)
 
 // Phase B includes (added as helper bodies land; sister-convention relative paths):
-//   B.0 ApplyBnbDiscount → ControllerConfig.hpp (cfg.cores[c].fee_rate_*) + FixedPointN.hpp (FPN<F> arithmetic)
+//   B.0 ApplyBnbDiscount → ControllerConfig.hpp (cfg.cores[c].fee_rate_*) + FixedPointN.hpp (FPN_Binary<F> arithmetic)
 //   B.1 BootGlobal → ControllerEventLoop.hpp (EventLoopState_Init + ConfigureKillSwitch) + OrderManager.hpp (OrderManagerState<F>) + RegimeDetector.hpp (Regime_Init)
 #include "ControllerConfig.hpp"                  // ControllerConfig<F>, MAX_EXECUTION_CORES, MASK_RISK_CFG_KILL_SWITCH_ENABLED (transitive via RiskCfgFlagRegistry)
 #include "ControllerEventLoop.hpp"               // EventLoopState<F>, EventLoopState_Init, EventLoopState_ConfigureKillSwitch, EventLoopState_RegisterCore, EventLoopState_SetCoreStrategy
 #include "OrderManager.hpp"                      // OrderManagerState<F>
 #include "ExecutionCore.hpp"                     // ExecutionCore<F>, ExecutionCore_Init, ExecutionCore_SetPermission, SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE>
 #include "ModelValidation.hpp"                   // CoreModelZoo_ValidateAgainstCfg (extracted at v5.14.2.E.1; closes PARITY-012)
-#include "../FixedPoint/FixedPointN.hpp"         // FPN<F>, FPN_Mul, FPN_FromDouble, FPN_Zero, FPN_ToDouble
+#include "../FixedPoint/FixedPointN.hpp"         // FPN_Binary<F>, FPN_Mul, FPN_FromDouble, FPN_Zero, FPN_ToDouble
 #include "../MemHeaders/CoreStateFlagRegistry.hpp"  // CORE_STATE_FLAG_SET, MASK_CORE_STATE_MODEL_LOAD_FAILED
 #include "../Strategies/RegimeDetector.hpp"      // Regime_Init
 #include "../Strategies/StrategyInterface.hpp"   // STRATEGY_ML, STRATEGY_NONE (auto-generated via FOREACH_STRATEGY X-macro)
@@ -153,7 +153,7 @@ constexpr int BACKTEST_REGIME_SAMPLE_CORE = 0;
 template <unsigned F>
 inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
     if (cfg.pay_fees_in_bnb) {
-        FPN<F> bnb_factor = FPN_FromDouble<F>(0.75);
+        FPN_Binary<F> bnb_factor = FPN_FromDouble<F>(0.75);
         for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
             cfg.cores[c].fee_rate_maker = FPN_Mul(cfg.cores[c].fee_rate_maker, bnb_factor);
             cfg.cores[c].fee_rate_taker = FPN_Mul(cfg.cores[c].fee_rate_taker, bnb_factor);
@@ -239,7 +239,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                                       ExecutionCore<F>& core,
                                       CoreModelZoo<F>* zoo_ptr,        // nullable: non-ML OR alloc-failed
                                       EnsembleModelZoo<F>* ezoo_ptr,   // nullable: same
-                                      FPN<F> core_balance) {           // caller-precomputed (O2 bytewise-identical)
+                                      FPN_Binary<F> core_balance) {           // caller-precomputed (O2 bytewise-identical)
     // -------- Step 1-4: unconditional per-core init (per Step A.4 CSV ordering) --------
     //   LIVE :909, BACKTEST :252 — SPSC ring init for producer→hot path
     SPSCRing_Init(&tick_ring);
@@ -477,8 +477,8 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                                                int c,
                                                EventLoopState<F>& state,
                                                OrderManagerState<F>& oms,
-                                               FPN<F> price,
-                                               FPN<F> volume,
+                                               FPN_Binary<F> price,
+                                               FPN_Binary<F> volume,
                                                uint64_t ts_us,
                                                uint64_t now_tick,
                                                const BookSnapshot<F>& depth) {
@@ -498,10 +498,10 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // would COMPILE FAIL since EventLoopState<F> has no `.flags` member.
     SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state.global_gate_state, cfg);
 
-    // Derive double from caller-precomputed FPN<F> price for guard checks.
+    // Derive double from caller-precomputed FPN_Binary<F> price for guard checks.
     // `price` IS the mtm_price per caller-side O2 bytewise-identical math
     // (LIVE :3068-3071 / BACKTEST equivalent — caller does
-    // price = price_d > 0.0 ? FPN_FromDouble(price_d) : FPN_Zero()). FPN<F=64>
+    // price = price_d > 0.0 ? FPN_FromDouble(price_d) : FPN_Zero()). FPN_Binary<F=64>
     // has 64 fractional bits + ~4032 integer bits; FPN_ToDouble of
     // FPN_FromDouble(x) recovers x bytewise-identical for normal doubles.
     double price_d = FPN_ToDouble(price);
@@ -518,7 +518,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // fields per v1.7.4 NEW-1/2/3/4 corrections). Helper checks
     // MASK_GATE_CFG_DEPTH_ENABLED internally per LIVE :3052-3058 pattern —
     // when disabled, substitutes FPN_Zero regardless of what's in passed depth.
-    FPN<F> book_imb = FPN_Zero<F>();
+    FPN_Binary<F> book_imb = FPN_Zero<F>();
     double book_spread_d = 0.0, book_mid_d = 0.0;
     if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)) {
         book_imb      = depth.imbalance;
@@ -542,7 +542,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // v5.1.2 (full symmetric): use shared OneCore helper.
     // Single-writer is this thread (per_core_slow's c).
     auto* sst = state.cores[c].slow_state;
-    FPN<F> bs = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ?
+    FPN_Binary<F> bs = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ?
         FPN_FromDouble<F>(book_spread_d) : FPN_Zero<F>();
     EventLoop_UpdateRollingStateOneCore(
         &state, c,
@@ -627,11 +627,11 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
         uint16_t bm = (uint16_t)
             (oms.portfolio.active_bitmap & my_mask);
         if (bm) {
-            FPN<F> price_fpn = FPN_FromDouble<F>(price_d);
+            FPN_Binary<F> price_fpn = FPN_FromDouble<F>(price_d);
             while (bm) {
                 int pidx = __builtin_ctz(bm);
                 bm &= (uint16_t)(bm - 1);
-                FPN<F> qty =
+                FPN_Binary<F> qty =
                     oms.portfolio.positions[pidx].quantity;
                 if (FPN_IsZero(qty)) continue;
                 // Mark per-slot for v5.13.4 attribution + v5.13.0.B
@@ -806,8 +806,8 @@ template <unsigned F>
 inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                                 EventLoopState<F>& state,
                                                 OrderManagerState<F>& oms,
-                                                FPN<F> price,
-                                                FPN<F> volume,
+                                                FPN_Binary<F> price,
+                                                FPN_Binary<F> volume,
                                                 uint64_t ts_us,
                                                 uint64_t now_tick,
                                                 const BookSnapshot<F>& depth) {

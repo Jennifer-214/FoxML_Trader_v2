@@ -7,7 +7,7 @@
 //======================================================================================================
 // Closes TECH_DEBT-040: the 4-cfg-field cohort (session_asian/european/us/
 // overnight_mult) was an X-macro registry candidate carrying:
-//   1. ControllerConfig FPN<F> field declarations (4 rows)
+//   1. ControllerConfig FPN_Binary<F> field declarations (4 rows)
 //   2. ControllerConfig_Default initial-value assignments (4 rows)
 //   3. CFG_PARSE_FPN parser entries (4 rows)
 //   4. SettingsPanel GUI rows (4 rows)
@@ -22,7 +22,7 @@
 //
 // Float-cohort cfg-registry variant (first reference). Distinct from the
 // boolean-bitmap variant of FOREACH_<DOMAIN>_CFG_FLAG (FOREACH_OPS_CFG_FLAG,
-// FOREACH_RISK_CFG_FLAG, etc.). Cohorts of FPN<F> cfg fields with a
+// FOREACH_RISK_CFG_FLAG, etc.). Cohorts of FPN_Binary<F> cfg fields with a
 // SHARED SEMANTIC ROLE + uniform consumer dispatch get this treatment;
 // the storage is direct (no bit-packing) but multi-site sync is registry-
 // driven. Subsection in cfg-flag-eligibility-criteria.md captures the

@@ -68,9 +68,9 @@ constexpr int MAX_LEGACY_REF_SLOTS = 16;
 template <unsigned F>
 struct LegacyRefSlot {
     GateParameters<F> params;       // gate thresholds
-    FPN<F>            entry_price;  // 0 when inactive
-    FPN<F>            quantity;     // size of the open position
-    FPN<F>            entry_fee;    // fee paid at entry
+    FPN_Binary<F>            entry_price;  // 0 when inactive
+    FPN_Binary<F>            quantity;     // size of the open position
+    FPN_Binary<F>            entry_fee;    // fee paid at entry
     uint8_t           active;       // 1 = position open
     uint8_t           permission;   // 1 = allowed to take new entries
     uint8_t           strategy_id;
@@ -83,19 +83,19 @@ template <unsigned F>
 struct LegacyReferenceState {
     LegacyRefSlot<F> slots[MAX_LEGACY_REF_SLOTS];
     int num_slots;
-    FPN<F> balance;
-    FPN<F> realized_pnl;
-    FPN<F> fee_rate;
-    FPN<F> allocated_balance_per_slot;  // for parameter rebuild sizing
+    FPN_Binary<F> balance;
+    FPN_Binary<F> realized_pnl;
+    FPN_Binary<F> fee_rate;
+    FPN_Binary<F> allocated_balance_per_slot;  // for parameter rebuild sizing
     uint64_t total_entries;
     uint64_t total_exits;
 };
 
 template <unsigned F>
 inline void LegacyReference_Init(LegacyReferenceState<F>* state,
-                                  FPN<F> starting_balance,
-                                  FPN<F> fee_rate,
-                                  FPN<F> allocated_balance_per_slot) {
+                                  FPN_Binary<F> starting_balance,
+                                  FPN_Binary<F> fee_rate,
+                                  FPN_Binary<F> allocated_balance_per_slot) {
     state->num_slots = 0;
     state->balance = starting_balance;
     state->realized_pnl = FPN_Zero<F>();
@@ -145,7 +145,7 @@ inline void LegacyReference_Tick(LegacyReferenceState<F>* state, const Tick<F>& 
                 // open position
                 slot->entry_price = tick.price;
                 slot->quantity    = slot->params.trade_size;
-                FPN<F> notional = FPN_Mul(tick.price, slot->params.trade_size);
+                FPN_Binary<F> notional = FPN_Mul(tick.price, slot->params.trade_size);
                 slot->entry_fee   = FPN_Mul(notional, state->fee_rate);
                 slot->active      = 1;
                 slot->entries++;
@@ -157,12 +157,12 @@ inline void LegacyReference_Tick(LegacyReferenceState<F>* state, const Tick<F>& 
         // Active slot: check sell gate
         if (SG_Evaluate(tick.price, slot->entry_price, &slot->params)) {
             // close position, book P&L
-            FPN<F> diff  = FPN_Sub(tick.price, slot->entry_price);
-            FPN<F> gross = FPN_Mul(diff, slot->quantity);
-            FPN<F> exit_notional = FPN_Mul(tick.price, slot->quantity);
-            FPN<F> exit_fee = FPN_Mul(exit_notional, state->fee_rate);
-            FPN<F> total_fee = FPN_Add(slot->entry_fee, exit_fee);
-            FPN<F> net = FPN_Sub(gross, total_fee);
+            FPN_Binary<F> diff  = FPN_Sub(tick.price, slot->entry_price);
+            FPN_Binary<F> gross = FPN_Mul(diff, slot->quantity);
+            FPN_Binary<F> exit_notional = FPN_Mul(tick.price, slot->quantity);
+            FPN_Binary<F> exit_fee = FPN_Mul(exit_notional, state->fee_rate);
+            FPN_Binary<F> total_fee = FPN_Add(slot->entry_fee, exit_fee);
+            FPN_Binary<F> net = FPN_Sub(gross, total_fee);
             state->balance = FPN_Add(state->balance, net);
             state->realized_pnl = FPN_Add(state->realized_pnl, net);
             slot->active = 0;
