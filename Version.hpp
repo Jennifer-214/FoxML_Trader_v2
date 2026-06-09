@@ -5,7 +5,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.6"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.7"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -17,6 +17,42 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// .F.4d.1.E.0.7 (v5.15.5.F.4d.1.E.0.7 — tag monotonic after E.0.6 per D-88) — SHIP A: the 16B
+// binary-core storage flip. FPN<64> compacted 24B sign-magnitude (uint64_t w[2] + int32_t sign + pad)
+// → 16B two's-complement (bare __int128 v), VALUE-equivalent — NOT byte-identical (bytes change by
+// design under 16B; D-139). This is the STOP-before-money TAGGED BOUNDARY (D-130): a complete 16B
+// binary core, NO money yet (decimal money = Ship B). Mechanism = FPN<64> is a full-specialization of
+// FPN<F> (layout-identical to FixedPoint<2,64>; sizeof 24→16, 4 per cache line); the ~2,144 FPN sites
+// ride the alias-not-rename unchanged (D-143; the cosmetic FPN→FPN_Binary rename is deferred to A.5).
+// Disjoint traits is_fp_binary_v / is_fp_decimal_v landed (is_FPN_v = binary-only alias; B6). 16B ops
+// native + branchless, reusing the .E.0.1-certified FP64 reduce via the C1 hoist (FixedPoint64 NOT
+// deleted — load-bearing; the full absorb is the post-A D-99 cleanup). Hot OrderGates compares are
+// branchless a.v>=b.v (net latency REDUCTION; D-133).
+//
+// ACCEPTANCE (verified): controller_test 3246/0 with binary VALUE assertions PRESERVED (passing ⇒ 16B
+// produces identical values) + asan 3246/0 + UBSan UB-clean + gui green. B1 signed-overflow UBSan lane
+// added to build.sh; the 16B Negate/Abs/Mul carry an INT_MIN guard = branchless saturate-to-MAX in
+// unsigned space (D-147). R1 layout asserts re-derived → 16B (sizeof==16 self-proof). R2 max-magnitude
+// probe confirms saturate-not-wrap at the 2⁶³ boundary (the 63-bit bound is feature-domain-safe; money
+// decimal unaffected). R3 snapshot VERSIONS bumped current+1 — CONTROLLER 12→13, SHARDED 8→9, PORTFOLIO
+// 5→6 (D-144; H21 append-only — a no-op bump would silently load 24B snapshots into the 16B engine).
+// Run-to-run + cross-opt (-O3×2, -O3-vs-O0) determinism IDENTICAL.
+//
+// GOLDEN REFREEZE DEFERRED (D-157, operator-steered): the numeric core changes bytes AGAIN at Ship B, so
+// refreezing the 16B golden now is premature churn — the determinism PROPERTY is verified (above); only
+// committing a new frozen golden + un-bypassing pre-commit Check F is deferred until the core stabilizes
+// (post-Ship-B). Check F runs bypassed-with-rationale (SKIP_DETERMINISM_CHECK) on the flip commits until then.
+//
+// PRE-EXISTING-BUG CLOSE-OUT from the first-ever sanitizer run (NOT flip regressions; D-155): 3 asan
+// no_sanitize on verified-correct AVX-512 masked kernels (Bandit_GetProbabilities + RidgeBlender ×2 — asan
+// cannot model _mm512_mask_* masked load/store; buffers are correctly 8-wide); over-aligned-struct bare-malloc
+// → aligned_alloc (EventLoopState + PortfolioController arena fallback); NEW FOXML_SANITIZER_BUILD flag for
+// sanitizer-aware test thresholds. NEW GUARD: TECH_DEBT-157 tools/check_struct_alignment.py (pre-commit
+// Check K; teeth-proofed) closes the over-aligned-bare-malloc class (Knight/H21). Build-regression fix:
+// symlinked tests' ../-relative includes (LANDMINE 7; CMake CoreFrameworks include anchor). TECH_DEBT-157 +
+// -158 CLOSED. Decision log D-147..D-160 (Sessions 10-11; SSoT).
+// Postmortem at plans/v5.15-live-readiness/postmortems/2026-06-08-v5.15.5.F.4d.1.E.0.7-postmortem.md.
+//
 // .F.4d.1.E.0.6 (v5.15.5.F.4d.1.E.0.6 — tag monotonic after E.0.5 per D-88; plan keeps its semantic
 // .E.0.1 name = the FP+replay+locale determinism NET, Net-2 of D-73). Ships the deterministic-input
 // foundation that gates #11 (decimal numeric core) + .E.1 (Core→Node rename): F-056/57/58
