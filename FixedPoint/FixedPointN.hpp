@@ -1277,8 +1277,12 @@ inline __int128 i128_cneg(__int128 v, int neg) { __int128 m = -(__int128)(neg & 
 
 inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     bool neg = (a.v < 0) ^ (b.v < 0);
-    unsigned __int128 amag = a.v < 0 ? (unsigned __int128)(-a.v) : (unsigned __int128)a.v;
-    unsigned __int128 bmag = b.v < 0 ? (unsigned __int128)(-b.v) : (unsigned __int128)b.v;
+    // INT_MIN-safe abs in unsigned space (the i128_abs (v^s)-s trick) — UB-free even at -2^127,
+    // consistent with the guarded FPN_Negate/FPN_Abs<64> (D-147). The unreachable INT_MIN now feeds
+    // the of_mask saturate below instead of signed-negation UB; value-identical for every reachable input.
+    __int128 as = a.v >> 127, bs = b.v >> 127;                                   // 0 / -1 (arithmetic shift)
+    unsigned __int128 amag = ((unsigned __int128)a.v ^ (unsigned __int128)as) - (unsigned __int128)as;
+    unsigned __int128 bmag = ((unsigned __int128)b.v ^ (unsigned __int128)bs) - (unsigned __int128)bs;
     // FP64_Mul's exact reduce (bits[191:64] of amag*bmag) — the C1 hoist.
     uint64_t a_lo = (uint64_t)amag, a_hi = (uint64_t)(amag >> 64);
     uint64_t b_lo = (uint64_t)bmag, b_hi = (uint64_t)(bmag >> 64);

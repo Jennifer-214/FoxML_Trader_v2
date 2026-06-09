@@ -465,7 +465,11 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
     if (auto* arena = tt::InitArena_Global()) {
       return tt::InitArena_Alloc(arena, bytes, align);
     }
-    return std::malloc(bytes);
+    // honor the requested alignment — std::malloc ignores it, but RollingStats (and other arena
+    // types) are alignas(64); storing them to malloc's 16-byte-aligned memory is UB and breaks
+    // aligned-SIMD + false-sharing discipline. aligned_alloc needs size % align == 0 (C++17) → round up.
+    size_t aligned_bytes = (bytes + align - 1) / align * align;
+    return std::aligned_alloc(align, aligned_bytes);
   };
   if (!ctrl->rolling_long) {
     ctrl->rolling_long = (RollingStats<F, 512>*)alloc_or_arena(
