@@ -213,6 +213,13 @@ endif()
 # Skip the dev/test targets on a public clone where tests/ is absent; build them
 # locally (the dir is present, symlinked from the private workspace).
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+# LANDMINE (symlink include resolution): tests/ + tools/ are symlinks into the private
+# workspace. A test/tool file's "../X" engine include resolves ".." against the symlink's
+# CANONICAL dir (the workspace), not the engine, so e.g. "../DataStream/MockGenerator.hpp"
+# misses. Anchor quote-include search on a REAL engine subdir: "../X" then resolves as
+# CoreFrameworks/../X == <engine>/X. Engine/gui/suite targets above are unaffected (defined
+# before this line; they use no "../" engine includes). See DOCS/LANDMINES.md.
+include_directories(${CMAKE_SOURCE_DIR}/CoreFrameworks)
 add_executable(controller_test tests/controller_test.cpp)
 target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
