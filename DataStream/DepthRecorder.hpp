@@ -249,13 +249,17 @@ static inline void DepthRecorder_Write(DepthRecorder *rec, const BookSnapshot<F>
     // CSV row: timestamp_us,last_update_id,bid_price,bid_qty,ask_price,ask_qty
     // F-055/PARITY-036: locale-immune + lossless emit (std::to_chars shortest round-trip)
     // — replaces lossy/LC_NUMERIC-fragile %.8f; completes the write∧read replay loop.
+    // Each to_chars gets rend-1 so the trailing separator byte is PROVABLY in-bounds even on
+    // to_chars' value-too-large path (ptr==last): worst-case row is 142B of 160 so the limit is
+    // arithmetically unreachable, but provable > unreachable-by-arithmetic (TECH_DEBT-160; the
+    // unchecked ptr + *o++ shape was a real 1-byte-overflow latent under the type contract).
     char row[160]; char* o = row; char* const rend = row + sizeof(row);
-    o = std::to_chars(o, rend, (unsigned long long)cur_us).ptr;          *o++ = ',';
-    o = std::to_chars(o, rend, (unsigned long long)cur_id).ptr;          *o++ = ',';
-    o = std::to_chars(o, rend, FPN_ToDouble(snap->bids[0].price)).ptr;   *o++ = ',';
-    o = std::to_chars(o, rend, FPN_ToDouble(snap->bids[0].qty)).ptr;     *o++ = ',';
-    o = std::to_chars(o, rend, FPN_ToDouble(snap->asks[0].price)).ptr;   *o++ = ',';
-    o = std::to_chars(o, rend, FPN_ToDouble(snap->asks[0].qty)).ptr;     *o++ = '\n';
+    o = std::to_chars(o, rend - 1, (unsigned long long)cur_us).ptr;          *o++ = ',';
+    o = std::to_chars(o, rend - 1, (unsigned long long)cur_id).ptr;          *o++ = ',';
+    o = std::to_chars(o, rend - 1, FPN_ToDouble(snap->bids[0].price)).ptr;   *o++ = ',';
+    o = std::to_chars(o, rend - 1, FPN_ToDouble(snap->bids[0].qty)).ptr;     *o++ = ',';
+    o = std::to_chars(o, rend - 1, FPN_ToDouble(snap->asks[0].price)).ptr;   *o++ = ',';
+    o = std::to_chars(o, rend - 1, FPN_ToDouble(snap->asks[0].qty)).ptr;     *o++ = '\n';
     fwrite(row, 1, (size_t)(o - row), rec->file);
     rec->count++;
 

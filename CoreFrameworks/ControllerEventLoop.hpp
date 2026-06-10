@@ -1189,7 +1189,11 @@ template <unsigned F>
 inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
                                             uint8_t strategy_id,
                                             FPN_Binary<F> allocated_balance) {
-    if (slot < 0 || slot >= state->registered_count) return;
+    // The MAX_EXECUTION_CORES clause is compiler-provable bound hygiene (TECH_DEBT-160): the
+    // registered_count invariant (<= MAX_EXECUTION_CORES, enforced at registration) already bounds
+    // slot at runtime, but value-range analysis can't see it -> gui-lane -Wstringop-overflow FP.
+    // Never fires alone; boot/setup cadence (not hot path).
+    if (slot < 0 || slot >= state->registered_count || slot >= MAX_EXECUTION_CORES) return;
     state->cores[slot].strategy_id       = strategy_id;
     state->cores[slot].allocated_balance = allocated_balance;
 }

@@ -187,11 +187,14 @@ static inline void TickRecorder_Push(TickRecorder *rec, double price, double qty
     // F-054/PARITY-036: locale-immune + lossless emit (std::to_chars shortest round-trip).
     // %.8f is LOSSY for a double AND LC_NUMERIC-fragile; to_chars completes the
     // write∧read replay loop (read side = tt::parse_double_fast_advance).
+    // rend-1 per to_chars: the separator byte is PROVABLY in-bounds even on the value-too-large
+    // path (ptr==last). Worst-case row is ~73B of 96 — unreachable arithmetically; provable >
+    // unreachable (TECH_DEBT-160 sister-cohort fix with DepthRecorder's identical emit shape).
     char row[96]; char* o = row; char* const rend = row + sizeof(row);
-    o = std::to_chars(o, rend, (long long)timestamp_us).ptr; *o++ = ',';
-    o = std::to_chars(o, rend, price).ptr;                   *o++ = ',';
-    o = std::to_chars(o, rend, qty).ptr;                     *o++ = ',';
-    o = std::to_chars(o, rend, is_buyer_maker).ptr;          *o++ = '\n';
+    o = std::to_chars(o, rend - 1, (long long)timestamp_us).ptr; *o++ = ',';
+    o = std::to_chars(o, rend - 1, price).ptr;                   *o++ = ',';
+    o = std::to_chars(o, rend - 1, qty).ptr;                     *o++ = ',';
+    o = std::to_chars(o, rend - 1, is_buyer_maker).ptr;          *o++ = '\n';
     fwrite(row, 1, (size_t)(o - row), rec->file);
     rec->count++;
 

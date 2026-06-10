@@ -145,6 +145,18 @@ static inline bool SPSCRing_TryPush(SPSCRing<T, N>* r, const T& item) {
 
     // Write the slot first, then publish via head store with release ordering.
     // The release ensures the slot write is visible before the head update is.
+    //
+    // KNOWN-FP (TECH_DEBT-160, verified 2026-06-09): GCC's gui-lane build emits 8
+    // -Wstringop-overflow "writing 1 byte into a region of size 0" instances for this write,
+    // via IPA/.isra clones of the submit inline chain (BinanceAdapter_Submit* ->
+    // OrderManager_Submit -> OMS_DrainSubmit). The write is in-bounds BY CONSTRUCTION:
+    // MASK = N-1 with (N & (N-1)) == 0 static_assert'd at the struct => (head & MASK) < N,
+    // always. "Region of SIZE 0" = the clone's base-pointer PROVENANCE is degenerate — an
+    // index-side fact cannot fix it, and both remedies were tried + verified ineffective:
+    // (1) #pragma GCC diagnostic ignored — IGNORED by the late IPA passes that emit this;
+    // (2) __builtin_unreachable() range hint on the masked index — no effect (the glitch is
+    // the object model, not the index range). Disposition: documented verified-FP; do NOT
+    // chase these 8 lines again — but a stringop warning at ANY OTHER site is real signal.
     r->slots[head & SPSCRing<T, N>::MASK] = item;
     r->head.store(next_head, std::memory_order_release);
     return true;
