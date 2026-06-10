@@ -1274,6 +1274,27 @@ inline constexpr __int128 FP2_64_MAX = (__int128)(((unsigned __int128)1 << 127) 
 inline __int128 i128_abs(__int128 v)           { __int128 s = v >> 127; return (v ^ s) - s; }
 inline __int128 i128_cneg(__int128 v, int neg) { __int128 m = -(__int128)(neg & 1); return (v ^ m) - m; }  // neg ? -v : v
 
+// The ONE certified unsigned 128×128→256 product (Ship-B P0.2, S-19/D-174). Extracted from the
+// byte-identical inner blocks of FP64_Mul (FixedPoint64.hpp:140-156) + fp2_mul below, so that
+// #3 divmul_pow10, #7 Money Div, and the to_decimal cast consume the SAME body — a third hand
+// copy would drift (the Class-18 shape the merge-scan flagged). FP64_Mul keeps its inline copy
+// until the Ship-B FP64 absorb deletes that file (the copy dies with it).
+// DOMAIN: both |a|,|b| < 2^127 (the 16B core magnitude ceiling — the money-domain closure
+// invariant guarantees it for every caller). In-domain, `mid` provably cannot wrap
+// (a_hi,b_hi ≤ 2^63-1 ⇒ lh+hl+carry < 2^128); outside it this composition is NOT total.
+struct u256 { unsigned __int128 hi, lo; };   // product = hi·2^128 + lo
+inline u256 umul_128x128_256(unsigned __int128 a, unsigned __int128 b) {
+    uint64_t a_lo = (uint64_t)a, a_hi = (uint64_t)(a >> 64);
+    uint64_t b_lo = (uint64_t)b, b_hi = (uint64_t)(b >> 64);
+    unsigned __int128 ll = (unsigned __int128)a_lo * b_lo;
+    unsigned __int128 lh = (unsigned __int128)a_lo * b_hi;
+    unsigned __int128 hl = (unsigned __int128)a_hi * b_lo;
+    unsigned __int128 hh = (unsigned __int128)a_hi * b_hi;
+    unsigned __int128 mid     = lh + hl + (ll >> 64);
+    unsigned __int128 shifted = hh + (mid >> 64);
+    return { shifted, ((unsigned __int128)(uint64_t)mid << 64) | (uint64_t)ll };
+}
+
 // (fp2_from_fpn REMOVED — the 24B-sign-mag → 16B decoder is obsolete now that FPN_Binary<64> IS the 16B type;
 //  D-143 + Class-40 dead-code removal. The slice that used it retires at this flip.)
 
@@ -1285,19 +1306,14 @@ inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     __int128 as = a.v >> 127, bs = b.v >> 127;                                   // 0 / -1 (arithmetic shift)
     unsigned __int128 amag = ((unsigned __int128)a.v ^ (unsigned __int128)as) - (unsigned __int128)as;
     unsigned __int128 bmag = ((unsigned __int128)b.v ^ (unsigned __int128)bs) - (unsigned __int128)bs;
-    // FP64_Mul's exact reduce (bits[191:64] of amag*bmag) — the C1 hoist.
-    uint64_t a_lo = (uint64_t)amag, a_hi = (uint64_t)(amag >> 64);
-    uint64_t b_lo = (uint64_t)bmag, b_hi = (uint64_t)(bmag >> 64);
-    unsigned __int128 ll = (unsigned __int128)a_lo * b_lo;
-    unsigned __int128 lh = (unsigned __int128)a_lo * b_hi;
-    unsigned __int128 hl = (unsigned __int128)a_hi * b_lo;
-    unsigned __int128 hh = (unsigned __int128)a_hi * b_hi;
-    unsigned __int128 mid     = lh + hl + (ll >> 64);
-    unsigned __int128 shifted = hh + (mid >> 64);
-    unsigned __int128 mag     = (shifted << 64) | (uint64_t)mid;
+    // FP64_Mul's exact reduce (bits[191:64] of amag*bmag) — the C1 hoist, now via the extracted
+    // certified product (P0.2). Bit-identical composition to the previous inline block:
+    // p.hi ≡ shifted; (uint64_t)(p.lo >> 64) ≡ (uint64_t)mid.
+    u256 p = umul_128x128_256(amag, bmag);
+    unsigned __int128 mag = (p.hi << 64) | (unsigned __int128)(uint64_t)(p.lo >> 64);
     // BRANCHLESS saturate (R2 — same of_mask discipline as FPN_Mul:616-622 / FP64_Mul): no data-dependent
     // control flow. ovf nonzero iff the product exceeds the 127-bit magnitude range; of_m is 0 or all-ones.
-    unsigned __int128 ovf  = (shifted >> 64) | (mag >> 127);
+    unsigned __int128 ovf  = (p.hi >> 64) | (mag >> 127);
     unsigned __int128 nz   = ovf | (~ovf + 1);                            // top bit set iff ovf != 0 (no compare → no branch)
     unsigned __int128 of_m = -(unsigned __int128)(int)(nz >> 127);        // 0 / all-ones
     mag = (mag & ~of_m) | (of_m >> 1);                                    // saturate to 2^127-1 = (all-ones >> 1): the SAT

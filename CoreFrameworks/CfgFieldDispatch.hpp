@@ -41,6 +41,14 @@ namespace tt {
     // StampBoundModelConstRegistry.hpp:97-99 forward-decl-to-avoid-include-cycle).
     inline double parse_double_fast(const char* s);
 
+    // Dependent-false for exhaustive if-constexpr chains (Ship-B P0, S-5/V5).
+    // A dispatcher chain's final `else { static_assert(always_false_v<T>, ...) }` turns an
+    // unmatched type COMBINATION into a compile error instead of a silent fall-through —
+    // the two-template drift dispatchers below previously compiled `return false`/`return 0`
+    // for any pair outside their branch set, silently disabling stamp drift protection.
+    template <typename...>
+    inline constexpr bool always_false_v = false;
+
     //==================================================================================================
     // [PARSE: text → typed cfg field]
     //==================================================================================================
@@ -238,10 +246,19 @@ namespace tt {
                       "extend tt::cfg_assign_field<T> with a new branch.");
 
         if constexpr (is_fp_binary_v<T>) {
-            // Default is stored as fraction (NOT percent); no PCT scaling needed.
-            dst = FPN_FromDouble<T::F>(desc.payload.as_double.default_val);
+            // Ship-B P0.3 (PARITY-037/V12 inverted): the DBL payload column is PERCENT-space for
+            // KIND_DOUBLE_PCT rows — matching the GUI ×100 display, the cfg-FILE convention
+            // (cfg_parse_field ÷100), and the 0-100 clamp ranges. Scale exactly as the file
+            // parser does. (The previous "default is stored as fraction" comment was wrong vs
+            // the row data; it silently made reset-to-default / boot-fill 100× too large for
+            // every PCT field once its manual init is swept.)
+            double v = desc.payload.as_double.default_val;
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v /= 100.0;
+            dst = FPN_FromDouble<T::F>(v);
         } else if constexpr (std::is_floating_point_v<T>) {
-            dst = static_cast<T>(desc.payload.as_double.default_val);
+            double v = desc.payload.as_double.default_val;
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v /= 100.0;
+            dst = static_cast<T>(v);
         } else if constexpr (std::is_array_v<T>) {
             // KIND_STRING / KIND_FILE_PATH — default is const char*; copy into array.
             if (desc.payload.as_string.default_val) {
@@ -280,10 +297,16 @@ namespace tt {
 
         if constexpr (is_fp_binary_v<T>) {
             // FPN_Binary equality via integer comparison (after FromDouble conversion).
-            const T default_fpn = FPN_FromDouble<T::F>(desc.payload.as_double.default_val);
+            // PCT payload is PERCENT-space — scale before compare (Ship-B P0.3, sister to
+            // cfg_assign_field; without it the GUI "modified" badge is wrong for every PCT field).
+            double dv = desc.payload.as_double.default_val;
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) dv /= 100.0;
+            const T default_fpn = FPN_FromDouble<T::F>(dv);
             return !(current == default_fpn);
         } else if constexpr (std::is_floating_point_v<T>) {
-            return current != static_cast<T>(desc.payload.as_double.default_val);
+            double dv = desc.payload.as_double.default_val;
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) dv /= 100.0;
+            return current != static_cast<T>(dv);
         } else if constexpr (std::is_array_v<T>) {
             if (!desc.payload.as_string.default_val) {
                 return current[0] != '\0';
@@ -459,6 +482,15 @@ namespace tt {
                    || std::is_array_v<StampT>,
                       "stamp field type not in recognized family — "
                       "extend tt::cfg_drift_compare<StampT,CfgT> with a new branch.");
+        // Ship-B P0 (S-5/V5): CfgT was previously UNASSERTED — cfg_drift_compare<double, Money>
+        // compiled and fell through to `return false` (silent no-drift on the HMAC-bound stamp
+        // surface). Both params now family-asserted; the chain below is exhaustive.
+        static_assert(is_fp_binary_v<CfgT>
+                   || std::is_floating_point_v<CfgT>
+                   || std::is_integral_v<CfgT>
+                   || std::is_array_v<CfgT>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_drift_compare<StampT,CfgT> with a new branch.");
 
         if constexpr (std::is_floating_point_v<StampT> && is_fp_binary_v<CfgT>) {
             // stamp is double (legacy struct-gen) vs cfg is FPN_Binary<F>. Compare in double space
@@ -482,8 +514,13 @@ namespace tt {
             return strncmp(stamp_val, cfg_val, std::extent_v<StampT>) != 0;
         } else if constexpr (std::is_integral_v<StampT> && std::is_integral_v<CfgT>) {
             return static_cast<int64_t>(stamp_val) != static_cast<int64_t>(cfg_val);
+        } else {
+            // Exhaustive-else (S-5/V5): an in-family but UNHANDLED (StampT, CfgT) pairing is a
+            // compile error, never a silent "no drift". Decimal money gets its branch at P2.
+            static_assert(always_false_v<StampT, CfgT>,
+                          "cfg_drift_compare: unhandled (StampT, CfgT) combination — "
+                          "add an explicit branch (silent fall-through = disabled drift protection).");
         }
-        return false;
     }
 
     // v5.15.5.F.4d.1.B.3 Step 0.5a — first-drift attribution helper for framework drift walker.
@@ -508,6 +545,13 @@ namespace tt {
                    || std::is_array_v<StampT>,
                       "stamp field type not in recognized family — "
                       "extend tt::cfg_drift_format_reason<StampT,CfgT> with a new branch.");
+        // Ship-B P0 (S-5/V5): CfgT family-asserted + exhaustive chain, sister to cfg_drift_compare.
+        static_assert(is_fp_binary_v<CfgT>
+                   || std::is_floating_point_v<CfgT>
+                   || std::is_integral_v<CfgT>
+                   || std::is_array_v<CfgT>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_drift_format_reason<StampT,CfgT> with a new branch.");
 
         if (!buf || cap == 0) return 0;
 
@@ -528,8 +572,13 @@ namespace tt {
         } else if constexpr (std::is_integral_v<StampT> && std::is_integral_v<CfgT>) {
             return snprintf(buf, cap, "%s drift: stamp=%lld cfg=%lld",
                             field_name, (long long)stamp_val, (long long)cfg_val);
+        } else {
+            // Exhaustive-else (S-5/V5): unhandled pairing = compile error, never a silent
+            // zero-length attribution. Decimal money gets its branch at P2.
+            static_assert(always_false_v<StampT, CfgT>,
+                          "cfg_drift_format_reason: unhandled (StampT, CfgT) combination — "
+                          "add an explicit branch (sister to cfg_drift_compare).");
         }
-        return 0;
     }
 
     // Note: cfg_render_field<T> is implemented inline in GUI/SettingsPanel.hpp (Step 0.5

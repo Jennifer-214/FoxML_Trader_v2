@@ -453,8 +453,8 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         "Refuse model load if file mtime older than N hours. 0 = disabled (legacy default; v5.14.8.E).",                                                                                                              \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Slow Path (1) === */ \
-    X(FPN_Binary<F>,               KIND_DOUBLE_PCT, lazy_rebuild_price_threshold_pct, "Lazy Rebuild Price Thresh %%", "Slow Path", CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0005, 0.0, 0.1),                                                       \
-        "Per-tick price-delta threshold below which slow-path cycle is 'no material change' (skips RebuildOneCore). Default 0.0005 (0.05%).",                                                                        \
+    X(FPN_Binary<F>,               KIND_DOUBLE_PCT, lazy_rebuild_price_threshold_pct, "Lazy Rebuild Price Thresh %%", "Slow Path", CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 10.0),                                                        \
+        "Per-tick price-delta threshold below which slow-path cycle is 'no material change' (skips RebuildOneCore). Default 0.05% (stored fraction 0.0005). Payload re-authored PERCENT-space at Ship-B P0.3 — value-identical through cfg_assign_field's PCT scaling (this row was the one fraction-authored outlier).",                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
