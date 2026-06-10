@@ -101,13 +101,13 @@ struct EventLoopAggregates {
 //======================================================================================================
 template <unsigned F>
 inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* state,
-                                                    FPN_Binary<F> mark_price) {
+                                                    Money mark_price) {
     EventLoopAggregates agg;
 
     // realized side from OMS (financial state lives there since chunk 1B)
-    agg.balance      = FPN_ToDouble(state->oms->balance);
-    agg.realized_pnl = FPN_ToDouble(state->oms->realized_pnl);
-    agg.peak_balance = FPN_ToDouble(state->oms->ks_peak_balance);
+    agg.balance      = Money_ToDouble(state->oms->balance);
+    agg.realized_pnl = Money_ToDouble(state->oms->realized_pnl);
+    agg.peak_balance = Money_ToDouble(state->oms->ks_peak_balance);
 
     // counts
     agg.registered_cores = state->registered_count;
@@ -117,10 +117,10 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
     agg.kill_switch_tripped = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
 
     // walk the active bitmap once for unrealized P&L and active count
-    FPN_Binary<F> unreal = FPN_Zero<F>();
+    Money unreal = Money_Zero();
     int active = 0;
     uint16_t bm = state->oms->portfolio.active_bitmap;
-    bool have_mark = !FPN_IsZero(mark_price);
+    bool have_mark = !Money_IsZero(mark_price);
     for (int slot = 0; slot < MAX_PORTFOLIO_POSITIONS; ++slot) {
         if (((bm >> slot) & 1) == 0) continue;
         ++active;
@@ -128,13 +128,13 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
             const Position<F>* pos = &state->oms->portfolio.positions[slot];
             // unrealized = qty * (mark - entry). Long-only for now; if quantity
             // were ever negative this still produces the correct sign.
-            FPN_Binary<F> diff = FPN_Sub(mark_price, pos->entry_price);
-            FPN_Binary<F> pnl  = FPN_Mul(pos->quantity, diff);
-            unreal = FPN_Add(unreal, pnl);
+            Money diff = Money_Sub(mark_price, pos->entry_price);
+            Money pnl  = Money_Mul(pos->quantity, diff);
+            unreal = Money_Add(unreal, pnl);
         }
     }
     agg.active_position_count = active;
-    agg.unrealized_pnl = FPN_ToDouble(unreal);
+    agg.unrealized_pnl = Money_ToDouble(unreal);
     agg.equity         = agg.balance + agg.unrealized_pnl;
 
     // drawdown — computed against equity (not balance) so it reflects mark to

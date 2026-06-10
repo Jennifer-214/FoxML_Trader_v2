@@ -326,10 +326,10 @@ struct alignas(64) CoreContext {
 
     GateParameters<F> pending_params;   // staged params, pushed on next _PushParameters
 
-    FPN_Binary<F> intended_tp;                 // TP to apply when this core's next entry fires
-    FPN_Binary<F> intended_sl;                 // SL to apply when this core's next entry fires
-    FPN_Binary<F> intended_qty;                // quantity to size the next entry to
-    FPN_Binary<F> allocated_balance;           // capital share for this core (set by Regime_AllocateCores in phase 06+)
+    Money intended_tp;                 // TP to apply when this core's next entry fires
+    Money intended_sl;                 // SL to apply when this core's next entry fires
+    Money intended_qty;                // quantity to size the next entry to
+    Money allocated_balance;           // capital share for this core (set by Regime_AllocateCores in phase 06+)
 
     // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
     // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
@@ -381,7 +381,7 @@ struct alignas(64) CoreContext {
     // |new_entry - last_entry_price| < stddev × spacing_multiplier and
     // zero-gates if too close, preventing entry clustering at similar
     // prices. Mirrors legacy PortfolioController spacing logic.
-    FPN_Binary<F>   last_entry_price;
+    Money   last_entry_price;
     uint64_t last_entry_tick;           // for time-based exit (A3)
     // v4.7.6: wall-clock microseconds at the leg-A entry stamp site so
     // GUI can show "hold time" for open positions. Independent of
@@ -408,8 +408,8 @@ struct alignas(64) CoreContext {
     // counters split it out by source core for the Account panel and any
     // future per-core kill switch / risk re-allocation logic. Updated in
     // EventLoop_OnEvent exit branch, alongside oms->realized_pnl.
-    FPN_Binary<F>   core_realized;             // sum of net P&L from this core's exits
-    FPN_Binary<F>   core_fees;                 // sum of fees paid by this core's fills
+    Money   core_realized;             // sum of net P&L from this core's exits
+    Money   core_fees;                 // sum of fees paid by this core's fills
     uint32_t core_wins;                 // exits with net > 0
     uint32_t core_losses;               // exits with net <= 0
     // v4.7.21: per-trade W/L pairing under partial exits. When partials are
@@ -421,7 +421,7 @@ struct alignas(64) CoreContext {
     // partner closes we compute total net and bump core_wins/core_losses by 1.
     // partials disabled → bypass pairing, per-leg-A logic is correct
     // (single-leg trades, no partner exists).
-    FPN_Binary<F>   partner_pending_pnl;
+    Money   partner_pending_pnl;
     // partner_pending_active migrated to EventLoopState.partner_pending_bitmap
     // (v5.14.9.G; 1 bit per core in single uint16_t bitmap)
     // v4.7.25: per-core gross win/loss accumulators, mirroring the legacy
@@ -433,8 +433,8 @@ struct alignas(64) CoreContext {
     // Pre-v4.7.25 sharded snapshot left snap->avg_win / avg_loss /
     // profit_factor / expectancy at zero — these accumulators feed those
     // fields in TUI_CopySnapshotSharded.
-    FPN_Binary<F>   core_gross_wins;
-    FPN_Binary<F>   core_gross_losses;
+    Money   core_gross_wins;
+    Money   core_gross_losses;
     // Phase 2.1: per-core open notional. Sum of (entry_price × qty) across
     // currently-open positions for this core. Updated branchlessly in
     // EventLoop_OnEvent — entry adds notional, exit subtracts the SAME
@@ -449,7 +449,7 @@ struct alignas(64) CoreContext {
     // positions). Single-position-per-core invariant means this is the
     // entry notional of one position today, but the sum-of-positions
     // model survives future multi-position-per-core.
-    FPN_Binary<F>   core_open_notional;
+    Money   core_open_notional;
 
     // Phase 3: per-core kill switch state. Realized + MTM unrealized P&L
     // tracked against a peak-to-trough drawdown. When dd exceeds threshold
@@ -464,8 +464,8 @@ struct alignas(64) CoreContext {
     // Manual reset via TUISharedState::kill_reset_per_core[N] resets the
     // trip flag and refreshes peak to current. Aggregate OMS-level breaker
     // remains as backstop for whole-account drawdown.
-    FPN_Binary<F>   core_peak_balance;         // peak of current_value over core's lifetime
-    FPN_Binary<F>   core_dd_pct;               // current drawdown % (display field, recomputed each rebuild)
+    Money   core_peak_balance;         // peak of current_value over core's lifetime
+    Money   core_dd_pct;               // current drawdown % (display field, recomputed each rebuild)
     // v5.15.5.B.3 — core_kill_tripped migrated to core_state_flags bitmap on
     // CoreContext HOT cluster (see core_state_flags above). _pad_kill[3]
     // eliminated as natural pad-collapse consequence — the kill trip is now
@@ -842,7 +842,7 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
     if (log.count == 0) return;  // no events → nothing to reconstruct (first boot)
 
     // Per-slot outstanding-entry tracker; transient (replay walk only).
-    struct SlotEntry { FPN_Binary<F> entry_price; FPN_Binary<F> qty; FPN_Binary<F> entry_fee; int valid; };
+    struct SlotEntry { Money entry_price; Money qty; Money entry_fee; int valid; };
     SlotEntry slot_entries[MAX_PORTFOLIO_POSITIONS] = {};
 
     for (size_t i = 0; i < log.count; ++i) {
@@ -857,37 +857,37 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
         if (core_id < 0 || core_id >= MAX_EXECUTION_CORES) continue;
 
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (hoisted above loop).
-        const FPN_Binary<F> fee_rate_taker_for_core = effective_cores[core_id].fee_rate_taker;
+        const Money fee_rate_taker_for_core = effective_cores[core_id].fee_rate_taker;
         if (e.order_type == tt::ORDER_MARKET_BUY) {
-            FPN_Binary<F> notional  = FPN_Mul(e.price, e.qty);
-            FPN_Binary<F> entry_fee = FPN_Mul(notional, fee_rate_taker_for_core);
+            Money notional  = Money_Mul(e.price, e.qty);
+            Money entry_fee = Money_Mul(notional, fee_rate_taker_for_core);
             slot_entries[slot].entry_price = e.price;
             slot_entries[slot].qty         = e.qty;
             slot_entries[slot].entry_fee   = entry_fee;
             slot_entries[slot].valid       = 1;
             state->cores[core_id].entries_processed++;
             state->cores[core_id].core_open_notional =
-                FPN_Add(state->cores[core_id].core_open_notional, notional);
+                Money_Add(state->cores[core_id].core_open_notional, notional);
         } else if (e.order_type == tt::ORDER_MARKET_SELL) {
             if (!slot_entries[slot].valid) continue;  // unmatched SELL — skip
-            FPN_Binary<F> entry_price  = slot_entries[slot].entry_price;
-            FPN_Binary<F> qty          = slot_entries[slot].qty;
-            FPN_Binary<F> entry_fee    = slot_entries[slot].entry_fee;
-            FPN_Binary<F> exit_notional= FPN_Mul(e.price, qty);
-            FPN_Binary<F> exit_fee     = FPN_Mul(exit_notional, fee_rate_taker_for_core);  // per-core via cores param
-            FPN_Binary<F> total_fee    = FPN_Add(entry_fee, exit_fee);
-            FPN_Binary<F> diff         = FPN_Sub(e.price, entry_price);
-            FPN_Binary<F> gross        = FPN_Mul(diff, qty);
-            FPN_Binary<F> net          = FPN_Sub(gross, total_fee);
+            Money entry_price  = slot_entries[slot].entry_price;
+            Money qty          = slot_entries[slot].qty;
+            Money entry_fee    = slot_entries[slot].entry_fee;
+            Money exit_notional= Money_Mul(e.price, qty);
+            Money exit_fee     = Money_Mul(exit_notional, fee_rate_taker_for_core);  // per-core via cores param
+            Money total_fee    = Money_Add(entry_fee, exit_fee);
+            Money diff         = Money_Sub(e.price, entry_price);
+            Money gross        = Money_Mul(diff, qty);
+            Money net          = Money_Sub(gross, total_fee);
             state->cores[core_id].exits_processed++;
             state->cores[core_id].core_realized =
-                FPN_Add(state->cores[core_id].core_realized, net);
+                Money_Add(state->cores[core_id].core_realized, net);
             state->cores[core_id].core_fees     =
-                FPN_Add(state->cores[core_id].core_fees, total_fee);
-            FPN_Binary<F> entry_notional = FPN_Mul(entry_price, qty);
+                Money_Add(state->cores[core_id].core_fees, total_fee);
+            Money entry_notional = Money_Mul(entry_price, qty);
             state->cores[core_id].core_open_notional =
-                FPN_SubSat(state->cores[core_id].core_open_notional, entry_notional);
-            uint32_t is_win = (uint32_t)FPN_GreaterThan(net, FPN_Zero<F>());
+                Money_Sub(state->cores[core_id].core_open_notional, entry_notional);
+            uint32_t is_win = (uint32_t)Money_Gt(net, Money_Zero());
             state->cores[core_id].core_wins   += is_win;
             state->cores[core_id].core_losses += (1u - is_win);
             slot_entries[slot].valid = 0;  // slot freed for next match
@@ -963,7 +963,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
 template <unsigned F>
 inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
                                        OrderManagerState<F>* oms,
-                                       FPN_Binary<F> starting_balance) {
+                                       Money starting_balance) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` param DELETED. OMS no longer holds scalar fee_rate;
     // per-Order pre_resolved.fee_rate set at submit via Order_BindPreResolved with cfg.cores[c].
     // Test fixtures that need non-zero fee accounting must populate cfg.cores[c].fee_rate_*.
@@ -1049,9 +1049,9 @@ inline void EventLoopState_Free(EventLoopState<F>* state) {
 template <unsigned F>
 inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
                                        ExecutionCore<F>* core,
-                                       FPN_Binary<F> intended_tp,
-                                       FPN_Binary<F> intended_sl,
-                                       FPN_Binary<F> intended_qty) {
+                                       Money intended_tp,
+                                       Money intended_sl,
+                                       Money intended_qty) {
     if (state->registered_count >= MAX_EXECUTION_CORES) return -1;
     int slot = state->registered_count++;
     state->cores[slot].core         = core;
@@ -1155,7 +1155,7 @@ static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg)
             max_pair_cores);
         return 0;
     }
-    double pct = FPN_ToDouble(cfg->partial_exit_pct);
+    double pct = Money_ToDouble(cfg->partial_exit_pct);
     if (pct <= 0.0 || pct >= 1.0) {
         std::fprintf(stderr,
             "[partial-exits] partial_exit_pct=%.4f invalid; needs (0, 1) "
@@ -1188,7 +1188,7 @@ static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg)
 template <unsigned F>
 inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
                                             uint8_t strategy_id,
-                                            FPN_Binary<F> allocated_balance) {
+                                            Money allocated_balance) {
     // The MAX_EXECUTION_CORES clause is compiler-provable bound hygiene (TECH_DEBT-160): the
     // registered_count invariant (<= MAX_EXECUTION_CORES, enforced at registration) already bounds
     // slot at runtime, but value-range analysis can't see it -> gui-lane -Wstringop-overflow FP.
@@ -1313,7 +1313,7 @@ inline ShardedTradeLog* EventLoopState_TradeLog(const EventLoopState<F>* state) 
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
-                                              FPN_Binary<F> tp, FPN_Binary<F> sl, FPN_Binary<F> qty) {
+                                              FPN_Binary<F> tp, FPN_Binary<F> sl, Money qty) {
     if (slot < 0 || slot >= state->registered_count) return;
     state->cores[slot].intended_tp  = tp;
     state->cores[slot].intended_sl  = sl;
@@ -1420,8 +1420,8 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 (unsigned)oms->last_opened_mask,
                 (unsigned)oms->last_closed_mask,
                 partial_on,
-                FPN_ToDouble(ctx.core_realized),
-                FPN_ToDouble(ctx.core_fees),
+                Money_ToDouble(ctx.core_realized),
+                Money_ToDouble(ctx.core_fees),
                 ctx.core_wins, ctx.core_losses);
         }
     }
@@ -1437,9 +1437,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // (Portfolio_OpenSlot just wrote entry_price + quantity + entry_fee
         // in Phase B; DrainPostFill open-mask iter runs after).
         const auto& pos_entry = oms->portfolio.positions[slot];
-        const FPN_Binary<F> entry_notional_derived = FPN_Mul(pos_entry.entry_price, pos_entry.quantity);
-        const FPN_Binary<F> entry_fee_derived      = pos_entry.entry_fee;
-        ctx.core_open_notional = FPN_Add(ctx.core_open_notional, entry_notional_derived);
+        const Money entry_notional_derived = Money_Mul(pos_entry.entry_price, pos_entry.quantity);
+        const Money entry_fee_derived      = pos_entry.entry_fee;
+        ctx.core_open_notional = Money_Add(ctx.core_open_notional, entry_notional_derived);
         // v5.3.1 (Phase D fee accounting fix): do NOT add entry_fee here.
         // The exit pass below adds rec.exit_total_fees which already equals
         // entry_fee + exit_fee (set in OMS_HandleFill). Adding entry_fee
@@ -1479,10 +1479,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ctx.regime_state.last_volatile_score,
                 ctx.regime_state.hysteresis_count,
                 ctx.regime_state.hysteresis_threshold,
-                FPN_ToDouble(pos.entry_price),
-                FPN_ToDouble(pos.quantity),
-                FPN_ToDouble(entry_notional_derived),  // v5.15.5.C.4 Phase H — derived
-                FPN_ToDouble(entry_fee_derived),       // v5.15.5.C.4 Phase H — derived
+                Money_ToDouble(pos.entry_price),
+                Money_ToDouble(pos.quantity),
+                Money_ToDouble(entry_notional_derived),  // v5.15.5.C.4 Phase H — derived
+                Money_ToDouble(entry_fee_derived),       // v5.15.5.C.4 Phase H — derived
                 // v5.15.5.B.2 — diag_* + last_ml_* fields extracted to
                 // display_meta. Use the per-core meta alias for readability.
                 FPN_ToDouble(state->display_meta[core_id].diag_tp_pct_actual),
@@ -1525,21 +1525,21 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
         const auto& pos = oms->portfolio.positions[slot];
         const bool slot_is_maker = BITMAP_IS_SET(oms->last_is_maker_bitmap, BITMAP_BIT_U16(slot));
-        const FPN_Binary<F> exit_entry_notional = FPN_Mul(pos.entry_price, pos.quantity);
-        const FPN_Binary<F> exit_notional       = FPN_Mul(oms->last_exit_fill_price[slot], pos.quantity);
+        const Money exit_entry_notional = Money_Mul(pos.entry_price, pos.quantity);
+        const Money exit_notional       = Money_Mul(oms->last_exit_fill_price[slot], pos.quantity);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — read authoritative exit_fee from OMS sibling array (set by HandleFill
         // SELL from o->pre_resolved.fee_rate). Replaces the prior cfg-recompute which lost the Order's
         // captured fee_rate. Per decision-time-data-binding-pattern.md: Order pre_resolved is canonical;
         // DrainPostFill is a CONSUMER, not a re-deriver. Eliminates the core_cfg param dependency at this site.
-        const FPN_Binary<F> exit_fee            = oms->last_exit_fee[slot];
-        const FPN_Binary<F> exit_total_fees     = FPN_Add(pos.entry_fee, exit_fee);
-        const FPN_Binary<F> gross               = FPN_Sub(exit_notional, exit_entry_notional);
-        const FPN_Binary<F> exit_net_pnl        = FPN_Sub(gross, exit_total_fees);
+        const Money exit_fee            = oms->last_exit_fee[slot];
+        const Money exit_total_fees     = Money_Add(pos.entry_fee, exit_fee);
+        const Money gross               = Money_Sub(exit_notional, exit_entry_notional);
+        const Money exit_net_pnl        = Money_Sub(gross, exit_total_fees);
 
         // Per-leg accounting: every exit fill contributes.
-        ctx.core_realized      = FPN_Add(ctx.core_realized, exit_net_pnl);
-        ctx.core_open_notional = FPN_SubSat(ctx.core_open_notional, exit_entry_notional);
-        ctx.core_fees          = FPN_AddSat(ctx.core_fees, exit_total_fees);
+        ctx.core_realized      = Money_Add(ctx.core_realized, exit_net_pnl);
+        ctx.core_open_notional = Money_Sub(ctx.core_open_notional, exit_entry_notional);
+        ctx.core_fees          = Money_Add(ctx.core_fees, exit_total_fees);
         ctx.exits_processed++;
         state->total_exits++;
         state->total_events_processed++;
@@ -1562,9 +1562,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 slot, (unsigned)ctx.strategy_id,
                 (unsigned)ctx.resolved_strategy_id,
                 (int)slot_was_win, realized,
-                FPN_ToDouble(exit_net_pnl),         // v5.15.5.C.4 Phase G — derived
-                FPN_ToDouble(exit_entry_notional),  // v5.15.5.C.4 Phase G — derived
-                FPN_ToDouble(exit_total_fees),       // v5.15.5.C.4 Phase G — derived
+                Money_ToDouble(exit_net_pnl),         // v5.15.5.C.4 Phase G — derived
+                Money_ToDouble(exit_entry_notional),  // v5.15.5.C.4 Phase G — derived
+                Money_ToDouble(exit_total_fees),       // v5.15.5.C.4 Phase G — derived
                 is_leg_a ? 1 : 0);
         }
 
@@ -1573,16 +1573,16 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         if (partial_on) {
             if (BITMAP_IS_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id))) {
                 // v5.15.5.C.4 Phase G — exit_net_pnl is derived (see top of slot iter).
-                FPN_Binary<F> total_net = FPN_Add(ctx.partner_pending_pnl, exit_net_pnl);
-                if (FPN_GreaterThan(total_net, FPN_Zero<F>())) {
+                Money total_net = Money_Add(ctx.partner_pending_pnl, exit_net_pnl);
+                if (Money_Gt(total_net, Money_Zero())) {
                     ctx.core_wins++;
-                    ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, total_net);
+                    ctx.core_gross_wins = Money_Add(ctx.core_gross_wins, total_net);
                 } else {
                     ctx.core_losses++;
-                    ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,
-                                                    FPN_Sub(FPN_Zero<F>(), total_net));
+                    ctx.core_gross_losses = Money_Add(ctx.core_gross_losses,
+                                                    Money_Negate(total_net));
                 }
-                ctx.partner_pending_pnl = FPN_Zero<F>();
+                ctx.partner_pending_pnl = Money_Zero();
                 BITMAP_CLR(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id));
             } else {
                 ctx.partner_pending_pnl = exit_net_pnl;  // v5.15.5.C.4 Phase G — derived
@@ -1597,10 +1597,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ctx.core_wins   += (slot_was_win ? 1u : 0u);
                 ctx.core_losses += (slot_was_win ? 0u : 1u);
                 if (slot_was_win) {
-                    ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
+                    ctx.core_gross_wins = Money_Add(ctx.core_gross_wins, exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
                 } else {
-                    ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,
-                                                    FPN_Sub(FPN_Zero<F>(), exit_net_pnl));
+                    ctx.core_gross_losses = Money_Add(ctx.core_gross_losses,
+                                                    Money_Negate(exit_net_pnl));
                 }
             }
             double realized = oms->last_realized_return[slot];
@@ -1689,9 +1689,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             if (ctx.ensemble_handle) {
                 auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
                 if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
-                    double bal_d = FPN_ToDouble(oms->balance);
+                    double bal_d = Money_ToDouble(oms->balance);
                     if (bal_d > 0.0) {
-                        double pnl_d = FPN_ToDouble(exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
+                        double pnl_d = Money_ToDouble(exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
                         double pnl_bps = (pnl_d / bal_d) * 10000.0;
                         // v5.15.5.F.4d — pass core_cfg for per-core bandit_algorithm dispatch
                         // (Step 3 + § H Class 25 sweep). Inside _TradeCloseReward, reward attribution
@@ -1745,17 +1745,17 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 // intended TP target without staleness from later
                 // ratchet writes (those modify take_profit_price not
                 // original_tp).
-                FPN_Binary<F> entry_p   = oms->portfolio.positions[slot].entry_price;
-                FPN_Binary<F> orig_tp   = oms->portfolio.positions[slot].original_tp;
-                double entry_d   = FPN_ToDouble(entry_p);
-                double orig_tp_d = FPN_ToDouble(orig_tp);
+                Money entry_p   = oms->portfolio.positions[slot].entry_price;
+                Money orig_tp   = oms->portfolio.positions[slot].original_tp;
+                double entry_d   = Money_ToDouble(entry_p);
+                double orig_tp_d = Money_ToDouble(orig_tp);
                 if (entry_d > 0.0 && orig_tp_d > entry_d) {
                     double tp_pct = (orig_tp_d - entry_d) / entry_d;
                     double hypothetical_pnl_bps =
                         (tp_pct - 2.0 * fee_rate_taker_for_cf) * 10000.0;
-                    double notional_d = FPN_ToDouble(exit_entry_notional);  // v5.15.5.C.4 Phase G — derived
+                    double notional_d = Money_ToDouble(exit_entry_notional);  // v5.15.5.C.4 Phase G — derived
                     double actual_pnl_bps = (notional_d > 0.0)
-                        ? FPN_ToDouble(exit_net_pnl) / notional_d * 10000.0  // v5.15.5.C.4 Phase G — derived
+                        ? Money_ToDouble(exit_net_pnl) / notional_d * 10000.0  // v5.15.5.C.4 Phase G — derived
                         : 0.0;
                     double reward_bps = actual_pnl_bps - hypothetical_pnl_bps;
                     // v5.15.5.F.4d — exit-side bandit reward attribution via g_exit_reward_dispatch
@@ -1870,7 +1870,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // event.core_id is uint16_t (always >= 0); clamp upper bound via `& (MAX-1)` mask-style. With
     // MAX_EXECUTION_CORES = 16 (power of 2), `& 0xF` is exact. Pure ALU; no branch.
     const int slip_idx = (int)(event.core_id & (uint16_t)(MAX_EXECUTION_CORES - 1));
-    const FPN_Binary<F> slip_pct_for_event = effective_cores[slip_idx].slippage_pct;
+    const Money slip_pct_for_event = effective_cores[slip_idx].slippage_pct;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — fully branchless slippage application per H20 + Pattern 3 mask-select.
     // Old branchy form: `if (!live && !zero_slip) { mul + if-entry-add-else-if-exit-sub; }` — three
     // data-dependent branches (live gate + entry/exit dispatch + zero-slip gate). Real-world cost: up to
@@ -1879,14 +1879,14 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // branchless sign-select via ternary chain → cmov. Slow path budget ~100μs; ~30-50 unused cycles
     // when live mode is 0.05% of budget; determinism wins.
     const bool not_live    = !BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING);
-    const FPN_Binary<F> effective_slip_pct = not_live ? slip_pct_for_event : FPN_Zero<F>();
-    const FPN_Binary<F> slip_magnitude = FPN_Mul(event.price, effective_slip_pct);
+    const Money effective_slip_pct = not_live ? slip_pct_for_event : Money_Zero();
+    const Money slip_magnitude = Money_Mul(event.price, effective_slip_pct);
     const bool is_entry_evt = (event.type & TRADE_EVENT_ENTRY) != 0;
     const bool is_exit_evt  = (event.type & TRADE_EVENT_EXIT)  != 0;
-    const FPN_Binary<F> slip_signed = is_entry_evt
+    const Money slip_signed = is_entry_evt
         ? slip_magnitude
-        : (is_exit_evt ? FPN_Negate(slip_magnitude) : FPN_Zero<F>());
-    event.price = FPN_Add(event.price, slip_signed);
+        : (is_exit_evt ? Money_Negate(slip_magnitude) : Money_Zero());
+    event.price = Money_Add(event.price, slip_signed);
     int slot = (int)event.core_id;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 option C — combined-mask collapse: 3 separate predicate branches
     // (bounds + mutex + mode-1 fast-path) collapsed into 1 combined-mask + single guard branch.
@@ -1917,10 +1917,10 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // Phase 8: synchronous market BUY = taker by exchange definition.
         // OMS HandleFill (mode 1) will book the actual maker/taker fee from
         // the WS executionReport. This sync accounting is optimistic.
-        FPN_Binary<F> notional = FPN_Mul(event.price, ctx->intended_qty);
+        Money notional = Money_Mul(event.price, ctx->intended_qty);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (slot already validated above).
-        const FPN_Binary<F> entry_fee_rate = effective_cores[slot].fee_rate_taker;
-        FPN_Binary<F> entry_fee = FPN_Mul(notional, entry_fee_rate);
+        const Money entry_fee_rate = effective_cores[slot].fee_rate_taker;
+        Money entry_fee = Money_Mul(notional, entry_fee_rate);
         Portfolio_OpenSlot(&state->oms->portfolio, slot,
                            event.price,
                            ctx->intended_qty,
@@ -1936,7 +1936,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // exit branch subtracts the SAME (entry_price × qty) snapshot so
         // round-trips return to exactly zero — never use exit_price × qty
         // here (asymmetric subtraction would leak residue per trade).
-        ctx->core_open_notional = FPN_Add(ctx->core_open_notional, notional);
+        ctx->core_open_notional = Money_Add(ctx->core_open_notional, notional);
         // CSV: record AFTER portfolio mutation so the slot is consistent if the
         // log call inspects it (currently it doesn't, but kept defensive).
         if (state->oms->trade_log) {
@@ -1956,19 +1956,19 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // time, recorded in position) and exit fee (computed from exit notional).
         // Snapshot the position fields BEFORE CloseSlot clears the bit, so the
         // CSV row sees the entry_price + qty even though the slot is "closed".
-        FPN_Binary<F> entry_price_snap = state->oms->portfolio.positions[slot].entry_price;
-        FPN_Binary<F> qty_snap = state->oms->portfolio.positions[slot].quantity;
-        FPN_Binary<F> entry_fee = state->oms->portfolio.positions[slot].entry_fee;
-        FPN_Binary<F> gross = Portfolio_CloseSlot(&state->oms->portfolio, slot, event.price);
-        FPN_Binary<F> exit_notional = FPN_Mul(event.price, qty_snap);
+        Money entry_price_snap = state->oms->portfolio.positions[slot].entry_price;
+        Money qty_snap = state->oms->portfolio.positions[slot].quantity;
+        Money entry_fee = state->oms->portfolio.positions[slot].entry_fee;
+        Money gross = Portfolio_CloseSlot(&state->oms->portfolio, slot, event.price);
+        Money exit_notional = Money_Mul(event.price, qty_snap);
         // Phase 8: TP/SL exit = market sell = always taker by exchange def.
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (slot already validated above).
-        const FPN_Binary<F> exit_fee_rate = effective_cores[slot].fee_rate_taker;
-        FPN_Binary<F> exit_fee = FPN_Mul(exit_notional, exit_fee_rate);
-        FPN_Binary<F> total_fee = FPN_Add(entry_fee, exit_fee);
-        FPN_Binary<F> net = FPN_Sub(gross, total_fee);
-        state->oms->balance = FPN_Add(state->oms->balance, net);
-        state->oms->realized_pnl = FPN_Add(state->oms->realized_pnl, net);
+        const Money exit_fee_rate = effective_cores[slot].fee_rate_taker;
+        Money exit_fee = Money_Mul(exit_notional, exit_fee_rate);
+        Money total_fee = Money_Add(entry_fee, exit_fee);
+        Money net = Money_Sub(gross, total_fee);
+        state->oms->balance = Money_Add(state->oms->balance, net);
+        state->oms->realized_pnl = Money_Add(state->oms->realized_pnl, net);
         // v4.0.4: per-core P&L bookkeeping. The OMS keeps a single global
         // accumulator (one portfolio); we split it back out by source core
         // for the Account panel so users can see which core is making/losing
@@ -1976,9 +1976,9 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // Branchless win/loss: FPN_GreaterThan returns 1/0, used as integer
         // mask. Slow path so cost is irrelevant — kept branchless for
         // consistency with the rest of the engine.
-        ctx->core_realized = FPN_Add(ctx->core_realized, net);
-        ctx->core_fees = FPN_Add(ctx->core_fees, total_fee);
-        uint32_t is_win = (uint32_t)FPN_GreaterThan(net, FPN_Zero<F>());
+        ctx->core_realized = Money_Add(ctx->core_realized, net);
+        ctx->core_fees = Money_Add(ctx->core_fees, total_fee);
+        uint32_t is_win = (uint32_t)Money_Gt(net, Money_Zero());
         ctx->core_wins   += is_win;
         ctx->core_losses += (1u - is_win);
         // Phase 2.1: subtract the SAME entry notional we added at entry time.
@@ -1987,11 +1987,11 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // negative when losing) and drift the budget tracker unboundedly.
         // FPN_SubSat saturates at zero if state ever becomes inconsistent
         // (defensive against future bugs; should never trigger in practice).
-        FPN_Binary<F> entry_notional_snap = FPN_Mul(entry_price_snap, qty_snap);
-        ctx->core_open_notional = FPN_SubSat(ctx->core_open_notional, entry_notional_snap);
+        Money entry_notional_snap = Money_Mul(entry_price_snap, qty_snap);
+        ctx->core_open_notional = Money_Sub(ctx->core_open_notional, entry_notional_snap);
         // Phase 09: track peak balance for drawdown-based kill switch.
         // Cheap on the slow path; the comparison is one FPN_Binary compare per exit.
-        if (FPN_GreaterThan(state->oms->balance, state->oms->ks_peak_balance)) {
+        if (Money_Gt(state->oms->balance, state->oms->ks_peak_balance)) {
             state->oms->ks_peak_balance = state->oms->balance;
         }
         ctx->exits_processed++;
@@ -2186,14 +2186,19 @@ inline int EventLoop_RebuildAllParameters(
 template <unsigned F>
 inline void EventLoop_UpdateRollingStateOneCore(
     EventLoopState<F>* state, int slot,
-    FPN_Binary<F> price, FPN_Binary<F> volume, uint64_t timestamp_us,
+    Money price_m, Money volume_m, uint64_t timestamp_us,
     int is_buyer_maker,
     FPN_Binary<F> depth_imbalance, FPN_Binary<F> depth_spread,
     int depth_enabled) {
     if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
     auto* sst = state->cores[slot].slow_state;
     if (!sst) return;
-    if (FPN_IsZero(price)) return;  // pre-warmup tick — skip pushes
+    if (Money_IsZero(price_m)) return;  // pre-warmup tick — skip pushes
+
+    // D-122 feature-domain ingress: the money tick crosses to binary EXACTLY ONCE
+    // here; every rolling/regime/flow consumer below stays FPN_Binary (feature domain).
+    FPN_Binary<F> price  = Money_ToBinary(price_m);
+    FPN_Binary<F> volume = Money_ToBinary(volume_m);
 
     RollingStats_Push(&sst->rolling_short,    price, volume);
     RollingStats_Push(&sst->rolling_long,     price, volume);
@@ -2298,7 +2303,7 @@ inline void EventLoop_RebuildOneCore(
             FPN_Binary<F> abs_delta = FPN_Abs(delta);
             FPN_Binary<F> rel_delta = FPN_DivNoAssert(abs_delta, price_last);
             int price_force = FPN_GreaterThan(rel_delta,
-                config->lazy_rebuild_price_threshold_pct);
+                Money_ToBinary(config->lazy_rebuild_price_threshold_pct));  // cadence heuristic, feature-side
             if (!time_force && !price_force) {
                 // Lazy-skip path. Mark dirty=1 so PushParameters publishes
                 // pending_params with fresh publish_tick (v5.12.1.B
@@ -2410,10 +2415,10 @@ inline void EventLoop_RebuildOneCore(
                 FPN_Binary<F> shift = FPN_Mul(slope, resolved_cfg.filter_scale);
                 shift = FPN_Negate(shift);  // negate (was a sign-bit flip; 16B two's-comp)
                 // Apply to entry_offset_pct, clamped to [offset_min, offset_max]
-                FPN_Binary<F> new_offset = FPN_Add(resolved_cfg.entry_offset_pct, shift);
-                if (FPN_LessThan(new_offset, resolved_cfg.offset_min))
+                Money new_offset = Money_Add(resolved_cfg.entry_offset_pct, Money_FromBinary(shift));  // D-170 egress
+                if (Money_Lt(new_offset, resolved_cfg.offset_min))
                     new_offset = resolved_cfg.offset_min;
-                if (FPN_GreaterThan(new_offset, resolved_cfg.offset_max))
+                if (Money_Gt(new_offset, resolved_cfg.offset_max))
                     new_offset = resolved_cfg.offset_max;
                 resolved_cfg.entry_offset_pct = new_offset;
                 // Apply to volume_multiplier same direction (tighter when losing)
@@ -2528,9 +2533,9 @@ inline void EventLoop_RebuildOneCore(
                 while (bm) {
                     int pidx = __builtin_ctz(bm);
                     bm &= (uint16_t)(bm - 1);
-                    FPN_Binary<F> entry_p = state->oms->portfolio.positions[pidx].entry_price;
-                    if (!FPN_IsZero(entry_p)) {
-                        Strategy_WriteRatchetSL(state, slot, tight_sl,
+                    Money entry_p = state->oms->portfolio.positions[pidx].entry_price;
+                    if (!Money_IsZero(entry_p)) {
+                        Strategy_WriteRatchetSL(state, slot, Money_FromBinary(tight_sl),  // D-170 egress
                                                   entry_p, &resolved_cfg);
                     }
                 }
@@ -2554,7 +2559,7 @@ inline void EventLoop_RebuildOneCore(
                     FPN_Binary<F> tp_offset = FPN_Mul(rolling->price_stddev,
                                                 resolved_cfg.momentum_tp_mult);
                     FPN_Binary<F> wide_tp   = FPN_Add(rolling->price_avg, tp_offset);
-                    Strategy_WriteRatchetTP(state, slot, wide_tp);
+                    Strategy_WriteRatchetTP(state, slot, Money_FromBinary(wide_tp));  // D-170 egress
                 } else if (tighten) {
                     // Tighter TP target: lock in profit by ratcheting TP up
                     // to current_price + small offset. Only advances if
@@ -2562,7 +2567,7 @@ inline void EventLoop_RebuildOneCore(
                     FPN_Binary<F> tight_offset = FPN_Mul(rolling->price_stddev,
                                                    FPN_FromDouble<F>(0.5));
                     FPN_Binary<F> tight_tp     = FPN_Add(rolling->price_avg, tight_offset);
-                    Strategy_WriteRatchetTP(state, slot, tight_tp);
+                    Strategy_WriteRatchetTP(state, slot, Money_FromBinary(tight_tp));  // D-170 egress
                 }
             }
         }
@@ -2715,7 +2720,7 @@ inline void EventLoop_RebuildOneCore(
         bool slot_active = (state->oms->portfolio.active_bitmap &
                              Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED))) != 0;
         if (!slot_active) {
-            state->cores[slot].pending_params.ratchet_sl = FPN_Zero<F>();
+            state->cores[slot].pending_params.ratchet_sl = Money_Zero();
         }
 
         // v5.4.0 Phase 2.2: strategy-specific exit-adjust for cores with
@@ -2725,7 +2730,8 @@ inline void EventLoop_RebuildOneCore(
         // proposal wins.
         if (slot_active) {
             Strategy_ExitAdjustPerCore(state, slot, effective_strategy_id,
-                                        rolling->price_avg, rolling, &resolved_cfg);
+                                        Money_FromBinary(rolling->price_avg),  // slow-path price proxy (D-170)
+                                        rolling, &resolved_cfg);
         }
 
         // v4.0.3 cross-cutting checks applied uniformly across all strategies.
@@ -2799,7 +2805,7 @@ inline void EventLoop_RebuildOneCore(
         // write for backward compat with buy-below paths and for any
         // downstream code that special-cases the zero threshold.
         auto zero_gate = [&](uint8_t reason) {
-            state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            state->cores[slot].pending_params.bg_price_threshold = Money_Zero();
             state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
             if (state->cores[slot].halt_reason == HALT_OK)  // first reason wins
                 state->cores[slot].halt_reason = reason;
@@ -2832,27 +2838,27 @@ inline void EventLoop_RebuildOneCore(
         // compare open_notional >= allocated (rather than relying on
         // FPN_SubSat saturating to zero on underflow, which it doesn't).
         {
-            FPN_Binary<F> alloc       = state->cores[slot].allocated_balance;
-            FPN_Binary<F> open_n      = state->cores[slot].core_open_notional;
-            FPN_Binary<F> entry_price = state->cores[slot].pending_params.bg_price_threshold;
-            if (FPN_GreaterThanOrEqual(open_n, alloc)) {
+            Money alloc       = state->cores[slot].allocated_balance;
+            Money open_n      = state->cores[slot].core_open_notional;
+            Money entry_price = state->cores[slot].pending_params.bg_price_threshold;
+            if (Money_Ge(open_n, alloc)) {
                 // Fully or over-deployed — no slot-room for another entry.
                 // Zero-gate with HALT_CORE_BUDGET. Trade size also clamped
                 // to zero so any downstream consumer of trade_size sees
                 // an honest zero rather than a stale value.
-                state->cores[slot].pending_params.trade_size = FPN_Zero<F>();
+                state->cores[slot].pending_params.trade_size = Money_Zero();
                 zero_gate(HALT_CORE_BUDGET);
-            } else if (!FPN_IsZero(entry_price)) {
+            } else if (!Money_IsZero(entry_price)) {
                 // Budget remaining is positive — clamp qty to
                 // (budget_remaining / entry_price). Under single-position-
                 // per-core today, open_n is 0 when this branch runs (we hit
                 // the GE branch above when deployed), so budget_remaining
                 // == alloc and the clamp is a no-op. Multi-position-per-core
                 // would land here with partial budget, producing a real clamp.
-                FPN_Binary<F> budget_remaining = FPN_Sub(alloc, open_n);  // > 0 by branch
-                FPN_Binary<F> max_qty = FPN_DivNoAssert(budget_remaining, entry_price);
+                Money budget_remaining = Money_Sub(alloc, open_n);  // > 0 by branch
+                Money max_qty = Money_Div(budget_remaining, entry_price);
                 state->cores[slot].pending_params.trade_size =
-                    FPN_Min(state->cores[slot].pending_params.trade_size, max_qty);
+                    Money_Min(state->cores[slot].pending_params.trade_size, max_qty);
             }
         }
 
@@ -2870,59 +2876,59 @@ inline void EventLoop_RebuildOneCore(
         // without the unrealized term. enable_mtm_kill_switch=0 forces this
         // realized-only mode regardless of whether current_price was passed.
         {
-            FPN_Binary<F> alloc     = state->cores[slot].allocated_balance;
-            FPN_Binary<F> realized  = state->cores[slot].core_realized;
-            FPN_Binary<F> unrealized = FPN_Zero<F>();
-            const FPN_Binary<F>* px_in = (const FPN_Binary<F>*)current_price;
+            Money alloc     = state->cores[slot].allocated_balance;
+            Money realized  = state->cores[slot].core_realized;
+            Money unrealized = Money_Zero();
+            const Money* px_in = (const Money*)current_price;
             // Partials-aware MTM walk: under partials, core c's positions
             // live in slots 2c and 2c+1 (one Position per leg, each with
             // independent qty). Sum unrealized across both. Without
             // partials, only slot c is walked.
-            if (BITMAP_IS_SET(config->risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED) && px_in && !FPN_IsZero(*px_in)) {
+            if (BITMAP_IS_SET(config->risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED) && px_in && !Money_IsZero(*px_in)) {
                 uint16_t mask = Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
                 uint16_t bm   = state->oms->portfolio.active_bitmap & mask;
                 while (bm) {
                     int s = __builtin_ctz(bm);
                     bm &= (uint16_t)(bm - 1);
                     Position<F>& pos = state->oms->portfolio.positions[s];
-                    FPN_Binary<F> diff = FPN_Sub(*px_in, pos.entry_price);
-                    unrealized = FPN_Add(unrealized, FPN_Mul(diff, pos.quantity));
+                    Money diff = Money_Sub(*px_in, pos.entry_price);
+                    unrealized = Money_Add(unrealized, Money_Mul(diff, pos.quantity));
                 }
             }
-            FPN_Binary<F> current_value = FPN_Add(alloc, FPN_Add(realized, unrealized));
+            Money current_value = Money_Add(alloc, Money_Add(realized, unrealized));
             // Peak ratchet (branchless via FPN_Max). Initialize to alloc on
             // first sight if peak is still zero (first rebuild after init).
-            if (FPN_IsZero(state->cores[slot].core_peak_balance)) {
+            if (Money_IsZero(state->cores[slot].core_peak_balance)) {
                 state->cores[slot].core_peak_balance = alloc;
             }
             state->cores[slot].core_peak_balance =
-                FPN_Max(state->cores[slot].core_peak_balance, current_value);
+                Money_Max(state->cores[slot].core_peak_balance, current_value);
             // Drawdown computation. Skip if peak is zero (defensive — should
             // never happen after the init bump above, but handles a freshly
             // reset state). dd = (peak - current) / peak.
-            FPN_Binary<F> drop = FPN_Sub(state->cores[slot].core_peak_balance, current_value);
-            if (FPN_GreaterThan(drop, FPN_Zero<F>()) &&
-                FPN_GreaterThan(state->cores[slot].core_peak_balance, FPN_Zero<F>())) {
-                state->cores[slot].core_dd_pct = FPN_DivNoAssert(drop,
+            Money drop = Money_Sub(state->cores[slot].core_peak_balance, current_value);
+            if (Money_Gt(drop, Money_Zero()) &&
+                Money_Gt(state->cores[slot].core_peak_balance, Money_Zero())) {
+                state->cores[slot].core_dd_pct = Money_Div(drop,
                     state->cores[slot].core_peak_balance);
             } else {
-                state->cores[slot].core_dd_pct = FPN_Zero<F>();
+                state->cores[slot].core_dd_pct = Money_Zero();
             }
             // Trip evaluation. Threshold: per-core override if set, else
             // global max_drawdown_pct. Trip ALSO requires drop > min_kill_loss
             // so a tiny allocation doesn't trip on rounding noise.
             if (!CORE_STATE_FLAG_IS_SET(state->cores[slot], KILL_TRIPPED)) {
-                FPN_Binary<F> threshold = !FPN_IsZero(config->core_max_drawdown_pct[slot])
+                Money threshold = !Money_IsZero(config->core_max_drawdown_pct[slot])
                     ? config->core_max_drawdown_pct[slot]
                     : config->max_drawdown_pct;
-                if (FPN_GreaterThan(state->cores[slot].core_dd_pct, threshold) &&
-                    FPN_GreaterThan(drop, config->min_kill_loss)) {
+                if (Money_Gt(state->cores[slot].core_dd_pct, threshold) &&
+                    Money_Gt(drop, config->min_kill_loss)) {
                     CORE_STATE_FLAG_SET(state->cores[slot], KILL_TRIPPED);
                     state->cores[slot].core_ks_trips_total++;
-                    double dd_pct_d  = FPN_ToDouble(state->cores[slot].core_dd_pct) * 100.0;
-                    double drop_d    = FPN_ToDouble(drop);
-                    double peak_d    = FPN_ToDouble(state->cores[slot].core_peak_balance);
-                    double current_d = FPN_ToDouble(current_value);
+                    double dd_pct_d  = Money_ToDouble(state->cores[slot].core_dd_pct) * 100.0;
+                    double drop_d    = Money_ToDouble(drop);
+                    double peak_d    = Money_ToDouble(state->cores[slot].core_peak_balance);
+                    double current_d = Money_ToDouble(current_value);
                     fprintf(stderr, "[sharded] CORE KILL: core %d tripped — "
                             "dd=%.2f%% drop=$%.2f peak=$%.2f current=$%.2f\n",
                             slot, dd_pct_d, drop_d, peak_d, current_d);
@@ -2975,13 +2981,13 @@ inline void EventLoop_RebuildOneCore(
         // Single-source rule — these are the SAME values
         // Strategy_SpacingOk reads internally, exposed for display.
         {
-            FPN_Binary<F> a = state->cores[slot].pending_params.bg_price_threshold;
-            FPN_Binary<F> b = state->cores[slot].last_entry_price;
-            FPN_Binary<F> abs_dist = FPN_GreaterThanOrEqual(a, b)
-                ? FPN_Sub(a, b) : FPN_Sub(b, a);
+            Money a = state->cores[slot].pending_params.bg_price_threshold;
+            Money b = state->cores[slot].last_entry_price;
+            Money abs_dist = Money_Ge(a, b)
+                ? Money_Sub(a, b) : Money_Sub(b, a);
             FPN_Binary<F> min_dist = FPN_Mul(rolling->price_stddev,
                                        spacing_cfg.spacing_multiplier);
-            state->display_meta[slot].diag_spacing_actual = abs_dist;
+            state->display_meta[slot].diag_spacing_actual = Money_ToBinary(abs_dist);  // display mirror stays binary
             state->display_meta[slot].diag_spacing_floor  = min_dist;
         }
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
@@ -2995,10 +3001,10 @@ inline void EventLoop_RebuildOneCore(
                 FPN_Mul(rolling->vwap, resolved_cfg.vwap_offset));
             // v5.6.3: capture both sides for GUI.
             state->display_meta[slot].diag_vwap_actual    =
-                state->cores[slot].pending_params.bg_price_threshold;
+                Money_ToBinary(state->cores[slot].pending_params.bg_price_threshold);
             state->display_meta[slot].diag_vwap_threshold = vwap_threshold;
-            if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
-                                 vwap_threshold)) {
+            if (Money_Gt(state->cores[slot].pending_params.bg_price_threshold,
+                                 Money_FromBinary(vwap_threshold))) {
                 zero_gate(HALT_VWAP);
             }
         }
@@ -3048,29 +3054,29 @@ inline void EventLoop_RebuildOneCore(
             // in PER_CORE_OVERRIDE_FIELDS at ControllerConfig.hpp:119); per-core value lives at
             // resolved_cfg.cores[slot].fee_rate_taker. Sister-pattern at line 3061 (Strategy_TpFloor)
             // correctly uses &resolved_cfg.cores[slot] — proven right shape.
-            FPN_Binary<F> fee_taker = !FPN_IsZero(resolved_cfg.cores[slot].fee_rate_taker)
+            Money fee_taker = !Money_IsZero(resolved_cfg.cores[slot].fee_rate_taker)
                 ? resolved_cfg.cores[slot].fee_rate_taker : resolved_cfg.cores[slot].fee_rate;
             state->display_meta[slot].diag_tp_pct_actual =
-                state->cores[slot].pending_params.tp_pct;
+                Money_ToBinary(state->cores[slot].pending_params.tp_pct);
             state->display_meta[slot].diag_tp_pct_floor =
-                FPN_Mul(fee_taker, FPN_FromDouble<F>(3.0));
+                Money_ToBinary(Money_Mul(fee_taker, Money_FromInt(3)));
         }
         // FEE FLOOR: ratchet TP up so it clears at least
         // entry × fee_rate × fee_floor_mult. Round-trip fees are 2×fee_rate,
         // so fee_floor_mult=5 means TP must clear ~2.5× round-trip fees + margin.
         // No-op when bg_price_threshold is zero (no entry), or
         // fee_floor_mult/fee_rate is zero.
-        if (!FPN_IsZero(state->cores[slot].pending_params.bg_price_threshold)) {
-            FPN_Binary<F> entry = state->cores[slot].pending_params.bg_price_threshold;
-            FPN_Binary<F> current_tp = state->cores[slot].pending_params.sg_take_profit_price;
+        if (!Money_IsZero(state->cores[slot].pending_params.bg_price_threshold)) {
+            Money entry = state->cores[slot].pending_params.bg_price_threshold;
+            Money current_tp = state->cores[slot].pending_params.sg_take_profit_price;
             // tp_amount = current_tp - entry; if it's negative that's already broken
             // (means strategy set TP below entry — leave alone, it's strategy's bug).
-            if (FPN_GreaterThan(current_tp, entry)) {
-                FPN_Binary<F> tp_amount = FPN_Sub(current_tp, entry);
-                FPN_Binary<F> floored = Strategy_TpFloor(entry, tp_amount, &resolved_cfg.cores[slot]);
-                if (FPN_GreaterThan(floored, tp_amount)) {
+            if (Money_Gt(current_tp, entry)) {
+                Money tp_amount = Money_Sub(current_tp, entry);
+                Money floored = Strategy_TpFloor(entry, tp_amount, &resolved_cfg.cores[slot]);
+                if (Money_Gt(floored, tp_amount)) {
                     state->cores[slot].pending_params.sg_take_profit_price =
-                        FPN_Add(entry, floored);
+                        Money_Add(entry, floored);
                 }
             }
         }
@@ -3111,7 +3117,7 @@ inline void EventLoop_RebuildOneCore(
                     "gate=%g price=%g",
                     (unsigned)hr, (unsigned)shr,
                     (unsigned)bb, (unsigned)perm,
-                    FPN_ToDouble(state->cores[slot].pending_params.bg_price_threshold),
+                    Money_ToDouble(state->cores[slot].pending_params.bg_price_threshold),
                     FPN_ToDouble(rolling->price_avg));
                 state->display_meta[slot].prev_gate_log_state = packed;
             }
@@ -3184,8 +3190,8 @@ inline int EventLoop_PushParameters(EventLoopState<F>* state,
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_ConfigureKillSwitch(EventLoopState<F>* state,
-                                                FPN_Binary<F> min_balance,
-                                                FPN_Binary<F> max_drawdown_pct) {
+                                                Money min_balance,
+                                                Money max_drawdown_pct) {
     state->oms->ks_min_balance      = min_balance;
     state->oms->ks_max_drawdown_pct = max_drawdown_pct;
 }
@@ -3240,21 +3246,21 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
     int trip = 0;
 
     // condition 1: hard balance floor
-    if (!FPN_IsZero(state->oms->ks_min_balance) &&
-        FPN_LessThan(state->oms->balance, state->oms->ks_min_balance)) {
+    if (!Money_IsZero(state->oms->ks_min_balance) &&
+        Money_Lt(state->oms->balance, state->oms->ks_min_balance)) {
         trip = 1;
     }
 
     // condition 2: drawdown from peak
-    if (!FPN_IsZero(state->oms->ks_max_drawdown_pct) &&
-        !FPN_IsZero(state->oms->ks_peak_balance)) {
-        FPN_Binary<F> drop = FPN_Sub(state->oms->ks_peak_balance, state->oms->balance);
+    if (!Money_IsZero(state->oms->ks_max_drawdown_pct) &&
+        !Money_IsZero(state->oms->ks_peak_balance)) {
+        Money drop = Money_Sub(state->oms->ks_peak_balance, state->oms->balance);
         // only consider positive drops (balance below peak)
-        if (FPN_GreaterThan(drop, FPN_Zero<F>())) {
+        if (Money_Gt(drop, Money_Zero())) {
             // drawdown = drop / peak. NoAssert variant: peak is non-zero per
             // the guard above so this can't trip the production assert path.
-            FPN_Binary<F> dd = FPN_DivNoAssert(drop, state->oms->ks_peak_balance);
-            if (FPN_GreaterThan(dd, state->oms->ks_max_drawdown_pct)) trip = 1;
+            Money dd = Money_Div(drop, state->oms->ks_peak_balance);
+            if (Money_Gt(dd, state->oms->ks_max_drawdown_pct)) trip = 1;
         }
     }
 
@@ -3350,17 +3356,17 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
         if (max_hold == 0) max_hold = cfg.cores[core_id].max_hold_ticks;
         if (elapsed < max_hold) continue;
 
-        double entry_d = FPN_ToDouble(oms->portfolio.positions[slot].entry_price);
+        double entry_d = Money_ToDouble(oms->portfolio.positions[slot].entry_price);
         if (entry_d <= 0.0) continue;
         double gain_pct = (current_price - entry_d) / entry_d;
-        double min_gain = FPN_ToDouble(cfg.min_hold_gain_pct);
+        double min_gain = Money_ToDouble(cfg.min_hold_gain_pct);
         if (gain_pct >= min_gain) continue;  // still profitable enough; keep it
 
         // Force-close via OMS_PushSubmit (drainer is sole Submit caller).
         // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit.
-        FPN_Binary<F> qty       = oms->portfolio.positions[slot].quantity;
-        FPN_Binary<F> price_fpn = FPN_FromDouble<F>(current_price);
+        Money qty       = oms->portfolio.positions[slot].quantity;
+        Money price_fpn = Money{ money_from_double_payload(current_price) };  // D-103 ingress bridge
         tt::OMS_PushExitForSlot(oms, (int16_t)slot,
                                 qty, state->cores[core_id].strategy_id, price_fpn,
                                 /*leg*/(uint8_t)0, &cfg.cores[core_id]);
@@ -3414,9 +3420,9 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
     // event_price is for log/audit (the actual market fill happens at
     // exchange-side price). FPN_Zero on degenerate price preserves
     // existing OMS conventions.
-    FPN_Binary<F> price_fpn = (current_price > 0.0)
-        ? FPN_FromDouble<F>(current_price)
-        : FPN_Zero<F>();
+    Money price_fpn = (current_price > 0.0)
+        ? Money{ money_from_double_payload(current_price) }
+        : Money_Zero();
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     while (bm) {
@@ -3427,7 +3433,7 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         // result (0 or 1) — exactly the right shift count. Replaces the prior ternary (cmov-able) with a single
         // shift instruction; no cmov, no conditional move at all. Same semantic, tighter ALU.
         int logical_core = slot >> (uint32_t)partial_on;
-        FPN_Binary<F> qty = oms->portfolio.positions[slot].quantity;
+        Money qty = oms->portfolio.positions[slot].quantity;
         uint8_t sid = state->cores[logical_core].strategy_id;
         // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for Order_BindPreResolved at submit.
@@ -3616,14 +3622,14 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
     // H20 branchless: pre-resolve core_cfg ref (single array index via CSE) + ternary select (cmov-lowerable).
     // Sister-canonical: StrategyParameters.hpp:1762 (core_cfg->X pattern).
     const auto& core_cfg = cfg.cores[core_id];
-    double fee_taker_d = FPN_ToDouble(!FPN_IsZero(core_cfg.fee_rate_taker)
+    double fee_taker_d = Money_ToDouble(!Money_IsZero(core_cfg.fee_rate_taker)
         ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
     double fee_floor_pct = 3.0 * fee_taker_d;
 
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        double entry_d = FPN_ToDouble(state->oms->portfolio.positions[slot].entry_price);
+        double entry_d = Money_ToDouble(state->oms->portfolio.positions[slot].entry_price);
         if (entry_d <= 0.0) continue;
         double gain_pct = (current_price - entry_d) / entry_d;
         if (gain_pct < hold_thresh) continue;  // not yet trailing
@@ -3639,9 +3645,9 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
 
         // Note: pending_params is per-CORE (one queue per core). Both legs
         // share it under partials. Index via core_id, not slot.
-        FPN_Binary<F> new_ratchet = FPN_FromDouble<F>(new_ratchet_d);
-        FPN_Binary<F> existing    = state->cores[core_id].pending_params.ratchet_sl;
-        if (FPN_GreaterThan(new_ratchet, existing)) {
+        Money new_ratchet = Money{ money_from_double_payload(new_ratchet_d) };
+        Money existing    = state->cores[core_id].pending_params.ratchet_sl;
+        if (Money_Gt(new_ratchet, existing)) {
             state->cores[core_id].pending_params.ratchet_sl = new_ratchet;
             CORE_STATE_FLAG_SET(state->cores[core_id], DIRTY);  // force push next cycle
         }
@@ -3684,7 +3690,7 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
     // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker (UNINDEXED-GLOBAL closure).
     // H20 branchless: pre-resolve core_cfg ref + ternary select (sister to HIGH-1 above + StrategyParameters.hpp:1762).
     const auto& core_cfg = cfg.cores[core_id];
-    double fee_taker_d = FPN_ToDouble(!FPN_IsZero(core_cfg.fee_rate_taker)
+    double fee_taker_d = Money_ToDouble(!Money_IsZero(core_cfg.fee_rate_taker)
         ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
     double net_profit_threshold = 2.0 * fee_taker_d;
     double fee_floor_pct        = 3.0 * fee_taker_d;
@@ -3692,7 +3698,7 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        double entry_d = FPN_ToDouble(state->oms->portfolio.positions[slot].entry_price);
+        double entry_d = Money_ToDouble(state->oms->portfolio.positions[slot].entry_price);
         if (entry_d <= 0.0) continue;
         double gain_pct = (current_price - entry_d) / entry_d;
         if (gain_pct < net_profit_threshold) continue;  // not net-profitable yet
@@ -3700,9 +3706,9 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
         // Ratchet SL to fee-floored breakeven (entry × (1 - 3 × fee)).
         // pending_params.ratchet_sl is max-only; if trailing-SL already
         // proposed a higher floor (gain > tp_hold_score path), that wins.
-        FPN_Binary<F> breakeven_sl = FPN_FromDouble<F>(entry_d * (1.0 - fee_floor_pct));
-        FPN_Binary<F> existing     = state->cores[core_id].pending_params.ratchet_sl;
-        if (FPN_GreaterThan(breakeven_sl, existing)) {
+        Money breakeven_sl = Money{ money_from_double_payload(entry_d * (1.0 - fee_floor_pct)) };
+        Money existing     = state->cores[core_id].pending_params.ratchet_sl;
+        if (Money_Gt(breakeven_sl, existing)) {
             state->cores[core_id].pending_params.ratchet_sl = breakeven_sl;
             CORE_STATE_FLAG_SET(state->cores[core_id], DIRTY);
         }

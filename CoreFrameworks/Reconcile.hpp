@@ -255,15 +255,15 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order_BindPreResolved with originating core's cfg.
         // Closes Class 27 cross-core fee accuracy gap for the common (in-flight) case.
         Order_BindPreResolved(&synth, effective_cores[safe_core_id]);
-        synth.requested_qty = FPN_FromDouble<F>(t.qty);
-        synth.event_price   = FPN_FromDouble<F>(t.price);
+        synth.requested_qty = Money{ money_from_double_payload(t.qty) };  // D-103 reconcile ingress
+        synth.event_price   = Money{ money_from_double_payload(t.price) };
 
         // Call existing fill path. Updates portfolio + balance + writes
         // event log entry. Same code as live WS fill handler — this is
         // the canonical fill-application path (single source of truth).
         OrderManager_HandleFill(oms, &synth,
-                                  FPN_FromDouble<F>(t.price),
-                                  FPN_FromDouble<F>(t.qty));
+                                  Money{ money_from_double_payload(t.price) },
+                                  Money{ money_from_double_payload(t.qty) });
 
         replayed++;
         if ((uint64_t)t.trade_id > max_trade_id) {

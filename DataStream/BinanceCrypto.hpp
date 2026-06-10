@@ -741,8 +741,10 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
                 continue;
             }
 
-            out->price  = FPN_FromString<F>(price_str);
-            out->volume = FPN_FromString<F>(qty_str);
+            // D-102: venue decimal strings parse EXACTLY into decimal money (no binary
+            // round-trip). Sticky MONEY_PARSE_* flags drain at the drainer cycle tail (P3).
+            out->price  = Money_FromString(price_str).value;
+            out->volume = Money_FromString(qty_str).value;
             // v5.11.19 — derive TUI doubles from the FPN_Binary values directly
             // instead of running a separate parse_double_fast pass on the
             // same string. Saves one parse per tick (BinanceCrypto's hot
@@ -756,8 +758,8 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
             // limb math + ldexp combination), so this is a strict
             // tightening: every TUI double is now provably consistent
             // with its FPN_Binary value.
-            out->price_d  = FPN_ToDouble(out->price);
-            out->volume_d = FPN_ToDouble(out->volume);
+            out->price_d  = Money_ToDouble(out->price);
+            out->volume_d = Money_ToDouble(out->volume);
             out->is_buyer_maker = is_buyer_maker;
             bs->tick_count++;
             return 1;

@@ -232,6 +232,14 @@ namespace tt {
             if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) out.v *= 100;
             char tmp[40];
             Money_ToCString(out, tmp, (int)sizeof(tmp));
+            // Cfg-file presentation trim: drop trailing zeros past 2 decimals ("2.34000000"
+            // -> "2.34", "3.00000000" -> "3.00"). EXACTNESS preserved (only zero digits
+            // removed; reload parses identically). The WIRE emit branch stays full-raw.
+            char* dot = strchr(tmp, '.');
+            if (dot) {
+                char* end = tmp + strlen(tmp) - 1;
+                while (end > dot + 2 && *end == '0') *end-- = '\0';
+            }
             n = snprintf(buf, cap, "%s", tmp);
         } else if constexpr (is_fp_binary_v<T>) {
             double v = FPN_ToDouble(src);

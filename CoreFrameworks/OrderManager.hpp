@@ -95,7 +95,7 @@ enum CommandType : uint8_t {
 };
 
 // Non-templated POD so the SPSCRing slots stay self-contained regardless
-// of FPN_Binary<F> width.
+// of Money width.
 struct Command {
     uint8_t      type;
     uint8_t      _pad0[7];
@@ -115,7 +115,7 @@ constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 // Sizing: 32 slots per queue. Slow-path submit events are rare (force-close
 // on time-exit, manual close, drag, swap) — peak <1/sec. 32 is generous.
 //
-// SubmitCommand is templated on F so the FPN_Binary<F> fields are sized correctly.
+// SubmitCommand is templated on F so the Money fields are sized correctly.
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — POD args struct + SPSC wire-format unified (option l).
 // SubmitCommand is BOTH the OMS submit-API arg shape AND the SPSC ring element. Producers
 // construct one struct; drainer pops the same struct; OrderManager_Submit consumes the same
@@ -143,23 +143,23 @@ struct SubmitCommand {
     // ─── REQUIRED (semantic; ctor-signaled) ───
     int16_t                 core_id      = 0;
     uint8_t                 order_type   = 0;
-    FPN_Binary<F>                  qty          = FPN_Zero<F>();
+    Money                  qty          = Money_Zero();
     uint8_t                 leg          = 0;
     const ::PerCoreCfg<F>*  core_cfg     = nullptr;
 
     // ─── OPTIONAL (default-init; caller overrides as needed) ───
     uint8_t                 strategy_id  = 0xFF;
     uint8_t                 _pad[2]      = {0, 0};
-    FPN_Binary<F>                  intended_tp  = FPN_Zero<F>();
-    FPN_Binary<F>                  intended_sl  = FPN_Zero<F>();
-    FPN_Binary<F>                  event_price  = FPN_Zero<F>();
+    Money                  intended_tp  = Money_Zero();
+    Money                  intended_sl  = Money_Zero();
+    Money                  event_price  = Money_Zero();
 
     // Default ctor — needed for SPSC ring slot init + OMS state value-init compat.
     SubmitCommand() = default;
 
     // Required-field ctor — recommended form for production + test callers; signals
     // which fields a valid submit needs.
-    SubmitCommand(int16_t cid, OrderType t, FPN_Binary<F> q, uint8_t lg, const ::PerCoreCfg<F>* cfg)
+    SubmitCommand(int16_t cid, OrderType t, Money q, uint8_t lg, const ::PerCoreCfg<F>* cfg)
         : core_id(cid), order_type((uint8_t)t), qty(q), leg(lg), core_cfg(cfg) {}
 };
 
@@ -222,7 +222,7 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // the always-call default; real fns wired at boot when respective subsystems enable.
 template <unsigned F> struct OrderManagerState;
 template <unsigned F>
-inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, FPN_Binary<F>, FPN_Binary<F>, FPN_Binary<F>);
+inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money);
 
 template <unsigned F>
 struct OrderManagerState {
@@ -305,8 +305,8 @@ struct OrderManagerState {
     // are derived from the order event log. In mode 0 (legacy) and during
     // chunk 1 itself, EventLoop_OnEvent still mutates them directly.
     alignas(64) Portfolio<F> portfolio;
-    FPN_Binary<F>       balance;
-    FPN_Binary<F>       realized_pnl;
+    Money       balance;
+    Money       realized_pnl;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — DELETED: fee_rate, fee_rate_maker, fee_rate_taker, slippage_pct.
     // Per Class 27 structural closure: scalar cfg-mirror caches eliminated. Per-Order fee_rate
     // now lives on Order::pre_resolved (set at submit via Order_BindPreResolved with cfg.cores[c]).
@@ -320,9 +320,9 @@ struct OrderManagerState {
     // after every fill.
     uint32_t     maker_fills_count;
     uint32_t     taker_fills_count;
-    FPN_Binary<F>       total_maker_fees;
-    FPN_Binary<F>       total_taker_fees;
-    FPN_Binary<F>       total_fees;       // mirrors PortfolioController.total_fees
+    Money       total_maker_fees;
+    Money       total_taker_fees;
+    Money       total_fees;       // mirrors PortfolioController.total_fees
                                     // for sanity invariant; OMS-side aggregate.
 
     // === EXIT-FILL FEEDBACK (Phase 6prep sharded c14) ===
@@ -405,7 +405,7 @@ struct OrderManagerState {
     // OMS-level sibling SoA array (same reasoning as last_is_maker_bitmap).
     // Per-slot captured at HandleFill SELL; consumed by Phase G derive at
     // DrainPostFill. 384B (24 × 16); not persisted.
-    FPN_Binary<F> last_exit_fill_price[MAX_PORTFOLIO_POSITIONS];
+    Money last_exit_fill_price[MAX_PORTFOLIO_POSITIONS];
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — exit_fee stored at HandleFill SELL time (from o->pre_resolved.fee_rate).
     // Consumed by EventLoop_DrainPostFillOneCore for per-core accounting. Replaces the prior pattern of
     // RE-COMPUTING exit_fee in DrainPostFill from cfg lookup — that was a Class 27 adjacent shape
@@ -414,7 +414,7 @@ struct OrderManagerState {
     // value; subsequent consumers READ it, never recompute from cfg. 384B (24 × 16); not persisted.
     // v5.15.5.F.4d Step 7 (§ N.2): enrolled in FOREACH_OMS_PER_SLOT_FIELD registry — closes Class 30
     // latent drift (existed since .F.4c.3 r-4 but wasn't in registry; init/reset hand-maintained).
-    FPN_Binary<F> last_exit_fee[MAX_PORTFOLIO_POSITIONS];
+    Money last_exit_fee[MAX_PORTFOLIO_POSITIONS];
 
     // v5.15.5.F.4d Step 7 (§ N.2) — NEW per-slot bandit reward attribution. Written at HandleFill SELL
     // (computed reward_bps per the dispatch's chosen leaf reward fn — for exit-side dispatch via
@@ -483,8 +483,8 @@ struct OrderManagerState {
     // 5 bits headroom for future COLD-cluster booleans (static_assert catches overflow).
     uint8_t oms_state_flags;
     // v5.15.5.C.2.1 (MEDIUM-2 close from /dod-audit on 852a6e3): explicit 7-byte
-    // pad locking the COLD-cluster alignment gap before FPN_Binary<F> ks_min_balance.
-    // FPN_Binary<F> needs 8-byte alignment (uint64 internally + CLAUDE.md item 27
+    // pad locking the COLD-cluster alignment gap before Money ks_min_balance.
+    // Money needs 8-byte alignment (uint64 internally + CLAUDE.md item 27
     // padding-determinism). The 7-byte gap is structurally inherent; explicit
     // pad matches the prior _pad_pe[7] + _pad_ks[7] discipline pre-S3a.
     // Offset-lock static_assert at the end of struct (line ~520).
@@ -496,9 +496,9 @@ struct OrderManagerState {
     // zero). Tripping clears every registered core's permission with
     // RELEASE; resume via EventLoop_Unpause.
     // kill_switch_tripped bit lives in oms_state_flags above (v5.15.5.C.2).
-    FPN_Binary<F>  ks_min_balance;       // trip if balance < this
-    FPN_Binary<F>  ks_max_drawdown_pct;  // trip if (peak - balance) / peak > this (0 = disabled)
-    FPN_Binary<F>  ks_peak_balance;      // running max of balance, updated on exits
+    Money  ks_min_balance;       // trip if balance < this
+    Money  ks_max_drawdown_pct;  // trip if (peak - balance) / peak > this (0 = disabled)
+    Money  ks_peak_balance;      // running max of balance, updated on exits
     uint64_t ks_trips_total;      // count of trip events (observability)
 
     // v5.15.5.C.3 — paper-session start time (microseconds). Set at OrderManager_Init
@@ -613,9 +613,9 @@ struct OrderManagerState {
     // `if (oms->calibration_log_file)` callsite branches in handle_buy_fill / handle_sell_fill.
     // Indirect call cost ~3-5ns vs predicted-correctly branch ~0-1ns; branchless wins on
     // p99 + variance per H20 + Caramel principle ("branchless even when slightly slower").
-    void (*on_entry_fill_emit)(OrderManagerState<F>*, Order<F>*, FPN_Binary<F>, FPN_Binary<F>, FPN_Binary<F>) = &noop_fill_emit<F>;
-    void (*on_exit_fill_emit)(OrderManagerState<F>*, Order<F>*, FPN_Binary<F>, FPN_Binary<F>, FPN_Binary<F>)  = &noop_fill_emit<F>;
-    void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, FPN_Binary<F>, FPN_Binary<F>, FPN_Binary<F>) = &noop_fill_emit<F>;
+    void (*on_entry_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
+    void (*on_exit_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money)  = &noop_fill_emit<F>;
+    void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
 
     // v5.15.5.F.4d Step 7 § F — per-core ezoo + core_cfg lookup for calib log consumer.
     // Per-core ARRAYS indexed by Order::core_id at consumer (sister to per-slot last_exit_fee[]
@@ -636,14 +636,14 @@ struct OrderManagerState {
 // Single noop shared across all 3 fn-pointer fields (same sig). Used as the "always-call"
 // default when subsystems are disabled; production cost = 1 indirect call (~3-5ns deterministic).
 template <unsigned F>
-inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, FPN_Binary<F>, FPN_Binary<F>, FPN_Binary<F>) {}
+inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money) {}
 
 // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 real fn definitions.
 // Wrap the previous `if (oms->trade_log) { ... }` / `if (oms->calibration_log_file) { ... }` bodies.
 // Set at boot site (e.g., ShardedTradeLog_Init, calibration_log_open) when respective subsystem enables.
 template <unsigned F>
 inline void real_on_entry_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
-                                     FPN_Binary<F> fill_price, FPN_Binary<F> fill_qty, FPN_Binary<F> entry_fee) {
+                                     Money fill_price, Money fill_qty, Money entry_fee) {
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
@@ -655,12 +655,12 @@ inline void real_on_entry_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
 
 template <unsigned F>
 inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
-                                    FPN_Binary<F> fill_price, FPN_Binary<F> net, FPN_Binary<F> total_fee) {
+                                    Money fill_price, Money net, Money total_fee) {
     // Re-read position state (preserved through CloseSlot per Phase F invariant — only the
     // active_bitmap bit was cleared; entry_price + quantity remain stored on Position).
     const int pslot = (int)o->core_id;
-    const FPN_Binary<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-    const FPN_Binary<F> qty_snap         = oms->portfolio.positions[pslot].quantity;
+    const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
+    const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
@@ -673,21 +673,21 @@ inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
 
 template <unsigned F>
 inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
-                                      FPN_Binary<F> fill_price, FPN_Binary<F> net, FPN_Binary<F> total_fee) {
+                                      Money fill_price, Money net, Money total_fee) {
     const int pslot = (int)o->core_id;
-    const FPN_Binary<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-    const FPN_Binary<F> qty_snap         = oms->portfolio.positions[pslot].quantity;
+    const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
+    const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
     const uint64_t ts_us = (uint64_t)
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-    const double entry_d_calib = FPN_ToDouble(entry_price_snap);
-    const double exit_d_calib  = FPN_ToDouble(fill_price);
+    const double entry_d_calib = Money_ToDouble(entry_price_snap);
+    const double exit_d_calib  = Money_ToDouble(fill_price);
     const double gain_pct      = entry_d_calib > 0.0
         ? (exit_d_calib - entry_d_calib) / entry_d_calib * 100.0 : 0.0;
     const double notional_d    = entry_d_calib > 0.0
-        ? entry_d_calib * FPN_ToDouble(qty_snap) : 0.0;
+        ? entry_d_calib * Money_ToDouble(qty_snap) : 0.0;
     const double pnl_bps       = notional_d > 0.0
-        ? FPN_ToDouble(net) / notional_d * 10000.0 : 0.0;
+        ? Money_ToDouble(net) / notional_d * 10000.0 : 0.0;
     const uint8_t pred_flag    = (uint8_t)BITMAP_IS_SET(oms->last_exit_predicted_bitmap, BITMAP_BIT_U16(pslot));
     const double pred_p        = oms->last_exit_predicted_p[pslot];
     (void)total_fee;
@@ -757,13 +757,13 @@ static_assert(offsetof(OrderManagerState<64>, flatten_pending) % 64 == 0,
               "RFO storms on neighbor cold fields. "
               "See cross-thread-snapshot-publish-cluster-isolation.md (ND1).");
 // v5.15.5.C.2.1 (MEDIUM-2 close from /dod-audit) — explicit 8-byte alignment
-// lock for the COLD-cluster post-bitmap gap. FPN_Binary<F> ks_min_balance needs
+// lock for the COLD-cluster post-bitmap gap. Money ks_min_balance needs
 // 8-byte alignment per CLAUDE.md item 27 (struct padding determinism). The
 // _pad_osf[7] field is the explicit pad; this assert confirms the offset
 // remains 8-byte-aligned after future field additions to the COLD cluster.
 // Compile-time check; zero runtime cost (offsetof + % 8 fold to constant).
 static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
-              "ks_min_balance (FPN_Binary<F>) MUST be 8-byte aligned. If this trips, "
+              "ks_min_balance (Money) MUST be 8-byte aligned. If this trips, "
               "the COLD cluster gained a non-8-aligned field between oms_state_flags "
               "and ks_min_balance. Re-check _pad_osf[7] explicit pad.");
 
@@ -861,7 +861,7 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
                               const ExchangeAdapter<F>& adapter,
                               int live_trading,
                               int partial_exit_enabled,
-                              FPN_Binary<F> starting_balance,
+                              Money starting_balance,
                               int event_log_mode = 0,
                               const char* event_log_path = "logging/order_events.bin") {
     OMS_INIT_AUTOPOPULATE(oms, adapter, live_trading, partial_exit_enabled,
@@ -892,7 +892,7 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 //   4. If the adapter rejects the enqueue (its queue is full), mark
 //      the slot REJECTED and free it.
 //
-// qty is FPN_Binary<F> per the FPN_Binary-only-accounting rule in CLAUDE.md.
+// qty is Money per the FPN_Binary-only-accounting rule in CLAUDE.md.
 //
 // Phase 03 chunk 3: extra context parameters for the fill handler.
 //   intended_tp / intended_sl: TP/SL to apply at fill time (entry only).
@@ -908,11 +908,11 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     // backstop catches misses at HandleFill).
     const int16_t                core_id     = cmd.core_id;
     const OrderType              type        = (OrderType)cmd.order_type;
-    const FPN_Binary<F>                 qty         = cmd.qty;
-    const FPN_Binary<F>                 intended_tp = cmd.intended_tp;
-    const FPN_Binary<F>                 intended_sl = cmd.intended_sl;
+    const Money                 qty         = cmd.qty;
+    const Money                 intended_tp = cmd.intended_tp;
+    const Money                 intended_sl = cmd.intended_sl;
     const uint8_t                strategy_id = cmd.strategy_id;
-    const FPN_Binary<F>                 event_price = cmd.event_price;
+    const Money                 event_price = cmd.event_price;
     const uint8_t                leg         = cmd.leg;
     const ::PerCoreCfg<F>* const core_cfg    = cmd.core_cfg;
     uint64_t id = oms->next_order_id++;
@@ -992,8 +992,8 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
         cmd.order_id = id;
         std::memset(&cmd.result, 0, sizeof(cmd.result));
         cmd.result.success        = 1;
-        cmd.result.avg_fill_price = FPN_ToDouble(event_price);
-        cmd.result.fill_qty       = FPN_ToDouble(qty);
+        cmd.result.avg_fill_price = Money_ToDouble(event_price);
+        cmd.result.fill_qty       = Money_ToDouble(qty);
         std::strncpy(cmd.result.exchange_id, "PAPER",
                      sizeof(cmd.result.exchange_id) - 1);
         if (!SPSCRing_TryPush(&oms->result_queue, cmd)) {
@@ -1018,7 +1018,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
 
     // Async submit to the adapter. The callback fires later from the
     // worker thread once the REST round trip completes.
-    double qty_d = FPN_ToDouble(qty);
+    double qty_d = Money_ToDouble(qty);
     int submit_ok = (type == ORDER_MARKET_BUY)
         ? oms->adapter.submit_market_buy(oms->adapter.ctx, id, qty_d,
                                           OrderManager_FillResultCallback<F>,
@@ -1119,13 +1119,13 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_cores) {
 // extra per fill (drainer slow path; ~0.005% of 100μs budget) for deterministic latency.
 template <unsigned F>
 inline void OrderManager_AccountMakerTakerFee(
-    OrderManagerState<F>* oms, int is_maker, FPN_Binary<F> fee) {
-    oms->total_fees = FPN_AddSat(oms->total_fees, fee);
+    OrderManagerState<F>* oms, int is_maker, Money fee) {
+    oms->total_fees = Money_Add(oms->total_fees, fee);
     const bool maker = is_maker != 0;
     oms->maker_fills_count   = (uint32_t)(oms->maker_fills_count + (uint32_t)maker);
     oms->taker_fills_count   = (uint32_t)(oms->taker_fills_count + (uint32_t)(!maker));
-    oms->total_maker_fees    = maker ? FPN_AddSat(oms->total_maker_fees, fee) : oms->total_maker_fees;
-    oms->total_taker_fees    = maker ? oms->total_taker_fees : FPN_AddSat(oms->total_taker_fees, fee);
+    oms->total_maker_fees    = maker ? Money_Add(oms->total_maker_fees, fee) : oms->total_maker_fees;
+    oms->total_taker_fees    = maker ? oms->total_taker_fees : Money_Add(oms->total_taker_fees, fee);
 }
 
 // GUARD — maker/taker fee-desync (DORMANT; the reactivatable-assumption shape, Class-40 sibling).
@@ -1157,10 +1157,10 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
 
 // BUY handler — entry fill: open portfolio slot + record entry fee + bump counters + trade log.
 template <unsigned F>
-inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<F> fill_price, FPN_Binary<F> fill_qty) {
-    const FPN_Binary<F> notional   = FPN_Mul(fill_price, fill_qty);
-    const FPN_Binary<F> entry_rate = o->pre_resolved.fee_rate;
-    const FPN_Binary<F> entry_fee  = FPN_Mul(notional, entry_rate);
+inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty) {
+    const Money notional   = Money_Mul(fill_price, fill_qty);
+    const Money entry_rate = o->pre_resolved.fee_rate;
+    const Money entry_fee  = Money_Mul(notional, entry_rate);
     OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
     OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), entry_fee);
     Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
@@ -1175,7 +1175,7 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<F
 
 // SELL handler — exit fill: close portfolio slot, compute P&L, update balance, write trade log.
 template <unsigned F>
-inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<F> fill_price, FPN_Binary<F> fill_qty) {
+inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty) {
     const int pslot = (int)o->core_id;
     // v4.7.19 race guard — H20 exception #4 (genuine predicate; alternative requires Portfolio refactor).
     // __builtin_expect-rare: production fires only on rare hot-path-SG / manual-close race.
@@ -1185,36 +1185,36 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<
             "no-op (race between manual close and hot-path SG)\n", pslot);
         return;
     }
-    const FPN_Binary<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-    const FPN_Binary<F> entry_fee        = oms->portfolio.positions[pslot].entry_fee;
-    const FPN_Binary<F> qty_snap         = oms->portfolio.positions[pslot].quantity;
-    const FPN_Binary<F> tp_snap          = oms->portfolio.positions[pslot].take_profit_price;
-    const FPN_Binary<F> sl_snap          = oms->portfolio.positions[pslot].stop_loss_price;
+    const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
+    const Money entry_fee        = oms->portfolio.positions[pslot].entry_fee;
+    const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
+    const Money tp_snap          = oms->portfolio.positions[pslot].take_profit_price;
+    const Money sl_snap          = oms->portfolio.positions[pslot].stop_loss_price;
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless last_realized_return + last_closed_mask update.
     // Pre-r-6: `if (entry_price_d > 0.0 && bounds) { write }` — 2 branches.
     // Post-r-6: always compute return value; mask-gate the WRITE via ternary store-select.
     // pslot bounds already enforced by HandleFill caller guard + active_bitmap check above.
-    const double entry_price_d   = FPN_ToDouble(entry_price_snap);
-    const double exit_price_d    = FPN_ToDouble(fill_price);
+    const double entry_price_d   = Money_ToDouble(entry_price_snap);
+    const double exit_price_d    = Money_ToDouble(fill_price);
     const bool   valid_entry     = entry_price_d > 0.0;
     const double computed_ret    = valid_entry ? (exit_price_d - entry_price_d) / entry_price_d : 0.0;
     oms->last_realized_return[pslot] = valid_entry ? computed_ret : oms->last_realized_return[pslot];
     const uint16_t closed_bit    = (uint16_t)(1u << pslot);
     oms->last_closed_mask        = (uint16_t)(oms->last_closed_mask | (valid_entry ? closed_bit : (uint16_t)0));
 
-    const FPN_Binary<F> gross         = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
-    const FPN_Binary<F> exit_notional = FPN_Mul(fill_price, qty_snap);
-    const FPN_Binary<F> exit_rate     = o->pre_resolved.fee_rate;
-    const FPN_Binary<F> exit_fee      = FPN_Mul(exit_notional, exit_rate);
+    const Money gross         = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
+    const Money exit_notional = Money_Mul(fill_price, qty_snap);
+    const Money exit_rate     = o->pre_resolved.fee_rate;
+    const Money exit_fee      = Money_Mul(exit_notional, exit_rate);
     OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
     OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), exit_fee);
-    const FPN_Binary<F> total_fee     = FPN_Add(entry_fee, exit_fee);
-    const FPN_Binary<F> net           = FPN_Sub(gross, total_fee);
-    oms->balance               = FPN_Add(oms->balance, net);
-    oms->realized_pnl          = FPN_Add(oms->realized_pnl, net);
+    const Money total_fee     = Money_Add(entry_fee, exit_fee);
+    const Money net           = Money_Sub(gross, total_fee);
+    oms->balance               = Money_Add(oms->balance, net);
+    oms->realized_pnl          = Money_Add(oms->realized_pnl, net);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — peak balance via FPN_Max (branchless mask-select replaces `if`).
-    oms->ks_peak_balance       = FPN_Max(oms->ks_peak_balance, oms->balance);
+    oms->ks_peak_balance       = Money_Max(oms->ks_peak_balance, oms->balance);
 
     // Exit-side scratch on OMS sibling arrays.
     oms->last_exit_fill_price[pslot] = fill_price;
@@ -1227,7 +1227,7 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<
 
     // Branchless mask-select on last_was_win_bitmap (Pattern 3).
     const uint16_t win_bit       = BITMAP_BIT_U16(pslot);
-    const uint16_t was_win_mask  = FPN_GreaterThan(net, FPN_Zero<F>()) ? win_bit : (uint16_t)0;
+    const uint16_t was_win_mask  = Money_Gt(net, Money_Zero()) ? win_bit : (uint16_t)0;
     oms->last_was_win_bitmap     = (uint16_t)((oms->last_was_win_bitmap & ~win_bit) | was_win_mask);
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
@@ -1236,13 +1236,13 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<
 
     // v5.1.6 exit reason diagnostic — branchless ternary chain (replaces if-else-if; cmov on pointer).
     {
-        const double entry_d = FPN_ToDouble(entry_price_snap);
-        const double exit_d  = FPN_ToDouble(fill_price);
-        const double tp_d    = FPN_ToDouble(tp_snap);
-        const double sl_d    = FPN_ToDouble(sl_snap);
+        const double entry_d = Money_ToDouble(entry_price_snap);
+        const double exit_d  = Money_ToDouble(fill_price);
+        const double tp_d    = Money_ToDouble(tp_snap);
+        const double sl_d    = Money_ToDouble(sl_snap);
         const double gain    = entry_d > 0.0 ? (exit_d - entry_d) / entry_d : 0.0;
-        const double net_d   = FPN_ToDouble(net);
-        const double fee_d   = FPN_ToDouble(total_fee);
+        const double net_d   = Money_ToDouble(net);
+        const double fee_d   = Money_ToDouble(total_fee);
         // Branchless: chained ternaries → cmov on const char*.
         const bool is_tp     = (tp_d > 0.0) && (exit_d >= tp_d - 1e-6);
         const bool is_sl     = (sl_d > 0.0) && (exit_d <= sl_d + 1e-6);
@@ -1252,7 +1252,7 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<
             "tp=%.2f sl=%.2f gain=%+.4f%% gross=%+.4f fees=%.4f net=%+.4f\n",
             pslot, (unsigned)o->strategy_id, reason,
             entry_d, exit_d, tp_d, sl_d, gain * 100.0,
-            FPN_ToDouble(gross), fee_d, net_d);
+            Money_ToDouble(gross), fee_d, net_d);
     }
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
@@ -1263,7 +1263,7 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, FPN_Binary<
 // Fn pointer table — indexed by OrderType (0=MARKET_BUY, 1=MARKET_SELL, 2=LIMIT_BUY, 3=LIMIT_SELL).
 // 4 × 8B = 32B = 1 cache line; L1-hot on pinned drainer.
 template <unsigned F>
-using FillHandler = void (*)(OrderManagerState<F>*, Order<F>*, FPN_Binary<F>, FPN_Binary<F>);
+using FillHandler = void (*)(OrderManagerState<F>*, Order<F>*, Money, Money);
 
 template <unsigned F>
 inline constexpr FillHandler<F> g_fill_dispatch[4] = {
@@ -1282,7 +1282,7 @@ inline constexpr FillHandler<F> g_fill_dispatch[4] = {
 //======================================================================================================
 template <unsigned F>
 inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
-                                     FPN_Binary<F> fill_price, FPN_Binary<F> fill_qty) {
+                                     Money fill_price, Money fill_qty) {
     // Bounds guard — H20 exception #4 (genuine predicate without alternative); __builtin_expect-rare.
     if (__builtin_expect(o->core_id < 0 || o->core_id >= MAX_PORTFOLIO_POSITIONS, 0)) {
         std::fprintf(stderr,
@@ -1366,8 +1366,8 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             return 1;  // slot stays open — don't free
         }
 
-        o->avg_fill_price = FPN_FromDouble<F>(cmd.result.avg_fill_price);
-        o->filled_qty     = FPN_FromDouble<F>(cmd.result.fill_qty);
+        o->avg_fill_price = Money{ money_from_double_payload(cmd.result.avg_fill_price) };  // OrderResult ring bridge (scaled-i64 vehicle rides P3/S-8)
+        o->filled_qty     = Money{ money_from_double_payload(cmd.result.fill_qty) };
         // Phase 8: maker/taker flag from Binance executionReport, parsed in c3.
         // Fee_Compute reads this for entry-fee math when the controller books
         // the fill. is_maker stays at Order_Init's 0 (taker) for synchronous
@@ -1387,8 +1387,8 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 
         // Mode 1 fill handler: portfolio mutation + event log.
         if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
-            FPN_Binary<F> fill_price = o->avg_fill_price;
-            FPN_Binary<F> fill_qty   = o->filled_qty;
+            Money fill_price = o->avg_fill_price;
+            Money fill_qty   = o->filled_qty;
             OrderManager_HandleFill(oms, o, fill_price, fill_qty);
         }
     } else {
@@ -1428,8 +1428,8 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
                  "[OMS] RECONCILE: drift=$%.4f, correcting balance to match "
                  "exchange ($%.4f)\n", drift, exchange_balance);
 
-    oms->balance = FPN_FromDouble<F>(exchange_balance);
-    if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
+    oms->balance = Money{ money_from_double_payload(exchange_balance) };  // D-103 reconcile ingress (exact venue parse rides P3)
+    if (Money_Gt(oms->balance, oms->ks_peak_balance)) {
         oms->ks_peak_balance = oms->balance;
     }
 
@@ -1439,7 +1439,7 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
         recon_event.type       = OEVT_RECONCILED;
         recon_event.order_type = ORDER_MARKET_BUY;  // placeholder
         recon_event.core_id    = -1;
-        recon_event.price      = FPN_FromDouble<F>(drift);
+        recon_event.price      = Money{ money_from_double_payload(drift) };
         std::strncpy(recon_event.reason, cmd.result.error_message,
                      sizeof(recon_event.reason) - 1);
         recon_event.reason[sizeof(recon_event.reason) - 1] = '\0';

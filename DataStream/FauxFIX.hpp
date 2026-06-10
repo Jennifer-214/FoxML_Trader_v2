@@ -241,8 +241,8 @@ static inline FIX_ParsedMessage FIX_Parse(const char *msg, int len) {
 //======================================================================================================
 template <unsigned F> inline DataStream<F> FIX_ToDataStream(const FIX_ParsedMessage *msg) {
     DataStream<F> stream;
-    stream.price  = FPN_FromDouble<F>(msg->price);
-    stream.volume = FPN_FromDouble<F>(msg->volume);
+    stream.price  = Money{ money_from_double_payload(msg->price) };
+    stream.volume = Money{ money_from_double_payload(msg->volume) };
     return stream;
 }
 

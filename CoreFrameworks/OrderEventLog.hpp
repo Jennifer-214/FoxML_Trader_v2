@@ -40,7 +40,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cerrno>      // errno - made explicit (was transitively included; header self-sufficiency, .E.1-reshuffle-protective)
+#include <cerrno>
+#include <ctime>      // time() for D-175a rotate suffix      // errno - made explicit (was transitively included; header self-sufficiency, .E.1-reshuffle-protective)
 #include <atomic>      // v5.11.3.C — async writer thread coordination
 #include <pthread.h>   // v5.11.3.C — async writer pthread
 #include <unistd.h>    // v5.11.3.C — usleep in writer idle path
@@ -84,10 +85,12 @@ struct OrderEvent {
     OrderType      order_type;     // ORDER_MARKET_BUY / ORDER_MARKET_SELL
     int16_t        core_id;        // which executor core (-1 for non-core)
     uint8_t        _pad[4];
-    FPN_Binary<F>         price;          // fill price (zero for non-fill events)
-    FPN_Binary<F>         qty;            // fill qty (zero for non-fill events)
-    FPN_Binary<F>         tp;             // intended TP at fill time (entry only)
-    FPN_Binary<F>         sl;             // intended SL at fill time (entry only)
+    Money          price;          // fill price (DECIMAL money — Ship B P2b epoch)
+    Money          qty;            // fill qty (decimal)
+    Money          tp;             // intended TP at fill time (entry only; decimal)
+    Money          sl;             // intended SL at fill time (entry only; decimal)
+    Money          fee;            // booked fee for fill events (S-3; semantics land at P3
+                                   // fill-lifecycle rework — zero until then; wire slot settles NOW)
     char           reason[32];     // short description for REJECTED/RECONCILED
 };
 
@@ -97,11 +100,11 @@ struct OrderEvent {
 // format_version + switch the reject path to ROTATE-not-append (the loader's swallowed -1 +
 // "ab" reopen otherwise appends decimal events under the OLD magic — lost at next boot) + add
 // the booked-fee field (S-3) in the same stroke.
-static_assert(!is_fp_decimal_v<decltype(OrderEvent<64>::price)>,
-              "Ship-B epoch: OrderEvent money fields flipped to decimal — in THIS commit: magic "
-              "OMSEL01->OMSEL02 (H21 tombstone), reserved[]->format_version, rotate-not-append "
-              "on reject (D-175a), + the S-3 booked-fee field. Then update this guard to the "
-              "version-compare form.");
+// Format version 2 = the decimal-money epoch (OMSEL02). Version 1 = the 16B-binary
+// OMSEL01 era — H21 TOMBSTONE: never reuse the OMSEL01 magic or version 1.
+#define ORDER_EVENT_LOG_FORMAT_VERSION 2u
+static_assert(!is_fp_decimal_v<decltype(OrderEvent<64>::price)> || ORDER_EVENT_LOG_FORMAT_VERSION >= 2u,
+              "Ship-B epoch: decimal OrderEvent money requires format version >= 2 (OMSEL02).");
 
 //======================================================================================================
 // [EVENT LOG STRUCT]
@@ -136,10 +139,11 @@ constexpr size_t ORDER_EVENT_LOG_MAX_CAPACITY = 32768;
 // Phase 07 file header — written at the start of the event log file.
 // Carries the FPN_Binary width and entry size for forward compatibility.
 struct OrderEventLogFileHeader {
-    char     magic[8];       // "OMSEL01\0"
+    char     magic[8];       // "OMSEL02\0" (OMSEL01 = pre-epoch binary era, H21 tombstone)
     uint32_t fpn_width;      // F template parameter (e.g. 64)
     uint32_t entry_size;     // sizeof(OrderEvent<F>) for this build
-    uint64_t reserved[2];    // future: checksum, version
+    uint64_t format_version; // ORDER_EVENT_LOG_FORMAT_VERSION (claimed from reserved[0] at the epoch)
+    uint64_t reserved;       // future: checksum
 };
 
 // v5.11.3.C — async writer SPSC ring size. 256 events × ~176B/event = ~45 KB.
@@ -417,10 +421,39 @@ inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) 
     std::strncpy(log->disk_path, path, sizeof(log->disk_path) - 1);
     log->disk_path[sizeof(log->disk_path) - 1] = '\0';
 
-    // Check if the file exists (for the header write decision).
+    // Check if the file exists (for the header write decision) AND validate its
+    // header. D-175a ROTATE-not-append: an existing file whose header is not the
+    // current epoch (old magic / version / entry size) must NEVER be appended to —
+    // pre-epoch binary events + new decimal events under one header would corrupt
+    // replay silently. Rotate it aside and start fresh.
     bool file_exists = false;
     FILE* probe = std::fopen(path, "rb");
-    if (probe) { file_exists = true; std::fclose(probe); }
+    if (probe) {
+        file_exists = true;
+        OrderEventLogFileHeader phdr;
+        bool header_current =
+            std::fread(&phdr, sizeof(phdr), 1, probe) == 1 &&
+            std::memcmp(phdr.magic, "OMSEL02", 8) == 0 &&
+            phdr.format_version == ORDER_EVENT_LOG_FORMAT_VERSION &&
+            phdr.fpn_width == F &&
+            phdr.entry_size == (uint32_t)sizeof(OrderEvent<F>);
+        std::fclose(probe);
+        if (!header_current) {
+            char rotated[sizeof(log->disk_path) + 32];
+            std::snprintf(rotated, sizeof(rotated), "%s.pre-epoch.%lld",
+                          path, (long long)time(nullptr));
+            if (std::rename(path, rotated) == 0) {
+                std::fprintf(stderr, "[OrderEventLog] stale-format log ROTATED: %s -> %s (D-175a)\n",
+                             path, rotated);
+            } else {
+                std::fprintf(stderr, "[OrderEventLog] WARN: could not rotate stale log %s "
+                             "(errno=%d); disk persistence DISABLED to protect it\n",
+                             path, errno);
+                return;  // never append mixed-epoch events
+            }
+            file_exists = false;  // fresh file gets the new header below
+        }
+    }
 
     log->disk_file = std::fopen(path, "ab");
     if (!log->disk_file) {
@@ -433,9 +466,10 @@ inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) 
     if (!file_exists) {
         OrderEventLogFileHeader hdr;
         std::memset(&hdr, 0, sizeof(hdr));
-        std::memcpy(hdr.magic, "OMSEL01", 8);
+        std::memcpy(hdr.magic, "OMSEL02", 8);
         hdr.fpn_width  = F;
         hdr.entry_size = (uint32_t)sizeof(OrderEvent<F>);
+        hdr.format_version = ORDER_EVENT_LOG_FORMAT_VERSION;
         std::fwrite(&hdr, sizeof(hdr), 1, log->disk_file);
         std::fflush(log->disk_file);
     }
@@ -473,9 +507,10 @@ inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
     }
     OrderEventLogFileHeader hdr;
     std::memset(&hdr, 0, sizeof(hdr));
-    std::memcpy(hdr.magic, "OMSEL01", 8);
+    std::memcpy(hdr.magic, "OMSEL02", 8);
     hdr.fpn_width  = F;
     hdr.entry_size = (uint32_t)sizeof(OrderEvent<F>);
+    hdr.format_version = ORDER_EVENT_LOG_FORMAT_VERSION;
     std::fwrite(&hdr, sizeof(hdr), 1, log->disk_file);
     std::fflush(log->disk_file);
     // reopen in append mode so subsequent writes keep going
@@ -507,8 +542,23 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
         std::fclose(f);
         return -1;
     }
-    if (std::memcmp(hdr.magic, "OMSEL01", 8) != 0) {
+    if (std::memcmp(hdr.magic, "OMSEL01", 8) == 0) {
+        // H21 tombstone: pre-epoch BINARY-encoded log — decimal replay would
+        // misread every money field. Refuse loudly; InitWithFile rotates it away.
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s is a pre-epoch OMSEL01 (binary-money) "
+                     "log — refused (H21); will be rotated, not appended\n", path);
+        std::fclose(f);
+        return -1;
+    }
+    if (std::memcmp(hdr.magic, "OMSEL02", 8) != 0) {
         std::fprintf(stderr, "[OrderEventLog] WARN: %s bad magic\n", path);
+        std::fclose(f);
+        return -1;
+    }
+    if (hdr.format_version != ORDER_EVENT_LOG_FORMAT_VERSION) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s format_version mismatch "
+                     "(file=%llu, build=%u)\n", path,
+                     (unsigned long long)hdr.format_version, ORDER_EVENT_LOG_FORMAT_VERSION);
         std::fclose(f);
         return -1;
     }
@@ -575,10 +625,10 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
                                           uint64_t timestamp_us,
                                           OrderType order_type,
                                           int16_t core_id,
-                                          FPN_Binary<F> price,
-                                          FPN_Binary<F> qty,
-                                          FPN_Binary<F> tp,
-                                          FPN_Binary<F> sl) {
+                                          Money price,
+                                          Money qty,
+                                          Money tp,
+                                          Money sl) {
     OrderEvent<F> e;
     std::memset(&e, 0, sizeof(e));
     e.event_id     = 0;  // assigned by Append
@@ -636,19 +686,19 @@ inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
 //======================================================================================================
 template <unsigned F>
 struct FoldResult {
-    FPN_Binary<F> balance;
-    FPN_Binary<F> realized_pnl;
+    Money balance;
+    Money realized_pnl;
     Portfolio<F> portfolio;
     int    fills_processed;
 };
 
 template <unsigned F>
 inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
-                                            FPN_Binary<F> starting_balance,
-                                            FPN_Binary<F> fee_rate) {
+                                            Money starting_balance,
+                                            Money fee_rate) {
     FoldResult<F> result;
     result.balance         = starting_balance;
-    result.realized_pnl    = FPN_Zero<F>();
+    result.realized_pnl    = Money_Zero();
     result.fills_processed = 0;
     Portfolio_Init(&result.portfolio);
 
@@ -665,8 +715,8 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
             // timestamp so hold-time display survives engine restart +
             // replay. Closes the Class-18 mirror between live-entry +
             // replay paths per CLAUDE.md item 19.
-            FPN_Binary<F> notional  = FPN_Mul(e.price, e.qty);
-            FPN_Binary<F> entry_fee = FPN_Mul(notional, fee_rate);
+            Money notional  = Money_Mul(e.price, e.qty);
+            Money entry_fee = Money_Mul(notional, fee_rate);
             PositionEntryArgs<F> args;
             args.entry_price        = e.price;
             args.quantity           = e.qty;
@@ -681,15 +731,15 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
         } else if (e.order_type == ORDER_MARKET_SELL) {
             // Exit fill: close the slot, compute net P&L, update balance.
             // Same math as EventLoop_OnEvent in ControllerEventLoop.hpp.
-            FPN_Binary<F> entry_fee     = result.portfolio.positions[slot].entry_fee;
-            FPN_Binary<F> qty_snap      = result.portfolio.positions[slot].quantity;
-            FPN_Binary<F> gross         = Portfolio_CloseSlot(&result.portfolio, slot, e.price);
-            FPN_Binary<F> exit_notional = FPN_Mul(e.price, qty_snap);
-            FPN_Binary<F> exit_fee      = FPN_Mul(exit_notional, fee_rate);
-            FPN_Binary<F> total_fee     = FPN_Add(entry_fee, exit_fee);
-            FPN_Binary<F> net           = FPN_Sub(gross, total_fee);
-            result.balance       = FPN_Add(result.balance, net);
-            result.realized_pnl  = FPN_Add(result.realized_pnl, net);
+            Money entry_fee     = result.portfolio.positions[slot].entry_fee;
+            Money qty_snap      = result.portfolio.positions[slot].quantity;
+            Money gross         = Portfolio_CloseSlot(&result.portfolio, slot, e.price);
+            Money exit_notional = Money_Mul(e.price, qty_snap);
+            Money exit_fee      = Money_Mul(exit_notional, fee_rate);
+            Money total_fee     = Money_Add(entry_fee, exit_fee);
+            Money net           = Money_Sub(gross, total_fee);
+            result.balance       = Money_Add(result.balance, net);
+            result.realized_pnl  = Money_Add(result.realized_pnl, net);
         }
         result.fills_processed++;
     }

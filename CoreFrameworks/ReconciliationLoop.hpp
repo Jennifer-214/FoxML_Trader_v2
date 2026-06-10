@@ -102,7 +102,7 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
     }
 
     // Expected USDT balance from OMS (known race — snapshot, not locked).
-    double oms_balance = FPN_ToDouble(s->oms->balance);
+    double oms_balance = Money_ToDouble(s->oms->balance);
 
     // Exclude in-flight orders: scan the order table for orders that have
     // been submitted but not yet filled. Their notional value is committed
@@ -116,8 +116,8 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
         if (ostate == ORDER_SUBMITTED || ostate == ORDER_ACKNOWLEDGED) {
             if (Order_GetType(&o) == ORDER_MARKET_BUY) {
                 // estimate notional from event_price * requested_qty
-                double price = FPN_ToDouble(o.event_price);
-                double qty   = FPN_ToDouble(o.requested_qty);
+                double price = Money_ToDouble(o.event_price);
+                double qty   = Money_ToDouble(o.requested_qty);
                 inflight_buy_notional += price * qty;
             }
         }

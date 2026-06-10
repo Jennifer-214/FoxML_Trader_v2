@@ -344,10 +344,10 @@ template <unsigned F>
 inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
                                          const TradeEvent<F>& event,
                                          uint8_t strategy_id,
-                                         FPN_Binary<F> entry_price,
-                                         FPN_Binary<F> trade_size,
-                                         FPN_Binary<F> entry_fee,
-                                         FPN_Binary<F> balance_after,
+                                         Money entry_price,
+                                         Money trade_size,
+                                         Money entry_fee,
+                                         Money balance_after,
                                          int regime = -1) {
     if (!log->file) return;
     char row[1024];
@@ -361,13 +361,13 @@ inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
     uint64_t timestamp_us  = event.timestamp;
     uint32_t core_id       = event.core_id;
     char     event_type    = 'E';
-    double   price_v       = FPN_ToDouble(event.price);
-    double   entry_price_v = FPN_ToDouble(entry_price);
+    double   price_v       = Money_ToDouble(event.price);
+    double   entry_price_v = Money_ToDouble(entry_price);
     double   exit_price_v  = 0.0;                                // entry: exit_price unused
     double   pnl_v         = 0.0;                                // entry: pnl unused
-    double   fees_v        = FPN_ToDouble(entry_fee);            // entry: fees = entry_fee
-    double   balance_after_v = FPN_ToDouble(balance_after);
-    double   trade_size_v    = FPN_ToDouble(trade_size);
+    double   fees_v        = Money_ToDouble(entry_fee);            // entry: fees = entry_fee
+    double   balance_after_v = Money_ToDouble(balance_after);
+    double   trade_size_v    = Money_ToDouble(trade_size);
     int      regime_v        = regime;
     const char* regime_name_v = (regime >= 0 && regime < NUM_REGIMES)
                                     ? REGIME_INFO[regime].full_name
@@ -397,12 +397,12 @@ template <unsigned F>
 inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
                                         const TradeEvent<F>& event,
                                         uint8_t strategy_id,
-                                        FPN_Binary<F> entry_price,
-                                        FPN_Binary<F> exit_price,
-                                        FPN_Binary<F> trade_size,
-                                        FPN_Binary<F> net_pnl,
-                                        FPN_Binary<F> total_fees,
-                                        FPN_Binary<F> balance_after,
+                                        Money entry_price,
+                                        Money exit_price,
+                                        Money trade_size,
+                                        Money net_pnl,
+                                        Money total_fees,
+                                        Money balance_after,
                                         int regime = -1) {
     if (!log->file) return;
     char row[1024];
@@ -411,13 +411,13 @@ inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
     uint64_t timestamp_us  = event.timestamp;
     uint32_t core_id       = event.core_id;
     char     event_type    = 'X';
-    double   price_v       = FPN_ToDouble(event.price);
-    double   entry_price_v = FPN_ToDouble(entry_price);
-    double   exit_price_v  = FPN_ToDouble(exit_price);
-    double   pnl_v         = FPN_ToDouble(net_pnl);              // exit: pnl = net_pnl
-    double   fees_v        = FPN_ToDouble(total_fees);           // exit: fees = total_fees
-    double   balance_after_v = FPN_ToDouble(balance_after);
-    double   trade_size_v    = FPN_ToDouble(trade_size);
+    double   price_v       = Money_ToDouble(event.price);
+    double   entry_price_v = Money_ToDouble(entry_price);
+    double   exit_price_v  = Money_ToDouble(exit_price);
+    double   pnl_v         = Money_ToDouble(net_pnl);              // exit: pnl = net_pnl
+    double   fees_v        = Money_ToDouble(total_fees);           // exit: fees = total_fees
+    double   balance_after_v = Money_ToDouble(balance_after);
+    double   trade_size_v    = Money_ToDouble(trade_size);
     int      regime_v        = regime;
     const char* regime_name_v = (regime >= 0 && regime < NUM_REGIMES)
                                     ? REGIME_INFO[regime].full_name

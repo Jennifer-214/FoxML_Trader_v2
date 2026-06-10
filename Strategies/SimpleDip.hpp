@@ -70,7 +70,7 @@ inline BuySideGateConditions<F> SimpleDip_BuySignal(
     // buy price = recent_high * (1 - dip_pct)
     // dip_pct comes from entry_offset_pct (reuse existing config field)
     // e.g. 0.15% dip from high → buy
-    FPN_Binary<F> dip_offset = FPN_Mul(state->recent_high, cfg->entry_offset_pct);
+    FPN_Binary<F> dip_offset = FPN_Mul(state->recent_high, Money_ToBinary(cfg->entry_offset_pct));  // feature-side ingress
     conds.price = FPN_Sub(state->recent_high, dip_offset);
 
     // volume gate: same as MR — require minimum volume
@@ -100,7 +100,7 @@ template <unsigned F, unsigned W>
 inline void SimpleDip_ExitAdjustSharded(
     EventLoopState<F>* state, int slot,
     SimpleDipState<F>* strat_state,
-    FPN_Binary<F> current_price,
+    Money current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg) {
     (void)state; (void)slot; (void)strat_state;

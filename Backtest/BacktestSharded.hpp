@@ -81,8 +81,8 @@ template <unsigned F>
 static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uint64_t seq) {
     Tick<F> t;
     memset(&t, 0, sizeof(t));
-    t.price     = FPN_FromDouble<F>(h->price);
-    t.volume    = FPN_FromDouble<F>(h->qty);
+    t.price     = Money{ money_from_double_payload(h->price) };  // historical-data ingress (exact recorder boundary rides the recorder rework)
+    t.volume    = Money{ money_from_double_payload(h->qty) };
     t.timestamp = (uint64_t)h->timestamp_us;
     t.sequence  = seq;
     // v5.1.2 carry-forward — TODO(parity-check Finding #5):
@@ -227,8 +227,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // Risk slice per core: even split of (total_balance × risk_pct) across
     // cores, with cfg.core_risk_pct[i] override allowed. Mirrors
     // EngineSharded_Run lines 549-557.
-    double total_balance = FPN_ToDouble(cfg.starting_balance);
-    double default_risk = FPN_ToDouble(cfg.risk_pct);
+    double total_balance = Money_ToDouble(cfg.starting_balance);
+    double default_risk = Money_ToDouble(cfg.risk_pct);
     if (default_risk <= 0.0) default_risk = 0.10;
     double default_per_core = (total_balance * default_risk) / (double)num_cores;
     if (default_per_core < 1.0) default_per_core = 1.0;
@@ -261,8 +261,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 
         // Per-core risk: same as LIVE per v1.6 O2 bytewise-identical math discipline.
         double core_balance = default_per_core;
-        if (!FPN_IsZero(cfg.core_risk_pct[i])) {
-            core_balance = total_balance * FPN_ToDouble(cfg.core_risk_pct[i]);
+        if (!Money_IsZero(cfg.core_risk_pct[i])) {
+            core_balance = total_balance * Money_ToDouble(cfg.core_risk_pct[i]);
             if (core_balance < 1.0) core_balance = 1.0;
         }
 
@@ -284,7 +284,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // SetPermission.
         EngineCommon_BootPerCore(cfg, i, state, tick_rings[i], cores[i],
                                   zoo_ptr, ezoo_ptr,
-                                  FPN_FromDouble<BACKTEST_FP>(core_balance));
+                                  Money{ money_from_double_payload(core_balance) });
 
         // Post-helper BACKTEST-only operator override (Decision B external wrapper).
         // v5.10.0a.next.1 — operator-explicit prior path overrides the default
@@ -508,7 +508,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 }
             }
             fc->results->sample_tick_indices[fc->results->sample_count] = (uint64_t)tick_index;
-            fc->results->sample_prices[fc->results->sample_count] = FPN_ToDouble(tk.price);
+            fc->results->sample_prices[fc->results->sample_count] = Money_ToDouble(tk.price);
             // Sharded has no central regime field (each core may run a
             // different strategy). Default 0 — Past Runs / regime histograms
             // that read this should treat sharded results as regime-agnostic.
@@ -639,10 +639,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // PortfolioController_Tick. Driver reads the resulting value via
             // drv.ema_price on slow-path firings; without per-tick updates
             // sig->ema_sma_spread + sig->ema_above_sma stay stale or zero.
+            // D-122/D-170 producer-ingress cast: ema_price is a BINARY feature; the money
+            // tick price crosses the domain boundary EXACTLY ONCE per tick here.
+            FPN_Binary<BACKTEST_FP> price_bin = Money_ToBinary(t.price);
             FPN_Binary<BACKTEST_FP> ema_new = FPN_Add(
                 FPN_Mul(ema_price, ema_alpha),
-                FPN_Mul(t.price,    one_minus_alpha));
-            if (FPN_IsZero(ema_price)) ema_price = t.price;
+                FPN_Mul(price_bin,  one_minus_alpha));
+            if (FPN_IsZero(ema_price)) ema_price = price_bin;
             else                       ema_price = ema_new;
 
             // Track E.3 — advance depth replay in lockstep with the tick
@@ -716,13 +719,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 fprintf(stderr, "  rolling.volume_avg : %.4f\n", FPN_ToDouble(rolling.volume_avg));
                 fprintf(stderr, "  rolling_long.max   : %.4f\n", FPN_ToDouble(rolling_long.price_max));
                 fprintf(stderr, "  core[0] pending bg_threshold : %.4f\n",
-                        FPN_ToDouble(state.cores[0].pending_params.bg_price_threshold));
+                        Money_ToDouble(state.cores[0].pending_params.bg_price_threshold));
                 fprintf(stderr, "  core[0] pending tp_price     : %.4f\n",
-                        FPN_ToDouble(state.cores[0].pending_params.sg_take_profit_price));
+                        Money_ToDouble(state.cores[0].pending_params.sg_take_profit_price));
                 fprintf(stderr, "  core[0] pending sl_price     : %.4f\n",
-                        FPN_ToDouble(state.cores[0].pending_params.sg_stop_loss_price));
+                        Money_ToDouble(state.cores[0].pending_params.sg_stop_loss_price));
                 fprintf(stderr, "  core[0] pending trade_size   : %.8f\n",
-                        FPN_ToDouble(state.cores[0].pending_params.trade_size));
+                        Money_ToDouble(state.cores[0].pending_params.trade_size));
                 fprintf(stderr, "  core[0] pending strategy_id  : %u\n",
                         (unsigned)state.cores[0].pending_params.strategy_id);
                 fprintf(stderr, "  core[0] pending flags        : 0x%02x\n",
@@ -734,7 +737,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // After the drain, check if any new exits happened by comparing
             // realized_pnl. If it changed, classify as win/loss and bump the
             // equity curve.
-            double current_realized = FPN_ToDouble(state.oms->realized_pnl);
+            double current_realized = Money_ToDouble(state.oms->realized_pnl);
             if (current_realized != last_realized_pnl) {
                 double trade_pnl = current_realized - last_realized_pnl;
                 if (trade_pnl > 0.0) {
@@ -753,7 +756,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 // Equity curve sample (one per completed trade).
                 // dynamic growth — capping silently contaminates stats.
                 if (BacktestResults_EnsureEquityCapacity(results, results->equity_count + 1)) {
-                    double bal = FPN_ToDouble(state.oms->balance);
+                    double bal = Money_ToDouble(state.oms->balance);
                     results->equity_curve[results->equity_count] = bal;
                     results->equity_count++;
                 }
@@ -762,7 +765,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // v5.8.4c: shared inner-update helper — same code path as
             // BacktestStats_ComputeFromEquity's post-hoc walk. Bytewise
             // FP identity guaranteed by construction.
-            double cur_equity = FPN_ToDouble(state.oms->balance);
+            double cur_equity = Money_ToDouble(state.oms->balance);
             MaxDrawdown_UpdateIncremental(cur_equity, &peak_equity,
                                            &max_drawdown, &max_dd_pct);
 
@@ -808,8 +811,8 @@ done:
     BacktestStats *stats = &results->stats;
     memset(stats, 0, sizeof(*stats));
 
-    double final_balance = FPN_ToDouble(state.oms->balance);
-    double final_pnl = FPN_ToDouble(state.oms->realized_pnl);
+    double final_balance = Money_ToDouble(state.oms->balance);
+    double final_pnl = Money_ToDouble(state.oms->realized_pnl);
 
     stats->total_pnl = final_pnl;
     stats->total_trades = (uint32_t)(state.total_entries + state.total_exits) / 2;
@@ -835,7 +838,7 @@ done:
                                                    stats->avg_win, stats->avg_loss);
     stats->max_drawdown     = max_drawdown;
     stats->max_drawdown_pct = max_dd_pct * 100.0;
-    double starting_bal = FPN_ToDouble(cfg.starting_balance);
+    double starting_bal = Money_ToDouble(cfg.starting_balance);
     stats->return_pct = Compute_ReturnPct(final_balance - starting_bal, starting_bal);
     stats->elapsed_ms = elapsed;
 

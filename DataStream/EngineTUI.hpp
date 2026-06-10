@@ -1533,7 +1533,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->long_gate_ok = !snap->long_gate_enabled || (snap->long_rel_slope >= min_ls);
 
     // portfolio + positions
-    double fee_r = FPN_ToDouble(ctrl->config.fee_rate);
+    double fee_r = Money_ToDouble(ctrl->config.fee_rate);
     snap->active_count = Portfolio_CountActive(&ctrl->portfolio);
     snap->max_positions = (int)ctrl->config.max_positions;
     snap->total_value = 0.0;
@@ -1545,15 +1545,15 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
         const Position<F> *pos = &ctrl->portfolio.positions[idx];
         TUIPositionSnap *ps = &snap->positions[idx];
         ps->idx      = idx;
-        ps->entry    = FPN_ToDouble(pos->entry_price);
-        ps->qty      = FPN_ToDouble(pos->quantity);
-        ps->tp       = FPN_ToDouble(pos->take_profit_price);
-        ps->sl       = FPN_ToDouble(pos->stop_loss_price);
-        ps->orig_tp  = FPN_ToDouble(pos->original_tp);
+        ps->entry    = Money_ToDouble(pos->entry_price);
+        ps->qty      = Money_ToDouble(pos->quantity);
+        ps->tp       = Money_ToDouble(pos->take_profit_price);
+        ps->sl       = Money_ToDouble(pos->stop_loss_price);
+        ps->orig_tp  = Money_ToDouble(pos->original_tp);
         ps->value    = price_d * ps->qty;
         ps->gross_pnl = (ps->entry != 0.0) ? ((price_d - ps->entry) / ps->entry) * 100.0 : 0.0;
         ps->net_pnl   = ps->gross_pnl - (fee_r * 200.0);
-        ps->is_trailing  = !FPN_Equal(pos->take_profit_price, pos->original_tp);
+        ps->is_trailing  = !Money_Eq(pos->take_profit_price, pos->original_tp);
         ps->above_orig_tp = (price_d > ps->orig_tp) && (ps->entry != 0.0);
         ps->ticks_held   = ctrl->total_ticks - ctrl->entry_ticks[idx];
         ps->hold_minutes = (ctrl->entry_time[idx] > 0)
@@ -1565,10 +1565,10 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     }
 
     // financials
-    double starting = FPN_ToDouble(ctrl->config.starting_balance);
-    double balance  = FPN_ToDouble(ctrl->balance);
-    double realized = FPN_ToDouble(ctrl->realized_pnl);
-    double unrealized = FPN_ToDouble(ctrl->portfolio_delta);
+    double starting = Money_ToDouble(ctrl->config.starting_balance);
+    double balance  = Money_ToDouble(ctrl->balance);
+    double realized = Money_ToDouble(ctrl->realized_pnl);
+    double unrealized = Money_ToDouble(ctrl->portfolio_delta);
     snap->balance    = balance;
     snap->starting   = starting;
     snap->realized   = realized;
@@ -1577,12 +1577,12 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->total_pnl  = snap->equity - starting; // derive from equity (always correct)
     snap->return_pct = (starting != 0.0) ? (snap->total_pnl / starting) * 100.0 : 0.0;
     snap->exposure_pct = (starting != 0.0) ? (snap->total_value / starting) * 100.0 : 0.0;
-    snap->max_exp    = FPN_ToDouble(ctrl->config.max_exposure_pct) * 100.0;
-    snap->fees       = FPN_ToDouble(ctrl->total_fees);
+    snap->max_exp    = Money_ToDouble(ctrl->config.max_exposure_pct) * 100.0;
+    snap->fees       = Money_ToDouble(ctrl->total_fees);
     snap->fee_rate_pct = fee_r * 100.0;
-    snap->risk_amt   = FPN_ToDouble(ctrl->config.risk_pct) * 100.0;
-    snap->max_dd     = FPN_ToDouble(ctrl->config.max_drawdown_pct) * 100.0;
-    snap->breaker_tripped = (snap->total_pnl < -(starting * FPN_ToDouble(ctrl->config.max_drawdown_pct)));
+    snap->risk_amt   = Money_ToDouble(ctrl->config.risk_pct) * 100.0;
+    snap->max_dd     = Money_ToDouble(ctrl->config.max_drawdown_pct) * 100.0;
+    snap->breaker_tripped = (snap->total_pnl < -(starting * Money_ToDouble(ctrl->config.max_drawdown_pct)));
     snap->buying_halted = ctrl->buying_halted;
     snap->halt_reason = ctrl->halt_reason;
     snap->gate_reason = ctrl->gate_reason;
@@ -1637,7 +1637,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
       double bavg = FPN_ToDouble(ctrl->rolling.price_avg);
       double bprice = FPN_ToDouble(ctrl->buy_conds.price);
       snap->signal_strength = (bavg > 1e-15) ? fabs(bprice - bavg) / bavg * 100.0 : 0.0;
-      double min_signal = FPN_ToDouble(ctrl->config.fee_rate) * FPN_ToDouble(ctrl->config.no_trade_band_mult) * 100.0;
+      double min_signal = Money_ToDouble(ctrl->config.fee_rate) * FPN_ToDouble(ctrl->config.no_trade_band_mult) * 100.0;
       snap->no_trade_band_blocked = BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_NO_TRADE_BAND_ENABLED) &&
           (snap->signal_strength < min_signal) && !snap->state_warmup;
     }
@@ -1650,7 +1650,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // populated indices; explicitly zero the AUTO bin so TUIAnsi iterations
     // through NUM_STRATEGIES read valid data at every index.
     for (int i = 0; i < NUM_STRATEGIES_REAL; i++) {
-      snap->strat_stats[i].pnl   = FPN_ToDouble(ctrl->strategy_stats[i].realized_pnl);
+      snap->strat_stats[i].pnl   = Money_ToDouble(ctrl->strategy_stats[i].realized_pnl);
       snap->strat_stats[i].wins  = ctrl->strategy_stats[i].wins;
       snap->strat_stats[i].losses = ctrl->strategy_stats[i].losses;
       snap->strat_stats[i].total = ctrl->strategy_stats[i].total_trades;
@@ -1664,10 +1664,10 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->last_reject_reason = ctrl->last_reject_reason;
 
     // config
-    snap->cfg_tp  = FPN_ToDouble(ctrl->config.take_profit_pct) * 100.0;
-    snap->cfg_sl  = FPN_ToDouble(ctrl->config.stop_loss_pct) * 100.0;
+    snap->cfg_tp  = Money_ToDouble(ctrl->config.take_profit_pct) * 100.0;
+    snap->cfg_sl  = Money_ToDouble(ctrl->config.stop_loss_pct) * 100.0;
     snap->cfg_fee = fee_r * 100.0;
-    snap->cfg_slippage = FPN_ToDouble(ctrl->config.slippage_pct) * 100.0;
+    snap->cfg_slippage = Money_ToDouble(ctrl->config.slippage_pct) * 100.0;
     snap->live_trading = ctrl->config.use_real_money;
     snap->trailing_enabled = !FPN_IsZero(ctrl->config.tp_hold_score);
     snap->cfg_hold_score   = FPN_ToDouble(ctrl->config.tp_hold_score);
@@ -1675,7 +1675,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->cfg_sl_trail_mult = FPN_ToDouble(ctrl->config.sl_trail_mult);
     snap->cfg_offset_val = snap->stddev_mode
         ? FPN_ToDouble(ctrl->config.offset_stddev_mult)
-        : FPN_ToDouble(ctrl->config.entry_offset_pct) * 100.0;
+        : Money_ToDouble(ctrl->config.entry_offset_pct) * 100.0;
 
     // stats
     snap->total_buys = ctrl->total_buys;
@@ -1686,12 +1686,12 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // (simplified 2026-04)" — backtest gets these for free, no second update site.
     snap->maker_fills_count = ctrl->maker_fills_count;
     snap->taker_fills_count = ctrl->taker_fills_count;
-    snap->total_maker_fees  = FPN_ToDouble(ctrl->total_maker_fees);
-    snap->total_taker_fees  = FPN_ToDouble(ctrl->total_taker_fees);
+    snap->total_maker_fees  = Money_ToDouble(ctrl->total_maker_fees);
+    snap->total_taker_fees  = Money_ToDouble(ctrl->total_taker_fees);
     uint32_t total_exits = ctrl->wins + ctrl->losses;
     snap->win_rate      = (total_exits > 0) ? ((double)ctrl->wins / total_exits) * 100.0 : 0.0;
-    double g_wins  = FPN_ToDouble(ctrl->gross_wins);
-    double g_losses = FPN_ToDouble(ctrl->gross_losses);
+    double g_wins  = Money_ToDouble(ctrl->gross_wins);
+    double g_losses = Money_ToDouble(ctrl->gross_losses);
     // v5.8.4c: canonical helpers (single source of truth across backtest +
     // live + sharded snapshot paths).
     snap->profit_factor = Compute_ProfitFactor(g_wins, g_losses);
@@ -1703,7 +1703,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // use total_fees / total_exits as a simpler proxy
     {
       uint32_t tex = ctrl->wins + ctrl->losses;
-      double fee_per_exit = (tex > 0) ? FPN_ToDouble(ctrl->total_fees) / tex : 0.0;
+      double fee_per_exit = (tex > 0) ? Money_ToDouble(ctrl->total_fees) / tex : 0.0;
       snap->avg_loss_market = (ctrl->losses > 0) ? snap->avg_loss - fee_per_exit : 0.0;
       if (snap->avg_loss_market < 0.0) snap->avg_loss_market = 0.0; // clamp (loss was entirely fees)
     }
@@ -1715,14 +1715,14 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
                                            snap->avg_win, snap->avg_loss);
 
     // max drawdown
-    snap->max_drawdown = FPN_ToDouble(ctrl->max_drawdown);
-    double pe = FPN_ToDouble(ctrl->peak_equity);
+    snap->max_drawdown = Money_ToDouble(ctrl->max_drawdown);
+    double pe = Money_ToDouble(ctrl->peak_equity);
     snap->max_drawdown_pct = (pe > 0.0) ?
         (snap->max_drawdown / pe) * 100.0 : 0.0;
 
     // fee ratio: what % of gross wins go to fees
     snap->fee_ratio = (g_wins > 0.001) ?
-        (FPN_ToDouble(ctrl->total_fees) / g_wins) * 100.0 : 0.0;
+        (Money_ToDouble(ctrl->total_fees) / g_wins) * 100.0 : 0.0;
 }
 
 //======================================================================================================

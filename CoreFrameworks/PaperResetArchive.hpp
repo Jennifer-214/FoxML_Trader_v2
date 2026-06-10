@@ -208,12 +208,12 @@ inline int Summary_WriteJson(const char* output_path,
     std::fprintf(f, "  \"global\":{");
     {
         bool first_field = true;
-        json_emit_pair<FPN_Binary<F>>(f, "balance_start",     cfg.starting_balance,           first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "balance_end",       state.oms->balance,             first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "realized_pnl",      state.oms->realized_pnl,        first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "total_fees",        state.oms->total_fees,          first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "total_maker_fees",  state.oms->total_maker_fees,    first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "total_taker_fees",  state.oms->total_taker_fees,    first_field);
+        json_emit_pair<Money>(f, "balance_start",     cfg.starting_balance,           first_field);
+        json_emit_pair<Money>(f, "balance_end",       state.oms->balance,             first_field);
+        json_emit_pair<Money>(f, "realized_pnl",      state.oms->realized_pnl,        first_field);
+        json_emit_pair<Money>(f, "total_fees",        state.oms->total_fees,          first_field);
+        json_emit_pair<Money>(f, "total_maker_fees",  state.oms->total_maker_fees,    first_field);
+        json_emit_pair<Money>(f, "total_taker_fees",  state.oms->total_taker_fees,    first_field);
         json_emit_pair(f, "maker_fills_count",         (uint64_t)state.oms->maker_fills_count, first_field);
         json_emit_pair(f, "taker_fills_count",         (uint64_t)state.oms->taker_fills_count, first_field);
         json_emit_pair(f, "total_entries",             (uint64_t)state.total_entries,  first_field);

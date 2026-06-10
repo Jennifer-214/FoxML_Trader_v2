@@ -5526,8 +5526,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                     fprintf(ef, "# barrier_gate_enabled = 0 or 1 both fine for binary models\n");
                 }
                 fprintf(ef, "ml_buy_threshold = %.3f\n", FPN_ToDouble(results->config_used.ml_buy_threshold));
-                fprintf(ef, "ml_tp_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_tp_pct));
-                fprintf(ef, "ml_sl_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_sl_pct));
+                fprintf(ef, "ml_tp_pct = %.6f\n", Money_ToDouble(results->config_used.ml_tp_pct));
+                fprintf(ef, "ml_sl_pct = %.6f\n", Money_ToDouble(results->config_used.ml_sl_pct));
                 fprintf(ef, "ml_backend = %d\n", results->config_used.ml_backend);
                 // v4.3.1 — record the slow-path cadence the model was trained
                 // against. Sharded engine reads cfg.poll_interval at boot;

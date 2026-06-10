@@ -176,8 +176,8 @@ inline bool EngineSharded_Async_FanOut(
 ) {
     Tick<F> t;
     memset(&t, 0, sizeof(t));
-    t.price = FPN_FromDouble<F>(price_d);
-    t.volume = FPN_FromDouble<F>(volume_d);
+    t.price = Money{ money_from_double_payload(price_d) };   // replay/TUI-side ingress bridge
+    t.volume = Money{ money_from_double_payload(volume_d) };
     t.timestamp = ts_us;
     t.sequence = seq++;
     t.is_buyer_maker = (uint8_t)(is_buyer_maker ? 1 : 0);
@@ -243,8 +243,8 @@ inline bool EngineSharded_Async_FanOut(
             __atomic_store_n(&shared_ptr->drag_slot, -1, __ATOMIC_RELEASE);
             auto *pos = &state.oms->portfolio.positions[slot];
             if (state.oms->portfolio.active_bitmap & (uint16_t)(1u << slot)) {
-                if (is_tp) pos->take_profit_price = FPN_FromDouble<F>(dprice);
-                else       pos->stop_loss_price   = FPN_FromDouble<F>(dprice);
+                if (is_tp) pos->take_profit_price = Money{ money_from_double_payload(dprice) };
+                else       pos->stop_loss_price   = Money{ money_from_double_payload(dprice) };
                 fprintf(stderr, "[sharded] GUI drag: slot %d %s -> $%.2f\n",
                         slot, is_tp ? "TP" : "SL", dprice);
             }
@@ -259,10 +259,12 @@ inline bool EngineSharded_Async_FanOut(
     // First-tick branchless: if ema is zero, take current price as-is;
     // otherwise standard exponential smoothing.
     FPN_Binary<F> one_minus_alpha = FPN_Sub(FPN_FromDouble<F>(1.0), ema_alpha);
+    // D-122 producer feature ingress: ONE money->binary cast per tick for the ema chain.
+    FPN_Binary<F> price_bin = Money_ToBinary(t.price);
     FPN_Binary<F> ema_new = FPN_Add(
         FPN_Mul(ema_price, ema_alpha),
-        FPN_Mul(t.price, one_minus_alpha));
-    if (FPN_IsZero(ema_price)) ema_price = t.price;
+        FPN_Mul(price_bin, one_minus_alpha));
+    if (FPN_IsZero(ema_price)) ema_price = price_bin;
     else                       ema_price = ema_new;
     // v5.1.2 (full symmetric decoupling): replicate ema_price to
     // ALL engines' slow_state in BOTH arches. Single-writer is
@@ -343,18 +345,18 @@ inline bool EngineSharded_Async_FanOut(
             // expands or shrinks the budget but the deployed
             // notional is unchanged.
             {
-                double total_balance = FPN_ToDouble(cfg.starting_balance);
-                double default_risk  = FPN_ToDouble(cfg.risk_pct);
+                double total_balance = Money_ToDouble(cfg.starting_balance);
+                double default_risk  = Money_ToDouble(cfg.risk_pct);
                 if (default_risk <= 0.0) default_risk = 0.10;
                 double default_per_core = (total_balance * default_risk) / (double)num_cores;
                 if (default_per_core < 1.0) default_per_core = 1.0;
                 for (int c = 0; c < num_cores; ++c) {
                     double core_balance = default_per_core;
-                    if (!FPN_IsZero(cfg.core_risk_pct[c])) {
-                        core_balance = total_balance * FPN_ToDouble(cfg.core_risk_pct[c]);
+                    if (!Money_IsZero(cfg.core_risk_pct[c])) {
+                        core_balance = total_balance * Money_ToDouble(cfg.core_risk_pct[c]);
                         if (core_balance < 1.0) core_balance = 1.0;
                     }
-                    state.cores[c].allocated_balance = FPN_FromDouble<F>(core_balance);
+                    state.cores[c].allocated_balance = Money{ money_from_double_payload(core_balance) };
                 }
             }
             fprintf(stderr, "[sharded] cfg hot-reloaded "
@@ -370,8 +372,8 @@ inline bool EngineSharded_Async_FanOut(
                 if (shared_ptr->kill_reset_per_core[c]) {
                     shared_ptr->kill_reset_per_core[c] = 0;
                     CORE_STATE_FLAG_CLR(state.cores[c], KILL_TRIPPED);
-                    state.cores[c].core_peak_balance = FPN_Zero<F>();
-                    state.cores[c].core_dd_pct = FPN_Zero<F>();
+                    state.cores[c].core_peak_balance = Money_Zero();
+                    state.cores[c].core_dd_pct = Money_Zero();
                     fprintf(stderr, "[sharded] core %d kill switch RESET\n", c);
                 }
             }
@@ -380,8 +382,8 @@ inline bool EngineSharded_Async_FanOut(
         // Phase 3: pass current_price for MTM kill switch evaluation.
         // Read once from the producer atomic; tracker is realized-only
         // on the first slow path before any tick has been seen.
-        FPN_Binary<F> mtm_price = FPN_FromDouble<F>(
-            last_price.load(std::memory_order_relaxed));
+        Money mtm_price = Money{ money_from_double_payload(
+            last_price.load(std::memory_order_relaxed)) };  // producer atomic carries double (S-8 vehicle rework rides P3)
         // v4.3 — pass expanded feature-pack state for the model's
         // medium-horizon features. Same pointers go to both the AUTO
         // regime resolution branch (above the dispatch) and the ML
@@ -725,7 +727,7 @@ inline bool EngineSharded_Async_FanOut(
             shared_ptr->paper_reset_seq++;
             fprintf(stderr, "[sharded] paper reset: balance=$%.2f "
                             "(seq=%u, trade log + event log rotated)\n",
-                    FPN_ToDouble(cfg.starting_balance),
+                    Money_ToDouble(cfg.starting_balance),
                     (unsigned)shared_ptr->paper_reset_seq);
             // v4.7.39 (Phase C.2): reset complete; release slow-path
             // threads. They were parked on this flag — next loop
@@ -795,7 +797,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // qty for leg A exit, leg B's for leg B exit). With
                 // partials disabled, portfolio_slot == slot == core_id
                 // and behavior is identical to pre-P.3.
-                order_qty_d = FPN_ToDouble(
+                order_qty_d = Money_ToDouble(
                     state.oms->portfolio.positions[portfolio_slot].quantity);
             } else if (is_entry) {
                 // Entry qty: split intended_qty between legs by
@@ -808,14 +810,14 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // v5.15.5.C.4 Phase T1: hoisted core_overrides[slot] ref —
                 // single deref shared with the tp2_mult read at line ~2386
                 // below (was two separate `const auto&` declarations).
-                double full_qty = FPN_ToDouble(state.cores[slot].intended_qty);
+                double full_qty = Money_ToDouble(state.cores[slot].intended_qty);
                 const auto& ov_slot = cfg.core_overrides[slot];
-                FPN_Binary<F> partial_pct = !FPN_IsZero(ov_slot.partial_exit_pct)
+                Money partial_pct = !Money_IsZero(ov_slot.partial_exit_pct)
                     ? ov_slot.partial_exit_pct : cfg.cores[slot].partial_exit_pct;
                 if (partial_on && event.leg == PARTIAL_LEG_A) {
-                    order_qty_d = full_qty * FPN_ToDouble(partial_pct);
+                    order_qty_d = full_qty * Money_ToDouble(partial_pct);
                 } else if (partial_on && event.leg == PARTIAL_LEG_B) {
-                    order_qty_d = full_qty * (1.0 - FPN_ToDouble(partial_pct));
+                    order_qty_d = full_qty * (1.0 - Money_ToDouble(partial_pct));
                 } else {
                     order_qty_d = full_qty;
                 }
@@ -834,12 +836,12 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // the panel display honest AND prevents
                 // snapshot-restore-while-paired from reviving leg B
                 // with TP1 instead of TP2.
-                FPN_Binary<F> leg_tp = state.cores[slot].intended_tp;
+                Money leg_tp = state.cores[slot].intended_tp;
                 if (is_entry && partial_on && event.leg == PARTIAL_LEG_B) {
                     // v5.15.5.C.4 Phase T1: use leg_tp local (already
                     // captured at line above) instead of re-reading
                     // state.cores[slot].intended_tp; saves 1 indexed read.
-                    FPN_Binary<F> tp_dist_a = FPN_Sub(leg_tp, event.price);
+                    Money tp_dist_a = Money_Sub(leg_tp, event.price);
                     // v4.7.32: per-core tp2_mult override (0 = inherit).
                     // v5.15.5.C.4 Phase T1: NOTE — `ov_slot` from earlier
                     // entry branch is NOT in scope here; the entry-qty
@@ -849,10 +851,10 @@ inline int EngineSharded_Async_DrainWithSubmit(
                     // iteration (above is_exit/is_entry split) if more
                     // sites need it.
                     const auto& ov_tp2 = cfg.core_overrides[slot];
-                    FPN_Binary<F> tp2_mult_eff = !FPN_IsZero(ov_tp2.tp2_mult)
+                    Money tp2_mult_eff = !Money_IsZero(ov_tp2.tp2_mult)
                         ? ov_tp2.tp2_mult : cfg.cores[slot].tp2_mult;
-                    FPN_Binary<F> tp_dist_b = FPN_Mul(tp_dist_a, tp2_mult_eff);
-                    leg_tp = FPN_Add(event.price, tp_dist_b);
+                    Money tp_dist_b = Money_Mul(tp_dist_a, tp2_mult_eff);
+                    leg_tp = Money_Add(event.price, tp_dist_b);
                 }
                 // v4.7.37 (Phase B reordered): push through OMS_PushSubmit
                 // instead of calling Submit directly. Drainer drains the
@@ -862,7 +864,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // ctor: (core_id, type, qty, leg, core_cfg); optional intended_tp/intended_sl/strategy_id/event_price.
                 SubmitCommand<F> cmd((int16_t)portfolio_slot,                                       // P.3: actual slot, not core_id
                                       is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
-                                      FPN_FromDouble<F>(order_qty_d),
+                                      Money{ money_from_double_payload(order_qty_d) },  // partial-qty exact split rides P3
                                       event.leg,                                                    // P.3: leg propagated to Order
                                       &cfg.cores[slot]);                                            // per-core cfg (sharded: core_id == slot)
                 cmd.intended_tp = leg_tp;

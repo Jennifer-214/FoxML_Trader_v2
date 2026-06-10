@@ -97,7 +97,9 @@ template <typename T> inline constexpr bool is_fpn_v = is_fpn<T>::value;
 template <typename T>
 inline void json_emit_value(std::FILE* f, const T& value) {
     if (!f) return;
-    if constexpr (is_fpn_v<T>) {
+    if constexpr (is_fp_decimal_v<T>) {
+        std::fprintf(f, "%.8f", Money_ToDouble(value));  // decimal money — exact 8dp display
+    } else if constexpr (is_fpn_v<T>) {
         std::fprintf(f, "%.6f", FPN_ToDouble(value));
     } else if constexpr (std::is_floating_point_v<T>) {
         std::fprintf(f, "%.6f", static_cast<double>(value));
@@ -106,7 +108,7 @@ inline void json_emit_value(std::FILE* f, const T& value) {
     } else if constexpr (std::is_signed_v<T> && std::is_integral_v<T>) {
         std::fprintf(f, "%lld", static_cast<long long>(value));
     } else {
-        static_assert(is_fpn_v<T> || std::is_arithmetic_v<T>,
+        static_assert(is_fpn_v<T> || is_fp_decimal_v<T> || std::is_arithmetic_v<T>,
                       "json_emit_value: unsupported type — add a constexpr branch above");
     }
 }
@@ -140,24 +142,24 @@ inline void json_emit_pair(std::FILE* f, const char* key, const T& value, bool& 
     X(halt_reason,           uint8_t,  "halt_reason")                                           \
     X(strategy_halt_reason,  uint8_t,  "strategy_halt_reason")                                  \
     /* Capital allocation */                                                                    \
-    X(allocated_balance,     FPN_Binary<F>,   "allocated_balance")                                     \
+    X(allocated_balance,     Money,           "allocated_balance")                                     \
     /* Event counters */                                                                        \
     X(entries_processed,     uint64_t, "entries")                                               \
     X(exits_processed,       uint64_t, "exits")                                                 \
     X(sl_cooldown_remaining, uint32_t, "sl_cooldown_remaining")                                 \
     X(idle_cycles,           uint32_t, "idle_cycles")                                           \
     /* P&L (net) */                                                                             \
-    X(core_realized,         FPN_Binary<F>,   "realized")                                              \
-    X(core_fees,             FPN_Binary<F>,   "fees")                                                  \
+    X(core_realized,         Money,           "realized")                                              \
+    X(core_fees,             Money,           "fees")                                                  \
     X(core_wins,             uint32_t, "wins")                                                  \
     X(core_losses,           uint32_t, "losses")                                                \
     /* P&L (gross — per-side accumulators for avg_win, avg_loss, profit_factor, expectancy) */  \
-    X(core_gross_wins,       FPN_Binary<F>,   "gross_wins")                                            \
-    X(core_gross_losses,     FPN_Binary<F>,   "gross_losses")                                          \
-    X(core_open_notional,    FPN_Binary<F>,   "open_notional")                                         \
+    X(core_gross_wins,       Money,           "gross_wins")                                            \
+    X(core_gross_losses,     Money,           "gross_losses")                                          \
+    X(core_open_notional,    Money,           "open_notional")                                         \
     /* Kill switch / drawdown */                                                                \
-    X(core_peak_balance,     FPN_Binary<F>,   "peak_balance")                                          \
-    X(core_dd_pct,           FPN_Binary<F>,   "dd_pct")                                                \
+    X(core_peak_balance,     Money,           "peak_balance")                                          \
+    X(core_dd_pct,           Money,           "dd_pct")                                                \
     X(core_ks_trips_total,   uint32_t, "ks_trips_total")                                        \
     /* ML observability */                                                                      \
     X(last_confidence,       double,   "last_confidence")
@@ -239,13 +241,13 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, i
         int      present;
         uint64_t entries;
         uint64_t exits;
-        FPN_Binary<F>   realized;
-        FPN_Binary<F>   fees;
+        Money    realized;
+        Money    fees;
         uint32_t wins;
         uint32_t losses;
-        FPN_Binary<F>   gross_wins;
-        FPN_Binary<F>   gross_losses;
-        FPN_Binary<F>   open_notional;
+        Money    gross_wins;
+        Money    gross_losses;
+        Money    open_notional;
     };
     StratAgg agg[MAX_STRAT] = {};
     for (int c = 0; c < num_cores; ++c) {
@@ -255,13 +257,13 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, i
         a.present = 1;
         a.entries      += cores[c].entries_processed;
         a.exits        += cores[c].exits_processed;
-        a.realized      = FPN_Add(a.realized,      cores[c].core_realized);
-        a.fees          = FPN_Add(a.fees,          cores[c].core_fees);
+        a.realized      = Money_Add(a.realized,      cores[c].core_realized);
+        a.fees          = Money_Add(a.fees,          cores[c].core_fees);
         a.wins         += cores[c].core_wins;
         a.losses       += cores[c].core_losses;
-        a.gross_wins    = FPN_Add(a.gross_wins,    cores[c].core_gross_wins);
-        a.gross_losses  = FPN_Add(a.gross_losses,  cores[c].core_gross_losses);
-        a.open_notional = FPN_Add(a.open_notional, cores[c].core_open_notional);
+        a.gross_wins    = Money_Add(a.gross_wins,    cores[c].core_gross_wins);
+        a.gross_losses  = Money_Add(a.gross_losses,  cores[c].core_gross_losses);
+        a.open_notional = Money_Add(a.open_notional, cores[c].core_open_notional);
     }
     std::fprintf(f, "[");
     bool first_strat = true;
@@ -274,13 +276,13 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, i
         json_emit_pair(f, "strategy_id",   static_cast<uint64_t>(sid), first_field);
         json_emit_pair(f, "entries",       agg[sid].entries,           first_field);
         json_emit_pair(f, "exits",         agg[sid].exits,             first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "realized",      agg[sid].realized,      first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "fees",          agg[sid].fees,          first_field);
+        json_emit_pair<Money>(f, "realized",      agg[sid].realized,      first_field);
+        json_emit_pair<Money>(f, "fees",          agg[sid].fees,          first_field);
         json_emit_pair(f, "wins",          static_cast<uint64_t>(agg[sid].wins),   first_field);
         json_emit_pair(f, "losses",        static_cast<uint64_t>(agg[sid].losses), first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "gross_wins",    agg[sid].gross_wins,    first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "gross_losses",  agg[sid].gross_losses,  first_field);
-        json_emit_pair<FPN_Binary<F>>(f, "open_notional", agg[sid].open_notional, first_field);
+        json_emit_pair<Money>(f, "gross_wins",    agg[sid].gross_wins,    first_field);
+        json_emit_pair<Money>(f, "gross_losses",  agg[sid].gross_losses,  first_field);
+        json_emit_pair<Money>(f, "open_notional", agg[sid].open_notional, first_field);
         std::fprintf(f, "}");
     }
     std::fprintf(f, "]");

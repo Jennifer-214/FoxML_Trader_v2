@@ -26,8 +26,8 @@
 //i need to make a feature store thats branchless probably unless the relationships between price and volume can be extrapolated to the actual raw data, otherwise the features pribably need to be branchless as well, to reduce inference time, those would stack up fast having mispredcitons for every single tick
 //======================================================================================================
 template <unsigned F> struct DataStream {
-    FPN_Binary<F> price;
-    FPN_Binary<F> volume;
+    Money price;
+    Money volume;
     int is_buyer_maker; // 1 = buyer was maker (seller-initiated), 0 = buyer was taker (buyer-initiated)
     int _pad0;          // align doubles to 8 bytes
     double price_d;     // stashed from parse for TUI display (no FPN_ToDouble on hot path)
@@ -97,12 +97,16 @@ template <unsigned F> inline void BuyGate(const BuySideGateConditions<F> *condit
     // 16B two's-comp: crypto price/volume are always >= 0 and << 2^127, so .v compares NATIVELY — value-
     // equivalent to the old 2-word unsigned magnitude compare on non-negative values, and branchless (a single
     // __int128 cmp → setcc, no jump; also faster than the 2-word logic this replaces).
-    int below = (conditions->price.v >= stream->price.v);   // below: price <= gate  (gate >= price)
-    int above = (stream->price.v >= conditions->price.v);   // above: price >= gate
+    // Ship-B P2b: the legacy gate apparatus stays FEATURE-domain (binary thresholds,
+    // matching the ema/danger chain) — the money tick crosses ONCE here per eval.
+    const FPN_Binary<F> price_b  = Money_ToBinary(stream->price);
+    const FPN_Binary<F> volume_b = Money_ToBinary(stream->volume);
+    int below = (conditions->price.v >= price_b.v);   // below: price <= gate  (gate >= price)
+    int above = (price_b.v >= conditions->price.v);   // above: price >= gate
 
     int price_pass  = (below & !conditions->gate_direction) | (above & conditions->gate_direction);
 
-    int volume_pass = (stream->volume.v >= conditions->volume.v);   // volume: stream volume >= threshold
+    int volume_pass = (volume_b.v >= conditions->volume.v);   // volume: stream volume >= threshold
 
     int pass = price_pass & volume_pass;
 

@@ -49,8 +49,8 @@
 //======================================================================================================
 template <unsigned F> struct CurrentOrder {
     uint64_t order_id;
-    FPN_Binary<F> price;
-    FPN_Binary<F> quantity;
+    Money price;
+    Money quantity;
 };
 
 template <unsigned F> struct OrderPool {

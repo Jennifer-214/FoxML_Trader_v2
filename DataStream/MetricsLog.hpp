@@ -107,10 +107,10 @@ static inline void MetricsLog_SlowPath(MetricsLog *log,
     double spacing  = FPN_ToDouble(RollingStats_EntrySpacing(&ctrl->rolling, ctrl->config.spacing_multiplier));
 
     int positions = __builtin_popcount(ctrl->portfolio.active_bitmap);
-    double balance = FPN_ToDouble(ctrl->balance);
-    double realized = FPN_ToDouble(ctrl->realized_pnl);
-    double unrealized = FPN_ToDouble(ctrl->portfolio_delta);
-    double equity = balance + FPN_ToDouble(Portfolio_ComputeValue(&ctrl->portfolio, FPN_FromDouble<F>(current_price)));
+    double balance = Money_ToDouble(ctrl->balance);
+    double realized = Money_ToDouble(ctrl->realized_pnl);
+    double unrealized = Money_ToDouble(ctrl->portfolio_delta);
+    double equity = balance + Money_ToDouble(Portfolio_ComputeValue(&ctrl->portfolio, Money{ money_from_double_payload(current_price) }));
 
     fprintf(log->file,
         "%lu,%s,SLOW_PATH,%s,%s,%d,%s,"
@@ -146,11 +146,11 @@ static inline void MetricsLog_Event(MetricsLog *log,
     char ts[32]; _metrics_timestamp(ts, sizeof(ts));
 
     int positions = __builtin_popcount(ctrl->portfolio.active_bitmap);
-    double balance = FPN_ToDouble(ctrl->balance);
-    double realized = FPN_ToDouble(ctrl->realized_pnl);
-    double unrealized = FPN_ToDouble(ctrl->portfolio_delta);
+    double balance = Money_ToDouble(ctrl->balance);
+    double realized = Money_ToDouble(ctrl->realized_pnl);
+    double unrealized = Money_ToDouble(ctrl->portfolio_delta);
     double avg = FPN_ToDouble(ctrl->rolling.price_avg);
-    double equity = balance + FPN_ToDouble(Portfolio_ComputeValue(&ctrl->portfolio, FPN_FromDouble<F>(current_price)));
+    double equity = balance + Money_ToDouble(Portfolio_ComputeValue(&ctrl->portfolio, Money{ money_from_double_payload(current_price) }));
 
     fprintf(log->file,
         "%lu,%s,%s,%s,%s,%d,%s,"

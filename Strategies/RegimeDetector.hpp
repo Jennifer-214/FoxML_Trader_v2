@@ -694,7 +694,7 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
     if (FPN_IsZero(stddev)) return;
 
     FPN_Binary<F> hundred = FPN_FromDouble<F>(100.0);
-    FPN_Binary<F> half = cfg->min_sl_tp_ratio;
+    Money half = cfg->min_sl_tp_ratio;
 
     uint16_t active = portfolio->active_bitmap;
     while (active) {
@@ -706,120 +706,120 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
             if (old_regime == REGIME_RANGING && new_regime == REGIME_TRENDING) {
                 // momentum_tp/sl_mult are direct stddev multipliers — no ×100
                 FPN_Binary<F> wide_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
-                FPN_Binary<F> wide_tp = FPN_AddSat(pos->entry_price, wide_tp_offset);
-                pos->take_profit_price = FPN_Max(pos->take_profit_price, wide_tp);
+                Money wide_tp = Money_Add(pos->entry_price, Money_FromBinary(wide_tp_offset));  // D-170 feature->money egress
+                pos->take_profit_price = Money_Max(pos->take_profit_price, wide_tp);
 
                 FPN_Binary<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
-                FPN_Binary<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
-                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
+                Money tight_sl = Money_Sub(pos->entry_price, Money_FromBinary(tight_sl_offset));  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Max(pos->stop_loss_price, tight_sl);
 
                 // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
-                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+                Money tp_dist = Money_Sub(pos->take_profit_price, pos->entry_price);
+                Money min_sl_dist = Money_Mul(tp_dist, half);
+                Money sl_floor = Money_Sub(pos->entry_price, min_sl_dist);  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, sl_floor);
             }
             // RANGING → MILD_TREND: both buy dips, widen TP slightly (uptrend confirmed)
             else if (old_regime == REGIME_RANGING && new_regime == REGIME_MILD_TREND) {
-                FPN_Binary<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
+                FPN_Binary<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(Money_ToBinary(cfg->take_profit_pct), hundred));
                 FPN_Binary<F> mild_widen = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
-                FPN_Binary<F> wider_tp = FPN_AddSat(pos->entry_price, mild_widen);
-                pos->take_profit_price = FPN_Max(pos->take_profit_price, wider_tp);
+                Money wider_tp = Money_Add(pos->entry_price, Money_FromBinary(mild_widen));  // D-170 feature->money egress
+                pos->take_profit_price = Money_Max(pos->take_profit_price, wider_tp);
 
-                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+                Money tp_dist = Money_Sub(pos->take_profit_price, pos->entry_price);
+                Money min_sl_dist = Money_Mul(tp_dist, half);
+                Money sl_floor = Money_Sub(pos->entry_price, min_sl_dist);  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, sl_floor);
             }
             // MILD_TREND → TRENDING: uptrend strengthening, widen TP to momentum levels
             else if (old_regime == REGIME_MILD_TREND && new_regime == REGIME_TRENDING) {
                 FPN_Binary<F> wide_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
-                FPN_Binary<F> wide_tp = FPN_AddSat(pos->entry_price, wide_tp_offset);
-                pos->take_profit_price = FPN_Max(pos->take_profit_price, wide_tp);
+                Money wide_tp = Money_Add(pos->entry_price, Money_FromBinary(wide_tp_offset));  // D-170 feature->money egress
+                pos->take_profit_price = Money_Max(pos->take_profit_price, wide_tp);
 
                 FPN_Binary<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
-                FPN_Binary<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
-                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
+                Money tight_sl = Money_Sub(pos->entry_price, Money_FromBinary(tight_sl_offset));  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Max(pos->stop_loss_price, tight_sl);
 
-                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+                Money tp_dist = Money_Sub(pos->take_profit_price, pos->entry_price);
+                Money min_sl_dist = Money_Mul(tp_dist, half);
+                Money sl_floor = Money_Sub(pos->entry_price, min_sl_dist);  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, sl_floor);
             }
             // TRENDING/TRENDING_DOWN/MILD_TREND → RANGING: tighten TP, widen SL for chop
             else if ((old_regime == REGIME_TRENDING || old_regime == REGIME_TRENDING_DOWN
                       || old_regime == REGIME_MILD_TREND)
                      && new_regime == REGIME_RANGING) {
-                FPN_Binary<F> tight_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
-                FPN_Binary<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
-                pos->take_profit_price = FPN_Min(pos->take_profit_price, tight_tp);
+                FPN_Binary<F> tight_tp_offset = FPN_Mul(stddev, FPN_Mul(Money_ToBinary(cfg->take_profit_pct), hundred));
+                Money tight_tp = Money_Add(pos->entry_price, Money_FromBinary(tight_tp_offset));  // D-170 feature->money egress
+                pos->take_profit_price = Money_Min(pos->take_profit_price, tight_tp);
 
                 // fee floor: TP must cover round-trip fees even after tightening
-                FPN_Binary<F> fee_floor = FPN_AddSat(pos->entry_price,
-                    FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
-                pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
+                Money fee_floor = Money_Add(pos->entry_price,
+                    Money_Mul(Money_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
+                pos->take_profit_price = Money_Max(pos->take_profit_price, fee_floor);
 
-                FPN_Binary<F> wide_sl_offset = FPN_Mul(stddev, FPN_Mul(cfg->stop_loss_pct, hundred));
-                FPN_Binary<F> wide_sl = FPN_SubSat(pos->entry_price, wide_sl_offset);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, wide_sl);
+                FPN_Binary<F> wide_sl_offset = FPN_Mul(stddev, FPN_Mul(Money_ToBinary(cfg->stop_loss_pct), hundred));
+                Money wide_sl = Money_Sub(pos->entry_price, Money_FromBinary(wide_sl_offset));  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, wide_sl);
 
                 // SL ceiling: if TP was tightened (vol dropped since fill), don't let SL
                 // stay at the old high-vol width. SL distance must not exceed TP distance.
                 // without this, a fill at high σ followed by regime switch at low σ
                 // produces SL > TP (inverted risk/reward)
-                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN_Binary<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
-                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
+                Money tp_dist = Money_Sub(pos->take_profit_price, pos->entry_price);
+                Money sl_ceiling = Money_Sub(pos->entry_price, tp_dist);
+                pos->stop_loss_price = Money_Max(pos->stop_loss_price, sl_ceiling);
 
                 // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
-                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+                Money min_sl_dist = Money_Mul(tp_dist, half);
+                Money sl_floor = Money_Sub(pos->entry_price, min_sl_dist);  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, sl_floor);
             }
             // TRENDING → MILD_TREND: trend weakening, tighten TP moderately
             else if (old_regime == REGIME_TRENDING && new_regime == REGIME_MILD_TREND) {
-                FPN_Binary<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
+                FPN_Binary<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(Money_ToBinary(cfg->take_profit_pct), hundred));
                 FPN_Binary<F> mild_tp = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
-                FPN_Binary<F> tighter_tp = FPN_AddSat(pos->entry_price, mild_tp);
-                pos->take_profit_price = FPN_Min(pos->take_profit_price, tighter_tp);
+                Money tighter_tp = Money_Add(pos->entry_price, Money_FromBinary(mild_tp));  // D-170 feature->money egress
+                pos->take_profit_price = Money_Min(pos->take_profit_price, tighter_tp);
 
                 // fee floor: TP must cover round-trip fees even after tightening
-                FPN_Binary<F> fee_floor = FPN_AddSat(pos->entry_price,
-                    FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
-                pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
+                Money fee_floor = Money_Add(pos->entry_price,
+                    Money_Mul(Money_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
+                pos->take_profit_price = Money_Max(pos->take_profit_price, fee_floor);
 
                 // SL ceiling + floor
-                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN_Binary<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
-                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
-                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+                Money tp_dist = Money_Sub(pos->take_profit_price, pos->entry_price);
+                Money sl_ceiling = Money_Sub(pos->entry_price, tp_dist);
+                pos->stop_loss_price = Money_Max(pos->stop_loss_price, sl_ceiling);
+                Money min_sl_dist = Money_Mul(tp_dist, half);
+                Money sl_floor = Money_Sub(pos->entry_price, min_sl_dist);  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, sl_floor);
             }
             // entering downtrend: tighten TP (take profits), tighten SL (cut losses)
             else if (new_regime == REGIME_TRENDING_DOWN) {
                 FPN_Binary<F> tight_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
-                FPN_Binary<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
-                pos->take_profit_price = FPN_Min(pos->take_profit_price, tight_tp);
+                Money tight_tp = Money_Add(pos->entry_price, Money_FromBinary(tight_tp_offset));  // D-170 feature->money egress
+                pos->take_profit_price = Money_Min(pos->take_profit_price, tight_tp);
 
                 // fee floor: TP must cover round-trip fees even after tightening
-                FPN_Binary<F> fee_floor = FPN_AddSat(pos->entry_price,
-                    FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
-                pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
+                Money fee_floor = Money_Add(pos->entry_price,
+                    Money_Mul(Money_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
+                pos->take_profit_price = Money_Max(pos->take_profit_price, fee_floor);
 
                 FPN_Binary<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
-                FPN_Binary<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
-                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
+                Money tight_sl = Money_Sub(pos->entry_price, Money_FromBinary(tight_sl_offset));  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Max(pos->stop_loss_price, tight_sl);
 
                 // SL ceiling: SL distance must not exceed TP distance (no inverted risk/reward)
-                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN_Binary<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
-                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
+                Money tp_dist = Money_Sub(pos->take_profit_price, pos->entry_price);
+                Money sl_ceiling = Money_Sub(pos->entry_price, tp_dist);
+                pos->stop_loss_price = Money_Max(pos->stop_loss_price, sl_ceiling);
 
                 // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
-                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, half);
-                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+                Money min_sl_dist = Money_Mul(tp_dist, half);
+                Money sl_floor = Money_Sub(pos->entry_price, min_sl_dist);  // D-170 feature->money egress
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, sl_floor);
             }
         }
 

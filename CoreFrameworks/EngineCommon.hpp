@@ -153,10 +153,10 @@ constexpr int BACKTEST_REGIME_SAMPLE_CORE = 0;
 template <unsigned F>
 inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
     if (cfg.pay_fees_in_bnb) {
-        FPN_Binary<F> bnb_factor = FPN_FromDouble<F>(0.75);
+        Money bnb_factor = Money{ 75000000 };  // exact 0.75 (D-173 BNB discount; runtime guard rides P3)
         for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
-            cfg.cores[c].fee_rate_maker = FPN_Mul(cfg.cores[c].fee_rate_maker, bnb_factor);
-            cfg.cores[c].fee_rate_taker = FPN_Mul(cfg.cores[c].fee_rate_taker, bnb_factor);
+            cfg.cores[c].fee_rate_maker = Money_Mul(cfg.cores[c].fee_rate_maker, bnb_factor);
+            cfg.cores[c].fee_rate_taker = Money_Mul(cfg.cores[c].fee_rate_taker, bnb_factor);
         }
         fprintf(stderr,
             "[sharded] BNB fee discount ENABLED — applied per-core to cfg.cores[c].fee_rate_*"
@@ -189,7 +189,7 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
     // 2. KillSwitch configure (per Step A.4 :749-753; PARITY-026 closure)
     if (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED)) {
         EventLoopState_ConfigureKillSwitch(&state,
-            FPN_Zero<F>(),                       // no hard balance floor; drawdown-only kill
+            Money_Zero(),                        // no hard balance floor; drawdown-only kill
             cfg.kill_switch_drawdown_pct);
     }
 
@@ -239,7 +239,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                                       ExecutionCore<F>& core,
                                       CoreModelZoo<F>* zoo_ptr,        // nullable: non-ML OR alloc-failed
                                       EnsembleModelZoo<F>* ezoo_ptr,   // nullable: same
-                                      FPN_Binary<F> core_balance) {           // caller-precomputed (O2 bytewise-identical)
+                                      Money core_balance) {           // caller-precomputed (O2 bytewise-identical)
     // -------- Step 1-4: unconditional per-core init (per Step A.4 CSV ordering) --------
     //   LIVE :909, BACKTEST :252 — SPSC ring init for producer→hot path
     SPSCRing_Init(&tick_ring);
@@ -248,9 +248,9 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
     //   LIVE :911-914, BACKTEST :255-256 — register core with EventLoop; intended_tp/sl/qty
     //   placeholders (slow-path rebuild fills in real values)
     EventLoopState_RegisterCore(&state, &core,
-        FPN_Zero<F>(),  // intended_tp
-        FPN_Zero<F>(),  // intended_sl
-        FPN_Zero<F>()); // intended_qty
+        Money_Zero(),  // intended_tp
+        Money_Zero(),  // intended_sl
+        Money_Zero()); // intended_qty
     //   LIVE :921-923, BACKTEST :264-266 — wire per-core strategy + risk budget
     //   (core_balance precomputed at caller per v1.6 O2 bytewise-identical math discipline)
     EventLoopState_SetCoreStrategy(&state, c, cfg.core_strategies[c], core_balance);
@@ -477,8 +477,8 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                                                int c,
                                                EventLoopState<F>& state,
                                                OrderManagerState<F>& oms,
-                                               FPN_Binary<F> price,
-                                               FPN_Binary<F> volume,
+                                               Money price,
+                                               Money volume,
                                                uint64_t ts_us,
                                                uint64_t now_tick,
                                                const BookSnapshot<F>& depth) {
@@ -504,7 +504,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // price = price_d > 0.0 ? FPN_FromDouble(price_d) : FPN_Zero()). FPN_Binary<F=64>
     // has 64 fractional bits + ~4032 integer bits; FPN_ToDouble of
     // FPN_FromDouble(x) recovers x bytewise-identical for normal doubles.
-    double price_d = FPN_ToDouble(price);
+    double price_d = Money_ToDouble(price);
 
     // === Read shared market state (eventually-consistent) ===
     // Producer is single writer; slow-paths read with relaxed
@@ -569,7 +569,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     EventLoop_RebuildOneCore(
         &state, c, &sst->rolling_short, &cfg, &sst->rolling_long,
         &sst->regime_ror, &sst->ema_price,
-        FPN_IsZero(price) ? nullptr : &price,
+        Money_IsZero(price) ? nullptr : &price,
         &sst->rolling_medium, &sst->rolling_baseline,
         &sst->cumdelta_state, &sst->tick_rate_state, rebuild_ts_us,
         BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? &book_imb : nullptr,
@@ -627,13 +627,13 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
         uint16_t bm = (uint16_t)
             (oms.portfolio.active_bitmap & my_mask);
         if (bm) {
-            FPN_Binary<F> price_fpn = FPN_FromDouble<F>(price_d);
+            Money price_fpn = Money{ money_from_double_payload(price_d) };
             while (bm) {
                 int pidx = __builtin_ctz(bm);
                 bm &= (uint16_t)(bm - 1);
-                FPN_Binary<F> qty =
+                Money qty =
                     oms.portfolio.positions[pidx].quantity;
-                if (FPN_IsZero(qty)) continue;
+                if (Money_IsZero(qty)) continue;
                 // Mark per-slot for v5.13.4 attribution + v5.13.0.B
                 // calibration log. Set BEFORE OMS_PushSubmit so the
                 // SPSC ring release-acquire makes it visible to drainer
@@ -806,8 +806,8 @@ template <unsigned F>
 inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                                 EventLoopState<F>& state,
                                                 OrderManagerState<F>& oms,
-                                                FPN_Binary<F> price,
-                                                FPN_Binary<F> volume,
+                                                Money price,
+                                                Money volume,
                                                 uint64_t ts_us,
                                                 uint64_t now_tick,
                                                 const BookSnapshot<F>& depth) {

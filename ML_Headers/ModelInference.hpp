@@ -138,8 +138,8 @@
 // CURRENT is the version emit produces; MAX_SUPPORTED is the upper bound parser accepts.
 // Bump CURRENT when wire-format changes; bump MAX_SUPPORTED when next bump is planned.
 // Legacy versions ≥ 1 continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat (see verify_model_stamp).
-static constexpr uint32_t STAMP_FORMAT_VERSION_CURRENT      = 2;  // v5.15.5.F.4d.1.B.3 Step 1.6.7.3 — SOFT bump 1 → 2 (cfg-derived cohort wire keys lose `inference_cfg_` prefix)
-static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 2;  // parser accepts [1, MAX] inclusive; > MAX = future version this engine doesn't understand
+static constexpr uint32_t STAMP_FORMAT_VERSION_CURRENT      = 3;  // Ship-B DECIMAL epoch (money wire values re-encode); v2 = 16B-binary era (H21 tombstone), v1 = legacy prefix era
+static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 3;  // Ship-B: pre-epoch stamps [1,2] are HARD-INVALID (unconditional floor below — bypasses the strict fork)
 
 // Ship-B P2 epoch guard (S-4/D-174 — the strict-gate bypass closed at the flip): stamps carry
 // ~30 money fields whose wire values re-encode at the decimal epoch. Tripwire: the flip commit

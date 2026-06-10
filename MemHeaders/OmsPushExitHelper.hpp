@@ -75,9 +75,9 @@ namespace tt {
 template <unsigned F>
 inline bool OMS_PushExitForSlot(OrderManagerState<F>* oms,
                                  int16_t slot,
-                                 FPN_Binary<F> qty,
+                                 Money qty,
                                  uint8_t strategy_id,
-                                 FPN_Binary<F> event_price,
+                                 Money event_price,
                                  uint8_t leg,
                                  const ::PerCoreCfg<F>* core_cfg) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (A refined): required-field ctor + optional assignments.

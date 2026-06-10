@@ -62,16 +62,16 @@ constexpr unsigned FP = 64;
 // the key guarantee: we NEVER reconnect with orphaned positions
 // if the bitmap isnt zero after force-close, thats a bug and we halt rather than lose track of money
 //======================================================================================================
-static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLog *log, FPN_Binary<FP> last_price) {
+static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLog *log, Money last_price) {
     uint16_t active = ctrl->portfolio.active_bitmap;
     while (active) {
         int idx = __builtin_ctz(active);
         Position<FP> *pos = &ctrl->portfolio.positions[idx];
 
         // grab display values before RecordExit for direct CSV write
-        double entry_d   = FPN_ToDouble(pos->entry_price);
-        double exit_d    = FPN_ToDouble(last_price);
-        double qty_d     = FPN_ToDouble(pos->quantity);
+        double entry_d   = Money_ToDouble(pos->entry_price);
+        double exit_d    = Money_ToDouble(last_price);
+        double qty_d     = Money_ToDouble(pos->quantity);
         double delta_pct = (entry_d != 0.0) ? ((exit_d - entry_d) / entry_d) * 100.0 : 0.0;
 
         // build ExitRecord from live position data (slot is valid — we're iterating active bitmap)
@@ -90,7 +90,7 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
         { TradeLogRecord r = {};
           r.tick = ctrl->total_ticks; r.price = exit_d; r.quantity = qty_d;
           r.entry_price = entry_d; r.delta_pct = delta_pct;
-          r.balance = FPN_ToDouble(ctrl->balance);
+          r.balance = Money_ToDouble(ctrl->balance);
           r.strategy_id = ctrl->entry_strategy[idx];
           r.regime = ctrl->regime.current_regime;
           snprintf(r.reason, sizeof(r.reason), "SESSION_CLOSE");
@@ -345,7 +345,7 @@ int main(int argc, char *argv[]) {
     if (PortfolioController_LoadSnapshot(&ctrl, snapshot_path)) {
         int pos_count = Portfolio_CountActive(&ctrl.portfolio);
         fprintf(stderr, "[ENGINE] resumed %d positions from snapshot\n", pos_count);
-        fprintf(stderr, "[ENGINE] realized P&L: $%.4f\n", FPN_ToDouble(ctrl.realized_pnl));
+        fprintf(stderr, "[ENGINE] realized P&L: $%.4f\n", Money_ToDouble(ctrl.realized_pnl));
     }
 
     //==================================================================================================
@@ -455,9 +455,9 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
-        ctrl.balance = FPN_FromDouble<FP>(usdt_start);
+        ctrl.balance = Money{ money_from_double_payload(usdt_start) };
         // in live mode, starting_balance = actual exchange equity, not engine.cfg
-        ctrl.config.starting_balance = FPN_FromDouble<FP>(usdt_start);
+        ctrl.config.starting_balance = Money{ money_from_double_payload(usdt_start) };
         fprintf(stderr, "[LIVE] starting_balance set to $%.2f from exchange\n", usdt_start);
     }
 
@@ -711,9 +711,9 @@ int main(int argc, char *argv[]) {
                 auto *pos = &ctrl.portfolio.positions[slot];
                 if (ctrl.portfolio.active_bitmap & (1 << slot)) {
                     if (is_tp)
-                        pos->take_profit_price = FPN_FromDouble<FP>(dprice);
+                        pos->take_profit_price = Money{ money_from_double_payload(dprice) };
                     else
-                        pos->stop_loss_price = FPN_FromDouble<FP>(dprice);
+                        pos->stop_loss_price = Money{ money_from_double_payload(dprice) };
                     fprintf(stderr, "[ENGINE] GUI drag: slot %d %s -> $%.2f\n",
                             slot, is_tp ? "TP" : "SL", dprice);
                 }
@@ -820,7 +820,7 @@ int main(int argc, char *argv[]) {
                 for (uint32_t i = 0; i < ctrl.exit_buf.count; i++) {
                     uint32_t pidx = ctrl.exit_buf.records[i].position_index;
                     saved_exit_slots[saved_exit_count] = pidx;
-                    saved_exit_qtys[saved_exit_count] = FPN_ToDouble(
+                    saved_exit_qtys[saved_exit_count] = Money_ToDouble(
                         ctrl.portfolio.positions[pidx].quantity);
                     saved_exit_count++;
                 }
@@ -868,7 +868,7 @@ int main(int argc, char *argv[]) {
                     while (active) {
                         int slot = __builtin_ctz(active);
                         if (ctrl.entry_ticks[slot] == ctrl.total_ticks) {
-                            double qty_d = FPN_ToDouble(ctrl.portfolio.positions[slot].quantity);
+                            double qty_d = Money_ToDouble(ctrl.portfolio.positions[slot].quantity);
                             double notional = qty_d * last_stream.price_d;
                             // 2x minNotional ensures sells also pass (Binance uses 5-min avg price)
                             if (qty_d >= order_api.filters.lot_min_qty
@@ -879,9 +879,9 @@ int main(int argc, char *argv[]) {
                                     live_position_bitmap |= (1 << slot);
                                     // sync paper position to actual fill
                                     if (fq > 0 && fabs(fq - qty_d) > 1e-10)
-                                        ctrl.portfolio.positions[slot].quantity = FPN_FromDouble<FP>(fq);
+                                        ctrl.portfolio.positions[slot].quantity = Money{ money_from_double_payload(fq) };
                                     if (fp > 0)
-                                        ctrl.portfolio.positions[slot].entry_price = FPN_FromDouble<FP>(fp);
+                                        ctrl.portfolio.positions[slot].entry_price = Money{ money_from_double_payload(fp) };
                                 } else {
                                     fprintf(stderr, "[LIVE] BUY failed — paper position kept, no real backing\n");
                                 }
@@ -902,17 +902,17 @@ int main(int argc, char *argv[]) {
                         int slot = __builtin_ctz(check);
                         if (ctrl.entry_ticks[slot] == ctrl.total_ticks
                             && !(live_position_bitmap & (1 << slot))) {
-                            double qty_d = FPN_ToDouble(ctrl.portfolio.positions[slot].quantity);
+                            double qty_d = Money_ToDouble(ctrl.portfolio.positions[slot].quantity);
                             double cost = qty_d * last_stream.price_d;
                             fprintf(stderr, "[LIVE] undoing paper position slot %d — no real backing (notional $%.2f)\n", slot, cost);
                             ctrl.portfolio.active_bitmap &= ~(1 << slot);
                             // restore balance: reverse the cost + fee deduction from position sizing
-                            FPN_Binary<FP> position_cost = FPN_Mul(ctrl.portfolio.positions[slot].quantity,
+                            Money position_cost = Money_Mul(ctrl.portfolio.positions[slot].quantity,
                                                             ctrl.portfolio.positions[slot].entry_price);
-                            FPN_Binary<FP> fee = FPN_Mul(position_cost, ctrl.config.fee_rate);
-                            ctrl.balance = FPN_AddSat(ctrl.balance, FPN_AddSat(position_cost, fee));
+                            Money fee = Money_Mul(position_cost, ctrl.config.fee_rate);
+                            ctrl.balance = Money_Add(ctrl.balance, Money_Add(position_cost, fee));
                             // reverse the entry fee that was counted at buy time — the buy didn't happen
-                            ctrl.total_fees = FPN_SubSat(ctrl.total_fees, fee);
+                            ctrl.total_fees = Money_Sub(ctrl.total_fees, fee);
                             ctrl.total_buys--;
                         }
                         check &= check - 1;
@@ -1037,7 +1037,7 @@ int main(int argc, char *argv[]) {
                         // sync paper balance when no live positions
                         // (USDT balance is complete picture when not holding BTC)
                         if (live_position_bitmap == 0) {
-                            ctrl.balance = FPN_FromDouble<FP>(usdt_bal);
+                            ctrl.balance = Money{ money_from_double_payload(usdt_bal) };
                         }
 
                         // orphan detection: real positions without paper backing
@@ -1056,20 +1056,20 @@ int main(int argc, char *argv[]) {
                             }
                             while (orphans) {
                                 int idx = __builtin_ctz(orphans);
-                                double qty_d = FPN_ToDouble(ctrl.portfolio.positions[idx].quantity);
+                                double qty_d = Money_ToDouble(ctrl.portfolio.positions[idx].quantity);
                                 double notional = qty_d * last_stream.price_d;
                                 if (qty_d >= order_api.filters.lot_min_qty
                                     && notional >= order_api.filters.min_notional * 2.0) {
                                     char oid[32]; double fp = 0, fq = 0;
                                     if (BinanceOrderAPI_MarketSell(&order_api, qty_d, oid, &fp, &fq) && fq > 0) {
                                         // book the exit in paper ledger
-                                        FPN_Binary<FP> proceeds = FPN_FromDouble<FP>(fp * fq);
-                                        FPN_Binary<FP> exit_fee = FPN_Mul(proceeds, ctrl.config.fee_rate);
-                                        ctrl.balance = FPN_AddSat(ctrl.balance, FPN_SubSat(proceeds, exit_fee));
-                                        ctrl.total_fees = FPN_AddSat(ctrl.total_fees, exit_fee);
+                                        Money proceeds = Money{ money_from_double_payload(fp * fq) };
+                                        Money exit_fee = Money_Mul(proceeds, ctrl.config.fee_rate);
+                                        ctrl.balance = Money_Add(ctrl.balance, Money_Sub(proceeds, exit_fee));
+                                        ctrl.total_fees = Money_Add(ctrl.total_fees, exit_fee);
                                         ctrl.losses++;
                                         fprintf(stderr, "[LIVE] orphan sold: %.8f @ $%.2f, fee $%.4f\n",
-                                                fq, fp, FPN_ToDouble(exit_fee));
+                                                fq, fp, Money_ToDouble(exit_fee));
                                     }
                                 } else {
                                     fprintf(stderr, "[LIVE] orphan slot %d too small to sell (notional $%.2f)\n", idx, notional);
@@ -1087,15 +1087,15 @@ int main(int argc, char *argv[]) {
                                     __builtin_popcount(ghost));
                             while (ghost) {
                                 int idx = __builtin_ctz(ghost);
-                                FPN_Binary<FP> cost = FPN_Mul(ctrl.portfolio.positions[idx].quantity,
+                                Money cost = Money_Mul(ctrl.portfolio.positions[idx].quantity,
                                                        ctrl.portfolio.positions[idx].entry_price);
-                                FPN_Binary<FP> fee = FPN_Mul(cost, ctrl.config.fee_rate);
-                                ctrl.balance = FPN_AddSat(ctrl.balance, FPN_AddSat(cost, fee));
+                                Money fee = Money_Mul(cost, ctrl.config.fee_rate);
+                                ctrl.balance = Money_Add(ctrl.balance, Money_Add(cost, fee));
                                 ctrl.portfolio.active_bitmap &= ~(1 << idx);
                                 ghost &= ghost - 1;
                             }
                             live_position_bitmap = 0;
-                            ctrl.balance = FPN_FromDouble<FP>(usdt_bal);
+                            ctrl.balance = Money{ money_from_double_payload(usdt_bal) };
                         }
                     }
 
@@ -1231,7 +1231,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "  Total ticks:      %lu\n", (unsigned long)ctrl.total_ticks);
     fprintf(stderr, "  Trade log:        %lu entries\n", (unsigned long)log.trade_count);
     fprintf(stderr, "  Open positions:   %d\n", Portfolio_CountActive(&ctrl.portfolio));
-    fprintf(stderr, "  Unrealized P&L:   $%.4f\n", FPN_ToDouble(ctrl.portfolio_delta));
+    fprintf(stderr, "  Unrealized P&L:   $%.4f\n", Money_ToDouble(ctrl.portfolio_delta));
 #ifdef LATENCY_PROFILING
     fprintf(stderr, "--------------------------------------------------\n");
     if (tui.hot_count > 0) {

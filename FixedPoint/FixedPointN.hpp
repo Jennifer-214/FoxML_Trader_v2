@@ -131,7 +131,7 @@ template <> struct is_fp_binary<FPN_Binary<64>> : std::true_type {};
 // The S-4 lesson made structural: the flip is 16B->16B, so NO sizeof/layout guard can see it —
 // these ENCODING-keyed guards are the net. DO NOT flip outside the P2 migration commit.
 // (Placed AFTER the traits — is_fp_decimal_v must be visible to the constexpr derivation.)
-using EngineMoneyT = FPN_Binary<64>;                                  // P2 flip target: -> Money
+using EngineMoneyT = Money;                                           // FLIPPED at P2b — THE EPOCH (D-181)
 inline constexpr unsigned MONEY_ENCODING_EPOCH = is_fp_decimal_v<EngineMoneyT> ? 1u : 0u;
 
 //======================================================================================================
@@ -1887,6 +1887,8 @@ inline int   Money_IsZero(Money a)              { return a.v == 0; }
 inline int   Money_Lt(Money a, Money b)         { return a.v <  b.v; }
 inline int   Money_Le(Money a, Money b)         { return a.v <= b.v; }
 inline int   Money_Eq(Money a, Money b)         { return a.v == b.v; }
+inline int   Money_Gt(Money a, Money b)         { return a.v >  b.v; }
+inline int   Money_Ge(Money a, Money b)         { return a.v >= b.v; }
 inline Money Money_BlendOnMask(Money if_true, Money if_false, uint64_t mask) {
     unsigned __int128 m = (unsigned __int128)(__int128)(int64_t)mask;  // 0 / all-ones-128 (sign-extended)
     return { (__int128)(((unsigned __int128)if_true.v & m) | ((unsigned __int128)if_false.v & ~m)) };

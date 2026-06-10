@@ -470,15 +470,15 @@ static inline void BacktestStats_Compute(BacktestStats *stats,
     stats->total_trades = ctrl->total_buys;
     stats->wins = ctrl->wins;
     stats->losses = ctrl->losses;
-    stats->total_pnl = FPN_ToDouble(ctrl->realized_pnl);
-    stats->total_fees = FPN_ToDouble(ctrl->total_fees);
+    stats->total_pnl = Money_ToDouble(ctrl->realized_pnl);
+    stats->total_fees = Money_ToDouble(ctrl->total_fees);
     stats->ticks_processed = ctrl->total_ticks;
     stats->elapsed_ms = elapsed_ms;
 
     // v5.8.4c: route every metric through Compute_* helpers (single
     // source of truth shared with EngineTUI / ShardedSnapshot paths).
-    double gw = FPN_ToDouble(ctrl->gross_wins);
-    double gl = FPN_ToDouble(ctrl->gross_losses);
+    double gw = Money_ToDouble(ctrl->gross_wins);
+    double gl = Money_ToDouble(ctrl->gross_losses);
     stats->avg_win  = (stats->wins > 0)   ? gw / stats->wins   : 0.0;
     stats->avg_loss = (stats->losses > 0) ? gl / stats->losses : 0.0;
     stats->win_rate       = Compute_WinRate(stats->wins, stats->total_trades);
@@ -2240,7 +2240,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
 static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char *key, double value) {
     // percentage fields (config says 4.0, stored as 0.04)
     #define OPT_SET_PCT(name) \
-        if (strcmp(key, #name) == 0) { cfg->name = FPN_FromDouble<BACKTEST_FP>(value / 100.0); return 1; }
+        if (strcmp(key, #name) == 0) { cfg->name = Money{ money_from_double_payload(value / 100.0) }; return 1; }
     // raw FPN_Binary fields
     #define OPT_SET_FPN(name) \
         if (strcmp(key, #name) == 0) { cfg->name = FPN_FromDouble<BACKTEST_FP>(value); return 1; }

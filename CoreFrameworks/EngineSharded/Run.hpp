@@ -637,7 +637,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // alerts at this point go to stderr only. That's acceptable: stderr is
     // line-buffered to a file (logging/engine.log), and any failure here
     // is fatal anyway — the user will see it on next start.
-    FPN_Binary<F> live_starting_balance = cfg.starting_balance;
+    Money live_starting_balance = cfg.starting_balance;
     if (live_trading) {
         double usdt_recovered = 0.0, btc_remaining = 0.0;
         if (!EngineSharded_OrphanRecovery(&g_sharded_binance_adapter,
@@ -650,7 +650,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             std::signal(SIGTERM, prev_term);
             return;
         }
-        live_starting_balance = FPN_FromDouble<F>(usdt_recovered);
+        live_starting_balance = Money{ money_from_double_payload(usdt_recovered) };  // D-103 reconcile ingress (exact venue-string parse rides P3 REST rework)
         fprintf(stderr, "[sharded] LIVE starting balance set from exchange: $%.2f\n",
                 usdt_recovered);
     }
@@ -885,8 +885,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // cores. Each core gets its own mini-portfolio that's risk_pct of the
     // total. With risk_pct=10% and 4 cores starting at $10k, each core gets
     // $250 to risk on a single trade.
-    double total_balance = FPN_ToDouble(cfg.starting_balance);
-    double default_risk = FPN_ToDouble(cfg.risk_pct);
+    double total_balance = Money_ToDouble(cfg.starting_balance);
+    double default_risk = Money_ToDouble(cfg.risk_pct);
     if (default_risk <= 0.0) default_risk = 0.10;
     double default_per_core = (total_balance * default_risk) / (double)num_cores;
     if (default_per_core < 1.0) default_per_core = 1.0;
@@ -904,8 +904,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // Per-core risk: use core-specific override if set, else shared/even split
         // (preserved verbatim per v1.6 O2 bytewise-identical math discipline).
         double core_balance = default_per_core;
-        if (!FPN_IsZero(cfg.core_risk_pct[i])) {
-            core_balance = total_balance * FPN_ToDouble(cfg.core_risk_pct[i]);
+        if (!Money_IsZero(cfg.core_risk_pct[i])) {
+            core_balance = total_balance * Money_ToDouble(cfg.core_risk_pct[i]);
             if (core_balance < 1.0) core_balance = 1.0;
         }
 
@@ -947,7 +947,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // inline at LIVE :908-1177.
         EngineCommon_BootPerCore(cfg, i, state, tick_rings[i], cores[i],
                                   zoo_ptr, ezoo_ptr,
-                                  FPN_FromDouble<F>(core_balance));
+                                  Money{ money_from_double_payload(core_balance) });
 
         // Post-helper LIVE-only wires (M5 persistence + threading observability;
         // Decision B + Decision G — STAY in caller post-helper return).
@@ -1250,10 +1250,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // (Pattern 2 — per-core in-scope; cfg.cores[i] in loop scope). Each core's tp floor
     // is computed against its own fee_rate_taker since per-core fee rates can differ.
     for (int i = 0; i < num_cores; ++i) {
-        double fee_taker_i = FPN_ToDouble(cfg.cores[i].fee_rate_taker);
-        if (fee_taker_i <= 0.0) fee_taker_i = FPN_ToDouble(cfg.cores[i].fee_rate);  // fallback
+        double fee_taker_i = Money_ToDouble(cfg.cores[i].fee_rate_taker);
+        if (fee_taker_i <= 0.0) fee_taker_i = Money_ToDouble(cfg.cores[i].fee_rate);  // fallback
         double tp_floor_i = 3.0 * fee_taker_i;
-        double tp_pct = FPN_ToDouble(cfg.cores[i].take_profit_pct);
+        double tp_pct = Money_ToDouble(cfg.cores[i].take_profit_pct);
         if (tp_pct > 0.0 && tp_pct < tp_floor_i) {
             fprintf(stderr,
                 "[sharded] WARN: core %d take_profit_pct=%.4f%% is below "
@@ -1915,14 +1915,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v1.7.3 HIGH-4).
 
                     // Per-cycle scalar inputs (mtm_price discipline preserved; helper takes
-                    // FPN_Binary<F> price = mtm_price, derives double internally via FPN_ToDouble
+                    // Money price = mtm_price, derives double internally via FPN_ToDouble
                     // for guard checks).
                     double price_d = last_price.load(std::memory_order_relaxed);
                     double volume_d = last_volume.load(std::memory_order_relaxed);
-                    FPN_Binary<F> price = price_d > 0.0
-                                 ? FPN_FromDouble<F>(price_d) : FPN_Zero<F>();
-                    FPN_Binary<F> volume = volume_d > 0.0
-                                  ? FPN_FromDouble<F>(volume_d) : FPN_Zero<F>();
+                    Money price = price_d > 0.0
+                                 ? Money{ money_from_double_payload(price_d) } : Money_Zero();
+                    Money volume = volume_d > 0.0
+                                  ? Money{ money_from_double_payload(volume_d) } : Money_Zero();
                     uint64_t ts_us =
                         (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -2004,8 +2004,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // Top bar
         auto now = std::chrono::steady_clock::now();
         long uptime = std::chrono::duration_cast<std::chrono::seconds>(now - t_start).count();
-        double bal = FPN_ToDouble(state.oms->balance);
-        double pnl = FPN_ToDouble(state.oms->realized_pnl);
+        double bal = Money_ToDouble(state.oms->balance);
+        double pnl = Money_ToDouble(state.oms->realized_pnl);
         int active = __builtin_popcount(state.oms->portfolio.active_bitmap);
         fprintf(stdout, " " SH_DIM "STATE: " SH_RESET SH_FG "ACTIVE" SH_RESET
                 "  " SH_DIM "│" SH_RESET "  " SH_DIM "UPTIME: " SH_RESET SH_FG "%02ld:%02ld:%02ld" SH_RESET
@@ -2023,8 +2023,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             while (bm) {
                 int s = __builtin_ctz(bm);
                 bm &= (uint16_t)(bm - 1);
-                double entry = FPN_ToDouble(state.oms->portfolio.positions[s].entry_price);
-                double qty   = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
+                double entry = Money_ToDouble(state.oms->portfolio.positions[s].entry_price);
+                double qty   = Money_ToDouble(state.oms->portfolio.positions[s].quantity);
                 unrealized += (price_d - entry) * qty;
             }
         }
@@ -2077,10 +2077,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             while (bm) {
                 int s = __builtin_ctz(bm);
                 bm &= (uint16_t)(bm - 1);
-                double entry_d = FPN_ToDouble(state.oms->portfolio.positions[s].entry_price);
-                double qty_d   = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
-                double tp_d    = FPN_ToDouble(state.oms->portfolio.positions[s].take_profit_price);
-                double sl_d    = FPN_ToDouble(state.oms->portfolio.positions[s].stop_loss_price);
+                double entry_d = Money_ToDouble(state.oms->portfolio.positions[s].entry_price);
+                double qty_d   = Money_ToDouble(state.oms->portfolio.positions[s].quantity);
+                double tp_d    = Money_ToDouble(state.oms->portfolio.positions[s].take_profit_price);
+                double sl_d    = Money_ToDouble(state.oms->portfolio.positions[s].stop_loss_price);
                 double unreal_d = (price_d - entry_d) * qty_d;
                 const char* strat = (s < state.registered_count && state.cores[s].strategy_id < NUM_STRATEGIES)
                     ? STRATEGY_SHORT_NAMES[state.cores[s].strategy_id] : "?";
@@ -2316,7 +2316,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             (unsigned long)ticks_consumed_total.load(),
             (unsigned long)state.total_entries,
             (unsigned long)state.total_exits,
-            FPN_ToDouble(state.oms->balance));
+            Money_ToDouble(state.oms->balance));
 
     EngineSharded_DumpLatency<F>(cores, num_cores, tsc_ghz);
 

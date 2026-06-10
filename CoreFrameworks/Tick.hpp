@@ -30,8 +30,8 @@ namespace tt {
 
 template <unsigned F>
 struct alignas(64) Tick {
-    FPN_Binary<F>   price;        // current trade price (FPN_Binary)
-    FPN_Binary<F>   volume;       // current trade volume (FPN_Binary)
+    Money           price;        // current trade price (DECIMAL money — Ship B P2b)
+    Money           volume;       // current trade volume (DECIMAL money — Ship B P2b)
     uint64_t timestamp;    // market time, microseconds since epoch
     uint64_t sequence;     // monotonic sequence number from the exchange feed
     // v4.3 — Binance "m" field. 1 = buyer was the maker (seller aggressed),

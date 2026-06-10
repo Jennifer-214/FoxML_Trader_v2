@@ -85,34 +85,34 @@ constexpr uint8_t GATE_FLAG_STALENESS_ENABLED = 0x80;
 template <unsigned F>
 struct alignas(64) GateParameters {
     // --- Buy gate inputs ---
-    FPN_Binary<F> bg_price_threshold;       // tick.price must be < this to enter
-    FPN_Binary<F> bg_volume_threshold;      // tick.volume must be > this (when GATE_FLAG_VOLUME_REQUIRED)
+    Money bg_price_threshold;       // tick.price must be < this to enter
+    Money bg_volume_threshold;      // tick.volume must be > this (when GATE_FLAG_VOLUME_REQUIRED)
 
     // --- Sell gate inputs (PRECOMPUTED — backward compatibility / tests) ---
     // The execution core uses these absolute prices directly when both
     // tp_pct AND sl_pct are zero. When either pct is non-zero, the core
     // computes TP/SL from the actual fill price using the percentages
     // instead — this is the "per-fill" path from phase 14.
-    FPN_Binary<F> sg_take_profit_price;     // legacy absolute TP
-    FPN_Binary<F> sg_stop_loss_price;       // legacy absolute SL
+    Money sg_take_profit_price;     // legacy absolute TP
+    Money sg_stop_loss_price;       // legacy absolute SL
 
     // --- Sell gate inputs (PER-FILL, phase 14 — the right way) ---
     // Strategies set tp_pct and sl_pct as percentages of fill price. The
     // execution core computes absolute TP/SL on entry against the actual
     // fill price, not the controller's expected entry. Fixes the structural
     // loss bias from phase 13 head-to-head.
-    FPN_Binary<F> tp_pct;                   // 0.005 = 0.5% TP. zero → use sg_take_profit_price
-    FPN_Binary<F> sl_pct;                   // 0.0025 = 0.25% SL. zero → use sg_stop_loss_price
+    Money tp_pct;                   // 0.005 = 0.5% TP. zero → use sg_take_profit_price
+    Money sl_pct;                   // 0.0025 = 0.25% SL. zero → use sg_stop_loss_price
     // Partial exits P.2: leg-B TP percentage (used only when
     // GATE_FLAG_PAIR_ACTIVE is set). Strategy_BuildParameters typically
     // sets tp_pct_b = tp_pct * cfg.tp2_mult (TP2 farther than TP1). Leg B
     // shares the same live_sl as leg A. Zero-defaults when partials
     // disabled, in which case the entry path won't activate leg B
     // regardless.
-    FPN_Binary<F> tp_pct_b;
+    Money tp_pct_b;
 
     // --- Sizing (controller-set, not used by gate evaluation directly) ---
-    FPN_Binary<F> trade_size;               // size for the next entry, written to Position by controller
+    Money trade_size;               // size for the next entry, written to Position by controller
 
     // --- v4.0.3 D9 trailing SL ratchet ---
     // Controller writes via standard slow-path PushParameters (seqlock-protected).
@@ -122,7 +122,7 @@ struct alignas(64) GateParameters {
     // this level even if the original live_sl was lower. Mirrors legacy
     // PortfolioController trailing behavior; reaction time bounded by
     // slow_path_interval (~100-200ms) for the SET, microseconds for the FIRE.
-    FPN_Binary<F> ratchet_sl;
+    Money ratchet_sl;
 
     // --- v5.4.0 Phase 3.3 trailing TP ratchet ---
     // Parallel channel to ratchet_sl. For LONG positions, ratcheting TP UP
@@ -133,7 +133,7 @@ struct alignas(64) GateParameters {
     // strategy-specific TP trailing in Phase 4+. Pre-v5.4 sharded had no TP
     // ratchet field; the legacy Regime_AdjustPositions writes to pos->take_profit_price
     // were dead — postmortem F4.
-    FPN_Binary<F> ratchet_tp;
+    Money ratchet_tp;
 
     // --- Identification ---
     uint8_t strategy_id;             // STRATEGY_* constant
@@ -168,11 +168,11 @@ static inline bool BG_Evaluate(const Tick<F>& tick, const GateParameters<F>* par
     // Branchless price check — selects buy-below (price < threshold, MR/DIP/EMA/ML)
     // or buy-above (price > threshold, MOM) based on GATE_FLAG_BUY_ABOVE.
     // Both comparisons computed unconditionally; mask selects the active one.
-    uint64_t price_below = (uint64_t)FPN_LessThan(tick.price, params->bg_price_threshold);
-    uint64_t price_above = (uint64_t)FPN_GreaterThan(tick.price, params->bg_price_threshold);
+    uint64_t price_below = (uint64_t)Money_Lt(tick.price, params->bg_price_threshold);
+    uint64_t price_above = (uint64_t)Money_Gt(tick.price, params->bg_price_threshold);
     uint64_t buy_above   = (uint64_t)((params->flags & GATE_FLAG_BUY_ABOVE) != 0);
     uint64_t price_ok    = (price_above & buy_above) | (price_below & ~buy_above);
-    uint64_t volume_ok   = (uint64_t)FPN_GreaterThan(tick.volume, params->bg_volume_threshold);
+    uint64_t volume_ok   = (uint64_t)Money_Gt(tick.volume, params->bg_volume_threshold);
     uint64_t volume_required = (uint64_t)((params->flags & GATE_FLAG_VOLUME_REQUIRED) != 0);
     uint64_t volume_check = (volume_required & volume_ok) | (~volume_required & 1ULL);
     // Track E.3: slow-path veto. When GATE_FLAG_BUY_BLOCKED is set, force
@@ -186,17 +186,17 @@ static inline bool BG_Evaluate(const Tick<F>& tick, const GateParameters<F>* par
 
 template <unsigned F>
 __attribute__((always_inline))
-static inline bool SG_Evaluate(const FPN_Binary<F>& current_price, const FPN_Binary<F>& entry_price, const GateParameters<F>* params) {
+static inline bool SG_Evaluate(const Money& current_price, const Money& entry_price, const GateParameters<F>* params) {
     // Stub: TP hit OR SL hit (each gated by its enable flag)
     (void)entry_price;  // unused in stub; real implementation may use for trailing
     uint64_t tp_enabled = (uint64_t)((params->flags & GATE_FLAG_TP_ENABLED) != 0);
     uint64_t sl_enabled = (uint64_t)((params->flags & GATE_FLAG_SL_ENABLED) != 0);
     // v5.4.0 Phase 3.3: ratchet_tp / ratchet_sl raise the effective exit
     // levels (max-only). Zero defaults preserve pre-v5.4 numerics.
-    FPN_Binary<F> effective_tp = FPN_Max(params->sg_take_profit_price, params->ratchet_tp);
-    FPN_Binary<F> effective_sl = FPN_Max(params->sg_stop_loss_price,   params->ratchet_sl);
-    uint64_t tp_hit = (uint64_t)FPN_GreaterThanOrEqual(current_price, effective_tp);
-    uint64_t sl_hit = (uint64_t)FPN_LessThanOrEqual(current_price, effective_sl);
+    Money effective_tp = Money_Max(params->sg_take_profit_price, params->ratchet_tp);
+    Money effective_sl = Money_Max(params->sg_stop_loss_price,   params->ratchet_sl);
+    uint64_t tp_hit = (uint64_t)Money_Ge(current_price, effective_tp);
+    uint64_t sl_hit = (uint64_t)Money_Le(current_price, effective_sl);
     return ((tp_enabled & tp_hit) | (sl_enabled & sl_hit)) != 0;
 }
 
@@ -204,16 +204,16 @@ static inline bool SG_Evaluate(const FPN_Binary<F>& current_price, const FPN_Bin
 // these params + permission=0 the execution core will not trade.
 template <unsigned F>
 static inline void GateParameters_Init(GateParameters<F>* params) {
-    params->bg_price_threshold = FPN_Zero<F>();
-    params->bg_volume_threshold = FPN_Zero<F>();
-    params->sg_take_profit_price = FPN_Zero<F>();
-    params->sg_stop_loss_price = FPN_Zero<F>();
-    params->tp_pct = FPN_Zero<F>();
-    params->sl_pct = FPN_Zero<F>();
-    params->tp_pct_b = FPN_Zero<F>();  // P.2: leg-B TP%, set by strategy when partials enabled
-    params->trade_size = FPN_Zero<F>();
-    params->ratchet_sl = FPN_Zero<F>();  // v4.0.3 D9
-    params->ratchet_tp = FPN_Zero<F>();  // v5.4.0 Phase 3.3 — TP ratchet channel
+    params->bg_price_threshold = Money_Zero();
+    params->bg_volume_threshold = Money_Zero();
+    params->sg_take_profit_price = Money_Zero();
+    params->sg_stop_loss_price = Money_Zero();
+    params->tp_pct = Money_Zero();
+    params->sl_pct = Money_Zero();
+    params->tp_pct_b = Money_Zero();  // P.2: leg-B TP%, set by strategy when partials enabled
+    params->trade_size = Money_Zero();
+    params->ratchet_sl = Money_Zero();  // v4.0.3 D9
+    params->ratchet_tp = Money_Zero();  // v5.4.0 Phase 3.3 — TP ratchet channel
     params->strategy_id = STRATEGY_NONE;
     params->flags = 0;
 }

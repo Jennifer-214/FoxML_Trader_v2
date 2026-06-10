@@ -51,13 +51,13 @@
 // locality co-access with PERSIST fields.
 template <unsigned F> struct alignas(64) Position {
     // Auto-generated fields from FOREACH_POSITION_FIELD (PositionFieldRegistry.hpp):
-    //   take_profit_price (FPN_Binary<F>)   ← hot; offset 0
-    //   stop_loss_price   (FPN_Binary<F>)   ← hot; offset 16  (Ship-A 16B FPN_Binary, was 24)
-    //   quantity          (FPN_Binary<F>)
-    //   entry_price       (FPN_Binary<F>)
-    //   entry_fee         (FPN_Binary<F>)
-    //   original_tp       (FPN_Binary<F>)
-    //   original_sl       (FPN_Binary<F>)
+    //   take_profit_price (Money)   ← hot; offset 0
+    //   stop_loss_price   (Money)   ← hot; offset 16  (Ship-A 16B FPN_Binary, was 24)
+    //   quantity          (Money)
+    //   entry_price       (Money)
+    //   entry_fee         (Money)
+    //   original_tp       (Money)
+    //   original_sl       (Money)
     //   entry_timestamp_us (uint64_t)
     //   pair_index        (int8_t)
     #define POSITION_EMIT_FIELD(name, type, init, persist_kind, doc) type name = init;
@@ -79,7 +79,7 @@ template <unsigned F> struct alignas(64) Position {
 // preservation discipline. Catches accidental field-reorder that would
 // invalidate PORTFOLIO_SNAPSHOT_VERSION=6 wire format.
 //
-// Reference layout (Ship-A 16B FPN_Binary<64>; PORTFOLIO_SNAPSHOT_VERSION=6; was 24B/v5):
+// Reference layout (Ship-A 16B Money; PORTFOLIO_SNAPSHOT_VERSION=6; was 24B/v5):
 //   offset 0:   take_profit_price   (16B)
 //   offset 16:  stop_loss_price     (16B)
 //   offset 32:  quantity            (16B)
@@ -167,11 +167,11 @@ template <unsigned F> struct ExitRecord {
     uint32_t position_index;    // slot index (for entry_ticks/entry_strategy lookup only)
     int reason;                 // 0 = take profit, 1 = stop loss
     uint64_t tick;
-    FPN_Binary<F> exit_price;
+    Money exit_price;
     // position data snapshot — captured at exit time, immune to slot reuse
-    FPN_Binary<F> entry_price;
-    FPN_Binary<F> quantity;
-    FPN_Binary<F> entry_fee;
+    Money entry_price;
+    Money quantity;
+    Money entry_fee;
     int8_t pair_index;
     uint8_t _pad_rec[7];
 };
@@ -193,18 +193,18 @@ template <unsigned F> inline void ExitBuffer_Clear(ExitBuffer<F> *buf) {
 // exact net proceeds pending in exit buffer — matches what DrainExits/RecordExit will credit
 // reads ALL data from ExitRecord (not position slots — those may have been reused)
 template <unsigned F>
-inline FPN_Binary<F> ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
-                                          FPN_Binary<F> fee_rate, FPN_Binary<F> slippage_pct) {
-    FPN_Binary<F> total = FPN_Zero<F>();
+inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
+                                          Money fee_rate, Money slippage_pct) {
+    Money total = Money_Zero();
     for (uint32_t i = 0; i < buf->count; i++) {
-        FPN_Binary<F> exit_price = buf->records[i].exit_price;
-        if (!FPN_IsZero(slippage_pct)) {
-            FPN_Binary<F> slip = FPN_Mul(exit_price, slippage_pct);
-            exit_price = FPN_SubSat(exit_price, slip);
+        Money exit_price = buf->records[i].exit_price;
+        if (!Money_IsZero(slippage_pct)) {
+            Money slip = Money_Mul(exit_price, slippage_pct);
+            exit_price = Money_Sub(exit_price, slip);
         }
-        FPN_Binary<F> gross = FPN_Mul(exit_price, buf->records[i].quantity);
-        FPN_Binary<F> fee = FPN_Mul(gross, fee_rate);
-        total = FPN_AddSat(total, FPN_SubSat(gross, fee));
+        Money gross = Money_Mul(exit_price, buf->records[i].quantity);
+        Money fee = Money_Mul(gross, fee_rate);
+        total = Money_Add(total, Money_Sub(gross, fee));
     }
     return total;
 }
@@ -215,11 +215,11 @@ inline FPN_Binary<F> ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
 //======================================================================================================
 template <unsigned F> inline void Portfolio_Init(Portfolio<F> *portfolio) {
     for (int i = 0; i < 16; i++) {
-        portfolio->positions[i].quantity          = FPN_Zero<F>();
-        portfolio->positions[i].entry_price       = FPN_Zero<F>();
-        portfolio->positions[i].entry_fee         = FPN_Zero<F>();
-        portfolio->positions[i].take_profit_price = FPN_Zero<F>();
-        portfolio->positions[i].stop_loss_price   = FPN_Zero<F>();
+        portfolio->positions[i].quantity          = Money_Zero();
+        portfolio->positions[i].entry_price       = Money_Zero();
+        portfolio->positions[i].entry_fee         = Money_Zero();
+        portfolio->positions[i].take_profit_price = Money_Zero();
+        portfolio->positions[i].stop_loss_price   = Money_Zero();
     }
     portfolio->active_bitmap = 0;
 }
@@ -234,11 +234,11 @@ template <unsigned F> inline int Portfolio_CountActive(const Portfolio<F> *portf
 //======================================================================================================
 // find position by entry price - walks active bits, returns index or -1
 //======================================================================================================
-template <unsigned F> inline int Portfolio_FindByPrice(const Portfolio<F> *portfolio, FPN_Binary<F> entry_price) {
+template <unsigned F> inline int Portfolio_FindByPrice(const Portfolio<F> *portfolio, Money entry_price) {
     uint16_t active = portfolio->active_bitmap;
     while (active) {
         int idx = __builtin_ctz(active);
-        if (FPN_Equal(portfolio->positions[idx].entry_price, entry_price)) {
+        if (Money_Eq(portfolio->positions[idx].entry_price, entry_price)) {
             return idx;
         }
         active &= active - 1;
@@ -248,16 +248,16 @@ template <unsigned F> inline int Portfolio_FindByPrice(const Portfolio<F> *portf
 //======================================================================================================
 // add quantity to existing position at index (consolidation)
 //======================================================================================================
-template <unsigned F> inline void Portfolio_AddQuantity(Portfolio<F> *portfolio, int index, FPN_Binary<F> quantity) {
-    portfolio->positions[index].quantity = FPN_AddSat(portfolio->positions[index].quantity, quantity);
+template <unsigned F> inline void Portfolio_AddQuantity(Portfolio<F> *portfolio, int index, Money quantity) {
+    portfolio->positions[index].quantity = Money_Add(portfolio->positions[index].quantity, quantity);
 }
 //======================================================================================================
 // add new position with pre-computed exit prices, returns slot index or -1 if full
 //======================================================================================================
 template <unsigned F>
-inline int Portfolio_AddPositionWithExits(Portfolio<F> *portfolio, FPN_Binary<F> quantity, FPN_Binary<F> entry_price,
-                                          FPN_Binary<F> take_profit_price, FPN_Binary<F> stop_loss_price,
-                                          FPN_Binary<F> entry_fee = FPN_Zero<F>()) {
+inline int Portfolio_AddPositionWithExits(Portfolio<F> *portfolio, Money quantity, Money entry_price,
+                                          Money take_profit_price, Money stop_loss_price,
+                                          Money entry_fee = Money_Zero()) {
     if (portfolio->active_bitmap == 0xFFFF) return -1;
     int idx                                       = __builtin_ctz(~portfolio->active_bitmap);
     portfolio->positions[idx].quantity             = quantity;
@@ -272,14 +272,14 @@ inline int Portfolio_AddPositionWithExits(Portfolio<F> *portfolio, FPN_Binary<F>
 //======================================================================================================
 // legacy add - for backward compatibility with existing tests, no exit prices
 //======================================================================================================
-template <unsigned F> inline void Portfolio_AddPosition(Portfolio<F> *portfolio, FPN_Binary<F> quantity, FPN_Binary<F> entry_price) {
+template <unsigned F> inline void Portfolio_AddPosition(Portfolio<F> *portfolio, Money quantity, Money entry_price) {
     if (portfolio->active_bitmap == 0xFFFF) return;
     int idx                                       = __builtin_ctz(~portfolio->active_bitmap);
     portfolio->positions[idx].quantity             = quantity;
     portfolio->positions[idx].entry_price          = entry_price;
-    portfolio->positions[idx].entry_fee            = FPN_Zero<F>();
-    portfolio->positions[idx].take_profit_price    = FPN_Zero<F>();
-    portfolio->positions[idx].stop_loss_price      = FPN_Zero<F>();
+    portfolio->positions[idx].entry_fee            = Money_Zero();
+    portfolio->positions[idx].take_profit_price    = Money_Zero();
+    portfolio->positions[idx].stop_loss_price      = Money_Zero();
     portfolio->active_bitmap |= (1 << idx);
 }
 //======================================================================================================
@@ -330,11 +330,11 @@ template <unsigned F> inline void Portfolio_RemovePosition(Portfolio<F> *portfol
 //     preservation).
 template <unsigned F>
 struct PositionEntryArgs {
-    FPN_Binary<F>   entry_price;
-    FPN_Binary<F>   quantity;
-    FPN_Binary<F>   take_profit_price;
-    FPN_Binary<F>   stop_loss_price;
-    FPN_Binary<F>   entry_fee          = FPN_Zero<F>();
+    Money   entry_price;
+    Money   quantity;
+    Money   take_profit_price;
+    Money   stop_loss_price;
+    Money   entry_fee          = Money_Zero();
     uint64_t entry_timestamp_us = 0;   // 0 = use clock_gettime(REALTIME); non-zero = preserve
     int      pair_index         = -1;  // -1 = unpaired; >=0 = paired-leg slot index (partial-exit)
 };
@@ -376,9 +376,9 @@ inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
 // overload directly. Deprecation path: convert all callers, then delete this.
 template <unsigned F>
 inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
-                                FPN_Binary<F> entry_price, FPN_Binary<F> quantity,
-                                FPN_Binary<F> take_profit_price, FPN_Binary<F> stop_loss_price,
-                                FPN_Binary<F> entry_fee = FPN_Zero<F>()) {
+                                Money entry_price, Money quantity,
+                                Money take_profit_price, Money stop_loss_price,
+                                Money entry_fee = Money_Zero()) {
     PositionEntryArgs<F> args;
     args.entry_price        = entry_price;
     args.quantity           = quantity;
@@ -390,9 +390,9 @@ inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
 }
 
 template <unsigned F>
-inline FPN_Binary<F> Portfolio_CloseSlot(Portfolio<F> *portfolio, int slot, FPN_Binary<F> exit_price) {
-    FPN_Binary<F> diff = FPN_Sub(exit_price, portfolio->positions[slot].entry_price);
-    FPN_Binary<F> gross = FPN_Mul(diff, portfolio->positions[slot].quantity);
+inline Money Portfolio_CloseSlot(Portfolio<F> *portfolio, int slot, Money exit_price) {
+    Money diff = Money_Sub(exit_price, portfolio->positions[slot].entry_price);
+    Money gross = Money_Mul(diff, portfolio->positions[slot].quantity);
     portfolio->active_bitmap &= ~(uint16_t)(1 << slot);
     return gross;
 }
@@ -404,17 +404,17 @@ inline int Portfolio_SlotActive(const Portfolio<F> *portfolio, int slot) {
 //======================================================================================================
 template <unsigned F> inline void Portfolio_ClearPositions(Portfolio<F> *portfolio) {
     for (int i = 0; i < 16; i++) {
-        portfolio->positions[i].quantity          = FPN_Zero<F>();
-        portfolio->positions[i].entry_price       = FPN_Zero<F>();
-        portfolio->positions[i].entry_fee         = FPN_Zero<F>();
-        portfolio->positions[i].take_profit_price = FPN_Zero<F>();
-        portfolio->positions[i].stop_loss_price   = FPN_Zero<F>();
+        portfolio->positions[i].quantity          = Money_Zero();
+        portfolio->positions[i].entry_price       = Money_Zero();
+        portfolio->positions[i].entry_fee         = Money_Zero();
+        portfolio->positions[i].take_profit_price = Money_Zero();
+        portfolio->positions[i].stop_loss_price   = Money_Zero();
     }
     portfolio->active_bitmap = 0;
 }
 //======================================================================================================
 template <unsigned F>
-inline void Portfolio_UpdatePosition(Portfolio<F> *portfolio, int index, FPN_Binary<F> new_quantity, FPN_Binary<F> new_entry_price) {
+inline void Portfolio_UpdatePosition(Portfolio<F> *portfolio, int index, Money new_quantity, Money new_entry_price) {
     portfolio->positions[index].quantity    = new_quantity;
     portfolio->positions[index].entry_price = new_entry_price;
 }
@@ -425,14 +425,14 @@ inline void Portfolio_UpdatePosition(Portfolio<F> *portfolio, int index, FPN_Bin
 // this is the signal the controller feeds to regression - measures whether current
 // gate conditions are producing positions that are making money
 //======================================================================================================
-template <unsigned F> inline FPN_Binary<F> Portfolio_ComputePnL(const Portfolio<F> *portfolio, FPN_Binary<F> current_price) {
-    FPN_Binary<F> total = FPN_Zero<F>();
+template <unsigned F> inline Money Portfolio_ComputePnL(const Portfolio<F> *portfolio, Money current_price) {
+    Money total = Money_Zero();
     uint16_t active  = portfolio->active_bitmap;
     while (active) {
         int idx        = __builtin_ctz(active);
-        FPN_Binary<F> diff = FPN_Sub(current_price, portfolio->positions[idx].entry_price);
-        FPN_Binary<F> pnl  = FPN_Mul(diff, portfolio->positions[idx].quantity);
-        total           = FPN_AddSat(total, pnl);
+        Money diff = Money_Sub(current_price, portfolio->positions[idx].entry_price);
+        Money pnl  = Money_Mul(diff, portfolio->positions[idx].quantity);
+        total           = Money_Add(total, pnl);
         active &= active - 1;
     }
     return total;
@@ -440,13 +440,13 @@ template <unsigned F> inline FPN_Binary<F> Portfolio_ComputePnL(const Portfolio<
 //======================================================================================================
 // total portfolio value: sum of current_price * quantity across active positions
 //======================================================================================================
-template <unsigned F> inline FPN_Binary<F> Portfolio_ComputeValue(const Portfolio<F> *portfolio, FPN_Binary<F> current_price) {
-    FPN_Binary<F> total = FPN_Zero<F>();
+template <unsigned F> inline Money Portfolio_ComputeValue(const Portfolio<F> *portfolio, Money current_price) {
+    Money total = Money_Zero();
     uint16_t active  = portfolio->active_bitmap;
     while (active) {
         int idx        = __builtin_ctz(active);
-        FPN_Binary<F> val = FPN_Mul(current_price, portfolio->positions[idx].quantity);
-        total          = FPN_AddSat(total, val);
+        Money val = Money_Mul(current_price, portfolio->positions[idx].quantity);
+        total          = Money_Add(total, val);
         active &= active - 1;
     }
     return total;
@@ -459,7 +459,7 @@ template <unsigned F> inline FPN_Binary<F> Portfolio_ComputeValue(const Portfoli
 // clears position bit immediately on exit so next tick's gate skips it
 //======================================================================================================
 template <unsigned F>
-inline void PositionExitGate(Portfolio<F> *portfolio, FPN_Binary<F> current_price, ExitBuffer<F> *exit_buf, uint64_t tick) {
+inline void PositionExitGate(Portfolio<F> *portfolio, Money current_price, ExitBuffer<F> *exit_buf, uint64_t tick) {
     uint16_t active = portfolio->active_bitmap;
     while (active) {
         int idx = __builtin_ctz(active);
@@ -467,13 +467,13 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN_Binary<F> current_pric
         // positive-FPN_Binary comparison; crypto prices always positive so sign check skipped. 16B two's-comp →
         // native .v compares: value-equivalent to the old MSW-to-LSW magnitude compare for non-negative values
         // (== triggers exit, matching the old all-words-equal case). Branchless, replaces the word-loop short-circuit.
-        const FPN_Binary<F> &tp = portfolio->positions[idx].take_profit_price;
-        const FPN_Binary<F> &sl = portfolio->positions[idx].stop_loss_price;
+        const Money &tp = portfolio->positions[idx].take_profit_price;
+        const Money &sl = portfolio->positions[idx].stop_loss_price;
         int hit_tp = (current_price.v >= tp.v);   // price >= TP
         int hit_sl = (current_price.v <= sl.v);   // price <= SL
 
         // skip positions with no exit prices set (legacy adds, zero TP/SL)
-        int has_exits = !FPN_IsZero(tp);
+        int has_exits = !Money_IsZero(tp);
         int should_exit = (hit_tp | hit_sl) & has_exits;
 
         // conditional write: exits are rare (~1/1000 ticks), well-predicted branch
@@ -509,13 +509,13 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN_Binary<F> current_pric
 //   [2 bytes] active_bitmap
 //   [2 bytes] padding
 //   [16 * sizeof(Position<F>)] positions array
-//   [sizeof(FPN_Binary<F>)] realized_pnl
-//   [sizeof(FPN_Binary<F>)] live_offset_pct
-//   [sizeof(FPN_Binary<F>)] live_vol_mult
-//   [sizeof(FPN_Binary<F>)] balance
+//   [sizeof(Money)] realized_pnl
+//   [sizeof(Money)] live_offset_pct
+//   [sizeof(Money)] live_vol_mult
+//   [sizeof(Money)] balance
 //======================================================================================================
 #define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian
-#define PORTFOLIO_SNAPSHOT_VERSION 6   // Ship-A 16B FPN_Binary: Position PERSIST 184->128 B; v5 snapshots version-rejected (H21/D-144)
+#define PORTFOLIO_SNAPSHOT_VERSION 7   // Ship-B DECIMAL epoch: money re-encoded 2^64->10^8 at identical 16B layout; v6 (16B binary, H21 tombstone) + earlier version-rejected. Was: // Ship-A 16B FPN_Binary: Position PERSIST 184->128 B; v5 snapshots version-rejected (H21/D-144)
 
 // Ship-B P2 epoch guard (S-4/D-174 #14): Position persists money fields RAW — a 16B->16B decimal
 // re-encoding changes the VALUE SEMANTICS at identical layout, so no sizeof/offset assert can see
@@ -528,9 +528,9 @@ static_assert(!is_fp_decimal_v<decltype(Position<64>::entry_price)>
               "snapshots load with money misread x1.8e11.");
 
 template <unsigned F>
-static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN_Binary<F> realized_pnl,
-                                  FPN_Binary<F> live_offset_pct, FPN_Binary<F> live_vol_mult,
-                                  FPN_Binary<F> live_stddev_mult, FPN_Binary<F> balance,
+static inline int Portfolio_Save(const Portfolio<F> *portfolio, Money realized_pnl,
+                                  Money live_offset_pct, Money live_vol_mult,
+                                  Money live_stddev_mult, Money balance,
                                   const char *filepath) {
     FILE *f = fopen(filepath, "wb");
     if (!f) {
@@ -555,11 +555,11 @@ static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN_Binary<F> re
     for (int i = 0; i < 16; i++) {
         fwrite(&portfolio->positions[i], pos_persist_bytes, 1, f);
     }
-    fwrite(&realized_pnl, sizeof(FPN_Binary<F>), 1, f);
-    fwrite(&live_offset_pct, sizeof(FPN_Binary<F>), 1, f);
-    fwrite(&live_vol_mult, sizeof(FPN_Binary<F>), 1, f);
-    fwrite(&live_stddev_mult, sizeof(FPN_Binary<F>), 1, f);
-    fwrite(&balance, sizeof(FPN_Binary<F>), 1, f);
+    fwrite(&realized_pnl, sizeof(Money), 1, f);
+    fwrite(&live_offset_pct, sizeof(Money), 1, f);
+    fwrite(&live_vol_mult, sizeof(Money), 1, f);
+    fwrite(&live_stddev_mult, sizeof(Money), 1, f);
+    fwrite(&balance, sizeof(Money), 1, f);
 
     fflush(f);
     fclose(f);
@@ -567,9 +567,9 @@ static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN_Binary<F> re
 }
 
 template <unsigned F>
-static inline int Portfolio_Load(Portfolio<F> *portfolio, FPN_Binary<F> *realized_pnl,
-                                  FPN_Binary<F> *live_offset_pct, FPN_Binary<F> *live_vol_mult,
-                                  FPN_Binary<F> *live_stddev_mult, FPN_Binary<F> *balance,
+static inline int Portfolio_Load(Portfolio<F> *portfolio, Money *realized_pnl,
+                                  Money *live_offset_pct, Money *live_vol_mult,
+                                  Money *live_stddev_mult, Money *balance,
                                   const char *filepath) {
     FILE *f = fopen(filepath, "rb");
     if (!f) {
@@ -607,11 +607,11 @@ static inline int Portfolio_Load(Portfolio<F> *portfolio, FPN_Binary<F> *realize
 
     portfolio->active_bitmap = bitmap;
 
-    if (fread(realized_pnl, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(live_offset_pct, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(live_vol_mult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(live_stddev_mult, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(balance, sizeof(FPN_Binary<F>), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(realized_pnl, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(live_offset_pct, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(live_vol_mult, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(live_stddev_mult, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(balance, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
 
     fclose(f);
 

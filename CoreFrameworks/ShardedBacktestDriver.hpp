@@ -251,24 +251,27 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     // every tick narrows the window 64x and produces tighter dip thresholds
     // that miss the trades the legacy path takes.
     if (((tick_index + 1) % drv->slow_path_interval) == 0) {
+        // D-122 feature ingress: money tick -> binary feature domain, ONE cast.
+        FPN_Binary<64> price_b  = Money_ToBinary(tick.price);
+        FPN_Binary<64> volume_b = Money_ToBinary(tick.volume);
         if (drv->rolling) {
-            RollingStats_Push(drv->rolling, tick.price, tick.volume);
+            RollingStats_Push(drv->rolling, price_b, volume_b);
         }
         if (drv->rolling_long) {
-            RollingStats_Push(drv->rolling_long, tick.price, tick.volume);
+            RollingStats_Push(drv->rolling_long, price_b, volume_b);
         }
         // Track E.1 — push v4.3 state at the same cadence EngineSharded_Run
         // does (lines 804-818). Each guarded so callers that don't supply
         // the state get prior behavior.
         if (drv->rolling_medium) {
-            RollingStats_Push(drv->rolling_medium, tick.price, tick.volume);
+            RollingStats_Push(drv->rolling_medium, price_b, volume_b);
         }
         if (drv->rolling_baseline) {
-            RollingStats_Push(drv->rolling_baseline, tick.price, tick.volume);
+            RollingStats_Push(drv->rolling_baseline, price_b, volume_b);
         }
         if (drv->cumdelta_state) {
             // is_buyer_maker available on Tick<F> per the v4.3 plumbing.
-            CumDelta_Push(drv->cumdelta_state, tick.volume, tick.is_buyer_maker);
+            CumDelta_Push(drv->cumdelta_state, volume_b, tick.is_buyer_maker);
         }
         if (drv->tick_rate_state) {
             TickRate_Push(drv->tick_rate_state, tick.timestamp);
@@ -294,7 +297,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         if (drv->flow_state) {
             // Signed volume: is_buyer_maker=1 → seller aggression (negative);
             // =0 → buyer aggression (+). Mirrors CumDelta_Push.
-            double signed_vol = FPN_ToDouble(tick.volume);
+            double signed_vol = Money_ToDouble(tick.volume);
             if (tick.is_buyer_maker) signed_vol = -signed_vol;
             FlowState_Push((FlowState*)drv->flow_state,
                             tick.timestamp, signed_vol);
@@ -302,7 +305,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         if (drv->large_trade_state) {
             LargeTradeState_Push(
                 (LargeTradeState<F, 1024>*)drv->large_trade_state,
-                tick.volume);
+                Money_ToBinary(tick.volume));
         }
         // v4.6 Wave 2 — push current spread into z-score ring. Caller must
         // have updated *drv->current_spread before RunTick.
@@ -329,7 +332,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             // it during backtest, gap == 0 → still no flatten (publish
             // and check use same value). Determinism preserved.
             if (drv->config && drv->oms) {
-                double current_price = FPN_ToDouble(tick.price);
+                double current_price = Money_ToDouble(tick.price);
                 EventLoop_CheckWsStaleness(drv->state, *drv->config,
                                             current_price,
                                             tick.timestamp);

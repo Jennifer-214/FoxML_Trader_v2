@@ -59,6 +59,7 @@ namespace tt {
     template <typename T>
     inline bool cfg_render_field(T& field, const CfgFieldDescriptor& desc) {
         static_assert(is_fp_binary_v<T>
+                   || is_fp_decimal_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -80,7 +81,19 @@ namespace tt {
 
         bool changed = false;
 
-        if constexpr (is_fp_binary_v<T>) {
+        if constexpr (is_fp_decimal_v<T>) {
+            double v = Money_ToDouble(field);
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v *= 100.0;
+            float vf = static_cast<float>(v);
+            float lo = static_cast<float>(desc.payload.as_double.clamp_min);
+            float hi = static_cast<float>(desc.payload.as_double.clamp_max);
+            const char* fmt = (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) ? "%.2f%%" : "%.4f";
+            changed = ImGui::SliderFloat(desc.label, &vf, lo, hi, fmt);
+            if (changed) {
+                if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) vf /= 100.0f;
+                field = Money{ money_from_double_payload(static_cast<double>(vf)) };  // GUI ingress (display-grade)
+            }
+        } else if constexpr (is_fp_binary_v<T>) {
             double v = FPN_ToDouble(field);
             if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v *= 100.0;
             float vf = static_cast<float>(v);

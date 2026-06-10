@@ -216,7 +216,7 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 // ratchets TP/SL upward when price runs past original TP in a strong trend.
 // uses tp_trail_mult / sl_trail_mult from config with R² gating.
 template <unsigned F>
-inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, FPN_Binary<F> current_price,
+inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, Money current_price,
                                    const RollingStats<F> *rolling,
                                    MLStrategyState<F> *state,
                                    const ControllerConfig<F> *cfg) {
@@ -232,23 +232,23 @@ inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, FPN_Binary<F> current
         int idx = __builtin_ctz(active);
         Position<F> *pos = &portfolio->positions[idx];
 
-        int above_tp = FPN_GreaterThan(current_price, pos->original_tp);
+        int above_tp = Money_Gt(current_price, pos->original_tp);
 
         if (above_tp & r2_ok) {
             FPN_Binary<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
-            FPN_Binary<F> trailing_tp = FPN_Sub(current_price, tp_offset);
-            pos->take_profit_price = FPN_Max(pos->take_profit_price, trailing_tp);
+            Money trailing_tp = Money_Sub(current_price, Money_FromBinary(tp_offset));
+            pos->take_profit_price = Money_Max(pos->take_profit_price, trailing_tp);
 
             FPN_Binary<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-            FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
-            pos->stop_loss_price = FPN_Max(pos->stop_loss_price, trailing_sl);
+            Money trailing_sl = Money_Sub(current_price, Money_FromBinary(sl_offset));
+            pos->stop_loss_price = Money_Max(pos->stop_loss_price, trailing_sl);
 
             // SL floor: 2:1 min reward/risk (only when SL below entry)
-            if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
-                FPN_Binary<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
-                FPN_Binary<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
-                FPN_Binary<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
-                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+            if (Money_Lt(pos->stop_loss_price, pos->entry_price)) {
+                Money tp_dist = Money_Sub(pos->take_profit_price, pos->entry_price);
+                Money min_sl_dist = Money_Mul(tp_dist, Money{ 50000000 });  // exact 0.5
+                Money sl_floor = Money_Sub(pos->entry_price, min_sl_dist);
+                pos->stop_loss_price = Money_Min(pos->stop_loss_price, sl_floor);
             }
         }
 
@@ -285,7 +285,7 @@ inline void MLStrategy_ExitAdjustSharded(
     EventLoopState<F>* state,
     int slot,
     MLStrategyState<F>* /*ml*/,            // reserved — see comment above
-    FPN_Binary<F> current_price,
+    Money current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {
@@ -302,15 +302,15 @@ inline void MLStrategy_ExitAdjustSharded(
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     FPN_Binary<F> sl_offset   = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-    FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+    Money trailing_sl = Money_Sub(current_price, Money_FromBinary(sl_offset));
 
     while (bm) {
         int pidx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        FPN_Binary<F> entry = state->oms->portfolio.positions[pidx].entry_price;
-        if (FPN_IsZero(entry)) continue;
-        FPN_Binary<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
-        if (!FPN_IsZero(orig_tp) && !FPN_GreaterThan(current_price, orig_tp)) continue;
+        Money entry = state->oms->portfolio.positions[pidx].entry_price;
+        if (Money_IsZero(entry)) continue;
+        Money orig_tp = state->oms->portfolio.positions[pidx].original_tp;
+        if (!Money_IsZero(orig_tp) && !Money_Gt(current_price, orig_tp)) continue;
         Strategy_WriteRatchetSL(state, slot, trailing_sl, entry, cfg);
     }
 }

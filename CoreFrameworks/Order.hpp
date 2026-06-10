@@ -138,8 +138,8 @@ static constexpr uint32_t MASK_ORDER_BANDIT_3BIT          = 0x7u;
 //======================================================================================================
 template <unsigned F>
 struct OrderPreResolved {
-    FPN_Binary<F> fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
-    FPN_Binary<F> slippage_pct;   // pre-resolved per-core
+    Money fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
+    Money slippage_pct;   // pre-resolved per-core
     // Future per-resolved fields (extend in lockstep with Order_BindPreResolved):
     //   - effective_kill_switch_threshold (per-core risk envelope at submit time)
     //   - effective_min_holding_ticks (per-core time-exit floor)
@@ -169,21 +169,21 @@ struct Order {
     uint32_t              flags_packed;   // 4 B  @ 16
     int16_t               core_id;        // 2 B  @ 20   which executor core, -1 for non-core orders
     uint8_t               strategy_id;    // 1 B  @ 22   STRATEGY_* constant, for trade log CSV
-    // Ship-A 16B FPN_Binary: FPN_Binary<64> is now __int128 (alignof 16, was 8). The scalar prefix ends @ 23, so the FPN_Binary
+    // Ship-A 16B FPN_Binary: Money is now __int128 (alignof 16, was 8). The scalar prefix ends @ 23, so the FPN_Binary
     // block can't start until the next 16 B boundary (@ 32) — an 8 B alignment hole. _pad_hot1 grew 1→9 B to
     // make that hole EXPLICIT (no hidden compiler padding; DOD/H12). Layout-neutral: sizeof stays 256 either way.
-    uint8_t               _pad_hot1[9];   // 9 B  @ 23   explicit pad to FPN_Binary<64> 16 B alignment (__int128)
-    FPN_Binary<F>                requested_qty;            // 16 B @ 32
-    FPN_Binary<F>                requested_price;          // 16 B @ 48  limit only, ignored for MARKET (phase 08 forward-compat)
-    FPN_Binary<F>                filled_qty;               // 16 B @ 64  running total across partials
-    FPN_Binary<F>                avg_fill_price;           // 16 B @ 80  weighted across partials
+    uint8_t               _pad_hot1[9];   // 9 B  @ 23   explicit pad to Money 16 B alignment (__int128)
+    Money                requested_qty;            // 16 B @ 32
+    Money                requested_price;          // 16 B @ 48  limit only, ignored for MARKET (phase 08 forward-compat)
+    Money                filled_qty;               // 16 B @ 64  running total across partials
+    Money                avg_fill_price;           // 16 B @ 80  weighted across partials
     // phase 03 chunk 3: context fields for the OMS fill handler. when event_log_mode == 1,
     // the OMS opens portfolio slots on fill and needs the TP/SL/strategy the controller
     // intended at entry time. Also carries event_price for paper mode fills (no adapter
     // callback to supply a fill price, so we use the market price at submit time).
-    FPN_Binary<F>                intended_tp;              // 16 B @ 96  TP to apply when this order fills (entry only)
-    FPN_Binary<F>                intended_sl;              // 16 B @ 112 SL to apply when this order fills (entry only)
-    FPN_Binary<F>                event_price;              // 16 B @ 128 market price at submit time (paper fill price)
+    Money                intended_tp;              // 16 B @ 96  TP to apply when this order fills (entry only)
+    Money                intended_sl;              // 16 B @ 112 SL to apply when this order fills (entry only)
+    Money                event_price;              // 16 B @ 128 market price at submit time (paper fill price)
     uint64_t              submitted_at_us;          // 8 B  @ 144 wall-clock microseconds since epoch
     uint64_t              last_update_us;           // 8 B  @ 152 last state transition timestamp
     // Decision-time-bound values, pre-resolved at Order submit via Order_BindPreResolved().
@@ -323,17 +323,17 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t core_id, OrderType type
     Order_SetType(o, type);
     Order_SetState(o, ORDER_PENDING);
     // is_maker, leg, retry_count remain 0 (taker / leg A / 0 retries) per zero-init
-    o->requested_qty             = FPN_Zero<F>();
-    o->requested_price           = FPN_Zero<F>();
-    o->filled_qty                = FPN_Zero<F>();
-    o->avg_fill_price            = FPN_Zero<F>();
-    o->intended_tp               = FPN_Zero<F>();
-    o->intended_sl               = FPN_Zero<F>();
-    o->event_price               = FPN_Zero<F>();
+    o->requested_qty             = Money_Zero();
+    o->requested_price           = Money_Zero();
+    o->filled_qty                = Money_Zero();
+    o->avg_fill_price            = Money_Zero();
+    o->intended_tp               = Money_Zero();
+    o->intended_sl               = Money_Zero();
+    o->event_price               = Money_Zero();
     o->submitted_at_us           = 0;
     o->last_update_us            = 0;
-    o->pre_resolved.fee_rate     = FPN_Zero<F>();
-    o->pre_resolved.slippage_pct = FPN_Zero<F>();
+    o->pre_resolved.fee_rate     = Money_Zero();
+    o->pre_resolved.slippage_pct = Money_Zero();
     o->exchange_id[0]            = '\0';
 }
 
@@ -389,7 +389,7 @@ inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
             "Order_MarkPreResolvedBound after manual set). Production paths require core_cfg "
             "at OrderManager_Submit (sig-enforced); this Order bypassed Submit (test fixture path).\n",
             site, (unsigned long long)o->id, (int)o->core_id,
-            FPN_ToDouble(o->pre_resolved.fee_rate));
+            Money_ToDouble(o->pre_resolved.fee_rate));
     }
 }
 

@@ -228,8 +228,8 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
       FPN_Binary<F> offset_scale = cfg->offset_adapt_scale;
       FPN_Binary<F> offset_shift = FPN_Mul(masked_pct_shift, offset_scale);
       state->live_offset_pct = FPN_AddSat(state->live_offset_pct, offset_shift);
-      state->live_offset_pct = FPN_Max(state->live_offset_pct, cfg->offset_min);
-      state->live_offset_pct = FPN_Min(state->live_offset_pct, cfg->offset_max);
+      state->live_offset_pct = FPN_Max(state->live_offset_pct, Money_ToBinary(cfg->offset_min));
+      state->live_offset_pct = FPN_Min(state->live_offset_pct, Money_ToBinary(cfg->offset_max));
     }
 
     // STDDEV MODE: apply shift to stddev_mult, scale 0.1, clamp [stddev_min,
@@ -411,7 +411,7 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
 //======================================================================================================
 template <unsigned F>
 inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
-                                     FPN_Binary<F> current_price,
+                                     Money current_price,
                                      const RollingStats<F> *rolling,
                                      MeanReversionState<F> *state,
                                      const ControllerConfig<F> *cfg) {
@@ -457,7 +457,7 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
 
     // only trail positions that are above their original TP (position is
     // "running")
-    int above_tp = FPN_GreaterThan(current_price, pos->original_tp);
+    int above_tp = Money_Gt(current_price, pos->original_tp);
 
     if (above_tp & should_trail) {
       // trailing TP: current_price - (stddev * trail_mult)
@@ -521,7 +521,7 @@ inline void MeanReversion_ExitAdjustSharded(
     EventLoopState<F>* state,
     int slot,
     MeanReversionState<F>* mr,
-    FPN_Binary<F> current_price,
+    Money current_price,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {
@@ -553,17 +553,17 @@ inline void MeanReversion_ExitAdjustSharded(
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     FPN_Binary<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
-    FPN_Binary<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+    Money trailing_sl = Money_Sub(current_price, Money_FromBinary(sl_offset));
 
     while (bm) {
         int pidx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        FPN_Binary<F> entry = state->oms->portfolio.positions[pidx].entry_price;
+        Money entry = state->oms->portfolio.positions[pidx].entry_price;
         // Only trail when position is "running" (price above original_tp)
         // and entry is set (idle slot guard).
-        if (FPN_IsZero(entry)) continue;
-        FPN_Binary<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
-        if (!FPN_IsZero(orig_tp) && !FPN_GreaterThan(current_price, orig_tp)) continue;
+        if (Money_IsZero(entry)) continue;
+        Money orig_tp = state->oms->portfolio.positions[pidx].original_tp;
+        if (!Money_IsZero(orig_tp) && !Money_Gt(current_price, orig_tp)) continue;
         Strategy_WriteRatchetSL(state, slot, trailing_sl, entry, cfg);
     }
 }

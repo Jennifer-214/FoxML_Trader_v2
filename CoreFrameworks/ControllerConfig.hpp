@@ -120,7 +120,7 @@ constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
     /* Trading */ \
     PCT(take_profit_pct) \
     PCT(stop_loss_pct) \
-    RAW(fee_floor_mult) \
+    /* fee_floor_mult: money-RAW outlier — handled explicitly at each walker site (Ship-B P2b) */ \
     /* Entry filters */ \
     PCT(entry_offset_pct) \
     RAW(volume_multiplier) \
@@ -163,8 +163,7 @@ constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
     /* v4.7.29: No-trade band override — entry gate strictness per core */ \
     RAW(no_trade_band_mult) \
     /* v4.7.29: Partial exit geometry overrides — TP1 split + TP2 mult per core */ \
-    RAW(partial_exit_pct) \
-    RAW(tp2_mult) \
+    /* partial_exit_pct + tp2_mult: money-RAW outliers — explicit at walker sites (Ship-B P2b) */ \
     /* v4.7.31: ML/FoxML overrides — different ML cores can have different */ \
     /* confidence behavior, vol-z scaling, bandit blend ratios, etc. */ \
     RAW(foxml_vol_scaling_z_max) \
@@ -239,9 +238,14 @@ constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
     X(ops,       OPS,       uint8_t,  FOREACH_OPS_CFG_FLAG)
 
 template <unsigned F> struct PerCoreOverrides {
-#define _DECL_OV_FIELD(name) FPN_Binary<F> name;
-    PER_CORE_OVERRIDE_FIELDS(_DECL_OV_FIELD, _DECL_OV_FIELD)
-#undef _DECL_OV_FIELD
+#define _DECL_OV_MONEY(name) Money name;
+#define _DECL_OV_RAW(name)   FPN_Binary<F> name;
+    PER_CORE_OVERRIDE_FIELDS(_DECL_OV_MONEY, _DECL_OV_RAW)
+    Money fee_floor_mult;  // money-RAW outlier (no /100 parse scaling, money domain)
+    Money partial_exit_pct;
+    Money tp2_mult;
+#undef _DECL_OV_MONEY
+#undef _DECL_OV_RAW
 // v4.7.40: INT-typed overrides. uint32_t storage; 0 = inherit.
 #define _DECL_OV_INT_FIELD(name) uint32_t name;
     PER_CORE_OVERRIDE_INT_FIELDS(_DECL_OV_INT_FIELD)
@@ -373,10 +377,10 @@ template <unsigned F> struct ControllerConfig {
   FPN_Binary<F> r2_threshold;     // min R^2 to trust regression
   FPN_Binary<F> slope_scale_buy;  // how much slope shifts buy price threshold
   FPN_Binary<F> max_shift;        // max drift from initial buy conditions
-  FPN_Binary<F> take_profit_pct;  // per-position take profit (e.g. 0.03 = 3%)
-  FPN_Binary<F> stop_loss_pct;    // per-position stop loss (e.g. 0.015 = 1.5%)
-  FPN_Binary<F> starting_balance; // paper trading starting balance (e.g. 10000.0)
-  FPN_Binary<F> fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
+  Money take_profit_pct;  // per-position take profit (e.g. 0.03 = 3%)
+  Money stop_loss_pct;    // per-position stop loss (e.g. 0.015 = 1.5%)
+  Money starting_balance; // paper trading starting balance (e.g. 10000.0)
+  Money fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
                            // Phase 8: legacy field. Pre-Phase-8 behavior preserved
                            // when fee_rate_maker == fee_rate_taker == fee_rate.
                            // (.E.0.1 F-076: a prior comment here claimed the fingerprint
@@ -386,8 +390,8 @@ template <unsigned F> struct ControllerConfig {
   // Phase 8 — bifurcated maker/taker fee rates. Live engine uses these per fill
   // based on order->is_maker (set from Binance executionReport "m" field).
   // Backtest simulates as all-taker (is_maker=0 always). Documented divergence.
-  FPN_Binary<F> fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
-  FPN_Binary<F> fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
+  Money fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
+  Money fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
   // v4.3.2 (Track C.1) — pay fees in BNB on Binance gives a 25% discount
   // on both maker and taker. When set, fee_rate_maker and fee_rate_taker
   // are scaled by 0.75 at engine boot. User must also enable BNB fee
@@ -396,25 +400,24 @@ template <unsigned F> struct ControllerConfig {
   uint32_t pay_fees_in_bnb;
   // Fee_Compute helper — defined after the struct so all fee math sites
   // share one implementation. See note in main file just below struct.
-  FPN_Binary<F> risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
+  Money risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
   // market microstructure filters (initial values - adapted at runtime by P&L
   // regression)
   FPN_Binary<F> volume_multiplier; // buy only when tick volume >= this * rolling_avg
                             // (e.g. 3.0)
-  FPN_Binary<F> entry_offset_pct;  // buy gate offset below rolling mean (e.g. 0.0015 =
+  Money entry_offset_pct;  // buy gate offset below rolling mean (e.g. 0.0015 =
                             // 0.15%)
   FPN_Binary<F> spacing_multiplier; // min entry spacing = stddev * this (e.g. 2.0)
   // adaptation clamps - how far the filters can drift from their initial values
-  FPN_Binary<F>
-      offset_min; // min entry_offset_pct (most aggressive, e.g. 0.0005 = 0.05%)
-  FPN_Binary<F> offset_max; // max entry_offset_pct (most defensive, e.g. 0.005 = 0.5%)
+  Money offset_min; // min entry_offset_pct (most aggressive, e.g. 0.0005 = 0.05%)
+  Money offset_max; // max entry_offset_pct (most defensive, e.g. 0.005 = 0.5%)
   FPN_Binary<F> vol_mult_min; // min volume_multiplier (most aggressive, e.g. 1.5)
   FPN_Binary<F> vol_mult_max; // max volume_multiplier (most defensive, e.g. 6.0)
   FPN_Binary<F> filter_scale; // how much P&L slope shifts the filters (e.g. 0.50)
   // risk management
-  FPN_Binary<F> max_drawdown_pct; // halt trading if total P&L drops below this % of
+  Money max_drawdown_pct; // halt trading if total P&L drops below this % of
                            // starting balance (e.g. 0.10 = 10%)
-  FPN_Binary<F> max_exposure_pct; // max fraction of balance deployed in positions
+  Money max_exposure_pct; // max fraction of balance deployed in positions
                            // (e.g. 0.50 = 50%)
   // enhanced buy signal (disabled by default = backward compatible)
   FPN_Binary<F> offset_stddev_mult; // stddev-scaled offset multiplier (0 = use
@@ -435,11 +438,10 @@ template <unsigned F> struct ControllerConfig {
   FPN_Binary<F> tp_hold_score;  // min SNR*R² to hold past TP (0 = disabled, fixed TP)
   FPN_Binary<F> tp_trail_mult;  // trailing distance: stddev * this (e.g. 1.0)
   FPN_Binary<F> sl_trail_mult;  // trailing SL distance: stddev * this (e.g. 2.0)
-  FPN_Binary<F> fee_floor_mult; // TP floor = entry × fee_rate × this (default 3.0,
+  Money fee_floor_mult; // TP floor = entry × fee_rate × this (default 3.0,
                          // try 5.0 for wider)
   // risk ratios
-  FPN_Binary<F>
-      min_sl_tp_ratio; // min SL/TP distance ratio (0.5 = 2:1 reward/risk floor)
+  Money min_sl_tp_ratio; // min SL/TP distance ratio (0.5 = 2:1 reward/risk floor)
   FPN_Binary<F> ror_tp_bonus; // TP multiplier when ROR positive (1.2 = 20% wider)
   FPN_Binary<F> momentum_tp_r2_min; // TP scale at R²=0 (0.5 = half base TP,
                              // conservative on uncertainty)
@@ -461,8 +463,7 @@ template <unsigned F> struct ControllerConfig {
   // or where strategy comparison wants different time horizons per core.
   // Cfg parser pattern: core_<N>_time_exit_ticks=<int>
   // core_time_exit_ticks: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
-  FPN_Binary<F>
-      min_hold_gain_pct; // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
+  Money min_hold_gain_pct; // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
   FPN_Binary<F> regime_slope_threshold;     // relative slope magnitude for TRENDING
                                      // (legacy, kept for compat)
@@ -507,7 +508,7 @@ template <unsigned F> struct ControllerConfig {
   // See DOCS/changelogs/2026-04-30-regime-classifier-audit.md for
   // why these are defensive depth even after Phase 2's hardcoded
   // strategy boot guard.
-  FPN_Binary<F> momentum_min_tp_margin_pct;     // SHALT_MOM_TP_TOO_TIGHT — require tp_pct >= this (recommended: 0.0040 = 0.40%)
+  Money momentum_min_tp_margin_pct;     // SHALT_MOM_TP_TOO_TIGHT — require tp_pct >= this (recommended: 0.0040 = 0.40%)
   FPN_Binary<F> momentum_min_buy_delta_recent;  // SHALT_MOM_NO_FLOW — require recent volume_delta >= this (rec: 0.05)
   FPN_Binary<F> momentum_min_r2;                // SHALT_MOM_LOW_R2 — require short_r2 >= this (rec: 0.30)
   int momentum_require_last_win;         // SHALT_MOM_LAST_LOST — 1 = block re-entry until previous trade was TP win (rec: 0=off)
@@ -563,14 +564,13 @@ template <unsigned F> struct ControllerConfig {
               uint16_t ml_cfg_flags;
               uint8_t  risk_cfg_flags;
               uint8_t  ops_cfg_flags;
-  FPN_Binary<F>
-      partial_exit_pct; // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
-  FPN_Binary<F> tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
-  FPN_Binary<F> breakeven_buffer_pct; // SL offset from entry once breakeven ratchet
+  Money partial_exit_pct; // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
+  Money tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
+  Money breakeven_buffer_pct; // SL offset from entry once breakeven ratchet
                                // fires (0.001 = +0.1% above entry, -0.001 =
                                // allow 0.1% loss)
   // slippage simulation
-  FPN_Binary<F> slippage_pct; // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
+  Money slippage_pct; // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
   // session awareness — session_filter_enabled migrated to ops_cfg_flags
   // (v5.14.9.F.3). The 4 per-session gate multipliers are registry-driven
   // as of v5.15.5.B.5; see FOREACH_SESSION_PHASE in SessionPhaseRegistry.hpp.
@@ -619,9 +619,8 @@ template <unsigned F> struct ControllerConfig {
   // DOCS/OPERATOR_DEPLOYMENT.md for the production-machine recipe.
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
   // kill_switch_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
-  FPN_Binary<F>
-      kill_switch_daily_loss_pct; // max daily loss before kill (e.g. 0.03 = 3%)
-  FPN_Binary<F> kill_switch_drawdown_pct; // max drawdown from session peak before kill
+  Money kill_switch_daily_loss_pct; // max daily loss before kill (e.g. 0.03 = 3%)
+  Money kill_switch_drawdown_pct; // max drawdown from session peak before kill
                                    // (e.g. 0.05 = 5%)
   // v5.15.5.F.4d.1.B.4 Cx-D extension: kill_recovery_warmup manual decl DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker per H17 STRONG→HARD progression.
   // v5.12.1.A — WS dead-time emergency-flatten policy (live-only).
@@ -798,8 +797,8 @@ template <unsigned F> struct ControllerConfig {
   // ML inference
   char ml_model_path[256];     // path to buy-signal model file
   FPN_Binary<F> ml_buy_threshold;     // prediction > this = buy signal (e.g. 0.6)
-  FPN_Binary<F> ml_tp_pct;            // TP % for ML positions (e.g. 0.015 = 1.5%)
-  FPN_Binary<F> ml_sl_pct;            // SL % for ML positions (e.g. 0.008 = 0.8%)
+  Money ml_tp_pct;            // TP % for ML positions (e.g. 0.015 = 1.5%)
+  Money ml_sl_pct;            // SL % for ML positions (e.g. 0.008 = 0.8%)
   char regime_model_path[256]; // path to regime enrichment model
   FPN_Binary<F> regime_model_weight;  // score weight in Regime_Classify (e.g. 2)
   // danger gradient (hot-path crash protection)
@@ -1039,7 +1038,7 @@ template <unsigned F> struct ControllerConfig {
   // this floor. Without it, a tiny allocation ($10) loses $0.50, dd=5%,
   // and the kill trips on rounding noise. Default $5. Config syntax:
   // min_kill_loss=5.0
-  FPN_Binary<F> min_kill_loss;
+  Money min_kill_loss;
   // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch H14 migration — moved from `uint32_t`
   // scalar to MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit in cfg.risk_cfg_flags. Default ENABLED
   // (safety-critical; sister to MASK_RISK_CFG_KILL_SWITCH_ENABLED). MTM catches "position riding
@@ -1098,12 +1097,12 @@ template <unsigned F> struct ControllerConfig {
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
-  FPN_Binary<F> simpledip_tp_pct;    // SimpleDip TP override (%, stored as decimal)
-  FPN_Binary<F> simpledip_sl_pct;    // SimpleDip SL override
-  FPN_Binary<F> mr_tp_pct;           // MeanReversion TP override
-  FPN_Binary<F> mr_sl_pct;           // MeanReversion SL override
-  FPN_Binary<F> emacross_tp_pct;     // EMA Cross TP override
-  FPN_Binary<F> emacross_sl_pct;     // EMA Cross SL override
+  Money simpledip_tp_pct;    // SimpleDip TP override (%, stored as decimal)
+  Money simpledip_sl_pct;    // SimpleDip SL override
+  Money mr_tp_pct;           // MeanReversion TP override
+  Money mr_sl_pct;           // MeanReversion SL override
+  Money emacross_tp_pct;     // EMA Cross TP override
+  Money emacross_sl_pct;     // EMA Cross SL override
   // OMS phase 03: which path EventLoop_OnEvent takes when a TradeEvent
   // arrives. mode 0 (legacy): OnEvent mutates the portfolio + balance
   // directly, same as phase 02. mode 1 (event log): OnEvent just bumps
@@ -1363,9 +1362,9 @@ template <unsigned F> struct ControllerConfig {
 // switching to o->pre_resolved.fee_rate. Check 10 detects via UNINDEXED-GLOBAL
 // pattern at per-core consumer sites.
 template <unsigned F>
-inline FPN_Binary<F> Fee_Compute(const ControllerConfig<F>* cfg, FPN_Binary<F> notional, int is_maker) {
-    FPN_Binary<F> rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
-    return FPN_Mul(notional, rate);
+inline Money Fee_Compute(const ControllerConfig<F>* cfg, Money notional, int is_maker) {
+    Money rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
+    return Money_Mul(notional, rate);
 }
 
 //======================================================================================================
@@ -1388,9 +1387,14 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
     const PerCoreOverrides<F>& ov = global.core_overrides[core_id];
     // v4.7.24: resolver auto-derives from PER_CORE_OVERRIDE_FIELDS. Adding
     // a new field = 1 line in the macro list, not a line here.
-#define _RESOLVE_OV_FIELD(name) if (!FPN_IsZero(ov.name)) resolved.name = ov.name;
-    PER_CORE_OVERRIDE_FIELDS(_RESOLVE_OV_FIELD, _RESOLVE_OV_FIELD)
-#undef _RESOLVE_OV_FIELD
+#define _RESOLVE_OV_MONEY(name) if (!Money_IsZero(ov.name)) resolved.name = ov.name;
+#define _RESOLVE_OV_RAW(name)   if (!FPN_IsZero(ov.name))   resolved.name = ov.name;
+    PER_CORE_OVERRIDE_FIELDS(_RESOLVE_OV_MONEY, _RESOLVE_OV_RAW)
+    if (!Money_IsZero(ov.fee_floor_mult)) resolved.fee_floor_mult = ov.fee_floor_mult;
+    if (!Money_IsZero(ov.partial_exit_pct)) resolved.partial_exit_pct = ov.partial_exit_pct;
+    if (!Money_IsZero(ov.tp2_mult)) resolved.tp2_mult = ov.tp2_mult;
+#undef _RESOLVE_OV_MONEY
+#undef _RESOLVE_OV_RAW
 // v4.7.40: INT overrides — 0 = inherit (caller's config field already
 // has the global default; non-zero overrides it).
 #define _RESOLVE_OV_INT_FIELD(name) if (ov.name != 0) resolved.name = ov.name;
@@ -1516,29 +1520,29 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.slope_scale_buy = FPN_FromDouble<F>(0.50);
   cfg.max_shift =
       FPN_FromDouble<F>(0.0001); // 0.01% of price — e.g. $7 at BTC $70k
-  cfg.take_profit_pct = FPN_FromDouble<F>(0.03);
-  cfg.stop_loss_pct = FPN_FromDouble<F>(0.015);
+  cfg.take_profit_pct = Money{ money_from_double_payload(0.03) };
+  cfg.stop_loss_pct = Money{ money_from_double_payload(0.015) };
   cfg.starting_balance =
-      FPN_FromDouble<F>(1000000.0); // 1M default so tests arent balance-limited
-  cfg.fee_rate = FPN_FromDouble<F>(0.001); // 0.1% per trade (Binance default)
+      Money{ money_from_double_payload(1000000.0) }; // 1M default so tests arent balance-limited
+  cfg.fee_rate = Money{ money_from_double_payload(0.001) }; // 0.1% per trade (Binance default)
   // Phase 8 — Binance tier 0 BNB-discount default rates. Live engine uses
   // these per-fill based on order->is_maker. If user sets only fee_rate
   // (legacy mode), backward-compat clause below mirrors to both.
-  cfg.fee_rate_maker = FPN_FromDouble<F>(0.00075); // 0.075% maker tier 0
-  cfg.fee_rate_taker = FPN_FromDouble<F>(0.00100); // 0.100% taker tier 0
+  cfg.fee_rate_maker = Money{ money_from_double_payload(0.00075) }; // 0.075% maker tier 0
+  cfg.fee_rate_taker = Money{ money_from_double_payload(0.00100) }; // 0.100% taker tier 0
   cfg.pay_fees_in_bnb = 0;                          // v4.3.2: 1 = apply BNB 25% discount
-  cfg.risk_pct = FPN_FromDouble<F>(0.02);  // risk 2% of balance per position
+  cfg.risk_pct = Money{ money_from_double_payload(0.02) };  // risk 2% of balance per position
   cfg.volume_multiplier = FPN_FromDouble<F>(3.0);
-  cfg.entry_offset_pct = FPN_FromDouble<F>(0.0015);
+  cfg.entry_offset_pct = Money{ money_from_double_payload(0.0015) };
   cfg.spacing_multiplier = FPN_FromDouble<F>(2.0);
-  cfg.offset_min = FPN_FromDouble<F>(0.0005);     // 0.05% - most aggressive
-  cfg.offset_max = FPN_FromDouble<F>(0.005);      // 0.5%  - most defensive
+  cfg.offset_min = Money{ money_from_double_payload(0.0005) };     // 0.05% - most aggressive
+  cfg.offset_max = Money{ money_from_double_payload(0.005) };      // 0.5%  - most defensive
   cfg.vol_mult_min = FPN_FromDouble<F>(1.5);      // 1.5x  - most aggressive
   cfg.vol_mult_max = FPN_FromDouble<F>(6.0);      // 6.0x  - most defensive
   cfg.filter_scale = FPN_FromDouble<F>(0.50);     // how fast filters adapt
-  cfg.max_drawdown_pct = FPN_FromDouble<F>(0.10); // halt at 10% drawdown
+  cfg.max_drawdown_pct = Money{ money_from_double_payload(0.10) }; // halt at 10% drawdown
   cfg.max_exposure_pct =
-      FPN_FromDouble<F>(0.50); // max 50% of balance in positions
+      Money{ money_from_double_payload(0.50) }; // max 50% of balance in positions
   // v5.15.5.F.4d.1.B.3 Step 8.6: max_positions MATCH — registry INT(1) == manual; DELETED.
   cfg.offset_stddev_mult = FPN_Zero<F>(); // 0 = disabled, use percentage mode
   cfg.offset_stddev_min =
@@ -1555,9 +1559,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.tp_trail_mult = FPN_FromDouble<F>(1.0); // trail 1 stddev below price
   cfg.sl_trail_mult = FPN_FromDouble<F>(2.0); // trail SL 2 stddevs below price
   cfg.fee_floor_mult =
-      FPN_FromDouble<F>(3.0);      // TP floor = entry × fee_rate × 3
+      Money{ money_from_double_payload(3.0) };      // TP floor = entry × fee_rate × 3
   cfg.vwap_offset = FPN_Zero<F>(); // 0 = disabled (backward compat)
-  cfg.min_sl_tp_ratio = FPN_FromDouble<F>(0.5); // 2:1 reward/risk floor
+  cfg.min_sl_tp_ratio = Money{ money_from_double_payload(0.5) }; // 2:1 reward/risk floor
   cfg.ror_tp_bonus =
       FPN_FromDouble<F>(1.2); // 20% wider TP on accelerating trend
   cfg.momentum_tp_r2_min = FPN_FromDouble<F>(0.5); // TP scale at R²=0
@@ -1576,7 +1580,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // sets specific cores via core_<N>_time_exit_ticks=<value> in cfg.
   for (int i = 0; i < 16; ++i) cfg.core_time_exit_ticks[i] = 0;
   cfg.min_hold_gain_pct =
-      FPN_FromDouble<F>(0.001); // 0.1% — only time-exit if below this gain
+      Money{ money_from_double_payload(0.001) }; // 0.1% — only time-exit if below this gain
   // regime detection
   cfg.regime_slope_threshold =
       FPN_FromDouble<F>(0.00002); // legacy (unused by crossover classifier)
@@ -1595,7 +1599,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // momentum strategy
   cfg.momentum_breakout_mult = FPN_FromDouble<F>(1.5); // buy 1.5σ above avg
   // v5.7.5 — MOM quality filters default 0 (off, preserves pre-v5.7 behavior)
-  cfg.momentum_min_tp_margin_pct    = FPN_Zero<F>();
+  cfg.momentum_min_tp_margin_pct    = Money_Zero();
   cfg.momentum_min_buy_delta_recent = FPN_Zero<F>();
   cfg.momentum_min_r2               = FPN_Zero<F>();
   cfg.momentum_require_last_win     = 0;
@@ -1650,11 +1654,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // default OFF. Operator cfg keys set bits via FOREACH_OPS_CFG_FLAG parser walker
   // at line ~2220 (legacy_field column auto-routes legacy key names).
   cfg.ops_cfg_flags = 0;
-  cfg.partial_exit_pct = FPN_FromDouble<F>(0.5); // 50% at TP1, 50% rides
-  cfg.tp2_mult = FPN_FromDouble<F>(2.0);         // TP2 = 2x TP1 distance
+  cfg.partial_exit_pct = Money{ money_from_double_payload(0.5) }; // 50% at TP1, 50% rides
+  cfg.tp2_mult = Money{ money_from_double_payload(2.0) };         // TP2 = 2x TP1 distance
   cfg.breakeven_buffer_pct =
-      FPN_FromDouble<F>(0.0005);    // +0.05% above entry (lock in tiny profit)
-  cfg.slippage_pct = FPN_Zero<F>(); // 0 = disabled (backward compat)
+      Money{ money_from_double_payload(0.0005) };    // +0.05% above entry (lock in tiny profit)
+  cfg.slippage_pct = Money_Zero(); // 0 = disabled (backward compat)
   // session_filter_enabled migrated to ops_cfg_flags (default 0)
   // v5.15.5.B.5 — session multipliers default-init via FOREACH_SESSION_PHASE.
   // Per-session default is the MULT column of the registry tuple.
@@ -1678,9 +1682,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // kill switch
   // kill_switch_enabled migrated to risk_cfg_flags (default 1 — safety-first; set via AUTOPOPULATE above)
   cfg.kill_switch_daily_loss_pct =
-      FPN_FromDouble<F>(0.03); // 3% daily loss triggers kill
+      Money{ money_from_double_payload(0.03) }; // 3% daily loss triggers kill
   cfg.kill_switch_drawdown_pct =
-      FPN_FromDouble<F>(0.05); // 5% drawdown from session peak
+      Money{ money_from_double_payload(0.05) }; // 5% drawdown from session peak
   // v5.15.5.F.4d.1.B.4 Cx-D extension: kill_recovery_warmup (50) manual init DELETED; auto-populated via FOREACH_GLOBAL_CFG_FIELD walker.
   // vol-scaled sizing
   // vol_sizing_enabled migrated to risk_cfg_flags (default 0)
@@ -1693,8 +1697,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.15.5.F.4d.1.B.3 Step 8.6: ml_backend MATCH — registry INT(0) == manual; DELETED.
   cfg.ml_model_path[0] = '\0';
   cfg.ml_buy_threshold = FPN_FromDouble<F>(0.6);
-  cfg.ml_tp_pct = FPN_FromDouble<F>(0.015); // 1.5% TP
-  cfg.ml_sl_pct = FPN_FromDouble<F>(0.008); // 0.8% SL
+  cfg.ml_tp_pct = Money{ money_from_double_payload(0.015) }; // 1.5% TP
+  cfg.ml_sl_pct = Money{ money_from_double_payload(0.008) }; // 0.8% SL
   // v5.15.5.F.4d.1.B.3 Step 8.6: regime_model_backend MATCH — registry INT(0) == manual; DELETED.
   cfg.regime_model_path[0] = '\0';
   cfg.regime_model_weight = FPN_FromDouble<F>(2.0);
@@ -1860,10 +1864,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
   cfg.core_strategies_explicit_set = 0;                       // v5.9.0c: no bits set = all defaulted
   cfg.source_cfg_path[0] = '\0';                              // v5.9.0c: populated by ControllerConfig_Load
-  for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
+  for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = Money_Zero();  // 0 = shared
   // Phase 3: per-core kill switch overrides default to 0 (= use shared).
-  for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = FPN_Zero<F>();
-  cfg.min_kill_loss = FPN_FromDouble<F>(5.0);   // $5 absolute-loss floor for trip
+  for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = Money_Zero();
+  cfg.min_kill_loss = Money{ money_from_double_payload(5.0) };   // $5 absolute-loss floor for trip
   // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch default (ENABLED) now applied via RISK_CFG_FLAG_AUTOPOPULATE_FROM_QUINTUPLE above (MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit ON; safety-critical).
   // v5.12.1.A — disabled by default. Operator opts in for live deployment;
   // backtest MUST keep this off (live-only safety net).
@@ -1932,9 +1936,14 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v4.0 per-core overrides — zero in every field = "inherit global".
   // v4.7.24: zeroing auto-derives from PER_CORE_OVERRIDE_FIELDS macro.
   for (int i = 0; i < 16; ++i) {
-#define _ZERO_OV_FIELD(name) cfg.core_overrides[i].name = FPN_Zero<F>();
-    PER_CORE_OVERRIDE_FIELDS(_ZERO_OV_FIELD, _ZERO_OV_FIELD)
-#undef _ZERO_OV_FIELD
+#define _ZERO_OV_MONEY(name) cfg.core_overrides[i].name = Money_Zero();
+#define _ZERO_OV_RAW(name)   cfg.core_overrides[i].name = FPN_Zero<F>();
+    PER_CORE_OVERRIDE_FIELDS(_ZERO_OV_MONEY, _ZERO_OV_RAW)
+    cfg.core_overrides[i].fee_floor_mult = Money_Zero();
+    cfg.core_overrides[i].partial_exit_pct = Money_Zero();
+    cfg.core_overrides[i].tp2_mult = Money_Zero();
+#undef _ZERO_OV_MONEY
+#undef _ZERO_OV_RAW
 // v4.7.40: zero INT overrides too (0 = inherit).
 #define _ZERO_OV_INT_FIELD(name) cfg.core_overrides[i].name = 0;
     PER_CORE_OVERRIDE_INT_FIELDS(_ZERO_OV_INT_FIELD)
@@ -1946,12 +1955,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
     PER_CORE_OVERRIDE_BITMAP_DOMAINS(_ZERO_OV_BITMAP_FIELDS)
 #undef _ZERO_OV_BITMAP_FIELDS
   }
-  cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
-  cfg.simpledip_sl_pct  = FPN_Zero<F>();
-  cfg.mr_tp_pct         = FPN_Zero<F>();
-  cfg.mr_sl_pct         = FPN_Zero<F>();
-  cfg.emacross_tp_pct   = FPN_Zero<F>();
-  cfg.emacross_sl_pct   = FPN_Zero<F>();
+  cfg.simpledip_tp_pct  = Money_Zero();  // 0 = use shared take_profit_pct
+  cfg.simpledip_sl_pct  = Money_Zero();
+  cfg.mr_tp_pct         = Money_Zero();
+  cfg.mr_sl_pct         = Money_Zero();
+  cfg.emacross_tp_pct   = Money_Zero();
+  cfg.emacross_sl_pct   = Money_Zero();
   // OMS phase 03 — mode 1: OMS owns portfolio mutation + per-core
   // accounting (via FillRecord drained post-Tick). Required for partials
   // (mode 0 used event.core_id directly as portfolio slot, which breaks
@@ -2165,11 +2174,26 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     continue;                                                                  \
   }
 
+// Ship-B P2b: legacy-parser route for DECIMAL money fields — exact string parse
+// (fraction-authored values, same semantics the FPN route had, now lossless).
+#define CFG_PARSE_MONEY_POS(name)                                              \
+  if (strcmp(key, #name) == 0) {                                               \
+    cfg.name = Money_FromString(val).value;                                    \
+    if (cfg.name.v < 0) cfg.name = Money_Zero();                               \
+    continue;                                                                  \
+  }
+
+#define CFG_PARSE_MONEY(name)                                                  \
+  if (strcmp(key, #name) == 0) {                                               \
+    cfg.name = Money_FromString(val).value;                                    \
+    continue;                                                                  \
+  }
+
 // FPN_Binary fields parsed as atof(val) / 100.0 (percentage: config says 15.0, stored
 // as 0.15)
 #define CFG_PARSE_PCT(name)                                                    \
   if (strcmp(key, #name) == 0) {                                               \
-    cfg.name = FPN_FromDouble<F>(atof(val) / 100.0);                           \
+    cfg.name = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };  \
     continue;                                                                  \
   }
 
@@ -2201,7 +2225,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(r2_threshold)
     CFG_PARSE_FPN(slope_scale_buy)
     CFG_PARSE_FPN(max_shift)
-    CFG_PARSE_FPN(starting_balance)
+    CFG_PARSE_MONEY(starting_balance)
     CFG_PARSE_FPN(volume_multiplier)
     CFG_PARSE_FPN(spacing_multiplier)
     CFG_PARSE_FPN(vol_mult_min)
@@ -2212,7 +2236,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(vwap_offset)
     CFG_PARSE_FPN(min_stddev_pct)
     CFG_PARSE_FPN(momentum_r2_min)
-    CFG_PARSE_FPN(min_sl_tp_ratio)
+    CFG_PARSE_MONEY(min_sl_tp_ratio)
     CFG_PARSE_FPN(ror_tp_bonus)
     CFG_PARSE_FPN(momentum_tp_r2_min)
     CFG_PARSE_FPN(momentum_sl_r2_max)
@@ -2227,7 +2251,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(regime_volatile_stddev)
     CFG_PARSE_FPN(regime_vol_spike_ratio)
     CFG_PARSE_FPN(momentum_breakout_mult)
-    CFG_PARSE_FPN(momentum_min_tp_margin_pct)     // v5.7.5
+    CFG_PARSE_MONEY(momentum_min_tp_margin_pct)     // v5.7.5
     CFG_PARSE_FPN(momentum_min_buy_delta_recent)  // v5.7.5
     CFG_PARSE_FPN(momentum_min_r2)                // v5.7.5
     // v5.15.5.F.4c — momentum_require_last_win migrated to FOREACH_CFG_FIELD (KIND_BOOL).
@@ -2251,12 +2275,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // Inline parse instead of CFG_PARSE_PCT macro (which would `continue;`
     // before setting the flag). Same divide-by-100 semantics.
     if (strcmp(key, "fee_rate_maker") == 0) {
-        cfg.fee_rate_maker = FPN_FromDouble<F>(atof(val) / 100.0);
+        cfg.fee_rate_maker = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
         maker_explicitly_set = 1;
         continue;
     }
     if (strcmp(key, "fee_rate_taker") == 0) {
-        cfg.fee_rate_taker = FPN_FromDouble<F>(atof(val) / 100.0);
+        cfg.fee_rate_taker = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
         taker_explicitly_set = 1;
         continue;
     }
@@ -2266,7 +2290,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(offset_max)
     CFG_PARSE_PCT(max_drawdown_pct)
     // Phase 3: kill switch tunables
-    CFG_PARSE_FPN_POS(min_kill_loss)
+    CFG_PARSE_MONEY_POS(min_kill_loss)
     // v5.15.5.F.4c — enable_mtm_kill_switch migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint32 storage).
     // v5.12.1.A — WS dead-time emergency-flatten (live-only safety net)
     // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
@@ -2395,7 +2419,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
-    CFG_PARSE_PCT(regime_r2_threshold)
+    // regime_r2_threshold is FEATURE-domain (binary) — keeps the legacy /100 double parse.
+    if (strcmp(key, "regime_r2_threshold") == 0) {
+      cfg.regime_r2_threshold = FPN_FromDouble<F>(atof(val) / 100.0);
+      continue;
+    }
     CFG_PARSE_PCT(slippage_pct)
     CFG_PARSE_PCT(kill_switch_daily_loss_pct)
     CFG_PARSE_PCT(kill_switch_drawdown_pct)
@@ -2414,7 +2442,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       double v = atof(val);
       if (v < 1)
         v = 1;
-      cfg.fee_floor_mult = FPN_FromDouble<F>(v);
+      cfg.fee_floor_mult = Money{ money_from_double_payload(v) };
       continue;
     }
 
@@ -2517,8 +2545,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.15.5.F.4c — ml_backend + regime_model_backend migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY; pending TECH_DEBT-068).
 
     //--- partial exit + depth + EMA FPN_Binary ---
-    CFG_PARSE_FPN(partial_exit_pct)
-    CFG_PARSE_FPN(tp2_mult)
+    CFG_PARSE_MONEY(partial_exit_pct)
+    CFG_PARSE_MONEY(tp2_mult)
     CFG_PARSE_FPN(min_book_imbalance)
     CFG_PARSE_FPN(vol_scale_min)
     CFG_PARSE_FPN(vol_scale_max)
@@ -2826,7 +2854,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     if (strncmp(key, "core_", 5) == 0 && strstr(key, "_risk_pct")) {
       int core_idx = atoi(key + 5);
       if (core_idx >= 0 && core_idx < 16) {
-        cfg.core_risk_pct[core_idx] = FPN_FromDouble<F>(atof(val) / 100.0);
+        cfg.core_risk_pct[core_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
       }
       continue;
     }
@@ -2837,7 +2865,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     if (strncmp(key, "core_", 5) == 0 && strstr(key, "_max_drawdown_pct")) {
       int core_idx = atoi(key + 5);
       if (core_idx >= 0 && core_idx < 16) {
-        cfg.core_max_drawdown_pct[core_idx] = FPN_FromDouble<F>(atof(val) / 100.0);
+        cfg.core_max_drawdown_pct[core_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
       }
       continue;
     }
@@ -2915,9 +2943,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       if (*p == '_' && core_idx >= 0 && core_idx < 16) {
         suffix = p + 1;
         PerCoreOverrides<F>& ov = cfg.core_overrides[core_idx];
-#define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = FPN_FromDouble<F>(atof(val)/100.0); continue; }
+#define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) }; continue; }
 #define _PARSE_OV_RAW(name) if (strcmp(suffix, #name) == 0) { ov.name = FPN_FromDouble<F>(atof(val));       continue; }
         PER_CORE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
+        if (strcmp(suffix, "fee_floor_mult") == 0) { ov.fee_floor_mult = Money_FromString(val).value; continue; }
+        if (strcmp(suffix, "partial_exit_pct") == 0) { ov.partial_exit_pct = Money_FromString(val).value; continue; }
+        if (strcmp(suffix, "tp2_mult") == 0) { ov.tp2_mult = Money_FromString(val).value; continue; }
 #undef _PARSE_OV_PCT
 #undef _PARSE_OV_RAW
 // v4.7.40: INT overrides — atoi parse, 0 = inherit.
@@ -3130,7 +3161,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   // the case where the user explicitly sets maker/taker to values that
   // happen to equal Default() — value-comparison can't distinguish.
   {
-    int legacy_set = !FPN_IsZero(cfg.fee_rate);
+    int legacy_set = !Money_IsZero(cfg.fee_rate);
 
     if (!maker_explicitly_set && !taker_explicitly_set && legacy_set) {
       // Legacy mode: only fee_rate set in cfg, mirror to both.
@@ -3138,7 +3169,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       cfg.fee_rate_taker = cfg.fee_rate;
       fprintf(stderr,
               "[CFG] fee_rate=%.5f → mirrored to maker+taker (legacy mode)\n",
-              FPN_ToDouble(cfg.fee_rate));
+              Money_ToDouble(cfg.fee_rate));
     } else if (legacy_set && (maker_explicitly_set ^ taker_explicitly_set)) {
       // Mixed-cfg WARNING — almost certainly user error.
       fprintf(stderr,
@@ -3147,9 +3178,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
               "The other stayed at its default. If you meant to set both, "
               "set both explicitly. If you meant legacy mode, remove the "
               "explicitly-set one.\n",
-              FPN_ToDouble(cfg.fee_rate),
-              FPN_ToDouble(cfg.fee_rate_maker),
-              FPN_ToDouble(cfg.fee_rate_taker));
+              Money_ToDouble(cfg.fee_rate),
+              Money_ToDouble(cfg.fee_rate_maker),
+              Money_ToDouble(cfg.fee_rate_taker));
     }
     // else: both maker+taker set explicitly (case 2 — silent, working as
     // intended) OR neither set + no legacy fee_rate (zero everywhere, fine).

@@ -126,8 +126,8 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
                 "[manual-close] slot %d: no active position, ignoring\n", slot);
             continue;
         }
-        FPN_Binary<F> qty = oms.portfolio.positions[slot].quantity;
-        if (FPN_IsZero(qty)) continue;
+        Money qty = oms.portfolio.positions[slot].quantity;
+        if (Money_IsZero(qty)) continue;
         // Map slot → core_id for strategy_id + leg lookup
         // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
         // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
@@ -137,9 +137,9 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         uint8_t strategy_id = state.cores[core_id].strategy_id;
         // Use latest tick price as fill price for paper mode. Live
         // mode would route to a real adapter SELL — same Submit call.
-        FPN_Binary<F> fill_px = FPN_FromDouble<F>(
-            last_price.load(std::memory_order_relaxed));
-        if (FPN_IsZero(fill_px)) {
+        Money fill_px = Money{ money_from_double_payload(
+            last_price.load(std::memory_order_relaxed)) };
+        if (Money_IsZero(fill_px)) {
             fill_px = oms.portfolio.positions[slot].entry_price;  // safe fallback
         }
         // v4.7.37 (Phase B reordered): push through OMS_PushSubmit so
@@ -171,7 +171,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         std::fprintf(stderr,
             "[manual-close] slot %d (core %d leg %s): force-exit @ %.2f, qty %.6f\n",
             slot, core_id, leg == 0 ? "A" : "B",
-            FPN_ToDouble(fill_px), FPN_ToDouble(qty));
+            Money_ToDouble(fill_px), Money_ToDouble(qty));
     }
 #else
     // ANSI / headless build: no GUI → no manual close requests possible.

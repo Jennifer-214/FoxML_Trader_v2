@@ -81,10 +81,10 @@ static inline void TUI_CopySnapshotSharded(
     }
 
     // account — from OMS via EventLoopAggregates
-    tt::EventLoopAggregates agg = tt::EventLoop_GetAggregates(state, FPN_FromDouble<F>(price_d));
+    tt::EventLoopAggregates agg = tt::EventLoop_GetAggregates(state, Money{ money_from_double_payload(price_d) });
     snap->balance      = agg.balance;
     snap->equity       = agg.equity;
-    snap->starting     = FPN_ToDouble(cfg->starting_balance);
+    snap->starting     = Money_ToDouble(cfg->starting_balance);
     snap->realized     = agg.realized_pnl;
     snap->unrealized   = agg.unrealized_pnl;
     snap->total_pnl    = agg.realized_pnl + agg.unrealized_pnl;
@@ -93,7 +93,7 @@ static inline void TUI_CopySnapshotSharded(
     // Legacy EngineTUI.hpp path set this from ctrl->total_fees; the
     // sharded equivalent is oms->total_fees, populated by HandleFill on
     // entry+exit fills.
-    snap->fees             = FPN_ToDouble(state->oms->total_fees);
+    snap->fees             = Money_ToDouble(state->oms->total_fees);
     // v5.4.2 — same B1-class fix for the maker/taker breakdown
     // (used by the fees tooltip). OMS HandleFill bumps these counters
     // on every fill (BUY entry + SELL exit). Pre-fix, sharded mode
@@ -101,8 +101,8 @@ static inline void TUI_CopySnapshotSharded(
     // fills.
     snap->maker_fills_count = state->oms->maker_fills_count;
     snap->taker_fills_count = state->oms->taker_fills_count;
-    snap->total_maker_fees  = FPN_ToDouble(state->oms->total_maker_fees);
-    snap->total_taker_fees  = FPN_ToDouble(state->oms->total_taker_fees);
+    snap->total_maker_fees  = Money_ToDouble(state->oms->total_maker_fees);
+    snap->total_taker_fees  = Money_ToDouble(state->oms->total_taker_fees);
     // v5.11.4.B — surface async log writer health (parity-check Section J).
     // Both counters are atomic on the writer-thread side; relaxed loads on
     // the publish thread are fine — these are advisory observability metrics,
@@ -139,7 +139,7 @@ static inline void TUI_CopySnapshotSharded(
     // KEEP-AS-GLOBAL: engine-wide headline display shows GLOBAL fee_rate default;
     // per-core deviations are surfaced via per_core_count panel + per-position
     // net_pnl computation at line 249 (per-core fee_taker). Operator-facing summary.
-    snap->fee_rate_pct = FPN_ToDouble(cfg->fee_rate) * 100.0;
+    snap->fee_rate_pct = Money_ToDouble(cfg->fee_rate) * 100.0;
 
     // v4.0.4: warmup progress display. min_warmup_samples is what the
     // warmup gate at EngineSharded.hpp checks; warmup_samples_now is
@@ -206,8 +206,8 @@ static inline void TUI_CopySnapshotSharded(
         const Position<F>* pos = &state->oms->portfolio.positions[idx];
         TUIPositionSnap* ps = &snap->positions[idx];
         ps->idx      = idx;
-        ps->entry    = FPN_ToDouble(pos->entry_price);
-        ps->qty      = FPN_ToDouble(pos->quantity);
+        ps->entry    = Money_ToDouble(pos->entry_price);
+        ps->qty      = Money_ToDouble(pos->quantity);
 
         // v5.4.0 Phase 4: GUI shows the SAME effective TP/SL the hot path
         // will exit at. Pre-Phase 4 the snapshot read pos->take_profit_price
@@ -226,26 +226,26 @@ static inline void TUI_CopySnapshotSharded(
                 // Leg-aware live levels: leg B (slot odd under partials)
                 // uses live_tp_b, leg A uses live_tp.
                 bool is_leg_b = BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) && (idx & 1);
-                FPN_Binary<F> live_tp = is_leg_b ? xc->live_tp_b : xc->live_tp;
-                FPN_Binary<F> live_sl = is_leg_b ? xc->live_sl_b : xc->live_sl;
+                Money live_tp = is_leg_b ? xc->live_tp_b : xc->live_tp;
+                Money live_sl = is_leg_b ? xc->live_sl_b : xc->live_sl;
                 // active_tp/sl is the per-fill price when set, else the
                 // cached params absolute. Same shape as ExecutionCore_Tick.
-                FPN_Binary<F> active_tp = !FPN_IsZero(live_tp) ? live_tp : params.sg_take_profit_price;
-                FPN_Binary<F> active_sl = !FPN_IsZero(live_sl) ? live_sl : params.sg_stop_loss_price;
-                FPN_Binary<F> effective_tp = FPN_Max(active_tp, params.ratchet_tp);
-                FPN_Binary<F> effective_sl = FPN_Max(active_sl, params.ratchet_sl);
-                ps->tp = FPN_ToDouble(effective_tp);
-                ps->sl = FPN_ToDouble(effective_sl);
+                Money active_tp = !Money_IsZero(live_tp) ? live_tp : params.sg_take_profit_price;
+                Money active_sl = !Money_IsZero(live_sl) ? live_sl : params.sg_stop_loss_price;
+                Money effective_tp = Money_Max(active_tp, params.ratchet_tp);
+                Money effective_sl = Money_Max(active_sl, params.ratchet_sl);
+                ps->tp = Money_ToDouble(effective_tp);
+                ps->sl = Money_ToDouble(effective_sl);
                 resolved_effective = true;
             }
         }
         if (!resolved_effective) {
             // Fallback for cold-start / no-core-registered: legacy display
             // matches what it used to show.
-            ps->tp = FPN_ToDouble(pos->take_profit_price);
-            ps->sl = FPN_ToDouble(pos->stop_loss_price);
+            ps->tp = Money_ToDouble(pos->take_profit_price);
+            ps->sl = Money_ToDouble(pos->stop_loss_price);
         }
-        ps->orig_tp  = FPN_ToDouble(pos->original_tp);
+        ps->orig_tp  = Money_ToDouble(pos->original_tp);
         ps->value    = price_d * ps->qty;
         if (ps->entry > 0.0) {
             ps->gross_pnl = ((price_d - ps->entry) / ps->entry) * 100.0;
@@ -255,7 +255,7 @@ static inline void TUI_CopySnapshotSharded(
             // H20 branchless: pre-resolve core_cfg ref + ternary select (cmov-lowerable;
             // sister to ControllerEventLoop HIGH-1/2 fix + StrategyParameters.hpp:1762).
             const auto& core_cfg = cfg->cores[core_id_for_pos];
-            double fee_r = FPN_ToDouble(!FPN_IsZero(core_cfg.fee_rate_taker)
+            double fee_r = Money_ToDouble(!Money_IsZero(core_cfg.fee_rate_taker)
                 ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
             ps->net_pnl   = ps->gross_pnl - (fee_r * 200.0);
         }
@@ -325,8 +325,8 @@ static inline void TUI_CopySnapshotSharded(
     //   fields read by GUI_Panel_MLIntelligence.
     uint32_t total_wins   = 0;
     uint32_t total_losses = 0;
-    FPN_Binary<F>   gross_wins   = FPN_Zero<F>();
-    FPN_Binary<F>   gross_losses = FPN_Zero<F>();
+    Money   gross_wins   = Money_Zero();
+    Money   gross_losses = Money_Zero();
     int      headline_regime     = REGIME_RANGING;
     bool     headline_regime_set = false;
     int      headline_ml_core    = -1;
@@ -338,10 +338,10 @@ static inline void TUI_CopySnapshotSharded(
     // per-core deviations surfaced via per_core_count panel at line 339.
     // Operator-facing summary semantic; per-core values are visible in the
     // dedicated per-core view rather than headline Settings.
-    snap->cfg_tp  = FPN_ToDouble(cfg->take_profit_pct) * 100.0;
-    snap->cfg_sl  = FPN_ToDouble(cfg->stop_loss_pct) * 100.0;
-    snap->cfg_fee = FPN_ToDouble(cfg->fee_rate) * 100.0;
-    snap->cfg_slippage = FPN_ToDouble(cfg->slippage_pct) * 100.0;
+    snap->cfg_tp  = Money_ToDouble(cfg->take_profit_pct) * 100.0;
+    snap->cfg_sl  = Money_ToDouble(cfg->stop_loss_pct) * 100.0;
+    snap->cfg_fee = Money_ToDouble(cfg->fee_rate) * 100.0;
+    snap->cfg_slippage = Money_ToDouble(cfg->slippage_pct) * 100.0;
     snap->live_trading = cfg->use_real_money;
 
     // per-core details (strategy assignment + buy gate levels).
@@ -401,8 +401,8 @@ static inline void TUI_CopySnapshotSharded(
         // ---- (was Loop 2) wins/losses + gross accumulator aggregation ----
         total_wins   += state->cores[i].core_wins;
         total_losses += state->cores[i].core_losses;
-        gross_wins   = FPN_Add(gross_wins,   state->cores[i].core_gross_wins);
-        gross_losses = FPN_Add(gross_losses, state->cores[i].core_gross_losses);
+        gross_wins   = Money_Add(gross_wins,   state->cores[i].core_gross_wins);
+        gross_losses = Money_Add(gross_losses, state->cores[i].core_gross_losses);
         // ---- (was Loop 3) headline regime — first AUTO match wins ----
         // Flag-driven; preserves the pre-.B.8 break-on-first-AUTO semantic
         // without an explicit break (which would prevent further loop work
@@ -474,9 +474,9 @@ static inline void TUI_CopySnapshotSharded(
 #undef X
         snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
         // v4.0.4: per-core P&L for Account panel breakdown
-        snap->per_core[i].core_realized      = FPN_ToDouble(state->cores[i].core_realized);
-        snap->per_core[i].core_fees          = FPN_ToDouble(state->cores[i].core_fees);
-        snap->per_core[i].core_allocated     = FPN_ToDouble(state->cores[i].allocated_balance);
+        snap->per_core[i].core_realized      = Money_ToDouble(state->cores[i].core_realized);
+        snap->per_core[i].core_fees          = Money_ToDouble(state->cores[i].core_fees);
+        snap->per_core[i].core_allocated     = Money_ToDouble(state->cores[i].allocated_balance);
         snap->per_core[i].core_wins          = state->cores[i].core_wins;
         snap->per_core[i].core_losses        = state->cores[i].core_losses;
         // open positions = entries minus exits (single-position-per-core invariant
@@ -487,13 +487,13 @@ static inline void TUI_CopySnapshotSharded(
         // Phase 2.1: per-core open notional + budget-used %. The % is
         // computed defensively — if allocated is zero or near-zero (rare
         // misconfiguration), report 0% rather than a divide-by-zero blowup.
-        double open_n  = FPN_ToDouble(state->cores[i].core_open_notional);
-        double alloc_d = FPN_ToDouble(state->cores[i].allocated_balance);
+        double open_n  = Money_ToDouble(state->cores[i].core_open_notional);
+        double alloc_d = Money_ToDouble(state->cores[i].allocated_balance);
         snap->per_core[i].core_open_notional = open_n;
         snap->per_core[i].core_budget_used_pct = (alloc_d > 0.01) ? (open_n / alloc_d * 100.0) : 0.0;
         // Phase 3: per-core kill switch state for the Risk panel
-        snap->per_core[i].core_peak_balance    = FPN_ToDouble(state->cores[i].core_peak_balance);
-        snap->per_core[i].core_dd_pct          = FPN_ToDouble(state->cores[i].core_dd_pct);
+        snap->per_core[i].core_peak_balance    = Money_ToDouble(state->cores[i].core_peak_balance);
+        snap->per_core[i].core_dd_pct          = Money_ToDouble(state->cores[i].core_dd_pct);
         snap->per_core[i].core_ks_trips_total  = state->cores[i].core_ks_trips_total;
         // v5.15.1 — TECH_DEBT-028: core_kill_tripped + drift_breached +
         // drift_kill_tripped migrated to state_flags bitmap. ExecutionCore
@@ -526,7 +526,7 @@ static inline void TUI_CopySnapshotSharded(
         if (core) {
             tt::GateParameters<F> params;
             tt::ParameterSlot_Read(&core->param_slot, &params);
-            snap->per_core[i].buy_gate_price = FPN_ToDouble(params.bg_price_threshold);
+            snap->per_core[i].buy_gate_price = Money_ToDouble(params.bg_price_threshold);
             // v5.6.0: snapshot the flags byte so GUI can render BUY_BLOCKED /
             // VOLUME_REQUIRED / TP/SL ENABLED / BUY_ABOVE / PAIR_ACTIVE without
             // needing access to GateParameters internals. ParameterSlot_Read
@@ -536,7 +536,7 @@ static inline void TUI_CopySnapshotSharded(
             // meaningful when GATE_FLAG_VOLUME_REQUIRED is set, but copying
             // unconditionally is cheaper than branching.
             snap->per_core[i].bg_volume_threshold =
-                FPN_ToDouble(params.bg_volume_threshold);
+                Money_ToDouble(params.bg_volume_threshold);
             // v5.6.1: permission atomic snapshot. ACQUIRE load matches the
             // hot-path read in ExecutionCore.hpp:356, so we see the same
             // state the next tick would see. 0 = entries forbidden.
@@ -546,8 +546,8 @@ static inline void TUI_CopySnapshotSharded(
             }
             // populate headline buy gate from core 0
             if (i == 0) {
-                snap->buy_p = FPN_ToDouble(params.bg_price_threshold);
-                snap->buy_v = FPN_ToDouble(params.bg_volume_threshold);
+                snap->buy_p = Money_ToDouble(params.bg_price_threshold);
+                snap->buy_v = Money_ToDouble(params.bg_volume_threshold);
                 if (snap->buy_p > 0.01 && price_d > 0.01) {
                     snap->gate_dist = price_d - snap->buy_p;
                     snap->gate_dist_pct = (snap->gate_dist / price_d) * 100.0;
@@ -844,8 +844,8 @@ static inline void TUI_CopySnapshotSharded(
         snap->win_rate = 0.0;
     }
     {
-        double g_wins_d   = FPN_ToDouble(gross_wins);
-        double g_losses_d = FPN_ToDouble(gross_losses);
+        double g_wins_d   = Money_ToDouble(gross_wins);
+        double g_losses_d = Money_ToDouble(gross_losses);
         snap->avg_win  = (total_wins   > 0) ? g_wins_d   / (double)total_wins   : 0.0;
         snap->avg_loss = (total_losses > 0) ? g_losses_d / (double)total_losses : 0.0;
         // v5.8.4c — routed through canonical Compute_* helpers (single source
