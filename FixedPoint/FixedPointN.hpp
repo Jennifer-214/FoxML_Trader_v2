@@ -1365,8 +1365,17 @@ inline FixedPoint<2,64> fp2_max(FixedPoint<2,64> a, FixedPoint<2,64> b) { return
 // quotient bit) lifted to the magnitude level on __int128 — same proven math, no FPN_Binary<64> dependency.
 // Fixed 128-trip loop (fixed-trip branch = 100% predicted, not data-dependent — per the generic's note);
 // cmov inside, no data-dependent branch. b_mag==0 → all-ones (caller saturates).
-inline unsigned __int128 udiv_q64(unsigned __int128 a_mag, unsigned __int128 b_mag) {
-    unsigned __int128 rem_hi = a_mag >> 64, rem_lo = a_mag << 64, q = 0;   // dividend = a_mag << 64 (256-bit rem_hi:rem_lo)
+//
+// Ship-B P1b (#7/D-174): generalized to udiv256_qr — an ARBITRARY 256-bit dividend (hi:lo seed)
+// and the REMAINDER returned alongside q (rem_hi at loop end IS the remainder; rem_lo is fully
+// shifted out). udiv_q64 below re-wraps it with the original `a_mag << 64` seed — bit-identical
+// loop, bit-identical results (A/B determinism oracle re-verified at the change). Seed invariant
+// (the trip-0 MSB concern from the design audit): initial hi must be < 2^127 so the first shift
+// cannot drop a bit — binary's seed hi = a_mag >> 64 < 2^64; money's divmul seed hi = (a·10^8)>>128
+// < 2^26; thereafter the restoring invariant (rem_hi < b after each subtract) bounds the shift.
+struct udiv_qr_t { unsigned __int128 q, r; };
+inline udiv_qr_t udiv256_qr(unsigned __int128 hi, unsigned __int128 lo, unsigned __int128 b_mag) {
+    unsigned __int128 rem_hi = hi, rem_lo = lo, q = 0;
     for (int bit = 0; bit < 128; bit++) {
         rem_hi = (rem_hi << 1) | (rem_lo >> 127);   // shift the 256-bit remainder left 1
         rem_lo <<= 1;
@@ -1374,7 +1383,10 @@ inline unsigned __int128 udiv_q64(unsigned __int128 a_mag, unsigned __int128 b_m
         rem_hi = ge ? (rem_hi - b_mag) : rem_hi;     // conditional subtract (cmov)
         q = (q << 1) | (unsigned __int128)ge;        // quotient bit, MSB-first
     }
-    return q;
+    return { q, rem_hi };
+}
+inline unsigned __int128 udiv_q64(unsigned __int128 a_mag, unsigned __int128 b_mag) {
+    return udiv256_qr(a_mag >> 64, a_mag << 64, b_mag).q;    // the original seed, re-wrapped (value-identical)
 }
 inline FixedPoint<2,64> fp2_div(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     bool neg = (a.v < 0) ^ (b.v < 0);
@@ -1601,6 +1613,45 @@ inline Money Money_Mul(Money a, Money b) {
     mag = (mag & ~of_m) | (lim & of_m);                                  // saturate to the closure ceiling
     return { i128_cneg((__int128)mag, neg) };
 }
+
+// Money_Div — #7 (P1b): (a/1e8)/(b/1e8) at <10,8> = (a·10^8)/b with half-even on the TRUE
+// remainder (r = P − q·b ∈ [0,b), exactly #4's contract with d = b). Seed = the certified
+// product a_mag·10^8 (in-domain ≤ 2^90, hi==0; defensively total to ≤ 2^154, rem_hi ≤ 2^26),
+// divided by the GENERALIZED certified long division udiv256_qr (defined with the binary core
+// ops above — the decimal section sits after them). Div-by-zero: deterministic saturate to
+// ±MONEY_MAX by sign(a) + the DISTINCT DIVZERO sticky bit (OVERFLOW suppressed on dz); all call
+// sites pre-guard today (verified at the D-93 audit) — the op stays TOTAL regardless. Quotient
+// overflow (tiny divisors — the audit's Q5 catch): closure saturate + OVERFLOW bit, same as Mul.
+// NEVER __udivti3 (constant 128-trip cmov loop).
+inline Money Money_Div(Money a, Money b) {
+    int neg = (int)((a.v < 0) ^ (b.v < 0));
+    unsigned __int128 amag = (unsigned __int128)i128_abs(a.v);
+    unsigned __int128 bmag = (unsigned __int128)i128_abs(b.v);
+    u256 P = umul_128x128_256(amag, MONEY_SCALE);
+    udiv_qr_t dr = udiv256_qr(P.hi, P.lo, bmag);
+    unsigned __int128 q = money_round_half_even(dr.q, dr.r, bmag);
+    unsigned __int128 lim = ((unsigned __int128)1 << 63) - 1;
+    unsigned __int128 dz  = (unsigned __int128)(bmag == 0);
+    unsigned __int128 ovf = (unsigned __int128)(q > lim) | dz;          // saturate mask covers BOTH
+    unsigned __int128 of_m = (unsigned __int128)0 - ovf;
+    money_op_flags |= (uint64_t)(((unsigned __int128)(q > lim) & ~dz))  // OVERFLOW only when genuine
+                    | ((uint64_t)dz << 1);                              // DIVZERO distinct (bit 1)
+    q = (q & ~of_m) | (lim & of_m);
+    return { i128_cneg((__int128)q, neg) };                             // b==0 ⇒ neg=(a<0): ±MAX by sign(a)
+}
+
+// Money_Add / Money_Sub — exact in __int128 BY DOMAIN (|a|,|b| ≤ 2^63-1 ⇒ |a±b| ≤ 2^64-2 ≪ 2^127:
+// the i128 sum/difference CANNOT wrap, so no certified-saturate body is needed — these are exact
+// integer ops with a closure clamp + S-17 flag). Branchless mask-select clamp by the result sign.
+inline Money Money_Add(Money a, Money b) {
+    __int128 s = a.v + b.v;
+    unsigned __int128 ovf  = (unsigned __int128)(s > MONEY_MAX) | (unsigned __int128)(s < -MONEY_MAX);
+    unsigned __int128 of_m = (unsigned __int128)0 - ovf;
+    money_op_flags |= (uint64_t)ovf;                                     // MONEY_FLAG_OVERFLOW
+    __int128 sat = i128_cneg(MONEY_MAX, (int)(s < 0));                   // ±MONEY_MAX by the result sign
+    return { (__int128)(((unsigned __int128)s & ~of_m) | ((unsigned __int128)sat & of_m)) };
+}
+inline Money Money_Sub(Money a, Money b) { return Money_Add(a, Money{ -b.v }); }  // |b.v| ≤ 2^63-1: negation exact
 
 template<> inline FPN_Binary<64> FPN_Mul<64>(FPN_Binary<64> a, FPN_Binary<64> b)         { return { fp2_mul({a.v}, {b.v}).v }; }
 template<> inline FPN_Binary<64> FPN_AddSat<64>(FPN_Binary<64> a, FPN_Binary<64> b)      { return { fp2_addsat({a.v}, {b.v}).v }; }
