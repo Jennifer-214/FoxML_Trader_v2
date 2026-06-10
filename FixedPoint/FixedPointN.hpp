@@ -1733,17 +1733,23 @@ template<> inline unsigned FPN_ToString<64>(FPN_Binary<64> value, char *buf, uns
 // generic: diff-tested byte-identical across the venue string domain (build_probe/fromstring_difftest.cpp,
 // 297/0). frac_low = floor((frac_int<<64)/10^n) IS the generic's right-to-left divmod for n≤19 (venue
 // precision). Full fixed-width SWAR throughput stays task #5; this is the branchless-where-it-counts form.
-template<> inline FPN_Binary<64> FPN_FromString<64>(const char *str) {
-    static const uint64_t POW10[20] = {
-        1ull,10ull,100ull,1000ull,10000ull,100000ull,1000000ull,10000000ull,100000000ull,1000000000ull,
-        10000000000ull,100000000000ull,1000000000000ull,10000000000000ull,100000000000000ull,
-        1000000000000000ull,10000000000000000ull,100000000000000000ull,1000000000000000000ull,
-        10000000000000000000ull };
+// Ship-B P1c (#5/D-174): the SHARED digit-scan front-end. EXACTLY the live binary accumulate —
+// same branchless arithmetic, same ≥20-digit wrap, same second-dot fold, same silent bad-char
+// skip — with OBSERVATIONAL flags computed alongside (the accumulate itself is untouched, so the
+// binary wrapper below stays BYTE-IDENTICAL; the decimal consumer rejects/rounds on the flags
+// per the per-site failure table in the design sidecar).
+inline constexpr uint32_t FP_SCAN_BAD_CHAR   = 1u << 0;   // non-digit/non-dot seen (live path skips it silently)
+inline constexpr uint32_t FP_SCAN_DUP_DOT    = 1u << 1;   // second '.' (live path folds digits after it into frac)
+inline constexpr uint32_t FP_SCAN_NO_DIGITS  = 1u << 2;   // zero digits scanned
+inline constexpr uint32_t FP_SCAN_WRAP       = 1u << 3;   // a 64-bit accumulator would-wrap (live path wraps silently)
+struct fp_scan_t { uint64_t int_part, frac_int; unsigned n_frac; int neg; uint32_t flags; };
+inline fp_scan_t fp_scan_decimal_string(const char *str) {
     int neg = (str[0] == '-');
     unsigned i = (unsigned)(neg | (str[0] == '+'));
     uint64_t int_part = 0, frac_int = 0;
-    unsigned n_frac = 0;
+    unsigned n_frac = 0, n_digits = 0;
     int seen_dot = 0;
+    uint32_t bad = 0, dup = 0, wrap = 0;
     for (; str[i] != '\0'; i++) {                                   // safe: stop at null (no over-read)
         char c = str[i];
         int is_digit = ((unsigned char)(c - '0') <= 9u);
@@ -1751,20 +1757,110 @@ template<> inline FPN_Binary<64> FPN_FromString<64>(const char *str) {
         unsigned dig = (unsigned)(unsigned char)(c - '0');
         int in_int  = is_digit & !seen_dot;
         int in_frac = is_digit &  seen_dot;
+        bad  |= (uint32_t)!(is_digit | is_dot);                     // flag only — the accumulate still skips it
+        dup  |= (uint32_t)(is_dot & seen_dot);                      // flag only — the fold behavior is preserved
+        wrap |= (uint32_t)(in_int  & (int_part > (~0ull - dig) / 10));   // pre-mul would-wrap detect (flag only)
+        wrap |= (uint32_t)(in_frac & (frac_int > (~0ull - dig) / 10));
         int_part += (uint64_t)in_int  * (int_part * 9 + dig);       // branchless: in_int ? int_part*10+dig : int_part
         frac_int += (uint64_t)in_frac * (frac_int * 9 + dig);
         n_frac   += (unsigned)in_frac;
+        n_digits += (unsigned)is_digit;
         seen_dot |= is_dot;
     }
-    unsigned nf = n_frac < 20u ? n_frac : 19u;                      // clamp (cmov); >19 frac digits is beyond venue precision
-    unsigned __int128 frac_low = ((unsigned __int128)frac_int << 64) / POW10[nf];
-    unsigned __int128 mag = ((unsigned __int128)int_part << 64) | (uint64_t)frac_low;
-    int s = neg & (mag != 0);
-    return { (__int128)(s ? -mag : mag) };
+    uint32_t flags = (bad  * FP_SCAN_BAD_CHAR)
+                   | (dup  * FP_SCAN_DUP_DOT)
+                   | ((uint32_t)(n_digits == 0) * FP_SCAN_NO_DIGITS)
+                   | (wrap * FP_SCAN_WRAP);
+    return { int_part, frac_int, n_frac, neg, flags };
+}
+
+inline const uint64_t FP_POW10[20] = {
+    1ull,10ull,100ull,1000ull,10000ull,100000ull,1000000ull,10000000ull,100000000ull,1000000000ull,
+    10000000000ull,100000000000ull,1000000000000ull,10000000000000ull,100000000000000ull,
+    1000000000000000ull,10000000000000000ull,100000000000000000ull,1000000000000000000ull,
+    10000000000000000000ull };
+
+template<> inline FPN_Binary<64> FPN_FromString<64>(const char *str) {
+    fp_scan_t s = fp_scan_decimal_string(str);                      // flags DISCARDED — binary keeps live semantics
+    unsigned nf = s.n_frac < 20u ? s.n_frac : 19u;                  // clamp (cmov); >19 frac digits is beyond venue precision
+    // The scale tail, via the certified constant-trip divider (P1c kills the former __udivti3
+    // libcall at this exact site — the audit's :1760 disposition; floor division both ways =
+    // value-identical, A/B-oracle-verified).
+    unsigned __int128 frac_low = udiv256_qr(0, (unsigned __int128)s.frac_int << 64, FP_POW10[nf]).q;
+    unsigned __int128 mag = ((unsigned __int128)s.int_part << 64) | (uint64_t)frac_low;
+    int sg = s.neg & (mag != 0);
+    return { (__int128)(sg ? -mag : mag) };
 }
 
 // (FPN_FromFP64<64>/FPN_ToFP64<64> NOT specialized — their generic is `#ifdef FIXED_POINT_64_H`-gated at a
 //  point where the macro isn't defined yet, and the engine red-build never instantiates them for <64>. If a
 //  build ever flags them, specialize at a point after FixedPoint64.hpp is included.)
+
+//======================================================================================================
+// [DECIMAL MONEY PARSE + CASTS — Ship B P1c (#5 + D-170 casts; placed here so fp_scan is in scope)]
+//======================================================================================================
+// Money_FromString — #5: exact venue-decimal-string -> <10,8>, NEVER via double. Returns
+// (value, flags): the per-site failure table (design sidecar) keys on the flags — LIVE-context
+// consumers REFUSE on MALFORMED/EXCESS_DP per D-174b/c; paper/cfg contexts may round+warn.
+// SEPARATE mechanism from money_op_flags by design (S-16 note).
+inline constexpr uint32_t MONEY_PARSE_MALFORMED = 1u << 0;   // bad char / second dot / digitless
+inline constexpr uint32_t MONEY_PARSE_OVERFLOW  = 1u << 1;   // |value| exceeds the closure ceiling (saturated)
+inline constexpr uint32_t MONEY_PARSE_EXCESS_DP = 1u << 2;   // > 8 fractional digits (venue contract says <= 8; value half-even-rounded)
+struct MoneyParse { Money value; uint32_t flags; };
+inline MoneyParse Money_FromString(const char *str) {
+    fp_scan_t s = fp_scan_decimal_string(str);
+    uint32_t flags = ((s.flags & (FP_SCAN_BAD_CHAR | FP_SCAN_DUP_DOT | FP_SCAN_NO_DIGITS)) ? MONEY_PARSE_MALFORMED : 0u)
+                   | ((s.flags & FP_SCAN_WRAP) ? MONEY_PARSE_OVERFLOW : 0u);
+    // Scale to 10^8: <=8dp pads exactly (frac_int < 10^nf => *10^(8-nf) < 10^8, u64-exact);
+    // >8dp divides by 10^(nf-8) with #4 half-even (defensive arm — the venue never sends it;
+    // plain u64 HW divide, parse cadence, constant-bounded).
+    unsigned nf = s.n_frac < 20u ? s.n_frac : 19u;
+    uint64_t frac_scaled;
+    if (__builtin_expect(nf <= 8u, 1)) {
+        frac_scaled = s.frac_int * FP_POW10[8u - nf];
+    } else {
+        uint64_t d = FP_POW10[nf - 8u];
+        uint64_t q = s.frac_int / d, r = s.frac_int - q * d;
+        frac_scaled = (uint64_t)money_round_half_even(q, r, d);
+        flags |= MONEY_PARSE_EXCESS_DP;
+    }
+    unsigned __int128 scaled = (unsigned __int128)s.int_part * MONEY_SCALE + frac_scaled;  // <= ~2^91: exact
+    unsigned __int128 lim = ((unsigned __int128)1 << 63) - 1;
+    flags |= (scaled > lim) ? MONEY_PARSE_OVERFLOW : 0u;
+    scaled = scaled > lim ? lim : scaled;                            // deterministic saturate (cmov)
+    int sg = s.neg & (scaled != 0);                                  // -0 canonicalizes to +0 (mirror the live parser)
+    return { Money{ i128_cneg((__int128)scaled, sg) }, flags };
+}
+
+// Money_ToBinary — the D-170 INGRESS cast (decimal -> binary feature domain; per-tick capable):
+// b = round_he(m * 2^64 / 10^8) via the PROVEN divmul on (|m| << 64) — |m| <= 2^63-1 => the
+// dividend < 2^127 sits INSIDE the D-140 proven domain (the fold's range note; no new proof).
+// Saturation provably UNREACHABLE this direction (q < 2^101 << 2^127) => NO flag, no dead arm
+// (S-16). Branchless; ~one umul + shift + round.
+inline FPN_Binary<64> Money_ToBinary(Money m) {
+    unsigned __int128 mag = (unsigned __int128)i128_abs(m.v);
+    divmul_qr dr = divmul_pow10(mag << 64);
+    unsigned __int128 q = money_round_half_even(dr.q, dr.r, MONEY_SCALE);
+    return { i128_cneg((__int128)q, (int)(m.v < 0)) };
+}
+
+// Money_FromBinary — the EGRESS cast (binary threshold -> money at gate-build cadence, D-170):
+// m = round_he(b * 10^8 / 2^64) via the certified product; divisor d = 2^64 (even => exact ties
+// possible; #4's generalized form handles it). Saturation REACHABLE (binary values reach ~2^63
+// => *10^8 ~ 2^90 > ceiling) => closure saturate + S-17 OVERFLOW flag (a silently-saturated
+// threshold would be a wrong gate — load-bearing, per the fold).
+inline Money Money_FromBinary(FPN_Binary<64> b) {
+    unsigned __int128 mag = (unsigned __int128)i128_abs(b.v);
+    u256 p = umul_128x128_256(mag, MONEY_SCALE);
+    unsigned __int128 q = (p.hi << 64) | (unsigned __int128)(uint64_t)(p.lo >> 64);   // bits[191:64] = floor(b*10^8 / 2^64)
+    unsigned __int128 r = (unsigned __int128)(uint64_t)p.lo;                          // bits[63:0]  = the true remainder
+    q = money_round_half_even(q, r, (unsigned __int128)1 << 64);
+    unsigned __int128 lim = ((unsigned __int128)1 << 63) - 1;
+    unsigned __int128 ovf = (unsigned __int128)(p.hi >> 64 != 0) | (unsigned __int128)(q > lim);
+    unsigned __int128 of_m = (unsigned __int128)0 - ovf;
+    money_op_flags |= (uint64_t)ovf;                                                  // MONEY_FLAG_OVERFLOW
+    q = (q & ~of_m) | (lim & of_m);
+    return { i128_cneg((__int128)q, (int)(b.v < 0)) };
+}
 
 #endif // FIXED_POINT_N_H
