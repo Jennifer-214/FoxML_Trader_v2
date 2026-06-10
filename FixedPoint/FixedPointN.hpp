@@ -1875,4 +1875,73 @@ inline Money Money_FromBinary(FPN_Binary<64> b) {
     return { i128_cneg((__int128)q, (int)(b.v < 0)) };
 }
 
+// --- P2a: the Money one-liner op set the migration consumes (all trivial .v ops; the closure
+// domain |v| <= 2^63-1 makes INT_MIN edges unreachable — negate/abs are exact). Compares/min/max
+// lower to cmov (same shape as fp2_min/max); BlendOnMask mirrors the live <64> mask-select.
+inline Money Money_Zero()                       { return { (__int128)0 }; }
+inline Money Money_Negate(Money a)              { return { -a.v }; }
+inline Money Money_Abs(Money a)                 { return { i128_abs(a.v) }; }
+inline Money Money_Min(Money a, Money b)        { return { a.v < b.v ? a.v : b.v }; }
+inline Money Money_Max(Money a, Money b)        { return { a.v > b.v ? a.v : b.v }; }
+inline int   Money_IsZero(Money a)              { return a.v == 0; }
+inline int   Money_Lt(Money a, Money b)         { return a.v <  b.v; }
+inline int   Money_Le(Money a, Money b)         { return a.v <= b.v; }
+inline int   Money_Eq(Money a, Money b)         { return a.v == b.v; }
+inline Money Money_BlendOnMask(Money if_true, Money if_false, uint64_t mask) {
+    unsigned __int128 m = (unsigned __int128)(__int128)(int64_t)mask;  // 0 / all-ones-128 (sign-extended)
+    return { (__int128)(((unsigned __int128)if_true.v & m) | ((unsigned __int128)if_false.v & ~m)) };
+}
+// Money_FromInt: whole-unit int -> money (i*10^8), clamp+flag past the closure ceiling.
+inline Money Money_FromInt(int64_t i) {
+    unsigned __int128 mag = (unsigned __int128)(uint64_t)(i < 0 ? -(uint64_t)i : (uint64_t)i) * MONEY_SCALE;
+    unsigned __int128 lim = ((unsigned __int128)1 << 63) - 1;
+    unsigned __int128 ovf = (unsigned __int128)(mag > lim);
+    money_op_flags |= (uint64_t)ovf;
+    mag = mag > lim ? lim : mag;
+    return { i128_cneg((__int128)mag, (int)(i < 0)) };
+}
+// Money_ToDouble — DISPLAY-ONLY (H4-exempt): GUI/diag/inf-bridge consumption. Never accounting.
+inline double Money_ToDouble(Money a)           { return (double)a.v / 1e8; }
+// money_from_double_payload — the cfg-PAYLOAD bridge ONLY (registry default/clamp literals,
+// <=8dp by authoring convention => exact at 1e-8). TOTAL: saturates past the closure ceiling
+// (a raw llround(d*1e8) is UB past 2^63 — x86 yields INT64_MIN, which silently inverted a clamp
+// during P2a testing). NEVER a general money ingress (that's Money_FromString — exact).
+inline __int128 money_from_double_payload(double d) {
+    double s = d * 1e8;
+    if (!(s < 9.2233720368547e18))  return (__int128)(((unsigned __int128)1 << 63) - 1);   // +sat (incl. NaN-safe ordering)
+    if (!(s > -9.2233720368547e18)) return -(__int128)(((unsigned __int128)1 << 63) - 1);  // -sat
+    return (__int128)llround(s);
+}
+// money_scale_down_pow10 — exact ÷10^k with #4 half-even (k <= 19): the S-18 PCT ingress helper
+// (file "0.075" percent -> parse exact -> ÷100 -> stored fraction; ONE rounding total for <=6dp).
+inline Money money_scale_down_pow10(Money a, unsigned k) {
+    unsigned __int128 mag = (unsigned __int128)i128_abs(a.v);
+    uint64_t d = FP_POW10[k < 20u ? k : 19u];
+    // Runtime divisor => route through the certified constant-trip divider (a raw u128/u64
+    // divide would emit __udivti3 — the exact class the no-libcall acceptance bans).
+    udiv_qr_t dr = udiv256_qr(0, mag, (unsigned __int128)d);
+    unsigned __int128 q = money_round_half_even(dr.q, dr.r, (unsigned __int128)d);
+    return { i128_cneg((__int128)q, (int)(a.v < 0)) };
+}
+// Money_ToCString — EXACT decimal emit, always 8 fractional digits ("123.45670000"); the
+// FromString inverse (round-trips bit-exactly; the #6 width-param wire variant lands with
+// quantize). Returns chars written (excl. NUL); 0 on insufficient cap (needs <= 32).
+inline int Money_ToCString(Money a, char *buf, int cap) {
+    if (cap < 32) { if (cap > 0) buf[0] = '\0'; return 0; }
+    unsigned __int128 mag = (unsigned __int128)i128_abs(a.v);
+    divmul_qr dr = divmul_pow10(mag);                      // proven reduce — no libcall, total to 2^127
+    uint64_t ip = (uint64_t)dr.q;                          // in-domain ip < 2^36 (closure |v| <= 2^63-1)
+    uint64_t fp = (uint64_t)dr.r;
+    int n = 0;
+    if (a.v < 0) buf[n++] = '-';
+    char tmp[24]; int t = 0;
+    do { tmp[t++] = (char)('0' + ip % 10ull); ip /= 10ull; } while (ip);
+    while (t) buf[n++] = tmp[--t];
+    buf[n++] = '.';
+    for (int k = 7; k >= 0; k--) { buf[n + k] = (char)('0' + fp % 10ull); fp /= 10ull; }
+    n += 8;
+    buf[n] = '\0';
+    return n;
+}
+
 #endif // FIXED_POINT_N_H

@@ -31,6 +31,7 @@
 #include <cstdio>      // snprintf
 #include <type_traits> // std::is_floating_point_v, std::is_integral_v, std::is_array_v, std::is_unsigned_v
 #include <algorithm>   // std::clamp
+#include <cmath>       // llround (Ship-B P2a: exact registry-default/clamp -> Money conversion)
 #include <locale.h>    // newlocale, uselocale, freelocale (Layer 2 locale pinning)
 #include <strings.h>   // v5.15.5.F.4c — strcasecmp for KIND_INT_ENUM string-token parsing
 
@@ -69,6 +70,7 @@ namespace tt {
         // a deliberate decision (extend tt::cfg_parse_field<T> with a new branch)
         // rather than silent truncation via type-erased reinterpret_cast.
         static_assert(is_fp_binary_v<T>
+                   || is_fp_decimal_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -77,7 +79,29 @@ namespace tt {
                       "using this T as a cfg field. See "
                       "DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.");
 
-        if constexpr (is_fp_binary_v<T>) {
+        if constexpr (is_fp_decimal_v<T>) {
+            // Ship-B P2a (B3/S-15): EXACT decimal money parse — never via double (the D-102
+            // class this ship exists to kill). PCT file convention: parse exact, then ÷100
+            // decimally (ONE rounding total, S-18). Parse flags surface via stderr here; the
+            // LIVE refuse-boot policy (D-174c) plumbs at the mode-aware parser layer in P2b.
+            MoneyParse p = Money_FromString(val);
+            if (!wire_context && desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT)
+                p.value = money_scale_down_pow10(p.value, 2);
+            if (p.flags) {
+                fprintf(stderr, "[cfg] WARN: %s='%s' decimal parse flags=0x%x "
+                        "(1=malformed 2=overflow 4=excess-dp); LIVE boot refuses these (D-174c).\n",
+                        desc.cfg_field_name, val, p.flags);
+            }
+            // Clamp parity with the binary branch (same numbers, same vacuousness for
+            // percent-form rows) — converted ONCE to .v space; the VALUE never round-trips
+            // through double. TOTAL conversion (saturating — a raw llround is UB past 2^63
+            // and inverted a wide clamp to INT64_MIN during P2a testing).
+            const __int128 clo = money_from_double_payload(desc.payload.as_double.clamp_min);
+            const __int128 chi = money_from_double_payload(desc.payload.as_double.clamp_max);
+            if (p.value.v < clo) p.value.v = clo;
+            if (p.value.v > chi) p.value.v = chi;
+            dst = p.value;
+        } else if constexpr (is_fp_binary_v<T>) {
             // FPN_Binary<F>: parse double, apply percent scaling if KIND_DOUBLE_PCT (cfg-file context only),
             // clamp to descriptor range, convert to FPN_Binary<T::F>.
             double v = parse_double_fast(val);
@@ -186,6 +210,7 @@ namespace tt {
     template <typename T>
     inline int cfg_save_field(const T& src, const CfgFieldDescriptor& desc, char* buf, size_t cap) {
         static_assert(is_fp_binary_v<T>
+                   || is_fp_decimal_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -198,7 +223,17 @@ namespace tt {
         if (pinned) prev = uselocale(pinned);
 
         int n = 0;
-        if constexpr (is_fp_binary_v<T>) {
+        if constexpr (is_fp_decimal_v<T>) {
+            // Ship-B P2a (S-15): EXACT decimal save — never %.4f/%.2f (value-mutating for money
+            // rates: 0.00075 -> "0.07" -> reload 0.0007) and never %.17g (doesn't round-trip
+            // 10^8-scaled ints past 2^53). PCT saves the percent form ×100 EXACTLY in .v
+            // (|v|·100 < 2^70 — no overflow possible from the closure domain).
+            Money out = src;
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) out.v *= 100;
+            char tmp[40];
+            Money_ToCString(out, tmp, (int)sizeof(tmp));
+            n = snprintf(buf, cap, "%s", tmp);
+        } else if constexpr (is_fp_binary_v<T>) {
             double v = FPN_ToDouble(src);
             if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v *= 100.0;
             const char* fmt = (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) ? "%.2f" : "%.4f";
@@ -239,13 +274,20 @@ namespace tt {
     template <typename T>
     inline void cfg_assign_field(T& dst, const CfgFieldDescriptor& desc) {
         static_assert(is_fp_binary_v<T>
+                   || is_fp_decimal_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
                       "cfg field type not in recognized family — "
                       "extend tt::cfg_assign_field<T> with a new branch.");
 
-        if constexpr (is_fp_binary_v<T>) {
+        if constexpr (is_fp_decimal_v<T>) {
+            // Ship-B P2a: PERCENT-space payload (P0.3 convention) -> exact fraction. Registry
+            // default literals are <=8dp => llround(d*1e8) is exact; no double VALUE round-trip.
+            double d = desc.payload.as_double.default_val;
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) d /= 100.0;
+            dst = Money{ money_from_double_payload(d) };
+        } else if constexpr (is_fp_binary_v<T>) {
             // Ship-B P0.3 (PARITY-037/V12 inverted): the DBL payload column is PERCENT-space for
             // KIND_DOUBLE_PCT rows — matching the GUI ×100 display, the cfg-FILE convention
             // (cfg_parse_field ÷100), and the 0-100 clamp ranges. Scale exactly as the file
@@ -289,13 +331,20 @@ namespace tt {
     template <typename T>
     inline bool cfg_diff_field(const T& current, const CfgFieldDescriptor& desc) {
         static_assert(is_fp_binary_v<T>
+                   || is_fp_decimal_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
                       "cfg field type not in recognized family — "
                       "extend tt::cfg_diff_field<T> with a new branch.");
 
-        if constexpr (is_fp_binary_v<T>) {
+        if constexpr (is_fp_decimal_v<T>) {
+            // Ship-B P2a: exact .v compare against the percent-converted default (sister to
+            // cfg_assign_field's conversion — same llround path, byte-deterministic).
+            double d = desc.payload.as_double.default_val;
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) d /= 100.0;
+            return current.v != money_from_double_payload(d);
+        } else if constexpr (is_fp_binary_v<T>) {
             // FPN_Binary equality via integer comparison (after FromDouble conversion).
             // PCT payload is PERCENT-space — scale before compare (Ship-B P0.3, sister to
             // cfg_assign_field; without it the GUI "modified" badge is wrong for every PCT field).
@@ -352,6 +401,7 @@ namespace tt {
     template <typename T>
     inline size_t cfg_emit_field(const T& src, const CfgFieldDescriptor& desc, char* buf, size_t cap) {
         static_assert(is_fp_binary_v<T>
+                   || is_fp_decimal_v<T>
                    || std::is_floating_point_v<T>
                    || std::is_integral_v<T>
                    || std::is_array_v<T>,
@@ -366,7 +416,14 @@ namespace tt {
         if (pinned) prev = uselocale(pinned);
 
         int n = 0;
-        if constexpr (is_fp_binary_v<T>) {
+        if constexpr (is_fp_decimal_v<T>) {
+            // Ship-B P2a (B3 — THE wire branch this ship exists for): EXACT decimal string on
+            // the HMAC body. Raw fraction (wire carries fractions; sister to the binary branch's
+            // no-PCT-scale rule); pure digits => locale-immune on top of the pin.
+            char tmp[40];
+            Money_ToCString(src, tmp, (int)sizeof(tmp));
+            n = snprintf(buf, cap, "%s=%s\n", desc.cfg_field_name, tmp);
+        } else if constexpr (is_fp_binary_v<T>) {
             // %.17g — lossless double round-trip.
             n = snprintf(buf, cap, "%s=%.17g\n", desc.cfg_field_name, FPN_ToDouble(src));
         } else if constexpr (std::is_floating_point_v<T>) {
@@ -421,6 +478,7 @@ namespace tt {
     template <typename SrcT, typename DstT, typename HasT>
     inline void cfg_populate_inf_field(const SrcT& cfg_src, DstT& inf_dst, HasT& inf_has_dst, bool gate) {
         static_assert(is_fp_binary_v<SrcT>
+                   || is_fp_decimal_v<SrcT>
                    || std::is_floating_point_v<SrcT>
                    || std::is_integral_v<SrcT>
                    || std::is_array_v<SrcT>,
@@ -447,6 +505,16 @@ namespace tt {
             inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
         } else if constexpr (is_fp_binary_v<SrcT> && is_fp_binary_v<DstT>) {
             // FPN_Binary<F> → FPN_Binary<F> direct (no conversion).
+            inf_dst = gate ? cfg_src : DstT{};
+            inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
+        } else if constexpr (is_fp_decimal_v<SrcT> && std::is_floating_point_v<DstT>) {
+            // Ship-B P2a BRIDGE: Money → double inf field (the v2-era stamp records doubles).
+            // Display/compare semantics only — the WIRE body emits the exact string via
+            // cfg_emit_field's decimal branch; the exact-typed inf field lands with stamp v3
+            // (P2b). Sound to 16 significant digits (money magnitudes sit far inside).
+            inf_dst = gate ? Money_ToDouble(cfg_src) : DstT{};
+            inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
+        } else if constexpr (is_fp_decimal_v<SrcT> && is_fp_decimal_v<DstT>) {
             inf_dst = gate ? cfg_src : DstT{};
             inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
         } else {
@@ -477,6 +545,7 @@ namespace tt {
     template <typename StampT, typename CfgT>
     inline bool cfg_drift_compare(const StampT& stamp_val, const CfgT& cfg_val) {
         static_assert(is_fp_binary_v<StampT>
+                   || is_fp_decimal_v<StampT>
                    || std::is_floating_point_v<StampT>
                    || std::is_integral_v<StampT>
                    || std::is_array_v<StampT>,
@@ -486,13 +555,22 @@ namespace tt {
         // compiled and fell through to `return false` (silent no-drift on the HMAC-bound stamp
         // surface). Both params now family-asserted; the chain below is exhaustive.
         static_assert(is_fp_binary_v<CfgT>
+                   || is_fp_decimal_v<CfgT>
                    || std::is_floating_point_v<CfgT>
                    || std::is_integral_v<CfgT>
                    || std::is_array_v<CfgT>,
                       "cfg field type not in recognized family — "
                       "extend tt::cfg_drift_compare<StampT,CfgT> with a new branch.");
 
-        if constexpr (std::is_floating_point_v<StampT> && is_fp_binary_v<CfgT>) {
+        if constexpr (std::is_floating_point_v<StampT> && is_fp_decimal_v<CfgT>) {
+            // Ship-B P2a BRIDGE (v2-era stamps record doubles): compare in double space via the
+            // SAME conversion the populate path uses — equal values round-trip identically, so
+            // the compare is sound to 16 significant digits. The exact-typed compare lands with
+            // stamp v3 (P2b), which retires this branch.
+            return stamp_val != Money_ToDouble(cfg_val);
+        } else if constexpr (is_fp_decimal_v<StampT> && is_fp_decimal_v<CfgT>) {
+            return stamp_val.v != cfg_val.v;                 // exact scaled-int equality
+        } else if constexpr (std::is_floating_point_v<StampT> && is_fp_binary_v<CfgT>) {
             // stamp is double (legacy struct-gen) vs cfg is FPN_Binary<F>. Compare in double space
             // (what was wire-emitted at training time per FPN_ToDouble in cfg_emit_field).
             return stamp_val != FPN_ToDouble(cfg_val);
@@ -540,6 +618,7 @@ namespace tt {
                                         const StampT& stamp_val,
                                         const CfgT& cfg_val) {
         static_assert(is_fp_binary_v<StampT>
+                   || is_fp_decimal_v<StampT>
                    || std::is_floating_point_v<StampT>
                    || std::is_integral_v<StampT>
                    || std::is_array_v<StampT>,
@@ -547,6 +626,7 @@ namespace tt {
                       "extend tt::cfg_drift_format_reason<StampT,CfgT> with a new branch.");
         // Ship-B P0 (S-5/V5): CfgT family-asserted + exhaustive chain, sister to cfg_drift_compare.
         static_assert(is_fp_binary_v<CfgT>
+                   || is_fp_decimal_v<CfgT>
                    || std::is_floating_point_v<CfgT>
                    || std::is_integral_v<CfgT>
                    || std::is_array_v<CfgT>,
@@ -555,7 +635,16 @@ namespace tt {
 
         if (!buf || cap == 0) return 0;
 
-        if constexpr (std::is_floating_point_v<StampT> && is_fp_binary_v<CfgT>) {
+        if constexpr (std::is_floating_point_v<StampT> && is_fp_decimal_v<CfgT>) {
+            // Ship-B P2a bridge attribution (sister to cfg_drift_compare's decimal bridge).
+            return snprintf(buf, cap, "%s drift: stamp=%g cfg=%g",
+                            field_name, (double)stamp_val, Money_ToDouble(cfg_val));
+        } else if constexpr (is_fp_decimal_v<StampT> && is_fp_decimal_v<CfgT>) {
+            char st[40], ct[40];
+            Money_ToCString(stamp_val, st, (int)sizeof(st));
+            Money_ToCString(cfg_val, ct, (int)sizeof(ct));
+            return snprintf(buf, cap, "%s drift: stamp=%s cfg=%s", field_name, st, ct);
+        } else if constexpr (std::is_floating_point_v<StampT> && is_fp_binary_v<CfgT>) {
             // Stamp recorded as double (legacy struct-gen); cfg runtime is FPN_Binary<F>.
             // Format in double-space (matches wire-emit semantic per cfg_emit_field).
             return snprintf(buf, cap, "%s drift: stamp=%g cfg=%g",
