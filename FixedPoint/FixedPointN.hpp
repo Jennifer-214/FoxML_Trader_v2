@@ -122,6 +122,18 @@ template <typename T> inline constexpr bool is_fp_decimal_v = is_fp_decimal<T>::
 // (D-143/B6; the legacy is_FPN_v alias that briefly lived here was retired at A.5 — D-163).
 template <> struct is_fp_binary<FPN_Binary<64>> : std::true_type {};
 
+// P2 EPOCH SWITCH (markers-first, D-174 #14 / S-4): the type the ENGINE'S MONEY FIELDS use.
+// Flipping this alias to `Money` IS the value-encoding epoch transition — MONEY_ENCODING_EPOCH
+// derives from it, every persisted-surface version floor auto-raises, and the per-surface
+// trait-keyed static_asserts red-build until the SAME COMMIT carries: snapshot versions 14/10/7 +
+// the OMSEL magic bump + header format_version (rotate-not-append, D-175a) + the stamp v3
+// unconditional floor (strict-fork bypassed) + the money-golden regen + retrain checklist.
+// The S-4 lesson made structural: the flip is 16B->16B, so NO sizeof/layout guard can see it —
+// these ENCODING-keyed guards are the net. DO NOT flip outside the P2 migration commit.
+// (Placed AFTER the traits — is_fp_decimal_v must be visible to the constexpr derivation.)
+using EngineMoneyT = FPN_Binary<64>;                                  // P2 flip target: -> Money
+inline constexpr unsigned MONEY_ENCODING_EPOCH = is_fp_decimal_v<EngineMoneyT> ? 1u : 0u;
+
 //======================================================================================================
 // [N-WORD HELPERS]
 //======================================================================================================

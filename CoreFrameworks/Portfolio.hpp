@@ -517,6 +517,16 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN_Binary<F> current_pric
 #define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian
 #define PORTFOLIO_SNAPSHOT_VERSION 6   // Ship-A 16B FPN_Binary: Position PERSIST 184->128 B; v5 snapshots version-rejected (H21/D-144)
 
+// Ship-B P2 epoch guard (S-4/D-174 #14): Position persists money fields RAW — a 16B->16B decimal
+// re-encoding changes the VALUE SEMANTICS at identical layout, so no sizeof/offset assert can see
+// it. This trait-keyed tripwire red-builds the flip commit until the version bumps past the
+// binary-era 6 (-> 7) in the SAME commit (old snapshots must version-reject, never load misscaled).
+static_assert(!is_fp_decimal_v<decltype(Position<64>::entry_price)>
+                  || PORTFOLIO_SNAPSHOT_VERSION >= 7,
+              "Ship-B epoch: Position money fields flipped to decimal — bump "
+              "PORTFOLIO_SNAPSHOT_VERSION to 7 (H21 tombstone v6) in THIS commit, or pre-epoch "
+              "snapshots load with money misread x1.8e11.");
+
 template <unsigned F>
 static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN_Binary<F> realized_pnl,
                                   FPN_Binary<F> live_offset_pct, FPN_Binary<F> live_vol_mult,

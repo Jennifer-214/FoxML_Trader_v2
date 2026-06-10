@@ -93,6 +93,13 @@ namespace tt {
 // (live mode never persists via this path; reconciles from exchange).
 #define SHARDED_SNAPSHOT_VERSION  9u   // Ship-A 16B FPN_Binary: embedded Position/FPN_Binary-struct byte layouts changed; v8 version-rejected (H21/D-144)
 
+// Ship-B P2 epoch guard (S-4): this file raw-fwrites per-core money (allocated_balance /
+// core_realized / fees / notional / pnl_feeder / 16x Position). Encoding-keyed (the 16B->16B
+// decimal flip is layout-invisible): red-builds until the version rides the SAME commit.
+static_assert(MONEY_ENCODING_EPOCH == 0u || SHARDED_SNAPSHOT_VERSION >= 9u + MONEY_ENCODING_EPOCH,
+              "Ship-B epoch: the engine money type flipped to decimal — bump "
+              "SHARDED_SNAPSHOT_VERSION to 10u (H21 tombstone 9u) in THIS commit.");
+
 //======================================================================================================
 // [SAVE]
 //======================================================================================================

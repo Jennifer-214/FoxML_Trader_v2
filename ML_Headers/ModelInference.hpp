@@ -141,6 +141,15 @@
 static constexpr uint32_t STAMP_FORMAT_VERSION_CURRENT      = 2;  // v5.15.5.F.4d.1.B.3 Step 1.6.7.3 — SOFT bump 1 → 2 (cfg-derived cohort wire keys lose `inference_cfg_` prefix)
 static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 2;  // parser accepts [1, MAX] inclusive; > MAX = future version this engine doesn't understand
 
+// Ship-B P2 epoch guard (S-4/D-174 — the strict-gate bypass closed at the flip): stamps carry
+// ~30 money fields whose wire values re-encode at the decimal epoch. Tripwire: the flip commit
+// must bump CURRENT/MAX to 3 AND make pre-epoch refusal an UNCONDITIONAL hard-invalid class that
+// BYPASSES the held_out_gate_strict fork (strict=0 loads r.valid=0 today — a v2 stamp must NOT
+// enter the decimal engine), retiring the [1,2] legacy key dispatch (H21) + the retrain ritual.
+static_assert(MONEY_ENCODING_EPOCH == 0u || STAMP_FORMAT_VERSION_CURRENT >= 3u,
+              "Ship-B epoch: the engine money type flipped to decimal — bump STAMP_FORMAT_VERSION "
+              "to 3 + unconditional pre-epoch stamp refusal (bypass the strict fork) in THIS commit.");
+
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
 //======================================================================================================

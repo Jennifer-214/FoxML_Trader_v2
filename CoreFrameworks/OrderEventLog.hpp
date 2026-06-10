@@ -91,6 +91,18 @@ struct OrderEvent {
     char           reason[32];     // short description for REJECTED/RECONCILED
 };
 
+// Ship-B P2 epoch guard (S-4/D-175a): the header's magic/fpn_width/entry_size ALL stay unchanged
+// at a 16B->16B decimal re-encoding — old logs would replay binary-scaled ints as decimals.
+// Tripwire: the flip commit must bump the magic OMSEL01->OMSEL02 + claim a reserved[] word as
+// format_version + switch the reject path to ROTATE-not-append (the loader's swallowed -1 +
+// "ab" reopen otherwise appends decimal events under the OLD magic — lost at next boot) + add
+// the booked-fee field (S-3) in the same stroke.
+static_assert(!is_fp_decimal_v<decltype(OrderEvent<64>::price)>,
+              "Ship-B epoch: OrderEvent money fields flipped to decimal — in THIS commit: magic "
+              "OMSEL01->OMSEL02 (H21 tombstone), reserved[]->format_version, rotate-not-append "
+              "on reject (D-175a), + the S-3 booked-fee field. Then update this guard to the "
+              "version-compare form.");
+
 //======================================================================================================
 // [EVENT LOG STRUCT]
 //======================================================================================================
