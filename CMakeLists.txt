@@ -62,7 +62,6 @@ endif()
 if(LATENCY_BENCH)
     target_compile_definitions(engine PRIVATE LATENCY_PROFILING LATENCY_BENCH)
 endif()
-endif()
 if(BUSY_POLL)
     target_compile_definitions(engine PRIVATE BUSY_POLL)
 endif()
@@ -146,7 +145,6 @@ if(USE_IMGUI_GUI)
     if(LATENCY_LITE)
         target_compile_definitions(engine_gui PRIVATE LATENCY_PROFILING LATENCY_LITE)
     endif()
-    endif()
     if(BUSY_POLL)
         target_compile_definitions(engine_gui PRIVATE BUSY_POLL)
     endif()
@@ -189,7 +187,6 @@ if(USE_IMGUI_GUI)
               # per-pthread to prevent OpenMP team collisions across
               # parallel multi-horizon workers running XGBoost)
     )
-    endif()
     if(USE_XGBOOST)
         target_compile_definitions(foxml_suite PRIVATE USE_XGBOOST)
         target_link_libraries(foxml_suite PRIVATE xgboost::xgboost)
@@ -221,8 +218,7 @@ target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 # unconditionally references TUISnapshot, which is only defined under
 # MULTICORE_TUI. Match the production engine target.
 target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
-# exercises the native specializations, not the generic fallback (tested==shipped).
-endif()
+# (native-FP pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 find_package(Threads REQUIRED)
 target_link_libraries(controller_test PRIVATE Threads::Threads ssl crypto)
 
@@ -234,9 +230,7 @@ add_executable(depth_recorder_test tests/depth_recorder_test.cpp)
 target_compile_options(depth_recorder_test PRIVATE -O2 -march=native)
 target_include_directories(depth_recorder_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(depth_recorder_test PRIVATE ssl crypto pthread)
-# F-057: depth_recorder_test exercises the FPN ops (24 FPN_Sqrt/FromDouble calls) -> build the
-# shipped native FP path so tested==shipped. (compare_scalers stays generic: 0 divergent FP calls.)
-endif()
+# (F-057 native-FP-path pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 
 # Track E.6 — parity validation harness. Runs the legacy + sharded backtest
 # paths on the same tick file and diffs feature_matrix output. Final gate
@@ -247,8 +241,7 @@ add_executable(parity_harness tests/parity_harness.cpp)
 target_compile_options(parity_harness PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(parity_harness PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_compile_definitions(parity_harness PRIVATE MULTICORE_TUI)
-# F-057: tested==shipped — parity_harness must build the native FP path too.
-endif()
+# (F-057 native-FP-path pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 target_link_libraries(parity_harness PRIVATE Threads::Threads ssl crypto)
 endif()  # tests/ present
 

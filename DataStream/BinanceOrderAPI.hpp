@@ -513,9 +513,18 @@ static inline int BinanceOrderAPI_MarketBuy(BinanceOrderAPI *api,
                                              double *fill_price_out = NULL,
                                              double *fill_qty_out = NULL,
                                              uint64_t client_order_id = 0) {
-    // round quantity to exchange step size
-    if (api->filters.loaded)
+    // round quantity to exchange step size + clamp to the venue max (Ship-B P4
+    // ratified pick, D-175: lot_max_qty was parsed-never-consumed — an oversized
+    // order would be venue-REJECTED; clamping + warning keeps the entry alive).
+    if (api->filters.loaded) {
         quantity = binance_round_qty(quantity, api->filters.lot_step_size);
+        double max_q = Money_ToDouble(api->filters.lot_max_qty);
+        if (max_q > 0.0 && quantity > max_q) {
+            fprintf(stderr, "[order-api] qty %.8f CLAMPED to venue lot_max_qty %.8f\n",
+                    quantity, max_q);
+            quantity = binance_round_qty(max_q, api->filters.lot_step_size);
+        }
+    }
 
     char qty_str[32];
     snprintf(qty_str, sizeof(qty_str), "%.*f", api->filters.qty_decimals, quantity);
@@ -559,8 +568,15 @@ static inline int BinanceOrderAPI_MarketSell(BinanceOrderAPI *api,
                                               double *fill_price_out = NULL,
                                               double *fill_qty_out = NULL,
                                               uint64_t client_order_id = 0) {
-    if (api->filters.loaded)
+    if (api->filters.loaded) {
         quantity = binance_round_qty(quantity, api->filters.lot_step_size);
+        double max_q = Money_ToDouble(api->filters.lot_max_qty);   // D-175 ratified clamp (sell side)
+        if (max_q > 0.0 && quantity > max_q) {
+            fprintf(stderr, "[order-api] sell qty %.8f CLAMPED to venue lot_max_qty %.8f\n",
+                    quantity, max_q);
+            quantity = binance_round_qty(max_q, api->filters.lot_step_size);
+        }
+    }
 
     char qty_str[32];
     snprintf(qty_str, sizeof(qty_str), "%.*f", api->filters.qty_decimals, quantity);
