@@ -743,8 +743,19 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
 
             // D-102: venue decimal strings parse EXACTLY into decimal money (no binary
             // round-trip). Sticky MONEY_PARSE_* flags drain at the drainer cycle tail (P3).
-            out->price  = Money_FromString(price_str).value;
-            out->volume = Money_FromString(qty_str).value;
+            // Parse flags are STICKY on the producer thread (observational; S-17):
+            // MALFORMED/OVERFLOW from a venue string is a wire-contract violation —
+            // warn loudly at the parse seam (cold path; flags are ~always zero).
+            const MoneyParse _pp = Money_FromString(price_str);
+            const MoneyParse _qp = Money_FromString(qty_str);
+            if (__builtin_expect((_pp.flags | _qp.flags) &
+                                 (MONEY_PARSE_MALFORMED | MONEY_PARSE_OVERFLOW), 0)) {
+                fprintf(stderr, "[ws-parse] MONEY parse flags=0x%x/0x%x on '%s'/'%s' — "
+                        "venue wire contract violated\n",
+                        _pp.flags, _qp.flags, price_str, qty_str);
+            }
+            out->price  = _pp.value;
+            out->volume = _qp.value;
             // v5.11.19 — derive TUI doubles from the FPN_Binary values directly
             // instead of running a separate parse_double_fast pass on the
             // same string. Saves one parse per tick (BinanceCrypto's hot

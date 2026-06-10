@@ -628,7 +628,8 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
                                           Money price,
                                           Money qty,
                                           Money tp,
-                                          Money sl) {
+                                          Money sl,
+                                          Money fee = Money_Zero()) {
     OrderEvent<F> e;
     std::memset(&e, 0, sizeof(e));
     e.event_id     = 0;  // assigned by Append
@@ -641,6 +642,7 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
     e.qty          = qty;
     e.tp           = tp;
     e.sl           = sl;
+    e.fee          = fee;          // Ship-B P3 (S-3): booked fee — the log is fee-self-contained
     e.reason[0]    = '\0';
     return e;
 }

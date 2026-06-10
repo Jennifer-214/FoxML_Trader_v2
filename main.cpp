@@ -436,7 +436,7 @@ int main(int argc, char *argv[]) {
             // recovers orphaned value from prior sessions into USDT
             if (btc_start > 0.000001) {
                 double qty_d = binance_round_qty(btc_start, order_api.filters.lot_step_size);
-                if (qty_d >= order_api.filters.lot_min_qty) {
+                if (qty_d >= Money_ToDouble(order_api.filters.lot_min_qty)) {
                     fprintf(stderr, "[LIVE] orphaned BTC %.8f — selling to recover USDT\n", qty_d);
                     if (g_notify) {
                         char body[256];
@@ -749,9 +749,9 @@ int main(int argc, char *argv[]) {
                 double usdt_tmp = 0, btc_bal = 0;
                 BinanceOrderAPI_GetBalances(&order_api, &usdt_tmp, &btc_bal);
                 double qty_d = binance_round_qty(btc_bal, order_api.filters.lot_step_size);
-                if (qty_d >= order_api.filters.lot_min_qty) {
+                if (qty_d >= Money_ToDouble(order_api.filters.lot_min_qty)) {
                     double notional = qty_d * last_stream.price_d;
-                    if (notional >= order_api.filters.min_notional) {
+                    if (notional >= Money_ToDouble(order_api.filters.min_notional)) {
                         char oid[32]; double fp = 0, fq = 0;
                         fprintf(stderr, "[LIVE] 24h reconnect — selling entire BTC balance: %.8f ($%.2f)\n", qty_d, notional);
                         BinanceOrderAPI_MarketSell(&order_api, qty_d, oid, &fp, &fq);
@@ -871,8 +871,8 @@ int main(int argc, char *argv[]) {
                             double qty_d = Money_ToDouble(ctrl.portfolio.positions[slot].quantity);
                             double notional = qty_d * last_stream.price_d;
                             // 2x minNotional ensures sells also pass (Binance uses 5-min avg price)
-                            if (qty_d >= order_api.filters.lot_min_qty
-                                && notional >= order_api.filters.min_notional * 2.0) {
+                            if (qty_d >= Money_ToDouble(order_api.filters.lot_min_qty)
+                                && notional >= Money_ToDouble(order_api.filters.min_notional) * 2.0) {
                                 char oid[32];
                                 double fp = 0, fq = 0;
                                 if (BinanceOrderAPI_MarketBuy(&order_api, qty_d, oid, &fp, &fq)) {
@@ -937,7 +937,7 @@ int main(int argc, char *argv[]) {
                     BinanceOrderAPI_GetBalances(&order_api, &usdt_tmp, &btc_bal);
                     double qty_d = binance_round_qty(btc_bal, order_api.filters.lot_step_size);
                     double notional = qty_d * last_stream.price_d;
-                    if (qty_d >= order_api.filters.lot_min_qty && notional >= order_api.filters.min_notional) {
+                    if (qty_d >= Money_ToDouble(order_api.filters.lot_min_qty) && notional >= Money_ToDouble(order_api.filters.min_notional)) {
                         char oid[32];
                         double fp = 0, fq = 0;
                         fprintf(stderr, "[LIVE] SELL entire BTC balance: %.8f BTC ($%.2f)\n", qty_d, notional);
@@ -958,7 +958,7 @@ int main(int argc, char *argv[]) {
                         if (!(live_position_bitmap & (1 << slot))) continue;
                         double qty_d = saved_exit_qtys[i];
                         double notional = qty_d * last_stream.price_d;
-                        if (qty_d >= order_api.filters.lot_min_qty && notional >= order_api.filters.min_notional) {
+                        if (qty_d >= Money_ToDouble(order_api.filters.lot_min_qty) && notional >= Money_ToDouble(order_api.filters.min_notional)) {
                             char oid[32];
                             double fp = 0, fq = 0;
                             if (BinanceOrderAPI_MarketSell(&order_api, qty_d, oid, &fp, &fq))
@@ -1058,8 +1058,8 @@ int main(int argc, char *argv[]) {
                                 int idx = __builtin_ctz(orphans);
                                 double qty_d = Money_ToDouble(ctrl.portfolio.positions[idx].quantity);
                                 double notional = qty_d * last_stream.price_d;
-                                if (qty_d >= order_api.filters.lot_min_qty
-                                    && notional >= order_api.filters.min_notional * 2.0) {
+                                if (qty_d >= Money_ToDouble(order_api.filters.lot_min_qty)
+                                    && notional >= Money_ToDouble(order_api.filters.min_notional) * 2.0) {
                                     char oid[32]; double fp = 0, fq = 0;
                                     if (BinanceOrderAPI_MarketSell(&order_api, qty_d, oid, &fp, &fq) && fq > 0) {
                                         // book the exit in paper ledger

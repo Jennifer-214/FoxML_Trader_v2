@@ -487,34 +487,8 @@ template <unsigned F> inline FPN_Binary<F> FPN_FromString(const char *str) {
     return result;
 }
 
-//======================================================================================================
-// [FP64 CONVERSION]
-//======================================================================================================
-#ifdef FIXED_POINT_64_H
-template <unsigned F> inline FPN_Binary<F> FPN_FromFP64(FP64 value) {
-    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
-    // FP64 has 64 frac bits, FPN_Binary has F frac bits
-    // FP64 magnitude is __uint128_t = two uint64_t words
-    // place them at word (FW-1) and word (FW) to shift left by (F-64) bits
-    FPN_Binary<F> result = FPN_Zero<F>();
-    if (FW >= 1)
-        result.w[FW - 1] = (uint64_t)value.magnitude;
-    if (FW < FPN_Binary<F>::N)
-        result.w[FW] = (uint64_t)(value.magnitude >> 64);
-    result.sign = value.sign;
-    return result;
-}
-
-template <unsigned F> inline FP64 FPN_ToFP64(FPN_Binary<F> value) {
-    constexpr unsigned FW = FPN_Binary<F>::FRAC_WORDS;
-    FP64 result;
-    uint64_t lo      = (FW >= 1) ? value.w[FW - 1] : 0;
-    uint64_t hi      = (FW < FPN_Binary<F>::N) ? value.w[FW] : 0;
-    result.magnitude = ((__uint128_t)hi << 64) | (__uint128_t)lo;
-    result.sign      = value.sign & (result.magnitude != 0);
-    return result;
-}
-#endif
+// (FP64 CONVERSION block REMOVED — Ship-B P5 FP64 absorb (D-163): FixedPoint64.hpp deleted;
+//  FPN_FromFP64/ToFP64 had no engine consumers. H21 n/a: build-internal symbols, never persisted.)
 
 //======================================================================================================
 // [GUARDS]
@@ -1270,15 +1244,8 @@ template <unsigned F> inline FPN_Binary<F> FPN_SmoothStep(FPN_Binary<F> edge0, F
 // which uses __uint128_t — single native instructions instead of 2-word loops
 // reduces instruction cache footprint on the hot path
 //======================================================================================================
-#ifdef USE_NATIVE_128
-#include "FixedPoint64.hpp"
-#include <cstring>  // F-058: memcpy for type-pun-free FP64<->FPN_Binary<64> conversion
-
-// (FP64-forwarding block REMOVED — Ship A flip. FPN_Binary<64> is now the 16B two's-complement core, so its ops
-//  ARE the proven fp2_* bodies; the FPN_Binary<64> op specializations live after the fp2_* defs, at the bottom of
-//  this header. FixedPoint64.hpp stays included [FP64 still backs FPN_FromFP64/ToFP64] until the D-99 absorb.)
-
-#endif // USE_NATIVE_128
+// (USE_NATIVE_128 include block REMOVED — Ship-B P5 FP64 absorb (D-163/D-99): FixedPoint64.hpp
+//  DELETED. The certified 16B bodies below ARE the only implementation; the flag is inert.)
 
 //======================================================================================================
 //======================================================================================================
@@ -1889,6 +1856,21 @@ inline int   Money_Le(Money a, Money b)         { return a.v <= b.v; }
 inline int   Money_Eq(Money a, Money b)         { return a.v == b.v; }
 inline int   Money_Gt(Money a, Money b)         { return a.v >  b.v; }
 inline int   Money_Ge(Money a, Money b)         { return a.v >= b.v; }
+
+// ── #6 — venue-step quantizer (Ship-B P4; design: 11-new-function-designs.md) ──────────
+// Floor |v| to a multiple of step, sign restored (trunc toward zero — the venue
+// LOT_SIZE truncation rule; Binance rejects non-multiples). step <= 0 is identity.
+// Division routes through the certified udiv256_qr (128÷128 sub-case: hi=0) —
+// NEVER a plain wide divide (no __udivti3 on any path).
+inline Money Money_QuantizeToStep(Money v, Money step) {
+    if (step.v <= 0) return v;
+    unsigned __int128 mag  = (unsigned __int128)(v.v < 0 ? -v.v : v.v);
+    unsigned __int128 smag = (unsigned __int128)step.v;
+    unsigned __int128 q    = udiv256_qr(0, mag, smag).q;
+    unsigned __int128 rmag = q * smag;                  // <= mag < 2^127 — no overflow
+    __int128 r = (__int128)rmag;
+    return Money{ v.v < 0 ? -r : r };
+}
 inline Money Money_BlendOnMask(Money if_true, Money if_false, uint64_t mask) {
     unsigned __int128 m = (unsigned __int128)(__int128)(int64_t)mask;  // 0 / all-ones-128 (sign-extended)
     return { (__int128)(((unsigned __int128)if_true.v & m) | ((unsigned __int128)if_false.v & ~m)) };

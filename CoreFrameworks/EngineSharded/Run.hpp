@@ -1505,6 +1505,20 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);   // Phase B
             tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);  // Phase C
 
+            // ── Ship-B P3 (S-17): sticky money-flag drain — drainer cycle tail ──
+            // Observational only (never feeds back into math; replay runs the same
+            // path). OVERFLOW/DIVZERO on the drainer thread = saturated money op
+            // somewhere in the cycle — loud operator signal, then re-arm.
+            if (__builtin_expect(money_op_flags != 0, 0)) {
+                std::fprintf(stderr,
+                    "[drainer] MONEY FLAGS tripped this cycle: %s%s— investigate "
+                    "(saturation is deterministic but means a value left the "
+                    "money closure domain)\n",
+                    (money_op_flags & MONEY_FLAG_OVERFLOW) ? "OVERFLOW " : "",
+                    (money_op_flags & MONEY_FLAG_DIVZERO)  ? "DIVZERO "  : "");
+                money_op_flags = 0;
+            }
+
             if constexpr (BENCH) {
                 uint64_t _bench_dt = (uint64_t)__rdtsc() - _bench_t0;
                 LatencyHistogram_Accumulate(&g_engine_drainer_cycle_hist, _bench_dt);

@@ -73,10 +73,14 @@ enum BinanceErrorCode {
 };
 
 struct SymbolFilters {
-    double lot_step_size;    // BTC: 0.00000100 — quantity must be multiple of this
-    double lot_min_qty;      // minimum order quantity
-    double lot_max_qty;      // maximum order quantity
-    double min_notional;     // minimum order value in quote asset (e.g. $10 USDT)
+    // Ship-B P4 (D-106 source-authority): venue-DEFINED constants stored as DECIMAL
+    // money — exact mirrors of the exchangeInfo strings (all <=8dp by venue contract).
+    // Parse currently bridges through extract_double (exact for <=8dp via llround);
+    // string-direct Money_FromString rides the .E.3 REST rework.
+    Money lot_step_size;     // BTC: 0.00000100 — quantity must be multiple of this
+    Money lot_min_qty;       // minimum order quantity
+    Money lot_max_qty;       // maximum order quantity
+    Money min_notional;      // minimum order value in quote asset (e.g. $10 USDT)
     int qty_decimals;        // decimal places for quantity formatting (derived from step_size)
     int loaded;              // 1 = filters fetched successfully
 };
@@ -175,9 +179,12 @@ static inline double binance_json_extract_double(const char *json, const char *k
 
 // truncate quantity to exchange step size (always rounds down, no math.h needed)
 // positive quantities only (always true for order sizing)
-static inline double binance_round_qty(double qty, double step_size) {
-    if (step_size <= 0) return qty;
-    return (double)((int64_t)(qty / step_size)) * step_size;
+static inline double binance_round_qty(double qty, Money step_size) {
+    // Ship-B P4: the quantize core is EXACT decimal (#6 Money_QuantizeToStep via the
+    // certified divider) — the double shell remains for the .E.3 REST plumbing.
+    if (step_size.v <= 0) return qty;
+    Money q = Money{ money_from_double_payload(qty) };
+    return Money_ToDouble(Money_QuantizeToStep(q, step_size));
 }
 
 // count decimal places in step size for quantity formatting
@@ -711,16 +718,16 @@ static inline int BinanceOrderAPI_LoadFilters(BinanceOrderAPI *api) {
     // parse LOT_SIZE filter
     const char *lot = strstr(body, "LOT_SIZE");
     if (lot) {
-        api->filters.lot_min_qty  = binance_json_extract_double(lot, "minQty");
-        api->filters.lot_max_qty  = binance_json_extract_double(lot, "maxQty");
-        api->filters.lot_step_size = binance_json_extract_double(lot, "stepSize");
-        api->filters.qty_decimals = binance_step_decimals(api->filters.lot_step_size);
+        api->filters.lot_min_qty  = Money{ money_from_double_payload(binance_json_extract_double(lot, "minQty")) };
+        api->filters.lot_max_qty  = Money{ money_from_double_payload(binance_json_extract_double(lot, "maxQty")) };
+        api->filters.lot_step_size = Money{ money_from_double_payload(binance_json_extract_double(lot, "stepSize")) };
+        api->filters.qty_decimals = binance_step_decimals(Money_ToDouble(api->filters.lot_step_size));
     }
 
     // parse NOTIONAL filter (or MIN_NOTIONAL for older API)
     const char *notional = strstr(body, "NOTIONAL");
     if (notional)
-        api->filters.min_notional = binance_json_extract_double(notional, "minNotional");
+        api->filters.min_notional = Money{ money_from_double_payload(binance_json_extract_double(notional, "minNotional")) };
 
     api->filters.loaded = 1;
     fprintf(stderr, "[REST] filters: step=%.8f minQty=%.8f minNotional=%.2f decimals=%d\n",

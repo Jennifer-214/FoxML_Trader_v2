@@ -75,7 +75,7 @@ static inline bool EngineSharded_OrphanRecovery(
     // anyway since lot_min_qty is typically 0.0001.
     if (btc > 0.000001) {
         double qty = binance_round_qty(btc, api->filters.lot_step_size);
-        if (qty >= api->filters.lot_min_qty) {
+        if (qty >= Money_ToDouble(api->filters.lot_min_qty)) {
             fprintf(stderr, "[sharded-safety] ORPHAN: %.8f BTC detected — selling to recover USDT\n",
                     qty);
             if (notify) {
@@ -113,7 +113,7 @@ static inline bool EngineSharded_OrphanRecovery(
             }
         } else {
             fprintf(stderr, "[sharded-safety] ORPHAN: %.8f BTC below lot_min_qty %.8f — leaving as dust\n",
-                    btc, api->filters.lot_min_qty);
+                    btc, Money_ToDouble(api->filters.lot_min_qty));
         }
     }
 
@@ -202,7 +202,7 @@ static inline int EngineSharded_ForceCloseOnShutdown(
         FPN_Binary<F> qty = oms->portfolio.positions[slot].quantity;
         double qty_d = FPN_ToDouble(qty);
         qty_d = binance_round_qty(qty_d, api->filters.lot_step_size);
-        if (qty_d < api->filters.lot_min_qty) {
+        if (qty_d < Money_ToDouble(api->filters.lot_min_qty)) {
             fprintf(stderr, "[sharded-safety] FORCE-CLOSE slot %d: qty %.8f below min — skipping\n",
                     slot, qty_d);
             continue;

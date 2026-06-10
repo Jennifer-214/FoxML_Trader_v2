@@ -1157,10 +1157,12 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
 
 // BUY handler — entry fill: open portfolio slot + record entry fee + bump counters + trade log.
 template <unsigned F>
-inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty) {
-    const Money notional   = Money_Mul(fill_price, fill_qty);
-    const Money entry_rate = o->pre_resolved.fee_rate;
-    const Money entry_fee  = Money_Mul(notional, entry_rate);
+inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty,
+                            Money booked_fee) {
+    // Ship-B P3: the fee is resolved ONCE in OrderManager_HandleFill (venue-reported
+    // commission preferred per D-173, computed fallback) and threaded here — the
+    // handler no longer derives its own copy (booking-rule SSoT).
+    const Money entry_fee  = booked_fee;
     OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
     OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), entry_fee);
     Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
@@ -1175,7 +1177,8 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
 
 // SELL handler — exit fill: close portfolio slot, compute P&L, update balance, write trade log.
 template <unsigned F>
-inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty) {
+inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty,
+                             Money booked_fee) {
     const int pslot = (int)o->core_id;
     // v4.7.19 race guard — H20 exception #4 (genuine predicate; alternative requires Portfolio refactor).
     // __builtin_expect-rare: production fires only on rare hot-path-SG / manual-close race.
@@ -1204,9 +1207,7 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
     oms->last_closed_mask        = (uint16_t)(oms->last_closed_mask | (valid_entry ? closed_bit : (uint16_t)0));
 
     const Money gross         = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
-    const Money exit_notional = Money_Mul(fill_price, qty_snap);
-    const Money exit_rate     = o->pre_resolved.fee_rate;
-    const Money exit_fee      = Money_Mul(exit_notional, exit_rate);
+    const Money exit_fee      = booked_fee;   // Ship-B P3: resolved once in HandleFill (D-173 rule)
     OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
     OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), exit_fee);
     const Money total_fee     = Money_Add(entry_fee, exit_fee);
@@ -1263,7 +1264,7 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
 // Fn pointer table — indexed by OrderType (0=MARKET_BUY, 1=MARKET_SELL, 2=LIMIT_BUY, 3=LIMIT_SELL).
 // 4 × 8B = 32B = 1 cache line; L1-hot on pinned drainer.
 template <unsigned F>
-using FillHandler = void (*)(OrderManagerState<F>*, Order<F>*, Money, Money);
+using FillHandler = void (*)(OrderManagerState<F>*, Order<F>*, Money, Money, Money /*booked_fee*/);
 
 template <unsigned F>
 inline constexpr FillHandler<F> g_fill_dispatch[4] = {
@@ -1282,7 +1283,9 @@ inline constexpr FillHandler<F> g_fill_dispatch[4] = {
 //======================================================================================================
 template <unsigned F>
 inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
-                                     Money fill_price, Money fill_qty) {
+                                     Money fill_price, Money fill_qty,
+                                     double venue_commission = 0.0,
+                                     const char* venue_commission_asset = nullptr) {
     // Bounds guard — H20 exception #4 (genuine predicate without alternative); __builtin_expect-rare.
     if (__builtin_expect(o->core_id < 0 || o->core_id >= MAX_PORTFOLIO_POSITIONS, 0)) {
         std::fprintf(stderr,
@@ -1294,16 +1297,37 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     }
     // Pre-resolve bind discipline runtime warn (cost ~1 cycle in production).
     Order_WarnIfNotPreResolved(o, "OrderManager_HandleFill");
-    // Audit log append — common across BUY/SELL/future LIMIT.
+    // ── Ship-B P3 fee booking rule (D-173, SSoT) ──────────────────────────────────
+    // Venue-reported commission is AUTHORITATIVE when it arrives in the quote asset
+    // (the engine's books are USDT-quoted; multi-quote rides the .E.1 venue registry).
+    // Anything else (BNB-paid, base-asset, absent) books the COMPUTED fee
+    // (pre_resolved rate × notional) and warns — the operator-visible signal that
+    // venue fees and engine books have diverged (the D-173 degrade arm).
+    const Money computed_fee = Money_Mul(Money_Mul(fill_price, fill_qty),
+                                         o->pre_resolved.fee_rate);
+    Money booked_fee = computed_fee;
+    if (venue_commission > 0.0 && venue_commission_asset) {
+        if (std::strcmp(venue_commission_asset, "USDT") == 0) {
+            booked_fee = Money{ money_from_double_payload(venue_commission) };
+        } else {
+            std::fprintf(stderr,
+                "[OMS] fill %llu: venue commission %.8f %s != quote asset — booking "
+                "COMPUTED fee (D-173 fallback; check BNB-burn / fee-asset config)\n",
+                (unsigned long long)o->id, venue_commission, venue_commission_asset);
+        }
+    }
+    // Audit log append — common across BUY/SELL/future LIMIT. The S-3 fee slot makes
+    // the event log fee-self-contained from this epoch on.
     OrderEventLog_Append(&oms->event_log,
         OrderEvent_MakeFill<F>(
             o->id, o->submitted_at_us,
             Order_GetType(o), o->core_id,
             fill_price, fill_qty,
-            o->intended_tp, o->intended_sl));
+            o->intended_tp, o->intended_sl,
+            booked_fee));
     // Pattern 1 1D dispatch — branchless via fn pointer table. Deterministic latency regardless
     // of BUY/SELL access pattern. Closes Class 28 first canonical.
-    g_fill_dispatch<F>[(uint8_t)Order_GetType(o)](oms, o, fill_price, fill_qty);
+    g_fill_dispatch<F>[(uint8_t)Order_GetType(o)](oms, o, fill_price, fill_qty, booked_fee);
 }
 
 
@@ -1389,7 +1413,8 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
             Money fill_price = o->avg_fill_price;
             Money fill_qty   = o->filled_qty;
-            OrderManager_HandleFill(oms, o, fill_price, fill_qty);
+            OrderManager_HandleFill(oms, o, fill_price, fill_qty,
+                                     cmd.result.commission, cmd.result.commission_asset);
         }
     } else {
         std::fprintf(stderr,
