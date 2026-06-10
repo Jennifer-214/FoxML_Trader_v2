@@ -1240,9 +1240,8 @@ template <unsigned F> inline FPN_Binary<F> FPN_SmoothStep(FPN_Binary<F> edge0, F
 //======================================================================================================
 // [NATIVE 128-BIT SPECIALIZATIONS FOR F=64]
 //======================================================================================================
-// when USE_NATIVE_128 is defined, FPN_Binary<64> operations forward to FixedPoint64.hpp
-// which uses __uint128_t — single native instructions instead of 2-word loops
-// reduces instruction cache footprint on the hot path
+// (HISTORICAL: USE_NATIVE_128 used to forward FPN_Binary<64> ops to FixedPoint64.hpp;
+//  that file was DELETED at Ship-B P5 — the certified 16B bodies below are the only impl.)
 //======================================================================================================
 // (USE_NATIVE_128 include block REMOVED — Ship-B P5 FP64 absorb (D-163/D-99): FixedPoint64.hpp
 //  DELETED. The certified 16B bodies below ARE the only implementation; the flag is inert.)
