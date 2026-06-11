@@ -434,11 +434,15 @@ inline bool EngineSharded_Async_FanOut(
         // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
         // oms->balance from this (producer) thread while the drainer
         // thread writes it via OnEvent / OMS_Tick fill handler.
-        // FPN_Binary<64> is 64 words — torn reads are possible under
-        // concurrent writes. Probability is low at current event
-        // rates (~1 exit/sec vs 5 Hz slow path). Consequence:
+        // Money (post-Ship-B decimal; was FPN_Binary) is 16B = 2 machine
+        // words — a plain load can TEAR (high word from one fill, low word
+        // from the next) under concurrent writes. (Prior comment said
+        // "FPN_Binary<64> is 64 words" — triple-stale: FPN was always 16B/
+        // 2 words [the 64 is F, the fractional-bit count]; the field is now
+        // Money; the tear survives the decimal flip.) Probability is low at
+        // current event rates (~1 exit/sec vs 5 Hz slow path). Consequence:
         // false-positive or missed kill switch trip from a garbage
-        // FPN_Binary comparison. Pre-existing race (sharded engine always
+        // balance comparison. Pre-existing race (sharded engine always
         // had producer + drainer on separate threads).
         // TODO: move kill switch eval to drainer thread, or use an
         // atomic balance snapshot for the comparison.
