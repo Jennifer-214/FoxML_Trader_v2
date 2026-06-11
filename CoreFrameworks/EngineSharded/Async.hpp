@@ -710,6 +710,16 @@ inline bool EngineSharded_Async_FanOut(
             // every paper-reset site auto-flows. See MemHeaders/CoreCtxInitRegistry.hpp.
             for (int c = 0; c < num_cores; ++c) {
                 CORE_CTX_RESET_AUTOPOPULATE(state, c);
+                // persist-8 (.E.0.10): CORE_CTX_RESET resets ctx VALUE fields, but the ExecutionCore is a
+                // pointer-target (CoreCtxInitRegistry.hpp:94 "pointer; registration persists") — its hot
+                // mirror is outside the registry's reach. Clear the active flag so the (un-parked) hot path
+                // doesn't evaluate TP/SL on the now-wiped portfolio until the next cadence-gated slow-path
+                // re-arm. Single-byte flag (hardware-atomic on x86); once active=0 the hot path skips the
+                // exit eval, so the stale live_tp/live_sl are never read. Paper-mode only + the phantom sell
+                // is guarded downstream (OrderManager.hpp:1185 active_bitmap check) → hygiene, LOW severity.
+                // The robust version (full hot-path quiesce during reset, like the slow path at Run.hpp:1670)
+                // pairs with conc-5's concurrency pass.
+                cores[c].active = 0;
             }
             // v4.7.18: rotate the trade history CSV to a timestamped
             // backup so the GUI's Trade History panel goes blank
