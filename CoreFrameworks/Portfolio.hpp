@@ -389,10 +389,19 @@ inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
     Portfolio_OpenSlot(portfolio, slot, args);
 }
 
+// Canonical fill P&L gross — the SINGLE SOURCE so the per-core, OMS-aggregate, and replay
+// accounting paths cannot drift (D-190; feedback_single_source_the_computation_not_just_the_mode).
+// 1-mul form: round the price DIFFERENCE once, then scale by qty (matches the authoritative OMS
+// books). NB round((exit−entry)×qty) != round(exit×qty)−round(entry×qty) under decimal half-even —
+// open-coding the 2-mul form at any site (was DrainPostFill :1536) re-introduces a 1-ULP divergence.
+inline Money Money_FillGross(Money entry_price, Money exit_price, Money quantity) {
+    return Money_Mul(Money_Sub(exit_price, entry_price), quantity);
+}
+
 template <unsigned F>
 inline Money Portfolio_CloseSlot(Portfolio<F> *portfolio, int slot, Money exit_price) {
-    Money diff = Money_Sub(exit_price, portfolio->positions[slot].entry_price);
-    Money gross = Money_Mul(diff, portfolio->positions[slot].quantity);
+    Money gross = Money_FillGross(portfolio->positions[slot].entry_price, exit_price,
+                                  portfolio->positions[slot].quantity);
     portfolio->active_bitmap &= ~(uint16_t)(1 << slot);
     return gross;
 }
@@ -430,8 +439,10 @@ template <unsigned F> inline Money Portfolio_ComputePnL(const Portfolio<F> *port
     uint16_t active  = portfolio->active_bitmap;
     while (active) {
         int idx        = __builtin_ctz(active);
-        Money diff = Money_Sub(current_price, portfolio->positions[idx].entry_price);
-        Money pnl  = Money_Mul(diff, portfolio->positions[idx].quantity);
+        // D-190 single-source: unrealized = the same (mark − entry) × qty gross, via Money_FillGross
+        // (valued at current_price instead of an exit fill). Keeps all price-diff gross 1-mul + drift-proof.
+        Money pnl  = Money_FillGross(portfolio->positions[idx].entry_price, current_price,
+                                     portfolio->positions[idx].quantity);
         total           = Money_Add(total, pnl);
         active &= active - 1;
     }

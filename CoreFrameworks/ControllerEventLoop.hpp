@@ -876,8 +876,7 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
             Money exit_notional= Money_Mul(e.price, qty);
             Money exit_fee     = Money_Mul(exit_notional, fee_rate_taker_for_core);  // per-core via cores param
             Money total_fee    = Money_Add(entry_fee, exit_fee);
-            Money diff         = Money_Sub(e.price, entry_price);
-            Money gross        = Money_Mul(diff, qty);
+            Money gross        = Money_FillGross(entry_price, e.price, qty);  // D-190 single-source
             Money net          = Money_Sub(gross, total_fee);
             state->cores[core_id].exits_processed++;
             state->cores[core_id].core_realized =
@@ -1526,14 +1525,16 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         const auto& pos = oms->portfolio.positions[slot];
         const bool slot_is_maker = BITMAP_IS_SET(oms->last_is_maker_bitmap, BITMAP_BIT_U16(slot));
         const Money exit_entry_notional = Money_Mul(pos.entry_price, pos.quantity);
-        const Money exit_notional       = Money_Mul(oms->last_exit_fill_price[slot], pos.quantity);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — read authoritative exit_fee from OMS sibling array (set by HandleFill
         // SELL from o->pre_resolved.fee_rate). Replaces the prior cfg-recompute which lost the Order's
         // captured fee_rate. Per decision-time-data-binding-pattern.md: Order pre_resolved is canonical;
         // DrainPostFill is a CONSUMER, not a re-deriver. Eliminates the core_cfg param dependency at this site.
         const Money exit_fee            = oms->last_exit_fee[slot];
         const Money exit_total_fees     = Money_Add(pos.entry_fee, exit_fee);
-        const Money gross               = Money_Sub(exit_notional, exit_entry_notional);
+        // D-190: gross via the SINGLE-SOURCE Money_FillGross (was 2-mul Sub(exit_notional, exit_entry_notional)
+        // — the lone site that diverged from the 1-mul OMS books by 1 ULP under decimal). exit_entry_notional
+        // is kept for the core_open_notional decrement below; the standalone exit_notional is no longer needed.
+        const Money gross               = Money_FillGross(pos.entry_price, oms->last_exit_fill_price[slot], pos.quantity);
         const Money exit_net_pnl        = Money_Sub(gross, exit_total_fees);
 
         // Per-leg accounting: every exit fill contributes.
@@ -2891,8 +2892,8 @@ inline void EventLoop_RebuildOneCore(
                     int s = __builtin_ctz(bm);
                     bm &= (uint16_t)(bm - 1);
                     Position<F>& pos = state->oms->portfolio.positions[s];
-                    Money diff = Money_Sub(*px_in, pos.entry_price);
-                    unrealized = Money_Add(unrealized, Money_Mul(diff, pos.quantity));
+                    unrealized = Money_Add(unrealized,  // D-190 single-source (mark gross via the canonical helper)
+                                           Money_FillGross(pos.entry_price, *px_in, pos.quantity));
                 }
             }
             Money current_value = Money_Add(alloc, Money_Add(realized, unrealized));
