@@ -992,7 +992,18 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
         cmd.order_id = id;
         std::memset(&cmd.result, 0, sizeof(cmd.result));
         cmd.result.success        = 1;
-        cmd.result.avg_fill_price = Money_ToDouble(event_price);
+        // v5.15.5.F.4d.1.E.0.10 A9 — apply paper/backtest slippage HERE: the single production slip SSoT
+        // (D-202 + adversarial-pessimistic-simulation-discipline.md). Paper-gated BY CONSTRUCTION — this is
+        // the !LIVE_TRADING branch; live books the real executionReport price untouched. Consumes the bound
+        // pre_resolved.slippage_pct (set at Order_BindPreResolved above) — closes the bound-but-unread orphan
+        // (the old EventLoop_OnEvent slip was dead-in-mode-1, now deleted). Pessimistic-sim: entry fills WORSE
+        // (higher), exit fills WORSE (lower); slip_pct=0 (default) -> Money_Mul=0 -> no-op, so no guard branch.
+        // Branchless sign-select per H20: both sides computed; cmov-select on the value (not a branch).
+        const Money a9_slip      = Money_Mul(event_price, oms->orders[slot].pre_resolved.slippage_pct);
+        const Money a9_buy_fill  = Money_Add(event_price, a9_slip);   // entry (BUY): pay higher
+        const Money a9_sell_fill = Money_Sub(event_price, a9_slip);   // exit (SELL): receive lower
+        const Money a9_fill      = (type == ORDER_MARKET_SELL) ? a9_sell_fill : a9_buy_fill;
+        cmd.result.avg_fill_price = Money_ToDouble(a9_fill);
         cmd.result.fill_qty       = Money_ToDouble(qty);
         std::strncpy(cmd.result.exchange_id, "PAPER",
                      sizeof(cmd.result.exchange_id) - 1);

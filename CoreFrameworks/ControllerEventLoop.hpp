@@ -1857,37 +1857,13 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; subsequent reads pure ALU.
     static const PerCoreCfg<F> NULL_PER_CORE_CFG_STUB_ARRAY[MAX_EXECUTION_CORES] = {};
     const PerCoreCfg<F>* effective_cores = cores ? cores : NULL_PER_CORE_CFG_STUB_ARRAY;
-    // v4.2.1 — paper-mode slippage simulation. In live, event.price comes
-    // from the WS executionReport (already includes real exchange slippage).
-    // In paper, event.price is the tick that triggered the gate; adjust to
-    // model realistic worst-case execution: BUY fills above gate price,
-    // SELL fills below trigger price. Mirrors legacy PortfolioController
-    // behavior (PortfolioController.hpp:1041 + :659).
-    //
+    // v5.15.5.F.4d.1.E.0.10 A9 — paper/backtest SLIPPAGE moved to the OrderManager_Submit synthetic-fill
+    // chokepoint: the SINGLE production slip SSoT (D-202 + adversarial-pessimistic-simulation-discipline.md).
+    // This OnEvent slip was DEAD on the production (mode-1) path — the should_apply gate below returns BEFORE
+    // the mode-0 body reads event.price, and Async books the raw price via Submit (Async.hpp:887). It is now
+    // removed; the mode-0 / test-only bookkeeping path below books the raw trigger price (slip lives at Submit).
     // Mutate a local copy so the caller's event is untouched.
     TradeEvent<F> event = event_in;
-    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-    // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core slippage via effective_cores (branchless; bounds-clamped).
-    // event.core_id is uint16_t (always >= 0); clamp upper bound via `& (MAX-1)` mask-style. With
-    // MAX_EXECUTION_CORES = 16 (power of 2), `& 0xF` is exact. Pure ALU; no branch.
-    const int slip_idx = (int)(event.core_id & (uint16_t)(MAX_EXECUTION_CORES - 1));
-    const Money slip_pct_for_event = effective_cores[slip_idx].slippage_pct;
-    // v5.15.5.F.4c.3 WIP2d-1.B.1 — fully branchless slippage application per H20 + Pattern 3 mask-select.
-    // Old branchy form: `if (!live && !zero_slip) { mul + if-entry-add-else-if-exit-sub; }` — three
-    // data-dependent branches (live gate + entry/exit dispatch + zero-slip gate). Real-world cost: up to
-    // 3 mispredicts per event = 90-300ns variance (Class 28). Branchless: always compute slip_magnitude
-    // with cmov-selected effective_pct (zero in live mode → multiplying by zero is harmless), then
-    // branchless sign-select via ternary chain → cmov. Slow path budget ~100μs; ~30-50 unused cycles
-    // when live mode is 0.05% of budget; determinism wins.
-    const bool not_live    = !BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING);
-    const Money effective_slip_pct = not_live ? slip_pct_for_event : Money_Zero();
-    const Money slip_magnitude = Money_Mul(event.price, effective_slip_pct);
-    const bool is_entry_evt = (event.type & TRADE_EVENT_ENTRY) != 0;
-    const bool is_exit_evt  = (event.type & TRADE_EVENT_EXIT)  != 0;
-    const Money slip_signed = is_entry_evt
-        ? slip_magnitude
-        : (is_exit_evt ? Money_Negate(slip_magnitude) : Money_Zero());
-    event.price = Money_Add(event.price, slip_signed);
     int slot = (int)event.core_id;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 option C — combined-mask collapse: 3 separate predicate branches
     // (bounds + mutex + mode-1 fast-path) collapsed into 1 combined-mask + single guard branch.

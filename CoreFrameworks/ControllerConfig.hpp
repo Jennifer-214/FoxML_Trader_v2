@@ -1658,7 +1658,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.tp2_mult = Money{ money_from_double_payload(2.0) };         // TP2 = 2x TP1 distance
   cfg.breakeven_buffer_pct =
       Money{ money_from_double_payload(0.0005) };    // +0.05% above entry (lock in tiny profit)
-  cfg.slippage_pct = Money_Zero(); // 0 = disabled (backward compat)
+  cfg.slippage_pct = Money{ money_from_double_payload(0.0005) }; // 0.05% — CONSERVATIVE, pessimistic-by-DEFAULT
+  // (D-203; was Money_Zero "disabled"). Stored as a fraction (the registry DBL(0.05)% /100, mirroring the
+  // take_profit_pct 3.0%↔0.03 convention). A9 consumes this at the Submit fill chokepoint → paper/backtest are
+  // honestly-costed out of the box, never optimistic-by-omission (adversarial-pessimistic-simulation-discipline.md).
+  // Set slippage_pct=0 in the cfg to disable. Behavior change (D-203): paper/backtest P&L drops by the modeled cost.
   // session_filter_enabled migrated to ops_cfg_flags (default 0)
   // v5.15.5.B.5 — session multipliers default-init via FOREACH_SESSION_PHASE.
   // Per-session default is the MULT column of the registry tuple.

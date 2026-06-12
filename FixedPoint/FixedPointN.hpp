@@ -104,6 +104,9 @@ static_assert(sizeof(FixedPoint<10,8>) == 16,
 static_assert(std::has_unique_object_representations_v<FixedPoint<10,8>>,
               "Ship B/H12-F-076: the money type must stay padding-free (memcmp/SHA-256/HMAC surfaces)");
 using Money = FixedPoint<10, 8>;             // D-176: the money domain alias; the op family is Money_*
+static_assert(sizeof(Money) == 16,           // H9 wire/persist pin by the DOMAIN name (redundant with the
+              "Money's wire/persist size is load-bearing (~30 fwrite/fread/memcmp/SHA/HMAC sites); a layout "
+              "change must be a compile error HERE + a snapshot-VERSION bump (H21), never a silent wire break");
 
 // Disjoint domain traits (B6 mechanical guard): binary <2,FRAC> vs decimal <10,FRAC>. Since A.5 the
 // binary domain has exactly ONE trait spelling: is_fp_binary_v (legacy is_FPN_v retired). Every tt::
