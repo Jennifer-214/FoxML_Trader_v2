@@ -63,6 +63,9 @@
     X(FOREACH_STAMP_BOUND_MODEL_CONST           , 1,      FOREACH_REGISTRY                 , "Stamp-bound model-const fields (union of PRE_CFG + POST_CFG; canonical body emit order).") \
     X(FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS    , 1,      FOREACH_REGISTRY                 , "Stamp-bound model-const grouped fields (Y3 dispatch group anchor).") \
     X(FOREACH_STAMP_BOUND_MODEL_CONST_STANDALONE, 1,      FOREACH_REGISTRY                 , "Stamp-bound model-const standalone (non-grouped) fields.") \
+    /* .E.0.10 (2026-06-11): enroll 2 pre-existing registries Check-1 flagged — H15 past-milestone close (the "convenient now" item) */ \
+    X(FOREACH_LEGACY_PREFIXED_KEY               , 1,      FOREACH_REGISTRY                 , "v1->v2 wire-key back-compat dispatch (16 legacy->unprefixed pairs; parser+tests auto-flow; deletion TECH_DEBT-101).") \
+    X(FOREACH_STAMP_RESULT_FIELD_EXCLUSION      , 1,      FOREACH_REGISTRY                 , "ModelStampResult struct-field exclusion sidecar (3 xgb_* MODEL_CONST<->master-cfg name collisions; H18; check_struct_field_uniqueness.py).") \
     X(FOREACH_BARRIER_BLEND_MODE                , 1,      FOREACH_REGISTRY                 , "Barrier blend mode dispatch (LEGACY/BLEND/DOMINANT).") \
     X(FOREACH_IC_VARIANT                        , 1,      FOREACH_REGISTRY                 , "IC variant enum (per-core confidence IC method choice).") \
     X(FOREACH_DEGRADATION_CURVE                 , 1,      FOREACH_REGISTRY                 , "Risk degradation curve enum (OFF/LINEAR/EXP/STEP).") \
