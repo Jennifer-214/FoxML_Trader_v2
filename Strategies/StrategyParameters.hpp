@@ -296,6 +296,48 @@ inline Money Strategy_TpFloor(Money entry_price,
 //   ~3 sim seconds) refreshes them as the rolling stats move, so the drift
 //   is bounded.
 //======================================================================================================
+// ───────── H22 single-source per-fill TP/SL pct (.E.0.10 A1) ─────────
+// Effective per-fill TP/SL pct = the strategy override (simpledip/mr/emacross_*_pct)
+// ?: the shared take_profit_pct / stop_loss_pct. ONE source for BOTH the fresh-entry
+// dispatcher (compile-time strategy id → the switch folds; slow-path, H7/H20-clean) and
+// snapshot restore (runtime resolved_strategy_id; boot-time-only, the H20 exception), so a
+// restored position exits at the SAME TP/SL it had while live. (A1 fix: restore previously
+// read the GLOBAL take_profit_pct, dropping the per-node override → SimpleDip/MR/EmaCross
+// positions survived a warm-restart at the wrong exit price.) Templated on the cfg view so
+// PerCoreCfg<F> (dispatcher) and the resolved ControllerConfig<F> (restore) both call it.
+// MOMENTUM → flat global (no override field); ML → global (its TP is the barrier blend at
+// entry, unreproducible at restore — a separate tracked sibling, NOT closed by A1).
+template <typename CfgT>
+inline Money ResolvePerFillTpPct(uint8_t strategy_id, const CfgT& cfg) {
+    switch (strategy_id) {
+        case STRATEGY_SIMPLE_DIP:
+            return !Money_IsZero(cfg.simpledip_tp_pct) ? cfg.simpledip_tp_pct : cfg.take_profit_pct;
+        case STRATEGY_MEAN_REVERSION:
+            return !Money_IsZero(cfg.mr_tp_pct) ? cfg.mr_tp_pct : cfg.take_profit_pct;
+#if __has_include("private/EmaCross.hpp")
+        case STRATEGY_EMA_CROSS:
+            return !Money_IsZero(cfg.emacross_tp_pct) ? cfg.emacross_tp_pct : cfg.take_profit_pct;
+#endif
+        default:  // MOMENTUM (flat) / ML (blend at entry; restore→global) / AUTO / NONE
+            return cfg.take_profit_pct;
+    }
+}
+template <typename CfgT>
+inline Money ResolvePerFillSlPct(uint8_t strategy_id, const CfgT& cfg) {
+    switch (strategy_id) {
+        case STRATEGY_SIMPLE_DIP:
+            return !Money_IsZero(cfg.simpledip_sl_pct) ? cfg.simpledip_sl_pct : cfg.stop_loss_pct;
+        case STRATEGY_MEAN_REVERSION:
+            return !Money_IsZero(cfg.mr_sl_pct) ? cfg.mr_sl_pct : cfg.stop_loss_pct;
+#if __has_include("private/EmaCross.hpp")
+        case STRATEGY_EMA_CROSS:
+            return !Money_IsZero(cfg.emacross_sl_pct) ? cfg.emacross_sl_pct : cfg.stop_loss_pct;
+#endif
+        default:
+            return cfg.stop_loss_pct;
+    }
+}
+
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void SimpleDip_BuildParameters(
     const RollingStats<F, W>* rolling,
@@ -323,9 +365,9 @@ inline void SimpleDip_BuildParameters(
     Money dip_offset = Money_Mul(high_m, core_cfg->entry_offset_pct);
     Money expected_entry = Money_Sub(high_m, dip_offset);
 
-    // Per-strategy TP/SL: use simpledip-specific override if set, else shared
-    Money tp_pct = !Money_IsZero(core_cfg->simpledip_tp_pct) ? core_cfg->simpledip_tp_pct : core_cfg->take_profit_pct;
-    Money sl_pct = !Money_IsZero(core_cfg->simpledip_sl_pct) ? core_cfg->simpledip_sl_pct : core_cfg->stop_loss_pct;
+    // Per-strategy TP/SL via the H22 single-source resolver (shared with snapshot restore — A1).
+    Money tp_pct = ResolvePerFillTpPct(STRATEGY_SIMPLE_DIP, *core_cfg);
+    Money sl_pct = ResolvePerFillSlPct(STRATEGY_SIMPLE_DIP, *core_cfg);
 
     // tp = expected_entry * (1 + tp_pct)
     Money tp_amount = Money_Mul(expected_entry, tp_pct);
@@ -415,8 +457,8 @@ inline void MeanReversion_BuildParameters(
         entry_price = FPN_Sub(avg, dip_offset);
     }
 
-    Money tp_pct = !Money_IsZero(core_cfg->mr_tp_pct) ? core_cfg->mr_tp_pct : core_cfg->take_profit_pct;
-    Money sl_pct = !Money_IsZero(core_cfg->mr_sl_pct) ? core_cfg->mr_sl_pct : core_cfg->stop_loss_pct;
+    Money tp_pct = ResolvePerFillTpPct(STRATEGY_MEAN_REVERSION, *core_cfg);  // H22 single-source (A1)
+    Money sl_pct = ResolvePerFillSlPct(STRATEGY_MEAN_REVERSION, *core_cfg);
     Money entry_m = Money_FromBinary(entry_price);  // D-170 ingress
     Money tp_amount = Money_Mul(entry_m, tp_pct);
     Money sl_amount = Money_Mul(entry_m, sl_pct);
@@ -515,8 +557,8 @@ inline void Momentum_BuildParameters(
     out->bg_volume_threshold  = Money_FromBinary(volume_threshold);  // D-170 egress
     out->sg_take_profit_price = Money_Add(entry_mm, Money_FromBinary(tp_amount));
     out->sg_stop_loss_price   = Money_Sub(entry_mm, Money_FromBinary(sl_amount));
-    out->tp_pct               = core_cfg->take_profit_pct;  // fallback for per-fill
-    out->sl_pct               = core_cfg->stop_loss_pct;
+    out->tp_pct               = ResolvePerFillTpPct(STRATEGY_MOMENTUM, *core_cfg);  // flat (no MOM override); H22 single-source (A1)
+    out->sl_pct               = ResolvePerFillSlPct(STRATEGY_MOMENTUM, *core_cfg);
     out->trade_size           = trade_size;
     out->strategy_id          = STRATEGY_MOMENTUM;
 
@@ -583,6 +625,12 @@ inline void EmaCross_BuildParameters(
     // When state is nullptr (legacy callers, tests), keep the pre-Phase 2.4
     // SimpleDip-with-overrides behavior so existing snapshots/tests stay
     // numerically identical.
+    // .E.0.10 A1/H22 EXEMPTION (documented per H16-style): this stateless shim is
+    // DELIBERATELY not routed through ResolvePerFillTpPct — it preserves the legacy
+    // simpledip-fallback for old snapshots/tests. It is UNREACHABLE in production: the
+    // sharded dispatcher always passes a non-null EmaCrossState, taking the state-aware
+    // helper path below, so a real warm-restart never diverges (the A1 refute confirmed
+    // this is test/legacy-only). A future single-source CI-check must EXEMPT this branch.
     if (!state) {
         SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out);
         out->strategy_id = STRATEGY_EMA_CROSS;
@@ -622,10 +670,8 @@ inline void EmaCross_BuildParameters(
     FPN_Binary<F> entry_price = FPN_Sub(ref, dip);
 
     // TP/SL: use EMA-specific cfg overrides; fall through to shared.
-    Money tp_pct = !Money_IsZero(core_cfg->emacross_tp_pct)
-        ? core_cfg->emacross_tp_pct : core_cfg->take_profit_pct;
-    Money sl_pct = !Money_IsZero(core_cfg->emacross_sl_pct)
-        ? core_cfg->emacross_sl_pct : core_cfg->stop_loss_pct;
+    Money tp_pct = ResolvePerFillTpPct(STRATEGY_EMA_CROSS, *core_cfg);  // H22 single-source (A1)
+    Money sl_pct = ResolvePerFillSlPct(STRATEGY_EMA_CROSS, *core_cfg);
 
     Money entry_m = Money_FromBinary(entry_price);  // D-170 ingress
     Money tp_amount = Money_Mul(entry_m, tp_pct);

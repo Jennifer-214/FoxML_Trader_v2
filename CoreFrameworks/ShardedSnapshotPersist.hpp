@@ -650,8 +650,12 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         Money live_tp_b_val = pos.take_profit_price;
         if (cfg) {
             ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, core_id);
-            Money tp_pct_a = resolved.take_profit_pct;
-            Money sl_pct_a = resolved.stop_loss_pct;
+            // .E.0.10 A1 (H22): resolve the per-NODE per-strategy override, NOT the GLOBAL pct —
+            // single-sourced with the fresh-entry dispatcher (ResolvePerFillTpPct/SlPct) so a
+            // restored SimpleDip/MR/EmaCross position exits at the SAME TP/SL it had while live.
+            const uint8_t a1_sid = state->cores[core_id].resolved_strategy_id;
+            Money tp_pct_a = ResolvePerFillTpPct(a1_sid, resolved);
+            Money sl_pct_a = ResolvePerFillSlPct(a1_sid, resolved);
             if (!Money_IsZero(tp_pct_a))
                 live_tp_a = Money_Add(entry, Money_Mul(entry, tp_pct_a));
             if (!Money_IsZero(sl_pct_a))

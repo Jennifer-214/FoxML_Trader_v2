@@ -1974,9 +1974,11 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // accumulator (one portfolio); we split it back out by source core
         // for the Account panel so users can see which core is making/losing
         // money. core_fees adds the entry+exit fee for this fill.
-        // Branchless win/loss: FPN_GreaterThan returns 1/0, used as integer
+        // Branchless win/loss: Money_Gt returns 1/0, used as integer
         // mask. Slow path so cost is irrelevant — kept branchless for
         // consistency with the rest of the engine.
+        // (.E.0.10: comment de-rotted FPN_GreaterThan→Money_Gt — the line below
+        //  is decimal Money_Gt; the stale name caused a false register finding.)
         ctx->core_realized = Money_Add(ctx->core_realized, net);
         ctx->core_fees = Money_Add(ctx->core_fees, total_fee);
         uint32_t is_win = (uint32_t)Money_Gt(net, Money_Zero());
