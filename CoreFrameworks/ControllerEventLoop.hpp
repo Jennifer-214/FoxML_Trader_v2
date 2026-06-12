@@ -2724,6 +2724,11 @@ inline void EventLoop_RebuildOneCore(
                              Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED))) != 0;
         if (!slot_active) {
             state->cores[slot].pending_params.ratchet_sl = Money_Zero();
+            // A19 (.E.0.10): clear ratchet_tp SYMMETRICALLY — a stale TP-ratchet from a prior
+            // trade must not leak into the next entry's effective_tp = Money_Max(tp, ratchet_tp)
+            // (H22 per-trade purity; the SL side already clears above — the TP side was the
+            // missing half, a cross-trade representation leak per representation-migration-completeness.md).
+            state->cores[slot].pending_params.ratchet_tp = Money_Zero();
         }
 
         // v5.4.0 Phase 2.2: strategy-specific exit-adjust for cores with
