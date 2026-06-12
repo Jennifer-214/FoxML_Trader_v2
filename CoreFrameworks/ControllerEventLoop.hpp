@@ -3420,6 +3420,9 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
     // `cfg.cores`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core array."
     int submitted = 0;
     uint16_t bm = oms->portfolio.active_bitmap;
+    // A3 (.E.0.10): snapshot the requested count BEFORE the loop consumes `bm`, so a
+    // submit_queue-full shortfall (emergency + partials) is made visible, not silently lost.
+    const int requested = __builtin_popcount((unsigned)bm);
     // event_price is for log/audit (the actual market fill happens at
     // exchange-side price). FPN_Zero on degenerate price preserves
     // existing OMS conventions.
@@ -3438,13 +3441,31 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         int logical_core = slot >> (uint32_t)partial_on;
         Money qty = oms->portfolio.positions[slot].quantity;
         uint8_t sid = state->cores[logical_core].strategy_id;
+        // A8 (.E.0.10): the leg index is meaningful ONLY under partials (even slot = leg A,
+        // odd = leg B); without partials there is no leg, so gate on partial_on (branchless
+        // ALU; 0 or 1). NOTE: corrects the bare `slot&1` first proposed for A8 — that would
+        // mislabel odd-numbered STANDALONE slots as leg B when partials are OFF. No
+        // Order_GetLeg consumer reads this yet → correct-of-intent future-proofing, not a live fix.
+        uint8_t leg = (uint8_t)((slot & 1) & partial_on);
         // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for Order_BindPreResolved at submit.
-        tt::OMS_PushExitForSlot(oms, (int16_t)slot, qty, sid, price_fpn,
-                                /*leg*/(uint8_t)0, &cores[logical_core]);
-        submitted++;
+        // A3 (.E.0.10): count what ACTUALLY queued — OMS_PushExitForSlot forwards
+        // OMS_PushSubmit's success bool. Under a full submit_queue this push can fail; the
+        // prior unconditional `submitted++` reported it as flattened while the leg stayed
+        // OPEN on the emergency path.
+        submitted += (int)tt::OMS_PushExitForSlot(oms, (int16_t)slot, qty, sid, price_fpn,
+                                                  leg, &cores[logical_core]);
     }
-    if (submitted > 0) {
+    if (submitted < requested) {
+        // A3 (.E.0.10): the durable HONEST-COUNT half of the half-flatten fix — make the
+        // shortfall LOUD on the emergency path. The actual RETRY (re-fire the dropped legs)
+        // needs new plumbing and is .E.1-subsumed (drainer→per-node absorption); the
+        // FlattenAll characterization test pins this behavior so .E.1 can't silently regress it.
+        std::fprintf(stderr,
+            "[OMS] FlattenAll SHORTFALL: %d/%d position(s) queued (reason=%d) — "
+            "submit_queue full; %d leg(s) STILL OPEN on the emergency path.\n",
+            submitted, requested, reason_code, requested - submitted);
+    } else if (submitted > 0) {
         std::fprintf(stderr,
             "[OMS] FlattenAll: %d position(s) submitted "
             "(reason=%d, price=%.2f)\n",
