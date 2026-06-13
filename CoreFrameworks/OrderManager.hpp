@@ -1011,6 +1011,15 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
         const Money a9_fill      = (type == ORDER_MARKET_SELL) ? a9_sell_fill : a9_buy_fill;
         cmd.result.avg_fill_price = Money_ToDouble(a9_fill);
         cmd.result.fill_qty       = Money_ToDouble(qty);
+        // A17 (.E.0.10): the paper synth fills the FULL requested qty in ONE synthetic
+        // event → terminal by construction → order_complete=1, so OMS_Tick's gate
+        // (order_complete ? ORDER_FILLED : ORDER_PARTIAL, ~:1432) lands FILLED instead
+        // of a slot-leaking ORDER_PARTIAL. This is RBP Class 46's false-positive surface:
+        // asserting completeness here encodes a structural truth (fill_qty == requested
+        // qty on the synchronous synth path), NOT an unverified assumption. The REST/live
+        // path (BinanceAdapter) instead READS the venue's own "status" — D-106 let-the-
+        // venue-decide — because there completeness is not guaranteed by construction.
+        cmd.result.order_complete = 1;
         std::strncpy(cmd.result.exchange_id, "PAPER",
                      sizeof(cmd.result.exchange_id) - 1);
         if (!SPSCRing_TryPush(&oms->result_queue, cmd)) {
