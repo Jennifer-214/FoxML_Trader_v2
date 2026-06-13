@@ -892,8 +892,14 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // reg line 188 tp_pct_b = tp_pct×tp2_mult). Entry-only — no buy fill on exits.
                 // tp2_mult re-read locally (the leg-B block's tp2_mult_eff has gone out of scope;
                 // consistent with the existing ov_tp2 re-declare pattern above).
+                // F1 FIX (deep-check 2026-06-12): resolve from resolved_strategy_id (AUTO→the
+                // regime-resolved strategy), NOT the configured strategy_id — for an AUTO core
+                // strategy_id==STRATEGY_AUTO would hit ResolvePerFillTpPct's default arm (global
+                // take_profit_pct) while live_tp (ExecutionCore.hpp:543) arms from the RESOLVED
+                // strategy's tp_pct → original_tp != live_tp (the bug A25 fixes, for AUTO). This
+                // matches A1's restore path (ShardedSnapshotPersist.hpp uses resolved_strategy_id).
                 if (is_entry) {
-                    Money tp_pct_eff = ResolvePerFillTpPct(cmd.strategy_id, cfg.cores[slot]);
+                    Money tp_pct_eff = ResolvePerFillTpPct(state.cores[slot].resolved_strategy_id, cfg.cores[slot]);
                     if (partial_on && event.leg == PARTIAL_LEG_B) {
                         const auto& ov_tp2b = cfg.core_overrides[slot];
                         Money tp2m = !Money_IsZero(ov_tp2b.tp2_mult)

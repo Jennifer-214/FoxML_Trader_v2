@@ -288,11 +288,9 @@ inline int Portfolio_AddPositionWithExits(Portfolio<F> *portfolio, Money quantit
 template <unsigned F> inline void Portfolio_AddPosition(Portfolio<F> *portfolio, Money quantity, Money entry_price) {
     if (portfolio->active_bitmap == 0xFFFF) return;
     int idx                                       = __builtin_ctz(~portfolio->active_bitmap);
+    Position_Reset(&portfolio->positions[idx]);   // A28/F3: full-struct reset SSoT → no stale original_tp/sl/entry_ts/pair_index on slot reuse (was subset-zeroing 5 of 9 fields, sister to Init/Clear/AddPositionWithExits)
     portfolio->positions[idx].quantity             = quantity;
     portfolio->positions[idx].entry_price          = entry_price;
-    portfolio->positions[idx].entry_fee            = Money_Zero();
-    portfolio->positions[idx].take_profit_price    = Money_Zero();
-    portfolio->positions[idx].stop_loss_price      = Money_Zero();
     portfolio->active_bitmap |= (1 << idx);
 }
 //======================================================================================================

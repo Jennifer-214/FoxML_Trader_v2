@@ -1742,10 +1742,11 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 && OMS_META_IS_VALID(meta_byte)
                 && chosen_arm < ezoo->exit_predictor_count
                 && regime < NUM_REGIMES) {
-                // Original TP locked at entry — captures the trade's
-                // intended TP target without staleness from later
-                // ratchet writes (those modify take_profit_price not
-                // original_tp).
+                // original_tp = the trail anchor locked at entry, FILL-priced
+                // post-A25/D-205 (fill×(1+tp_pct), NOT the expected-entry TP) —
+                // stable against later ratchet writes (those modify
+                // take_profit_price, not original_tp). The exit-bandit
+                // counterfactual recovers the resolved tp_pct from it.
                 Money entry_p   = oms->portfolio.positions[slot].entry_price;
                 Money orig_tp   = oms->portfolio.positions[slot].original_tp;
                 double entry_d   = Money_ToDouble(entry_p);
