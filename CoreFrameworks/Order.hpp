@@ -140,13 +140,14 @@ template <unsigned F>
 struct OrderPreResolved {
     Money fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
     Money slippage_pct;   // pre-resolved per-core
+    Money tp_pct;         // A25 (D-205): per-fill TP fraction — leg-effective (ResolvePerFillTpPct base, ×tp2_mult for leg B). Carried on SubmitCommand (resolver not include-reachable at the OMS layer) → NOT bound in Order_BindPreResolved; set in OMS_Submit from cmd.tp_pct. Consumed @handle_buy_fill: original_tp = fill×(1+tp_pct); tp_pct==0 → fallback to intended_tp (bytewise-identical legacy path).
     // Future per-resolved fields (extend in lockstep with Order_BindPreResolved):
     //   - effective_kill_switch_threshold (per-core risk envelope at submit time)
     //   - effective_min_holding_ticks (per-core time-exit floor)
     //   - effective_intended_strategy_dispatch (pre-resolved dispatch arm)
 };
-static_assert(sizeof(OrderPreResolved<64>) == 32,
-              "OrderPreResolved<64> size locked at 32 B (Ship-A 16B FPN_Binary, was 48); if changing, update Order<64> size_assert.");
+static_assert(sizeof(OrderPreResolved<64>) == 48,
+              "OrderPreResolved<64> size locked at 48 B (A25 added Money tp_pct: 32->48; in-flight SPSC-only, NOT persisted — no wire/H21 concern; if changing, update Order<64> size_assert.");
 
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order<F> bit-packed flags + OrderPreResolved sub-struct.
 // Closes Class 27 (OMS scalar cfg-mirror cluster) via Order pre-resolve at submit.
@@ -400,8 +401,8 @@ inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
 // the pool's memory footprint.
 //
 // Per-instantiation: F=64 is the live-engine + suite default.
-static_assert(sizeof(Order<64>) == 256,
-              "Order<64> size locked at 256 B (HOT 192 B + COLD 64 B = exactly 4 cache lines, "
+static_assert(sizeof(Order<64>) == 272,
+              "Order<64> size locked at 272 B (A25: +16 B OrderPreResolved::tp_pct, 256->272; in-flight SPSC-only, NOT persisted; drainer-path grow accepted per D-205, no longer cache-line-exact). Was 256 B (HOT 192 B + COLD 64 B = exactly 4 cache lines, "
               "HOT/COLD cluster-aligned). Ship-A 16B FPN_Binary: 320->256 (HOT 256->192 as the 7 FPN_Binary fields "
               "+ OrderPreResolved compacted 24->16 B / 48->32 B; COLD exchange_id[64] unchanged). Prior "
               "v5.15.5.F.4c.3 WIP2d-1.B.1: 280->320 for OrderPreResolved sub-struct + bit-packed flags. "

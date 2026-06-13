@@ -153,6 +153,7 @@ struct SubmitCommand {
     Money                  intended_tp  = Money_Zero();
     Money                  intended_sl  = Money_Zero();
     Money                  event_price  = Money_Zero();
+    Money                  tp_pct       = Money_Zero();  // A25 (D-205): leg-effective per-fill TP fraction, resolved at submit; 0 → handle_buy_fill keeps the legacy intended_tp path (bytewise-identical)
 
     // Default ctor — needed for SPSC ring slot init + OMS state value-init compat.
     SubmitCommand() = default;
@@ -981,6 +982,11 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     static const ::PerCoreCfg<F> NULL_PER_CORE_CFG_STUB{};
     const ::PerCoreCfg<F>* effective_cfg = core_cfg ? core_cfg : &NULL_PER_CORE_CFG_STUB;
     Order_BindPreResolved(&oms->orders[slot], *effective_cfg);
+    // A25 (D-205): tp_pct is resolved at the submit SITE (ResolvePerFillTpPct needs
+    // StrategyParameters, not include-reachable here) + carried on the command; set it on
+    // the Order's pre_resolved beside the bound fee_rate/slippage_pct. 0 (unwired/test
+    // paths) → handle_buy_fill keeps the legacy intended_tp anchor (bytewise-identical).
+    oms->orders[slot].pre_resolved.tp_pct = cmd.tp_pct;
     oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
 
     // Paper mode + event log (mode 1): push a synthetic fill result so
@@ -1176,9 +1182,17 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
     const Money entry_fee  = booked_fee;
     OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
     OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), entry_fee);
+    // A25 (D-205): arm the trail anchor (original_tp) relative to the ACTUAL fill, not the
+    // expected-entry intended_tp — post-A9 they diverge under slippage, so the 4 sharded
+    // *_ExitAdjustSharded trails + the exit-bandit counterfactual (ControllerEventLoop.hpp:1749)
+    // were arming at the wrong price. tp_pct (leg-effective, resolved at submit) carries the
+    // per-fill fraction; tp_pct==0 → fallback to intended_tp = the legacy path (bytewise-identical).
+    const Money per_fill_tp = !Money_IsZero(o->pre_resolved.tp_pct)
+        ? Money_Add(fill_price, Money_Mul(fill_price, o->pre_resolved.tp_pct))
+        : o->intended_tp;
     Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                        fill_price, fill_qty,
-                       o->intended_tp, o->intended_sl, entry_fee);
+                       per_fill_tp, o->intended_sl, entry_fee);
     oms->last_opened_mask |= (uint16_t)(1u << (int)o->core_id);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
     // Default = noop_fill_emit (no-op); set to real_on_entry_fill_emit at boot when trade_log Init succeeds.

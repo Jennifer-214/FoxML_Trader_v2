@@ -885,6 +885,23 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 cmd.intended_sl = state.cores[slot].intended_sl;
                 cmd.strategy_id = state.cores[slot].strategy_id;
                 cmd.event_price = event.price;
+                // A25 (D-205): resolve the per-fill TP fraction (A1 SSoT — picks the per-node
+                // override, NOT global take_profit_pct) + carry it so handle_buy_fill arms
+                // original_tp = fill×(1+tp_pct), matching where the exit actually fires post-A9.
+                // leg B carries the TP2-scaled fraction (same tp2_mult that scaled leg_tp above;
+                // reg line 188 tp_pct_b = tp_pct×tp2_mult). Entry-only — no buy fill on exits.
+                // tp2_mult re-read locally (the leg-B block's tp2_mult_eff has gone out of scope;
+                // consistent with the existing ov_tp2 re-declare pattern above).
+                if (is_entry) {
+                    Money tp_pct_eff = ResolvePerFillTpPct(cmd.strategy_id, cfg.cores[slot]);
+                    if (partial_on && event.leg == PARTIAL_LEG_B) {
+                        const auto& ov_tp2b = cfg.core_overrides[slot];
+                        Money tp2m = !Money_IsZero(ov_tp2b.tp2_mult)
+                            ? ov_tp2b.tp2_mult : cfg.cores[slot].tp2_mult;
+                        tp_pct_eff = Money_Mul(tp_pct_eff, tp2m);
+                    }
+                    cmd.tp_pct = tp_pct_eff;
+                }
                 OMS_PushSubmit(&oms, cmd);
                 // Phase 6prep sharded c13: snapshot the staged prediction
                 // into active_prediction at entry submit. Persists across

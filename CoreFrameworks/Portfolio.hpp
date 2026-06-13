@@ -213,14 +213,24 @@ inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
 //======================================================================================================
 // similar to the pool allocator, will need more work and im not sure if i want the rebalancing adn stuff here or in another header, probably another header for the actual managment, because these are just the basic functions to add and manipulate the actual opsitions, tnd are dependent on the buy/sell gates
 //======================================================================================================
+// A28/TD-182 (sister A19): full-struct Position reset — the SINGLE source for clearing a slot to defaults.
+// The subset-zeroing class recurs when each clear site hand-lists fields (A19 = ratchet_tp never cleared;
+// A28 = original_tp/original_sl/pair_index/entry_timestamp_us never cleared → stale trail anchor + mis-paired
+// legs on slot reuse). Every reset site (Init/ClearPositions) calls this. pair_index defaults to -1 (unpaired),
+// NOT 0. Sets values only — no Position layout change, so no PORTFOLIO_SNAPSHOT_VERSION/H21 concern.
+template <unsigned F> inline void Position_Reset(Position<F>* p) {
+    p->take_profit_price  = Money_Zero();
+    p->stop_loss_price    = Money_Zero();
+    p->quantity           = Money_Zero();
+    p->entry_price        = Money_Zero();
+    p->entry_fee          = Money_Zero();
+    p->original_tp        = Money_Zero();
+    p->original_sl        = Money_Zero();
+    p->entry_timestamp_us = 0;
+    p->pair_index         = -1;
+}
 template <unsigned F> inline void Portfolio_Init(Portfolio<F> *portfolio) {
-    for (int i = 0; i < 16; i++) {
-        portfolio->positions[i].quantity          = Money_Zero();
-        portfolio->positions[i].entry_price       = Money_Zero();
-        portfolio->positions[i].entry_fee         = Money_Zero();
-        portfolio->positions[i].take_profit_price = Money_Zero();
-        portfolio->positions[i].stop_loss_price   = Money_Zero();
-    }
+    for (int i = 0; i < 16; i++) Position_Reset(&portfolio->positions[i]);   // A28: full reset (was a 5-field subset → original_*/pair_index/ts stale)
     portfolio->active_bitmap = 0;
 }
 //======================================================================================================
@@ -265,6 +275,9 @@ inline int Portfolio_AddPositionWithExits(Portfolio<F> *portfolio, Money quantit
     portfolio->positions[idx].entry_fee            = entry_fee;
     portfolio->positions[idx].take_profit_price    = take_profit_price;
     portfolio->positions[idx].stop_loss_price      = stop_loss_price;
+    portfolio->positions[idx].original_tp          = take_profit_price;   // A28/TD-182: was unset → stale trail anchor on slot reuse (mirror Portfolio_OpenSlot)
+    portfolio->positions[idx].original_sl          = stop_loss_price;
+    portfolio->positions[idx].entry_timestamp_us   = 0;
     portfolio->positions[idx].pair_index           = -1;
     portfolio->active_bitmap |= (1 << idx);
     return idx;
@@ -412,13 +425,7 @@ inline int Portfolio_SlotActive(const Portfolio<F> *portfolio, int slot) {
 }
 //======================================================================================================
 template <unsigned F> inline void Portfolio_ClearPositions(Portfolio<F> *portfolio) {
-    for (int i = 0; i < 16; i++) {
-        portfolio->positions[i].quantity          = Money_Zero();
-        portfolio->positions[i].entry_price       = Money_Zero();
-        portfolio->positions[i].entry_fee         = Money_Zero();
-        portfolio->positions[i].take_profit_price = Money_Zero();
-        portfolio->positions[i].stop_loss_price   = Money_Zero();
-    }
+    for (int i = 0; i < 16; i++) Position_Reset(&portfolio->positions[i]);   // A28/TD-182: full reset (sister Portfolio_Init)
     portfolio->active_bitmap = 0;
 }
 //======================================================================================================
