@@ -32,13 +32,11 @@
 #pragma once
 
 #include "../DataStream/BinanceOrderAPI.hpp"
-#include "../Limits.hpp"
 #include "OrderManager.hpp"
 #include "SPSCRing.hpp"
 
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <thread>
@@ -101,44 +99,33 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
         return 0;
     }
 
-    // Expected USDT balance from OMS (known race — snapshot, not locked).
-    double oms_balance = Money_ToDouble(s->oms->balance);
-
-    // Exclude in-flight orders: scan the order table for orders that have
-    // been submitted but not yet filled. Their notional value is committed
-    // capital that the exchange has reserved but we haven't confirmed.
-    double inflight_buy_notional = 0.0;
-    uint16_t bm = s->oms->order_bitmap;
-    for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
-        if (((bm >> i) & 1) == 0) continue;
-        const Order<F>& o = s->oms->orders[i];
-        OrderState ostate = Order_GetState(&o);
-        if (ostate == ORDER_SUBMITTED || ostate == ORDER_ACKNOWLEDGED) {
-            if (Order_GetType(&o) == ORDER_MARKET_BUY) {
-                // estimate notional from event_price * requested_qty
-                double price = Money_ToDouble(o.event_price);
-                double qty   = Money_ToDouble(o.requested_qty);
-                inflight_buy_notional += price * qty;
-            }
-        }
-    }
-
-    // Expected USDT = oms_balance - inflight_buy_notional
-    // (in-flight buys reduce our available USDT but the exchange has
-    // already reserved the funds)
-    double expected_usdt = oms_balance - inflight_buy_notional;
-    double drift_usdt = exchange_usdt - expected_usdt;
+    // A21 (D-216): expected FREE-USDT in Money (H4). The old formula compared flat-account
+    // balance (oms->balance = start + sum realized; a BUY never debits it) against venue
+    // free-USDT, so it diverged by the whole open-position notional the instant a position
+    // opened -> structural false drift (-> a false kill-switch trip downstream).
+    // ReconciliationLoop_ExpectedFreeCash nets out the committed open-position cost +
+    // inflight-reserved cash. The reconciler is ADVISORY (detect-only): drift is PUSHED for
+    // an alert; ProcessReconcile NEVER writes oms->balance (D-216). The authoritative
+    // venue-net correction + the BTC/qty leg defer to .E.1.
+    Money exchange_money = Money{ money_from_double_payload(exchange_usdt) };  // venue ingress (<=8dp; string-direct D-123 -> .E.1/.E.3)
+    Money expected       = OMS_ExpectedFreeCash(s->oms);
+    Money drift          = Money_Sub(exchange_money, expected);
+    double drift_usdt    = Money_ToDouble(drift);       // repurposed-field + log (display only)
+    double expected_usdt = Money_ToDouble(expected);
 
     s->last_drift_usdt.store(drift_usdt, std::memory_order_relaxed);
 
-    if (std::fabs(drift_usdt) <= s->balance_tolerance) {
-        return 0;  // within tolerance, no correction needed
+    // Tolerance: convert-at-compare (cfg field stays double; boundary-stable).
+    // TODO(.E.1): re-derive the band for the multi-leg Money sum (1c too tight once >=1
+    // Money_Mul rounds at 8dp per open leg) + make the cfg field Money at parse.
+    Money tol = Money{ money_from_double_payload(s->balance_tolerance) };
+    if (Money_Le(Money_Abs(drift), tol)) {
+        return 0;  // within tolerance
     }
 
-    // Drift detected — push CMD_RECONCILE to the drainer.
-    fprintf(stderr, "[Reconciler] DRIFT detected: exchange=$%.4f expected=$%.4f "
-                     "drift=$%.4f (inflight_buy=$%.4f)\n",
-                     exchange_usdt, expected_usdt, drift_usdt, inflight_buy_notional);
+    // Drift detected -- push CMD_RECONCILE so the drainer ALERTS (detect-only; no write).
+    fprintf(stderr, "[Reconciler] DRIFT detected: exchange=$%.4f expected=$%.4f drift=$%.4f\n",
+                     exchange_usdt, expected_usdt, drift_usdt);
 
     Command cmd;
     memset(&cmd, 0, sizeof(cmd));

@@ -1476,6 +1476,57 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 }
 
 //======================================================================================================
+// [OPEN-POSITION COMMITTED-CASH COST — SSoT for the reconciler + .E.1 venue-net]
+//======================================================================================================
+// Sum over open slots of (entry_price*qty + entry_fee) = the cash that left the account
+// to OPEN the held positions. oms->balance is FLAT-ACCOUNT value (start + sum realized; a
+// BUY never debits it -- Portfolio_OpenSlot only), so to predict the venue's FREE cash you
+// net this committed cost back out. Single-sourced (A21/D-216) so the reconciler and the
+// .E.1 venue-net aggregator share ONE body (avoids a Class-43 parallel-derivation vs
+// core_open_notional). entry_fee = the per-Position BOOKED fee (venue-exact in USDT, D-109).
+template <unsigned F>
+inline Money OMS_OpenPositionCost(const OrderManagerState<F>* oms) {
+    Money cost = Money_Zero();
+    uint16_t bm = oms->portfolio.active_bitmap;
+    while (bm) {
+        int idx = __builtin_ctz(bm);
+        const Position<F>& p = oms->portfolio.positions[idx];
+        cost = Money_Add(cost, Money_Add(Money_Mul(p.entry_price, p.quantity), p.entry_fee));
+        bm &= (uint16_t)(bm - 1);
+    }
+    return cost;
+}
+
+//======================================================================================================
+// [EXPECTED FREE CASH — the cash-leg reconcile formula (pure, REST-free, unit-testable)]
+//======================================================================================================
+// expected_free_cash = balance - OMS_OpenPositionCost - Sum_inflight((requested-filled)*price + est_fee).
+// Asset-agnostic STRUCTURE (cash = ledger - committed-cost - inflight-reserved); long-only cost-sign +
+// single-currency settlement are crypto-spot-specific -- .E.6 equities extend with signed-qty + a margin
+// term (D-216). All Money (H4). NOTE (Class-38): o.filled_qty is per-invocation today (the Order.hpp:179
+// "running total" comment is aspirational) -> (requested-filled) == requested now; the -filled term is
+// INERT but kept as the correct .E.1 form, CO-GATED with the A2/A16 cumulative-fill landing. NOTE: inflight
+// SELL is omitted -- cash-leg-correct; a mis-booked SELL is caught by the BTC/qty leg (.E.1 venue-net).
+template <unsigned F>
+inline Money OMS_ExpectedFreeCash(const OrderManagerState<F>* oms) {
+    Money expected = Money_Sub(oms->balance, OMS_OpenPositionCost(oms));
+    uint16_t bm = oms->order_bitmap;
+    for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+        if (((bm >> i) & 1) == 0) continue;
+        const Order<F>& o = oms->orders[i];
+        OrderState ostate = Order_GetState(&o);
+        if ((ostate == ORDER_SUBMITTED || ostate == ORDER_ACKNOWLEDGED) &&
+            Order_GetType(&o) == ORDER_MARKET_BUY) {
+            Money remain   = Money_Sub(o.requested_qty, o.filled_qty);   // == requested today (Class-38)
+            Money notional = Money_Mul(remain, o.event_price);
+            Money est_fee  = Money_Mul(notional, o.pre_resolved.fee_rate);
+            expected = Money_Sub(expected, Money_Add(notional, est_fee));
+        }
+    }
+    return expected;
+}
+
+//======================================================================================================
 // [PROCESS ONE RECONCILE COMMAND]
 //======================================================================================================
 template <unsigned F>
@@ -1483,14 +1534,19 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
     double drift = cmd.result.avg_fill_price;           // repurposed field
     double exchange_balance = cmd.result.fill_qty;      // repurposed field
 
+    // A21 (D-216): DETECT-ONLY. The reconciler is ADVISORY (ReconciliationLoop.hpp:16);
+    // it must NOT mutate the authoritative ledger. oms->balance is realized-derived
+    // (balance == start + sum realized -- tested), whereas exchange_balance is venue
+    // FREE-USDT; writing it back (a) breaks that invariant + boot-replay determinism
+    // (H9 -- replay reconstructs start+sum-realized, not a venue number), and (b)
+    // ratcheting ks_peak from a non-realized source mis-arms the kill-switch drawdown
+    // denominator (Knight-adjacent). The drift was detected + logged by the Pass; the
+    // authoritative venue-net correction (open-position value modeled) defers to .E.1.
+    // So: alert, keep the audit trail below, write NOTHING.
     std::fprintf(stderr,
-                 "[OMS] RECONCILE: drift=$%.4f, correcting balance to match "
-                 "exchange ($%.4f)\n", drift, exchange_balance);
-
-    oms->balance = Money{ money_from_double_payload(exchange_balance) };  // D-103 reconcile ingress (exact venue parse rides P3)
-    if (Money_Gt(oms->balance, oms->ks_peak_balance)) {
-        oms->ks_peak_balance = oms->balance;
-    }
+                 "[OMS] RECONCILE ALERT (advisory, detect-only -- ledger NOT modified): "
+                 "drift=$%.4f venue_free_usdt=$%.4f active_bitmap=0x%04X; .E.1 venue-net owns the correction\n",
+                 drift, exchange_balance, (unsigned)oms->portfolio.active_bitmap);
 
     if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
         OrderEvent<F> recon_event;
