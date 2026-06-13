@@ -988,20 +988,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                   &cfg);  // v5.5.5
             (void)loaded;  // logged inside; nothing else to do here
         } else {
-            // v5.2.2 (live reconciliation Phase 1 wiring): exchange truth
-            // is authoritative in live mode. Fetch account + open orders +
-            // recent trades and reconcile against local state. Refuses
-            // boot on critical disagreement (exchange has BTC, local has
-            // 0 positions). Apply path is dry-run by default — flip
-            // cfg.reconcile_dry_run=0 deliberately for production after
-            // verifying logs.
-            //
-            // Phase 2 (deferred): actually CANCEL flagged orders, REPLAY
-            // missed fills via OrderManager_ProcessFillCommand, FORCE-CLOSE
-            // local slots that don't match exchange. Requires
-            // BinanceOrderAPI_CancelOrder + Command synthesis helpers
-            // that don't exist yet. v5.2.2 ships dry-run + critical
-            // refusal — surfaces all the disagreements without applying.
+            // Live reconciliation: exchange truth is authoritative in live mode.
+            // Fetch account + open orders + recent trades and reconcile against
+            // local state. Refuses boot on critical disagreement (exchange has BTC,
+            // local has 0 positions). Mode dispatch (reconcile_mode, below): STRICT
+            // refuses on any disagreement; WARN logs + continues; AUTO_SYNC applies.
+            // (v5.14.4.B.1/.B.2 wired the apply: cancel-stale-orders is REAL; missed-
+            // fill handling is A20 SEED-DON'T-REPLAY [.E.0.10] — see the AUTO_SYNC case.
+            // The old "Phase 2 deferred / dry-run-by-default" framing is RETIRED;
+            // cfg.reconcile_dry_run is a dead legacy mirror superseded by reconcile_mode
+            // [cfg-flag-orphan cohort, TaskList #9].)
             fprintf(stderr, "[snapshot] LIVE mode: reconciling with exchange truth\n");
 
             BinanceOrderAPI* api = &g_sharded_binance_adapter.workers_api[0];
@@ -1090,20 +1086,25 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                 case tt::RECONCILE_AUTO_SYNC: {
                     // AUTO_SYNC = composition of N independent helper-actions.
-                    // .B.1: Reconcile_ApplyMissedFills (replay; pure OMS state
-                    //       mutation; no exchange writes)
-                    // .B.2: Reconcile_AutoCancelStale (real exchange cancels
-                    //       via lambda-injected BinanceOrderAPI_CancelOrder
-                    //       per Option E template-deferred dep injection)
-                    // v5.15.5.F.4c.3 WIP2d-1.B.1 — pass cfg.cores so reconciled fills bind
-                    // originating-core fee_rate via Order_BindPreResolved (Class 27 cross-core
-                    // accuracy closure for in-flight Orders; cores[0] fallback for released).
-                    int replayed = tt::Reconcile_ApplyMissedFills(
-                        &oms, trades, n_trades, cfg.cores);
+                    // .B.1: A20 (.E.0.10) SEED-DON'T-REPLAY. The boot balance was already seeded
+                    //       from the exchange (OrphanRecovery, :653) and ALREADY reflects every
+                    //       settled trade in the GetMyTrades(0) window; replaying them via
+                    //       Reconcile_ApplyMissedFills DOUBLE-BOOKS balance + opens phantom
+                    //       positions. The book is FLAT at live boot (no snapshot load :982;
+                    //       orphan-sell flattens BTC; Reconcile_Decide refuses on real
+                    //       exchange-position-no-local divergence), so the fills are historical.
+                    //       So SEED the watermark to max(fetched) WITHOUT replaying. The warm-tail
+                    //       replay (Reconcile_ApplyMissedFills, KEPT for that future path) is
+                    //       .E.1-gated behind the WS-fill watermark-bump (OrderManager.hpp:536) --
+                    //       until that lands, the boot watermark is always 0 and no non-zero-
+                    //       watermark replay is reachable (H21: do not run an unreachable replay).
+                    // .B.2: Reconcile_AutoCancelStale (real exchange cancels; UNAFFECTED -- a
+                    //       distinct action from the fill replay) stays below.
+                    uint64_t seeded = tt::Reconcile_SeedWatermark(&oms, trades, n_trades);
                     fprintf(stderr,
-                        "[reconcile] AUTO_SYNC replay: %d missed fill(s) "
-                        "applied (last_seen_trade_id=%llu)\n",
-                        replayed, (unsigned long long)oms.last_seen_trade_id);
+                        "[reconcile] AUTO_SYNC seed-don't-replay (A20): watermark set to %llu "
+                        "WITHOUT replay (boot balance already reflects %d venue trade(s))\n",
+                        (unsigned long long)seeded, n_trades);
 
                     // v5.14.4.B.2 — zombie order cleanup. Lambda injects
                     // the network primitive (BinanceOrderAPI_CancelOrder)

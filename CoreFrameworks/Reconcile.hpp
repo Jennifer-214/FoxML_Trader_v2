@@ -280,6 +280,32 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
 }
 
 //======================================================================================================
+// [A20 (.E.0.10) — SEED THE TRADE-ID WATERMARK WITHOUT REPLAYING]
+//======================================================================================================
+// Cold-boot seed: the live boot balance was already seeded from the exchange (post-
+// OrphanRecovery, Run.hpp:653), which ALREADY reflects every settled trade in the
+// GetMyTrades(since=0) window (Binance's most-recent 100). Replaying them via
+// Reconcile_ApplyMissedFills would DOUBLE-BOOK balance + open phantom positions (A20).
+// So set last_seen_trade_id = max(fetched trade_id) WITHOUT replaying. max() over the
+// most-recent set is the newest settled trade -> a correct floor for the FUTURE WS-fill
+// watermark-bump (OrderManager.hpp:536, .E.1). Order-independent (a max), so the venue
+// response ordering does not matter. The book is FLAT at live boot (no snapshot load,
+// Run.hpp:982; orphan-sell flattens BTC; Reconcile_Decide refuses on real exchange-position
+// -no-local divergence), so the fetched trades are historical, NOT open positions.
+template <unsigned F>
+inline uint64_t Reconcile_SeedWatermark(OrderManagerState<F>* oms,
+                                        const ReconcileTrade* trades, int n_trades) {
+    if (!oms) return 0;
+    uint64_t max_trade_id = oms->last_seen_trade_id;
+    for (int i = 0; i < n_trades; ++i) {
+        const uint64_t tid = (uint64_t)trades[i].trade_id;
+        max_trade_id = (tid > max_trade_id) ? tid : max_trade_id;   // branchless max
+    }
+    oms->last_seen_trade_id = max_trade_id;
+    return max_trade_id;
+}
+
+//======================================================================================================
 // [v5.14.4.B.2 — AUTOCANCELSTALE HELPER]
 //======================================================================================================
 // Cancels engine-orphaned exchange orders ("zombies"): for each
