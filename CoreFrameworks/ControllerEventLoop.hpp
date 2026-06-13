@@ -2334,8 +2334,14 @@ inline void EventLoop_RebuildOneCore(
         if (hour > 23) hour = 23;
         session_mult = session_mult_lookup[tt::SESSION_BY_HOUR[hour]];
         if (!FPN_IsZero(session_mult)) {
-            resolved_cfg.volume_multiplier =
-                FPN_Mul(resolved_cfg.volume_multiplier, session_mult);
+            // A24 (.E.0.10, D-211 option c): write the per-NODE slice cores[slot], NOT the
+            // flat resolved_cfg field. The live consumer (Strategy_BuildParameters @ :2677)
+            // reads &resolved_cfg.cores[slot]; ResolveForCore populates the slice but the
+            // session/D10/spike mutations historically wrote the flat field → silently inert
+            // (Class 44-B, H22 per-node-purity violation). cores[slot] is the canonical
+            // per-node view. resolved_cfg is stack-local → no seqlock concern.
+            resolved_cfg.cores[slot].volume_multiplier =
+                FPN_Mul(resolved_cfg.cores[slot].volume_multiplier, session_mult);
         }
 
         // v4.2.1: idle-cycle counter. Bump every rebuild; reset to 0 in
@@ -2395,19 +2401,24 @@ inline void EventLoop_RebuildOneCore(
                 FPN_Binary<F> shift = FPN_Mul(slope, resolved_cfg.filter_scale);
                 shift = FPN_Negate(shift);  // negate (was a sign-bit flip; 16B two's-comp)
                 // Apply to entry_offset_pct, clamped to [offset_min, offset_max]
-                Money new_offset = Money_Add(resolved_cfg.entry_offset_pct, Money_FromBinary(shift));  // D-170 egress
+                // A24 (.E.0.10, D-211 option c): read+write the per-NODE slice cores[slot]
+                // (the value the consumer reads + the value D6 just mutated above). The
+                // clamp BOUNDS (offset_min/max, vol_mult_min/max) are read-only + resolve-
+                // equal on flat vs slice (ResolveForCore folds overrides into both), so they
+                // stay flat — only the MUTATED fields move to the slice.
+                Money new_offset = Money_Add(resolved_cfg.cores[slot].entry_offset_pct, Money_FromBinary(shift));  // D-170 egress
                 if (Money_Lt(new_offset, resolved_cfg.offset_min))
                     new_offset = resolved_cfg.offset_min;
                 if (Money_Gt(new_offset, resolved_cfg.offset_max))
                     new_offset = resolved_cfg.offset_max;
-                resolved_cfg.entry_offset_pct = new_offset;
+                resolved_cfg.cores[slot].entry_offset_pct = new_offset;
                 // Apply to volume_multiplier same direction (tighter when losing)
-                FPN_Binary<F> new_vmult = FPN_Add(resolved_cfg.volume_multiplier, shift);
+                FPN_Binary<F> new_vmult = FPN_Add(resolved_cfg.cores[slot].volume_multiplier, shift);
                 if (FPN_LessThan(new_vmult, resolved_cfg.vol_mult_min))
                     new_vmult = resolved_cfg.vol_mult_min;
                 if (FPN_GreaterThan(new_vmult, resolved_cfg.vol_mult_max))
                     new_vmult = resolved_cfg.vol_mult_max;
-                resolved_cfg.volume_multiplier = new_vmult;
+                resolved_cfg.cores[slot].volume_multiplier = new_vmult;
             }
         }
 
@@ -2957,8 +2968,13 @@ inline void EventLoop_RebuildOneCore(
             // Equivalent: current >= max / spike_threshold.
             // We check the latest volume_avg as the "current" representative.
             if (FPN_GreaterThanOrEqual(rolling->volume_avg, ratio_thresh)) {
-                spacing_cfg.spacing_multiplier = FPN_Mul(
-                    resolved_cfg.spacing_multiplier,
+                // A24 (.E.0.10, D-211 option c): relax the per-NODE slice cores[slot] — the
+                // gate Strategy_SpacingOk (:2980) + the GUI diag (:2974, A32 display↔exec
+                // inversion) both read spacing_cfg.cores[slot]. Writing the flat field left
+                // both the gate inert AND the diag lying. spacing_cfg is the scratch copy
+                // that isolates the relaxation to this spacing check (kept deliberately).
+                spacing_cfg.cores[slot].spacing_multiplier = FPN_Mul(
+                    spacing_cfg.cores[slot].spacing_multiplier,
                     resolved_cfg.spike_spacing_reduction);
             }
         }
@@ -2971,7 +2987,7 @@ inline void EventLoop_RebuildOneCore(
             Money abs_dist = Money_Ge(a, b)
                 ? Money_Sub(a, b) : Money_Sub(b, a);
             FPN_Binary<F> min_dist = FPN_Mul(rolling->price_stddev,
-                                       spacing_cfg.spacing_multiplier);
+                                       spacing_cfg.cores[slot].spacing_multiplier);  // A24: read the slice the gate reads (A32 display↔exec fix)
             state->display_meta[slot].diag_spacing_actual = Money_ToBinary(abs_dist);  // display mirror stays binary
             state->display_meta[slot].diag_spacing_floor  = min_dist;
         }
