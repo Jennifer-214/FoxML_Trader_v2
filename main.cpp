@@ -260,6 +260,15 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // NEW-1/D-218 — HARD-REFUSE a contradictory capital config BEFORE any engine dispatch
+    // (use_real_money=1 conflicting with an explicit non-LIVE trading_mode; Load flagged it).
+    // Ambiguous capital intent on a SAFETY_CRITICAL field must not boot — covers sharded + legacy.
+    if (ccfg.live_capital_cfg_conflict) {
+        fprintf(stderr, "[ENGINE] FATAL: contradictory capital config (use_real_money vs trading_mode) "
+                        "-> boot REFUSED. Resolve engine.cfg (see the [cfg] FATAL above).\n");
+        return 1;
+    }
+
     if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
         // v5.15.5.C.3 Phase 7.B — runtime bench gate boot dispatch.
         // Two template instantiations of EngineSharded_Run exist in the

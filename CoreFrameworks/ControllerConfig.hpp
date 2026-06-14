@@ -592,6 +592,7 @@ template <unsigned F> struct ControllerConfig {
   int default_strategy; // -1=regime auto, 0=MR, 1=Momentum, 2=SimpleDip
   // live trading — `use_real_money` field RETIRED (NEW-1, H21): capital authority is now
   // `trading_mode` (ControllerConfig_IsLiveCapital). The cfg-file KEY stays a parse-alias.
+  uint8_t live_capital_cfg_conflict; // NEW-1/D-218 — Load sets =1 when use_real_money=1 conflicts with an explicit non-LIVE trading_mode; main.cpp HARD-REFUSES boot (ambiguous capital intent must not run).
   // v5.7.2: explicit acknowledgment that the operator wants to run a
   // hardcoded (non-AUTO) strategy in live mode. Default 0 — the boot
   // path refuses to start with trading_mode=live AND any
@@ -1678,6 +1679,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(0.003); // 1.0 - 0.997
   cfg.default_strategy = -1; // -1 = regime auto (backward compat)
   // use_real_money default RETIRED (NEW-1) — trading_mode defaults to PAPER via the registry.
+  cfg.live_capital_cfg_conflict = 0; // NEW-1/D-218 — no cfg conflict until Load detects one
   // v5.15.5.F.4d.1.B.3 Step 8.6: acknowledge_hardcoded_strategy_in_live MATCH — registry BOOL(0) == manual; DELETED.
   // init_arena_use_hugepages MATCH — registry BOOL(0) == manual; DELETED.
   // require_mlockall DIFFER: registry BOOL(0); manual=1 (HFT-correct; safety-first). Keep manual —
@@ -3266,9 +3268,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         fprintf(stderr, "[cfg] WARN: 'use_real_money=1' is DEPRECATED (tombstoned, NEW-1). "
           "Promoted to trading_mode=live. Update engine.cfg: replace it with 'trading_mode=live'.\n");
       } else if (cfg.trading_mode != TRADING_MODE_LIVE) {
-        fprintf(stderr, "[cfg] ERROR: 'use_real_money=1' CONFLICTS with explicit 'trading_mode=%u'. "
-          "The explicit trading_mode WINS (NO live capital). Remove 'use_real_money' from engine.cfg.\n",
-          (unsigned)cfg.trading_mode);
+        // HARD REFUSE (D-217/D-218): a contradictory capital config — legacy use_real_money=1 (wants
+        // live) vs an explicit non-LIVE trading_mode — is AMBIGUOUS on a SAFETY_CRITICAL field. Do NOT
+        // silently pick (ADV-2's call). Flag it; main.cpp refuses boot. (The prior explicit-wins-fail-
+        // safe was an effort-driven deviation from this decision — reconciled D-218.)
+        cfg.live_capital_cfg_conflict = 1;
+        fprintf(stderr, "[cfg] FATAL: 'use_real_money=1' CONFLICTS with explicit 'trading_mode=%u'. "
+          "Ambiguous capital intent on a SAFETY_CRITICAL field -> boot REFUSED. Resolve engine.cfg: "
+          "remove 'use_real_money' OR set 'trading_mode=live'.\n", (unsigned)cfg.trading_mode);
       } else {
         fprintf(stderr, "[cfg] WARN: 'use_real_money=1' is DEPRECATED + redundant (trading_mode=live "
           "already set). Remove it from engine.cfg.\n");
