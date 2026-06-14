@@ -852,7 +852,7 @@ struct TUISnapshot {
     // config display
     double cfg_tp, cfg_sl, cfg_fee, cfg_slippage;
     int trailing_enabled;
-    int live_trading;      // 1 = use_real_money enabled
+    int live_trading;      // 1 = live capital (trading_mode==LIVE); NEW-1
     double cfg_hold_score, cfg_trail_mult, cfg_sl_trail_mult;
     double cfg_offset_val; // offset pct or stddev mult depending on mode
     // stats. Two flavors:
@@ -1668,7 +1668,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->cfg_sl  = Money_ToDouble(ctrl->config.stop_loss_pct) * 100.0;
     snap->cfg_fee = fee_r * 100.0;
     snap->cfg_slippage = Money_ToDouble(ctrl->config.slippage_pct) * 100.0;
-    snap->live_trading = ctrl->config.use_real_money;
+    snap->live_trading = ControllerConfig_IsLiveCapital(ctrl->config); // NEW-1 — display mirror routes the single predicate
     snap->trailing_enabled = !FPN_IsZero(ctrl->config.tp_hold_score);
     snap->cfg_hold_score   = FPN_ToDouble(ctrl->config.tp_hold_score);
     snap->cfg_trail_mult   = FPN_ToDouble(ctrl->config.tp_trail_mult);

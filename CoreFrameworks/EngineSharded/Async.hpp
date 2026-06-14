@@ -562,7 +562,7 @@ inline bool EngineSharded_Async_FanOut(
             g_engine_sharded_shutdown = 1;
         }
         // paper reset: zero balance, clear positions, reset counters
-        if (shared_ptr && shared_ptr->paper_reset_requested && !cfg.use_real_money) {
+        if (shared_ptr && shared_ptr->paper_reset_requested && !ControllerConfig_IsLiveCapital(cfg)) { // NEW-1 — paper-reset interlock routes the single predicate
             shared_ptr->paper_reset_requested = 0;
             // Coordinate Reset Paper with per-core slow-path threads.
             // Set the in-progress flag → slow-paths park (yield) at

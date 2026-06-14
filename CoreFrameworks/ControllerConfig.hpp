@@ -58,7 +58,7 @@ constexpr uint8_t ENGINE_MODE_SHARDED = 1;
 // training-time mode for audit trail).
 constexpr uint8_t TRADING_MODE_PAPER  = 0;
 constexpr uint8_t TRADING_MODE_LIVE   = 1;
-constexpr uint8_t TRADING_MODE_SHADOW = 2;
+constexpr uint8_t TRADING_MODE_SHADOW = 2; // RESERVED/UNIMPLEMENTED (NEW-1) — live-data/simulated-fills path not built; behaves as PAPER (capital-authority FALSE). Append-only per H21; do NOT reuse the value.
 
 // v5.15.4 — ControllerConfig_NormalizeForMode key-explicit tracking.
 // Parser sets the corresponding bit when the operator explicitly sets a
@@ -72,7 +72,8 @@ constexpr uint8_t TRADING_MODE_SHADOW = 2;
 // of headroom; expected to grow with future mode-specific flip rules.
 constexpr uint16_t MASK_CFG_KEY_MODEL_VERIFY_STRICT = 1u << 0;
 constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
-// Reserved bits 2..15 for future tracked keys.
+constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alias precedence: use_real_money promotes trading_mode=LIVE only if this bit is unset
+// Reserved bits 3..15 for future tracked keys.
 
 //======================================================================================================
 // [PER-CORE OVERRIDES — v4.0]
@@ -589,11 +590,11 @@ template <unsigned F> struct ControllerConfig {
                                    // on hot path)
   // strategy selection
   int default_strategy; // -1=regime auto, 0=MR, 1=Momentum, 2=SimpleDip
-  // live trading
-  int use_real_money; // 0=paper (default), 1=real orders via REST API
+  // live trading — `use_real_money` field RETIRED (NEW-1, H21): capital authority is now
+  // `trading_mode` (ControllerConfig_IsLiveCapital). The cfg-file KEY stays a parse-alias.
   // v5.7.2: explicit acknowledgment that the operator wants to run a
   // hardcoded (non-AUTO) strategy in live mode. Default 0 — the boot
-  // path refuses to start with use_real_money=1 AND any
+  // path refuses to start with trading_mode=live AND any
   // core_N_strategy != auto unless this flag is set. AUTO (regime-
   // gated) is preferred for live capital because hardcoded strategies
   // fire regardless of regime. Setting this to 1 is the operator
@@ -1676,7 +1677,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gate_ema_alpha = FPN_FromDouble<F>(0.997); // ~333-tick effective window
   cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(0.003); // 1.0 - 0.997
   cfg.default_strategy = -1; // -1 = regime auto (backward compat)
-  cfg.use_real_money = 0;    // 0 = paper trading (default safe)
+  // use_real_money default RETIRED (NEW-1) — trading_mode defaults to PAPER via the registry.
   // v5.15.5.F.4d.1.B.3 Step 8.6: acknowledge_hardcoded_strategy_in_live MATCH — registry BOOL(0) == manual; DELETED.
   // init_arena_use_hugepages MATCH — registry BOOL(0) == manual; DELETED.
   // require_mlockall DIFFER: registry BOOL(0); manual=1 (HFT-correct; safety-first). Keep manual —
@@ -2029,6 +2030,20 @@ inline void ControllerConfig_NormalizeForMode(ControllerConfig<F>& cfg) {
     }
 }
 
+// NEW-1 (.E.0.10) — THE single capital-authority predicate. Every authorizer (the OMS
+// live-trading bit, the secrets/adapter gate, the paper-reset interlock, snapshot
+// selection, display mirrors) routes through this ONE function, so capital authority
+// cannot decouple from the safety pre-flight (RBP Class 47 — the split-brain that let
+// `use_real_money` authorize real orders while `trading_mode` gated only LiveReadiness).
+// `use_real_money` is retired to a parse-alias (tombstone H21). SHADOW is capital-FALSE
+// (live data + simulated fills, not built). The body is the .E.1 per-cluster scale-out
+// seam — it relocates global cfg -> resolved cluster cfg with ZERO authorizer edits (H22).
+// See DESIGN_SPECS/framework-patterns/single-authority-predicate-for-mode-gating.md.
+template <unsigned F>
+inline bool ControllerConfig_IsLiveCapital(const ControllerConfig<F>& cfg) {
+    return cfg.trading_mode == TRADING_MODE_LIVE;
+}
+
 //======================================================================================================
 // [CONFIG PARSER]
 //======================================================================================================
@@ -2053,6 +2068,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   // values matching defaults would falsely trigger legacy-mirroring.
   int maker_explicitly_set = 0;
   int taker_explicitly_set = 0;
+  int alias_use_real_money = -1; // NEW-1 — legacy use_real_money capture (-1=absent); resolved post-loop
 
   FILE *f = fopen(filepath, "r");
   if (!f)
@@ -2536,7 +2552,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     #undef X
     CFG_PARSE_PCT(breakeven_buffer_pct)
     // depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-    CFG_PARSE_INT(use_real_money)
+    // NEW-1 — use_real_money TOMBSTONED as an independent field (H21). Operators have it on
+    // disk -> parse-compat ALIAS: captured here, resolved post-loop (so an explicit trading_mode
+    // wins regardless of cfg line order). Promotes trading_mode=LIVE; there is NO cfg field.
+    if (strcmp(key, "use_real_money") == 0) { alias_use_real_money = atoi(val); continue; }
     // v5.15.5.F.4c — acknowledge_hardcoded_strategy_in_live + require_mlockall +
     // init_arena_use_hugepages migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
     // Registry walker at line 1896+ handles parse; manual CFG_PARSE_INT removed.
@@ -2816,6 +2835,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         else if (strcmp(val, "live")   == 0) cfg.trading_mode = TRADING_MODE_LIVE;
         else if (strcmp(val, "shadow") == 0) cfg.trading_mode = TRADING_MODE_SHADOW;
         else                                  cfg.trading_mode = (uint8_t)atoi(val);
+        // NEW-1 — track explicit set so the use_real_money alias defers to it (precedence).
+        cfg.cfg_keys_explicit |= MASK_CFG_KEY_TRADING_MODE;
+        if (cfg.trading_mode == TRADING_MODE_SHADOW) {
+            fprintf(stderr,
+                "[cfg] WARN: trading_mode=shadow is RESERVED/UNIMPLEMENTED (NEW-1); behaves as "
+                "PAPER (no real fills, no simulated-fill path). Use 'paper' or 'live'.\n");
+        }
         continue;
     }
     CFG_PARSE_INT(prediction_normalize)
@@ -3225,6 +3251,32 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         FPN_ToDouble(cfg.winsor_pct_low), FPN_ToDouble(cfg.winsor_pct_high));
     cfg.winsor_pct_low  = FPN_FromDouble<F>(0.005);
     cfg.winsor_pct_high = FPN_FromDouble<F>(0.995);
+  }
+
+  // NEW-1 (.E.0.10) — resolve the use_real_money back-compat alias. Post-loop so an explicit
+  // trading_mode wins regardless of cfg-file line order. The legacy key is tombstoned (H21):
+  // =1 promotes trading_mode=LIVE only if the operator did NOT explicitly set trading_mode; a
+  // conflicting explicit non-LIVE wins (fail-safe to no-capital) with a loud error.
+  if (alias_use_real_money >= 0) {
+    const bool tm_explicit = (cfg.cfg_keys_explicit & MASK_CFG_KEY_TRADING_MODE) != 0;
+    if (alias_use_real_money != 0) {
+      if (!tm_explicit) {
+        cfg.trading_mode = TRADING_MODE_LIVE;
+        cfg.cfg_keys_explicit |= MASK_CFG_KEY_TRADING_MODE;
+        fprintf(stderr, "[cfg] WARN: 'use_real_money=1' is DEPRECATED (tombstoned, NEW-1). "
+          "Promoted to trading_mode=live. Update engine.cfg: replace it with 'trading_mode=live'.\n");
+      } else if (cfg.trading_mode != TRADING_MODE_LIVE) {
+        fprintf(stderr, "[cfg] ERROR: 'use_real_money=1' CONFLICTS with explicit 'trading_mode=%u'. "
+          "The explicit trading_mode WINS (NO live capital). Remove 'use_real_money' from engine.cfg.\n",
+          (unsigned)cfg.trading_mode);
+      } else {
+        fprintf(stderr, "[cfg] WARN: 'use_real_money=1' is DEPRECATED + redundant (trading_mode=live "
+          "already set). Remove it from engine.cfg.\n");
+      }
+    } else {
+      fprintf(stderr, "[cfg] WARN: 'use_real_money' is DEPRECATED (tombstoned, NEW-1); ignored. "
+        "Live gating is 'trading_mode' (default paper).\n");
+    }
   }
 
   // v5.15.5.F.4c.3 Step 2 — populate per-core authoritative view from flat fields.

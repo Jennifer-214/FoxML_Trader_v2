@@ -287,6 +287,17 @@ int main(int argc, char *argv[]) {
             "[ENGINE]   in engine.cfg. Continuing in legacy mode for now.\n"
             "================================================================\n");
 
+    // NEW-1 (.E.0.10) — the legacy single_core path is DEPRECATED and may NOT authorize real
+    // capital (H21: do not leave a deprecated capital path reachable — the Knight-Capital
+    // dead-capital-path lesson). The SHARDED engine is the sole real-money authority; legacy
+    // may run paper for benchmark/regression only. Full legacy removal homes to TECH_DEBT-002.
+    if (ControllerConfig_IsLiveCapital(ccfg)) {
+        fprintf(stderr,
+            "[ENGINE] ERROR: legacy single_core mode CANNOT trade live capital (NEW-1). "
+            "trading_mode=live requires engine_mode=sharded. Boot refused.\n");
+        return 1;
+    }
+
     //==================================================================================================
     // ============================================================
     // LEGACY ENGINE PATH — single-threaded, deprecated as of 2026-04-25
@@ -341,7 +352,7 @@ int main(int argc, char *argv[]) {
     PortfolioController_Init(&ctrl, ccfg);
 
     // try to load snapshot from previous session
-    const char *snapshot_path = ccfg.use_real_money ? "logging/portfolio.live.snapshot" : "logging/portfolio.paper.snapshot";
+    const char *snapshot_path = ControllerConfig_IsLiveCapital(ccfg) ? "logging/portfolio.live.snapshot" : "logging/portfolio.paper.snapshot";
     if (PortfolioController_LoadSnapshot(&ctrl, snapshot_path)) {
         int pos_count = Portfolio_CountActive(&ctrl.portfolio);
         fprintf(stderr, "[ENGINE] resumed %d positions from snapshot\n", pos_count);
@@ -383,10 +394,10 @@ int main(int argc, char *argv[]) {
     BinanceOrderAPI order_api = {};
     uint16_t live_position_bitmap = 0; // which paper slots have real Binance orders
 
-    if (ccfg.use_real_money) {
+    if (ControllerConfig_IsLiveCapital(ccfg)) {
         char api_key[128] = {}, api_secret[128] = {};
         if (!LoadSecrets("secrets.cfg", api_key, api_secret)) {
-            fprintf(stderr, "[ENGINE] ERROR: use_real_money=1 but secrets.cfg missing or incomplete\n");
+            fprintf(stderr, "[ENGINE] ERROR: trading_mode=live but secrets.cfg missing or incomplete\n");
             return 1;
         }
         // REST host for orders — always use Binance US for US-based users
@@ -745,7 +756,7 @@ int main(int argc, char *argv[]) {
             // 4. clear pool, reconnect, restart warmup
             // LIVE: sell entire BTC balance before 24h force-close
             // sells everything in one order — catches tracked positions + any dust
-            if (ccfg.use_real_money) {
+            if (ControllerConfig_IsLiveCapital(ccfg)) {
                 double usdt_tmp = 0, btc_bal = 0;
                 BinanceOrderAPI_GetBalances(&order_api, &usdt_tmp, &btc_bal);
                 double qty_d = binance_round_qty(btc_bal, order_api.filters.lot_step_size);
@@ -816,7 +827,7 @@ int main(int argc, char *argv[]) {
             int saved_exit_count = 0;
             uint32_t saved_exit_slots[16];
             double saved_exit_qtys[16];
-            if (ccfg.use_real_money && ctrl.exit_buf.count > 0) {
+            if (ControllerConfig_IsLiveCapital(ccfg) && ctrl.exit_buf.count > 0) {
                 for (uint32_t i = 0; i < ctrl.exit_buf.count; i++) {
                     uint32_t pidx = ctrl.exit_buf.records[i].position_index;
                     saved_exit_slots[saved_exit_count] = pidx;
@@ -863,7 +874,7 @@ int main(int argc, char *argv[]) {
                 // LIVE: fire-and-forget buy order + set bitmap (Phase 3 wires this)
                 // skip if a sell happened this same tick — avoid back-to-back REST calls
                 // the paper position will be undone below, BuyGate fires again next cycle
-                if (ccfg.use_real_money && saved_exit_count == 0) {
+                if (ControllerConfig_IsLiveCapital(ccfg) && saved_exit_count == 0) {
                     uint16_t active = ctrl.portfolio.active_bitmap;
                     while (active) {
                         int slot = __builtin_ctz(active);
@@ -896,7 +907,7 @@ int main(int argc, char *argv[]) {
                 // undo paper positions that weren't backed by real orders
                 // with single-slot mode, if the buy was skipped or failed, the paper
                 // engine shouldn't track a phantom position
-                if (ccfg.use_real_money) {
+                if (ControllerConfig_IsLiveCapital(ccfg)) {
                     uint16_t check = ctrl.portfolio.active_bitmap;
                     while (check) {
                         int slot = __builtin_ctz(check);
@@ -921,7 +932,7 @@ int main(int argc, char *argv[]) {
             }
 
             // LIVE: sell exited positions (bitmap-gated)
-            if (saved_exit_count > 0 && ccfg.use_real_money) {
+            if (saved_exit_count > 0 && ControllerConfig_IsLiveCapital(ccfg)) {
                 // check if any exited positions were live
                 int has_live_exit = 0;
                 for (int i = 0; i < saved_exit_count; i++) {
@@ -1018,7 +1029,7 @@ int main(int argc, char *argv[]) {
             // save portfolio snapshot every slow-path cycle (crash recovery)
             if (ctrl.tick_count == 0) {
                 // LIVE: balance sync + external trade detection + orphan detection
-                if (ccfg.use_real_money) {
+                if (ControllerConfig_IsLiveCapital(ccfg)) {
                     // query USDT + BTC balances in one API call (~150ms, not two)
                     double usdt_bal = 0, btc_bal = 0;
                     int bal_ok = BinanceOrderAPI_GetBalances(&order_api, &usdt_bal, &btc_bal);
@@ -1219,7 +1230,7 @@ int main(int argc, char *argv[]) {
     //==================================================================================================
     // cleanup live trading
     //==================================================================================================
-    if (ccfg.use_real_money)
+    if (ControllerConfig_IsLiveCapital(ccfg))
         BinanceOrderAPI_Cleanup(&order_api);
 
     //==================================================================================================

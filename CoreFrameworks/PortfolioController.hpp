@@ -1961,7 +1961,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     Money saved_starting_balance = ctrl->config.starting_balance;
     uint32_t saved_warmup_ticks = ctrl->config.warmup_ticks;
     uint32_t saved_min_warmup = ctrl->config.min_warmup_samples;
-    int saved_use_real_money = ctrl->config.use_real_money;
+    uint8_t saved_trading_mode = ctrl->config.trading_mode; // NEW-1 — protect the capital-authority field across hot-reload (else a reload bulk-copy flips live/paper mid-session)
     // Per-core sharding (Phase 13): engine_mode and num_execution_cores
     // are STARTUP-ONLY because they determine the thread layout. Switching
     // modes mid-session would tear down half the engine.
@@ -1975,7 +1975,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.starting_balance = saved_starting_balance;
     ctrl->config.warmup_ticks = saved_warmup_ticks;
     ctrl->config.min_warmup_samples = saved_min_warmup;
-    ctrl->config.use_real_money = saved_use_real_money;
+    ctrl->config.trading_mode = saved_trading_mode; // NEW-1
     ctrl->config.engine_mode = saved_engine_mode;
     ctrl->config.num_execution_cores = saved_num_execution_cores;
     if (new_cfg.engine_mode != saved_engine_mode) {

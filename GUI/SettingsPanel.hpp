@@ -408,7 +408,9 @@ static const CfgFieldDef field_defs[] = {
         "Different kinds are independent. Lower = more spam during disconnect storms.\n"
         "Used for both stderr and command backends."},
     // Toggles
-    {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL,   NULL},
+    // NEW-1 — use_real_money checkbox REMOVED: trading_mode (THE capital-authority field) is
+    // registry-rendered (FOREACH_GLOBAL_CFG_FIELD); a separate legacy toggle would re-open the
+    // split-brain (RBP Class 47 — a derived bool independently flippable from the survivor).
     // partial_exit_enabled / session_filter_enabled / depth_enabled migrated to
     // FOREACH_<DOMAIN>_CFG_FLAG (v5.14.9.F.5 LIFECYCLE + OPS + GATE; auto-extended below)
     {"min_book_imbalance",    "Book Imbal",   "Toggles",         CFG_FLOAT, "%.2f", NULL},
@@ -1081,10 +1083,8 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
                 changed = true;
             }
             // warning label for dangerous toggles
-            if (bv && strcmp(fd->key, "use_real_money") == 0) {
-                ImGui::SameLine();
-                ImGui::TextColored(FoxmlColors::red_b, "REAL MONEY");
-            }
+            // NEW-1 — use_real_money toggle REMOVED (see field_defs); trading_mode is the
+            // capital-authority field (registry-rendered). No separate REAL MONEY toggle.
             if (bv && strcmp(fd->key, "gate_ema_enabled") == 0) {
                 ImGui::SameLine();
                 ImGui::TextColored(FoxmlColors::green_b, "ACTIVE");

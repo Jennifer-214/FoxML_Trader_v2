@@ -342,7 +342,7 @@ static inline void TUI_CopySnapshotSharded(
     snap->cfg_sl  = Money_ToDouble(cfg->stop_loss_pct) * 100.0;
     snap->cfg_fee = Money_ToDouble(cfg->fee_rate) * 100.0;
     snap->cfg_slippage = Money_ToDouble(cfg->slippage_pct) * 100.0;
-    snap->live_trading = cfg->use_real_money;
+    snap->live_trading = ControllerConfig_IsLiveCapital(*cfg); // NEW-1 — display mirror routes the single predicate
 
     // per-core details (strategy assignment + buy gate levels).
     // use core 0's strategy as the "headline" strategy for the Market panel,

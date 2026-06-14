@@ -490,11 +490,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             }
         }
         if (hardcoded_count > 0) {
-            const bool live = (cfg.use_real_money != 0);
+            const bool live = ControllerConfig_IsLiveCapital(cfg); // NEW-1 — single capital-authority predicate (was cfg.use_real_money)
             const bool ack  = (cfg.acknowledge_hardcoded_strategy_in_live != 0);
             if (live && !ack) {
                 fprintf(stderr,
-                    "[sharded] ERROR: live mode (use_real_money=1) with "
+                    "[sharded] ERROR: live mode (trading_mode=live) with "
                     "%d hardcoded strategy core(s): %s\n"
                     "[sharded]        AUTO is recommended for live capital "
                     "(regime-gated strategy selection).\n"
@@ -574,11 +574,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // thread-safe. The adapter owns one BinanceOrderAPI instance per
     // worker thread (per-thread, not shared). See BinanceAdapter.hpp.
     static BinanceAdapterState g_sharded_binance_adapter;
-    bool live_trading = (cfg.use_real_money != 0);
+    bool live_trading = ControllerConfig_IsLiveCapital(cfg); // NEW-1 — single capital-authority predicate (was cfg.use_real_money; RBP Class 47)
     if (live_trading) {
         char api_key[128] = {}, api_secret[128] = {};
         if (!LoadSecrets("secrets.cfg", api_key, api_secret)) {
-            fprintf(stderr, "[sharded] ERROR: use_real_money=1 but secrets.cfg missing or incomplete\n");
+            fprintf(stderr, "[sharded] ERROR: trading_mode=live but secrets.cfg missing or incomplete\n");
             std::signal(SIGINT, prev_int);
             std::signal(SIGTERM, prev_term);
             return;

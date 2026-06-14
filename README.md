@@ -28,7 +28,7 @@ The hot path is **0.4% of the project**. The rest is supporting infrastructure �
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
 
-> **paper trading by default.** live trading via Binance REST API is supported but experimental — use at your own risk. set `use_real_money=1` and add API keys to `secrets.cfg`. no API key needed for market data feeds.
+> **paper trading by default.** live trading via Binance REST API is supported but experimental — use at your own risk. set `trading_mode=live` and add API keys to `secrets.cfg`. no API key needed for market data feeds.
 
 ---
 
@@ -196,7 +196,7 @@ requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XG
 # engine.cfg — minimal example
 engine_mode = sharded
 num_execution_cores = 4
-use_real_money = 0               # paper trading (default)
+trading_mode = paper             # paper trading (default); 'live' = real orders via REST
 
 starting_balance = 10000.00
 fee_rate_taker = 0.00100
