@@ -190,18 +190,35 @@ struct OrderEventLog {
     // Fields below are touched by both threads — careful with ordering.
     SPSCRing<OrderEvent<F>, ORDER_EVENT_LOG_ASYNC_RING_SIZE> async_ring;
     pthread_t      writer_thread;        // pthread handle (only valid when active)
-    std::atomic<int> writer_thread_active;  // 1 = writer thread is running
-    std::atomic<int> writer_should_stop;    // writer polls this; set on Stop
+    std::atomic<int> writer_thread_active{0};  // 1 = writer thread is running. In-class init {0} (.E.0.10 TD-202/RBP Class 50): the quiesce-first OrderEventLog_Init reads this BEFORE its own store, and many OMS sites default-init (`OrderManagerState<64> oms;`) → without {0} the pre-Init read is indeterminate (UB).
+    std::atomic<int> writer_should_stop{0};    // writer polls this; set on Stop. {0} for the same construction-time-determinism reason (lifecycle pair).
     std::atomic<uint64_t> ring_full_spins;  // total pause/usleep iterations spent waiting for ring slots
     std::atomic<uint64_t> writer_realloc_failed_count;  // writer realloc failures (legacy — should stay 0 post-v5.11.5.C)
     std::atomic<uint64_t> log_full_drops;   // v5.11.5.C — events dropped because mmap'd capacity is exhausted
 };
+
+// Forward-decl so OrderEventLog_Init (below) can quiesce a running writer before
+// re-initializing. StopAsyncWriter is DEFINED further down; the forward-decl keeps
+// the dependent call well-formed under two-phase lookup. (.E.0.10 TD-202/RBP Class 50.)
+template <unsigned F> inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log);
 
 //======================================================================================================
 // [INIT]
 //======================================================================================================
 template <unsigned F>
 inline void OrderEventLog_Init(OrderEventLog<F>* log) {
+    // .E.0.10 (TD-202 / RBP Class 50 — re-init-defeats-join lifecycle): QUIESCE-FIRST.
+    // If a writer is already running (re-Init on a live log — the double-init that
+    // defeats OrderEventLog_Free's guarded join → heap-use-after-free on async_ring),
+    // stop+join it BEFORE re-initializing the ring / entries[] / the active flag.
+    // Safe on a fresh log: writer_thread_active is in-class-init'd to 0, so Stop no-ops.
+    // This is the forward-compatible .E.0.10 increment of the Init/Free/Start/Stop
+    // lifecycle-idempotency discipline the .E.1 SPSC/event-log rework OWNS (single-owner
+    // disk_file + a fully idempotent Init that also reclaims entries[]). The full rework
+    // is folded into the .E.1 foundation plan; this guard is the stone it builds on.
+    // See feedback_fix_toward_future_trajectory_not_static_state.
+    OrderEventLog_StopAsyncWriter(log);
+
     // v5.11.5.C — mmap(MAP_POPULATE) for the entries[] buffer. Pre-faults
     // all pages at boot so the first-write path never hits a page-fault
     // tail. Capacity is fixed (no realloc); overflow increments
