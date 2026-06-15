@@ -46,6 +46,7 @@
 #include <string.h>
 #include <time.h>
 #include "ModelInference.hpp"  // StampInferenceCfgInputs, stamp_write_for_model, STAMP_SET, MODEL_FORMAT_VERSION
+#include "BarrierValidation.hpp"  // v5.15.5.E.0.10 A6 (D-221) — tt::barrier_is_corrupt producer-seam guard
 #include "FeatureRegistry.hpp"  // FEATURE_REGISTRY_HASH, MODEL_NUM_FEATURES
 #include "BuildFlags.hpp"      // tt::BUILD_FLAGS_HASH
 #include "../Backtest/LabelFunctions.hpp"  // LABEL_REGISTRY_HASH, LabelType_NumClasses
@@ -253,6 +254,20 @@ inline StampWriteResult Stamp_AssembleAndEmit(
 
     // Label params (only if caller provides horizon_ticks > 0; v5.11.41 CRITICAL-1 close)
     if (args.horizon_ticks > 0) {
+        // v5.15.5.E.0.10 A6 PRODUCER seam (D-221) — refuse to EMIT a corrupt barrier into a stamp
+        // (the SSoT tt::barrier_is_corrupt predicate, the SAME one the ingress consumer applies at
+        // CoreModelZoo). Catches a corrupt label distance at the train->serve SOURCE, before it ever
+        // reaches an engine. label_*_pct here is the stored FRACTION (the StampHelper convention).
+        if (tt::barrier_is_corrupt(args.horizon_tp_pct, args.horizon_sl_pct)) {
+            StampWriteResult r{};
+            r.ok = 0;
+            snprintf(r.error, sizeof(r.error),
+                     "A6 (D-221): REFUSING corrupt barrier label_tp_pct=%g label_sl_pct=%g "
+                     "(negative / NaN / +Inf / out-of-range)",
+                     args.horizon_tp_pct, args.horizon_sl_pct);
+            fprintf(stderr, "[stamp] %s\n", r.error);
+            return r;
+        }
         STAMP_SET(inf, label_params);
         inf.label_lookahead_ticks = args.horizon_ticks;
         inf.label_tp_pct          = args.horizon_tp_pct;

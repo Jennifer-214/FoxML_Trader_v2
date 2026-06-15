@@ -1821,6 +1821,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 c, rc);
                                         } else {
                                             CORE_STATE_FLAG_CLR(state.cores[c], MODEL_LOAD_FAILED);
+                                            CORE_STATE_FLAG_CLR(state.cores[c], MODEL_CORRUPT);  // v5.15.5.E.0.10 A6 (D-221) — new model starts clean
                                             // Re-fetch ezoo after swap to run post-load
                                             // validators on the NEW ezoo. v5.14.2.E.1
                                             // closes PARITY-009.F: ValidateAgainstCfg +
@@ -1851,6 +1852,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 /*core_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
                                                 CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
+                                            }
+                                            // v5.15.5.E.0.10 A6 ingress (D-221) — post-swap corrupt finalize on
+                                            // the NEW ezoo (mirror of the boot path; same slow-path thread, AFTER
+                                            // the ACQ_REL ensemble_handle swap inside HotSwap_ShadowLoad_Ensemble).
+                                            if (EnsembleZoo_FinalizeCorrupt<F>(swap_ezoo, FPN_ToDouble(cfg.model_corrupt_shalt_ratio))) {
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_CORRUPT);
+                                                fprintf(stderr, "[hot_swap] core %d: ML barrier CORRUPT for the "
+                                                                "majority of arms — node REFUSES new trades; RETRAIN (D-221)\n", c);
                                             }
                                         }
                                         __atomic_store_n(

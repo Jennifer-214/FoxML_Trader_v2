@@ -42,6 +42,7 @@
 #include "ThompsonBandit.hpp"   // v5.14.10.B — per-regime ThompsonBanditState in EnsembleModelZoo (parallel to bandits[])
 #include "RidgeBlender.hpp"     // v5.14.0 — Ridge risk-parity blending state on EnsembleModelZoo
 #include "PerArmFlagRegistry.hpp"     // v5.15.5.A.2.b — FOREACH_PER_ARM_FLAG for per-arm uint8_t bitmaps
+#include "BarrierValidation.hpp"      // v5.15.5.E.0.10 A6 (D-221) — tt::barrier_is_corrupt SSoT predicate + SANE bounds
 #include "EzooInitFlagRegistry.hpp"   // v5.15.5.A.2.c — FOREACH_EZOO_INIT_FLAG bit-pack for init state
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
@@ -898,6 +899,13 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
 // circular dep; the value is small enough to hardcode.
 #define ENSEMBLE_HORIZON_MAX 8
 
+// v5.15.5.E.0.10 A6 (D-221) — the per-arm bitmaps (disabled_horizon_mask /
+// arms_with_barriers_mask / corrupt_arms_mask) are uint8_t = 8 bits = 8 arms.
+// Pin the width to the arm count (bitmap-overflow-protection-discipline): widen
+// the masks (uint8 -> uint16) if ENSEMBLE_HORIZON_MAX ever grows past 8.
+static_assert(ENSEMBLE_HORIZON_MAX <= 8,
+              "per-arm uint8_t bitmaps hold 8 arms; widen the masks if ENSEMBLE_HORIZON_MAX grows");
+
 // v5.15.4 — alignas(64) required so heap-allocated EnsembleModelZoo via
 // aligned_alloc(64) (HotSwap_ShadowLoad_Ensemble) gives the embedded
 // alignment-sensitive members correctly-aligned addresses:
@@ -1120,9 +1128,37 @@ static_assert(alignof(EnsembleModelZoo<64>) == 64,
 template <unsigned F>
 inline void ezoo_set_per_arm_barrier(EnsembleModelZoo<F>* ezoo, int arm_idx,
                                        float tp, float sl) {
+    // v5.15.5.E.0.10 A6 ingress (D-221) — refuse a CORRUPT barrier (neg/NaN/+Inf/out-of-range;
+    // tt::barrier_is_corrupt is the SSoT predicate, also applied at the StampHelper producer seam).
+    // A corrupt arm is FULLY DISABLED: mark corrupt_arms_mask (counted toward the per-node
+    // majority-SHALT + the sticky retrain alert) and WITHHOLD both the barrier value and the
+    // LOADED_BARRIERS bit -> excluded from the barrier blend (arms_with_barriers_mask gate). The
+    // disabled_horizon_mask union (prediction-loop exclusion) is applied at the post-load
+    // EvaluateCorruptShalt finalize, AFTER SetDisabledHorizons' reset so it can't be wiped.
+    if (tt::barrier_is_corrupt((double)tp, (double)sl)) {
+        BITMAP_SET(ezoo->corrupt_arms_mask, BITMAP_BIT_U8(arm_idx));
+        return;  // per_arm_barriers[arm_idx] stays zero-init; no LOADED_BARRIERS bit
+    }
     ezoo->per_arm_barriers[arm_idx].tp = tp;
     ezoo->per_arm_barriers[arm_idx].sl = sl;
     BITMAP_SET(ezoo->arms_with_barriers_mask, BITMAP_BIT_U8(arm_idx));
+}
+
+// v5.15.5.E.0.10 A6 ingress (D-221) — post-load corrupt finalize. Call ONCE per ezoo after
+// LoadFromCfg + SetDisabledHorizons (boot AND hot-swap), BEFORE publishing. (1) Unions the
+// corrupt arms into disabled_horizon_mask (prediction-loop exclusion; applied HERE so
+// SetDisabledHorizons' reset can't wipe it). (2) Returns the per-node majority-corrupt verdict:
+// true when MORE than `shalt_ratio` of the barrier-bearing arms are corrupt (default 0.5 =
+// strict majority) OR all are. The caller sets MASK_CORE_STATE_MODEL_CORRUPT + the sticky
+// retrain log on a true verdict. H22: pure function of THIS node's own ezoo + its cfg ratio.
+template <unsigned F>
+inline bool EnsembleZoo_FinalizeCorrupt(EnsembleModelZoo<F>* ezoo, double shalt_ratio) {
+    ezoo->disabled_horizon_mask |= ezoo->corrupt_arms_mask;
+    int n_corrupt = __builtin_popcount((unsigned)ezoo->corrupt_arms_mask);
+    int n_arms    = ezoo->buy_signal_count;  // barrier-bearing (primary) arm count
+    if (n_corrupt == 0 || n_arms <= 0) return false;
+    if (n_corrupt >= n_arms) return true;                    // all corrupt -> SHALT
+    return (double)n_corrupt > shalt_ratio * (double)n_arms; // strict majority -> SHALT
 }
 
 template <unsigned F>
@@ -1187,6 +1223,7 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     // Adding a FOREACH_PER_ARM_FLAG entry requires a matching line here.
     ezoo->disabled_horizon_mask = 0;
     ezoo->arms_with_barriers_mask = 0;
+    ezoo->corrupt_arms_mask = 0;  // v5.15.5.E.0.10 A6 (D-221) — per-arm corrupt bitmap
     ezoo->regime_transition_cycles_remaining = 0;
     ezoo->prev_regime_id = 0;
     // v5.10.0a.G.8 — reward state init

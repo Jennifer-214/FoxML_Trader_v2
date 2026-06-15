@@ -57,6 +57,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // (load failed / NaN events / pre-warmup) — keeps the panel
             // quiet for non-ML cores in mixed deployments.
             int has_ml_signal = STATE_FLAG_IS_SET(pc, IS_ML) || FAILURE_IS_SET(pc, ml_model_load_failed) ||
+                                 FAILURE_IS_SET(pc, ml_model_corrupt) ||  // v5.15.5.E.0.10 A6 (D-221)
                                  pc.ml_nan_feature_events > 0 ||
                                  pc.ml_nan_prediction_events > 0 ||
                                  (STATE_FLAG_IS_SET(pc, IS_ML) && pc.warmup_progress_pct < 100);
@@ -83,7 +84,17 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // Model state — tri-state, with ensemble awareness (v5.11.62+).
             // Ensemble counts as "loaded" even when single-zoo buy_model
             // isn't populated — the strategy reads ezoo->primary_handles.
-            if (FAILURE_IS_SET(pc, ml_model_load_failed)) {
+            if (FAILURE_IS_SET(pc, ml_model_corrupt)) {
+                // v5.15.5.E.0.10 A6 ingress (D-221) — corrupt is checked BEFORE load-failed: a
+                // corrupt artifact is more specific + more alarming than a generic load failure.
+                ImGui::TextColored(FoxmlColors::red, "model: CORRUPT — RETRAIN");
+                ImGui::SetItemTooltip(
+                    "ML model's stamp-bound barrier (label_tp_pct / label_sl_pct) failed\n"
+                    "ingress validation at load (negative / NaN / +Inf / out-of-range) for the\n"
+                    "majority of ensemble arms. The node REFUSES to trade until a valid model is\n"
+                    "loaded — distinct from a MISSING model (which degrades to SimpleDip).\n"
+                    "Operator action: RETRAIN the model (the on-disk stamp is corrupt).");
+            } else if (FAILURE_IS_SET(pc, ml_model_load_failed)) {
                 ImGui::TextColored(FoxmlColors::red, "model: LOAD FAILED");
                 ImGui::SetItemTooltip(
                     "ML strategy was selected but no model could be loaded.\n"

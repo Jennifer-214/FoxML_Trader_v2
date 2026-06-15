@@ -85,7 +85,8 @@
 // (which memsets the struct or explicit zero-init).
 #define FOREACH_PER_ARM_FLAG(X) \
     X(DISABLED,        disabled_horizon_mask,    "Per-arm operator-disabled (legacy v5.14; cfg.disabled_horizons CSV)") \
-    X(LOADED_BARRIERS, arms_with_barriers_mask,  "Per-arm has stamp-recorded TP/SL barriers (v5.15.5+)")
+    X(LOADED_BARRIERS, arms_with_barriers_mask,  "Per-arm has stamp-recorded TP/SL barriers (v5.15.5+)") \
+    X(CORRUPT,         corrupt_arms_mask,        "Per-arm barrier (label_tp/sl_pct) failed ingress validation: neg/NaN/+Inf/out-of-range — arm FULLY disabled (also sets disabled_horizon_mask, withholds arms_with_barriers_mask) + counted toward majority-SHALT (v5.15.5.E.0.10 A6)")
 
 //======================================================================================================
 // [AUTO-GENERATED ENUM]

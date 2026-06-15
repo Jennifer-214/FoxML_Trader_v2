@@ -616,6 +616,17 @@ static inline void TUI_CopySnapshotSharded(
             if (CORE_STATE_FLAG_IS_SET(state->cores[i], MODEL_LOAD_FAILED)) {
                 FAILURE_SET(snap->per_core[i], ml_model_load_failed);
             }
+            // v5.15.5.E.0.10 A6 ingress (D-221) — sticky "model: CORRUPT — RETRAIN" alert on ANY
+            // corrupt arm (a partial-drop graceful-degrade is NOT silent). Broader than the
+            // MODEL_CORRUPT CoreState SHALT (which is the MAJORITY case): the operator is alerted
+            // to retrain whenever even one barrier is corrupt, while the node keeps trading on the
+            // surviving clean arms until the majority threshold trips.
+            {
+                EnsembleModelZoo<F>* ez_corrupt = (EnsembleModelZoo<F>*)state->cores[i].ensemble_handle;
+                if (ez_corrupt && ez_corrupt->corrupt_arms_mask) {
+                    FAILURE_SET(snap->per_core[i], ml_model_corrupt);
+                }
+            }
             snap->per_core[i].ml_last_threshold          = state->display_meta[i].last_ml_threshold;
             snap->per_core[i].ml_last_effective_threshold= state->display_meta[i].last_ml_effective_threshold;
             snap->per_core[i].ml_nan_feature_events      = state->display_meta[i].nan_feature_events_total;

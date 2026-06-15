@@ -347,6 +347,18 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                         ezoo_ptr->primary_count, n_loaded);
                 EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, c,
                                                    cfg.core_model_dir[c]);
+                // v5.15.5.E.0.10 A6 ingress (D-221) — post-load corrupt finalize: union corrupt
+                // arms into disabled_horizon_mask + the per-node majority-corrupt verdict. Runs
+                // AFTER PostLoadSetup (incl. SetDisabledHorizons) so the disabled-union can't be
+                // wiped. Single-threaded at boot; sets MODEL_CORRUPT (distinct from MODEL_LOAD_FAILED).
+                if (EnsembleZoo_FinalizeCorrupt<F>(ezoo_ptr, FPN_ToDouble(cfg.model_corrupt_shalt_ratio))) {
+                    CORE_STATE_FLAG_SET(state.cores[c], MODEL_CORRUPT);
+                    fprintf(stderr, "[model] core %d: ML barrier CORRUPT for the majority of "
+                                    "ensemble arms (%d of %d) — node REFUSES new trades until "
+                                    "RETRAIN (D-221)\n",
+                            c, __builtin_popcount((unsigned)ezoo_ptr->corrupt_arms_mask),
+                            ezoo_ptr->buy_signal_count);
+                }
                 state.cores[c].ensemble_handle = ezoo_ptr;
                 ensemble_loaded = 1;
             } else {

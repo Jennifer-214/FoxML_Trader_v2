@@ -2602,6 +2602,7 @@ inline void EventLoop_RebuildOneCore(
             // to a core_state_flags bitmap bit. mctx field changed from int* to int-by-value;
             // copy current bit state into the int.
             ml_ctx.model_load_failed           = CORE_STATE_FLAG_IS_SET(state->cores[slot], MODEL_LOAD_FAILED) ? 1 : 0;
+            ml_ctx.model_corrupt               = CORE_STATE_FLAG_IS_SET(state->cores[slot], MODEL_CORRUPT) ? 1 : 0;  // v5.15.5.E.0.10 A6 (D-221)
             ml_ctx.last_ml_critical_log_us     = &state->display_meta[slot].last_ml_critical_log_us;
             ml_ctx.out_threshold               = &state->display_meta[slot].last_ml_threshold;
             ml_ctx.out_effective_threshold     = &state->display_meta[slot].last_ml_effective_threshold;

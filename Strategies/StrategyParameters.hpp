@@ -127,6 +127,7 @@ struct MLBuildContext {
     // site copies-in the current bit state. Read-only field from ML body's
     // perspective; semantics preserved (0 = no failure; non-zero = failure).
     int                 model_load_failed;            // read-only: BIT state at call time (0 = ok, 1 = load failed)
+    int                 model_corrupt;                // v5.15.5.E.0.10 A6 (D-221) read-only: MODEL_CORRUPT bit (majority barrier-corrupt -> SHALT-the-node; distinct from load_failed)
     uint64_t*           last_ml_critical_log_us;      // rate-limit gate for fall-through log
     double*             out_threshold;                // ml_buy_threshold at decision time
     double*             out_effective_threshold;      // post-damping threshold used
@@ -275,9 +276,14 @@ inline Money Strategy_TpFloor(Money entry_price,
 // On a violation: BUY_BLOCKED (the absolute sg_* fallback shares the corrupt source —
 // don't trust it; block the entry) + clamp (defense-in-depth) + a SHALT that OVERRIDES
 // first-wins (a corruption signal must not hide behind a benign earlier gate-block).
+// v5.15.5.E.0.10 A6 egress (D-221) — SSoT upper bound for an emitted barrier pct (a FRACTION; applied
+// as price·pct at exec). 10000.0 ≫ any legit pct (cfg-clamped ≤100%), ≪ +sat (~9.2e18). Shared by
+// FinalizeEmit's range-validate AND the leg-B tp_pct_b clamp below (the A-class leg-B leak fix).
+static inline Money GateEgress_MaxPct() { return Money{ (__int128)10000 * (__int128)MONEY_SCALE }; }
+
 template <unsigned F>
 inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strategy_halt_reason) {
-    const Money MAX_PCT = Money{ (__int128)10000 * (__int128)MONEY_SCALE };  // 10000.0 ≫ any legit pct (cfg-clamped ≤100%), ≪ +sat (~9.2e18)
+    const Money MAX_PCT = GateEgress_MaxPct();  // SSoT bound (shared with the tp_pct_b clamp); ≫ legit pct, ≪ +sat
     int bad = Money_Lt(out->tp_pct, Money_Zero()) | Money_Gt(out->tp_pct, MAX_PCT)
             | Money_Lt(out->sl_pct, Money_Zero()) | Money_Gt(out->sl_pct, MAX_PCT);
     if (bad) {
@@ -1785,6 +1791,17 @@ inline void Strategy_BuildParameters(
     // clamp) and before the fee-floor/cost-gate read them.
     GateParameters_FinalizeEmit(out, strategy_halt_reason);
 
+    // v5.15.5.E.0.10 A6 ingress (D-221) — MODEL_CORRUPT: SHALT-the-node. The bit was set at
+    // boot/hot-swap when the MAJORITY of barrier arms were corrupt. Block NEW entries (the hot
+    // path reads GATE_FLAG_BUY_BLOCKED) + distinct attribution (corruption is the headline, so it
+    // OVERRIDES any earlier SHALT). Open positions ride their valid pre-corruption barriers
+    // (block-new-only). model_ctx is non-null only on the ML dispatch path; model_corrupt is 0
+    // for non-ML cores, so this is a no-op elsewhere.
+    if (model_ctx && ((MLBuildContext*)model_ctx)->model_corrupt) {
+        out->flags |= GATE_FLAG_BUY_BLOCKED;
+        if (strategy_halt_reason) *strategy_halt_reason = SHALT_MODEL_CORRUPT;
+    }
+
     // Partial exits P.4 (2026-04-27): uniform post-dispatch cap. When
     // cfg.partial_exit_enabled=1, set GATE_FLAG_PAIR_ACTIVE on the param
     // pack so the hot path (ExecutionCore_Tick, P.2) opens both legs on
@@ -1811,6 +1828,11 @@ inline void Strategy_BuildParameters(
         } else {
             out->tp_pct_b = out->tp_pct;
         }
+        // v5.15.5.E.0.10 A6 egress (D-221) — tp_pct_b is derived AFTER FinalizeEmit's clamp, so a
+        // large tp2_mult could push it back out of range (the leg-B leak the A-class found —
+        // live_tp_b = price + price*tp_pct_b reads it raw on the hot path). Re-clamp to the SSoT
+        // egress bound so leg-B can't saturate.
+        out->tp_pct_b = Money_Max(Money_Min(out->tp_pct_b, GateEgress_MaxPct()), Money_Zero());
     } else {
         // Explicit clear when disabled — guarantees pre-P.4 callers
         // (or a re-used GateParameters instance) see tp_pct_b == 0 +

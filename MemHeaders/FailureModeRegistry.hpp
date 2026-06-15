@@ -233,7 +233,19 @@ enum FailureModeGroupId : int {
       "detached from current market regime.\n"                                                          \
       "Operator action: retrain on recent data OR adjust\n"                                             \
       "model_max_age_hours.",                                                                           \
-      tt::GROUP_DRIFT)
+      tt::GROUP_DRIFT)                                                                                  \
+    /* v5.15.5.E.0.10 A6 ingress (D-221) — ML model BARRIER corruption; sticky (latches until a       */ \
+    /* valid reload clears MODEL_CORRUPT). Node REFUSES new trades. Distinct from ml_model_load_failed */ \
+    /* (missing→SimpleDip degrade). 1 hand-placed MLStatusPanel render branch (sibling pattern).       */ \
+    X(ml_model_corrupt,         BIT_FLAG,    SEV_RED,    "model: CORRUPT — RETRAIN",                    \
+      "ML model's stamp-bound barrier (label_tp_pct / label_sl_pct) failed\n"                            \
+      "ingress validation at load (negative / NaN / +Inf / out-of-range) for\n"                          \
+      "the MAJORITY of ensemble arms (or all arms). The node REFUSES to trade\n"                         \
+      "(new entries gate-zeroed) until a valid model is loaded — DISTINCT from\n"                        \
+      "a MISSING model (which degrades to SimpleDip): a corrupt capital artifact\n"                      \
+      "is more alarming than an absent one.\n"                                                           \
+      "Operator action: RETRAIN the model (the on-disk stamp is corrupt).",                             \
+      tt::GROUP_STANDALONE)
 
 //======================================================================================================
 // [STORAGE-CLASS-AWARE FIELD GENERATION]

@@ -60,7 +60,7 @@ namespace tt {
 //                + MASK_CORE_STATE_<name> uint8_t mask constant
 //   doc_string — human-readable description for audits + docs
 //
-// 5 entries used; 3 bits headroom in uint8_t. Promote storage to uint16_t
+// 6 entries used; 2 bits headroom in uint8_t. Promote storage to uint16_t
 // if/when a 9th entry needs adding (static_assert below catches overflow).
 //======================================================================================================
 #define FOREACH_CORE_STATE_FLAG(X)                                                                  \
@@ -91,7 +91,16 @@ namespace tt {
     /* the log + sets bit so subsequent cycles don't re-emit. (.B.2 → DisplayMeta; .B.3 migrates  */ \
     /* back to CoreContext as a bit.) */                                                             \
     X(WARMUP_LOG_EMITTED,                                                                             \
-      "boot-time per-core warmup-complete log has been emitted (edge-trigger)")
+      "boot-time per-core warmup-complete log has been emitted (edge-trigger)")                       \
+    /* v5.15.5.E.0.10 A6 ingress — ML model BARRIER corruption refusal. Set by the per-core slow-   */ \
+    /* path thread (single-writer; ordered AFTER the ensemble_handle ACQ_REL hot-swap) when the      */ \
+    /* corrupt-arm ratio popcount(ezoo->corrupt_arms_mask)/primary_count > model_corrupt_shalt_ratio */ \
+    /* (majority), OR all barrier-arms corrupt (empty barrier-zoo). Node SHALTs: NEW entries zero-    */ \
+    /* gated (GATE_FLAG_BUY_BLOCKED + SHALT_MODEL_CORRUPT) + sticky retrain alert. DISTINCT from      */ \
+    /* MODEL_LOAD_FAILED (missing→SimpleDip degrade): a corrupt artifact is more alarming than an     */ \
+    /* absent one (D-221). Open positions ride their valid pre-corruption barriers (block-new-only). */ \
+    X(MODEL_CORRUPT,                                                                                  \
+      "ML model barrier failed ingress validation for the majority of arms — node refuses NEW trades (retrain)")
 
 //======================================================================================================
 // [AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]

@@ -261,7 +261,8 @@ static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == 
     X(RECOVERY,         "recovery",       "post-flatten recovery window — new entries blocked (v5.12.1.A.3)") \
     X(PARAM_STALE,      "param-stale",    "slow-path params older than max_age_ticks (v5.12.1.B.3)") \
     X(EXIT_PREDICTED,   "exit-predicted", "ML exit predictor fired early exit (v5.13.0+; sell-side attribution)") \
-    X(BAD_PCT,          "bad-pct",        "A6 egress chokepoint: tp/sl_pct out of [0,MAX] — corrupt model barrier or override (TECH_DEBT-171)")
+    X(BAD_PCT,          "bad-pct",        "A6 egress chokepoint: tp/sl_pct out of [0,MAX] — corrupt model barrier or override (TECH_DEBT-171)") \
+    X(MODEL_CORRUPT,    "model-corrupt",  "A6 ingress: ML model barrier corrupt for the majority of ensemble arms — node refuses NEW trades (D-221; distinct from egress BAD_PCT)")
 
 // Auto-generated SHALT_<id> constants. Underlying type uint8_t for
 // compact storage in TradeEvent / per-core snapshot fields.
