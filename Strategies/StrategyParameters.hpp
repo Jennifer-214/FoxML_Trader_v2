@@ -265,6 +265,29 @@ inline Money Strategy_TpFloor(Money entry_price,
     return Money_Ge(tp_amount, floor) ? tp_amount : floor;
 }
 
+// A6 egress invariant (TECH_DEBT-171) — the single gate-emit chokepoint. Every
+// dispatched strategy flows through this once (called from Strategy_BuildParameters
+// after the switch, BEFORE the tp_pct_b derive), so a 7th strategy auto-inherits it.
+// tp_pct/sl_pct MUST land in [0, MAX_PCT]: a NEGATIVE pct inverts live_sl ABOVE entry
+// (instant SL fire); NaN/+Inf launder to +sat via money_from_double_payload, so a
+// SIGN-ONLY clamp would let +sat through → live_sl/live_tp saturate → an UN-EXITABLE
+// position (the A-class catch). 0 is legitimate (no pct → the absolute sg_* target).
+// On a violation: BUY_BLOCKED (the absolute sg_* fallback shares the corrupt source —
+// don't trust it; block the entry) + clamp (defense-in-depth) + a SHALT that OVERRIDES
+// first-wins (a corruption signal must not hide behind a benign earlier gate-block).
+template <unsigned F>
+inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strategy_halt_reason) {
+    const Money MAX_PCT = Money{ (__int128)10000 * (__int128)MONEY_SCALE };  // 10000.0 ≫ any legit pct (cfg-clamped ≤100%), ≪ +sat (~9.2e18)
+    int bad = Money_Lt(out->tp_pct, Money_Zero()) | Money_Gt(out->tp_pct, MAX_PCT)
+            | Money_Lt(out->sl_pct, Money_Zero()) | Money_Gt(out->sl_pct, MAX_PCT);
+    if (bad) {
+        out->flags |= GATE_FLAG_BUY_BLOCKED;
+        out->tp_pct = Money_Max(Money_Min(out->tp_pct, MAX_PCT), Money_Zero());
+        out->sl_pct = Money_Max(Money_Min(out->sl_pct, MAX_PCT), Money_Zero());
+        if (strategy_halt_reason) *strategy_halt_reason = SHALT_BAD_PCT;  // corruption overrides first-wins
+    }
+}
+
 //======================================================================================================
 // [SIMPLEDIP — full port]
 //======================================================================================================
@@ -1756,6 +1779,11 @@ inline void Strategy_BuildParameters(
             }
             return;
     }
+
+    // A6 egress invariant (TECH_DEBT-171) — validate tp_pct/sl_pct ONCE for every
+    // dispatched strategy, BEFORE the tp_pct_b derive below (so leg-B inherits the
+    // clamp) and before the fee-floor/cost-gate read them.
+    GateParameters_FinalizeEmit(out, strategy_halt_reason);
 
     // Partial exits P.4 (2026-04-27): uniform post-dispatch cap. When
     // cfg.partial_exit_enabled=1, set GATE_FLAG_PAIR_ACTIVE on the param
