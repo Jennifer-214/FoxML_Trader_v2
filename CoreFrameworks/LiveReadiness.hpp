@@ -182,6 +182,24 @@ inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
 }
 
 //======================================================================================================
+// [.E.0.10 Phase-D — BLANKET live-capital boot gate (D-77/F-2 + D-168)]
+//======================================================================================================
+// Live trading is gated behind the WHOLE .E-series live-readiness rework (per-node aggregator +
+// reconciliation + the cross-thread torn-read closure; the sprint end-goal). Until .E lands, live
+// capital is REFUSED at boot — fail-safe: no accidental live trading on the pre-.E engine. Routes
+// through the single capital-authority predicate (NEW-1 / RBP Class 47), so it inherits the .E.1
+// per-cluster relocation (H22) with zero edits here.
+//
+// >>> H21 TOMBSTONE: REMOVE this fn + its FOREACH_LIVE_READINESS_CHECK row at .E / v5.16, when the
+//     live-readiness rework actually lands. Do NOT silently leave it — it would block the intended
+//     go-live. Tracked: TECH_DEBT-203 (removal) + the .E.1-foundation live-readiness completion. <<<
+template <unsigned F>
+inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
+                                             const EventLoopState<F>&) {
+    return !ControllerConfig_IsLiveCapital(cfg);  // PASS unless live capital is requested -> REFUSE in live
+}
+
+//======================================================================================================
 // [REGISTRY DEFINITION]
 //======================================================================================================
 // Tuple: X(name, fn_ptr, severity, fix_hint)
@@ -191,6 +209,8 @@ inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
 //   fix_hint  — operator-actionable guidance string (~80 chars).
 
 #define FOREACH_LIVE_READINESS_CHECK(X) \
+    X(live_capital_gated_until_e,  check_live_capital_gated_until_e,  LR_SEV_REFUSE, \
+      "live capital is gated behind the .E-series live-readiness rework (per-node aggregator / reconciliation / torn-read closure); run trading_mode=paper or shadow. REMOVED at v5.16 when .E lands (H21 tombstone; TECH_DEBT-203).") \
     X(secret_nonempty,             check_secret_nonempty,             LR_SEV_REFUSE, \
       "set held_out_stamp_secret in cfg (HMAC verification)") \
     X(mlockall_required,           check_mlockall_required,           LR_SEV_REFUSE, \
@@ -227,7 +247,7 @@ inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
 template <unsigned F>
 inline int LiveReadiness_Verify(const ControllerConfig<F>& cfg,
                                 const EventLoopState<F>& state) {
-    const bool live = (cfg.trading_mode == TRADING_MODE_LIVE);
+    const bool live = ControllerConfig_IsLiveCapital(cfg);  // NEW-1 single-authority predicate (RBP Class 47; the .E.1 per-cluster relocation seam, H22). Identical to trading_mode==LIVE today; routes through the one authority.
     const char* mode_str = live ? "live" :
                            (cfg.trading_mode == TRADING_MODE_SHADOW ? "shadow" : "paper");
     int refused = 0, warned = 0;

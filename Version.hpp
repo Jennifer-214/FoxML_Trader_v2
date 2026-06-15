@@ -5,7 +5,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.9"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.10"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -17,6 +17,34 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// .F.4d.1.E.0.10 (v5.15.5.F.4d.1.E.0.10) — Net-1 pre-`.E.1` CORRECTNESS NET + the capital-correctness
+// backlog burn-down (multi-session ship; full arc in the decision log D-201..D-221 + the postmortem).
+// Headline deliverables:
+//   - NET-1: the pre-`.E.1` regression net — PERSIST characterization tests + H1-H20 CI invariant
+//     checks + the live-disposition finding register (141 `.E` + 93 TECH_DEBT + 5 PARITY re-triaged).
+//   - A-SERIES adversarial exit-chain audit -> durable-now capital fixes: NEW-1 single capital-authority
+//     predicate `ControllerConfig_IsLiveCapital` (RBP Class 47 split-brain collapse; legacy single_core
+//     LIVE hard-refused, H21) - A20 reconciler seed-don't-replay (no double-book) - A21 venue-net cash-leg
+//     DETECT-ONLY - A17 paper-synth SSoT. Anti-patterns codified: RBP Class 43-49.
+//   - A6 CAPITAL GUARD (corrupt/bad barrier): EGRESS = `GateParameters_FinalizeEmit` range-validate every
+//     gate-emit + `SHALT_BAD_PCT` (one dispatcher chokepoint). INGRESS = corrupt-model detect->per-arm-drop->
+//     majority node-SHALT (`barrier_is_corrupt` SSoT + `MODEL_CORRUPT` CoreState + trainer-emit floor;
+//     RBP Class 49; D-220/D-221).
+//   - PHASE-D: BLANKET live-capital boot-gate — `LiveReadiness_Verify` REFUSES live until the `.E`-series
+//     live-readiness rework lands (fail-safe; via the NEW-1 predicate; H21 tombstone -> remove at v5.16,
+//     TECH_DEBT-203).
+//   - TD-202 (Ship-B-vintage OMS event-log UAF, asan ship-gate): quiesce-first `OrderEventLog_Init`
+//     (RBP Class 50 re-init-defeats-join). Surfaced by a 3-I->3-A `/precoding-audit-gate`; the gate also
+//     found a production `OrderEventLog_Reset` 3-way disk race + a `LoadFromDisk` recovery hole -> the
+//     single-owner-`disk_file` rework folded to `.E.1`. NEW disciplines: `fix-toward-future-trajectory`
+//     (design fixes as forward-compatible foundation increments) + the V-class post-implementation
+//     verification + the anti-stale sanitizer gate (`run_sanitizer_suite.sh` rebuilds each lane fresh —
+//     it had been grading months-old binaries).
+//   - VERIFY at close: controller_test 3635/0 - FRESH asan + ubsan 3635/0 (0 sanitizer errors) -
+//     calls_graph_diff CLEAN (hot path UNTOUCHED) - doc-CI SWEEP CLEAN - guard-coverage matrix §4d
+//     records the COMPLETE `.E.0.10` guard set + the `.E.1`-owned HOLE cluster (H7/H10/H14/H20).
+//   Postmortem at plans/v5.15-live-readiness/postmortems/2026-06-15-v5.15.5.F.4d.1.E.0.10-postmortem.md.
+//
 // .F.4d.1.E.0.8 (v5.15.5.F.4d.1.E.0.8 — tag monotonic after E.0.7 per D-88) — SHIP A.5: the cosmetic
 // FPN -> FPN_Binary type+trait rename against the stable 16B anchor (D-143/D-163; deferred OUT of Ship A
 // to preserve the flip's diff-anchor). ZERO-SEMANTIC: type spelling + is_FPN_v retirement (-> is_fp_binary_v;
