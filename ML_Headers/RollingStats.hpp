@@ -132,6 +132,17 @@ static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 4,
               "outputs (price_avg through vwap_deviation) read by GUI thread; "
               "head writes by engine must not share line with them");
 
+// SIZE PINS (mechanical SSoT — replaces the hand-computed size comments that DRIFTED
+// ~23x on PortfolioController.hpp:253-257; "~1.5MB" was rolling_baseline x16 cores at
+// the OLD 24B FPN, mis-placed on a per-core field — see decision log D-229). sizeof has
+// no "scope" assumption: these are the unambiguous per-INSTANCE sizes. A layout change
+// is now a COMPILE error; recompute via tools/check_struct_size_budget.py and update the
+// number here. Sister to the alignment asserts above + check_struct_alignment.py(c).
+static_assert(sizeof(RollingStats<64, 128>)  ==  8640, "RollingStats<64,128> size-pin (~8.4KB)");
+static_assert(sizeof(RollingStats<64, 256>)  == 16832, "RollingStats<64,256> size-pin (~16.4KB)");
+static_assert(sizeof(RollingStats<64, 512>)  == 33216, "RollingStats<64,512> size-pin (~32.4KB)");
+static_assert(sizeof(RollingStats<64, 1024>) == 65984, "RollingStats<64,1024> size-pin (~64.4KB, NOT the stale ~1.5MB)");
+
 //======================================================================================================
 // [INIT]
 //======================================================================================================
