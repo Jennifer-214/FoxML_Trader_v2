@@ -5,7 +5,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.0.10"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.0"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -17,6 +17,38 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// .F.4d.1.E.1.0 (v5.15.5.F.4d.1.E.1.0) — H8 STATIC latency-path CONFORMANCE ANALYZER + the §4d guard-NET
+// close. Zero engine-code change (private CI apparatus in tools/ + the ship-close codifications, all
+// gitignored-in-place/workspace-backed); FIRST leaf of the decomposed `.E.1` foundation (D-225 N=7:
+// E.1.0 guards -> E.1.1 rename -> E.1.2 SoA relayout -> ... -> E.1.5 per-cluster purity; HARD live-enable
+// = E.1.3 ∧ E.1.5).
+// Headline deliverables:
+//   - `tools/check_latency_path_conformance.py` — disassembles the PRODUCTION (`-O3 -march=native`)
+//     probe-wrappers of a 7-row KERNEL manifest (D-238 kernel-granularity: gate the bounded per-cycle
+//     LEAVES, NOT the `EventLoop_RebuildOneCore` orchestrator) + gates FROM ASM: instruction-count budget ·
+//     branch-classification {loop / rare-cold / data-dependent-warm = the H7/H20 meter, SUBSUMES the grep} ·
+//     no scalar-float incl. AVX/FMA (H4) · no div/malloc/indirect/vtable · transitive same-TU scan
+//     (MAX_DEPTH 5, fail-loud). Source-keyed `allow` + `FEATURE_MATH_EXTERN` exemptions single-sourced to
+//     the H4-sanctioned feature seams (D-237; forbidden-calls exempt by `file:line` ONLY). ASSERTS its OWN
+//     non-vacuity — else it would BE the Class-51 vacuously-green guard it codifies against.
+//   - WIRED: pre-commit Check N (trigger-scoped, `SKIP_LATENCY_CONFORMANCE_CHECK` bypass) + `run_all_tests.sh`
+//     (gate + `--selftest`, both HARD); grandfathered baseline `tools/lib/latency_path_budgets.json` (7 rows);
+//     15 `--selftest` teeth all fire. Sister to `.E.1.0` s2 `check_struct_size_budget.py` (derived-facts-
+//     drift guard family; D-229).
+//   - 5 INDEPENDENT adversarial passes found the load-bearing holes the builder's dogfood could NOT (AR-8
+//     model-bounded-self-check): the decorative div-gate (counted but un-gated) · the cold-quartile
+//     false-green · the forbidden-file-level hole — each fixed STRUCTURALLY. -> TD-207 (M7: independent-
+//     review-by-default for mid-session tool builds).
+//   - Ship-close codifications: the conformance DESIGN_SPEC (`audit-methodologies/static-latency-path-
+//     conformance-analysis.md`) + RBP Class 51 "vacuously-green guard" first-canonical + the mechanical-
+//     verification-of-derived-code-facts D-233 amendment (LATENCY/COMPLEXITY rows runtime->static).
+//   - i/a/v/d/c subagent registry (`claude-agents/` + `DOCS/SUBAGENT_ARMING.md`; the C->D->I->A->[code]->V
+//     cascade) live.
+//   - VERIFY at close: build.sh test 3635/0 - run_all_tests --fast ALL HARD PASS (suite + doc-CI + orphan +
+//     determinism + conformance + 15 teeth) - calls_graph_diff CLEAN (hot path UNTOUCHED) - doc-CI SWEEP
+//     CLEAN. Zero engine-code change -> NO sanitizer-lane gate (apparatus + docs only). Decision log
+//     D-233..D-238.
+//
 // .F.4d.1.E.0.10 (v5.15.5.F.4d.1.E.0.10) — Net-1 pre-`.E.1` CORRECTNESS NET + the capital-correctness
 // backlog burn-down (multi-session ship; full arc in the decision log D-201..D-221 + the postmortem).
 // Headline deliverables:
