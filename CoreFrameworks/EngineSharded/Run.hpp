@@ -199,6 +199,22 @@ static inline int EngineSharded_PinThread(int cpu_id) {
 }
 
 //======================================================================================================
+// [PER-NODE CPU TOPOLOGY] — a NODE owns 2 CPUs (1 hot + 1 slow); node_id ≠ cpu_id.
+//======================================================================================================
+// Boot CPU layout for N nodes (= num_execution_cores):
+//   CPU 0      = producer
+//   CPU 1..N   = node hot threads   (node i → EngineSharded_NodeHotCpu(i))
+//   CPU N+1    = drainer            (EngineSharded_DrainerCpu(N))
+//   CPU N+2..  = node slow threads  (EngineSharded_NodeSlowCpuBase(N) fallback base;
+//                SmartSlowPathPins overrides slow → a SEPARATE physical core, avoiding SMT siblings)
+// So a node spans 2 CPUs on 2 physical cores (the hot/slow split). These helpers name the
+// conventions (was scattered magic i+1 / num+1 / num+2) so node↔cpu stays legible — and are the
+// single override point if per-node CPU config ever lands (a NON-goal here; this leaf is names-only).
+static inline int EngineSharded_NodeHotCpu(int node_id)        { return node_id + 1;   }  // CPU 1..N (CPU 0 = producer)
+static inline int EngineSharded_DrainerCpu(int num_nodes)      { return num_nodes + 1; }  // CPU N+1
+static inline int EngineSharded_NodeSlowCpuBase(int num_nodes) { return num_nodes + 2; }  // CPU N+2.. (fallback base)
+
+//======================================================================================================
 // [SMART SLOW-PATH CPU PIN ASSIGNMENT — v5.1.5]
 //======================================================================================================
 // Read /sys/devices/system/cpu/cpuN/topology/thread_siblings_list to learn
@@ -257,7 +273,7 @@ static inline int EngineSharded_SmartSlowPathPins(int producer_cpu,
     if (producer_cpu >= 0 && producer_cpu < (int)nproc) hot[producer_cpu] = true;
     if (drainer_cpu  >= 0 && drainer_cpu  < (int)nproc) hot[drainer_cpu] = true;
     for (int i = 0; i < num_hot && i < 16; ++i) {
-        int hcpu = i + 1;  // hot-path i pins to CPU i+1 by convention
+        int hcpu = EngineSharded_NodeHotCpu(i);  // node i hot → CPU i+1 (CPU 0 = producer)
         if (hcpu >= 0 && hcpu < (int)nproc) hot[hcpu] = true;
     }
 
@@ -1265,7 +1281,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         }
     }
     int  topo_producer_cpu = 0;
-    int  topo_drainer_cpu  = num_cores + 1;
+    int  topo_drainer_cpu  = EngineSharded_DrainerCpu(num_cores);  // CPU N+1
     long topo_nproc        = sysconf(_SC_NPROCESSORS_ONLN);
     if (topo_nproc < 1) topo_nproc = 1;
 
@@ -1278,7 +1294,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                           &paper_reset_in_progress,
                           &topo_hot_cpu, &topo_slow_cpu, &topo_poll_interval,
                           topo_producer_cpu, topo_drainer_cpu, topo_nproc] {
-        EngineSharded_PinThread(0);  // best-effort pin to CPU 0
+        EngineSharded_PinThread(topo_producer_cpu);  // producer → CPU 0
         uint64_t seq = 0;
         // v4.3.1 — slow_path_interval now reads cfg.poll_interval to match
         // backtest (which always used cfg.poll_interval=100 default).
@@ -1393,7 +1409,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     executors.reserve(num_cores);
     for (int i = 0; i < num_cores; ++i) {
         executors.emplace_back([i, &producer_done, &ticks_consumed_total] {
-            EngineSharded_PinThread(i + 1);  // CPU 1..N (CPU 0 = producer)
+            EngineSharded_PinThread(EngineSharded_NodeHotCpu(i));  // node i hot → CPU i+1 (CPU 0 = producer)
             Tick<F> t;
             uint64_t local_consumed = 0;
             while (!g_engine_sharded_shutdown) {
@@ -1598,8 +1614,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 }
                 fprintf(stderr, ", nproc %ld)\n", nproc);
             } else {
-                // Fallback: simple (num_cores + 2 + c) % nproc
-                sp_pin_base = num_cores + 2;
+                // Fallback: simple (NodeSlowCpuBase(N) + c) % nproc = (num_cores + 2 + c) % nproc
+                sp_pin_base = EngineSharded_NodeSlowCpuBase(num_cores);  // CPU N+2.. fallback base
                 fprintf(stderr, "[sharded] spawning %d "
                                 "slow-path threads (smart pin failed; fallback base CPU %d, nproc %ld)\n",
                         num_cores, sp_pin_base, nproc);
