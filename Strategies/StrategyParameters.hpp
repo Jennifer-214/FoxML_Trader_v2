@@ -743,7 +743,7 @@ inline void EmaCross_BuildParameters(
 //   - else soft modulation: scale trade_size by bg.gate ∈ [g_min, 1.0]
 //
 // ml_ctx_ptr is &MLBuildContext (Phase 6prep sharded c13/c15). Legacy callers
-// (LegacyReferenceDriver, experiment tests) pass nullptr — no model, no
+// (experiment tests) pass nullptr — no model, no
 // confidence damping, fall back to SimpleDip. Sharded production path always
 // passes a real MLBuildContext.
 //======================================================================================================
