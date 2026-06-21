@@ -128,13 +128,13 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         }
         Money qty = oms.portfolio.positions[slot].quantity;
         if (Money_IsZero(qty)) continue;
-        // Map slot → core_id for strategy_id + leg lookup
+        // Map slot → node_id for strategy_id + leg lookup
         // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
         // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
-        int core_id = partial_on ? (slot >> 1) : slot;
+        int node_id = partial_on ? (slot >> 1) : slot;
         int leg     = partial_on ? (slot & 1)  : 0;
-        if (core_id < 0 || core_id >= state.registered_count) continue;
-        uint8_t strategy_id = state.cores[core_id].strategy_id;
+        if (node_id < 0 || node_id >= state.registered_count) continue;
+        uint8_t strategy_id = state.nodes[node_id].strategy_id;
         // Use latest tick price as fill price for paper mode. Live
         // mode would route to a real adapter SELL — same Submit call.
         Money fill_px = Money{ money_from_double_payload(
@@ -154,7 +154,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
             strategy_id,
             fill_px,
             (uint8_t)leg,
-            &cfg.cores[core_id]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-core cfg for pre-resolve at submit
+            &cfg.nodes[node_id]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-core cfg for pre-resolve at submit
         // v4.7.19: counter bumps moved to EventLoop_DrainPostFill —
         // see the doctrine note there. Pre-v4.7.19 we bumped here
         // BEFORE Submit could fail (queue full, slot already closed,
@@ -164,13 +164,13 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         // path doesn't re-emit on the next tick (race-tolerant —
         // worst case is one duplicate exit event that HandleFill
         // dedups via the empty-slot bitmap check).
-        if (state.cores[core_id].core) {
-            if (leg == 0) state.cores[core_id].core->active   = 0;
-            else          state.cores[core_id].core->active_b = 0;
+        if (state.nodes[node_id].core) {
+            if (leg == 0) state.nodes[node_id].core->active   = 0;
+            else          state.nodes[node_id].core->active_b = 0;
         }
         std::fprintf(stderr,
             "[manual-close] slot %d (core %d leg %s): force-exit @ %.2f, qty %.6f\n",
-            slot, core_id, leg == 0 ? "A" : "B",
+            slot, node_id, leg == 0 ? "A" : "B",
             Money_ToDouble(fill_px), Money_ToDouble(qty));
     }
 #else

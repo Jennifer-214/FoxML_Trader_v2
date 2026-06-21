@@ -60,8 +60,8 @@ constexpr uint8_t GATE_FLAG_BUY_ABOVE        = 0x10;
 //     the gate naturally re-opens.
 constexpr uint8_t GATE_FLAG_BUY_BLOCKED      = 0x20;
 // Partial exits P.2 (2026-04-27): when set, on entry the hot path opens
-// BOTH leg A (TP=tp_pct, slot=core_id*2+0) AND leg B (TP=tp_pct_b,
-// slot=core_id*2+1). Both share live_sl. Set by Strategy_BuildParameters
+// BOTH leg A (TP=tp_pct, slot=node_id*2+0) AND leg B (TP=tp_pct_b,
+// slot=node_id*2+1). Both share live_sl. Set by Strategy_BuildParameters
 // when cfg.partial_exit_enabled=1 (P.4); cleared otherwise. With this
 // flag set, ExecutionCore_Tick branchlessly evaluates SG on both legs;
 // either or both can fire on a given tick. With it clear, leg-B fields

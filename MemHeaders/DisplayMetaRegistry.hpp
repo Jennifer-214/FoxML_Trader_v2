@@ -5,11 +5,11 @@
 //======================================================================================================
 // [DISPLAY META REGISTRY — v5.15.5.B.2]
 //======================================================================================================
-// X-macro registries for `CoreContextDisplayMeta<F>` fields. Closes the
+// X-macro registries for `NodeContextDisplayMeta<F>` fields. Closes the
 // Display↔Execution Invariant Class-18 mirror class (CLAUDE.md item 12)
 // at the structural level: adding a new display-only diagnostic / counter
 // is ONE row in this registry; all downstream sites (struct decl + init +
-// snapshot publisher reads + PerCoreSnap field decls when applicable +
+// snapshot publisher reads + PerNodeSnap field decls when applicable +
 // GUI render rows when applicable) auto-flow.
 //
 // Pattern documented in
@@ -30,7 +30,7 @@
 //     mirrors the FOREACH_FAILURE_MODE storage-class pattern (CLAUDE.md item 13).
 //
 // (`slow_path_latency` + `slow_path_breakdown[SP_SECTION_COUNT]` are NOT in
-// either registry — they're CoreLatencyStats arrays with their own Init/
+// either registry — they're NodeLatencyStats arrays with their own Init/
 // Enable helpers + alignas(64) discipline; better to special-case than to
 // shoehorn into a uniform registry shape.)
 //
@@ -57,7 +57,7 @@ namespace tt {
 //   FAMILY       — registry constant suffix (UPPER_SNAKE; used in future
 //                  enum constants like GATE_DIAG_SPACING if needed)
 //   ACTUAL_FIELD — full lowercase field name for the "actual" side
-//                  (becomes `diag_<ACTUAL_FIELD>` on CoreContextDisplayMeta);
+//                  (becomes `diag_<ACTUAL_FIELD>` on NodeContextDisplayMeta);
 //                  preserves v5.6.3+ naming (some have _actual suffix, some
 //                  don't, per the original gate semantics)
 //   OTHER_FIELD  — full lowercase field name for the threshold/floor/min side
@@ -65,7 +65,7 @@ namespace tt {
 //   DOC          — human description (shown in tooltips, log header, etc.)
 //
 // To add a 7th gate diagnostic: append one row here. The DisplayMeta struct,
-// snapshot publisher reads, init, PerCoreSnap field decls (manual today),
+// snapshot publisher reads, init, PerNodeSnap field decls (manual today),
 // and GUI render block all auto-flow.
 //------------------------------------------------------------------------------
 #define FOREACH_GATE_DIAG_PAIR(X)                                                                  \
@@ -81,7 +81,7 @@ namespace tt {
 //
 // Tuple shape: (TYPE, NAME, INIT_VALUE, DOC)
 //   TYPE       — C++ type (uint16_t / uint32_t / uint64_t / double / int /
-//                uint8_t etc.) for the field on CoreContextDisplayMeta
+//                uint8_t etc.) for the field on NodeContextDisplayMeta
 //   NAME       — field name (lowercase snake_case)
 //   INIT_VALUE — value used in struct default-initializer + reset-init
 //                helper; matches the v5.6.3+ EventLoopState_Init semantics
@@ -91,9 +91,9 @@ namespace tt {
 // (CLAUDE.md item 13; v5.14.8.B). Future fields: append one row.
 //
 // Per CLAUDE.md item 19, some of the boolean entries below are FLAGGED for
-// .B.3 migration → uint8_t core_state_flags bitmap on CoreContext. When
+// .B.3 migration → uint8_t node_state_flags bitmap on NodeContext. When
 // .B.3 ships, those rows will be REMOVED from this registry + the bitmap
-// bit on CoreContext + the registry-generated DisplayMeta struct loses
+// bit on NodeContext + the registry-generated DisplayMeta struct loses
 // those fields automatically. .B.3 callout: see "(.B.3 → bitmap bit)"
 // notes inline below.
 //------------------------------------------------------------------------------
@@ -107,7 +107,7 @@ namespace tt {
     X(double,    last_ml_effective_threshold, 0.0,  "v5.9.0b post-confidence-damping threshold actually used")                     \
     X(uint32_t,  nan_feature_events_total,    0,    "v5.9.0b Features_PackAll -1 sentinel count on this core")                     \
     X(uint32_t,  nan_prediction_events_total, 0,    "v5.9.0b Model_Predict NaN/Inf events on this core")                           \
-    /* Cfg-drift counter state (booleans moved to core_state_flags bitmap in v5.15.5.B.3) */       \
+    /* Cfg-drift counter state (booleans moved to node_state_flags bitmap in v5.15.5.B.3) */       \
     X(uint8_t,   cfg_drift_tier1_count,       0,    "v5.9.5i cfg drift Tier 1 count")                                              \
     X(uint8_t,   cfg_drift_tier2_count,       0,    "v5.9.5i cfg drift Tier 2 count")                                              \
     /* v5.15.5.E.B: drift_history.breach_first_us EXTRACTED here per cache-layout-discipline Rule 1. */                            \
@@ -116,7 +116,7 @@ namespace tt {
     /* a 3rd DisplayMeta sibling-struct creation if not unified here.                                */                            \
     X(uint64_t,  drift_breach_first_us,       0,    "v5.15.5.E.B wall-clock at first drift breach detection on this core")
     /* v5.15.5.B.3: model_load_failed, cfg_drift_strict_refused, warmup_log_emitted */                                             \
-    /* migrated to core_state_flags bitmap on CoreContext (CoreStateFlagRegistry.hpp).             */                              \
+    /* migrated to node_state_flags bitmap on NodeContext (NodeStateFlagRegistry.hpp).             */                              \
     /* Final home — closes the Class 18 mirror they represented. */
 
 // Count of entries — useful for static_asserts + iteration helpers

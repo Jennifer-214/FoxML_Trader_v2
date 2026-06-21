@@ -10,7 +10,7 @@
 #include "CandleAccumulator.hpp"
 #include "TradeReader.hpp"
 #include "../Strategies/StrategyInterface.hpp"
-#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
+#include "../MemHeaders/PerNodeStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
 
 // chart display settings (mutable — controlled by GUI dropdowns)
 struct ChartSettings {
@@ -42,7 +42,7 @@ struct ChartSettings {
     // chart. Affects entry markers, TP/SL dashed lines + tags, and
     // Y-axis auto-expansion. Candles + indicators (VWAP/SMA/sessions/H/L)
     // are global to the symbol and always rendered regardless.
-    int core_filter = -1;
+    int node_filter = -1;
 };
 
 //==========================================================================
@@ -213,10 +213,10 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     // either single-zoo (centralized snap) or ensemble (per-core).
     bool any_ml_active = snap->ml.ml_model_loaded != 0;
     if (!any_ml_active && snap->sharded_mode_active) {
-        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-            if (STATE_FLAG_IS_SET(snap->per_core[i], ML_MODEL_LOADED) ||
-                (snap->per_core[i].ensemble_active &&
-                 snap->per_core[i].ensemble_n_horizons > 0)) {
+        for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+            if (STATE_FLAG_IS_SET(snap->per_node[i], ML_MODEL_LOADED) ||
+                (snap->per_node[i].ensemble_active &&
+                 snap->per_node[i].ensemble_n_horizons > 0)) {
                 any_ml_active = true;
                 break;
             }
@@ -256,11 +256,11 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     ImGui::SameLine();
     ImGui::SetNextItemWidth(70);
     {
-        static const char *core_labels[] = {"All", "0", "1", "2", "3"};
-        int cur = (settings->core_filter < 0 || settings->core_filter > 3)
-                  ? 0 : settings->core_filter + 1;
-        if (ImGui::Combo("##core_filter", &cur, core_labels, 5)) {
-            settings->core_filter = (cur == 0) ? -1 : (cur - 1);
+        static const char *node_labels[] = {"All", "0", "1", "2", "3"};
+        int cur = (settings->node_filter < 0 || settings->node_filter > 3)
+                  ? 0 : settings->node_filter + 1;
+        if (ImGui::Combo("##node_filter", &cur, node_labels, 5)) {
+            settings->node_filter = (cur == 0) ? -1 : (cur - 1);
         }
     }
     if (ImGui::IsItemHovered()) {
@@ -270,10 +270,10 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
 
     // v4.7.10 helper: returns true if this slot should be skipped given the
     // core filter. -1 (= all) returns false unconditionally. Otherwise,
-    // map slot → core_id (slot/2 under partials, slot otherwise) and
-    // skip if that core_id != filter. Used in every position-iteration
+    // map slot → node_id (slot/2 under partials, slot otherwise) and
+    // skip if that node_id != filter. Used in every position-iteration
     // loop below.
-    int filter_core = settings->core_filter;
+    int filter_core = settings->node_filter;
     int filter_partial = snap->partial_exit_enabled ? 1 : 0;
     auto slot_filtered_out = [filter_core, filter_partial](int slot_idx) -> bool {
         if (filter_core < 0) return false;
@@ -1118,18 +1118,18 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             // upward by 16px increments to keep them readable.
             float drawn_label_py[16] = {0};
             int drawn_label_n = 0;
-            for (int ci = 0; ci < snap->per_core_count && ci < 16; ++ci) {
+            for (int ci = 0; ci < snap->per_node_count && ci < 16; ++ci) {
                 // v4.7.13: per-core filter — when filter is set, only
-                // show the selected core's gate. ci here is the core_id
+                // show the selected core's gate. ci here is the node_id
                 // directly (not a slot), so it's a simple equality check.
-                if (settings->core_filter >= 0 && ci != settings->core_filter) continue;
+                if (settings->node_filter >= 0 && ci != settings->node_filter) continue;
                 // skip cores that have an active position — their gate
                 // is irrelevant while holding, and the line overlaps
                 // with the position's TP/SL labels
                 if (ci < 16 && snap->positions[ci].idx >= 0) continue;
-                double bg_price = snap->per_core[ci].buy_gate_price;
+                double bg_price = snap->per_node[ci].buy_gate_price;
                 if (bg_price <= 0.0) continue;
-                uint8_t sid = snap->per_core[ci].strategy_id_display;
+                uint8_t sid = snap->per_node[ci].strategy_id_display;
                 ImVec4 col = (sid < NUM_STRATEGIES) ? strat_colors[sid]
                                         : ImVec4(0.5f, 0.5f, 0.5f, 0.4f);
                 const char *sname = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";

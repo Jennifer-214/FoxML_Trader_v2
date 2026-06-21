@@ -64,8 +64,8 @@ enum NotifyKind {
     NK_DISCONNECT_USERDATA  = 7,
     NK_ORDER_REJECTED       = 8,
     NK_SESSION_START        = 9,
-    NK_CORE_KILL_TRIP       = 10, // Phase 3 — per-core kill switch fired
-    NK_CORE_BUDGET_EXHAUST  = 11, // Phase 2.2 — per-core budget hit
+    NK_NODE_KILL_TRIP       = 10, // Phase 3 — per-core kill switch fired
+    NK_NODE_BUDGET_EXHAUST  = 11, // Phase 2.2 — per-core budget hit
     // append new kinds here; do NOT reorder
 };
 #define NOTIFY_KINDS_MAX 16

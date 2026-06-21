@@ -218,7 +218,7 @@ static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == 
 //======================================================================================================
 // [STRATEGY HALT REASON CODES — v5.6.2]
 //======================================================================================================
-// Distinct from CoreContext::halt_reason (controller-level halts:
+// Distinct from NodeContext::halt_reason (controller-level halts:
 // spacing, vwap, long-slope, vol-delta, min-stddev, sl-cooldown,
 // warmup, core-budget, core-kill, imbalance — set in
 // ControllerEventLoop.hpp:1812-1814).
@@ -317,12 +317,12 @@ static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHAL
     X(MIN_STDDEV,   "min-stddev",   "rolling stddev below floor (dead market)") \
     X(SL_COOLDOWN,  "sl-cooldown",  "stop-loss cooldown active") \
     X(WARMUP,       "warmup",       "reserved — warmup state via permission=0 instead") \
-    X(CORE_BUDGET,  "core-budget",  "core open_notional >= allocated") \
-    X(CORE_KILL,    "core-kill",    "per-core kill switch tripped") \
+    X(NODE_BUDGET,  "core-budget",  "core open_notional >= allocated") \
+    X(NODE_KILL,    "core-kill",    "per-core kill switch tripped") \
     X(IMBALANCE,    "imbalance",    "book imbalance below threshold (Track E.3)")
 
 // Auto-generated HALT_<id> constants. Underlying type uint8_t — matches
-// the existing `halt_reason` field width on EventLoopState::cores[].
+// the existing `halt_reason` field width on EventLoopState::nodes[].
 enum : uint8_t {
 #define X(id, name, desc) HALT_##id,
     FOREACH_HALT_REASON(X)

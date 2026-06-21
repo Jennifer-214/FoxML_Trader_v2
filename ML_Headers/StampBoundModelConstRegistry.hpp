@@ -352,7 +352,7 @@ namespace tt {
       (unsigned long)inf->label_registry_hash, inf->has_label_registry_hash,                        \
       "label registry hash; engine boot REFUSE on mismatch (label set drift)")                      \
     /* === feature_mask (standalone) — emitted at line 2292 === */                                  \
-    /* Parser compares against runtime cfg.core_feature_mask[core] at boot; not on handle.      */  \
+    /* Parser compares against runtime cfg.node_feature_mask[core] at boot; not on handle.      */  \
     X(feature_mask,                             _, SKIP_HANDLE, uint64_t, "%016lx", 0,              \
       (unsigned long)inf->feature_mask_train, inf->has_feature_mask,                                \
       "feature mask at training time; engine compares to runtime feature_mask")                     \
@@ -404,7 +404,7 @@ namespace tt {
       "SHA256(layer1 || layer2) (3-layer fingerprinting layer 3)")                                  \
     /* === v5.14.8.D NEW fields — model lineage + environment metadata === */                       \
     /* training_timestamp_us: wall-clock at training time (μs since unix epoch)                  */ \
-    /* used by v5.14.8.E stale-model gate (CoreModelZoo_CheckStaleModel)                         */ \
+    /* used by v5.14.8.E stale-model gate (NodeModelZoo_CheckStaleModel)                         */ \
     X(training_timestamp_us,                    _, INCLUDE, uint64_t, "%lu", 0,                     \
       (unsigned long)inf->training_timestamp_us, inf->has_training_timestamp_us,                    \
       "training wall-clock (μs since unix epoch); v5.14.8.E stale-model gate reads this")           \

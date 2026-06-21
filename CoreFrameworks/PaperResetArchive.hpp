@@ -17,7 +17,7 @@
 //     ├── trades.csv      — copy of logging/SYMBOL_order_history.csv at reset time
 //     │                      (per-core split deferred to Phase 5.B; aggregate file
 //     │                       is preserved for backward compat with TradeReader/GUI)
-//     └── summary.json    — { session, global, per_core[], per_strategy[], per_regime[] }
+//     └── summary.json    — { session, global, per_node[], per_strategy[], per_regime[] }
 //
 // {start_iso} = ISO 8601 date from `paper_session_start_us` (e.g., 2026-05-13-091523)
 // {end_iso}   = ISO 8601 date from current wall clock at reset time
@@ -29,9 +29,9 @@
 //   3. PaperResetArchive_CreateDirectories(dirname_buf)
 //   4. ShardedSnapshot_Save(&state, "<dirname>/snapshot.dat", partial_on)
 //   5. rename(logging/SYMBOL_order_history.csv, <dirname>/trades.csv)
-//   6. Summary_WriteJson("<dirname>/summary.json", state, cfg, num_cores, session_end_us)
+//   6. Summary_WriteJson("<dirname>/summary.json", state, cfg, num_nodes, session_end_us)
 //   7. OMS_RESET_AUTOPOPULATE(state.oms, cfg.starting_balance)  — existing
-//   8. CORE_CTX_RESET_AUTOPOPULATE loop                          — existing
+//   8. NODE_CTX_RESET_AUTOPOPULATE loop                          — existing
 //   9. ShardedTradeLog_Init (reopens fresh CSV; header written on empty file)
 //   10. OrderEventLog_Reset(&state.oms->event_log)               — existing
 //
@@ -61,16 +61,16 @@
 #include <sys/types.h>
 #include <errno.h>
 #include "../FixedPoint/FixedPointN.hpp"
-#include "../MemHeaders/CoreCtxSummaryFieldRegistry.hpp"  // Summary_EmitPerCoreEntry + Summary_EmitPerStrategy + json_emit_*
+#include "../MemHeaders/NodeCtxSummaryFieldRegistry.hpp"  // Summary_EmitPerCoreEntry + Summary_EmitPerStrategy + json_emit_*
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"         // MASK_OMS_STATE_KILL_SWITCH_TRIPPED
 #include "../MemHeaders/BitmapMacros.hpp"                 // BITMAP_IS_SET
 
 // Forward declarations — PaperResetArchive.hpp is included by EngineSharded.hpp
-// AFTER EventLoopState<F> + ControllerConfig<F> + CoreContext<F> are defined.
+// AFTER EventLoopState<F> + ControllerConfig<F> + NodeContext<F> are defined.
 // Templated helpers below take pointers / refs to incomplete types; template
 // body access deferred to instantiation site.
 //
-// IMPORTANT — namespace placement: EventLoopState + CoreContext live in
+// IMPORTANT — namespace placement: EventLoopState + NodeContext live in
 // namespace tt (per ControllerEventLoop.hpp:77). ControllerConfig lives at
 // GLOBAL scope (per ControllerConfig.hpp:280 — no enclosing namespace tt).
 // Forward-declaring `tt::ControllerConfig<F>` here would create a DIFFERENT
@@ -161,7 +161,7 @@ inline int PaperResetArchive_CreateDirectories(const char* path) {
 //                       total_maker_fees, total_taker_fees, maker_fills_count,
 //                       taker_fills_count, total_entries, total_exits,
 //                       kill_switch_tripped },
-//     "per_core":    [ { core_id, strategy_id, ..., last_confidence } × num_cores ],
+//     "per_node":    [ { node_id, strategy_id, ..., last_confidence } × num_nodes ],
 //     "per_strategy":[ { strategy_id, entries, exits, realized, fees, wins, losses,
 //                         gross_wins, gross_losses, open_notional } × N strategies ],
 //     "per_regime":  []   ← Phase 6 placeholder; populated by trade-log parser
@@ -174,7 +174,7 @@ template <unsigned F>
 inline int Summary_WriteJson(const char* output_path,
                               const EventLoopState<F>& state,
                               const ControllerConfig<F>& cfg,
-                              int num_cores,
+                              int num_nodes,
                               uint64_t session_end_us) {
     if (!output_path) return 0;
     FILE* f = std::fopen(output_path, "w");
@@ -224,17 +224,17 @@ inline int Summary_WriteJson(const char* output_path,
     }
     std::fprintf(f, "},\n");
 
-    // ---- per_core array ----
-    std::fprintf(f, "  \"per_core\":[");
-    for (int c = 0; c < num_cores; ++c) {
+    // ---- per_node array ----
+    std::fprintf(f, "  \"per_node\":[");
+    for (int c = 0; c < num_nodes; ++c) {
         if (c > 0) std::fprintf(f, ",");
-        Summary_EmitPerCoreEntry(f, state.cores[c], c);
+        Summary_EmitPerCoreEntry(f, state.nodes[c], c);
     }
     std::fprintf(f, "],\n");
 
     // ---- per_strategy array ----
     std::fprintf(f, "  \"per_strategy\":");
-    Summary_EmitPerStrategy<F>(f, state.cores, num_cores);
+    Summary_EmitPerStrategy<F>(f, state.nodes, num_nodes);
     std::fprintf(f, ",\n");
 
     // ---- per_regime placeholder ----

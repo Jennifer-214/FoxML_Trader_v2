@@ -6,8 +6,8 @@
 // [FAILURE MODE REGISTRY — v5.14.8.B]
 //======================================================================================================
 // Pseudo-registry for ML observability failure modes that surface to
-// PerCoreSnap + ML Status panel. Auto-generates 3 mechanical sites:
-//   1. PerCoreSnap field / bit declaration (storage_class-aware)
+// PerNodeSnap + ML Status panel. Auto-generates 3 mechanical sites:
+//   1. PerNodeSnap field / bit declaration (storage_class-aware)
 //   2. Populator helper (Health_Log rate-limit static + setter)
 //   3. Health_Log rate-limit per-call-site static (uint64_t last_emit_us)
 //
@@ -17,7 +17,7 @@
 //
 // CLOSES recurring "add failure mode requires N-site update" pattern:
 // before this registry, adding a failure mode required:
-//   - PerCoreSnap field (DataStream/EngineTUI.hpp)
+//   - PerNodeSnap field (DataStream/EngineTUI.hpp)
 //   - Populator at slow path (CoreFrameworks/EngineSharded.hpp)
 //   - Rate-limit static + Health_Log call (per failure mode)
 //   - ML Status panel branch (GUI/MLStatusPanel.hpp)
@@ -27,7 +27,7 @@
 // panel branch. 4-of-6 sites mechanically generated.
 //
 // STORAGE CLASSES (data-oriented design per CLAUDE.md item 1, 18):
-//   BIT_FLAG    — 1 bit in PerCoreSnap.failure_flags uint16_t bitmap.
+//   BIT_FLAG    — 1 bit in PerNodeSnap.failure_flags uint16_t bitmap.
 //                 Auto-allocates bit position via __COUNTER__ at struct
 //                 generation. Up to 16 BIT_FLAG entries (uint16_t cap).
 //                 Wins: branchless multi-flag check (failure_flags &
@@ -107,7 +107,7 @@ enum FailureModeGroupId : int {
 //======================================================================================================
 // X(name, storage_class, severity, format_str, tooltip_str, group_id)
 //
-//   name           — PerCoreSnap field/bit name + populator suffix.
+//   name           — PerNodeSnap field/bit name + populator suffix.
 //                    Must be a valid C identifier.
 //   storage_class  — BIT_FLAG / COUNTER_U32 / PERCENT_U8 token.
 //                    Drives field type + populator semantics.
@@ -161,7 +161,7 @@ enum FailureModeGroupId : int {
       "or stalled data source. Investigate if counter grows steadily.",                                  \
       tt::GROUP_STANDALONE)                                                                             \
     /* === v5.15.1 — Model Health drift surface (7 BIT_FLAG entries; tt::GROUP_DRIFT) === */            \
-    /* Set at CoreModelZoo_TryLoadRole post-verify_model_stamp chokepoint; read by   */                 \
+    /* Set at NodeModelZoo_TryLoadRole post-verify_model_stamp chokepoint; read by   */                 \
     /* MLStatusPanel.hpp Model Health CollapsingHeader + (future) v5.15.2 boot gate. */                 \
     X(feature_hash_drift,       BIT_FLAG,    SEV_RED,    "feat: HASH DRIFT",                            \
       "Model's stamp-bound feature_registry_hash does not match the\n"                                  \
@@ -196,7 +196,7 @@ enum FailureModeGroupId : int {
       "barrier_blend_mode, per_horizon_barrier_blend (v5.15.5.A.7+).\n"                                 \
       "Tier 1 fields REFUSE in strict mode (model_verify_strict=1);                                 \n" \
       "Tier 2 fields WARN regardless. Set by FOREACH_CFG_DRIFT_CHECK walker                          \n" \
-      "at CoreModelZoo_ValidateAgainstCfg post-v5.15.5.A.7 chokepoint.                                \n"\
+      "at NodeModelZoo_ValidateAgainstCfg post-v5.15.5.A.7 chokepoint.                                \n"\
       "Operator action: review boot log for per-field WARN; retrain if\n"                               \
       "intentional or revert cfg to training-time values; or ack via\n"                                 \
       "cfg.acknowledge_inference_cfg_drift=1 (now ops_cfg_flags bit).",                                 \
@@ -250,14 +250,14 @@ enum FailureModeGroupId : int {
 //======================================================================================================
 // [STORAGE-CLASS-AWARE FIELD GENERATION]
 //======================================================================================================
-// Token-paste dispatch on storage_class column. Used by PerCoreSnap
+// Token-paste dispatch on storage_class column. Used by PerNodeSnap
 // struct generation in v5.14.8.C migration to declare the right
 // underlying field type.
 //
 // BIT_FLAG entries DON'T declare a struct field directly — they're
 // auto-allocated bit positions in the per-snap failure_flags uint16_t.
 // At struct generation time:
-//   - PerCoreSnap.failure_flags is declared ONCE (uint16_t)
+//   - PerNodeSnap.failure_flags is declared ONCE (uint16_t)
 //   - BIT_FLAG entries' MASK_<name> constants generated separately
 //
 // COUNTER_U32 / PERCENT_U8 entries each declare a standalone field.
@@ -314,7 +314,7 @@ FOREACH_FAILURE_MODE(X)
 // [ERGONOMIC ACCESSORS — alias to BITMAP_*]
 //======================================================================================================
 // BIT_FLAG accessors via BITMAP_* API. failure_flags is a uint16_t on
-// PerCoreSnap (declared in v5.14.8.C migration).
+// PerNodeSnap (declared in v5.14.8.C migration).
 //
 // Atomic variants available via BITMAP_ATOMIC_* directly when slow path
 // writes + display thread reads concurrently.

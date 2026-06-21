@@ -53,7 +53,7 @@
 //   CLAUDE.md item 20 (per-record packing discipline)
 //   CLAUDE.md item 28 (latency-vs-cache framework — 16 bytes saved per OMS)
 //   v5.15.5.C.2 commit 852a6e3 (OmsStateFlagRegistry.hpp — companion 1-bit-cohort registry)
-//   v5.15.5.B.3 commit 4dd721e (CoreStateFlagRegistry.hpp — bitmap-flag-api 6th application)
+//   v5.15.5.B.3 commit 4dd721e (NodeStateFlagRegistry.hpp — bitmap-flag-api 6th application)
 //======================================================================================================
 #ifndef OMS_EXIT_PREDICTOR_META_REGISTRY_HPP
 #define OMS_EXIT_PREDICTOR_META_REGISTRY_HPP

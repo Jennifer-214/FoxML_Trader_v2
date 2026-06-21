@@ -11,13 +11,13 @@
 //                                   logging / reconcile (~47 rows). Consumed
 //                                   against `ControllerConfig<F>` flat fields.
 //
-//   FOREACH_PER_CORE_CFG_FIELD(X) — trading / strategy / entry / exit / ML /
+//   FOREACH_PER_NODE_CFG_FIELD(X) — trading / strategy / entry / exit / ML /
 //                                   risk-gate / regime-detection / per-core
 //                                   kill switches (~79 rows). Consumed against
-//                                   `cfg.cores[c].<field>` per-core struct
-//                                   instance (`PerCoreCfg<F>`).
+//                                   `cfg.nodes[c].<field>` per-core struct
+//                                   instance (`PerNodeCfg<F>`).
 //
-// PER_CORE_OK metadata bit REMOVED — every per-core row IS per-core by
+// PER_NODE_OK metadata bit REMOVED — every per-core row IS per-core by
 // construction (registry membership IS the scope assertion). Anti-pattern
 // closed at this ship per `DESIGN_SPECS/cfg-scope-discipline.md` § "Forbidden
 // patterns": no "global default + per-core override" mechanism.
@@ -42,9 +42,9 @@
 //
 // .F.4c.3 changes:
 //   • Replace single FOREACH_CFG_FIELD with FOREACH_GLOBAL_CFG_FIELD +
-//     FOREACH_PER_CORE_CFG_FIELD per locked scope classification
+//     FOREACH_PER_NODE_CFG_FIELD per locked scope classification
 //     (plans/plan_checks/cfg-field-scope-classification-2026-05-15.md).
-//   • Drop PER_CORE_OK from MetadataFlag enum (now redundant; bit 0 RESERVED).
+//   • Drop PER_NODE_OK from MetadataFlag enum (now redundant; bit 0 RESERVED).
 //   • Drop 3 rows entirely: `default_strategy` (legacy single_core; per-core
 //     IS canonical surface), `pay_fees_in_bnb` (operator-side cfg; doesn't
 //     affect engine behavior), `reconcile_dry_run` (DEPRECATED at v5.14.4;
@@ -52,9 +52,9 @@
 //   • Template-parameterize bitmap dispatcher framework (CfgMaskArray<N> +
 //     cfg_compute_mask + cfg_field_count + composed-mask helpers) to operate
 //     on arbitrary descriptor arrays per per-registry application.
-//   • Per-registry mask arrays (g_global_cfg_*_mask + g_per_core_cfg_*_mask).
+//   • Per-registry mask arrays (g_global_cfg_*_mask + g_per_node_cfg_*_mask).
 //   • Per-registry composed masks (g_global_cfg_render_mask +
-//     g_per_core_cfg_render_mask + save/stamp_emit/cli_explain analogues).
+//     g_per_node_cfg_render_mask + save/stamp_emit/cli_explain analogues).
 //   • cfg_field_names_unique templated to operate per-registry (each registry
 //     internally unique; cross-registry name collision is ALLOWED only with
 //     explicit per-axis rationale per cfg-scope-discipline § "Anti-patterns").
@@ -110,7 +110,7 @@ struct CfgFieldDescriptor {
     };
 
     //---- MetadataFlag enum (uint16_t) — 12 bits used; 4 bits headroom ----
-    // .F.4c.3: PER_CORE_OK (1u << 0) REMOVED. Every per-core row IS per-core by
+    // .F.4c.3: PER_NODE_OK (1u << 0) REMOVED. Every per-core row IS per-core by
     // construction (registry membership IS the scope assertion). Bit 0 RESERVED
     // for future use; do not reassign without documenting the schema change.
     //
@@ -122,12 +122,12 @@ struct CfgFieldDescriptor {
     // semantic separation". Walker triplet (parser/copy/render) consumes the
     // SPECIFIC bit relevant to each walker's concern; no overload risk.
     //   - MANUAL_PARSER: skip registry parser walker (manual string-form parser handles)
-    //   - NO_FLAT_FIELD: skip copy/render walkers (field exists only on cores[c], not on ControllerConfig flat scalar)
+    //   - NO_FLAT_FIELD: skip copy/render walkers (field exists only on nodes[c], not on ControllerConfig flat scalar)
     // A row may carry one, both, or neither bit. `strategy` carries both (custom
     // string parser + no flat scalar). bandit_algorithm/risk_degradation_curve/
     // barrier_blend_mode/fee_rate_maker/fee_rate_taker carry MANUAL_PARSER only.
     enum MetadataFlag : uint16_t {
-        // 1u << 0 RESERVED (was PER_CORE_OK, removed at v5.15.5.F.4c.3)
+        // 1u << 0 RESERVED (was PER_NODE_OK, removed at v5.15.5.F.4c.3)
         RESTART_REQUIRED      = 1u << 1,   // GUI badge: "restart needed" (.F.4d render)
         SAFETY_CRITICAL       = 1u << 2,   // GUI warning + confirmation prompt (.F.4d)
         DEPRECATED            = 1u << 3,   // GUI: strikethrough + tooltip (.F.4d)
@@ -139,7 +139,7 @@ struct CfgFieldDescriptor {
         LOG_VALUE_FORBIDDEN   = 1u << 9,   // value never appears in logs (privacy/security; v5.15.6.B)
         MANUAL_PARSER         = 1u << 10,  // skip registry parser walker — manual string-form / side-effect parser handles (WIP2d-1.B.0; was HAS_SIDE_EFFECT pre-split)
         WARN_ON_CLAMP         = 1u << 11,  // emit "[cfg] WARN: <key>='<val>' out of range; clamping to <clamped>" when parse clamps value (.F.4c)
-        NO_FLAT_FIELD         = 1u << 12,  // field exists only on cores[c] (no ControllerConfig flat scalar) — skip copy/render walkers (WIP2d-1.B.0)
+        NO_FLAT_FIELD         = 1u << 12,  // field exists only on nodes[c] (no ControllerConfig flat scalar) — skip copy/render walkers (WIP2d-1.B.0)
         // v5.15.5.F.4d Charter 8 — STAMP_BOUND_CFG_DERIVED drives DERIVED_FILTER framework
         // (auto-generates POST_CFG mirror + CfgDerivedInferenceCfgRegistry + CfgDriftCheckRegistry
         // rows from single flagged source row). Per metadata-bit-driven-derived-filter-framework.md
@@ -221,7 +221,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //     applies_to_regime_cat, applies_to_risk_cat, lives_in_struct)
 //
 // STORAGE_T is the C++ destination type stored on ControllerConfig<F> (global rows) or
-// PerCoreCfg<F> (per-core rows). KIND_TOKEN is GUI metadata only (H13/H14: Kind doesn't
+// PerNodeCfg<F> (per-core rows). KIND_TOKEN is GUI metadata only (H13/H14: Kind doesn't
 // drive storage; STORAGE_T does). Adding a new global field = 1 row in
 // FOREACH_GLOBAL_CFG_FIELD with explicit STORAGE_T + KIND_TOKEN; auto-gen mechanism
 // in ControllerConfig<F> at Step 0.5b.B will replace 48 manual cfg field decls
@@ -234,7 +234,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //
 // .F.4c.3: scope classification per
 //   plans/plan_checks/cfg-field-scope-classification-2026-05-15.md
-// (LOCKED 2026-05-15). Total: 47 GLOBAL + 79 PER_CORE + 3 REMOVED = 129.
+// (LOCKED 2026-05-15). Total: 47 GLOBAL + 79 PER_NODE + 3 REMOVED = 129.
 //======================================================================================================
 
 // Payload helper macros (one per Kind family):
@@ -262,7 +262,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //======================================================================================================
 #define FOREACH_GLOBAL_CFG_FIELD(X)                                                                                                                                                                                  \
     /* === System / Operational (5) === */                                                                                                                                                                            \
-    X(uint16_t,             KIND_INT,        num_execution_cores,         "Execution Cores",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
+    X(uint16_t,             KIND_INT,        num_execution_nodes,         "Execution Cores",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
         "Number of per-core execution shards. Clamp [1, 16].",                                                                                                                                                     \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(int,                  KIND_BOOL,       require_mlockall,            "Require mlockall",     "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
@@ -432,7 +432,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(int,                  KIND_BOOL,       danger_enabled,              "Enabled",              "Danger Gradient", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         nullptr,                                                                                                                                                                                                    \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    /* === Phase Cx-D extension cohort (v5.15.5.F.4d.1.B.4 v1.7.6 — 7 fields migrated from FOREACH_PER_CORE_CFG_FIELD GLOBAL_ONLY_READERS to canonical FOREACH_GLOBAL_CFG_FIELD; per Registry default precedence v1.1 § procedure all MATCH operational manual values; closes Class 26 worked-instance cohort + H17 STRONG→HARD progression at global surface per CfgFieldRegistry.hpp:722-724 roadmap) === */ \
+    /* === Phase Cx-D extension cohort (v5.15.5.F.4d.1.B.4 v1.7.6 — 7 fields migrated from FOREACH_PER_NODE_CFG_FIELD GLOBAL_ONLY_READERS to canonical FOREACH_GLOBAL_CFG_FIELD; per Registry default precedence v1.1 § procedure all MATCH operational manual values; closes Class 26 worked-instance cohort + H17 STRONG→HARD progression at global surface per CfgFieldRegistry.hpp:722-724 roadmap) === */ \
     X(uint32_t,             KIND_INT,        kill_recovery_warmup,        "Recovery",             "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, INT(50, 0, 1000000),                                                                \
         "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry).",                                                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -459,13 +459,13 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
-// [FOREACH_PER_CORE_CFG_FIELD — trading / strategy / entry / exit / ML / risk-gate / regime-detection]
+// [FOREACH_PER_NODE_CFG_FIELD — trading / strategy / entry / exit / ML / risk-gate / regime-detection]
 //======================================================================================================
-// 79 rows. Each per-core row lives at `cfg.cores[c].<field>` (one instance per
-// execution core; up to MAX_EXECUTION_CORES = 16). PER_CORE_OK metadata bit
+// 79 rows. Each per-core row lives at `cfg.nodes[c].<field>` (one instance per
+// execution core; up to MAX_EXECUTION_NODES = 16). PER_NODE_OK metadata bit
 // is REMOVED — registry membership IS the scope assertion.
 //======================================================================================================
-#define FOREACH_PER_CORE_CFG_FIELD(X)                                                                                                                                                                                \
+#define FOREACH_PER_NODE_CFG_FIELD(X)                                                                                                                                                                                \
     /* === Trading (6) === */                                                                                                                                                                                         \
     X(Money, KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         0,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE_PCT, stop_loss_pct,               "SL %%",                "Trading",         0,                                  DBL(1.5, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -579,7 +579,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(uint64_t              , KIND_INT, thompson_rng_seed,           "Thompson RNG Seed",    "FoxML",           CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::HAS_SIDE_EFFECT, INT(42, 0, 9223372036854775807),                \
         "splitmix64 seed for Thompson sampling bandit. Default 42. 0 = use ThompsonBandit.hpp's THOMPSON_RNG_SEED_DEFAULT. Boot-only; required for replay-determinism. HAS_SIDE_EFFECT — manual parser supports hex (0x...) base-auto-detect; registry walker skips.",                                                                                                                                                                                                                                                          \
         STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    /* v5.15.5.F.4d.1.B.4 Phase Cx-D: model_max_age_hours per-core registry row DELETED (GLOBAL_ONLY_READERS — consumer at LiveReadiness.hpp:125 + CoreModelZoo.hpp reads via cfg.model_max_age_hours global form; per-core auto-gen was dead code). Global manual struct field at ControllerConfig.hpp KEPT. */ \
+    /* v5.15.5.F.4d.1.B.4 Phase Cx-D: model_max_age_hours per-core registry row DELETED (GLOBAL_ONLY_READERS — consumer at LiveReadiness.hpp:125 + NodeModelZoo.hpp reads via cfg.model_max_age_hours global form; per-core auto-gen was dead code). Global manual struct field at ControllerConfig.hpp KEPT. */ \
     /* === STAMP_BOUND scalar cohort — Ridge + Winsor + Confidence + Thompson (12 DOUBLE) === */ \
     /*       Ridge risk-parity blending (v5.14.0) */ \
     X(FPN_Binary<F>                , KIND_DOUBLE, ridge_lambda,                "Ridge Lambda",         "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 10.0), \
@@ -664,7 +664,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         "Per-horizon TP/SL serving mode: 0=LEGACY (cfg-direct fallback), 1=BLEND (weighted across horizons), 2=DOMINANT (highest-weight horizon). HAS_SIDE_EFFECT — manual parser handles string form ('legacy'/'blend'/'dominant'). .B.3 Step 1.6.2 cohort bit-add (Decision D mechanism 1; legacy inference_cfg_barrier_blend_mode wire key deleted at Step 2).", \
         STRAT_CAT_ML,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === v5.15.5.F.4d TECH_DEBT-082 .F.5 residual close — 3 fields migrate from manual parser cases to auto-flow X-macro (Class 23 anti-pattern close at these 3 sites) === */                                          \
-    /* v5.15.5.F.4d.1.B.4 Phase Cx-D: lazy_rebuild_price_threshold_pct per-core registry row DELETED (GLOBAL_ONLY_READERS — production consumer at ControllerEventLoop.hpp:2364 reads via config->lazy_rebuild_price_threshold_pct global pointer; per-core auto-gen was dead code). Global manual struct field at ControllerConfig.hpp:743 KEPT as canonical. Per-core eligibility framing in original tooltip was aspirational; no per-core override syntax exists (PER_CORE_OVERRIDE_INT_FIELDS doesn't include it). */ \
+    /* v5.15.5.F.4d.1.B.4 Phase Cx-D: lazy_rebuild_price_threshold_pct per-core registry row DELETED (GLOBAL_ONLY_READERS — production consumer at ControllerEventLoop.hpp:2364 reads via config->lazy_rebuild_price_threshold_pct global pointer; per-core auto-gen was dead code). Global manual struct field at ControllerConfig.hpp:743 KEPT as canonical. Per-core eligibility framing in original tooltip was aspirational; no per-core override syntax exists (PER_NODE_OVERRIDE_INT_FIELDS doesn't include it). */ \
     X(FPN_Binary<F>                , KIND_DOUBLE, exit_threshold,              "Exit Threshold",       "ML/Exit",         CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.6, 0.0, 1.0),                                                  \
         "Blended exit probability threshold for sell-side ML predictions (Path 3 architecture; v5.13.0). When blended exit_prob > exit_threshold AND position open, fires early market-exit. Default 0.6 (60%). Per-core eligible — each core has its own ML model with different exit calibration. .F.4d TECH_DEBT-082 close.", \
         STRAT_CAT_ML,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -675,35 +675,35 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(Money, KIND_DOUBLE_PCT, fee_rate_maker,               "Fee Maker %%",         "Trading",         CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT, DBL(0.075, 0.0, 5.0), "Maker fill fee rate (% per trade; e.g. 0.075 = 0.075% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_taker. .B.3 Step 1.6.2 v1.6 cohort bit-add (Class 32 full closure).", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE_PCT, fee_rate_taker,               "Fee Taker %%",         "Trading",         CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT, DBL(0.100, 0.0, 5.0), "Taker fill fee rate (% per trade; e.g. 0.100 = 0.100% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_maker. .B.3 Step 1.6.2 v1.6 cohort bit-add (Class 32 full closure).", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN_Binary<F>                , KIND_DOUBLE, foxml_vol_scaling_z_max,      "Vol Scale Z-Max",      "ML",              CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3.0, 0.0, 100.0),    "Z-score clipping threshold for FoxML VolScaler (limits how much volatility scaling can compress trade size). Default 3.0 = clip at 3 sigma.", STRAT_CAT_ML, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    /* === Strategy selector (1) — WIP2d-1 Finding 1 closure (HIGH-2 amendment "core_strategies[16] → cores[c].strategy") === */                                                                                          \
+    /* === Strategy selector (1) — WIP2d-1 Finding 1 closure (HIGH-2 amendment "node_strategies[16] → nodes[c].strategy") === */                                                                                          \
     /* HAS_SIDE_EFFECT — registry walker triplet (parser/copy/render) uniformly skips via if-constexpr. */                                                                                                              \
     /* Manual handling: parser at legacy `core_<N>_strategy=` block (string-form: mr/momentum/simple_dip/ml/ema_cross/none); */                                                                                          \
-    /* copy via explicit `cores[c].strategy = core_strategies[c]` line after FOREACH walker; render via Step 6 per-core tabs. */                                                                                       \
-    /* Default 2 = STRATEGY_SIMPLE_DIP per ControllerConfig_Default core_strategies[i]=2 legacy init. */                                                                                                                \
+    /* copy via explicit `nodes[c].strategy = node_strategies[c]` line after FOREACH walker; render via Step 6 per-core tabs. */                                                                                       \
+    /* Default 2 = STRATEGY_SIMPLE_DIP per ControllerConfig_Default node_strategies[i]=2 legacy init. */                                                                                                                \
     X(uint8_t               , KIND_INT,    strategy,                     "Strategy",             "Strategies",      (CfgFieldDescriptor::MANUAL_PARSER | CfgFieldDescriptor::NO_FLAT_FIELD), INT(2, 0, 5),                                                                                              \
-        "Per-core strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `core_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; cores[c].strategy auto-syncs from core_strategies[c] via FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
+        "Per-core strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `core_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; nodes[c].strategy auto-syncs from node_strategies[c] via FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
-// [EMIT_PER_CORE_CFG_STRUCT_FIELD — payload macro for X-macro struct generation (WIP2d-0.B)]
+// [EMIT_PER_NODE_CFG_STRUCT_FIELD — payload macro for X-macro struct generation (WIP2d-0.B)]
 //======================================================================================================
-// Consumed by PerCoreCfg<F> in ControllerConfig.hpp via:
-//   FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
+// Consumed by PerNodeCfg<F> in ControllerConfig.hpp via:
+//   FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
 //
-// WIP2d-0.B (.F.4c.3) — TYPE consolidation: FOREACH_PER_CORE_CFG_FIELD now carries STORAGE_T
-// as its first column. The auxiliary FOREACH_PER_CORE_FIELD_TYPE registry is RETIRED — single
+// WIP2d-0.B (.F.4c.3) — TYPE consolidation: FOREACH_PER_NODE_CFG_FIELD now carries STORAGE_T
+// as its first column. The auxiliary FOREACH_PER_NODE_FIELD_TYPE registry is RETIRED — single
 // source of truth per H17 STRONG codification. Future per-core cfg field addition: 1 row in
 // 1 registry; struct field auto-generates from row's STORAGE_T column.
 //
 // Discipline per H17 (STRONG at .F.4c.3 per-core surface; HARD at .F.4d global surface):
-// - PerCoreCfg<F> body uses ONLY FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
-//   for the 92 cfg-surface fields + FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
+// - PerNodeCfg<F> body uses ONLY FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
+//   for the 92 cfg-surface fields + FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
 //   for the 5 runtime bitmap fields. NO manual fields anywhere.
 //
 // SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
 //======================================================================================================
 // Payload: emit `<STORAGE_T> <name>;` per row.
-#define EMIT_PER_CORE_CFG_STRUCT_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+#define EMIT_PER_NODE_CFG_STRUCT_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                          applies_to_strategy_cat, applies_to_op_mode_cat, \
                                          applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     STORAGE_T name;
@@ -711,7 +711,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //======================================================================================================
 // [EMIT_GLOBAL_CFG_STRUCT_FIELD — payload macro for global cfg field struct generation (v5.15.5.F.4d.1.B.3+)]
 //======================================================================================================
-// Sister to EMIT_PER_CORE_CFG_STRUCT_FIELD; landed at .B.3 Step 0.5b.A Path α cascade closing the
+// Sister to EMIT_PER_NODE_CFG_STRUCT_FIELD; landed at .B.3 Step 0.5b.A Path α cascade closing the
 // global↔per-core column asymmetry. ControllerConfig<F>'s 48 manual global cfg field decls become
 // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) at .B.3 Step 0.5b.B (this ship's follow-up
 // sub-step deletes the 48 manual decls atomically with the auto-gen invocation).
@@ -737,7 +737,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //
 // Mechanism: tt::cfg_assign_field<T> reads default from descriptor.payload (per KIND dispatch:
 // as_double.default_val for FPN_Binary<F> / as_int.default_val for int* / as_bool.default_val for bool).
-// Sister to EMIT_PER_CORE_CFG_DEFAULT (future work; per-core defaults still manual at HEAD).
+// Sister to EMIT_PER_NODE_CFG_DEFAULT (future work; per-core defaults still manual at HEAD).
 //
 // H17 STRONG→HARD codification: adding a new global cfg field = 1 row in FOREACH_GLOBAL_CFG_FIELD
 // with default in payload column; auto-default flows through this macro at ControllerConfig_Default.
@@ -748,11 +748,11 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     tt::cfg_assign_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name]);
 
 //======================================================================================================
-// [EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR — payload macro for per-core registry rows' global manual struct field defaults (v5.15.5.F.4d.1.B.4 Phase Cx-E.1)]
+// [EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR — payload macro for per-core registry rows' global manual struct field defaults (v5.15.5.F.4d.1.B.4 Phase Cx-E.1)]
 //======================================================================================================
 // Sister to EMIT_GLOBAL_CFG_DEFAULT; lands the "future work" noted at :739 comment above.
-// Per-core registry rows (FOREACH_PER_CORE_CFG_FIELD) have global manual struct field declarations
-// on ControllerConfig<F> (load-bearing for EMIT_PER_CORE_COPY walker propagation at
+// Per-core registry rows (FOREACH_PER_NODE_CFG_FIELD) have global manual struct field declarations
+// on ControllerConfig<F> (load-bearing for EMIT_PER_NODE_COPY walker propagation at
 // ControllerConfig.hpp:1432-1437). This walker auto-initializes those global manual struct fields
 // from registry payload defaults at ControllerConfig_Default<F> time — closes the H17 vestigial-init
 // surface (Registry default precedence v1.1 § procedure: registry is single source of truth).
@@ -761,72 +761,72 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 // via KIND dispatch (KIND_DOUBLE/PCT → FPN_FromDouble<F>; KIND_INT → int; KIND_BOOL → uint*).
 //
 // NO_FLAT_FIELD filter: rows with NO_FLAT_FIELD bit (e.g., `strategy`) have NO global manual struct
-// field — walker skips via if-constexpr (sister to EMIT_PER_CORE_COPY skip pattern).
+// field — walker skips via if-constexpr (sister to EMIT_PER_NODE_COPY skip pattern).
 //
 // Invoked in ControllerConfig_Default<F> alongside FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
-// — auto-flows registry defaults to global manual struct fields; downstream EMIT_PER_CORE_COPY walker
-// propagates global → all cores[c]; per-core override path (PER_CORE_OVERRIDE_INT_FIELDS for the 3 fields
+// — auto-flows registry defaults to global manual struct fields; downstream EMIT_PER_NODE_COPY walker
+// propagates global → all nodes[c]; per-core override path (PER_NODE_OVERRIDE_INT_FIELDS for the 3 fields
 // in that macro) applies on top via ControllerConfig_ResolveForCore.
 //======================================================================================================
-#define EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+#define EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                                   applies_to_strategy_cat, applies_to_op_mode_cat, \
                                                   applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     if constexpr (!((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
-        tt::cfg_assign_field(cfg.name, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_##name]); \
+        tt::cfg_assign_field(cfg.name, g_per_node_cfg_field_descriptors[FIELD_IDX_PER_NODE_##name]); \
     }
 
 //======================================================================================================
-// [FOREACH_MANUAL_PER_CORE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]
+// [FOREACH_MANUAL_PER_NODE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]
 //======================================================================================================
 // PURPOSE: documented exemptions for per-core fields that can't fit
-// FOREACH_PER_CORE_CFG_FIELD yet (awaiting KIND_STRING / KIND_FILE_PATH /
+// FOREACH_PER_NODE_CFG_FIELD yet (awaiting KIND_STRING / KIND_FILE_PATH /
 // KIND_HEX64 at .F.4e) OR are TRANSITIONAL during shadow-window migration.
 //
 // Every entry MUST have a row in DOCS/MANUAL_FIELDS_INVENTORY.md with full
 // rationale + migration trigger. CI cross-checks bidirectionally via
-// tools/check_per_core_registry_integrity.py — drift = BUILD ERROR.
+// tools/check_per_node_registry_integrity.py — drift = BUILD ERROR.
 //
-// ControllerConfig<F> declares these arrays via EMIT_MANUAL_PER_CORE_DECL
+// ControllerConfig<F> declares these arrays via EMIT_MANUAL_PER_NODE_DECL
 // X-macro expansion ONLY; no manual `core_X[16]` declarations allowed outside.
 //
 // SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
 //======================================================================================================
-#define FOREACH_MANUAL_PER_CORE_FIELD(X)                                                                                  \
+#define FOREACH_MANUAL_PER_NODE_FIELD(X)                                                                                  \
     /* type,                name,                      suffix,  rationale (matches MANUAL_FIELDS_INVENTORY.md) */         \
     /* === String arrays awaiting KIND_STRING / KIND_FILE_PATH at .F.4e === */                                            \
-    X(char,                 core_model_path,           [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
-    X(char,                 core_model_dir,            [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
-    X(char,                 core_horizon_list,         [128],   "KIND_STRING cohort at .F.4e")                            \
-    X(char,                 core_ensemble_blend_mode,  [16],    "KIND_STRING (or KIND_INT_ENUM) cohort at .F.4e")         \
-    X(char,                 core_disabled_horizons,    [128],   "KIND_STRING cohort at .F.4e")                            \
+    X(char,                 node_model_path,           [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
+    X(char,                 node_model_dir,            [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
+    X(char,                 node_horizon_list,         [128],   "KIND_STRING cohort at .F.4e")                            \
+    X(char,                 node_ensemble_blend_mode,  [16],    "KIND_STRING (or KIND_INT_ENUM) cohort at .F.4e")         \
+    X(char,                 node_disabled_horizons,    [128],   "KIND_STRING cohort at .F.4e")                            \
     /* === Per-core symbol (WIP2d-1.A — partial advance of .F.4c.3.A; operator-facing forward-compat for multi-symbol DataStream) === */ \
-    X(char,                 core_symbol,               [32],    "KIND_STRING cohort at .F.4e — partial advance of .F.4c.3.A symbol axis migration") \
+    X(char,                 node_symbol,               [32],    "KIND_STRING cohort at .F.4e — partial advance of .F.4c.3.A symbol axis migration") \
     /* === Hex64 bitmap awaiting KIND_HEX64 at .F.4e === */                                                                \
-    X(uint64_t,             core_feature_mask,         ,        "KIND_HEX64 needed at .F.4e")                             \
-    /* === TRANSITIONAL parallel arrays — delete at WIP2g (cores[c] authoritative) === */                                  \
-    X(Money,                       core_risk_pct,             ,        "TRANSITIONAL: cores[c].risk_pct authoritative; delete at WIP2g") \
-    X(uint8_t,              core_strategies,           ,        "TRANSITIONAL: cores[c].strategy authoritative (WIP2d-0); delete at WIP2g") \
-    X(uint32_t,             core_time_exit_ticks,      ,        "TRANSITIONAL: cores[c].max_hold_ticks authoritative; legacy override array; delete at WIP2g") \
-    X(Money,                       core_max_drawdown_pct,     ,        "TRANSITIONAL: cores[c].max_drawdown_pct authoritative; legacy override array; delete at WIP2g") \
-    /* === TRANSITIONAL legacy override struct — delete at WIP2f (PerCoreOverrides<F> retired) === */                      \
-    X(PerCoreOverrides<F>,  core_overrides,            ,        "TRANSITIONAL: legacy global-default-with-override anti-pattern; entire mechanism retires at WIP2f when ControllerConfig_ResolveForCore deletes")
+    X(uint64_t,             node_feature_mask,         ,        "KIND_HEX64 needed at .F.4e")                             \
+    /* === TRANSITIONAL parallel arrays — delete at WIP2g (nodes[c] authoritative) === */                                  \
+    X(Money,                       node_risk_pct,             ,        "TRANSITIONAL: nodes[c].risk_pct authoritative; delete at WIP2g") \
+    X(uint8_t,              node_strategies,           ,        "TRANSITIONAL: nodes[c].strategy authoritative (WIP2d-0); delete at WIP2g") \
+    X(uint32_t,             node_time_exit_ticks,      ,        "TRANSITIONAL: nodes[c].max_hold_ticks authoritative; legacy override array; delete at WIP2g") \
+    X(Money,                       node_max_drawdown_pct,     ,        "TRANSITIONAL: nodes[c].max_drawdown_pct authoritative; legacy override array; delete at WIP2g") \
+    /* === TRANSITIONAL legacy override struct — delete at WIP2f (PerNodeOverrides<F> retired) === */                      \
+    X(PerNodeOverrides<F>,  node_overrides,            ,        "TRANSITIONAL: legacy global-default-with-override anti-pattern; entire mechanism retires at WIP2f when ControllerConfig_ResolveForCore deletes")
 
-// Payload macro: emit `type name[MAX_EXECUTION_CORES] suffix;` per row.
+// Payload macro: emit `type name[MAX_EXECUTION_NODES] suffix;` per row.
 // Used by ControllerConfig<F> for parallel array declarations.
-#define EMIT_MANUAL_PER_CORE_DECL(type, name, suffix, rationale) \
-    type name[MAX_EXECUTION_CORES] suffix;
+#define EMIT_MANUAL_PER_NODE_DECL(type, name, suffix, rationale) \
+    type name[MAX_EXECUTION_NODES] suffix;
 
 //======================================================================================================
-// [FOREACH_PER_CORE_DOMAIN_BITMAP — meta-registry for cfg-domain bitmap fields (WIP2d-0.B)]
+// [FOREACH_PER_NODE_DOMAIN_BITMAP — meta-registry for cfg-domain bitmap fields (WIP2d-0.B)]
 //======================================================================================================
 // PURPOSE: meta-registry binding each FOREACH_<DOMAIN>_CFG_FLAG child registry to its
 // per-core bitmap storage field. SINGLE source of truth for the 5 bitmap fields on
-// PerCoreCfg<F>; adding a new domain registry = 1 row here + 1 row in MANUAL_FIELDS_INVENTORY.md.
+// PerNodeCfg<F>; adding a new domain registry = 1 row here + 1 row in MANUAL_FIELDS_INVENTORY.md.
 //
 // DRIVES (auto-flows):
-//   1. Struct field declarations in PerCoreCfg<F> via FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
+//   1. Struct field declarations in PerNodeCfg<F> via FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
 //   2. Bitmap-overflow static_asserts per domain (defense in depth alongside per-registry asserts)
-//      via FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT) per
+//      via FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT) per
 //      bitmap-overflow-protection-discipline.md
 //   3. WIP2e bitmap-rebuild walker: iterates this meta-registry; for each domain walks
 //      `child_registry` to rebuild bitmap from flat KIND_BOOL rows at slow-path cadence
@@ -844,7 +844,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //   - storage_type: bitmap storage type (uint8_t / uint16_t per FOREACH_X_CFG_FLAG bit count)
 //   - child_registry_token: FOREACH_<DOMAIN>_CFG_FLAG (used by WIP2e rebuild walker)
 //======================================================================================================
-#define FOREACH_PER_CORE_DOMAIN_BITMAP(X)                                                              \
+#define FOREACH_PER_NODE_DOMAIN_BITMAP(X)                                                              \
     /* align, domain,    field,                  storage,  child registry token */                    \
     X(8,      LIFECYCLE, lifecycle_cfg_flags,    uint8_t,  FOREACH_LIFECYCLE_CFG_FLAG)                 \
     X(0,      GATE,      gate_cfg_flags,         uint8_t,  FOREACH_GATE_CFG_FLAG)                     \
@@ -857,7 +857,7 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 #define EMIT_ALIGNAS_8    alignas(8)
 
 // Payload macro: emit `[alignas(N)] <storage> <field>;` per row.
-// Used by PerCoreCfg<F> for runtime bitmap field declarations.
+// Used by PerNodeCfg<F> for runtime bitmap field declarations.
 #define EMIT_DOMAIN_BITMAP_FIELD(align_n, domain, field, storage, child) \
     EMIT_ALIGNAS_##align_n storage field;
 
@@ -869,98 +869,98 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 #define EMIT_DOMAIN_OVERFLOW_ASSERT(align_n, domain, field, storage, child)                            \
     static_assert(domain##_CFG_COUNT <= sizeof(storage) * 8,                                           \
                   "Bitmap overflow: " #domain "_CFG_COUNT exceeds " #storage " bits; "                  \
-                  "upgrade storage type in FOREACH_PER_CORE_DOMAIN_BITMAP row for " #domain);
+                  "upgrade storage type in FOREACH_PER_NODE_DOMAIN_BITMAP row for " #domain);
 
 // Invoke bitmap-overflow asserts at file scope (compile-time check).
 // WIP2d-1.B.0 (Shortsighted #5 close) — CfgFieldRegistry.hpp now self-contained: the 5 domain
 // registry headers are included at the top of this file, so <DOMAIN>_CFG_COUNT constants are
 // in scope here independent of any other file's include order.
-FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
+FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 
 //======================================================================================================
-// [FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC — AUTOPOPULATE manual sync sources (WIP2d-1.B.0)]
+// [FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC — AUTOPOPULATE manual sync sources (WIP2d-1.B.0)]
 //======================================================================================================
-// PURPOSE: auxiliary registry for FOREACH_PER_CORE_CFG_FIELD rows tagged NO_FLAT_FIELD.
+// PURPOSE: auxiliary registry for FOREACH_PER_NODE_CFG_FIELD rows tagged NO_FLAT_FIELD.
 // These rows lack a ControllerConfig flat scalar; the auto-flow copy walker skips them via
 // the NO_FLAT_FIELD bit. THIS registry provides the manual sync source mapping (legacy
-// parallel array → registry-driven cores[c] slice). The AUTOPOPULATE companion macro
+// parallel array → registry-driven nodes[c] slice). The AUTOPOPULATE companion macro
 // generates the sync lines in PopulateCoresFromFlat per autopopulate-pattern-for-production-
 // caller-class.md.
 //
-// Applied at N=1 (one entry currently: strategy ← core_strategies) per
+// Applied at N=1 (one entry currently: strategy ← node_strategies) per
 // feedback_overengineering_boundary_when_future_easier.md (future-easy multiplier wins).
 // Future per-core-only fields with legacy parallel-array source: 1 row in this X-macro +
-// 1 row in FOREACH_PER_CORE_CFG_FIELD with NO_FLAT_FIELD bit. Mechanical.
+// 1 row in FOREACH_PER_NODE_CFG_FIELD with NO_FLAT_FIELD bit. Mechanical.
 //
 // Row shape: X(target_field, source_array_field)
-//   - target_field:        the NO_FLAT_FIELD-tagged field name in FOREACH_PER_CORE_CFG_FIELD
+//   - target_field:        the NO_FLAT_FIELD-tagged field name in FOREACH_PER_NODE_CFG_FIELD
 //   - source_array_field:  the legacy parallel array on ControllerConfig (must be in
-//                          FOREACH_MANUAL_PER_CORE_FIELD as TRANSITIONAL exemption)
+//                          FOREACH_MANUAL_PER_NODE_FIELD as TRANSITIONAL exemption)
 //
-// CI check (tools/check_per_core_registry_integrity.py — added WIP2d-1.B.0 Check 7):
-// every row here must have BOTH a FOREACH_PER_CORE_CFG_FIELD row with NO_FLAT_FIELD bit
-// AND a FOREACH_MANUAL_PER_CORE_FIELD row matching the source. Closes Shortsighted #4.
+// CI check (tools/check_per_node_registry_integrity.py — added WIP2d-1.B.0 Check 7):
+// every row here must have BOTH a FOREACH_PER_NODE_CFG_FIELD row with NO_FLAT_FIELD bit
+// AND a FOREACH_MANUAL_PER_NODE_FIELD row matching the source. Closes Shortsighted #4.
 //======================================================================================================
-#define FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC(X)                                                           \
+#define FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC(X)                                                           \
     /* target_field,  source_array_field */                                                              \
-    X(strategy,       core_strategies)
+    X(strategy,       node_strategies)
 
 // Payload macro: emit per-core sync line. Used by PopulateCoresFromFlat (templated;
 // `cfg` + `c` in scope from caller's per-core loop).
 #define EMIT_NO_FLAT_FIELD_SYNC(target, source) \
-    cfg->cores[c].target = cfg->source[c];
+    cfg->nodes[c].target = cfg->source[c];
 
 //======================================================================================================
-// [PerCoreCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)]
+// [PerNodeCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)]
 //======================================================================================================
 // PURPOSE: closes Shortsighted #3 (CI regex heuristic) to ~99.9% structural strength via
 // COMPILE-TIME static_assert. The X-macro KNOWS the expected struct payload (sum of STORAGE_T
-// sizes from FOREACH_PER_CORE_CFG_FIELD + FOREACH_PER_CORE_DOMAIN_BITMAP). If anyone adds a
-// manual field to PerCoreCfg<F> body outside the X-macros, sizeof exceeds the bound and BUILD
+// sizes from FOREACH_PER_NODE_CFG_FIELD + FOREACH_PER_NODE_DOMAIN_BITMAP). If anyone adds a
+// manual field to PerNodeCfg<F> body outside the X-macros, sizeof exceeds the bound and BUILD
 // FAILS with operator-readable error. The CI script (gcc -E + audit) is defense-in-depth.
 //
-// LOWER BOUND: sizeof(PerCoreCfg<F>) >= sum of all field sizes (always; can't be less than sum).
+// LOWER BOUND: sizeof(PerNodeCfg<F>) >= sum of all field sizes (always; can't be less than sum).
 //              Fires on field removal or X-macro misconfiguration.
 //
 // UPPER BOUND: sizeof <= sum + (N_fields × max_alignof - 1) + alignas(64) tail pad.
-//              For PerCoreCfg<F=64>: max alignof = 8 (FPN_Binary<F=64>). N_fields ~98 (93 cfg + 5 bitmap).
+//              For PerNodeCfg<F=64>: max alignof = 8 (FPN_Binary<F=64>). N_fields ~98 (93 cfg + 5 bitmap).
 //              Max padding ~98×7 + 64 = ~750 bytes leeway. Tight enough that a manual field of
 //              any reasonable size (FPN_Binary<F=64> = 24 bytes, even uint32_t = 4 bytes) pushes sizeof
 //              over the upper bound. The static_assert at the struct definition site fires with
 //              clear "MANUAL FIELD ADDED" diagnostic.
 //
-// The static_asserts live in ControllerConfig.hpp post-PerCoreCfg<F> struct definition.
+// The static_asserts live in ControllerConfig.hpp post-PerNodeCfg<F> struct definition.
 //======================================================================================================
 template <unsigned F>
-constexpr size_t calc_per_core_cfg_expected_payload_bytes() {
+constexpr size_t calc_per_node_cfg_expected_payload_bytes() {
     size_t total = 0;
 #define EMIT_FIELD_SIZEOF(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                           applies_to_strategy_cat, applies_to_op_mode_cat, \
                           applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     total += sizeof(STORAGE_T);
-    FOREACH_PER_CORE_CFG_FIELD(EMIT_FIELD_SIZEOF)
+    FOREACH_PER_NODE_CFG_FIELD(EMIT_FIELD_SIZEOF)
 #undef EMIT_FIELD_SIZEOF
 #define EMIT_BITMAP_SIZEOF(align_n, domain, field, storage, child) total += sizeof(storage);
-    FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_BITMAP_SIZEOF)
+    FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_BITMAP_SIZEOF)
 #undef EMIT_BITMAP_SIZEOF
     return total;
 }
 
 // Field count for upper-bound leeway estimation (per-field max padding = alignof-1).
 template <unsigned F>
-constexpr size_t calc_per_core_cfg_field_count() {
+constexpr size_t calc_per_node_cfg_field_count() {
     size_t count = 0;
 #define EMIT_FIELD_COUNT(STORAGE_T, KIND_TOKEN, name, ...) count += 1;
-    FOREACH_PER_CORE_CFG_FIELD(EMIT_FIELD_COUNT)
+    FOREACH_PER_NODE_CFG_FIELD(EMIT_FIELD_COUNT)
 #undef EMIT_FIELD_COUNT
 #define EMIT_BITMAP_COUNT(align_n, domain, field, storage, child) count += 1;
-    FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_BITMAP_COUNT)
+    FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_BITMAP_COUNT)
 #undef EMIT_BITMAP_COUNT
     return count;
 }
 
-inline constexpr size_t kPerCoreCfgExpectedPayloadBytes64 = calc_per_core_cfg_expected_payload_bytes<64>();
-inline constexpr size_t kPerCoreCfgFieldCount             = calc_per_core_cfg_field_count<64>();
+inline constexpr size_t kPerCoreCfgExpectedPayloadBytes64 = calc_per_node_cfg_expected_payload_bytes<64>();
+inline constexpr size_t kPerCoreCfgFieldCount             = calc_per_node_cfg_field_count<64>();
 // Max padding leeway: each field can have at most (alignof-1) padding bytes before it.
 // FPN_Binary<F=64> alignof = 8 (8-byte alignment for uint64_t members). uint16_t = 2. uint8_t = 1.
 // Conservative upper bound: assume worst-case 8-byte alignment for all fields → 7 bytes padding each.
@@ -973,8 +973,8 @@ inline constexpr size_t kPerCoreCfgMaxPaddingBytes        = kPerCoreCfgFieldCoun
 // Drives g_*_cfg_field_descriptors[FIELD_IDX_*_<name>] direct access at compile time.
 #define X_GEN_GLOBAL_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     FIELD_IDX_GLOBAL_##name,
-#define X_GEN_PER_CORE_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
-    FIELD_IDX_PER_CORE_##name,
+#define X_GEN_PER_NODE_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    FIELD_IDX_PER_NODE_##name,
 
 enum CfgGlobalFieldIdx : uint16_t {
     FOREACH_GLOBAL_CFG_FIELD(X_GEN_GLOBAL_FIELD_IDX)
@@ -982,18 +982,18 @@ enum CfgGlobalFieldIdx : uint16_t {
 };
 
 enum CfgPerCoreFieldIdx : uint16_t {
-    FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_FIELD_IDX)
-    FIELD_IDX_PER_CORE_END  // sentinel; equals per-core registry entry count
+    FOREACH_PER_NODE_CFG_FIELD(X_GEN_PER_NODE_FIELD_IDX)
+    FIELD_IDX_PER_NODE_END  // sentinel; equals per-core registry entry count
 };
 
 #undef X_GEN_GLOBAL_FIELD_IDX
-#undef X_GEN_PER_CORE_FIELD_IDX
+#undef X_GEN_PER_NODE_FIELD_IDX
 
 //======================================================================================================
 // [g_*_cfg_field_descriptors — auto-generated arrays]
 //======================================================================================================
 // Single source of truth for descriptor data; consumers index via FIELD_IDX_GLOBAL_<name>
-// or FIELD_IDX_PER_CORE_<name>.
+// or FIELD_IDX_PER_NODE_<name>.
 #define X_GEN_DESCRIPTOR_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     CfgFieldDescriptor{                                                                                  \
         /* kind            */ CfgFieldDescriptor::KIND_TOKEN,                                            \
@@ -1013,13 +1013,13 @@ enum CfgPerCoreFieldIdx : uint16_t {
         /* payload         */ payload_init,                                                              \
     },
 
-#define X_GEN_DESCRIPTOR_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+#define X_GEN_DESCRIPTOR_PER_NODE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     CfgFieldDescriptor{                                                                                  \
         /* kind            */ CfgFieldDescriptor::KIND_TOKEN,                                            \
         /* lives_in_struct */ static_cast<uint8_t>(lives_in_struct),                                     \
         /* metadata_flags  */ static_cast<uint16_t>(meta),                                               \
         /* _reserved       */ 0,                                                                         \
-        /* field_idx       */ FIELD_IDX_PER_CORE_##name,                                                 \
+        /* field_idx       */ FIELD_IDX_PER_NODE_##name,                                                 \
         /* cfg_field_name  */ #name,                                                                     \
         /* label           */ label,                                                                     \
         /* section         */ section,                                                                   \
@@ -1039,18 +1039,18 @@ inline constexpr CfgFieldDescriptor g_global_cfg_field_descriptors[] = {
     FOREACH_GLOBAL_CFG_FIELD(X_GEN_DESCRIPTOR_GLOBAL)
 };
 
-inline constexpr CfgFieldDescriptor g_per_core_cfg_field_descriptors[] = {
-    FOREACH_PER_CORE_CFG_FIELD(X_GEN_DESCRIPTOR_PER_CORE)
+inline constexpr CfgFieldDescriptor g_per_node_cfg_field_descriptors[] = {
+    FOREACH_PER_NODE_CFG_FIELD(X_GEN_DESCRIPTOR_PER_NODE)
 };
 
 #undef X_GEN_DESCRIPTOR_GLOBAL
-#undef X_GEN_DESCRIPTOR_PER_CORE
+#undef X_GEN_DESCRIPTOR_PER_NODE
 
 // Verify array sizes match sentinels.
 static_assert(sizeof(g_global_cfg_field_descriptors) / sizeof(g_global_cfg_field_descriptors[0]) == FIELD_IDX_GLOBAL_END,
               "g_global_cfg_field_descriptors size must equal FIELD_IDX_GLOBAL_END");
-static_assert(sizeof(g_per_core_cfg_field_descriptors) / sizeof(g_per_core_cfg_field_descriptors[0]) == FIELD_IDX_PER_CORE_END,
-              "g_per_core_cfg_field_descriptors size must equal FIELD_IDX_PER_CORE_END");
+static_assert(sizeof(g_per_node_cfg_field_descriptors) / sizeof(g_per_node_cfg_field_descriptors[0]) == FIELD_IDX_PER_NODE_END,
+              "g_per_node_cfg_field_descriptors size must equal FIELD_IDX_PER_NODE_END");
 
 // v5.15.5.F.4c.1 — defense-in-depth: every cfg_field_name MUST be unique within
 // a registry. FIELD_IDX_*_<name> enum already enforces this at the preprocessor
@@ -1081,8 +1081,8 @@ static_assert(cfg_field_names_unique(g_global_cfg_field_descriptors),
               "FOREACH_GLOBAL_CFG_FIELD has duplicate cfg_field_name — violates "
               "row-uniqueness contract + breaks .F.4c.1 ImGui PushID collision "
               "avoidance. Find + rename the duplicate.");
-static_assert(cfg_field_names_unique(g_per_core_cfg_field_descriptors),
-              "FOREACH_PER_CORE_CFG_FIELD has duplicate cfg_field_name — violates "
+static_assert(cfg_field_names_unique(g_per_node_cfg_field_descriptors),
+              "FOREACH_PER_NODE_CFG_FIELD has duplicate cfg_field_name — violates "
               "row-uniqueness contract + breaks .F.4c.1 ImGui PushID collision "
               "avoidance. Find + rename the duplicate.");
 
@@ -1097,7 +1097,7 @@ static_assert(cfg_field_names_unique(g_per_core_cfg_field_descriptors),
 // .F.4c.3 — template-parameterized on (N_FIELDS, descriptor array). Each
 // registry instantiates its own mask arrays + composed views. Same template
 // body composes against either FOREACH_GLOBAL_CFG_FIELD or
-// FOREACH_PER_CORE_CFG_FIELD (or any future per-instance registry per
+// FOREACH_PER_NODE_CFG_FIELD (or any future per-instance registry per
 // DESIGN_SPECS/per-instance-registry-pattern.md).
 //
 // Per H6: these arrays are populated ONCE at static-init time (single-threaded;
@@ -1150,7 +1150,7 @@ constexpr size_t cfg_field_count(const CfgMaskArray<N_WORDS>& mask) {
 }
 
 // FOREACH_METADATA_BIT(X) — tuple: X(lowercase_name, UPPERCASE_BIT_NAME).
-// .F.4c.3 — PER_CORE_OK removed (redundant under per-core authoritative registry).
+// .F.4c.3 — PER_NODE_OK removed (redundant under per-core authoritative registry).
 // Each remaining row adds a per-bit precomputed mask array per registry.
 #define FOREACH_METADATA_BIT(X)                                            \
     X(restart_required,         RESTART_REQUIRED)                          \
@@ -1174,11 +1174,11 @@ constexpr size_t cfg_field_count(const CfgMaskArray<N_WORDS>& mask) {
 FOREACH_METADATA_BIT(X_GEN_GLOBAL_MASK)
 #undef X_GEN_GLOBAL_MASK
 
-#define X_GEN_PER_CORE_MASK(lname, BITNAME) \
-    inline constexpr auto g_per_core_cfg_##lname##_mask = \
-        cfg_compute_mask<CfgFieldDescriptor::BITNAME>(g_per_core_cfg_field_descriptors);
-FOREACH_METADATA_BIT(X_GEN_PER_CORE_MASK)
-#undef X_GEN_PER_CORE_MASK
+#define X_GEN_PER_NODE_MASK(lname, BITNAME) \
+    inline constexpr auto g_per_node_cfg_##lname##_mask = \
+        cfg_compute_mask<CfgFieldDescriptor::BITNAME>(g_per_node_cfg_field_descriptors);
+FOREACH_METADATA_BIT(X_GEN_PER_NODE_MASK)
+#undef X_GEN_PER_NODE_MASK
 
 //------------------------------------------------------------------------------
 // [CI CHECK 9 — STAMP_BOUND_CFG_DERIVED COHORT COVERAGE REGRESSION GUARD]
@@ -1200,11 +1200,11 @@ FOREACH_METADATA_BIT(X_GEN_PER_CORE_MASK)
 // at their respective registries.
 //------------------------------------------------------------------------------
 static_assert(
-    cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask)
+    cfg_field_count(g_per_node_cfg_stamp_bound_cfg_derived_mask)
     + cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask) >= 20,
     "STAMP_BOUND_CFG_DERIVED cohort coverage regression: per-core + global mask combined "
     "should flag ≥ 20 fields (was 19 per-core + 1 global = 20 at .B.3 ship close 2026-05-24). "
-    "If you intentionally removed a STAMP_BOUND_CFG_DERIVED row from FOREACH_PER_CORE_CFG_FIELD "
+    "If you intentionally removed a STAMP_BOUND_CFG_DERIVED row from FOREACH_PER_NODE_CFG_FIELD "
     "or FOREACH_GLOBAL_CFG_FIELD, lower this threshold AND document rationale at the row deletion site. "
     "If you DIDN'T remove a row, find what regressed (likely accidental metadata-flag drop)."
 );
@@ -1385,11 +1385,11 @@ constexpr CfgMaskArray<(N + 63) / 64> cfg_compute_lives_in_struct_mask(const Cfg
 FOREACH_LIVES_IN_STRUCT(X_GEN_GLOBAL_LIVES_IN_STRUCT_MASK)
 #undef X_GEN_GLOBAL_LIVES_IN_STRUCT_MASK
 
-#define X_GEN_PER_CORE_LIVES_IN_STRUCT_MASK(lname, VALUE) \
-    inline constexpr auto g_per_core_cfg_##lname##_mask = \
-        cfg_compute_lives_in_struct_mask<CfgFieldDescriptor::VALUE>(g_per_core_cfg_field_descriptors);
-FOREACH_LIVES_IN_STRUCT(X_GEN_PER_CORE_LIVES_IN_STRUCT_MASK)
-#undef X_GEN_PER_CORE_LIVES_IN_STRUCT_MASK
+#define X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK(lname, VALUE) \
+    inline constexpr auto g_per_node_cfg_##lname##_mask = \
+        cfg_compute_lives_in_struct_mask<CfgFieldDescriptor::VALUE>(g_per_node_cfg_field_descriptors);
+FOREACH_LIVES_IN_STRUCT(X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK)
+#undef X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK
 
 //------------------------------------------------------------------------------
 // [CFG_FIELD_FOR_EACH_SET_BIT — iteration macro]
@@ -1473,53 +1473,53 @@ inline constexpr auto g_global_cfg_cli_explain_mask = cfg_compose_global_cli_exp
 
 // Per-core registry — composed views
 
-constexpr CfgMaskArray<(FIELD_IDX_PER_CORE_END + 63) / 64> cfg_compose_per_core_render_mask() {
-    constexpr size_t WORDS = (FIELD_IDX_PER_CORE_END + 63) / 64;
+constexpr CfgMaskArray<(FIELD_IDX_PER_NODE_END + 63) / 64> cfg_compose_per_node_render_mask() {
+    constexpr size_t WORDS = (FIELD_IDX_PER_NODE_END + 63) / 64;
     CfgMaskArray<WORDS> out = {};
     for (size_t i = 0; i < WORDS; ++i) {
-        out.words[i] = ~(g_per_core_cfg_is_boot_only_mask.words[i] | g_per_core_cfg_hidden_by_default_mask.words[i]);
+        out.words[i] = ~(g_per_node_cfg_is_boot_only_mask.words[i] | g_per_node_cfg_hidden_by_default_mask.words[i]);
     }
-    if constexpr ((FIELD_IDX_PER_CORE_END % 64) != 0) {
-        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_PER_CORE_END % 64)) - 1ULL;
+    if constexpr ((FIELD_IDX_PER_NODE_END % 64) != 0) {
+        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_PER_NODE_END % 64)) - 1ULL;
         out.words[WORDS - 1] &= last_word_valid;
     }
     return out;
 }
-inline constexpr auto g_per_core_cfg_render_mask = cfg_compose_per_core_render_mask();
+inline constexpr auto g_per_node_cfg_render_mask = cfg_compose_per_node_render_mask();
 
-constexpr CfgMaskArray<(FIELD_IDX_PER_CORE_END + 63) / 64> cfg_compose_per_core_save_mask() {
-    constexpr size_t WORDS = (FIELD_IDX_PER_CORE_END + 63) / 64;
+constexpr CfgMaskArray<(FIELD_IDX_PER_NODE_END + 63) / 64> cfg_compose_per_node_save_mask() {
+    constexpr size_t WORDS = (FIELD_IDX_PER_NODE_END + 63) / 64;
     CfgMaskArray<WORDS> out = {};
     for (size_t i = 0; i < WORDS; ++i) {
-        out.words[i] = ~g_per_core_cfg_has_side_effect_mask.words[i];
+        out.words[i] = ~g_per_node_cfg_has_side_effect_mask.words[i];
     }
-    if constexpr ((FIELD_IDX_PER_CORE_END % 64) != 0) {
-        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_PER_CORE_END % 64)) - 1ULL;
+    if constexpr ((FIELD_IDX_PER_NODE_END % 64) != 0) {
+        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_PER_NODE_END % 64)) - 1ULL;
         out.words[WORDS - 1] &= last_word_valid;
     }
     return out;
 }
-inline constexpr auto g_per_core_cfg_save_mask = cfg_compose_per_core_save_mask();
+inline constexpr auto g_per_node_cfg_save_mask = cfg_compose_per_node_save_mask();
 
-// v5.15.5.F.4d.1.A Step 4c — g_per_core_cfg_stamp_emit_mask alias DELETED (was
-// pure alias of g_per_core_cfg_stamp_bound_mask; zero consumers verified).
+// v5.15.5.F.4d.1.A Step 4c — g_per_node_cfg_stamp_emit_mask alias DELETED (was
+// pure alias of g_per_node_cfg_stamp_bound_mask; zero consumers verified).
 
 // v5.15.5.F.4d.1.A Step 4b — cli_explain_mask composition FIXED per-core sister
 // to global fix. Was producing ~0ULL; corrected to documented composition.
-constexpr CfgMaskArray<(FIELD_IDX_PER_CORE_END + 63) / 64> cfg_compose_per_core_cli_explain_mask() {
-    constexpr size_t WORDS = (FIELD_IDX_PER_CORE_END + 63) / 64;
+constexpr CfgMaskArray<(FIELD_IDX_PER_NODE_END + 63) / 64> cfg_compose_per_node_cli_explain_mask() {
+    constexpr size_t WORDS = (FIELD_IDX_PER_NODE_END + 63) / 64;
     CfgMaskArray<WORDS> out = {};
     for (size_t i = 0; i < WORDS; ++i) {
-        out.words[i] = ~(g_per_core_cfg_has_side_effect_mask.words[i] | g_per_core_cfg_hidden_by_default_mask.words[i]);
+        out.words[i] = ~(g_per_node_cfg_has_side_effect_mask.words[i] | g_per_node_cfg_hidden_by_default_mask.words[i]);
     }
-    if constexpr ((FIELD_IDX_PER_CORE_END % 64) != 0) {
-        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_PER_CORE_END % 64)) - 1ULL;
+    if constexpr ((FIELD_IDX_PER_NODE_END % 64) != 0) {
+        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_PER_NODE_END % 64)) - 1ULL;
         out.words[WORDS - 1] &= last_word_valid;
     }
     return out;
 }
-inline constexpr auto g_per_core_cfg_cli_explain_mask = cfg_compose_per_core_cli_explain_mask();
+inline constexpr auto g_per_node_cfg_cli_explain_mask = cfg_compose_per_node_cli_explain_mask();
 
-// .F.4c.3 — g_cfg_per_core_ok_mask + g_cfg_per_core_override_mask DELETED.
+// .F.4c.3 — g_cfg_per_node_ok_mask + g_cfg_per_node_override_mask DELETED.
 // Per-core scope is registry membership, not a metadata bit; the override
-// emit path went away with PerCoreOverrides<F> at this ship.
+// emit path went away with PerNodeOverrides<F> at this ship.

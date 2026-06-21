@@ -69,7 +69,7 @@ enum OrderEventType : uint8_t {
 //======================================================================================================
 // One lifecycle event for one order. Self-contained — the fold function
 // can reconstruct the portfolio from a stream of these without consulting
-// any external state (no CoreContext lookup needed, no Order table needed).
+// any external state (no NodeContext lookup needed, no Order table needed).
 //
 // For OEVT_FULL_FILL buy events, tp and sl carry the intended take-profit
 // and stop-loss at fill time. For sells and non-fill events they're zero.
@@ -83,7 +83,7 @@ struct OrderEvent {
     uint64_t       timestamp_us;   // market time of the originating event
     OrderEventType type;           // OEVT_*
     OrderType      order_type;     // ORDER_MARKET_BUY / ORDER_MARKET_SELL
-    int16_t        core_id;        // which executor core (-1 for non-core)
+    int16_t        node_id;        // which executor core (-1 for non-core)
     uint8_t        _pad[4];
     Money          price;          // fill price (DECIMAL money — Ship B P2b epoch)
     Money          qty;            // fill qty (decimal)
@@ -641,7 +641,7 @@ template <unsigned F>
 inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
                                           uint64_t timestamp_us,
                                           OrderType order_type,
-                                          int16_t core_id,
+                                          int16_t node_id,
                                           Money price,
                                           Money qty,
                                           Money tp,
@@ -654,7 +654,7 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
     e.timestamp_us = timestamp_us;
     e.type         = OEVT_FULL_FILL;
     e.order_type   = order_type;
-    e.core_id      = core_id;
+    e.node_id      = node_id;
     e.price        = price;
     e.qty          = qty;
     e.tp           = tp;
@@ -668,7 +668,7 @@ template <unsigned F>
 inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
                                                uint64_t timestamp_us,
                                                OrderType order_type,
-                                               int16_t core_id,
+                                               int16_t node_id,
                                                const char* reason_str) {
     OrderEvent<F> e;
     std::memset(&e, 0, sizeof(e));
@@ -677,7 +677,7 @@ inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
     e.timestamp_us = timestamp_us;
     e.type         = OEVT_REJECTED;
     e.order_type   = order_type;
-    e.core_id      = core_id;
+    e.node_id      = node_id;
     if (reason_str) {
         std::strncpy(e.reason, reason_str, sizeof(e.reason) - 1);
         e.reason[sizeof(e.reason) - 1] = '\0';
@@ -725,7 +725,7 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
         const OrderEvent<F>& e = log->entries[i];
         if (e.type != OEVT_FULL_FILL) continue;
 
-        int slot = (int)e.core_id;
+        int slot = (int)e.node_id;
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
 
         if (e.order_type == ORDER_MARKET_BUY) {

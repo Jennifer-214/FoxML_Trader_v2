@@ -44,7 +44,7 @@
 #include "../MemHeaders/FailureModeRegistry.hpp"
 #include "ControllerConfig.hpp"
 #include "ControllerEventLoop.hpp"      // EventLoopState
-#include "../ML_Headers/CoreModelZoo.hpp"  // CoreModelZoo + ModelHandle.drift_flags_at_load
+#include "../ML_Headers/NodeModelZoo.hpp"  // NodeModelZoo + ModelHandle.drift_flags_at_load
 #include "../Strategies/StrategyInterface.hpp"  // STRATEGY_ML
 
 namespace tt {
@@ -63,12 +63,12 @@ enum LiveReadinessSeverity : uint8_t {
 //======================================================================================================
 // OR-aggregates drift_flags_at_load across all 4 zoo roles. Boot-gate
 // helpers use this to query drift state from the source-of-truth
-// (handle) rather than from PerCoreSnap.failure_flags (which isn't
+// (handle) rather than from PerNodeSnap.failure_flags (which isn't
 // populated until snapshot publish — i.e., AFTER pthread spawns; boot
 // gate runs BEFORE).
 
 template <unsigned F>
-inline uint16_t aggregate_zoo_drift(const CoreModelZoo<F>* zoo) {
+inline uint16_t aggregate_zoo_drift(const NodeModelZoo<F>* zoo) {
     if (!zoo) return 0;
     return (uint16_t)(zoo->buy_signal.drift_flags_at_load |
                       zoo->barrier.drift_flags_at_load    |
@@ -99,19 +99,19 @@ inline bool check_mlockall_required(const ControllerConfig<F>& cfg,
 template <unsigned F>
 inline bool check_all_cores_strategy_explicit(const ControllerConfig<F>& cfg,
                                               const EventLoopState<F>&) {
-    // Branchless mask compare: all bits 0..num_execution_cores-1 must be set.
-    // Reuses cfg.core_strategies_explicit_set bitmap (v5.9.0c precedent).
-    if (cfg.num_execution_cores <= 0 || cfg.num_execution_cores > 16) return false;
-    uint16_t expected = (uint16_t)((1u << cfg.num_execution_cores) - 1u);
-    return (cfg.core_strategies_explicit_set & expected) == expected;
+    // Branchless mask compare: all bits 0..num_execution_nodes-1 must be set.
+    // Reuses cfg.node_strategies_explicit_set bitmap (v5.9.0c precedent).
+    if (cfg.num_execution_nodes <= 0 || cfg.num_execution_nodes > 16) return false;
+    uint16_t expected = (uint16_t)((1u << cfg.num_execution_nodes) - 1u);
+    return (cfg.node_strategies_explicit_set & expected) == expected;
 }
 
 template <unsigned F>
 inline bool check_all_ml_cores_have_model(const ControllerConfig<F>& cfg,
                                           const EventLoopState<F>& state) {
-    for (uint16_t i = 0; i < cfg.num_execution_cores && i < 16; ++i) {
-        if (cfg.core_strategies[i] == STRATEGY_ML &&
-            state.cores[i].model_handle == nullptr) {
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        if (cfg.node_strategies[i] == STRATEGY_ML &&
+            state.nodes[i].model_handle == nullptr) {
             return false;
         }
     }
@@ -124,8 +124,8 @@ inline bool check_model_max_age_set(const ControllerConfig<F>& cfg,
     // (a) operator opted in to age gating
     if (cfg.model_max_age_hours == 0) return false;
     // (b) no core has MODEL_AGE_WARN drift bit set
-    for (uint16_t i = 0; i < cfg.num_execution_cores && i < 16; ++i) {
-        const CoreModelZoo<F>* zoo = (const CoreModelZoo<F>*)state.cores[i].model_handle;
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
         if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_model_age_warn)) {
             return false;
         }
@@ -136,8 +136,8 @@ inline bool check_model_max_age_set(const ControllerConfig<F>& cfg,
 template <unsigned F>
 inline bool check_no_feature_hash_drift(const ControllerConfig<F>& cfg,
                                         const EventLoopState<F>& state) {
-    for (uint16_t i = 0; i < cfg.num_execution_cores && i < 16; ++i) {
-        const CoreModelZoo<F>* zoo = (const CoreModelZoo<F>*)state.cores[i].model_handle;
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
         if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_feature_hash_drift)) {
             return false;
         }
@@ -148,8 +148,8 @@ inline bool check_no_feature_hash_drift(const ControllerConfig<F>& cfg,
 template <unsigned F>
 inline bool check_no_label_hash_drift(const ControllerConfig<F>& cfg,
                                       const EventLoopState<F>& state) {
-    for (uint16_t i = 0; i < cfg.num_execution_cores && i < 16; ++i) {
-        const CoreModelZoo<F>* zoo = (const CoreModelZoo<F>*)state.cores[i].model_handle;
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
         if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_label_hash_drift)) {
             return false;
         }
@@ -160,8 +160,8 @@ inline bool check_no_label_hash_drift(const ControllerConfig<F>& cfg,
 template <unsigned F>
 inline bool check_no_build_flags_drift(const ControllerConfig<F>& cfg,
                                        const EventLoopState<F>& state) {
-    for (uint16_t i = 0; i < cfg.num_execution_cores && i < 16; ++i) {
-        const CoreModelZoo<F>* zoo = (const CoreModelZoo<F>*)state.cores[i].model_handle;
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
         if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_build_flags_drift)) {
             return false;
         }
@@ -172,8 +172,8 @@ inline bool check_no_build_flags_drift(const ControllerConfig<F>& cfg,
 template <unsigned F>
 inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
                                            const EventLoopState<F>& state) {
-    for (uint16_t i = 0; i < cfg.num_execution_cores && i < 16; ++i) {
-        const CoreModelZoo<F>* zoo = (const CoreModelZoo<F>*)state.cores[i].model_handle;
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
         if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_stamp_hmac_not_verified)) {
             return false;
         }
@@ -216,9 +216,9 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
     X(mlockall_required,           check_mlockall_required,           LR_SEV_REFUSE, \
       "set require_mlockall=1 in cfg (deterministic latency)") \
     X(all_cores_strategy_explicit, check_all_cores_strategy_explicit, LR_SEV_REFUSE, \
-      "set core_<N>_strategy explicitly for all N in [0, num_execution_cores)") \
+      "set core_<N>_strategy explicitly for all N in [0, num_execution_nodes)") \
     X(all_ml_cores_have_model,     check_all_ml_cores_have_model,     LR_SEV_REFUSE, \
-      "set core_<N>_model_path or core_<N>_model_dir for all ML cores") \
+      "set core_<N>_model_path or core_<N>_model_dir for all ML nodes") \
     X(model_max_age_set,           check_model_max_age_set,           LR_SEV_REFUSE, \
       "set model_max_age_hours > 0; retrain stale models") \
     X(no_feature_hash_drift,       check_no_feature_hash_drift,       LR_SEV_REFUSE, \

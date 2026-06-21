@@ -9,7 +9,7 @@
 // fields. Used by multiple registries to provide uniform access semantics:
 //   - FOREACH_STAMP_BOUND_MODEL_CONST has_flags (v5.14.8.A.merged)
 //   - FOREACH_FAILURE_MODE failure_flags (v5.14.8.B)
-//   - Future TECH_DEBT-013 sweep candidates (PerCoreSnap state flags,
+//   - Future TECH_DEBT-013 sweep candidates (PerNodeSnap state flags,
 //     FOREACH_FEATURE enabled bitmap, engine-wide cfg flags, etc.)
 //
 // PRECEDENT (CLAUDE.md item 1): Portfolio<uint16_t> bitmap +

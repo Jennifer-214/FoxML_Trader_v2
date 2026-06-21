@@ -28,7 +28,7 @@
 //   - acknowledge_cross_binary_version_drift (was :853 int field; v5.9.4)
 // Both are operator-decision flags ("suppress this drift category WARN/REFUSE").
 // Closes the orphan-boolean tail of TECH_DEBT-009's v5.14.9.F.4 partial migration.
-// Per-core override comes free via PER_CORE_OVERRIDE_BITMAP_DOMAINS (ops domain
+// Per-core override comes free via PER_NODE_OVERRIDE_BITMAP_DOMAINS (ops domain
 // already listed there). Cohort migration per CLAUDE.local.md 2026-05-11 rule +
 // cfg-flag-eligibility-criteria.md (boot-frozen, engine-wide, slow-path-tolerant).
 //
@@ -39,7 +39,7 @@
 #define FOREACH_OPS_CFG_FLAG(X)                                                                                                                                                                                                                                       \
     X(SESSION_FILTER_ENABLED,                  session_filter_enabled,                  "Session Filter",                  "Toggles",                  "per-session gate multipliers (Asian/European/US)")                                                            \
     X(NOTIFY_ENABLED,                          notify_enabled,                          "Notify",                          "Operational Monitoring",   "external notification backend (Slack/email/etc.)")                                                             \
-    X(ACKNOWLEDGE_INFERENCE_CFG_DRIFT,         acknowledge_inference_cfg_drift,         "Ack Inference CFG Drift",         "Drift Acknowledgments",    "suppress stamp↔cfg inference_cfg drift WARN/REFUSE (Tier 1 + Tier 2 in CoreModelZoo_ValidateAgainstCfg)")    \
+    X(ACKNOWLEDGE_INFERENCE_CFG_DRIFT,         acknowledge_inference_cfg_drift,         "Ack Inference CFG Drift",         "Drift Acknowledgments",    "suppress stamp↔cfg inference_cfg drift WARN/REFUSE (Tier 1 + Tier 2 in NodeModelZoo_ValidateAgainstCfg)")    \
     X(ACKNOWLEDGE_CROSS_BINARY_DRIFT,          acknowledge_cross_binary_version_drift,  "Ack Cross-Binary Drift",          "Drift Acknowledgments",    "suppress xgb/build_flags/poll_interval cross-binary WARN (training-binary divergence is forensic only)")
 
 enum OpsCfgFlag {

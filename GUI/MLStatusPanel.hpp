@@ -14,7 +14,7 @@
 //   - ConfidenceScorer IC + RMSE for diagnostic
 //
 // Stateless render — direct call from main loop, NOT in FOREACH_PANEL(X)
-// registry. All data flows through TUISnapshot.per_core[i]. Mirrors the
+// registry. All data flows through TUISnapshot.per_node[i]. Mirrors the
 // v5.8.6b engine header pattern.
 //
 // Closes silent-failure visibility gap from v5.8 paper testing: operator
@@ -28,7 +28,7 @@
 #include "../DataStream/EngineTUI.hpp"
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.10 — REGIME_INFO
 #include "../MemHeaders/FailureModeRegistry.hpp"  // v5.14.8.C — FAILURE_IS_SET accessor
-#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
+#include "../MemHeaders/PerNodeStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
 
 namespace tt {
 
@@ -38,8 +38,8 @@ namespace tt {
 inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* shared = nullptr) {
     if (!snap) return;
     if (ImGui::Begin("ML Status")) {
-        if (snap->per_core_count == 0) {
-            ImGui::TextDisabled("No active cores.");
+        if (snap->per_node_count == 0) {
+            ImGui::TextDisabled("No active nodes.");
             ImGui::End();
             return;
         }
@@ -50,8 +50,8 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
         ImGui::Separator();
 
         // Per-core rows.
-        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-            const auto& pc = snap->per_core[i];
+        for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+            const auto& pc = snap->per_node[i];
 
             // Only render rows for ML cores OR cores with ML symptoms
             // (load failed / NaN events / pre-warmup) — keeps the panel
@@ -312,7 +312,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
 
             // v5.10.3.B — Runtime IC drift detection observability (parity-check
             // Finding #9 closure; v5.10.0e). Distinguishes drift-kill from
-            // MTM-kill / manual-kill (all of which set core_kill_tripped).
+            // MTM-kill / manual-kill (all of which set node_kill_tripped).
             if (STATE_FLAG_IS_SET(pc, DRIFT_BREACHED)) {
                 ImGui::Indent(20);
                 if (STATE_FLAG_IS_SET(pc, DRIFT_KILL_TRIPPED)) {
@@ -359,8 +359,8 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
         // yellow = mid, dim = low. "Last:" callout shows what the most
         // recent prediction picked.
         bool any_ensemble = false;
-        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-            if (snap->per_core[i].ensemble_active) {
+        for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+            if (snap->per_node[i].ensemble_active) {
                 any_ensemble = true;
                 break;
             }
@@ -369,8 +369,8 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             ImGui::Separator();
             if (ImGui::CollapsingHeader("Ensemble (multi-horizon)",
                                           ImGuiTreeNodeFlags_DefaultOpen)) {
-                for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-                    const auto& cs = snap->per_core[i];
+                for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+                    const auto& cs = snap->per_node[i];
                     if (!cs.ensemble_active) continue;
 
                     ImGui::TextColored(FoxmlColors::sand,
@@ -458,17 +458,17 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
         // ensemble_weights are EXP3 selection probabilities; thompson_mu_post
         // are Bayesian posterior means (different math; different semantics).
         bool any_thompson = false;
-        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-            if (snap->per_core[i].thompson_state &
-                TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE) {
+        for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+            if (snap->per_node[i].thompson_state &
+                TUISnapshot::PerNodeSnap::MASK_THOMPSON_BANDIT_ACTIVE) {
                 any_thompson = true;
                 break;
             }
         }
         // ──────────────────────────────────────────────────────────────────
         // v5.15.1 — Model Health CollapsingHeader (between Ensemble + Thompson).
-        // Reads failure_flags drift bits set at CoreModelZoo_TryLoadRole
-        // chokepoint + aggregated to PerCoreSnap by ShardedSnapshot publish.
+        // Reads failure_flags drift bits set at NodeModelZoo_TryLoadRole
+        // chokepoint + aggregated to PerNodeSnap by ShardedSnapshot publish.
         // Per CLAUDE.md item 12 (display↔execution invariant): drift state set
         // engine-side is visible operator-side.
         // ──────────────────────────────────────────────────────────────────
@@ -487,19 +487,19 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
 
         // Aggregate across cores for header summary (any drift tripped anywhere?).
         uint16_t any_drift_flags = 0;
-        int max_tripped_per_core = 0;
-        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-            uint16_t drift = snap->per_core[i].failure_flags & MODEL_HEALTH_DRIFT_MASK;
+        int max_tripped_per_node = 0;
+        for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+            uint16_t drift = snap->per_node[i].failure_flags & MODEL_HEALTH_DRIFT_MASK;
             any_drift_flags |= drift;
             int tripped_here = __builtin_popcount((unsigned)drift);
-            if (tripped_here > max_tripped_per_core) max_tripped_per_core = tripped_here;
+            if (tripped_here > max_tripped_per_node) max_tripped_per_node = tripped_here;
         }
         int total_tripped = __builtin_popcount((unsigned)any_drift_flags);
         const bool drift_red = (any_drift_flags & MODEL_HEALTH_DRIFT_RED_MASK) != 0;
         char model_health_label[96];
         if (total_tripped == 0) {
             snprintf(model_health_label, sizeof(model_health_label),
-                     "Model Health: clean (no drift across cores)##model_health_header");
+                     "Model Health: clean (no drift across nodes)##model_health_header");
         } else {
             snprintf(model_health_label, sizeof(model_health_label),
                      "Model Health: %d drift bit%s tripped %s##model_health_header",
@@ -515,8 +515,8 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     "No drift detected on any loaded model. "
                     "Stamp + scaler + cfg + HMAC + age all aligned with runtime.");
             } else {
-                for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-                    const auto& pc = snap->per_core[i];
+                for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+                    const auto& pc = snap->per_node[i];
                     uint16_t drift = pc.failure_flags & MODEL_HEALTH_DRIFT_MASK;
                     if (drift == 0) continue;
                     ImGui::TextColored(FoxmlColors::sand, "core %d:", i);
@@ -606,13 +606,13 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             ImGui::Separator();
             if (ImGui::CollapsingHeader("Thompson Bayesian dashboard (v5.14.10.D)",
                                           ImGuiTreeNodeFlags_DefaultOpen)) {
-                for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-                    const auto& cs = snap->per_core[i];
+                for (int i = 0; i < snap->per_node_count && i < 16; ++i) {
+                    const auto& cs = snap->per_node[i];
                     if (!(cs.thompson_state &
-                          TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE)) continue;
+                          TUISnapshot::PerNodeSnap::MASK_THOMPSON_BANDIT_ACTIVE)) continue;
                     int chosen_arm = (cs.thompson_state &
-                                       TUISnapshot::PerCoreSnap::MASK_THOMPSON_CHOSEN_ARM) >>
-                                       TUISnapshot::PerCoreSnap::SHIFT_THOMPSON_CHOSEN_ARM;
+                                       TUISnapshot::PerNodeSnap::MASK_THOMPSON_CHOSEN_ARM) >>
+                                       TUISnapshot::PerNodeSnap::SHIFT_THOMPSON_CHOSEN_ARM;
                     ImGui::TextColored(FoxmlColors::sand,
                         "core %d: Thompson active (last chose arm %d)",
                         i, chosen_arm);

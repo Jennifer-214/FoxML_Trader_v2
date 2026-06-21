@@ -54,9 +54,9 @@
 
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_BIT_U8 + BITMAP_* accessors
 
-// NOTE: deliberately NOT wrapped in `namespace tt` — matches CoreModelZoo.hpp
+// NOTE: deliberately NOT wrapped in `namespace tt` — matches NodeModelZoo.hpp
 // convention (consumer file uses globally-namespaced enums/types). The MASK
-// constants need to be accessible from template functions in CoreModelZoo
+// constants need to be accessible from template functions in NodeModelZoo
 // without namespace qualification. Sister registries (FailureModeRegistry,
 // etc.) use `namespace tt` because their consumers do too.
 

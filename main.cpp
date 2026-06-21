@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
     // .E.0.1 locale-determinism class close: pin LC_NUMERIC=C process-wide at boot,
     // BEFORE any float parse (cfg load at :139+). setlocale is process-global so every
     // pthread inherits it — makes the formerly-phantom "engine boot pins this"
-    // (CoreModelZoo.hpp:2845) actually TRUE. Headless engine: sole pin. engine_gui:
+    // (NodeModelZoo.hpp:2845) actually TRUE. Headless engine: sole pin. engine_gui:
     // re-pinned after SDL_Init (GuiThread) since SDL/X11 can reset LC_*.
     setlocale(LC_NUMERIC, "C");
 
@@ -162,10 +162,10 @@ int main(int argc, char *argv[]) {
     // symbol DataStream not yet supported — boot fails with clear error if cores have
     // mismatched non-empty symbols. Empty = no override (binance.cfg's symbol drives).
     {
-        const char* primary_symbol = ccfg.core_symbol[0];
+        const char* primary_symbol = ccfg.node_symbol[0];
         bool any_set = (primary_symbol[0] != '\0');
-        for (uint16_t c = 1; c < ccfg.num_execution_cores && c < 16; ++c) {
-            const char* sc = ccfg.core_symbol[c];
+        for (uint16_t c = 1; c < ccfg.num_execution_nodes && c < 16; ++c) {
+            const char* sc = ccfg.node_symbol[c];
             if (sc[0] != '\0') {
                 any_set = true;
                 if (primary_symbol[0] == '\0') {

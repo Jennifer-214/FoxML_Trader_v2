@@ -37,7 +37,7 @@
 // 23 (type-trait dispatch via templated helpers).
 //
 // CONSUMERS (one chokepoint walker):
-//   - CoreFrameworks/ModelValidation.hpp `CoreModelZoo_ValidateAgainstCfg<F, LogFn>`
+//   - CoreFrameworks/ModelValidation.hpp `NodeModelZoo_ValidateAgainstCfg<F, LogFn>`
 //     replaces 14 manual if-blocks with one FOREACH_CFG_DRIFT_CHECK expansion.
 //     Walker called from EngineSharded boot, hot-swap (ensemble + single-zoo),
 //     and BacktestSharded validate paths (all 4 caller sites unchanged in
@@ -181,7 +181,7 @@
 // [FOREACH_CFG_DRIFT_CHECK — 18 entries]
 //======================================================================================================
 // Walker composes the 3 Y3 axes per entry. See CoreFrameworks/ModelValidation.hpp
-// `CoreModelZoo_ValidateAgainstCfg<F, LogFn>` for the chokepoint consumer.
+// `NodeModelZoo_ValidateAgainstCfg<F, LogFn>` for the chokepoint consumer.
 //
 // Entries are grouped by category for readability but the order within FOREACH
 // does NOT affect runtime correctness (each entry is independent).

@@ -11,7 +11,7 @@
 #ifndef CONTROLLER_CONFIG_HPP
 #define CONTROLLER_CONFIG_HPP
 
-#include "../Limits.hpp"                       // MAX_EXECUTION_CORES (per-core sharding cap; PerCoreCfg<F> cores[] sizing)
+#include "../Limits.hpp"                       // MAX_EXECUTION_NODES (per-core sharding cap; PerNodeCfg<F> nodes[] sizing)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/LinearRegression3X.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // v5.14.9.A — DegradationCurve enum + ToString/FromString helpers
@@ -62,7 +62,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 // One slot per execution core (16 max). Each field shadows a same-named
 // `ControllerConfig` field; non-zero overrides the global; zero (default)
 // means "inherit from global". Resolved per-core via
-// `ControllerConfig_ResolveForCore(global, core_id)` on every slow-path
+// `ControllerConfig_ResolveForCore(global, node_id)` on every slow-path
 // rebuild.
 //
 // Why this exists: pre-4.0, each strategy *type* had its own override
@@ -73,10 +73,10 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 // defaults.
 //
 // Cfg syntax: `core_N_<field>=<value>`
-//   core_0_take_profit_pct=4.0
-//   core_1_take_profit_pct=6.0
-//   core_2_mr_tp_pct=3.5
-//   core_0_ml_buy_threshold=0.6
+//   node_0_take_profit_pct=4.0
+//   node_1_take_profit_pct=6.0
+//   node_2_mr_tp_pct=3.5
+//   node_0_ml_buy_threshold=0.6
 //
 // Adding a field: extend this struct + add the override line in
 // `ControllerConfig_ResolveForCore` + add a parser case in
@@ -98,7 +98,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 // Pre-v4.7.24 this required 4 separate edits across this file (struct,
 // init, resolver, parser) — easy to forget one site and silently lose
 // the override on a new field. The X-macro collapses that to one line.
-#define PER_CORE_OVERRIDE_FIELDS(PCT, RAW) \
+#define PER_NODE_OVERRIDE_FIELDS(PCT, RAW) \
     /* Trading */ \
     PCT(take_profit_pct) \
     PCT(stop_loss_pct) \
@@ -146,7 +146,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
     RAW(no_trade_band_mult) \
     /* v4.7.29: Partial exit geometry overrides — TP1 split + TP2 mult per core */ \
     /* partial_exit_pct + tp2_mult: money-RAW outliers — explicit at walker sites (Ship-B P2b) */ \
-    /* v4.7.31: ML/FoxML overrides — different ML cores can have different */ \
+    /* v4.7.31: ML/FoxML overrides — different ML nodes can have different */ \
     /* confidence behavior, vol-z scaling, bandit blend ratios, etc. */ \
     RAW(foxml_vol_scaling_z_max) \
     RAW(bandit_blend_ratio) \
@@ -164,7 +164,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
     /* full=0.20 + min_pct=0.05, conservative core 1 with full=0.10 + min_pct=0.20). */ \
     /* RUNTIME-ONLY overrides (NOT stamp-bound; matches existing per-core risk_pct */ \
     /* precedent — operator policy, not training-derived). 0 = inherit global. */ \
-    /* curve enum (risk_degradation_curve) is INT-typed; see PER_CORE_OVERRIDE_INT_FIELDS below. */ \
+    /* curve enum (risk_degradation_curve) is INT-typed; see PER_NODE_OVERRIDE_INT_FIELDS below. */ \
     RAW(risk_full_size_threshold) \
     RAW(risk_min_size_threshold) \
     RAW(risk_min_size_pct)
@@ -173,7 +173,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 // are uint32_t (not FPN_Binary<F>) — different declaration + parser. 0 = inherit
 // (caller checks `if (override == 0) use cfg.field`). All sentinel-friendly
 // (cfg INT defaults are non-zero meaningful values).
-#define PER_CORE_OVERRIDE_INT_FIELDS(INT) \
+#define PER_NODE_OVERRIDE_INT_FIELDS(INT) \
     /* v4.7.40: per-core slow-path cadence. Each engine can poll faster or */ \
     /* slower than the global poll_interval — fast strategies (momentum) */ \
     /* may want tighter rebuilds; slow strategies (MR) tolerate longer. */ \
@@ -197,7 +197,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 // override PAIR: <domain>_cfg_flags_override (the override values) +
 // <domain>_cfg_flags_override_set (mask of which bits are overridden).
 //
-// Per-bit override semantics: `core_3_partial_exit_enabled = 1` sets the
+// Per-bit override semantics: `node_3_partial_exit_enabled = 1` sets the
 // PARTIAL_EXIT_ENABLED bit in core 3's lifecycle override + sets the
 // corresponding bit in lifecycle_override_set so the resolver knows to use
 // the override value (not global) for that specific bit. Other bits in the
@@ -207,22 +207,22 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 //   resolved = (override_set & override_values) | (~override_set & global_values)
 //
 // Adding a new domain to FOREACH_<DOMAIN>_CFG_FLAG family = 1 row in
-// PER_CORE_OVERRIDE_BITMAP_DOMAINS below → declare + zero + resolve + parse
+// PER_NODE_OVERRIDE_BITMAP_DOMAINS below → declare + zero + resolve + parse
 // all auto-flow.
 //
 // Tuple: X(domain_lower, DOMAIN_UPPER, storage_type, FOREACH_macro)
 
-#define PER_CORE_OVERRIDE_BITMAP_DOMAINS(X)                                              \
+#define PER_NODE_OVERRIDE_BITMAP_DOMAINS(X)                                              \
     X(lifecycle, LIFECYCLE, uint8_t,  FOREACH_LIFECYCLE_CFG_FLAG)                        \
     X(gate,      GATE,      uint8_t,  FOREACH_GATE_CFG_FLAG)                             \
     X(ml,        ML,        uint16_t, FOREACH_ML_CFG_FLAG)                               \
     X(risk,      RISK,      uint8_t,  FOREACH_RISK_CFG_FLAG)                             \
     X(ops,       OPS,       uint8_t,  FOREACH_OPS_CFG_FLAG)
 
-template <unsigned F> struct PerCoreOverrides {
+template <unsigned F> struct PerNodeOverrides {
 #define _DECL_OV_MONEY(name) Money name;
 #define _DECL_OV_RAW(name)   FPN_Binary<F> name;
-    PER_CORE_OVERRIDE_FIELDS(_DECL_OV_MONEY, _DECL_OV_RAW)
+    PER_NODE_OVERRIDE_FIELDS(_DECL_OV_MONEY, _DECL_OV_RAW)
     Money fee_floor_mult;  // money-RAW outlier (no /100 parse scaling, money domain)
     Money partial_exit_pct;
     Money tp2_mult;
@@ -230,7 +230,7 @@ template <unsigned F> struct PerCoreOverrides {
 #undef _DECL_OV_RAW
 // v4.7.40: INT-typed overrides. uint32_t storage; 0 = inherit.
 #define _DECL_OV_INT_FIELD(name) uint32_t name;
-    PER_CORE_OVERRIDE_INT_FIELDS(_DECL_OV_INT_FIELD)
+    PER_NODE_OVERRIDE_INT_FIELDS(_DECL_OV_INT_FIELD)
 #undef _DECL_OV_INT_FIELD
 // v5.14.9.F.6: BITMAP-typed overrides. <domain>_cfg_flags_override holds the
 // override VALUES; <domain>_cfg_flags_override_set is the MASK of which bits
@@ -238,7 +238,7 @@ template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_BITMAP_FIELDS(d_lower, D_UPPER, stype, FOREACH_macro) \
     stype d_lower##_cfg_flags_override;     \
     stype d_lower##_cfg_flags_override_set;
-    PER_CORE_OVERRIDE_BITMAP_DOMAINS(_DECL_OV_BITMAP_FIELDS)
+    PER_NODE_OVERRIDE_BITMAP_DOMAINS(_DECL_OV_BITMAP_FIELDS)
 #undef _DECL_OV_BITMAP_FIELDS
 };
 
@@ -254,9 +254,9 @@ template <unsigned F> struct PerCoreOverrides {
 //======================================================================================================
 // 79 per-core scalar fields. Types preserved exactly from the existing flat
 // ControllerConfig<F> declarations. .F.4c.3 Step 2 shadow window: BOTH the
-// flat ControllerConfig<F>::<field> AND the per-core cfg.cores[c].<field>
-// exist. Parser populates cores[0] from flat after parse (Step 3 will add
-// [core N] section parser). Consumers migrate to cfg.cores[c].<field> one at
+// flat ControllerConfig<F>::<field> AND the per-core cfg.nodes[c].<field>
+// exist. Parser populates nodes[0] from flat after parse (Step 3 will add
+// [core N] section parser). Consumers migrate to cfg.nodes[c].<field> one at
 // a time; flat fields delete after the last consumer migrates.
 //
 // DESIGN_SPECS/per-instance-registry-pattern.md — this struct is the first
@@ -264,21 +264,21 @@ template <unsigned F> struct PerCoreOverrides {
 // per-regime) instantiate sister PerXxxCfg<F> structs from sister registries.
 //
 // Layout: alignas(64) — fits AVX-512 boundary; per-core instances at
-// cores[c] address cleanly to cache lines without cross-core false sharing.
-// Compiler auto-pads sizeof to a multiple of 64 for cores[] array alignment.
+// nodes[c] address cleanly to cache lines without cross-core false sharing.
+// Compiler auto-pads sizeof to a multiple of 64 for nodes[] array alignment.
 //======================================================================================================
 template <unsigned F>
-struct alignas(64) PerCoreCfg {
-    // === Cfg surface (92 fields) — auto-generated from FOREACH_PER_CORE_FIELD_TYPE ===
+struct alignas(64) PerNodeCfg {
+    // === Cfg surface (92 fields) — auto-generated from FOREACH_PER_NODE_FIELD_TYPE ===
     // WIP2d-0 structural fix per CLAUDE.md item 31 + DESIGN_PHILOSOPHY § 1.5
     // (framework discipline) + H17 STRONG codification:
     //
     // Single-path field declaration via X-macro; manual cfg-surface field
-    // declarations FORBIDDEN here. CI cross-check (tools/check_per_core_registry_integrity.py
+    // declarations FORBIDDEN here. CI cross-check (tools/check_per_node_registry_integrity.py
     // invoked from build.sh) enforces:
-    //   - Every FOREACH_PER_CORE_FIELD_TYPE entry has a FOREACH_PER_CORE_CFG_FIELD row
-    //   - Every FOREACH_PER_CORE_CFG_FIELD row has a FOREACH_PER_CORE_FIELD_TYPE entry
-    //   - PerCoreCfg<F> body has NO manual cfg-surface fields outside the X-macro
+    //   - Every FOREACH_PER_NODE_FIELD_TYPE entry has a FOREACH_PER_NODE_CFG_FIELD row
+    //   - Every FOREACH_PER_NODE_CFG_FIELD row has a FOREACH_PER_NODE_FIELD_TYPE entry
+    //   - PerNodeCfg<F> body has NO manual cfg-surface fields outside the X-macro
     //     (only the 5-field runtime bitmap cluster below is documented exempt)
     //
     // Field types follow DOD discipline per DESIGN_PHILOSOPHY § 3:
@@ -287,20 +287,20 @@ struct alignas(64) PerCoreCfg {
     //   - int: signed enums, signed counters (10 fields)
     //   - double: ML voting threshold exemption (ensemble_min_agreement_pct only)
     //
-    // Field ORDER matches FOREACH_PER_CORE_FIELD_TYPE row order — sections grouped
+    // Field ORDER matches FOREACH_PER_NODE_FIELD_TYPE row order — sections grouped
     // (Trading → Entry → TimeExit → Risk → Gate → Strategy → Regime → ML → ...).
     // Order preserved bytewise-identical to pre-WIP2d-0 manual struct for layout
     // determinism + alignment static_asserts continuity.
     //
     // SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
-    FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
+    FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
 
-    // === Runtime bitmap cluster (5 fields — auto-generated via FOREACH_PER_CORE_DOMAIN_BITMAP meta-registry) ===
+    // === Runtime bitmap cluster (5 fields — auto-generated via FOREACH_PER_NODE_DOMAIN_BITMAP meta-registry) ===
     // WIP2d-0.B (.F.4c.3) — meta-registry pattern applied per CLAUDE.md item 31 framework
     // discipline. The 5 bitmap fields are RUNTIME representations of FOREACH_*_CFG_FLAG bits,
     // rebuilt from flat KIND_BOOL rows at slow-path rebuild (WIP2e adds the rebuild walker).
     //
-    // SINGLE SOURCE OF TRUTH: FOREACH_PER_CORE_DOMAIN_BITMAP (in CfgFieldRegistry.hpp). Adding
+    // SINGLE SOURCE OF TRUTH: FOREACH_PER_NODE_DOMAIN_BITMAP (in CfgFieldRegistry.hpp). Adding
     // a new domain registry = 1 row in the meta-registry; struct field + bitmap-overflow
     // static_assert + future WIP2e rebuild walker entry all auto-flow.
     //
@@ -309,34 +309,34 @@ struct alignas(64) PerCoreCfg {
     //
     // SEE DESIGN_SPECS/meta-registry-pattern-for-codebase-registry-discipline.md for the
     // pattern doc + DOCS/MANUAL_FIELDS_INVENTORY.md § Section B for the documented exemption.
-    FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
+    FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
 };
 
 // alignment / size discipline per DESIGN_SPECS/per-snapshot-cluster-layout-pattern.md.
 // alignof must be 64 (alignas(64) decorator above); sizeof must be a multiple of 64
 // (compiler auto-tail-pads for array alignment).
-static_assert(alignof(PerCoreCfg<64>) == 64,
-              "PerCoreCfg<F> must be 64-byte aligned for cache-line discipline + per-core "
-              "cores[] array alignment");
-static_assert(sizeof(PerCoreCfg<64>) % 64 == 0,
-              "sizeof(PerCoreCfg<F>) must be a multiple of 64 — compiler should auto-pad "
+static_assert(alignof(PerNodeCfg<64>) == 64,
+              "PerNodeCfg<F> must be 64-byte aligned for cache-line discipline + per-core "
+              "nodes[] array alignment");
+static_assert(sizeof(PerNodeCfg<64>) % 64 == 0,
+              "sizeof(PerNodeCfg<F>) must be a multiple of 64 — compiler should auto-pad "
               "via alignas(64); if this fires, the struct definition broke the alignment "
               "invariant.");
 
 // WIP2d-1.B.0 — compile-time size-bound discipline (closes Shortsighted #3 to ~99.9%).
-// The X-macro knows expected payload bytes (sum of STORAGE_T sizeof from FOREACH_PER_CORE_CFG_FIELD
-// + FOREACH_PER_CORE_DOMAIN_BITMAP). Adding a manual field to PerCoreCfg<F> body OUTSIDE the X-macros
-// pushes sizeof past the upper bound → BUILD ERROR. See CfgFieldRegistry.hpp § "PerCoreCfg<F>
+// The X-macro knows expected payload bytes (sum of STORAGE_T sizeof from FOREACH_PER_NODE_CFG_FIELD
+// + FOREACH_PER_NODE_DOMAIN_BITMAP). Adding a manual field to PerNodeCfg<F> body OUTSIDE the X-macros
+// pushes sizeof past the upper bound → BUILD ERROR. See CfgFieldRegistry.hpp § "PerNodeCfg<F>
 // expected-payload computation" for rationale + leeway math. Defense-in-depth via the CI script's
-// gcc -E parser (tools/check_per_core_registry_integrity.py) catches any remaining ~0.1% adversarial gap.
-static_assert(sizeof(PerCoreCfg<64>) >= kPerCoreCfgExpectedPayloadBytes64,
-              "PerCoreCfg<64> sizeof less than X-macro payload sum — field removed from registry "
-              "without updating struct, OR struct manual content shrunk. Check FOREACH_PER_CORE_CFG_FIELD "
-              "+ FOREACH_PER_CORE_DOMAIN_BITMAP row count vs struct body.");
-static_assert(sizeof(PerCoreCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPerCoreCfgMaxPaddingBytes,
-              "PerCoreCfg<64> sizeof EXCEEDS X-macro payload + max alignment padding leeway — "
-              "MANUAL FIELD ADDED to struct body outside FOREACH_PER_CORE_CFG_FIELD / "
-              "FOREACH_PER_CORE_DOMAIN_BITMAP. Per H17 discipline: add field via X-macro row, "
+// gcc -E parser (tools/check_per_node_registry_integrity.py) catches any remaining ~0.1% adversarial gap.
+static_assert(sizeof(PerNodeCfg<64>) >= kPerCoreCfgExpectedPayloadBytes64,
+              "PerNodeCfg<64> sizeof less than X-macro payload sum — field removed from registry "
+              "without updating struct, OR struct manual content shrunk. Check FOREACH_PER_NODE_CFG_FIELD "
+              "+ FOREACH_PER_NODE_DOMAIN_BITMAP row count vs struct body.");
+static_assert(sizeof(PerNodeCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPerCoreCfgMaxPaddingBytes,
+              "PerNodeCfg<64> sizeof EXCEEDS X-macro payload + max alignment padding leeway — "
+              "MANUAL FIELD ADDED to struct body outside FOREACH_PER_NODE_CFG_FIELD / "
+              "FOREACH_PER_NODE_DOMAIN_BITMAP. Per H17 discipline: add field via X-macro row, "
               "or document exemption in MANUAL_FIELDS_INVENTORY.md.");
 
 //======================================================================================================
@@ -443,8 +443,8 @@ template <unsigned F> struct ControllerConfig {
   // core uses its own time-exit threshold. Useful for mixed paper-test
   // experiments where AUTO-mode core wants longer holds than DIP core,
   // or where strategy comparison wants different time horizons per core.
-  // Cfg parser pattern: core_<N>_time_exit_ticks=<int>
-  // core_time_exit_ticks: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // Cfg parser pattern: node_<N>_time_exit_ticks=<int>
+  // node_time_exit_ticks: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   Money min_hold_gain_pct; // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
   FPN_Binary<F> regime_slope_threshold;     // relative slope magnitude for TRENDING
@@ -588,7 +588,7 @@ template <unsigned F> struct ControllerConfig {
   // for portability — operator should explicitly opt out.
   // v5.11.22 — InitArena MAP_HUGETLB opt-in. Default 0 = use 4 KB pages
   // (no OS dependency); set to 1 to request 2 MB hugepages for the 8 MB
-  // boot arena, reducing TLB pressure on slow-path CoreSlowState +
+  // boot arena, reducing TLB pressure on slow-path NodeSlowState +
   // strategy state access.
   //
   // Requires OS-level hugepage reservation:
@@ -637,7 +637,7 @@ template <unsigned F> struct ControllerConfig {
   // than max_age_hours, engine WARNs (held_out_gate_strict=0) or
   // REFUSEs load (held_out_gate_strict=1). Default 0 = disabled.
   // Distinct from param_staleness_gate (slow-path-tier; this is a
-  // boot-time gate). Per-model evaluation in CoreModelZoo_CheckStaleModel
+  // boot-time gate). Per-model evaluation in NodeModelZoo_CheckStaleModel
   // (uses ModelHandle.training_timestamp_us — stamp-bound field added
   // in v5.14.8.D via FOREACH_STAMP_BOUND_MODEL_CONST registry).
   // v5.15.5.F.4d.1.B.4 Cx-D extension: model_max_age_hours manual decl DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker.
@@ -835,14 +835,14 @@ template <unsigned F> struct ControllerConfig {
   FPN_Binary<F>   confidence_hard_block_threshold;
   // Phase 7 prep — held-out validation infrastructure. Used by foxml_suite
   // when training/evaluating a model. Live engine reads via expected.cfg
-  // mismatch checks (CoreModelZoo).
+  // mismatch checks (NodeModelZoo).
   // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — manual `FPN_Binary<F> held_out_fraction;` decl REMOVED;
   // auto-gen via FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) at line 1338 (Path α)
   // covers the field declaration from the new registry row at CfgFieldRegistry.hpp Validation.
   // v5.2.0 (held-out gate Phase 1) — model attestation infrastructure.
   // Each .bin model can have a paired .stamp file with hash+signature
   // attesting that held-out validation passed. When held_out_gate_strict=1,
-  // CoreModelZoo_LoadFromDir refuses to load .bin files without a valid
+  // NodeModelZoo_LoadFromDir refuses to load .bin files without a valid
   // stamp. Defaults: strict=0 (gate disabled — existing models still load),
   // secret="" (which makes verify_model_stamp accept any stamp signature
   // — useful for dev). Set both for production live deploy.
@@ -975,8 +975,8 @@ template <unsigned F> struct ControllerConfig {
   // v5.0.2: slow-path CPU pin policy. STARTUP-ONLY.
   //   < 0  → do not pin slow-paths (OS-scheduled — original v5.0 behavior)
   //   == 0 → auto: pin slow-path c to (drainer_cpu + 1 + c) mod nproc.
-  //          Drainer pins to (num_cores + 1) so default base is num_cores + 2.
-  //          Wraps via modulo if base + num_cores > nproc.
+  //          Drainer pins to (num_nodes + 1) so default base is num_nodes + 2.
+  //          Wraps via modulo if base + num_nodes > nproc.
   //   > 0  → explicit base: pin slow-path c to (offset + c) mod nproc.
   // Default 0 (auto). Slow-paths are jitter-tolerant so HT-sharing with
   // spare cores is acceptable. Set to -1 to disable (e.g. for benchmarks
@@ -986,34 +986,34 @@ template <unsigned F> struct ControllerConfig {
   // (sawtooth around $60k) instead of connecting to Binance. Useful for
   // latency demos that need reliable trade firing without depending on
   // current market volatility. Default 0 = use real Binance feed.
-  // Per-core strategy assignment for sharded mode. core_strategies[i] is the
+  // Per-core strategy assignment for sharded mode. node_strategies[i] is the
   // STRATEGY_* constant for execution core i. Default: all STRATEGY_SIMPLE_DIP.
-  // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
+  // Config syntax: node_0_strategy=simple_dip, node_1_strategy=ema_cross, etc.
   // Accepted names: mr, momentum, simple_dip, ml, ema_cross, none.
-  // core_strategies: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
-  // v5.9.0c — explicit-set bitmap for core_strategies. Bit i set = `core_i_strategy=`
+  // node_strategies: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // v5.9.0c — explicit-set bitmap for node_strategies. Bit i set = `node_i_strategy=`
   // appeared in the cfg file (operator deliberate choice). Bit i clear = field
   // absent in cfg, default applied. Surfaces "default vs deliberate" tri-state
   // in TUI per V5_9_AUDIT-#5. The today-bug class: backtest.cfg lacked
   // per-core strategy lines → all cores defaulted to SIMPLE_DIP → operator
   // saw "0!" hardcoded warnings, couldn't tell defaulted from deliberate.
-  uint16_t core_strategies_explicit_set;
+  uint16_t node_strategies_explicit_set;
   // v5.9.0c — captured cfg file path. ControllerConfig_Load stores the path
   // it parsed; the engine header panel displays this so operators see at
   // boot which cfg drove the configuration. Distinct binaries (engine_gui
   // reads engine.cfg, foxml_suite reads backtest.cfg) → "loaded cfg path"
   // makes the difference visible.
   char source_cfg_path[256];
-  // Per-core risk allocation. core_risk_pct[i] is the fraction of total
+  // Per-core risk allocation. node_risk_pct[i] is the fraction of total
   // balance this core can risk on a single trade. Default 0 = use the
-  // shared risk_pct / num_cores. Non-zero = use this specific percentage.
-  // Config syntax: core_0_risk_pct=20.0 (stored as 0.20).
-  // core_risk_pct: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // shared risk_pct / num_nodes. Non-zero = use this specific percentage.
+  // Config syntax: node_0_risk_pct=20.0 (stored as 0.20).
+  // node_risk_pct: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Phase 3: per-core kill switch overrides + global tunables.
-  // core_max_drawdown_pct[i] overrides the shared max_drawdown_pct for
+  // node_max_drawdown_pct[i] overrides the shared max_drawdown_pct for
   // this specific core. Default 0 = use shared. Config syntax:
-  // core_0_max_drawdown_pct=15.0 (stored as 0.15).
-  // core_max_drawdown_pct: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // node_0_max_drawdown_pct=15.0 (stored as 0.15).
+  // node_max_drawdown_pct: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // min_kill_loss: absolute USDT floor for the per-core kill switch. The
   // trip fires only when BOTH dd_pct exceeds threshold AND drop exceeds
   // this floor. Without it, a tiny allocation ($10) loses $0.50, dd=5%,
@@ -1027,36 +1027,36 @@ template <unsigned F> struct ControllerConfig {
   // `enable_mtm_kill_switch=` preserved via FOREACH_RISK_CFG_FLAG legacy_field column.
   // Per-core ML model path. Each core running STRATEGY_ML can load its
   // own model. Default empty = use shared ml_model_path. Config syntax:
-  // core_0_model_path=models/aggressive.xgb
-  // core_model_path: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // node_0_model_path=models/aggressive.xgb
+  // node_model_path: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Per-core ML model directory. When set, the engine auto-discovers
   // role-specific models in this directory (barrier.json/.xgb,
   // buy_signal.json/.xgb, regime.json/.xgb, exit.json/.xgb) and loads
-  // them into a CoreModelZoo. Missing files = role disabled.
+  // them into a NodeModelZoo. Missing files = role disabled.
   // When BOTH model_dir and model_path are set, model_dir wins (zoo
   // supersedes legacy single-model). Config syntax:
-  // core_0_model_dir=models/aggressive/
-  // core_model_dir: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // node_0_model_dir=models/aggressive/
+  // node_model_dir: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // v5.10.0a.G.6 — per-core multi-horizon ensemble cfg (string-typed, can't
   // fit X-macro pattern). Default empty = inherit from global cfg.horizon_list /
   // cfg.ensemble_blend_mode. Auto-detect (G.5) takes priority over both;
   // these are overrides for operators who want explicit per-core control
   // (e.g., core 0 deploys 5-horizon ensemble while core 1 stays single-model).
   //
-  //   core_0_horizon_list=100,500,1000        # CSV; per-core horizon set
-  //   core_0_ensemble_blend_mode=weighted     # selection | weighted (default)
-  //   core_0_disabled_horizons=100            # CSV; kill-switch per horizon
+  //   node_0_horizon_list=100,500,1000        # CSV; per-core horizon set
+  //   node_0_ensemble_blend_mode=weighted     # selection | weighted (default)
+  //   node_0_disabled_horizons=100            # CSV; kill-switch per horizon
   //                                           # (skips predict; bandit weight frozen)
-  // core_horizon_list: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
-  // core_ensemble_blend_mode: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
-  // core_disabled_horizons: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // node_horizon_list: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // node_ensemble_blend_mode: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // node_disabled_horizons: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // v5.11.18a — per-core feature mask. Bit i set = feature index i is
   // computed + packed for this core; bit i clear = packed as 0.0f
   // (NOT skipped; sparse-zero array contract per parity-check finding).
   // Default 0xFFFFFFFFFFFFFFFF (all features enabled) — preserves
   // pre-v5.11.18a behavior bytewise.
   //
-  // Config syntax: `core_0_feature_mask=0xFFFFFFFFFFFFFFFF` (matches the
+  // Config syntax: `node_0_feature_mask=0xFFFFFFFFFFFFFFFF` (matches the
   // existing per-core field convention: core_N_strategy, core_N_risk_pct,
   // etc.). Parser accepts 0x-prefixed hex (any case) or plain decimal.
   // Stored uint64_t.
@@ -1068,13 +1068,13 @@ template <unsigned F> struct ControllerConfig {
   // change (Features_PackAll respecting the mask) lands in v5.11.18.
   // Default-on bitmap means any cfg without `feature_mask_<N>=` lines
   // produces identical features to pre-v5.11.18a builds.
-  // core_feature_mask: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // node_feature_mask: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Per-core full-tunable overrides (v4.0). One slot per execution core
-  // (16 max). Each PerCoreOverrides field shadows a same-named field on
+  // (16 max). Each PerNodeOverrides field shadows a same-named field on
   // ControllerConfig — non-zero overrides global; zero inherits.
   // Resolved on every slow-path rebuild via
-  // ControllerConfig_ResolveForCore. See PerCoreOverrides comment block.
-  // core_overrides: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // ControllerConfig_ResolveForCore. See PerNodeOverrides comment block.
+  // node_overrides: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
@@ -1156,7 +1156,7 @@ template <unsigned F> struct ControllerConfig {
   // LITE in v5.10.0a: trains + saves N models; operator manually picks
   // one to deploy. Ensemble inference (load all N at runtime, blend
   // predictions) deferred to v5.10.0a.x — needs stamp body extension +
-  // multi-model load in CoreModelZoo, both genuinely complex.
+  // multi-model load in NodeModelZoo, both genuinely complex.
   static constexpr int HORIZON_LIST_MAX = 8;
   int      horizon_list[HORIZON_LIST_MAX];  // 0 = unused slot
   int      horizon_count;                    // number of populated slots
@@ -1200,7 +1200,7 @@ template <unsigned F> struct ControllerConfig {
   // stamp-bound — tunable post-train without retraining).
   // window: rolling buffer size (≥ 2, ≤ 256)
   // topk: top-K arm members tracked per cycle (≥ 1, ≤ 8 = ENSEMBLE_HORIZON_MAX)
-  // Surfaced in PerCoreSnap.ml_portfolio_turnover for operator visibility.
+  // Surfaced in PerNodeSnap.ml_portfolio_turnover for operator visibility.
   int      confidence_turnover_window;  // default 100
   int      confidence_turnover_topk;    // default 3 (top-3 arms)
   // v5.14.1.F — IC variant selector (drift detection + TUI display).
@@ -1249,51 +1249,51 @@ template <unsigned F> struct ControllerConfig {
   //==================================================================================================
   // [v5.15.5.F.4c.3 — PER-CORE AUTHORITATIVE CONFIG]
   //==================================================================================================
-  // One PerCoreCfg<F> instance per execution core. Step 2 shadow window: each
+  // One PerNodeCfg<F> instance per execution core. Step 2 shadow window: each
   // per-core field exists in BOTH the flat fields above (legacy path) AND in
-  // cores[c].<field> (per-core authoritative path). Parser populates cores[c]
+  // nodes[c].<field> (per-core authoritative path). Parser populates nodes[c]
   // from flat after parse via ControllerConfig_PopulateCoresFromFlat (Step 3
-  // adds [core N] section parser that writes cores[c] directly).
+  // adds [core N] section parser that writes nodes[c] directly).
   //
-  // Consumer migration: _BuildParameters takes const PerCoreCfg<F>* per the
+  // Consumer migration: _BuildParameters takes const PerNodeCfg<F>* per the
   // HIGH-1 Option A boundary-stable sig change (4 fn sigs + 11 call sites).
-  // Production read sites (~32) migrate cfg.X → cfg.cores[c].X one cohort at
+  // Production read sites (~32) migrate cfg.X → cfg.nodes[c].X one cohort at
   // a time. After last consumer migrates, flat fields delete.
   //
   // DESIGN_SPECS/per-instance-registry-pattern.md — first canonical
   // application; sister axes (per-symbol, per-strategy, per-horizon,
   // per-regime) instantiate analogous PerXxxCfg<F> arrays.
   //
-  // alignas(64) on PerCoreCfg<F> ensures cores[0..N-1] addresses are all
+  // alignas(64) on PerNodeCfg<F> ensures nodes[0..N-1] addresses are all
   // cache-line aligned — per-core slow-path reads land in distinct cache
   // lines without cross-core false sharing (H6 discipline).
   //==================================================================================================
-  PerCoreCfg<F> cores[MAX_EXECUTION_CORES];
+  PerNodeCfg<F> nodes[MAX_EXECUTION_NODES];
 
   // === Per-core legacy parallel arrays (documented exemptions; auto-generated via X-macro) ===
-  // WIP2d-0.B (.F.4c.3) — 11 parallel arrays consolidated into FOREACH_MANUAL_PER_CORE_FIELD
+  // WIP2d-0.B (.F.4c.3) — 11 parallel arrays consolidated into FOREACH_MANUAL_PER_NODE_FIELD
   // X-macro expansion per CLAUDE.md item 31 framework discipline + H17 STRONG codification.
   // ONE source of truth; CI cross-checks bidirectional sync with DOCS/MANUAL_FIELDS_INVENTORY.md.
   //
   // SECTIONS:
-  //   • 5 string arrays (core_model_path/_dir/_horizon_list/_ensemble_blend_mode/_disabled_horizons)
+  //   • 5 string arrays (node_model_path/_dir/_horizon_list/_ensemble_blend_mode/_disabled_horizons)
   //     → migrate to KIND_FILE_PATH/KIND_STRING cohort at .F.4e
-  //   • 1 hex64 bitmap (core_feature_mask) → migrate to KIND_HEX64 cohort at .F.4e
-  //   • 4 TRANSITIONAL override arrays (core_risk_pct / core_strategies / core_time_exit_ticks /
-  //     core_max_drawdown_pct) → delete at WIP2g when cores[c] becomes authoritative
-  //   • 1 TRANSITIONAL legacy override struct (core_overrides) → delete at WIP2f with
-  //     PerCoreOverrides<F> retirement (cfg-scope-discipline.md § Anti-pattern 1)
+  //   • 1 hex64 bitmap (node_feature_mask) → migrate to KIND_HEX64 cohort at .F.4e
+  //   • 4 TRANSITIONAL override arrays (node_risk_pct / node_strategies / node_time_exit_ticks /
+  //     node_max_drawdown_pct) → delete at WIP2g when nodes[c] becomes authoritative
+  //   • 1 TRANSITIONAL legacy override struct (node_overrides) → delete at WIP2f with
+  //     PerNodeOverrides<F> retirement (cfg-scope-discipline.md § Anti-pattern 1)
   //
-  // CI script: tools/check_per_core_registry_integrity.py verifies every entry has a
-  // FOREACH_MANUAL_PER_CORE_FIELD row + a MANUAL_FIELDS_INVENTORY.md row + correct type.
-  FOREACH_MANUAL_PER_CORE_FIELD(EMIT_MANUAL_PER_CORE_DECL)
+  // CI script: tools/check_per_node_registry_integrity.py verifies every entry has a
+  // FOREACH_MANUAL_PER_NODE_FIELD row + a MANUAL_FIELDS_INVENTORY.md row + correct type.
+  FOREACH_MANUAL_PER_NODE_FIELD(EMIT_MANUAL_PER_NODE_DECL)
 
   //==================================================================================================
   // [Global cfg field auto-generation — v5.15.5.F.4d.1.B.3 Step 0.5b.B Path α landing]
   //==================================================================================================
   // 48 global cfg fields auto-generated from FOREACH_GLOBAL_CFG_FIELD (one source of truth at
-  // CoreFrameworks/CfgFieldRegistry.hpp). Sister to FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
-  // at PerCoreCfg<F>:324 — closes the global↔per-core column asymmetry per Decision A (a) Path α.
+  // CoreFrameworks/CfgFieldRegistry.hpp). Sister to FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
+  // at PerNodeCfg<F>:324 — closes the global↔per-core column asymmetry per Decision A (a) Path α.
   //
   // Per H17 invariant (STRONG at per-core; HARD-promoted at global surface at .B.3 Step 0.5b.B
   // codification): adding a new global cfg field = 1 row in FOREACH_GLOBAL_CFG_FIELD; the row's
@@ -1362,15 +1362,15 @@ inline Money Fee_Compute(const ControllerConfig<F>* cfg, Money notional, int is_
 //======================================================================================================
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_ResolveForCore(
-    const ControllerConfig<F>& global, int core_id) {
+    const ControllerConfig<F>& global, int node_id) {
     ControllerConfig<F> resolved = global;
-    if (core_id < 0 || core_id >= 16) return resolved;
-    const PerCoreOverrides<F>& ov = global.core_overrides[core_id];
-    // v4.7.24: resolver auto-derives from PER_CORE_OVERRIDE_FIELDS. Adding
+    if (node_id < 0 || node_id >= 16) return resolved;
+    const PerNodeOverrides<F>& ov = global.node_overrides[node_id];
+    // v4.7.24: resolver auto-derives from PER_NODE_OVERRIDE_FIELDS. Adding
     // a new field = 1 line in the macro list, not a line here.
 #define _RESOLVE_OV_MONEY(name) if (!Money_IsZero(ov.name)) resolved.name = ov.name;
 #define _RESOLVE_OV_RAW(name)   if (!FPN_IsZero(ov.name))   resolved.name = ov.name;
-    PER_CORE_OVERRIDE_FIELDS(_RESOLVE_OV_MONEY, _RESOLVE_OV_RAW)
+    PER_NODE_OVERRIDE_FIELDS(_RESOLVE_OV_MONEY, _RESOLVE_OV_RAW)
     if (!Money_IsZero(ov.fee_floor_mult)) resolved.fee_floor_mult = ov.fee_floor_mult;
     if (!Money_IsZero(ov.partial_exit_pct)) resolved.partial_exit_pct = ov.partial_exit_pct;
     if (!Money_IsZero(ov.tp2_mult)) resolved.tp2_mult = ov.tp2_mult;
@@ -1379,7 +1379,7 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 // v4.7.40: INT overrides — 0 = inherit (caller's config field already
 // has the global default; non-zero overrides it).
 #define _RESOLVE_OV_INT_FIELD(name) if (ov.name != 0) resolved.name = ov.name;
-    PER_CORE_OVERRIDE_INT_FIELDS(_RESOLVE_OV_INT_FIELD)
+    PER_NODE_OVERRIDE_INT_FIELDS(_RESOLVE_OV_INT_FIELD)
 #undef _RESOLVE_OV_INT_FIELD
 // v5.14.9.F.6: BITMAP overrides — branchless bit-select per domain.
 //   resolved = (override_set & override_values) | (~override_set & global_values)
@@ -1393,7 +1393,7 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
         stype _global = global.d_lower##_cfg_flags;                            \
         resolved.d_lower##_cfg_flags = (stype)((_ov_set & _ov_val) | ((stype)~_ov_set & _global)); \
     }
-    PER_CORE_OVERRIDE_BITMAP_DOMAINS(_RESOLVE_OV_BITMAP_FIELDS)
+    PER_NODE_OVERRIDE_BITMAP_DOMAINS(_RESOLVE_OV_BITMAP_FIELDS)
 #undef _RESOLVE_OV_BITMAP_FIELDS
     return resolved;
 }
@@ -1401,67 +1401,67 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 //======================================================================================================
 // [PER-CORE SHADOW POPULATE — v5.15.5.F.4c.3 Step 2]
 //======================================================================================================
-// Copies the resolved per-core view (flat fields + legacy PerCoreOverrides
-// merged via ControllerConfig_ResolveForCore) into cfg->cores[c] for each
-// execution core. This is the Step 2 SHADOW transition: cores[c] is populated
-// from the flat path so consumers migrating to read cfg.cores[c].<field> see
+// Copies the resolved per-core view (flat fields + legacy PerNodeOverrides
+// merged via ControllerConfig_ResolveForCore) into cfg->nodes[c] for each
+// execution core. This is the Step 2 SHADOW transition: nodes[c] is populated
+// from the flat path so consumers migrating to read cfg.nodes[c].<field> see
 // identical values to consumers still reading cfg.<field> + ResolveForCore.
 //
-// The X-macro walker iterates FOREACH_PER_CORE_CFG_FIELD; each row emits one
-// field assignment `cfg->cores[c].name = resolved.name`. Adding a new per-core
+// The X-macro walker iterates FOREACH_PER_NODE_CFG_FIELD; each row emits one
+// field assignment `cfg->nodes[c].name = resolved.name`. Adding a new per-core
 // row to the registry automatically adds a populate line — no changes needed
 // here.
 //
 // Called at end of ControllerConfig_Default + ControllerConfig_Load. After
-// Step 3 lands the `[core N]` section parser, the parser will write cores[c]
+// Step 3 lands the `[core N]` section parser, the parser will write nodes[c]
 // directly + this shadow function becomes a no-op / gets deleted.
 //
 // Runtime note: GUI cfg edits mutate the flat fields directly via
-// tt::cfg_render_field<T>; cores[c] becomes stale until next reload. Step 2
+// tt::cfg_render_field<T>; nodes[c] becomes stale until next reload. Step 2
 // consumers tolerate this (no migrated reader runs on the GUI-mutated path
 // without a reload signal yet). Step 6 wires GUI edits to also update
-// cores[c] via reload-from-file or direct-sync hook.
+// nodes[c] via reload-from-file or direct-sync hook.
 //======================================================================================================
 template <unsigned F>
 inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
-    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
         ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, c);
-        // Per-core registry rows — X-macro auto-walker over FOREACH_PER_CORE_CFG_FIELD.
+        // Per-core registry rows — X-macro auto-walker over FOREACH_PER_NODE_CFG_FIELD.
         // Future per-core row additions auto-flow here; no edits needed.
         // WIP2d-1.B.0 — copy walker filters by NO_FLAT_FIELD (was HAS_SIDE_EFFECT, which was
         // overloaded). Rows with NO_FLAT_FIELD have no scalar on ControllerConfig (resolved.name
-        // doesn't exist; e.g., `strategy` lives only on cores[c] + legacy core_strategies[16]).
+        // doesn't exist; e.g., `strategy` lives only on nodes[c] + legacy node_strategies[16]).
         // The if-constexpr inside templated PopulateCoresFromFlat<F> discards the cfg-access branch
         // at instantiation, making row body syntactically valid for ALL rows. Rows with MANUAL_PARSER
-        // (but NOT NO_FLAT_FIELD) DO have flat scalars — copy walker should populate cores[c].X from
+        // (but NOT NO_FLAT_FIELD) DO have flat scalars — copy walker should populate nodes[c].X from
         // resolved.X. Pre-WIP2d-1.B.0 the walker SKIPPED these rows (latent regression from Phase 1
         // HAS_SIDE_EFFECT overload); the bit split restores the correct copy semantic.
-        #define EMIT_PER_CORE_COPY(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+        #define EMIT_PER_NODE_COPY(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                     applies_to_strategy, applies_to_op_mode, \
                                     applies_to_regime, applies_to_risk, lives_in_struct) \
             if constexpr (!((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
-                cfg->cores[c].name = resolved.name; \
+                cfg->nodes[c].name = resolved.name; \
             }
-        FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_COPY)
-        #undef EMIT_PER_CORE_COPY
+        FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_COPY)
+        #undef EMIT_PER_NODE_COPY
 
         // WIP2d-1.B.0 — AUTOPOPULATE NO_FLAT_FIELD sync (replaces WIP2d-1 Phase 1 ad-hoc manual line).
         // Per autopopulate-pattern-for-production-caller-class.md: registry-driven sync of NO_FLAT_FIELD
         // rows from their legacy parallel-array sources. Future per-core-only fields = 1 row in
-        // FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC (target ← source) + 1 row in FOREACH_PER_CORE_CFG_FIELD
+        // FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC (target ← source) + 1 row in FOREACH_PER_NODE_CFG_FIELD
         // with NO_FLAT_FIELD bit. The auto-flow then generates sync line + skips copy walker
         // mechanically. Closes Shortsighted #4 (manual sync line ad-hoc).
-        FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC(EMIT_NO_FLAT_FIELD_SYNC)
+        FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC(EMIT_NO_FLAT_FIELD_SYNC)
 
         // 5 cfg-domain bitmap STORAGE fields — manual copies (not in registry; A2 flat KIND_BOOL
         // rows ship at WIP2e and rebuild these bitmaps from rows at slow-path rebuild). The
         // resolved view already merges per-core bitmap overrides via the legacy
-        // PerCoreOverrides<F> bitmap path in ControllerConfig_ResolveForCore.
-        cfg->cores[c].lifecycle_cfg_flags = resolved.lifecycle_cfg_flags;
-        cfg->cores[c].gate_cfg_flags      = resolved.gate_cfg_flags;
-        cfg->cores[c].ml_cfg_flags        = resolved.ml_cfg_flags;
-        cfg->cores[c].risk_cfg_flags      = resolved.risk_cfg_flags;
-        cfg->cores[c].ops_cfg_flags       = resolved.ops_cfg_flags;
+        // PerNodeOverrides<F> bitmap path in ControllerConfig_ResolveForCore.
+        cfg->nodes[c].lifecycle_cfg_flags = resolved.lifecycle_cfg_flags;
+        cfg->nodes[c].gate_cfg_flags      = resolved.gate_cfg_flags;
+        cfg->nodes[c].ml_cfg_flags        = resolved.ml_cfg_flags;
+        cfg->nodes[c].risk_cfg_flags      = resolved.risk_cfg_flags;
+        cfg->nodes[c].ops_cfg_flags       = resolved.ops_cfg_flags;
     }
 }
 
@@ -1484,8 +1484,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // default precedence v1.1: registry payload becomes single source of truth; manual init lines for
   // per-core registry rows (regime_hysteresis + exit_threshold + sl_cooldown_cycles + 9 others) deleted
   // at Phase Cx-E.3 atomically with this walker landing. Walker skips NO_FLAT_FIELD rows (strategy) via
-  // if-constexpr. Downstream EMIT_PER_CORE_COPY propagates global → cores[c] for all non-NO_FLAT_FIELD rows.
-  FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR)
+  // if-constexpr. Downstream EMIT_PER_NODE_COPY propagates global → nodes[c] for all non-NO_FLAT_FIELD rows.
+  FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR)
 
   // v5.15.5.F.4d.1.B.3 Step 8.6 (2026-05-24): poll_interval MATCH — registry INT(100) == manual; DELETED.
   // warmup_ticks DIFFER: registry INT(0, 0, 100000000); manual=128. Manual=128 is operational floor
@@ -1558,8 +1558,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.slow_path_max_secs = 3;  // KEEP — registry INT(60) too permissive for HFT slow-path cadence
   cfg.max_hold_ticks = 0; // 0 = disabled
   // v5.12.3.C — all per-core overrides default 0 (use global). Operator
-  // sets specific cores via core_<N>_time_exit_ticks=<value> in cfg.
-  for (int i = 0; i < 16; ++i) cfg.core_time_exit_ticks[i] = 0;
+  // sets specific cores via node_<N>_time_exit_ticks=<value> in cfg.
+  for (int i = 0; i < 16; ++i) cfg.node_time_exit_ticks[i] = 0;
   cfg.min_hold_gain_pct =
       Money{ money_from_double_payload(0.001) }; // 0.1% — only time-exit if below this gain
   // regime detection
@@ -1575,7 +1575,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       FPN_FromDouble<F>(0.0005); // 0.05% stddev/price (legacy compat)
   cfg.regime_vol_spike_ratio =
       FPN_FromDouble<F>(2.0);   // variance spike: 2x baseline = volatile
-  // v5.15.5.F.4d.1.B.4 Cx-E.2/E.3 + Cx-D extension: regime_hysteresis (5; registry payload bumped INT(3)→INT(5) at CfgFieldRegistry.hpp:543) + idle_reset_cycles (30) + sl_cooldown_cycles (5) + sl_cooldown_base (2) + sl_cooldown_extra (8) manual init lines DELETED; defaults now applied via FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR) + FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT) walkers at top of function (Registry default precedence v1.1).
+  // v5.15.5.F.4d.1.B.4 Cx-E.2/E.3 + Cx-D extension: regime_hysteresis (5; registry payload bumped INT(3)→INT(5) at CfgFieldRegistry.hpp:543) + idle_reset_cycles (30) + sl_cooldown_cycles (5) + sl_cooldown_base (2) + sl_cooldown_extra (8) manual init lines DELETED; defaults now applied via FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR) + FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT) walkers at top of function (Registry default precedence v1.1).
   // v5.15.5.F.4d.1.B.4 Cx-U: sl_cooldown_adaptive default (OFF) applied via RISK_CFG_FLAG_AUTOPOPULATE_FROM_QUINTUPLE above (MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED bit OFF).
   // momentum strategy
   cfg.momentum_breakout_mult = FPN_FromDouble<F>(1.5); // buy 1.5σ above avg
@@ -1809,10 +1809,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
   // v5.11.18a — per-core feature_mask defaults (all-bits-on = no masking)
   for (int i = 0; i < 16; ++i) {
-      cfg.core_horizon_list[i][0] = '\0';
-      cfg.core_ensemble_blend_mode[i][0] = '\0';
-      cfg.core_disabled_horizons[i][0] = '\0';
-      cfg.core_feature_mask[i] = 0xFFFFFFFFFFFFFFFFULL;  // all features enabled
+      cfg.node_horizon_list[i][0] = '\0';
+      cfg.node_ensemble_blend_mode[i][0] = '\0';
+      cfg.node_disabled_horizons[i][0] = '\0';
+      cfg.node_feature_mask[i] = 0xFFFFFFFFFFFFFFFFULL;  // all features enabled
   }
   // v5.15.5.F.4d.1.B.3 Step 8.6: health_log_level DIFFER — registry INT(1=debug); manual=0=info (less verbose default).
   cfg.health_log_level            = 0;                            // KEEP — registry INT(1=debug) too verbose; manual=0=info matches operator expectation
@@ -1833,18 +1833,18 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // mode. Each engine = a self-contained strategy unit (slow + hot
   // pthread pair). Train-serve parity preserved structurally: all
   // callers (live, backtest) execute the same OneCore helpers on the
-  // same state.cores[c].
+  // same state.nodes[c].
   // slow_path_pin_offset DIFFER — registry INT(-1); manual=0 (auto-derive drainer_cpu+1).
   cfg.slow_path_pin_offset = 0;  // KEEP — registry INT(-1) means no pin; manual=0 is "auto-derive (drainer_cpu + 1)" — operationally distinct
-  // num_execution_cores DIFFER — registry INT(1); manual=4 (operator-default for 4-core deployment).
-  cfg.num_execution_cores = 4;   // KEEP — registry INT(1) single-core too conservative for production; manual=4 is operator-typical
+  // num_execution_nodes DIFFER — registry INT(1); manual=4 (operator-default for 4-core deployment).
+  cfg.num_execution_nodes = 4;   // KEEP — registry INT(1) single-core too conservative for production; manual=4 is operator-typical
   // sharded_force_synthetic MATCH — registry BOOL(0) == manual; DELETED.
-  for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
-  cfg.core_strategies_explicit_set = 0;                       // v5.9.0c: no bits set = all defaulted
+  for (int i = 0; i < 16; ++i) cfg.node_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
+  cfg.node_strategies_explicit_set = 0;                       // v5.9.0c: no bits set = all defaulted
   cfg.source_cfg_path[0] = '\0';                              // v5.9.0c: populated by ControllerConfig_Load
-  for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = Money_Zero();  // 0 = shared
+  for (int i = 0; i < 16; ++i) cfg.node_risk_pct[i] = Money_Zero();  // 0 = shared
   // Phase 3: per-core kill switch overrides default to 0 (= use shared).
-  for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = Money_Zero();
+  for (int i = 0; i < 16; ++i) cfg.node_max_drawdown_pct[i] = Money_Zero();
   cfg.min_kill_loss = Money{ money_from_double_payload(5.0) };   // $5 absolute-loss floor for trip
   // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch default (ENABLED) now applied via RISK_CFG_FLAG_AUTOPOPULATE_FROM_QUINTUPLE above (MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit ON; safety-critical).
   // v5.12.1.A — disabled by default. Operator opts in for live deployment;
@@ -1902,35 +1902,35 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.15.5.F.4d.1.B.3 Step 8.6: use_aot_inference MATCH — registry BOOL(0) == manual; DELETED.
   // v5.13.0 — sell-side ML defaults: disabled; opt-in for paper-test.
   // use_exit_model migrated to ml_cfg_flags (default 0)
-  // v5.15.5.F.4d.1.B.4 Cx-E.3: exit_threshold (0.6) manual init DELETED; auto-populated via FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR) walker (registry DBL(0.6, 0.0, 1.0) MATCH).
+  // v5.15.5.F.4d.1.B.4 Cx-E.3: exit_threshold (0.6) manual init DELETED; auto-populated via FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR) walker (registry DBL(0.6, 0.0, 1.0) MATCH).
   cfg.exit_signal_model_dir[0] = '\0';
   cfg.calibration_log_path[0] = '\0';
-  for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
-  for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
+  for (int i = 0; i < 16; ++i) cfg.node_model_path[i][0] = '\0';    // empty = shared
+  for (int i = 0; i < 16; ++i) cfg.node_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // WIP2d-1.A — per-core symbol forward-compat. Empty = no override; BinanceConfig.symbol
   // (loaded from binance.cfg) drives. Non-empty = operator-set per-core symbol; main.cpp
   // syncs to BinanceConfig.symbol pre-EngineSharded_Run with uniformity check.
-  for (int i = 0; i < 16; ++i) cfg.core_symbol[i][0] = '\0';
+  for (int i = 0; i < 16; ++i) cfg.node_symbol[i][0] = '\0';
   // v4.0 per-core overrides — zero in every field = "inherit global".
-  // v4.7.24: zeroing auto-derives from PER_CORE_OVERRIDE_FIELDS macro.
+  // v4.7.24: zeroing auto-derives from PER_NODE_OVERRIDE_FIELDS macro.
   for (int i = 0; i < 16; ++i) {
-#define _ZERO_OV_MONEY(name) cfg.core_overrides[i].name = Money_Zero();
-#define _ZERO_OV_RAW(name)   cfg.core_overrides[i].name = FPN_Zero<F>();
-    PER_CORE_OVERRIDE_FIELDS(_ZERO_OV_MONEY, _ZERO_OV_RAW)
-    cfg.core_overrides[i].fee_floor_mult = Money_Zero();
-    cfg.core_overrides[i].partial_exit_pct = Money_Zero();
-    cfg.core_overrides[i].tp2_mult = Money_Zero();
+#define _ZERO_OV_MONEY(name) cfg.node_overrides[i].name = Money_Zero();
+#define _ZERO_OV_RAW(name)   cfg.node_overrides[i].name = FPN_Zero<F>();
+    PER_NODE_OVERRIDE_FIELDS(_ZERO_OV_MONEY, _ZERO_OV_RAW)
+    cfg.node_overrides[i].fee_floor_mult = Money_Zero();
+    cfg.node_overrides[i].partial_exit_pct = Money_Zero();
+    cfg.node_overrides[i].tp2_mult = Money_Zero();
 #undef _ZERO_OV_MONEY
 #undef _ZERO_OV_RAW
 // v4.7.40: zero INT overrides too (0 = inherit).
-#define _ZERO_OV_INT_FIELD(name) cfg.core_overrides[i].name = 0;
-    PER_CORE_OVERRIDE_INT_FIELDS(_ZERO_OV_INT_FIELD)
+#define _ZERO_OV_INT_FIELD(name) cfg.node_overrides[i].name = 0;
+    PER_NODE_OVERRIDE_INT_FIELDS(_ZERO_OV_INT_FIELD)
 #undef _ZERO_OV_INT_FIELD
 // v5.14.9.F.6: zero BITMAP overrides (0 = no overrides, full inherit).
 #define _ZERO_OV_BITMAP_FIELDS(d_lower, D_UPPER, stype, FOREACH_macro) \
-    cfg.core_overrides[i].d_lower##_cfg_flags_override = (stype)0;     \
-    cfg.core_overrides[i].d_lower##_cfg_flags_override_set = (stype)0;
-    PER_CORE_OVERRIDE_BITMAP_DOMAINS(_ZERO_OV_BITMAP_FIELDS)
+    cfg.node_overrides[i].d_lower##_cfg_flags_override = (stype)0;     \
+    cfg.node_overrides[i].d_lower##_cfg_flags_override_set = (stype)0;
+    PER_NODE_OVERRIDE_BITMAP_DOMAINS(_ZERO_OV_BITMAP_FIELDS)
 #undef _ZERO_OV_BITMAP_FIELDS
   }
   cfg.simpledip_tp_pct  = Money_Zero();  // 0 = use shared take_profit_pct
@@ -1941,8 +1941,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.emacross_sl_pct   = Money_Zero();
   // OMS phase 03 — mode 1: OMS owns portfolio mutation + per-core
   // accounting (via FillRecord drained post-Tick). Required for partials
-  // (mode 0 used event.core_id directly as portfolio slot, which breaks
-  // when slot != core_id under paired-leg geometry). Mode 0 left in
+  // (mode 0 used event.node_id directly as portfolio slot, which breaks
+  // when slot != node_id under paired-leg geometry). Mode 0 left in
   // place for tests that explicitly want the legacy OnEvent path; new
   // production code paths default to 1.
   cfg.oms_event_log_mode = 1;
@@ -1951,7 +1951,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.oms_bench_enabled = 0;
 
   // v5.15.5.F.4c.3 Step 2 — populate per-core authoritative view from flat fields.
-  // Step 3 will replace this with [core N] section parser writing cores[c] directly.
+  // Step 3 will replace this with [core N] section parser writing nodes[c] directly.
   ControllerConfig_PopulateCoresFromFlat(&cfg);
 
   return cfg;
@@ -2105,7 +2105,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     //==================================================================================================
     // [v5.15.5.F.4c.3] REGISTRY-DRIVEN DISPATCH — runs FIRST; manual CFG_PARSE_* below are fallback
     //==================================================================================================
-    // For each FOREACH_GLOBAL_CFG_FIELD + FOREACH_PER_CORE_CFG_FIELD entry: if
+    // For each FOREACH_GLOBAL_CFG_FIELD + FOREACH_PER_NODE_CFG_FIELD entry: if
     // `key` matches the row's name, call tt::cfg_parse_field<T>(cfg.name, descriptor, val)
     // — T is deduced from cfg.name's actual type (FPN_Binary<F> or scalar). 3-barrier
     // structural fix per DOCS/RECURRING_BUG_PATTERNS.md Class 23 +
@@ -2114,7 +2114,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // .F.4c.3 — registry split into two scope-disjoint registries (global vs
     // per-core). Parser walks BOTH; consumer field references remain at
     // cfg.<name> until Step 2 restructures ControllerConfig.hpp with
-    // PerCoreCfg<F> cores[16]. Future ship .F.4c.3 Step 3 introduces [core N]
+    // PerNodeCfg<F> nodes[16]. Future ship .F.4c.3 Step 3 introduces [core N]
     // section parser; this walker fires only in the GLOBAL section.
     //
     // Manual CFG_PARSE_FPN/PCT/U32/INT/FPN_POS macros below stay in place for
@@ -2146,18 +2146,18 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // get implicit skip via the same bit because per design, NO_FLAT_FIELD rows ALWAYS have
     // manual parsers (no auto-parse possible to a non-existent flat scalar). Strategy carries both
     // bits; this walker skip avoids cfg.strategy reference at instantiation.
-    #define EMIT_PER_CORE_CFG_PARSER_CASE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
+    #define EMIT_PER_NODE_CFG_PARSER_CASE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
                                            applies_to_strategy, applies_to_op_mode, \
                                            applies_to_regime, applies_to_risk, lives_in_struct) \
         if constexpr (!((meta) & CfgFieldDescriptor::MANUAL_PARSER) && \
                       !((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
             if (strcmp(key, #name) == 0) { \
-                tt::cfg_parse_field(cfg.name, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_##name], val); \
+                tt::cfg_parse_field(cfg.name, g_per_node_cfg_field_descriptors[FIELD_IDX_PER_NODE_##name], val); \
                 continue; \
             } \
         }
-    FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_PARSER_CASE)
-    #undef EMIT_PER_CORE_CFG_PARSER_CASE
+    FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_PARSER_CASE)
+    #undef EMIT_PER_NODE_CFG_PARSER_CASE
 
 // table-driven parser: FPN_Binary fields parsed as atof(val) directly
 // adding a new field = add ONE line to the matching table below
@@ -2392,12 +2392,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.12.2.B — lazy slow-path rebuild
     // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     // v5.15.5.F.4c — lazy_rebuild_force_period_us migrated to FOREACH_CFG_FIELD (KIND_INT; uint64 storage).
-    // v5.15.5.F.4d TECH_DEBT-082 — lazy_rebuild_price_threshold_pct migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE_PCT; FPN_Binary<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
+    // v5.15.5.F.4d TECH_DEBT-082 — lazy_rebuild_price_threshold_pct migrated to FOREACH_PER_NODE_CFG_FIELD (KIND_DOUBLE_PCT; FPN_Binary<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     // v5.12.2.D — Treelite AOT backend opt-in (infrastructure-only)
     // v5.15.5.F.4c — use_aot_inference migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
     // v5.13.0 — sell-side ML opt-in (Path 3 architecture)
     // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
-    // v5.15.5.F.4d TECH_DEBT-082 — exit_threshold migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE; FPN_Binary<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
+    // v5.15.5.F.4d TECH_DEBT-082 — exit_threshold migrated to FOREACH_PER_NODE_CFG_FIELD (KIND_DOUBLE; FPN_Binary<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     if (strcmp(key, "exit_signal_model_dir") == 0) {
       strncpy(cfg.exit_signal_model_dir, val,
               sizeof(cfg.exit_signal_model_dir) - 1);
@@ -2759,7 +2759,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // (legacy_field column matches keys at the ops_cfg_flags parser block line ~2220).
     // v5.15.5.F.4c — acknowledge_hot_swap_with_open_positions migrated to FOREACH_CFG_FIELD (KIND_BOOL).
     // Registry walker handles parse; manual CFG_PARSE_INT removed.
-    // v5.15.5.F.4d TECH_DEBT-082 — confidence_ic_floor migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE; double; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
+    // v5.15.5.F.4d TECH_DEBT-082 — confidence_ic_floor migrated to FOREACH_PER_NODE_CFG_FIELD (KIND_DOUBLE; double; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     // v5.15.5.F.4c — confidence_ic_floor_window migrated to FOREACH_CFG_FIELD (KIND_INT; uint32 storage).
     if (false) {
         cfg.confidence_ic_floor_window = (uint32_t)strtoul(val, nullptr, 10);
@@ -2828,80 +2828,80 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         continue;
     }
 
-    // v5.15.5.F.4c — slow_path_pin_offset + num_execution_cores migrated to FOREACH_CFG_FIELD (KIND_INT).
-    // num_execution_cores clamp [1, 16] preserved in INT(1, 1, 16) payload.
+    // v5.15.5.F.4c — slow_path_pin_offset + num_execution_nodes migrated to FOREACH_CFG_FIELD (KIND_INT).
+    // num_execution_nodes clamp [1, 16] preserved in INT(1, 1, 16) payload.
     // v5.15.5.F.4c — sharded_force_synthetic migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint8_t storage).
     // Registry walker's KIND_BOOL branch handles truthy-int normalization.
-    // v5.12.3.C — per-core time-exit override: core_0_time_exit_ticks=5000
+    // v5.12.3.C — per-core time-exit override: node_0_time_exit_ticks=5000
     // means core 0 forces exit after 5000 ticks held (overrides global
     // cfg.max_hold_ticks for this core). Match BEFORE generic _exit_*
     // patterns to avoid substring collisions.
-    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_time_exit_ticks")) {
-      int core_idx = atoi(key + 5);
-      if (core_idx >= 0 && core_idx < 16) {
-        cfg.core_time_exit_ticks[core_idx] = (uint32_t)atol(val);
+    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_time_exit_ticks")) {
+      int node_idx = atoi(key + 5);
+      if (node_idx >= 0 && node_idx < 16) {
+        cfg.node_time_exit_ticks[node_idx] = (uint32_t)atol(val);
       }
       continue;
     }
-    // Per-core risk: core_0_risk_pct=20.0 means core 0 risks 20% of balance
-    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_risk_pct")) {
-      int core_idx = atoi(key + 5);
-      if (core_idx >= 0 && core_idx < 16) {
-        cfg.core_risk_pct[core_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
+    // Per-core risk: node_0_risk_pct=20.0 means core 0 risks 20% of balance
+    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_risk_pct")) {
+      int node_idx = atoi(key + 5);
+      if (node_idx >= 0 && node_idx < 16) {
+        cfg.node_risk_pct[node_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
       }
       continue;
     }
-    // Phase 3: per-core kill switch override. core_0_max_drawdown_pct=15.0
+    // Phase 3: per-core kill switch override. node_0_max_drawdown_pct=15.0
     // means core 0 trips at 15% drawdown (overrides shared max_drawdown_pct).
     // Match must come before _max checks (substring "_max" is in
     // "_max_drawdown_pct"). Specific suffix match keeps it safe.
-    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_max_drawdown_pct")) {
-      int core_idx = atoi(key + 5);
-      if (core_idx >= 0 && core_idx < 16) {
-        cfg.core_max_drawdown_pct[core_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
+    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_max_drawdown_pct")) {
+      int node_idx = atoi(key + 5);
+      if (node_idx >= 0 && node_idx < 16) {
+        cfg.node_max_drawdown_pct[node_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
       }
       continue;
     }
-    // Per-core model path: core_0_model_path=models/aggressive.xgb
-    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_model_path")) {
-      int core_idx = atoi(key + 5);
-      if (core_idx >= 0 && core_idx < 16) {
-        strncpy(cfg.core_model_path[core_idx], val,
-                sizeof(cfg.core_model_path[core_idx]) - 1);
-        cfg.core_model_path[core_idx][sizeof(cfg.core_model_path[core_idx]) - 1] = '\0';
+    // Per-core model path: node_0_model_path=models/aggressive.xgb
+    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_model_path")) {
+      int node_idx = atoi(key + 5);
+      if (node_idx >= 0 && node_idx < 16) {
+        strncpy(cfg.node_model_path[node_idx], val,
+                sizeof(cfg.node_model_path[node_idx]) - 1);
+        cfg.node_model_path[node_idx][sizeof(cfg.node_model_path[node_idx]) - 1] = '\0';
       }
       continue;
     }
-    // WIP2d-1.A — Per-core symbol: core_0_symbol=BTCUSDT
+    // WIP2d-1.A — Per-core symbol: node_0_symbol=BTCUSDT
     // Forward-compat for multi-symbol DataStream. Uniformity-checked at boot (main.cpp);
     // bridges to BinanceConfig.symbol if operator set a non-empty value.
     // strstr "_symbol" comes BEFORE _strategy block (avoid match-substring shadowing).
-    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_symbol")) {
-      int core_idx = atoi(key + 5);
-      if (core_idx >= 0 && core_idx < 16) {
-        strncpy(cfg.core_symbol[core_idx], val,
-                sizeof(cfg.core_symbol[core_idx]) - 1);
-        cfg.core_symbol[core_idx][sizeof(cfg.core_symbol[core_idx]) - 1] = '\0';
+    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_symbol")) {
+      int node_idx = atoi(key + 5);
+      if (node_idx >= 0 && node_idx < 16) {
+        strncpy(cfg.node_symbol[node_idx], val,
+                sizeof(cfg.node_symbol[node_idx]) - 1);
+        cfg.node_symbol[node_idx][sizeof(cfg.node_symbol[node_idx]) - 1] = '\0';
       }
       continue;
     }
-    // Per-core model dir: core_0_model_dir=models/aggressive/
+    // Per-core model dir: node_0_model_dir=models/aggressive/
     // when set, engine auto-discovers role-specific models in the directory
     // (barrier.json, buy_signal.json, regime.json, exit.json) and loads each
-    // present file into the per-core CoreModelZoo.
-    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_model_dir")) {
-      int core_idx = atoi(key + 5);
-      if (core_idx >= 0 && core_idx < 16) {
-        strncpy(cfg.core_model_dir[core_idx], val,
-                sizeof(cfg.core_model_dir[core_idx]) - 1);
-        cfg.core_model_dir[core_idx][sizeof(cfg.core_model_dir[core_idx]) - 1] = '\0';
+    // present file into the per-core NodeModelZoo.
+    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_model_dir")) {
+      int node_idx = atoi(key + 5);
+      if (node_idx >= 0 && node_idx < 16) {
+        strncpy(cfg.node_model_dir[node_idx], val,
+                sizeof(cfg.node_model_dir[node_idx]) - 1);
+        cfg.node_model_dir[node_idx][sizeof(cfg.node_model_dir[node_idx]) - 1] = '\0';
       }
       continue;
     }
-    // Per-core strategy: core_0_strategy=simple_dip, core_1_strategy=none, etc.
-    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_strategy")) {
-      int core_idx = atoi(key + 5);
-      if (core_idx >= 0 && core_idx < 16) {
+    // Per-core strategy: node_0_strategy=simple_dip, node_1_strategy=none, etc.
+    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_strategy")) {
+      int node_idx = atoi(key + 5);
+      if (node_idx >= 0 && node_idx < 16) {
         uint8_t sid = 0xFF; // STRATEGY_NONE
         if (strcmp(val, "mr") == 0 || strcmp(val, "mean_reversion") == 0) sid = 0;
         else if (strcmp(val, "momentum") == 0 || strcmp(val, "mom") == 0) sid = 1;
@@ -2911,34 +2911,34 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         else if (strcmp(val, "auto") == 0 || strcmp(val, "regime") == 0) sid = 5;  // v4.0.3 STRATEGY_AUTO
         else if (strcmp(val, "none") == 0) sid = 0xFF;
         else sid = (uint8_t)atoi(val);  // numeric fallback
-        cfg.core_strategies[core_idx] = sid;
+        cfg.node_strategies[node_idx] = sid;
         // v5.9.0c — set explicit bit so TUI can distinguish deliberate from defaulted.
-        cfg.core_strategies_explicit_set |= (uint16_t)(1u << core_idx);
+        cfg.node_strategies_explicit_set |= (uint16_t)(1u << node_idx);
       }
       continue;
     }
     // Per-core overrides (v4.0). Parses `core_N_<field>=<value>` for any
-    // PerCoreOverrides field. Empty/0 = inherit global; resolver handles
+    // PerNodeOverrides field. Empty/0 = inherit global; resolver handles
     // the fallback. Two categories — pct (atof/100, e.g. take_profit_pct)
     // and raw FPN_Binary (atof, e.g. ml_buy_threshold).
     //
-    // v4.7.24: parser auto-derives from PER_CORE_OVERRIDE_FIELDS macro.
+    // v4.7.24: parser auto-derives from PER_NODE_OVERRIDE_FIELDS macro.
     // Adding a new override field = ONE line in the macro list near the
     // top of this header. The struct, init, resolver, and parser all
     // pick up the new field automatically.
-    if (strncmp(key, "core_", 5) == 0) {
-      int core_idx = -1;
+    if (strncmp(key, "node_", 5) == 0) {
+      int node_idx = -1;
       const char* suffix = nullptr;
       // parse core_N_<suffix>
       const char* p = key + 5;
-      core_idx = atoi(p);
+      node_idx = atoi(p);
       while (*p && *p != '_') p++;
-      if (*p == '_' && core_idx >= 0 && core_idx < 16) {
+      if (*p == '_' && node_idx >= 0 && node_idx < 16) {
         suffix = p + 1;
-        PerCoreOverrides<F>& ov = cfg.core_overrides[core_idx];
+        PerNodeOverrides<F>& ov = cfg.node_overrides[node_idx];
 #define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) }; continue; }
 #define _PARSE_OV_RAW(name) if (strcmp(suffix, #name) == 0) { ov.name = FPN_FromDouble<F>(atof(val));       continue; }
-        PER_CORE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
+        PER_NODE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
         if (strcmp(suffix, "fee_floor_mult") == 0) { ov.fee_floor_mult = Money_FromString(val).value; continue; }
         if (strcmp(suffix, "partial_exit_pct") == 0) { ov.partial_exit_pct = Money_FromString(val).value; continue; }
         if (strcmp(suffix, "tp2_mult") == 0) { ov.tp2_mult = Money_FromString(val).value; continue; }
@@ -2946,7 +2946,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 #undef _PARSE_OV_RAW
 // v4.7.40: INT overrides — atoi parse, 0 = inherit.
 #define _PARSE_OV_INT(name) if (strcmp(suffix, #name) == 0) { ov.name = (uint32_t)atoi(val); continue; }
-        PER_CORE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
+        PER_NODE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
 #undef _PARSE_OV_INT
 // v5.14.9.F.6: BITMAP per-bit overrides. `core_N_<legacy_field> = X` sets the
 // corresponding bit on <domain>_cfg_flags_override + marks it in
@@ -2987,7 +2987,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_RISK_CFG_##name; }
 #define _PARSE_OV_BITMAP_ROW_ops(name, legacy_field, dl, sec, doc) \
     if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_OPS_CFG_##name; }
-        PER_CORE_OVERRIDE_BITMAP_DOMAINS(_PARSE_OV_BITMAP_DOMAIN)
+        PER_NODE_OVERRIDE_BITMAP_DOMAINS(_PARSE_OV_BITMAP_DOMAIN)
 #undef _PARSE_OV_BITMAP_DOMAIN
 #undef _PARSE_OV_BITMAP_ROW_lifecycle
 #undef _PARSE_OV_BITMAP_ROW_gate
@@ -2998,30 +2998,30 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         // doesn't support string types; explicit branches here. All three
         // default empty (inherit global).
         if (strcmp(suffix, "horizon_list") == 0) {
-            strncpy(cfg.core_horizon_list[core_idx], val,
-                    sizeof(cfg.core_horizon_list[core_idx]) - 1);
-            cfg.core_horizon_list[core_idx][
-                sizeof(cfg.core_horizon_list[core_idx]) - 1] = '\0';
+            strncpy(cfg.node_horizon_list[node_idx], val,
+                    sizeof(cfg.node_horizon_list[node_idx]) - 1);
+            cfg.node_horizon_list[node_idx][
+                sizeof(cfg.node_horizon_list[node_idx]) - 1] = '\0';
             continue;
         }
         if (strcmp(suffix, "ensemble_blend_mode") == 0) {
             if (strcmp(val, "weighted") == 0 || strcmp(val, "selection") == 0) {
-                strncpy(cfg.core_ensemble_blend_mode[core_idx], val,
-                        sizeof(cfg.core_ensemble_blend_mode[core_idx]) - 1);
-                cfg.core_ensemble_blend_mode[core_idx][
-                    sizeof(cfg.core_ensemble_blend_mode[core_idx]) - 1] = '\0';
+                strncpy(cfg.node_ensemble_blend_mode[node_idx], val,
+                        sizeof(cfg.node_ensemble_blend_mode[node_idx]) - 1);
+                cfg.node_ensemble_blend_mode[node_idx][
+                    sizeof(cfg.node_ensemble_blend_mode[node_idx]) - 1] = '\0';
             } else {
-                fprintf(stderr, "[cfg] core_%d_ensemble_blend_mode='%s' unknown; "
+                fprintf(stderr, "[cfg] node_%d_ensemble_blend_mode='%s' unknown; "
                         "valid: weighted|selection. Falling back to global.\n",
-                        core_idx, val);
+                        node_idx, val);
             }
             continue;
         }
         if (strcmp(suffix, "disabled_horizons") == 0) {
-            strncpy(cfg.core_disabled_horizons[core_idx], val,
-                    sizeof(cfg.core_disabled_horizons[core_idx]) - 1);
-            cfg.core_disabled_horizons[core_idx][
-                sizeof(cfg.core_disabled_horizons[core_idx]) - 1] = '\0';
+            strncpy(cfg.node_disabled_horizons[node_idx], val,
+                    sizeof(cfg.node_disabled_horizons[node_idx]) - 1);
+            cfg.node_disabled_horizons[node_idx][
+                sizeof(cfg.node_disabled_horizons[node_idx]) - 1] = '\0';
             continue;
         }
         // v5.11.18a — per-core feature_mask (uint64_t, hex or decimal).
@@ -3041,17 +3041,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
             }
             if (end == val || (end != nullptr && *end != '\0' && *end != '\n')
                     || errno == ERANGE) {
-                fprintf(stderr, "[cfg] core_%d_feature_mask='%s' unparseable; "
+                fprintf(stderr, "[cfg] node_%d_feature_mask='%s' unparseable; "
                         "expected 0xHEX or decimal. Falling back to all-on "
-                        "(0xFFFFFFFFFFFFFFFF).\n", core_idx, val);
-                cfg.core_feature_mask[core_idx] = 0xFFFFFFFFFFFFFFFFULL;
+                        "(0xFFFFFFFFFFFFFFFF).\n", node_idx, val);
+                cfg.node_feature_mask[node_idx] = 0xFFFFFFFFFFFFFFFFULL;
             } else {
-                cfg.core_feature_mask[core_idx] = parsed;
+                cfg.node_feature_mask[node_idx] = parsed;
                 if (parsed == 0ULL) {
-                    fprintf(stderr, "[cfg] WARN: core_%d_feature_mask=0x0 "
+                    fprintf(stderr, "[cfg] WARN: node_%d_feature_mask=0x0 "
                             "disables ALL features for this core. Did you "
                             "mean 0xFFFFFFFFFFFFFFFF (all enabled)?\n",
-                            core_idx);
+                            node_idx);
                 }
             }
             continue;
@@ -3127,16 +3127,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   // saw "0!" hardcoded warnings, couldn't distinguish defaulted from
   // deliberate. Stderr WARN at boot makes the silent fallback visible.
   //
-  // Fires only when num_execution_cores > 0 (we have actual cores) AND
+  // Fires only when num_execution_nodes > 0 (we have actual cores) AND
   // explicit_set bitmap is zero (no core_N_strategy= lines parsed).
-  if (cfg.num_execution_cores > 0 && cfg.core_strategies_explicit_set == 0) {
+  if (cfg.num_execution_nodes > 0 && cfg.node_strategies_explicit_set == 0) {
     fprintf(stderr,
         "[cfg] WARN: %s has no `core_N_strategy=` lines. "
-        "All %u cores defaulting to SIMPLE_DIP (per ControllerConfig_Default). "
+        "All %u nodes defaulting to SIMPLE_DIP (per ControllerConfig_Default). "
         "If this is unintended (e.g., you copied backtest.cfg without "
-        "the per-core fields), add `core_0_strategy=mr` etc. to the cfg.\n",
+        "the per-core fields), add `node_0_strategy=mr` etc. to the cfg.\n",
         filepath ? filepath : "(unknown cfg)",
-        (unsigned)cfg.num_execution_cores);
+        (unsigned)cfg.num_execution_nodes);
   }
 
   // Phase 8 — backward-compat for fee_rate_maker / fee_rate_taker.
@@ -3249,9 +3249,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
   // v5.15.5.F.4c.3 Step 2 — populate per-core authoritative view from flat fields.
   // Runs AFTER all parser passes (registry walker + manual blocks + per-core overrides
-  // + NormalizeForMode). Ensures cfg.cores[c] reflects the fully-resolved per-core
-  // view (flat + PerCoreOverrides<F> merged via ControllerConfig_ResolveForCore).
-  // Step 3 will replace this with [core N] section parser writing cores[c] directly.
+  // + NormalizeForMode). Ensures cfg.nodes[c] reflects the fully-resolved per-core
+  // view (flat + PerNodeOverrides<F> merged via ControllerConfig_ResolveForCore).
+  // Step 3 will replace this with [core N] section parser writing nodes[c] directly.
   ControllerConfig_PopulateCoresFromFlat(&cfg);
 
   return cfg;

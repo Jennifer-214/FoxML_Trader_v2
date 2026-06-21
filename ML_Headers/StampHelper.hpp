@@ -151,7 +151,7 @@ inline StampWriteResult Stamp_AssembleAndEmit(
 
     // ────────────────────────────────────────────────────────────────────
     // (1) CFG-bound fields — framework-driven via INFERENCE_CFG_POPULATE_FROM_DERIVED.
-    // Walks master FOREACH_PER_CORE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD
+    // Walks master FOREACH_PER_NODE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD
     // filtered by STAMP_BOUND_CFG_DERIVED metadata bit; populates inf.<field>
     // + has_<field> per the per-field cohort gate from cfg_gate::lookup_populate.
     // Closes PARITY-020: any future caller that calls this helper automatically
@@ -174,7 +174,7 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // bandit_blend_ratio + 5 model-state cohort + per_horizon_barrier_blend
     // ml_cfg_flag) is now fully covered by INFERENCE_CFG_POPULATE_FROM_DERIVED
     // at section (1) above (framework walker; sets UNPREFIXED `inf.<name>` per
-    // master FOREACH_PER_CORE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD +
+    // master FOREACH_PER_NODE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD +
     // FOREACH_ML_CFG_FLAG + FOREACH_GATE_CFG_FLAG filtered by
     // STAMP_BOUND_CFG_DERIVED bit). Drift impossible by construction.
     //
@@ -256,7 +256,7 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     if (args.horizon_ticks > 0) {
         // v5.15.5.E.0.10 A6 PRODUCER seam (D-221) — refuse to EMIT a corrupt barrier into a stamp
         // (the SSoT tt::barrier_is_corrupt predicate, the SAME one the ingress consumer applies at
-        // CoreModelZoo). Catches a corrupt label distance at the train->serve SOURCE, before it ever
+        // NodeModelZoo). Catches a corrupt label distance at the train->serve SOURCE, before it ever
         // reaches an engine. label_*_pct here is the stored FRACTION (the StampHelper convention).
         if (tt::barrier_is_corrupt(args.horizon_tp_pct, args.horizon_sl_pct)) {
             StampWriteResult r{};

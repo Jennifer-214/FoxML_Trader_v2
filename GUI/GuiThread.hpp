@@ -428,11 +428,11 @@ static inline void *gui_thread_fn(void *arg) {
 
         // settings, trade history, log viewer.
         // Pass live core count so the per-core tabs match active cores
-        // rather than reading num_execution_cores from cfg (which may be
+        // rather than reading num_execution_nodes from cfg (which may be
         // missing — cfg defaults to 4 on the engine side, but Settings_Load
         // only sees what's actually written).
         GUI_Panel_Settings(&settings, &shared->reload_requested,
-                           snap->sharded_mode_active ? snap->per_core_count : 0,
+                           snap->sharded_mode_active ? snap->per_node_count : 0,
                            shared, snap);
         GUI_Panel_TradeHistory(&trade_history, snap->partial_exit_enabled);
         GUI_Panel_LogViewer(&log_viewer);

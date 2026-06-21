@@ -9,7 +9,7 @@
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
-// in model stamps / fingerprints for reproducibility + HMAC — StampHelper/CoreModelZoo/ModelInference),
+// in model stamps / fingerprints for reproducibility + HMAC — StampHelper/NodeModelZoo/ModelInference),
 // so it can't double as a clean public label. The release version is the public face (boot banner / GUI),
 // bumped MANUALLY at MAJOR changes. It is NEVER written into a stamp/fingerprint/wire body (re-tagging a
 // release must never perturb determinism — H9). Pre-1.0 until live-trading + the headless decoupling land.
@@ -60,7 +60,7 @@
 //     DETECT-ONLY - A17 paper-synth SSoT. Anti-patterns codified: RBP Class 43-49.
 //   - A6 CAPITAL GUARD (corrupt/bad barrier): EGRESS = `GateParameters_FinalizeEmit` range-validate every
 //     gate-emit + `SHALT_BAD_PCT` (one dispatcher chokepoint). INGRESS = corrupt-model detect->per-arm-drop->
-//     majority node-SHALT (`barrier_is_corrupt` SSoT + `MODEL_CORRUPT` CoreState + trainer-emit floor;
+//     majority node-SHALT (`barrier_is_corrupt` SSoT + `MODEL_CORRUPT` NodeState + trainer-emit floor;
 //     RBP Class 49; D-220/D-221).
 //   - PHASE-D: BLANKET live-capital boot-gate — `LiveReadiness_Verify` REFUSES live until the `.E`-series
 //     live-readiness rework lands (fail-safe; via the NEW-1 predicate; H21 tombstone -> remove at v5.16,
@@ -194,7 +194,7 @@
 // cohort closes the LLM-non-determinism gap at handoff-related skill surfaces. Tests baseline
 // preserved (3239/0 + 17/0; no engine code touched). Hot path UNTOUCHED. 5-binary build verify
 // preserved baseline (no engine changes). 12 CI structural checks PASS (existing 10 in
-// check_per_core_registry_integrity + 3 in check_meta_registry + B-Plus pre-commit hook + 5
+// check_per_node_registry_integrity + 3 in check_meta_registry + B-Plus pre-commit hook + 5
 // sister tools + NEW Check 11). Postmortem at
 // `plans/v5.15-live-readiness/postmortems/2026-05-28-v5.15.5.F.4d.1.D-postmortem.md`.
 //
@@ -206,7 +206,7 @@
 //
 // CRITICAL — Class 26 sub-shape B silent realized-P&L drift CLOSED structurally + mechanically:
 //   - 4 HIGH consumer-site fixes (per-core fee_rate_taker substitution + H20 branchless ternary +
-//     pre-resolved core_cfg ref per StrategyParameters.hpp:1762 sister-canonical):
+//     pre-resolved node_cfg ref per StrategyParameters.hpp:1762 sister-canonical):
 //     * ControllerEventLoop.hpp:3605-3606 — EventLoop_TrailingSLRatchetOneCore
 //     * ControllerEventLoop.hpp:3670-3671 — EventLoop_BreakevenOnProfitOneCore
 //     * StrategyLifecycle.hpp:272-273 — Strategy_WriteRatchetSL (5 callers: MR/Momentum/EmaCross/
@@ -214,11 +214,11 @@
 //     * ControllerEventLoop.hpp:3042-3043 — EventLoop_RebuildOneCore GUI diag (resolved_cfg aliased)
 //   - 1 MED display fix: ShardedSnapshot.hpp:249-250 (TUI per-position net_pnl per-core fee_taker)
 //   - 3 KEEP-AS-GLOBAL display sites annotated: ShardedSnapshot.hpp:139 + 330 + 331 (Settings panel
-//     operator-facing semantic; per-core deviations surfaced via per_core_count panel)
+//     operator-facing semantic; per-core deviations surfaced via per_node_count panel)
 //   - REGRESSION TESTS: tests/controller_test.cpp NEW "Class 26 sub-shape B: UNINDEXED-GLOBAL
 //     accounting cohort closure" section (16 NEW assertions; 4 slots × 4 consumer patterns).
 //     Tests 3223 → 3239.
-//   - STAGE 6 STRUCTURAL ENFORCEMENT: tools/check_per_core_registry_integrity.py NEW Check 10
+//   - STAGE 6 STRUCTURAL ENFORCEMENT: tools/check_per_node_registry_integrity.py NEW Check 10
 //     (UNINDEXED-GLOBAL detector for cfg.X / cfg->X / resolved_cfg.X UNINDEXED on per-core-with-global-
 //     sister fields). Sister to Check 9 per canonical-sister-extension-discipline.md v1.1
 //     CI-tooling-surface axis 2nd canonical. M7 6th canonical structural enforcement.
@@ -256,15 +256,15 @@
 // (2026-05-27). Mixed-ship per operator directive ("fold .B.8 into .7 i thnk").
 //
 // CRITICAL — Class 26 silent trading-logic bug CLOSED structurally + mechanically:
-//   - HOTFIX: CoreFrameworks/EngineSharded/Async.hpp:814+853 — `cfg.cores[i]` → `cfg.cores[slot]`
-//     (`i` was ring-pop counter from inner `for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_CORE; ++i)`
+//   - HOTFIX: CoreFrameworks/EngineSharded/Async.hpp:814+853 — `cfg.nodes[i]` → `cfg.nodes[slot]`
+//     (`i` was ring-pop counter from inner `for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_NODE; ++i)`
 //     at Async.hpp:768; should have been outer per-core `slot` at Async.hpp:765). Silent
 //     miscalibration of per-core partial_exit_pct + tp2_mult when overrides not set;
 //     introduced at mechanical migration commit ea08210 (.F.4c.3 WIP2d-1 Phase 2).
 //   - REGRESSION TEST: tests/controller_test.cpp NEW "Class 26: drainer per-core cfg slot integrity"
 //     section (8 new assertions; 4 slots × 2 fields). Tests 3215 → 3223.
-//   - STAGE 6 STRUCTURAL ENFORCEMENT: tools/check_per_core_registry_integrity.py NEW Check 9
-//     (paired-access mismatch detector flags `cfg.core_overrides[X]` + `cfg.cores[Y]` co-located
+//   - STAGE 6 STRUCTURAL ENFORCEMENT: tools/check_per_node_registry_integrity.py NEW Check 9
+//     (paired-access mismatch detector flags `cfg.node_overrides[X]` + `cfg.nodes[Y]` co-located
 //     within 5 lines where X != Y). Sanity-verified by reverting fix + tool catching exact site;
 //     re-applied fix; tool CLEAN post-fix. M7 4th canonical structural enforcement.
 //   - Class 26 recurrence_count bumped 11 → 13; catalog amendment includes detection-signature note.
@@ -274,7 +274,7 @@
 //
 // CLEANUP (TECH_DEBT-132 + -134 + -131 partial):
 //   - TECH_DEBT-132 NEW + CLOSED: 2 dead helpers deleted from CoreFrameworks/ControllerEventLoop.hpp:2225+2259
-//     (EventLoop_UpdateRollingStateAllCores + EventLoop_RebuildAllParameters_PerCore; zero production
+//     (EventLoop_UpdateRollingStateAllCores + EventLoop_RebuildAllParameters_PerNode; zero production
 //     callers post-.B.4 SHARDED full-surface deletion). 2 sister stale comment refs cleaned up at
 //     EngineSharded/Run.hpp:872 + Strategies/StrategyParameters.hpp:1429.
 //   - TECH_DEBT-134 NEW + CLOSED: 5 stale "centralized arch" comments cleaned up at
@@ -347,7 +347,7 @@
 //     regression test section). depth_recorder_test 17/0.
 //   - Hot path UNTOUCHED — tools/calls_graph_diff.sh verify GREEN (post-fix; tool now
 //     scans EngineSharded sub-files).
-//   - CI: check_per_core_registry_integrity.py 8 PASS (Check 9 NEW CLEAN; sanity-verified
+//   - CI: check_per_node_registry_integrity.py 8 PASS (Check 9 NEW CLEAN; sanity-verified
 //     by revert-detect-reapply test).
 //   - /latency-track on Async.hpp fix: NONE (2-char index swap; zero latency impact;
 //     HOT_PATH_CHANGELOG entry not needed).
@@ -437,7 +437,7 @@
 // QUEUED REMAINING file-size cleanup (post-code-LOC re-analysis 2026-05-27 — scope CUT
 // IN HALF; 6 files genuinely need splits, 6 files dropped as comment-heavy-but-code-fine):
 //   - .B.7 BacktestPanels.hpp (4,639 code-LOC; 3× over; biggest remaining)
-//   - .B.8 ControllerEventLoop + CoreModelZoo + BacktestEngine bundle (3 files; each
+//   - .B.8 ControllerEventLoop + NodeModelZoo + BacktestEngine bundle (3 files; each
 //     ~1.7-1.8k code-LOC just over threshold)
 //   - .B.9 DashboardPanels + PortfolioController bundle (2 files; barely over)
 //   - DROPPED — 6 marginal files UNDER code-LOC threshold (ControllerConfig + EngineTUI +
@@ -509,7 +509,7 @@
 //
 // WIP-16 Phase Cx-cfg-cohort closure (commits b8bba2b + 9d18eac engine + ccb3692 workspace) —
 // cfg field categorization correction across 11+ instances per Path 2 v5 final scope:
-// - 9 GLOBAL_ONLY_READERS per-core registry rows DELETED at FOREACH_PER_CORE_CFG_FIELD
+// - 9 GLOBAL_ONLY_READERS per-core registry rows DELETED at FOREACH_PER_NODE_CFG_FIELD
 //   (kill_recovery_warmup + sl_cooldown_base/extra/cycles + idle_reset_cycles + model_max_age_hours
 //   + lazy_rebuild_price_threshold_pct + enable_mtm_kill_switch + sl_cooldown_adaptive)
 // - 7 of those 9 fields MIGRATED to FOREACH_GLOBAL_CFG_FIELD with operational manual values as
@@ -517,7 +517,7 @@
 // - 2 H14 violations CLOSED via cfg-flag bitmap migration (enable_mtm_kill_switch +
 //   sl_cooldown_adaptive → MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED + MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED
 //   in risk_cfg_flags bitmap; sister to MASK_RISK_CFG_KILL_SWITCH_ENABLED PARITY-026 hotfix)
-// - NEW EMIT_PER_CORE_CFG_DEFAULT_GLOBAL_MIRROR walker (lands "future work" noted at
+// - NEW EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR walker (lands "future work" noted at
 //   CfgFieldRegistry.hpp:739 pre-cycle comment); auto-populates per-core registry rows' global
 //   manual struct field defaults at ControllerConfig_Default<F> time
 // - Class 25 cosmetic consumer fix at EngineCommon.hpp:618 (exit_threshold per-core scope; value-
@@ -545,7 +545,7 @@
 //   consumer-pattern verify + 4-category decision tree + 5-step re-categorization migration)
 //
 // CI INFRASTRUCTURE:
-// - check_per_core_registry_integrity.py Check 8 scaffold (M7 4th canonical; mechanical detection
+// - check_per_node_registry_integrity.py Check 8 scaffold (M7 4th canonical; mechanical detection
 //   patterns at sister mini-ship per token-budget pragmatism; discipline ENFORCED at /readiness
 //   Check 44 plan-time + Stage 4 synthesis stage + DESIGN_SPEC layer)
 //
@@ -695,7 +695,7 @@
 //
 // 6 NEW TECH_DEBT ENTRIES (TECH_DEBT-119 through TECH_DEBT-124; named homes per closure matrix):
 // - TECH_DEBT-119 EngineCommon extract → .B.4 (closes 4 CRITs + 3 HIGHs structurally)
-// - TECH_DEBT-120 parity_harness per_core_slow coverage → .F.5.C
+// - TECH_DEBT-120 parity_harness per_node_slow coverage → .F.5.C
 // - TECH_DEBT-121 live bandit_state_prior_path → .F.5.A
 // - TECH_DEBT-122 parity_harness rename/extend → .F.5.C
 // - TECH_DEBT-123 foxml_suite cfg-source-of-truth structural fix → v5.15.6.A/B/C
@@ -760,9 +760,9 @@
 //   StampT/CfgT for cfg_drift_compare (coding-time discoveries 1 + 2)
 // - wire_format_invariants helper extended to dual-mask shape (Stage 3 second reference)
 // - 6 COHORT_GATE_* macros extracted at MlCfgFlagRegistry.hpp; FOREACH_STAMP_BOUND_CFG +
-//   FOREACH_CFG_GATE_PER_CORE reference shared macros (Path γ #3 partial closure; 2 of 3
+//   FOREACH_CFG_GATE_PER_NODE reference shared macros (Path γ #3 partial closure; 2 of 3
 //   registries unified — CfgDriftCheck has distinct semantics preserved)
-// - FOREACH_CFG_GATE_PER_CORE populated with 16 cohort gate entries (Step 5)
+// - FOREACH_CFG_GATE_PER_NODE populated with 16 cohort gate entries (Step 5)
 // - Winsor parse-time cross-field invariant validation (Step 6)
 // - FPN<F> 6 comparison operators (==, !=, <, <=, >, >=) at FixedPointN.hpp (Step 6.5;
 //   removes FPN_ToDouble workaround pattern codebase-wide)
@@ -775,7 +775,7 @@
 //
 // Tests: 3235 controller_test passed (3213 baseline + 22 new) + 17 depth_recorder_test
 // GREEN. 5 binaries (test/gui/suite/tsan/asan) clean. Hot path UNTOUCHED. CI:
-// check_meta_registry.py 3 PASS (65/65 enrolled); check_per_core_registry_integrity.py
+// check_meta_registry.py 3 PASS (65/65 enrolled); check_per_node_registry_integrity.py
 // 6 PASS (0 Class 27 exemptions).
 //
 // DEFERRED to .B.3 (8 items; each with concrete TECH_DEBT entry — TECH_DEBT-09X series):
@@ -794,7 +794,7 @@
 //    deletion FORCES this migration (build BREAKS without it)
 // 5. Step 7.5 StampHelper.hpp:156 STAMP_CFG_AUTOPOPULATE migration — STRUCTURAL: legacy
 //    walker writes legacy struct fields; .B.3 deletion forces migration
-// 6. Step 7.6 CoreModelZoo.hpp:243 drift walker migration — STRUCTURAL: reason-field
+// 6. Step 7.6 NodeModelZoo.hpp:243 drift walker migration — STRUCTURAL: reason-field
 //    semantic preservation requires framework extension; .B.3 framework can grow reason
 //    arg OR migration accepts behavior change
 // 7. Step 8 stamp_format_version 5 sub-steps (constant extraction + bounds check + bump +
@@ -827,7 +827,7 @@
 //
 // LANDED at .B.1 (framework infrastructure):
 // - NEW MemHeaders/CfgGateRegistry.hpp (gate-type sparse sidecar; H18 first canonical of
-//   gate-type vs severity-type sidecar; FOREACH_CFG_GATE_PER_CORE + _GLOBAL empty at .B.1;
+//   gate-type vs severity-type sidecar; FOREACH_CFG_GATE_PER_NODE + _GLOBAL empty at .B.1;
 //   populate at .B.2 cohort migration)
 // - NEW 3 derived-filter consumer template fns in cfg_derived:: namespace
 //   (populate_inference_cfg_from_derived + populate_stamp_cfg_from_derived +
@@ -855,7 +855,7 @@
 //
 // Tests: 3215 controller_test passed (3196 + 19 new) + 17 depth_recorder_test GREEN.
 // 5 binaries (test/gui/suite/tsan/asan) clean. Hot path UNTOUCHED. CI:
-// check_meta_registry.py 3 checks PASS (65/65 enrolled); check_per_core_registry_integrity.py
+// check_meta_registry.py 3 checks PASS (65/65 enrolled); check_per_node_registry_integrity.py
 // 6 structural checks PASS (0 Class 27 exemptions).
 //
 // Closes Class 14/18/21 structurally at gate-type-sidecar surface; sets up .B.2 cohort
@@ -889,7 +889,7 @@
 // Tests: 3196 controller_test passed (3174 + 22 new) + 17 depth_recorder_test GREEN.
 // 5 binaries (test/gui/suite/tsan/asan) clean. Hot path UNTOUCHED (calls_graph_diff
 // empty). CI: check_meta_registry.py 3 checks PASS (63/63 enrolled);
-// check_per_core_registry_integrity.py 6 structural checks PASS (0 Class 27 exemptions).
+// check_per_node_registry_integrity.py 6 structural checks PASS (0 Class 27 exemptions).
 //
 // Closes Class 11/14/18/21/22 structurally at framework layer; strengthens Class 28
 // (branchless TZCNT); pre-emptive Gap 1 closure (composition discipline blindspot).
@@ -923,11 +923,11 @@
 //   6. FOREACH_OMS_PER_SLOT_FIELD 3→5 rows (Class 30 latent drift closure) — last_exit_fee
 //      enrolled (previously sibling-array unregistered drift risk from `.F.4c.3` r-4) +
 //      bandit_reward_bps[MAX_PORTFOLIO_POSITIONS] NEW per-slot reward signal.
-//   7. § F Pattern 5 path consolidation — OmsState ezoo_refs[MAX_EXECUTION_CORES] +
-//      core_cfg_refs[MAX_EXECUTION_CORES] per-core arrays (engine-wide single OmsState;
-//      per-core lookup indexed by Order::core_id at calib log emit time).
-//      EngineSharded boot wires oms.ezoo_refs[i] + core_cfg_refs[i] alongside per-core
-//      state.cores[i].ensemble_handle. real_on_exit_calibration body extended with
+//   7. § F Pattern 5 path consolidation — OmsState ezoo_refs[MAX_EXECUTION_NODES] +
+//      node_cfg_refs[MAX_EXECUTION_NODES] per-core arrays (engine-wide single OmsState;
+//      per-core lookup indexed by Order::node_id at calib log emit time).
+//      EngineSharded boot wires oms.ezoo_refs[i] + node_cfg_refs[i] alongside per-core
+//      state.nodes[i].ensemble_handle. real_on_exit_calibration body extended with
 //      bandit context decode + per-slot reward attribution + per-core ezoo/cfg cast +
 //      Bandit_GetProbabilities for exp3_probs + null-coalesced Thompson posterior telemetry.
 //   8. § M Calib log columns 9→47 — 6 bandit-context singletons (bandit_algorithm +
@@ -939,8 +939,8 @@
 //      ModelInference PredictBest argmax + WeightedBlend argmax + RollingTurnover argmax;
 //      __builtin_expect rare on Thompson_Update bounds guard.
 //  10. Class 25 consumer sweep at reward attribution surface — TickRewardsFromLookback +
-//      TradeCloseReward + ControllerEventLoop exit-side. PerCoreCfg<F>* threaded through.
-//  11. thompson_exp3_blend_alpha NEW per-core cfg field (FOREACH_PER_CORE_CFG_FIELD row) +
+//      TradeCloseReward + ControllerEventLoop exit-side. PerNodeCfg<F>* threaded through.
+//  11. thompson_exp3_blend_alpha NEW per-core cfg field (FOREACH_PER_NODE_CFG_FIELD row) +
 //      5 drift rows (PARITY-026 close) + 5 POST_CFG entries + 5 cfg→inf wiring rows +
 //      stamp emit row (only emits when bandit_algorithm==4 — preserves HMAC byte
 //      equivalence for legacy stamps).
@@ -970,10 +970,10 @@
 // 3 substantial TECH_DEBT fold-ins (closed this ship):
 //   - TECH_DEBT-082 — 3 .F.5 residual fields (lazy_rebuild_price_threshold_pct + exit_threshold +
 //     confidence_ic_floor) migrate from flat ControllerConfig + manual strcmp/atof parser cases
-//     to FOREACH_PER_CORE_CFG_FIELD X-macro registry rows (auto-flow parser via tt::cfg_*_field<T>
+//     to FOREACH_PER_NODE_CFG_FIELD X-macro registry rows (auto-flow parser via tt::cfg_*_field<T>
 //     dispatch). Class 23 manual-parser anti-pattern closure at 3 sites. Closes .F.5 charter
 //     residual completely.
-//   - TECH_DEBT-083 — IWYU sweep: 7 headers add explicit <cstdint> (CoreModelZoo + ModelInference +
+//   - TECH_DEBT-083 — IWYU sweep: 7 headers add explicit <cstdint> (NodeModelZoo + ModelInference +
 //     RewardTracker + WelfordStats + MeanReversion + Momentum + RegimeDetector). 8th header
 //     (StampBoundModelConstRegistry) already fixed inline during session. Closes latent class
 //     structurally (any future include-order change won't expose new chain-breakers).
@@ -993,7 +993,7 @@
 // STAMP_BOUND bandit/thompson fields gained drift-check rows; plus 1 NEW blend_alpha).
 //
 // Tests: 3174 controller_test (3148 baseline + 26 Step 9 assertions) + 17 depth_recorder_test;
-// all 5 binaries (test, gui, suite, tsan, asan) build clean; check_per_core_registry_integrity.py
+// all 5 binaries (test, gui, suite, tsan, asan) build clean; check_per_node_registry_integrity.py
 // 6 checks PASS (Check 7 Class 27 prevention: 0 Section C exemptions); check_meta_registry.py
 // 3 checks PASS (63 macros / 63 enrolled). Hot path UNTOUCHED.
 //
@@ -1015,7 +1015,7 @@
 //   2. Class 28 (branchy SP/HP data-dependent dispatch) — first canonicals: HandleFill
 //      Pattern 1 1D type dispatch table (BUY/SELL); was_win_bitmap mask-select (Pattern 3);
 //      ShardedLiveSafety force-close bitmap iteration; FlattenAll partial_on shift; Reconcile
-//      branchless bitmap-search for origin_core_id via match-mask + tzcnt (Pattern 3 sub-variant
+//      branchless bitmap-search for origin_node_id via match-mask + tzcnt (Pattern 3 sub-variant
 //      first canonical). 5+ Pattern 3 instances; 1 Pattern 1 instance; Pattern 5 first canonical.
 //   3. Silent zero-fee-rate class — closed via Order_BindPreResolved + TT_ASSERT_PRE_RESOLVED_BOUND
 //      runtime warn at HandleFill entry. Production catches forgotten-bind via __builtin_expect
@@ -1029,7 +1029,7 @@
 //      `if (oms->trade_log)` + `if (oms->calibration_log_file)` callsite branches. Default =
 //      noop fns; set-to-real at boot when subsystem enables. NEW DESIGN_SPEC at .F.4c.3 close.
 //   7. AccountMakerTakerFee fully branchless (mask-select counter incs + cmov fee buckets).
-//   8. ShardedLiveSafety_ForceClose + FlattenAll: `const PerCoreCfg<F>* cores` REQUIRED param
+//   8. ShardedLiveSafety_ForceClose + FlattenAll: `const PerNodeCfg<F>* cores` REQUIRED param
 //      (per cfg-scope-discipline § "consumer over per-core array" — first canonical).
 //   9. Reconcile_ApplyMissedFills nullable cfg pointer pattern (per cfg-scope-discipline
 //      § "recovery-path nullable pointer" — first canonical).

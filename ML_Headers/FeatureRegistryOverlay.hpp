@@ -41,7 +41,7 @@
 #pragma once
 
 #include "../CoreFrameworks/ControllerConfig.hpp"
-#include "CoreModelZoo.hpp"
+#include "NodeModelZoo.hpp"
 #include "ModelInference.hpp"
 
 #include <stdio.h>
@@ -146,9 +146,9 @@ inline int FeatureOverlay_ParseLayer2HashFromSidecar(
 
 template <unsigned F>
 inline int FeatureOverlay_PostLoadVerify(
-    const CoreModelZoo<F>* zoo,
+    const NodeModelZoo<F>* zoo,
     const EnsembleModelZoo<F>* ezoo,
-    int core_id,
+    int node_id,
     int strict_mode) {
     int strict = (strict_mode == 1);
     int mismatch_count = 0;
@@ -160,9 +160,9 @@ inline int FeatureOverlay_PostLoadVerify(
         // Format location string (single-zoo: "core 0"; ensemble: "core 0 ensemble[2]")
         char loc[64];
         if (h_idx < 0) {
-            snprintf(loc, sizeof(loc), "core %d", core_id);
+            snprintf(loc, sizeof(loc), "core %d", node_id);
         } else {
-            snprintf(loc, sizeof(loc), "core %d ensemble[%d]", core_id, h_idx);
+            snprintf(loc, sizeof(loc), "core %d ensemble[%d]", node_id, h_idx);
         }
 
         // Parse sidecar's computed_layer2_hash
@@ -219,7 +219,7 @@ inline int FeatureOverlay_PostLoadVerify(
             "strict mode. Set held_out_gate_strict=0 (warn-only) OR "
             "regenerate sidecar via tools/feature_overlay.py write OR "
             "retrain the model with current overlay.\n",
-            core_id, mismatch_count);
+            node_id, mismatch_count);
         return -1;
     }
     return 0;

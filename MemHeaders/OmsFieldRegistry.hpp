@@ -98,7 +98,7 @@
 //   CLAUDE.md item 20 (BITMAP_* hybrid: single-bit + multi-bit cohabitation)
 //   CLAUDE.md item 21 (AUTOPOPULATE companion macro)
 //   CLAUDE.md item 23 (templated helpers for dispatch — per .B.7 precedent)
-//   v5.15.5.B.7 FOREACH_CORE_CTX_INIT_FIELD (sister registry; 3-col tuple precedent)
+//   v5.15.5.B.7 FOREACH_NODE_CTX_INIT_FIELD (sister registry; 3-col tuple precedent)
 //   v5.15.5.C.2.1 FOREACH_OMS_META_SLOT (per-slot multi-bit; struct-level analog: this header's EVENT_LOG_MODE)
 //======================================================================================================
 #ifndef OMS_FIELD_REGISTRY_HPP
@@ -160,7 +160,7 @@ struct OmsInitCtx {
     int                       event_log_mode;        // 0..3 — K-state (NEW MULTI_BIT slot v5.15.5.C.3 Finding A')
     Money                             starting_balance;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — fee_rate DELETED. Per-core fee_rate now lives on
-    // cfg.cores[c].fee_rate_maker/_taker; flows through Order pre_resolved at submit.
+    // cfg.nodes[c].fee_rate_maker/_taker; flows through Order pre_resolved at submit.
     const char*               event_log_path;
 };
 
@@ -261,7 +261,7 @@ struct OmsResetCtx {
     /* [5] SKIP_PERSIST cfg-derived rows (fee rates, kill switch limits)                              */                                                  \
     /* ============================================================================================ */                                                  \
     /* v5.15.5.F.4c.3 WIP2d-1.B.1 — fee_rate / fee_rate_maker / fee_rate_taker / slippage_pct rows DELETED. */ \
-    /* Per Class 27 closure: scalar cfg-mirror caches eliminated. Per-core values live on cfg.cores[c]; */ \
+    /* Per Class 27 closure: scalar cfg-mirror caches eliminated. Per-core values live on cfg.nodes[c]; */ \
     /* per-Order via pre_resolved (Order_BindPreResolved at submit). last_exit_fee[pslot] sibling array */ \
     /* stores the authoritative per-fill exit_fee (set by HandleFill SELL; consumed by DrainPostFill). */ \
     X(ks_min_balance,         Money,                     Money_Zero(),                 Money_Zero(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
@@ -611,7 +611,7 @@ static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
 //======================================================================================================
 // [TEMPLATED HELPERS — registry walk encapsulation per CLAUDE.md item 23]
 //======================================================================================================
-// Per CLAUDE.md item 23 + v5.15.5.B.7 precedent (_core_ctx_init_value_fields).
+// Per CLAUDE.md item 23 + v5.15.5.B.7 precedent (_node_ctx_init_value_fields).
 // Templated functions encapsulate the FOREACH walks; each is instantiated
 // once per F (only F=64 today). AUTOPOPULATE macros delegate Layer 1 walk
 // to these helpers; sub-struct inits (Portfolio_Init, per-slot loops, SPSC
@@ -651,7 +651,7 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
 //                (MAX_INFLIGHT_ORDERS) + per-slot FOREACH_OMS_PER_SLOT_FIELD
 //                loop + OMS_META_CLEAR (MAX_PORTFOLIO_POSITIONS).
 //     Layer 3 — SPSC ring inits (result + ws_result + reconcile +
-//                MAX_EXECUTION_CORES submit queues).
+//                MAX_EXECUTION_NODES submit queues).
 //     Layer 4 — OrderEventLog conditional init + LoadFromDisk + replay.
 //                MUST RUN BEFORE Layer 5 (StartAsyncWriter depends on
 //                event_log being _Init-only or _InitWithFile'd).
@@ -723,7 +723,7 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
         SPSCRing_Init(&(_oms_target)->result_queue);                                                 \
         SPSCRing_Init(&(_oms_target)->ws_result_queue);                                              \
         SPSCRing_Init(&(_oms_target)->reconcile_queue);                                              \
-        for (int _i = 0; _i < MAX_EXECUTION_CORES; ++_i) {                                           \
+        for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                           \
             SPSCRing_Init(&(_oms_target)->submit_queues[_i]);                                        \
         }                                                                                            \
         /* Layer 4 — OrderEventLog conditional init + LoadFromDisk + replay (MUST RUN BEFORE L5) */  \

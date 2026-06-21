@@ -1015,8 +1015,8 @@ static inline int ANSI_Section_Latency(AnsiBuf *ab, const TUISnapshot *s, int y,
 // snapshot. Always-available (no compile flag) so the user can see live
 // per-core latency the moment they flip engine_mode=sharded.
 //======================================================================================================
-static inline int ANSI_Section_PerCoreLatency(AnsiBuf *ab, const TUISnapshot *s, int y, int w) {
-    if (!s->sharded_mode_active || s->per_core_count <= 0) return y;
+static inline int ANSI_Section_PerNodeLatency(AnsiBuf *ab, const TUISnapshot *s, int y, int w) {
+    if (!s->sharded_mode_active || s->per_node_count <= 0) return y;
     (void)w;
     ab_goto(ab, y, 2);
     ab_printf(ab, A_BOLD A_PEACH " PER-CORE LATENCY" A_RESET A_DIM " (sharded mode)" A_RESET);
@@ -1024,8 +1024,8 @@ static inline int ANSI_Section_PerCoreLatency(AnsiBuf *ab, const TUISnapshot *s,
     ab_goto(ab, y, 3);
     ab_printf(ab, A_DIM "core   samples       min      p50      p95      p99      max      avg" A_RESET);
     y++;
-    for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-        const TUISnapshot::PerCoreSnap *p = &s->per_core[i];
+    for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+        const TUISnapshot::PerNodeSnap *p = &s->per_node[i];
         ab_goto(ab, y, 3);
         if (p->samples == 0) {
             ab_printf(ab, A_DIM " %2d  %10s   %6s   %6s   %6s   %6s   %6s   %6s" A_RESET,
@@ -1144,9 +1144,9 @@ static inline void ANSI_Layout_Standard(AnsiBuf *ab, const TUISnapshot *s,
 #endif
     // Phase 14: per-core latency panel — only renders when sharded mode
     // is active. Always available, no compile flag.
-    if (s->sharded_mode_active && s->per_core_count > 0) {
+    if (s->sharded_mode_active && s->per_node_count > 0) {
         ab_divider(ab, y++, w, false);
-        y = ANSI_Section_PerCoreLatency(ab, s, y, w);
+        y = ANSI_Section_PerNodeLatency(ab, s, y, w);
     }
 
     // clear gap rows between content and bottom bar (per-row, no bulk erase)

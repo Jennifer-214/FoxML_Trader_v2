@@ -200,7 +200,7 @@ struct BacktestRunConfig {
     int label_forward_ticks; // forward window for forward_pnl label (e.g. 1000)
     // v5.10.0a.next.1 — operator-explicit bandit state prior. When set,
     // BacktestSharded_Run loads bandit weights from this path AFTER the
-    // default <core_model_dir>/bandit_state.json load, overriding it.
+    // default <node_model_dir>/bandit_state.json load, overriding it.
     // Bundle-ID check is SKIPPED on this path (operator may intentionally
     // bootstrap a new model bundle with weights from a sibling — e.g.
     // transfer learning across compatible horizon lists). Empty = no
@@ -835,7 +835,7 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
 // What no longer works because legacy is gone:
 //   - Per-tick `gate_reason` diagnostics (legacy printed a "gate
 //     reason breakdown" at end of run). Sharded tracks halt_reason
-//     per-core in `state.cores[i].halt_reason`; aggregate breakdown
+//     per-core in `state.nodes[i].halt_reason`; aggregate breakdown
 //     could be added if needed but isn't today. Not load-bearing.
 //   - The `BacktestStats_Compute(stats, ctrl, ...)` path that read
 //     fields off `PortfolioController`. Sharded computes equivalent

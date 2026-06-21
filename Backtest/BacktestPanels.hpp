@@ -5421,7 +5421,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::Separator();
         ImGui::InputText("Run Name", state->run_name, sizeof(state->run_name));
         if (ImGui::Button("Save Run")) {
-            // pick role-specific filename so CoreModelZoo auto-discovers it.
+            // pick role-specific filename so NodeModelZoo auto-discovers it.
             // role is derived from label_type: 3-class softmax → "barrier",
             // regime classifier → "regime", everything else → "buy_signal".
             const char *role_name = "buy_signal";
@@ -5514,7 +5514,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(ef, "# the engine compares these against engine.cfg at load time.\n");
                 fprintf(ef, "# mismatch → warning (default) or failure (model_verify_strict=1).\n");
                 fprintf(ef, "\n");
-                fprintf(ef, "# role this model fills in CoreModelZoo (barrier|regime|exit|buy_signal)\n");
+                fprintf(ef, "# role this model fills in NodeModelZoo (barrier|regime|exit|buy_signal)\n");
                 fprintf(ef, "expected_role = %s\n", role_name);
                 fprintf(ef, "expected_label_type = %d\n", state->label_type);
                 fprintf(ef, "expected_num_classes = %d\n", expected_num_classes);
@@ -5657,7 +5657,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::TextColored(FoxmlColors::green, "%s", state->save_msg);
         ImGui::SetItemTooltip("Bundles model + expected.cfg + summary into models/{name}/.\n"
                               "Filename is role-derived (barrier/regime/buy_signal) so the\n"
-                              "engine's CoreModelZoo auto-discovers it.\n"
+                              "engine's NodeModelZoo auto-discovers it.\n"
                               "Deploy: set core_N_model_dir = models/{name}/ in engine.cfg.");
     }
 
@@ -6020,7 +6020,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     //   - feature_registry_hash (FEATURE_REGISTRY_HASH() — current build)
     //   - engine_version       (ENGINE_VERSION_STRING — current build)
     //   - model_format_version (MODEL_FORMAT_VERSION — wire format)
-    // so the live engine's CoreModelZoo_TryLoadRole can refuse to load a
+    // so the live engine's NodeModelZoo_TryLoadRole can refuse to load a
     // model trained against a different feature set or engine version.
     //
     // This button is the ONLY UI path that exercises Backtest_RunFullValidation

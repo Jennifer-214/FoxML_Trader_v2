@@ -17,7 +17,7 @@
 //     1. RollingStats_Push absorbs the latest tick into the rolling window
 //     2. for each registered execution core, dispatch to the strategy's
 //        _BuildParameters via Strategy_BuildParameters(strategy_id, ...)
-//     3. write the resulting pack into CoreContext::pending_params, mark dirty
+//     3. write the resulting pack into NodeContext::pending_params, mark dirty
 //     4. EventLoop_PushParameters atomically swaps the pack into the core's
 //        ParameterSlot via the seqlock from phase 05
 //
@@ -27,7 +27,7 @@
 //     3. branchless decision, optional event push
 //
 // Pure invariant: each _BuildParameters function MUST be a pure function of
-// its inputs (RollingStats, core_cfg, allocated_balance). No globals, no
+// its inputs (RollingStats, node_cfg, allocated_balance). No globals, no
 // statics, no Portfolio reads. The controller is the source of truth for
 // per-core state and passes the parameters explicitly. Pitfall P6.3 (hidden
 // statics) is the failure mode this invariant protects against.
@@ -49,13 +49,13 @@
 #include "../CoreFrameworks/SlowPathGateRegistry.hpp"  // v5.14.9.B.0 — FOREACH_SLOW_PATH_GATE + MASK_* + BITMAP_IS_SET
 // Note: STATE_FLAG_LADDER_BOTTOM_HIT is set in ShardedSnapshot copy via
 // inference (gate_state.LADDER_ACTIVE && last_confidence_factor == 0.0)
-// — not set directly here. No PerCoreStateFlagsRegistry include needed.
+// — not set directly here. No PerNodeStateFlagsRegistry include needed.
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/BarrierGate.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/RollingTurnover.hpp"  // v5.14.1.G — portfolio turnover populator
 #include <ctime>  // v5.14.1.B — clock_gettime for composite confidence freshness
-#include "../ML_Headers/CoreModelZoo.hpp"
+#include "../ML_Headers/NodeModelZoo.hpp"
 #include "../ML_Headers/CostModel.hpp"     // v5.5.0 Class 8 — cost gate
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
@@ -91,8 +91,8 @@ namespace tt {
 // them.
 //
 // Field semantics:
-//   model_handle    — &CoreModelZoo<F>, populated by EngineSharded per core
-//   confidence      — &CoreContext::confidence, fed (pred, return) at exit fill
+//   model_handle    — &NodeModelZoo<F>, populated by EngineSharded per core
+//   confidence      — &NodeContext::confidence, fed (pred, return) at exit fill
 //   out_prediction  — written by ML_BuildParameters with the prediction value
 //                     used in the gate decision; drainer snapshots this into
 //                     active_prediction at entry-submit time
@@ -122,8 +122,8 @@ struct MLBuildContext {
     // these for the entry log + ML Status panel to read. nullptr-safe
     // (legacy/test callers can omit).
     // v5.15.5.B.3 — `model_load_failed` migrated from `int*` to plain
-    // `int`-by-value. The bitmap bit on CoreContext (core_state_flags bit
-    // MASK_CORE_STATE_MODEL_LOAD_FAILED) is not addressable, so the call
+    // `int`-by-value. The bitmap bit on NodeContext (node_state_flags bit
+    // MASK_NODE_STATE_MODEL_LOAD_FAILED) is not addressable, so the call
     // site copies-in the current bit state. Read-only field from ML body's
     // perspective; semantics preserved (0 = no failure; non-zero = failure).
     int                 model_load_failed;            // read-only: BIT state at call time (0 = ok, 1 = load failed)
@@ -163,7 +163,7 @@ struct MLBuildContext {
     double              current_spread;     // BookSnapshot::spread (FPN_Binary→double)
     double              current_mid_price;  // BookSnapshot::mid_price (FPN_Binary→double)
     // v5.10.0a.G.5 — multi-horizon ensemble dispatch. nullptr default =
-    // single-model path (CoreModelZoo via model_handle, existing); when
+    // single-model path (NodeModelZoo via model_handle, existing); when
     // engine boot auto-detects N horizon siblings on disk, populates this
     // pointer to the per-core EnsembleModelZoo. ML_BuildParameters checks
     // ensemble_zoo first; if active, dispatches through Model_Predict_Ensemble;
@@ -176,7 +176,7 @@ struct MLBuildContext {
     // (safe fallback when classifier hasn't run yet).
     int                 current_regime_id;
     // v5.11.18 main — per-core feature mask. Threaded from
-    // ControllerConfig::core_feature_mask[core_id] (set up in
+    // ControllerConfig::node_feature_mask[node_id] (set up in
     // v5.11.18a's cfg parser). When non-null, Features_PackAll
     // checks the bit-per-feature mask and writes 0.0f to the
     // corresponding output slot for any unset bit (sparse-zero,
@@ -194,10 +194,10 @@ struct MLBuildContext {
     const uint64_t*     feature_mask;
 
     // v5.14.1.G — portfolio turnover diagnostic state. Pointer to
-    // CoreContext.turnover (per-core EventLoopState; sharded-only).
+    // NodeContext.turnover (per-core EventLoopState; sharded-only).
     // ML_BuildParameters populates the ring with top-K weights mask
     // each cycle when non-null. nullptr = legacy path / non-ML cores
-    // (no-op). Surfaced via PerCoreSnap.ml_portfolio_turnover.
+    // (no-op). Surfaced via PerNodeSnap.ml_portfolio_turnover.
     void*               turnover_state;  // RollingTurnover* (void* avoids include cycle)
     int                 turnover_topk;   // matched to cfg.confidence_turnover_topk at boot
 
@@ -206,12 +206,12 @@ struct MLBuildContext {
     // confidence × degradation curve) here when non-null. 1.0 = full
     // size; (0, 1) = soft scale; 0.0 = ladder bottom (entry blocked
     // with SHALT_LOW_CONFIDENCE). nullptr-safe: legacy/test callers
-    // can omit. Read by ML Status panel + PerCoreSnap.ml_confidence_factor.
+    // can omit. Read by ML Status panel + PerNodeSnap.ml_confidence_factor.
     double*             out_confidence_factor;
     // v5.14.9.B.0 — pointer to the per-core slow-path gate cache
-    // (FOREACH_SLOW_PATH_GATE PER_CORE entries). Populated by the
+    // (FOREACH_SLOW_PATH_GATE PER_NODE entries). Populated by the
     // slow-path caller after ControllerConfig_ResolveForCore +
-    // SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE; ML_BuildParameters reads
+    // SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE; ML_BuildParameters reads
     // gate predicates via BITMAP_IS_SET(gate_state->flags, MASK_<NAME>).
     // nullptr-safe: legacy/test callers without slow-path setup can
     // omit (use sites fall back to inline cfg reads when null).
@@ -239,14 +239,14 @@ template <unsigned F, unsigned W = 128>
 inline bool Strategy_SpacingOk(Money proposed_entry,
                                 Money last_entry,
                                 const RollingStats<F, W>* rolling,
-                                const PerCoreCfg<F>* core_cfg) {
+                                const PerNodeCfg<F>* node_cfg) {
     // No prior entry → spacing irrelevant.
     if (Money_IsZero(last_entry)) return true;
     // Spacing disabled or zero stddev → can't compute meaningful threshold.
-    if (FPN_IsZero(core_cfg->spacing_multiplier)) return true;
+    if (FPN_IsZero(node_cfg->spacing_multiplier)) return true;
     if (FPN_IsZero(rolling->price_stddev))      return true;
     // Required min distance between entries
-    FPN_Binary<F> min_dist = FPN_Mul(rolling->price_stddev, core_cfg->spacing_multiplier);
+    FPN_Binary<F> min_dist = FPN_Mul(rolling->price_stddev, node_cfg->spacing_multiplier);
     // |proposed - last|
     Money diff = Money_Ge(proposed_entry, last_entry)
         ? Money_Sub(proposed_entry, last_entry)
@@ -257,12 +257,12 @@ inline bool Strategy_SpacingOk(Money proposed_entry,
 template <unsigned F>
 inline Money Strategy_TpFloor(Money entry_price,
                                 Money tp_amount,
-                                const PerCoreCfg<F>* core_cfg) {
-    if (Money_IsZero(core_cfg->fee_floor_mult) || Money_IsZero(core_cfg->fee_rate))
+                                const PerNodeCfg<F>* node_cfg) {
+    if (Money_IsZero(node_cfg->fee_floor_mult) || Money_IsZero(node_cfg->fee_rate))
         return tp_amount;
     // Required floor = entry × fee_rate × fee_floor_mult
-    Money fee_per_side = Money_Mul(entry_price, core_cfg->fee_rate);
-    Money floor = Money_Mul(fee_per_side, core_cfg->fee_floor_mult);
+    Money fee_per_side = Money_Mul(entry_price, node_cfg->fee_rate);
+    Money floor = Money_Mul(fee_per_side, node_cfg->fee_floor_mult);
     return Money_Ge(tp_amount, floor) ? tp_amount : floor;
 }
 
@@ -300,13 +300,13 @@ inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strateg
 //
 // SimpleDip buys when price drops `entry_offset_pct` below the recent high
 // in the rolling window. TP and SL are fixed percentage offsets from the
-// expected entry price (core_cfg: take_profit_pct, stop_loss_pct).
+// expected entry price (node_cfg: take_profit_pct, stop_loss_pct).
 //
 // inputs read from rolling stats:
 //   - price_max:  recent high used as the dip reference
 //   - volume_avg: rolling mean volume, used for the volume gate threshold
 //
-// inputs read from core_cfg:
+// inputs read from node_cfg:
 //   - entry_offset_pct: dip depth (e.g. 0.0015 = 0.15% below high)
 //   - volume_multiplier: volume gate (tick volume must be > avg * multiplier)
 //   - take_profit_pct: TP offset (e.g. 0.03 = 3%)
@@ -333,7 +333,7 @@ inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strateg
 // restored position exits at the SAME TP/SL it had while live. (A1 fix: restore previously
 // read the GLOBAL take_profit_pct, dropping the per-node override → SimpleDip/MR/EmaCross
 // positions survived a warm-restart at the wrong exit price.) Templated on the cfg view so
-// PerCoreCfg<F> (dispatcher) and the resolved ControllerConfig<F> (restore) both call it.
+// PerNodeCfg<F> (dispatcher) and the resolved ControllerConfig<F> (restore) both call it.
 // MOMENTUM → flat global (no override field); ML → global (its TP is the barrier blend at
 // entry, unreproducible at restore — a separate tracked sibling, NOT closed by A1).
 template <typename CfgT>
@@ -370,7 +370,7 @@ inline Money ResolvePerFillSlPct(uint8_t strategy_id, const CfgT& cfg) {
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void SimpleDip_BuildParameters(
     const RollingStats<F, W>* rolling,
-    const PerCoreCfg<F>* core_cfg,
+    const PerNodeCfg<F>* node_cfg,
     Money allocated_balance,
     GateParameters<F>* out,
     const RollingStats<F, WL>* rolling_long = nullptr,
@@ -391,12 +391,12 @@ inline void SimpleDip_BuildParameters(
 
     // expected_entry = recent_high * (1 - entry_offset_pct)
     Money high_m = Money_FromBinary(recent_high);  // D-170: ONE feature->money ingress per build
-    Money dip_offset = Money_Mul(high_m, core_cfg->entry_offset_pct);
+    Money dip_offset = Money_Mul(high_m, node_cfg->entry_offset_pct);
     Money expected_entry = Money_Sub(high_m, dip_offset);
 
     // Per-strategy TP/SL via the H22 single-source resolver (shared with snapshot restore — A1).
-    Money tp_pct = ResolvePerFillTpPct(STRATEGY_SIMPLE_DIP, *core_cfg);
-    Money sl_pct = ResolvePerFillSlPct(STRATEGY_SIMPLE_DIP, *core_cfg);
+    Money tp_pct = ResolvePerFillTpPct(STRATEGY_SIMPLE_DIP, *node_cfg);
+    Money sl_pct = ResolvePerFillSlPct(STRATEGY_SIMPLE_DIP, *node_cfg);
 
     // tp = expected_entry * (1 + tp_pct)
     Money tp_amount = Money_Mul(expected_entry, tp_pct);
@@ -407,7 +407,7 @@ inline void SimpleDip_BuildParameters(
     Money stop_loss_price = Money_Sub(expected_entry, sl_amount);
 
     // volume gate: tick volume must exceed rolling avg * multiplier
-    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, node_cfg->volume_multiplier);
 
     // sizing: allocated_balance / expected_entry_price (notional ÷ price = qty)
     // guard against zero entry to avoid divide-by-zero (rolling stats uninit)
@@ -450,7 +450,7 @@ inline void SimpleDip_BuildParameters(
 template <unsigned F, unsigned W = 128>
 inline void MeanReversion_BuildParameters(
     const RollingStats<F, W>* rolling,
-    const PerCoreCfg<F>* core_cfg,
+    const PerNodeCfg<F>* node_cfg,
     Money allocated_balance,
     GateParameters<F>* out,
     MeanReversionState<F>* state = nullptr   // v5.4.0 Phase 2.2 — adaptive filter state
@@ -460,9 +460,9 @@ inline void MeanReversion_BuildParameters(
     // — these are seeded from cfg at boot and adapted by MR_Adapt on cadence
     // (P&L regression-driven). When state is nullptr (legacy callers, tests),
     // fall back to cfg defaults — preserves pre-Phase 2.2 numerics.
-    FPN_Binary<F> live_offset = state ? state->live_offset_pct  : Money_ToBinary(core_cfg->entry_offset_pct);
-    FPN_Binary<F> live_vmult  = state ? state->live_vol_mult    : core_cfg->volume_multiplier;
-    FPN_Binary<F> live_smult  = state ? state->live_stddev_mult : core_cfg->offset_stddev_mult;
+    FPN_Binary<F> live_offset = state ? state->live_offset_pct  : Money_ToBinary(node_cfg->entry_offset_pct);
+    FPN_Binary<F> live_vmult  = state ? state->live_vol_mult    : node_cfg->volume_multiplier;
+    FPN_Binary<F> live_smult  = state ? state->live_stddev_mult : node_cfg->offset_stddev_mult;
 
     // BUG FIX (v4.0.3): pre-fix used `bg_threshold = rolling->price_avg`
     // with no depth requirement — gate fired on EVERY tick price < avg
@@ -486,8 +486,8 @@ inline void MeanReversion_BuildParameters(
         entry_price = FPN_Sub(avg, dip_offset);
     }
 
-    Money tp_pct = ResolvePerFillTpPct(STRATEGY_MEAN_REVERSION, *core_cfg);  // H22 single-source (A1)
-    Money sl_pct = ResolvePerFillSlPct(STRATEGY_MEAN_REVERSION, *core_cfg);
+    Money tp_pct = ResolvePerFillTpPct(STRATEGY_MEAN_REVERSION, *node_cfg);  // H22 single-source (A1)
+    Money sl_pct = ResolvePerFillSlPct(STRATEGY_MEAN_REVERSION, *node_cfg);
     Money entry_m = Money_FromBinary(entry_price);  // D-170 ingress
     Money tp_amount = Money_Mul(entry_m, tp_pct);
     Money sl_amount = Money_Mul(entry_m, sl_pct);
@@ -522,7 +522,7 @@ inline void MeanReversion_BuildParameters(
 template <unsigned F, unsigned W = 128>
 inline void Momentum_BuildParameters(
     const RollingStats<F, W>* rolling,
-    const PerCoreCfg<F>* core_cfg,
+    const PerNodeCfg<F>* node_cfg,
     Money allocated_balance,
     GateParameters<F>* out,
     MomentumState<F>* state = nullptr   // v5.4.0 Phase 2.3 — adaptive breakout state
@@ -536,7 +536,7 @@ inline void Momentum_BuildParameters(
     // uses momentum_breakout_mult (a stddev multiplier), which is the
     // legacy single-core convention.
     FPN_Binary<F> live_breakout = state ? state->live_breakout_mult : FPN_Zero<F>();
-    FPN_Binary<F> live_vmult    = state ? state->live_vol_mult      : core_cfg->volume_multiplier;
+    FPN_Binary<F> live_vmult    = state ? state->live_vol_mult      : node_cfg->volume_multiplier;
 
     // BUG FIX (v4.0.3): same family as MR — pre-fix used `bg_threshold = avg`
     // with no breakout depth. Gate fired on every tick price > avg (with the
@@ -553,7 +553,7 @@ inline void Momentum_BuildParameters(
     if (state && !FPN_IsZero(live_breakout) && !FPN_IsZero(rolling->price_stddev)) {
         breakout_offset = FPN_Mul(rolling->price_stddev, live_breakout);
     } else {
-        breakout_offset = FPN_Mul(avg, Money_ToBinary(core_cfg->entry_offset_pct));
+        breakout_offset = FPN_Mul(avg, Money_ToBinary(node_cfg->entry_offset_pct));
     }
     FPN_Binary<F> entry_price = FPN_Add(avg, breakout_offset);
 
@@ -565,12 +565,12 @@ inline void Momentum_BuildParameters(
     FPN_Binary<F> min_stddev_floor = FPN_Mul(avg, FPN_FromDouble<F>(0.0001));
     int stddev_usable = FPN_GreaterThan(rolling->price_stddev, min_stddev_floor);
     FPN_Binary<F> tp_amount, sl_amount;
-    if (!FPN_IsZero(core_cfg->momentum_tp_mult) && stddev_usable) {
-        tp_amount = FPN_Mul(rolling->price_stddev, core_cfg->momentum_tp_mult);
-        sl_amount = FPN_Mul(rolling->price_stddev, core_cfg->momentum_sl_mult);
+    if (!FPN_IsZero(node_cfg->momentum_tp_mult) && stddev_usable) {
+        tp_amount = FPN_Mul(rolling->price_stddev, node_cfg->momentum_tp_mult);
+        sl_amount = FPN_Mul(rolling->price_stddev, node_cfg->momentum_sl_mult);
     } else {
-        tp_amount = FPN_Mul(entry_price, Money_ToBinary(core_cfg->take_profit_pct));
-        sl_amount = FPN_Mul(entry_price, Money_ToBinary(core_cfg->stop_loss_pct));
+        tp_amount = FPN_Mul(entry_price, Money_ToBinary(node_cfg->take_profit_pct));
+        sl_amount = FPN_Mul(entry_price, Money_ToBinary(node_cfg->stop_loss_pct));
     }
     // v5.4.0 Phase 2.3: live_vmult from state when present (adaptive),
     // else cfg.volume_multiplier (legacy).
@@ -586,8 +586,8 @@ inline void Momentum_BuildParameters(
     out->bg_volume_threshold  = Money_FromBinary(volume_threshold);  // D-170 egress
     out->sg_take_profit_price = Money_Add(entry_mm, Money_FromBinary(tp_amount));
     out->sg_stop_loss_price   = Money_Sub(entry_mm, Money_FromBinary(sl_amount));
-    out->tp_pct               = ResolvePerFillTpPct(STRATEGY_MOMENTUM, *core_cfg);  // flat (no MOM override); H22 single-source (A1)
-    out->sl_pct               = ResolvePerFillSlPct(STRATEGY_MOMENTUM, *core_cfg);
+    out->tp_pct               = ResolvePerFillTpPct(STRATEGY_MOMENTUM, *node_cfg);  // flat (no MOM override); H22 single-source (A1)
+    out->sl_pct               = ResolvePerFillSlPct(STRATEGY_MOMENTUM, *node_cfg);
     out->trade_size           = trade_size;
     out->strategy_id          = STRATEGY_MOMENTUM;
 
@@ -614,7 +614,7 @@ inline void Momentum_BuildParameters(
                 "stddev=%.4f mom_sl_mult=%.4f geom=%s\n",
                 e, tp, sl, FPN_ToDouble(sl_amount),
                 FPN_ToDouble(rolling->price_stddev),
-                FPN_ToDouble(core_cfg->momentum_sl_mult), geom);
+                FPN_ToDouble(node_cfg->momentum_sl_mult), geom);
         }
     }
     // v4.0: GATE_FLAG_BUY_ABOVE — momentum buys breakouts above the threshold,
@@ -637,7 +637,7 @@ inline void Momentum_BuildParameters(
 template <unsigned F, unsigned W = 128>
 inline void EmaCross_BuildParameters(
     const RollingStats<F, W>* rolling,
-    const PerCoreCfg<F>* core_cfg,
+    const PerNodeCfg<F>* node_cfg,
     Money allocated_balance,
     GateParameters<F>* out,
     EmaCrossState<F>* state = nullptr   // v5.4.0 Phase 2.4 — EMA tracking state
@@ -661,17 +661,17 @@ inline void EmaCross_BuildParameters(
     // helper path below, so a real warm-restart never diverges (the A1 refute confirmed
     // this is test/legacy-only). A future single-source CI-check must EXEMPT this branch.
     if (!state) {
-        SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out);
+        SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out);
         out->strategy_id = STRATEGY_EMA_CROSS;
-        if (!Money_IsZero(core_cfg->emacross_tp_pct)) {
-            out->tp_pct = core_cfg->emacross_tp_pct;
+        if (!Money_IsZero(node_cfg->emacross_tp_pct)) {
+            out->tp_pct = node_cfg->emacross_tp_pct;
             Money entry = out->bg_price_threshold;
-            out->sg_take_profit_price = Money_Add(entry, Money_Mul(entry, core_cfg->emacross_tp_pct));
+            out->sg_take_profit_price = Money_Add(entry, Money_Mul(entry, node_cfg->emacross_tp_pct));
         }
-        if (!Money_IsZero(core_cfg->emacross_sl_pct)) {
-            out->sl_pct = core_cfg->emacross_sl_pct;
+        if (!Money_IsZero(node_cfg->emacross_sl_pct)) {
+            out->sl_pct = node_cfg->emacross_sl_pct;
             Money entry = out->bg_price_threshold;
-            out->sg_stop_loss_price = Money_Sub(entry, Money_Mul(entry, core_cfg->emacross_sl_pct));
+            out->sg_stop_loss_price = Money_Sub(entry, Money_Mul(entry, node_cfg->emacross_sl_pct));
         }
         return;
     }
@@ -691,21 +691,21 @@ inline void EmaCross_BuildParameters(
         FPN_Binary<F> diff = FPN_Sub(ref, rolling->price_avg);
         int ema_above = (diff.v > 0);   // positive diff (was sign==0 && !IsZero; 16B two's-comp)
         FPN_Binary<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
-        uptrend = valid & ema_above & FPN_GreaterThan(spread_stddevs, core_cfg->emacross_crossover_min);
+        uptrend = valid & ema_above & FPN_GreaterThan(spread_stddevs, node_cfg->emacross_crossover_min);
     }
 
     // Buy price = ref - stddev * emacross_dip_mult (dip below EMA)
-    FPN_Binary<F> dip = FPN_Mul(rolling->price_stddev, core_cfg->emacross_dip_mult);
+    FPN_Binary<F> dip = FPN_Mul(rolling->price_stddev, node_cfg->emacross_dip_mult);
     FPN_Binary<F> entry_price = FPN_Sub(ref, dip);
 
     // TP/SL: use EMA-specific cfg overrides; fall through to shared.
-    Money tp_pct = ResolvePerFillTpPct(STRATEGY_EMA_CROSS, *core_cfg);  // H22 single-source (A1)
-    Money sl_pct = ResolvePerFillSlPct(STRATEGY_EMA_CROSS, *core_cfg);
+    Money tp_pct = ResolvePerFillTpPct(STRATEGY_EMA_CROSS, *node_cfg);  // H22 single-source (A1)
+    Money sl_pct = ResolvePerFillSlPct(STRATEGY_EMA_CROSS, *node_cfg);
 
     Money entry_m = Money_FromBinary(entry_price);  // D-170 ingress
     Money tp_amount = Money_Mul(entry_m, tp_pct);
     Money sl_amount = Money_Mul(entry_m, sl_pct);
-    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, node_cfg->volume_multiplier);
 
     Money trade_size = Money_Zero();
     Money entry_me = Money_FromBinary(entry_price);  // D-170 ingress
@@ -726,18 +726,18 @@ inline void EmaCross_BuildParameters(
 }
 
 //======================================================================================================
-// [ML — model-driven buy signals via CoreModelZoo]
+// [ML — model-driven buy signals via NodeModelZoo]
 //======================================================================================================
 // Packs features from rolling stats, runs inference on whichever role models
-// are loaded in the per-core CoreModelZoo, computes BarrierGate modulation,
+// are loaded in the per-core NodeModelZoo, computes BarrierGate modulation,
 // and produces gate parameters.
 //
 // Model resolution priority (first match wins):
-//   1. CORE_MODEL_BARRIER (3-class softmax: stable/peak/valley) — primary path
-//   2. CORE_MODEL_BUY_SIGNAL (single-binary, complementary interpretation) — legacy
+//   1. NODE_MODEL_BARRIER (3-class softmax: stable/peak/valley) — primary path
+//   2. NODE_MODEL_BUY_SIGNAL (single-binary, complementary interpretation) — legacy
 //   3. no models → fall back to SimpleDip behavior
 //
-// BarrierGate modulation (when BITMAP_IS_SET(core_cfg->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)):
+// BarrierGate modulation (when BITMAP_IS_SET(node_cfg->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)):
 //   - hard block when bg.blocked (p_peak > BARRIER_HARD_BLOCK)
 //   - hard block when prediction < ml_buy_threshold (signal too cold)
 //   - else soft modulation: scale trade_size by bg.gate ∈ [g_min, 1.0]
@@ -751,7 +751,7 @@ template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ML_BuildParameters(
     const RollingStats<F, W>* rolling,
     const RollingStats<F, WL>* rolling_long,
-    const PerCoreCfg<F>* core_cfg,
+    const PerNodeCfg<F>* node_cfg,
     Money allocated_balance,
     GateParameters<F>* out,
     void* ml_ctx_ptr,
@@ -781,19 +781,19 @@ inline void ML_BuildParameters(
     double blend_tp_d = 0.0, blend_sl_d = 0.0;
     double dominant_tp_d = 0.0, dominant_sl_d = 0.0;  // captured at compute time; ezoo not in dispatch-site scope
     bool blend_dispatch_ready = false;  // 1 = weights+barriers populated
-    CoreModelZoo<F>* zoo = nullptr;
+    NodeModelZoo<F>* zoo = nullptr;
     ConfidenceScorer* conf_scorer = nullptr;
     double* out_prediction = nullptr;
     double* out_confidence = nullptr;
     const RORRegressor<F>* ror_in = nullptr;
     const FPN_Binary<F>* ema_in = nullptr;
     // v5.14.9.B.0 — per-core slow-path gate cache (FOREACH_SLOW_PATH_GATE
-    // PER_CORE entries). Wired by EventLoop_RebuildOneCore upstream.
+    // PER_NODE entries). Wired by EventLoop_RebuildOneCore upstream.
     // Null when caller didn't populate (legacy/test path) — use sites
     // fall back to inline cfg-flag reads for compatibility.
     const SlowPathGateState* gate_state = nullptr;
     if (mctx) {
-        zoo = (CoreModelZoo<F>*)mctx->model_handle;
+        zoo = (NodeModelZoo<F>*)mctx->model_handle;
         conf_scorer = mctx->confidence;
         out_prediction = mctx->out_prediction;
         out_confidence = mctx->out_confidence;
@@ -803,7 +803,7 @@ inline void ML_BuildParameters(
     }
 
     // if no zoo or no models loaded, fall back to SimpleDip
-    if (!zoo || !CoreModelZoo_HasAny(zoo)) {
+    if (!zoo || !NodeModelZoo_HasAny(zoo)) {
         // v5.9.0b — emit rate-limited CRITICAL log so the operator sees
         // ML→SimpleDip fall-through (V5_9_AUDIT-#2). Pre-v5.9.0b this
         // was silent; now visible in health log.
@@ -814,13 +814,13 @@ inline void ML_BuildParameters(
             tt::Health_LogCriticalRateLimited(
                 mctx->last_ml_critical_log_us,
                 /*gate_us=*/60000000ULL,  // 60s per-core gate
-                /*core=*/-1,  // ML_BuildParameters doesn't have core_id; -1 = unknown
+                /*core=*/-1,  // ML_BuildParameters doesn't have node_id; -1 = unknown
                 "ml",
                 "ML→SimpleDip fall-through: %s (zoo=%s)",
                 load_failed ? "model load failed" : "no model configured",
                 zoo ? "empty" : "null");
         }
-        SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out, rolling_long);
+        SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
     }
@@ -908,7 +908,7 @@ inline void ML_BuildParameters(
                 "(nan_feature_events_total=%u)",
                 mctx->nan_feature_events_total ? *mctx->nan_feature_events_total : 0);
         }
-        SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out, rolling_long);
+        SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
     }
@@ -919,7 +919,7 @@ inline void ML_BuildParameters(
     double p_valley   = 0.5;
     int have_signal   = 0;
 
-    if (zoo->loaded_mask & CORE_MODEL_BARRIER) {
+    if (zoo->loaded_mask & NODE_MODEL_BARRIER) {
         // v5.9.3b — apply scaler associated with barrier role. Identity
         // no-op when zoo->barrier.scaler.has_scaler=0 (legacy or absent).
         if (tt::FeatureStandardizer_Apply(&zoo->barrier.scaler, features, n) < 0) {
@@ -927,7 +927,7 @@ inline void ML_BuildParameters(
             if (mctx && mctx->nan_feature_events_total) {
                 (*mctx->nan_feature_events_total)++;
             }
-            SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out, rolling_long);
+            SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
             out->strategy_id = STRATEGY_ML;
             return;
         }
@@ -959,14 +959,14 @@ inline void ML_BuildParameters(
                 have_signal = 1;
             }
         }
-    } else if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
+    } else if (zoo->loaded_mask & NODE_MODEL_BUY_SIGNAL) {
         // v5.9.3b — apply scaler associated with buy_signal role.
         if (tt::FeatureStandardizer_Apply(&zoo->buy_signal.scaler, features, n) < 0) {
             fprintf(stderr, "[ML] dispatch: NaN/Inf post-scaler (buy_signal) — no signal\n");
             if (mctx && mctx->nan_feature_events_total) {
                 (*mctx->nan_feature_events_total)++;
             }
-            SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out, rolling_long);
+            SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
             out->strategy_id = STRATEGY_ML;
             return;
         }
@@ -1015,7 +1015,7 @@ inline void ML_BuildParameters(
                 // one-hot output weights have no natural alpha-blend semantic
                 // (alpha-blending one-hot with probability distribution is mathematically
                 // undefined; would corrupt Thompson's intended argmax-of-posterior dynamics).
-                if (core_cfg->bandit_algorithm == 0) {
+                if (node_cfg->bandit_algorithm == 0) {
                     // G.7 #7 — regime hysteresis dampening (Exp3 only). When regime just
                     // changed, blend OLD bandit's weights with NEW for hysteresis cycles.
                     // Otherwise use current bandit directly. Bytewise-identical to pre-v5.14.10.
@@ -1024,8 +1024,8 @@ inline void ML_BuildParameters(
                         double w_prev[ENSEMBLE_HORIZON_MAX];
                         Bandit_GetProbabilities(&ezoo->bandits[regime_id], w_curr);
                         Bandit_GetProbabilities(&ezoo->bandits[ezoo->prev_regime_id], w_prev);
-                        int hyst = core_cfg->regime_hysteresis > 0
-                                 ? (int)core_cfg->regime_hysteresis : 5;
+                        int hyst = node_cfg->regime_hysteresis > 0
+                                 ? (int)node_cfg->regime_hysteresis : 5;
                         double alpha = (double)(hyst - ezoo->regime_transition_cycles_remaining) /
                                        (double)hyst;
                         if (alpha < 0.0) alpha = 0.0;
@@ -1049,12 +1049,12 @@ inline void ML_BuildParameters(
                     // BanditAlgorithm_Apply ignores blend_alpha entirely; only BLENDED state-4
                     // (`BanditAlgo_Blended_Apply`) reads it. Per-core resolution avoids Class 27 scalar
                     // mirror (alpha varies per-core; each core's BLENDED dispatch reads its own value).
-                    BanditAlgorithm_Apply(core_cfg->bandit_algorithm,
+                    BanditAlgorithm_Apply(node_cfg->bandit_algorithm,
                                           &ezoo->bandits[regime_id],
                                           BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)
                                               ? &ezoo->buy_thompson_bandits[regime_id] : nullptr,
                                           ezoo->primary_count,
-                                          /*blend_alpha=*/FPN_ToDouble(core_cfg->thompson_exp3_blend_alpha),
+                                          /*blend_alpha=*/FPN_ToDouble(node_cfg->thompson_exp3_blend_alpha),
                                           weights_buf,
                                           &chosen_arm);
                     // Capture Thompson's chosen_arm for cfg=2 telemetry. .D's
@@ -1095,8 +1095,8 @@ inline void ML_BuildParameters(
                     constexpr uint16_t ridge_only_mask = MASK_RIDGE_WITHIN_ACTIVE | MASK_THOMPSON_ACTIVE;
                     _ridge_dispatch = (gate_state->flags & ridge_only_mask) == MASK_RIDGE_WITHIN_ACTIVE;
                 } else {
-                    _ridge_dispatch = BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON)
-                                     && core_cfg->bandit_algorithm == 0;
+                    _ridge_dispatch = BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON)
+                                     && node_cfg->bandit_algorithm == 0;
                 }
                 if (_ridge_dispatch &&
                     ezoo->primary_count >= 2) {
@@ -1109,7 +1109,7 @@ inline void ML_BuildParameters(
                     // DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
                     const bool use_online = gate_state
                         ? BITMAP_IS_SET(gate_state->flags, MASK_RIDGE_ONLINE_CORR_ACTIVE)
-                        : BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR);
+                        : BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR);
                     int rc_corr = RidgeBlender_OnlineCycleStep<F>(
                         &ezoo->ridge_state,
                         ezoo->reward_ring,
@@ -1135,9 +1135,9 @@ inline void ML_BuildParameters(
                         int rc = RidgeBlender_Compute<F>(
                             &ezoo->ridge_state,
                             ic_per_arm, cost_per_arm, ezoo->primary_count,
-                            FPN_ToDouble(core_cfg->ridge_lambda),
-                            FPN_ToDouble(core_cfg->ridge_cost_penalty),
-                            FPN_ToDouble(core_cfg->ridge_min_ic_floor));
+                            FPN_ToDouble(node_cfg->ridge_lambda),
+                            FPN_ToDouble(node_cfg->ridge_cost_penalty),
+                            FPN_ToDouble(node_cfg->ridge_min_ic_floor));
                         (void)rc;  // diagnostic only via fallback_to_uniform
                         for (int i = 0; i < ezoo->primary_count; ++i) {
                             weights_buf[i] = FPN_ToDouble(ezoo->ridge_state.w[i]);
@@ -1149,7 +1149,7 @@ inline void ML_BuildParameters(
                 // v5.14.1.G — push top-K mask to turnover ring for diagnostic.
                 // weights_buf is now finalized (post-bandit OR post-Ridge).
                 // Reads ezoo->primary_count + weights_buf; writes to per-core
-                // turnover ring via mctx->turnover_state pointer (CoreContext-
+                // turnover ring via mctx->turnover_state pointer (NodeContext-
                 // owned). No-op when state nullptr (legacy / non-ML).
                 if (mctx && mctx->turnover_state && ezoo->primary_count > 0) {
                     uint8_t topk_mask = topk_mask_from_weights(
@@ -1163,7 +1163,7 @@ inline void ML_BuildParameters(
                     features, n,
                     weights_buf,
                     ezoo->disabled_horizon_mask,
-                    core_cfg->ensemble_min_agreement_pct,
+                    node_cfg->ensemble_min_agreement_pct,
                     &dominant_idx,
                     per_arm_preds);
                 // v5.15.5.A.4 — per-horizon barrier dispatch compute. INSIDE
@@ -1235,7 +1235,7 @@ inline void ML_BuildParameters(
                 // specific lookback walking ezoo->barrier_horizons[].
                 // ic_floor 0.02 keeps drift watchdog safely inert at low
                 // sample counts; v5.10.0e will pull it from cfg.
-                // v5.15.5.F.4d — pass core_cfg for per-core bandit_algorithm dispatch (Step 3 +
+                // v5.15.5.F.4d — pass node_cfg for per-core bandit_algorithm dispatch (Step 3 +
                 // § H Class 25 sweep). Replaces former per-call cfg branches at attribution sites
                 // with metadata-driven g_buy_reward_dispatch[algo] inside the fn body. Class 24
                 // sister + Class 25 + Class 28 closure at this attribution surface.
@@ -1245,7 +1245,7 @@ inline void ML_BuildParameters(
                     /*forward_ticks=*/1000,
                     poll_interval_ticks,   // v5.15.5.F.4c.3 WIP2c.2 — caller-resolved scalar
                     /*ic_floor=*/0.02,
-                    core_cfg);             // v5.15.5.F.4d — per-core bandit_algorithm source
+                    node_cfg);             // v5.15.5.F.4d — per-core bandit_algorithm source
             }
         } else {
             // Single-zoo path (existing; bytewise unchanged from pre-G.5)
@@ -1275,7 +1275,7 @@ inline void ML_BuildParameters(
     // Hot path UNTOUCHED. Default cfg (use_exit_model=0): ~5ns flag check.
     EnsembleModelZoo<F>* ezoo_ex = (EnsembleModelZoo<F>*)
         (mctx ? mctx->ensemble_zoo : nullptr);
-    if (BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
+    if (BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
         && ezoo_ex
         && ezoo_ex->exit_predictor_count > 0
         && mctx
@@ -1299,7 +1299,7 @@ inline void ML_BuildParameters(
         if (n_loaded > 0) {
             // v5.14.1.E — push per-handle predictions into exit_reward_ring
             // BEFORE blending (mirrors buy-side reward_ring populate at
-            // CoreModelZoo.hpp:1002+). Used by Ridge solver to compute
+            // NodeModelZoo.hpp:1002+). Used by Ridge solver to compute
             // correlation matrix from prediction history. Cheap: ~50 bytes
             // memcpy per cycle into a 256-slot ring.
             int slot = ezoo_ex->exit_reward_ring_head %
@@ -1327,7 +1327,7 @@ inline void ML_BuildParameters(
             // v5.14.11.C — cfg.exit_blender_mode migrated to ml_cfg_flags bitmap
             bool _exit_blender_gate = gate_state
                 ? BITMAP_IS_SET(gate_state->flags, MASK_EXIT_BLENDER_ACTIVE)
-                : BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);
+                : BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);
             if (_exit_blender_gate &&
                 ezoo_ex->exit_predictor_count >= 2) {
                 // v5.14.11.A — OnlineCycleStep helper (mirrors buy-side dispatch
@@ -1336,7 +1336,7 @@ inline void ML_BuildParameters(
                 // (default 0 = full recompute; bytewise-identical).
                 const bool use_online = gate_state
                     ? BITMAP_IS_SET(gate_state->flags, MASK_RIDGE_ONLINE_CORR_ACTIVE)
-                    : BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR);
+                    : BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR);
                 int rc_corr = RidgeBlender_OnlineCycleStep<F>(
                     &ezoo_ex->exit_ridge_state,
                     ezoo_ex->exit_reward_ring,
@@ -1363,9 +1363,9 @@ inline void ML_BuildParameters(
                     int rc = RidgeBlender_Compute<F>(
                         &ezoo_ex->exit_ridge_state,
                         ic_per_arm, cost_per_arm, ezoo_ex->exit_predictor_count,
-                        FPN_ToDouble(core_cfg->ridge_lambda),
-                        FPN_ToDouble(core_cfg->ridge_cost_penalty),
-                        FPN_ToDouble(core_cfg->ridge_min_ic_floor));
+                        FPN_ToDouble(node_cfg->ridge_lambda),
+                        FPN_ToDouble(node_cfg->ridge_cost_penalty),
+                        FPN_ToDouble(node_cfg->ridge_min_ic_floor));
                     (void)rc;  // diagnostic via fallback_to_uniform
                     for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
                         weights[i] = FPN_ToDouble(ezoo_ex->exit_ridge_state.w[i]);
@@ -1401,7 +1401,7 @@ inline void ML_BuildParameters(
                 "(nan_prediction_events_total=%u)",
                 mctx->nan_prediction_events_total ? *mctx->nan_prediction_events_total : 0);
         }
-        SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out, rolling_long);
+        SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
     }
@@ -1409,7 +1409,7 @@ inline void ML_BuildParameters(
     // v5.9.0b — record threshold + effective_threshold for entry log + ML
     // Status panel display. Threshold is read from cfg; effective is
     // post-confidence-damping (computed below in the gate decision).
-    double ml_threshold_d = (double)FPN_ToDouble(core_cfg->ml_buy_threshold);
+    double ml_threshold_d = (double)FPN_ToDouble(node_cfg->ml_buy_threshold);
     if (mctx && mctx->out_threshold) *mctx->out_threshold = ml_threshold_d;
 
     // v5.15.5.A.4 — TP/SL mode-dispatch via FOREACH_BARRIER_BLEND_MODE.
@@ -1427,9 +1427,9 @@ inline void ML_BuildParameters(
     // gates the entire feature; cleared → falls back to LEGACY regardless
     // of mode value.
     Money tp_pct, sl_pct;
-    bool feature_enabled = BITMAP_IS_SET(core_cfg->ml_cfg_flags,
+    bool feature_enabled = BITMAP_IS_SET(node_cfg->ml_cfg_flags,
                                           MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND);
-    int active_mode = feature_enabled ? core_cfg->barrier_blend_mode
+    int active_mode = feature_enabled ? node_cfg->barrier_blend_mode
                                       : MODE_BARRIER_BLEND_LEGACY;
     uint8_t mode_flags = (active_mode >= 0 && active_mode < MODE_BARRIER_BLEND_COUNT)
                              ? MODE_FLAGS[active_mode]
@@ -1445,12 +1445,12 @@ inline void ML_BuildParameters(
         sl_pct = Money{ money_from_double_payload(dominant_sl_d) };
     } else {
         // LEGACY fallback: cfg-direct (bytewise-identical to pre-v5.15.5).
-        tp_pct = core_cfg->ml_tp_pct;
-        sl_pct = core_cfg->ml_sl_pct;
+        tp_pct = node_cfg->ml_tp_pct;
+        sl_pct = node_cfg->ml_sl_pct;
     }
     // v5.15.5.A.6 — observability writes for the per-horizon barrier
     // dispatch. Mirrors exit-side pattern. Surfaces to MLStatusPanel via
-    // PerCoreSnap (ShardedSnapshot.hpp:597-602 area).
+    // PerNodeSnap (ShardedSnapshot.hpp:597-602 area).
     if (mctx) {
         if (mctx->out_buy_dominant_horizon)
             *mctx->out_buy_dominant_horizon = blend_dispatch_ready ? blend_dominant_h : -1;
@@ -1472,7 +1472,7 @@ inline void ML_BuildParameters(
     Money sl_amount = Money_Mul(entry_m, sl_pct);
 
     // volume gate
-    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, core_cfg->volume_multiplier);
+    FPN_Binary<F> volume_threshold = FPN_Mul(rolling->volume_avg, node_cfg->volume_multiplier);
 
     // sizing — base trade size before barrier modulation
     Money trade_size = Money_Zero();
@@ -1489,14 +1489,14 @@ inline void ML_BuildParameters(
     // unconditional clamp to 1.0 prevents a perverse "always blocked" state if
     // base+scale combine to >1.0 with low conf. Mirrors the legacy formula at
     // PortfolioController.hpp:~1614.
-    double base_threshold = FPN_ToDouble(core_cfg->ml_buy_threshold);
+    double base_threshold = FPN_ToDouble(node_cfg->ml_buy_threshold);
     double conf_now = 0.0;
     double threshold = base_threshold;
     // v5.14.9.B.0 — read confidence_enabled gate from cached per-core state
     // when wired; fall back to inline cfg-flag for legacy/test callers.
     bool _conf_gate = gate_state
         ? BITMAP_IS_SET(gate_state->flags, MASK_CONFIDENCE_ENABLED)
-        : (BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) != 0);
+        : (BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) != 0);
     if (_conf_gate && conf_scorer) {
         // v5.14.1.B — cfg-gated swap to 4-factor composite confidence.
         // Default (composite_enabled=0) preserves bytewise-identical
@@ -1505,7 +1505,7 @@ inline void ML_BuildParameters(
         // v5.14.9.B.0 — read composite_enabled gate from cached state when wired
         bool _comp_gate = gate_state
             ? BITMAP_IS_SET(gate_state->flags, MASK_COMPOSITE_ENABLED)
-            : (BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) != 0);
+            : (BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) != 0);
         if (_comp_gate) {
             // v5.14.1.B.2 (PARITY-001) — now_us passed in by caller. Live:
             // clock_gettime at slow-path entry (non-deterministic OK; live
@@ -1521,7 +1521,7 @@ inline void ML_BuildParameters(
         } else {
             conf_now = ConfidenceScorer_Compute(conf_scorer, 0.0);  // data_age=0 (live)
         }
-        double scale = FPN_ToDouble(core_cfg->confidence_threshold_scale);
+        double scale = FPN_ToDouble(node_cfg->confidence_threshold_scale);
         double effective = base_threshold * (scale - conf_now);
         if (effective > 1.0) effective = 1.0;
         threshold = effective;
@@ -1535,7 +1535,7 @@ inline void ML_BuildParameters(
     // confidence is in the noise floor; entries fire on essentially-random
     // predictions. Hard-block when raw confidence is below the operator-
     // configured floor. Default 0.0 = disabled (preserves pre-v5.9.1).
-    double hard_floor = FPN_ToDouble(core_cfg->confidence_hard_block_threshold);
+    double hard_floor = FPN_ToDouble(node_cfg->confidence_hard_block_threshold);
     // v5.14.9.B.0 — same cached gate as the threshold-damping check above.
     if (_conf_gate && hard_floor > 0.0 && conf_now < hard_floor) {
         out->bg_price_threshold   = Money_Zero();
@@ -1558,7 +1558,7 @@ inline void ML_BuildParameters(
     // gate decision: BarrierGate (continuous modulation) OR binary threshold
     Money gate_price = Money_Zero();  // default: zero-gate (no entry)
 
-    if (BITMAP_IS_SET(core_cfg->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
+    if (BITMAP_IS_SET(node_cfg->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
         BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
         // hard block if either: barrier says "imminent peak" OR prediction below threshold
         if (!bg.blocked && prediction >= threshold) {
@@ -1589,7 +1589,7 @@ inline void ML_BuildParameters(
     // tunable thresholds.
     //
     // Read MASK_LADDER_ACTIVE from gate_state (populated upstream by
-    // SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE). MASK_LADDER_ACTIVE = (curve != OFF
+    // SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE). MASK_LADDER_ACTIVE = (curve != OFF
     // AND composite_enabled). When inactive: factor=1.0 (preserves pre-v5.14.9
     // behavior bytewise). When active: dispatch to FOREACH_DEGRADATION_CURVE
     // compute fn (branchless; cmov + fma). Factor=0 (ladder bottom) emits
@@ -1598,13 +1598,13 @@ inline void ML_BuildParameters(
     double factor = 1.0;
     if (gate_state && BITMAP_IS_SET(gate_state->flags, MASK_LADDER_ACTIVE)) {
         factor = Confidence_DegradationScale(
-            core_cfg->risk_degradation_curve,
+            node_cfg->risk_degradation_curve,
             conf_now,
-            FPN_ToDouble(core_cfg->risk_full_size_threshold),
-            FPN_ToDouble(core_cfg->risk_min_size_threshold),
-            FPN_ToDouble(core_cfg->risk_min_size_pct));
+            FPN_ToDouble(node_cfg->risk_full_size_threshold),
+            FPN_ToDouble(node_cfg->risk_min_size_threshold),
+            FPN_ToDouble(node_cfg->risk_min_size_pct));
     }
-    // Surface the per-cycle factor for PerCoreSnap.ml_confidence_factor
+    // Surface the per-cycle factor for PerNodeSnap.ml_confidence_factor
     // observability. nullptr-safe: legacy callers without the wiring skip.
     if (mctx && mctx->out_confidence_factor) {
         *mctx->out_confidence_factor = factor;
@@ -1666,7 +1666,7 @@ template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void Strategy_BuildParameters(
     uint8_t strategy_id,
     const RollingStats<F, W>* rolling,
-    const PerCoreCfg<F>* core_cfg,
+    const PerNodeCfg<F>* node_cfg,
     Money allocated_balance,
     GateParameters<F>* out,
     const RollingStats<F, WL>* rolling_long = nullptr,
@@ -1698,17 +1698,17 @@ inline void Strategy_BuildParameters(
             // v5.4.0 Phase 2.1 — pass typed state through. nullptr is the
             // legacy contract (test paths, AUTO cores pre-Phase 3) and
             // produces identical numerics to pre-Phase 2.1.
-            SimpleDip_BuildParameters(rolling, core_cfg, allocated_balance, out, rolling_long,
+            SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long,
                                        (SimpleDipState<F>*)strategy_state);
             break;
         case STRATEGY_MEAN_REVERSION:
             // v5.4.0 Phase 2.2 — pass typed MR state through.
-            MeanReversion_BuildParameters(rolling, core_cfg, allocated_balance, out,
+            MeanReversion_BuildParameters(rolling, node_cfg, allocated_balance, out,
                                            (MeanReversionState<F>*)strategy_state);
             break;
         case STRATEGY_MOMENTUM:
             // v5.4.0 Phase 2.3 — pass typed Momentum state through.
-            Momentum_BuildParameters(rolling, core_cfg, allocated_balance, out,
+            Momentum_BuildParameters(rolling, node_cfg, allocated_balance, out,
                                       (MomentumState<F>*)strategy_state);
             // v5.7.5 — MOM quality filters. Each gated cfg-side (default
             // 0/off, preserving pre-v5.7 behavior). Operator opts in
@@ -1725,9 +1725,9 @@ inline void Strategy_BuildParameters(
                 // (v5.1.10) passes — the dispatcher's check requires
                 // 3 * fee, this filter enforces a stricter operator-set
                 // floor (recommended 0.40%).
-                if (!Money_IsZero(core_cfg->momentum_min_tp_margin_pct) &&
+                if (!Money_IsZero(node_cfg->momentum_min_tp_margin_pct) &&
                     !Money_IsZero(out->tp_pct) &&
-                    Money_Lt(out->tp_pct, core_cfg->momentum_min_tp_margin_pct)) {
+                    Money_Lt(out->tp_pct, node_cfg->momentum_min_tp_margin_pct)) {
                     out->flags |= GATE_FLAG_BUY_BLOCKED;
                     blocked = true;
                     if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
@@ -1736,8 +1736,8 @@ inline void Strategy_BuildParameters(
                 }
                 // Filter 2: R² minimum (short-window regression fit).
                 // Low R² = noisy data = breakout is probably noise.
-                if (!blocked && !FPN_IsZero(core_cfg->momentum_min_r2) &&
-                    FPN_LessThan(rolling->price_r_squared, core_cfg->momentum_min_r2)) {
+                if (!blocked && !FPN_IsZero(node_cfg->momentum_min_r2) &&
+                    FPN_LessThan(rolling->price_r_squared, node_cfg->momentum_min_r2)) {
                     out->flags |= GATE_FLAG_BUY_BLOCKED;
                     blocked = true;
                     if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
@@ -1746,9 +1746,9 @@ inline void Strategy_BuildParameters(
                 }
                 // Filter 3: recent flow agreement (volume_delta).
                 // Reject when recent flow opposes the breakout direction.
-                if (!blocked && !FPN_IsZero(core_cfg->momentum_min_buy_delta_recent) &&
+                if (!blocked && !FPN_IsZero(node_cfg->momentum_min_buy_delta_recent) &&
                     FPN_LessThan(rolling->volume_delta,
-                                  core_cfg->momentum_min_buy_delta_recent)) {
+                                  node_cfg->momentum_min_buy_delta_recent)) {
                     out->flags |= GATE_FLAG_BUY_BLOCKED;
                     blocked = true;
                     if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
@@ -1763,18 +1763,18 @@ inline void Strategy_BuildParameters(
                 // and is deferred to a follow-up if measurement justifies.
                 // (Keeping the cfg field + SHALT code defined now so the
                 // table stays stable.)
-                (void)core_cfg->momentum_require_last_win;  // not yet wired
+                (void)node_cfg->momentum_require_last_win;  // not yet wired
             }
             break;
         case STRATEGY_EMA_CROSS:
             // v5.4.0 Phase 2.4 — pass typed EmaCross state through.
-            EmaCross_BuildParameters(rolling, core_cfg, allocated_balance, out,
+            EmaCross_BuildParameters(rolling, node_cfg, allocated_balance, out,
                                       (EmaCrossState<F>*)strategy_state);
             break;
         case STRATEGY_ML:
             // v5.14.1.B.2 (PARITY-001) — now_us threaded through for
             // composite confidence replay-determinism.
-            ML_BuildParameters(rolling, rolling_long, core_cfg, allocated_balance, out, model_ctx, now_us, poll_interval_ticks);
+            ML_BuildParameters(rolling, rolling_long, node_cfg, allocated_balance, out, model_ctx, now_us, poll_interval_ticks);
             break;
         default:
             GateParameters_Init(out);
@@ -1818,13 +1818,13 @@ inline void Strategy_BuildParameters(
     // No-op when partial_exit_enabled=0: tp_pct_b stays at GateParameters_-
     // Init's zero, and GATE_FLAG_PAIR_ACTIVE is never set. Pre-P.4
     // behavior preserved exactly.
-    if (BITMAP_IS_SET(core_cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
+    if (BITMAP_IS_SET(node_cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
         out->flags |= GATE_FLAG_PAIR_ACTIVE;
         // tp_pct_b = tp_pct * tp2_mult. Falls back to tp_pct (TP1 distance,
         // i.e. leg B duplicates leg A) when tp2_mult is zero (defensive —
         // strategy ought to have set tp_pct, but if not, leg B is a no-op).
-        if (!Money_IsZero(core_cfg->tp2_mult) && !Money_IsZero(out->tp_pct)) {
-            out->tp_pct_b = Money_Mul(out->tp_pct, core_cfg->tp2_mult);
+        if (!Money_IsZero(node_cfg->tp2_mult) && !Money_IsZero(out->tp_pct)) {
+            out->tp_pct_b = Money_Mul(out->tp_pct, node_cfg->tp2_mult);
         } else {
             out->tp_pct_b = out->tp_pct;
         }
@@ -1864,8 +1864,8 @@ inline void Strategy_BuildParameters(
     // doesn't log). Caller sees the BUY_BLOCKED flag in pending_params
     // and can decide whether to log + how often.
     {
-        Money fee_taker = !Money_IsZero(core_cfg->fee_rate_taker)
-            ? core_cfg->fee_rate_taker : core_cfg->fee_rate;
+        Money fee_taker = !Money_IsZero(node_cfg->fee_rate_taker)
+            ? node_cfg->fee_rate_taker : node_cfg->fee_rate;
         Money three = Money_FromInt(3);
         Money floor_pct = Money_Mul(fee_taker, three);
         // out->tp_pct may be zero if strategy didn't set it (e.g.
@@ -1891,8 +1891,8 @@ inline void Strategy_BuildParameters(
     // contribution is omitted in this first port — sharded path doesn't
     // yet plumb live spread bps to BuildParameters; timing + impact alone
     // is the conservative approximation. Future: thread spread_bps from
-    // CoreSlowState::spread_state.
-    if (BITMAP_IS_SET(core_cfg->gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED) && !Money_IsZero(out->tp_pct) &&
+    // NodeSlowState::spread_state.
+    if (BITMAP_IS_SET(node_cfg->gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED) && !Money_IsZero(out->tp_pct) &&
         !Money_IsZero(out->bg_price_threshold) && rolling) {
         double price = FPN_ToDouble(rolling->price_avg);
         double rel_vol = (price > 0.01)
@@ -1925,15 +1925,15 @@ inline void Strategy_BuildParameters(
     // VolScaler: shrink trade_size in high-volatility regimes. Uses
     // alpha=tp_pct and vol=stddev/price; weight in [0, 1] that scales
     // the existing trade_size down (never up — never increases risk).
-    if (BITMAP_IS_SET(core_cfg->ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED) && !Money_IsZero(out->trade_size) &&
+    if (BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED) && !Money_IsZero(out->trade_size) &&
         !Money_IsZero(out->tp_pct) && rolling) {
         double price = FPN_ToDouble(rolling->price_avg);
         double rel_vol = (price > 0.01)
             ? FPN_ToDouble(rolling->price_stddev) / price : 0.0;
         if (rel_vol > 0.0) {
             double alpha = Money_ToDouble(out->tp_pct);
-            double z_max = !FPN_IsZero(core_cfg->foxml_vol_scaling_z_max)
-                ? FPN_ToDouble(core_cfg->foxml_vol_scaling_z_max)
+            double z_max = !FPN_IsZero(node_cfg->foxml_vol_scaling_z_max)
+                ? FPN_ToDouble(node_cfg->foxml_vol_scaling_z_max)
                 : VOL_SCALER_Z_MAX_DEFAULT;
             // max_weight=1.0 → VolScaler returns weight in [0, 1] which we
             // multiply trade_size by. Effectively: weight=1 means no

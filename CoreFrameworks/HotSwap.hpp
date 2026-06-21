@@ -13,9 +13,9 @@
 //   1. Allocate NEW state into SEPARATE memory (aligned_alloc(64))
 //   2. Init + Load + PostLoadSetup into NEW state
 //   3. Validate (strict mode)
-//   4. ATOMIC swap pointer (state.cores[c].handle)
+//   4. ATOMIC swap pointer (state.nodes[c].handle)
 //   5. Free OLD state (single-owner reclamation; per-core slow-path is
-//      sole owner of state.cores[c].*_handle; hot-path uses cached
+//      sole owner of state.nodes[c].*_handle; hot-path uses cached
 //      cycle parameters via seqlock, never reads handle pointer)
 //
 // On failure (alloc / load / validate): Free NEW state; pre-swap
@@ -41,7 +41,7 @@
 #include <stdio.h>
 #include "ControllerConfig.hpp"
 #include "ControllerEventLoop.hpp"   // EventLoopState<F> struct
-#include "../ML_Headers/CoreModelZoo.hpp"
+#include "../ML_Headers/NodeModelZoo.hpp"
 #include "EnsembleHotSwap.hpp"   // legacy in-place helper (kept as thin wrapper)
 
 namespace tt {
@@ -50,7 +50,7 @@ namespace tt {
 // [HotSwap_ShadowLoad_Ensemble<F>]
 //======================================================================================================
 // Shadow-loads a new EnsembleModelZoo<F> from new_path; on success
-// atomically swaps state.cores[core_idx].ensemble_handle to the new
+// atomically swaps state.nodes[node_idx].ensemble_handle to the new
 // allocation + Free's the old. Pre-swap state untouched on any failure.
 //
 // Returns:
@@ -65,7 +65,7 @@ namespace tt {
 // of old_ezoo is safe immediately after atomic swap; no RCU grace.
 //
 // Caller responsibilities:
-//   - state.cores[core_idx].ensemble_handle must currently point at a
+//   - state.nodes[node_idx].ensemble_handle must currently point at a
 //     heap-allocated EnsembleModelZoo<F>* (boot path migrated to
 //     aligned_alloc(64) in v5.15.4) OR nullptr (first-time load).
 //   - new_path is non-null + non-empty
@@ -73,14 +73,14 @@ namespace tt {
 template <unsigned F>
 inline int HotSwap_ShadowLoad_Ensemble(
     EventLoopState<F>& state,
-    int core_idx,
+    int node_idx,
     const ControllerConfig<F>& cfg,
     const char* new_path,
     int swap_backend) {
 
     if (!new_path || new_path[0] == '\0') {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: empty path\n", core_idx);
+            "[hot_swap] ensemble core %d FAILED: empty path\n", node_idx);
         return -2;
     }
 
@@ -91,12 +91,12 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // EnsembleModelZoo_AutoDetectFromDir; new ezoo needs the same.
     // ────────────────────────────────────────────────────────────────────
     EnsembleModelZoo<F>* pre_swap_ezoo =
-        (EnsembleModelZoo<F>*)state.cores[core_idx].ensemble_handle;
+        (EnsembleModelZoo<F>*)state.nodes[node_idx].ensemble_handle;
     if (!pre_swap_ezoo) {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: pre-swap ezoo is null "
             "(no boot ensemble); single-zoo branch should fire instead\n",
-            core_idx);
+            node_idx);
         return -2;
     }
 
@@ -110,7 +110,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     if (h_count == 0) {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: no cached horizons "
-            "(boot must have failed)\n", core_idx);
+            "(boot must have failed)\n", node_idx);
         return -2;
     }
 
@@ -123,7 +123,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     if (!new_ezoo) {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: aligned_alloc OOM\n",
-            core_idx);
+            node_idx);
         return -1;
     }
     EnsembleModelZoo_Init(new_ezoo);
@@ -141,7 +141,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     if (total == 0) {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: 0 roles loaded from %s; "
-            "pre-swap state preserved\n", core_idx, new_path);
+            "pre-swap state preserved\n", node_idx, new_path);
         EnsembleModelZoo_Free(new_ezoo);
         free(new_ezoo);
         return -2;
@@ -151,7 +151,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // (4) Canonical post-load setup (X-macro registry FOREACH_ENSEMBLE_POST_LOAD).
     // Same shape as boot + legacy in-place hot-swap; just on new_ezoo.
     // ────────────────────────────────────────────────────────────────────
-    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, core_idx, new_path);
+    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, node_idx, new_path);
 
     // ────────────────────────────────────────────────────────────────────
     // (5) Strict validate. In strict mode + failure → Free new; pre-swap
@@ -171,7 +171,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // 8-byte pointer; lock-free; readers see old OR new, never torn.
     // ────────────────────────────────────────────────────────────────────
     EnsembleModelZoo<F>* old_ezoo = (EnsembleModelZoo<F>*)__atomic_exchange_n(
-        &state.cores[core_idx].ensemble_handle,
+        &state.nodes[node_idx].ensemble_handle,
         (void*)new_ezoo,
         __ATOMIC_ACQ_REL);
 
@@ -186,7 +186,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     fprintf(stderr,
         "[hot_swap] ensemble core %d shadow-swapped to %s "
         "(%d roles loaded; primary=%s; exit=%d)\n",
-        core_idx, new_path, total,
+        node_idx, new_path, total,
         new_ezoo->primary_role_name[0]
             ? new_ezoo->primary_role_name : "(none)",
         new_ezoo->exit_predictor_count);
@@ -197,9 +197,9 @@ inline int HotSwap_ShadowLoad_Ensemble(
 //======================================================================================================
 // [HotSwap_ShadowLoad_SingleZoo<F>]
 //======================================================================================================
-// Parallel to HotSwap_ShadowLoad_Ensemble for single-zoo CoreModelZoo<F>.
+// Parallel to HotSwap_ShadowLoad_Ensemble for single-zoo NodeModelZoo<F>.
 // Allocates new zoo on heap, loads from new_path, atomically swaps
-// state.cores[core_idx].model_handle, Free's old. Pre-swap untouched on
+// state.nodes[node_idx].model_handle, Free's old. Pre-swap untouched on
 // failure.
 //
 // Returns:
@@ -210,34 +210,34 @@ inline int HotSwap_ShadowLoad_Ensemble(
 template <unsigned F>
 inline int HotSwap_ShadowLoad_SingleZoo(
     EventLoopState<F>& state,
-    int core_idx,
+    int node_idx,
     const ControllerConfig<F>& cfg,
     const char* new_path,
     int swap_backend) {
 
     if (!new_path || new_path[0] == '\0') {
         fprintf(stderr,
-            "[hot_swap] single-zoo core %d FAILED: empty path\n", core_idx);
+            "[hot_swap] single-zoo core %d FAILED: empty path\n", node_idx);
         return -2;
     }
 
-    CoreModelZoo<F>* new_zoo =
-        (CoreModelZoo<F>*)aligned_alloc(64, sizeof(CoreModelZoo<F>));
+    NodeModelZoo<F>* new_zoo =
+        (NodeModelZoo<F>*)aligned_alloc(64, sizeof(NodeModelZoo<F>));
     if (!new_zoo) {
         fprintf(stderr,
             "[hot_swap] single-zoo core %d FAILED: aligned_alloc OOM\n",
-            core_idx);
+            node_idx);
         return -1;
     }
-    CoreModelZoo_Init(new_zoo);
+    NodeModelZoo_Init(new_zoo);
 
     // Mirror boot path's LoadFromDir args (feature_mask + cfg ptr for
     // X-macro drift check). aligned_alloc gives new_zoo a 64-byte-aligned
     // address; embedded ModelHandle members get correct alignment.
     uint64_t mask_for_load =
-        (cfg.core_feature_mask[core_idx] != 0xFFFFFFFFFFFFFFFFULL)
-            ? cfg.core_feature_mask[core_idx] : 0;
-    int loaded = CoreModelZoo_LoadFromDir(
+        (cfg.node_feature_mask[node_idx] != 0xFFFFFFFFFFFFFFFFULL)
+            ? cfg.node_feature_mask[node_idx] : 0;
+    int loaded = NodeModelZoo_LoadFromDir(
         new_zoo, new_path, swap_backend,
         /*secret=*/cfg.held_out_stamp_secret,
         /*gap=*/FPN_ToDouble(cfg.gap_acceptable_threshold),
@@ -249,39 +249,39 @@ inline int HotSwap_ShadowLoad_SingleZoo(
     if (loaded == 0) {
         fprintf(stderr,
             "[hot_swap] single-zoo core %d FAILED: 0 roles loaded from %s; "
-            "pre-swap state preserved\n", core_idx, new_path);
-        CoreModelZoo_Free(new_zoo);
+            "pre-swap state preserved\n", node_idx, new_path);
+        NodeModelZoo_Free(new_zoo);
         free(new_zoo);
         return -2;
     }
 
     // Post-load setup (X-macro FOREACH_SINGLE_ZOO_POST_LOAD; today:
     // VerifyExpected only). Returns 1 on success.
-    int post_ok = CoreModelZoo_PostLoadSetup<F>(new_zoo, cfg, core_idx, new_path);
+    int post_ok = NodeModelZoo_PostLoadSetup<F>(new_zoo, cfg, node_idx, new_path);
     if (!post_ok && cfg.model_verify_strict > 0) {
         fprintf(stderr,
             "[hot_swap] single-zoo core %d FAILED: post-load strict verify; "
-            "pre-swap state preserved\n", core_idx);
-        CoreModelZoo_Free(new_zoo);
+            "pre-swap state preserved\n", node_idx);
+        NodeModelZoo_Free(new_zoo);
         free(new_zoo);
         return -3;
     }
 
     // ATOMIC swap.
-    CoreModelZoo<F>* old_zoo = (CoreModelZoo<F>*)__atomic_exchange_n(
-        &state.cores[core_idx].model_handle,
+    NodeModelZoo<F>* old_zoo = (NodeModelZoo<F>*)__atomic_exchange_n(
+        &state.nodes[node_idx].model_handle,
         (void*)new_zoo,
         __ATOMIC_ACQ_REL);
 
     if (old_zoo) {
-        CoreModelZoo_Free(old_zoo);
+        NodeModelZoo_Free(old_zoo);
         free(old_zoo);
     }
 
     fprintf(stderr,
         "[hot_swap] single-zoo core %d shadow-swapped to %s "
         "(%d roles loaded; primary=%s)\n",
-        core_idx, new_path, loaded,
+        node_idx, new_path, loaded,
         new_zoo->primary_role_name[0]
             ? new_zoo->primary_role_name : "(none)");
 

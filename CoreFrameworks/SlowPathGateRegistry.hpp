@@ -9,9 +9,9 @@
 // gate is a cfg-driven boolean predicate. Scope column dispatches to the
 // appropriate state struct + AUTOPOPULATE walk:
 //
-//   PER_CORE     — checked in per-core ML rebuild body; uses RESOLVED cfg
+//   PER_NODE     — checked in per-core ML rebuild body; uses RESOLVED cfg
 //                  (already merged with per-core overrides). Cached on
-//                  CoreContext<F>.gate_state (SlowPathGateState).
+//                  NodeContext<F>.gate_state (SlowPathGateState).
 //   ENGINE_WIDE  — checked in engine-wide outer / function-entry; uses
 //                  GLOBAL cfg (no per-core override). Cached on
 //                  EventLoopState.global_gate_state (GlobalGateState).
@@ -37,7 +37,7 @@
 // Concurrency: per-core slow-path thread is the single writer + reader for
 // SlowPathGateState; engine-wide slow-path thread for GlobalGateState. No
 // atomics needed (matches v5.14.8.B FailureModeRegistry's failure_flags).
-// GUI display reads PerCoreSnap, not gate_state directly.
+// GUI display reads PerNodeSnap, not gate_state directly.
 //
 // Established: v5.14.9.B.0 (2026-05-10)
 //======================================================================================================
@@ -55,10 +55,10 @@ namespace tt {
 // [REGISTRY DEFINITION]
 //======================================================================================================
 // Tuple: X(scope, name, predicate_expr, doc_string)
-//   scope          — PER_CORE | ENGINE_WIDE; selects target state struct + cfg source
+//   scope          — PER_NODE | ENGINE_WIDE; selects target state struct + cfg source
 //   name           — UPPERCASE token; produces GATE_<name> bit + MASK_<name> constant
 //   predicate_expr — bool expression; uses bare `cfg` reference bound by AUTOPOPULATE
-//                    caller. PER_CORE gets resolved_cfg; ENGINE_WIDE gets global cfg
+//                    caller. PER_NODE gets resolved_cfg; ENGINE_WIDE gets global cfg
 //   doc_string     — human-readable description for audits + cfg.example
 //
 // Adding a new gate to an existing scope: 1 row. Adding a new scope:
@@ -67,29 +67,29 @@ namespace tt {
 //======================================================================================================
 
 #define FOREACH_SLOW_PATH_GATE(X)                                                                   \
-    /* === PER_CORE — checked in ML_BuildParameters body; uses resolved_cfg === */                  \
+    /* === PER_NODE — checked in ML_BuildParameters body; uses resolved_cfg === */                  \
     /* v5.14.9.A — soft risk degradation ladder. Composite must be on */                            \
-    X(PER_CORE,    LADDER_ACTIVE,                                                                    \
+    X(PER_NODE,    LADDER_ACTIVE,                                                                    \
       ((_gate_cfg).risk_degradation_curve != CURVE_OFF) && BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), \
       "soft risk degradation ladder (curve != OFF AND composite required)")                         \
     /* Pre-v5.14.x — confidence-damped threshold (v5.14.9.F.2 migrated to ml_cfg_flags) */          \
-    X(PER_CORE,    CONFIDENCE_ENABLED,                                                               \
+    X(PER_NODE,    CONFIDENCE_ENABLED,                                                               \
       BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED),                       \
       "scale entry threshold by confidence")                                                         \
     /* v5.14.1.B — composite (4-factor) vs legacy (3-factor) confidence (v5.14.9.F.2 migrated) */   \
-    X(PER_CORE,    COMPOSITE_ENABLED,                                                                \
+    X(PER_NODE,    COMPOSITE_ENABLED,                                                                \
       BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),             \
       "use 4-factor composite confidence formula (vs legacy 3-factor)")                             \
     /* v5.14.0 — Ridge within-horizon blend (v5.14.11.C migrated to ml_cfg_flags bitmap) */         \
-    X(PER_CORE,    RIDGE_WITHIN_ACTIVE,                                                              \
+    X(PER_NODE,    RIDGE_WITHIN_ACTIVE,                                                              \
       BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON),                     \
       "Ridge blend across role-arms within a horizon")                                              \
     /* v5.14.1.E — Ridge exit-side blend (v5.14.11.C migrated to ml_cfg_flags bitmap) */            \
-    X(PER_CORE,    EXIT_BLENDER_ACTIVE,                                                              \
+    X(PER_NODE,    EXIT_BLENDER_ACTIVE,                                                              \
       BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE),                        \
       "Ridge blend across exit_predictor handles")                                                  \
     /* v5.14.11.C — Ridge online correlation matrix (sliding-window incremental) gate */            \
-    X(PER_CORE,    RIDGE_ONLINE_CORR_ACTIVE,                                                         \
+    X(PER_NODE,    RIDGE_ONLINE_CORR_ACTIVE,                                                         \
       BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR),                        \
       "use sliding-window incremental correlation matrix in Ridge (vs full recompute)")             \
     /* v5.15.5.F.4d — metadata-derived predicates per § I of merged plan body. Replaces former */ \
@@ -98,12 +98,12 @@ namespace tt {
     /* metadata column reductions in BanditAlgorithmRegistry.hpp). Adding a 6th bandit algorithm */ \
     /* with appropriate thompson_up/exp3_up bits → these predicates auto-extend correctness; no  */ \
     /* per-site rebind needed. Class 18 + Class 28 closure at slow-path gate surface.            */ \
-    X(PER_CORE,    THOMPSON_ACTIVE,                                                                  \
+    X(PER_NODE,    THOMPSON_ACTIVE,                                                                  \
       (((uint8_t)BANDIT_THOMPSON_UPDATE_MASK >> (_gate_cfg).bandit_algorithm) & 1u),                 \
       "Thompson posterior is being updated for the current bandit_algorithm (any state with thompson_up=1)") \
     /* v5.15.5.F.4d — RENAMED from BANDIT_BOTH_ACTIVE. Semantic: BOTH algos learning from rewards.  */ \
     /* True for any state where exp3_up=1 AND thompson_up=1 (cfg=2/3/4 post-.F.4d expansion).        */ \
-    X(PER_CORE,    BANDIT_SHADOW_LEARNING,                                                           \
+    X(PER_NODE,    BANDIT_SHADOW_LEARNING,                                                           \
       ((((uint8_t)BANDIT_EXP3_UPDATE_MASK & (uint8_t)BANDIT_THOMPSON_UPDATE_MASK) >> (_gate_cfg).bandit_algorithm) & 1u), \
       "Both Exp3 + Thompson learning from rewards this cycle (any algo with exp3_up=1 AND thompson_up=1)") \
     /* === ENGINE_WIDE — checked in engine-wide outer / function-entry; uses global cfg === */     \
@@ -138,23 +138,23 @@ namespace tt {
 // Otherwise SKIP. Token-paste resolves at preprocessor expansion.
 //======================================================================================================
 
-// PER_CORE variant — INCLUDEs PER_CORE entries; SKIPs ENGINE_WIDE
-#define X_AUTOPOP_PER_CORE_INCLUDE(name, predicate, doc)                                             \
+// PER_NODE variant — INCLUDEs PER_NODE entries; SKIPs ENGINE_WIDE
+#define X_AUTOPOP_PER_NODE_INCLUDE(name, predicate, doc)                                             \
     _new_flags |= ((predicate) ? MASK_##name : 0u);
-#define X_AUTOPOP_PER_CORE_SKIP(name, predicate, doc) /* skip; not in this variant's scope */
+#define X_AUTOPOP_PER_NODE_SKIP(name, predicate, doc) /* skip; not in this variant's scope */
 
-#define X_AUTOPOP_PER_CORE_DISPATCH_PER_CORE     X_AUTOPOP_PER_CORE_INCLUDE
-#define X_AUTOPOP_PER_CORE_DISPATCH_ENGINE_WIDE  X_AUTOPOP_PER_CORE_SKIP
+#define X_AUTOPOP_PER_NODE_DISPATCH_PER_NODE     X_AUTOPOP_PER_NODE_INCLUDE
+#define X_AUTOPOP_PER_NODE_DISPATCH_ENGINE_WIDE  X_AUTOPOP_PER_NODE_SKIP
 
-#define X_AUTOPOP_PER_CORE_WALK(scope, name, predicate, doc)                                         \
-    X_AUTOPOP_PER_CORE_DISPATCH_##scope(name, predicate, doc)
+#define X_AUTOPOP_PER_NODE_WALK(scope, name, predicate, doc)                                         \
+    X_AUTOPOP_PER_NODE_DISPATCH_##scope(name, predicate, doc)
 
-// ENGINE_WIDE variant — INCLUDEs ENGINE_WIDE entries; SKIPs PER_CORE
+// ENGINE_WIDE variant — INCLUDEs ENGINE_WIDE entries; SKIPs PER_NODE
 #define X_AUTOPOP_ENGINE_WIDE_INCLUDE(name, predicate, doc)                                          \
     _new_flags |= ((predicate) ? MASK_##name : 0u);
 #define X_AUTOPOP_ENGINE_WIDE_SKIP(name, predicate, doc) /* skip */
 
-#define X_AUTOPOP_ENGINE_WIDE_DISPATCH_PER_CORE     X_AUTOPOP_ENGINE_WIDE_SKIP
+#define X_AUTOPOP_ENGINE_WIDE_DISPATCH_PER_NODE     X_AUTOPOP_ENGINE_WIDE_SKIP
 #define X_AUTOPOP_ENGINE_WIDE_DISPATCH_ENGINE_WIDE  X_AUTOPOP_ENGINE_WIDE_INCLUDE
 
 #define X_AUTOPOP_ENGINE_WIDE_WALK(scope, name, predicate, doc)                                      \
@@ -183,13 +183,13 @@ static_assert(GATE_SLOW_PATH_TOTAL_COUNT <= 16,
 
 // === Per-scope counts (for tests; uses >= per /readiness Check 21) ===
 
-#define X_GEN_PER_CORE_COUNT_DISPATCH_PER_CORE(name, predicate, doc) +1
-#define X_GEN_PER_CORE_COUNT_DISPATCH_ENGINE_WIDE(name, predicate, doc) /* skip */
-#define X_GEN_PER_CORE_COUNT(scope, name, predicate, doc) \
-    X_GEN_PER_CORE_COUNT_DISPATCH_##scope(name, predicate, doc)
-#define FOREACH_SLOW_PATH_GATE_PER_CORE_COUNT (0 FOREACH_SLOW_PATH_GATE(X_GEN_PER_CORE_COUNT))
+#define X_GEN_PER_NODE_COUNT_DISPATCH_PER_NODE(name, predicate, doc) +1
+#define X_GEN_PER_NODE_COUNT_DISPATCH_ENGINE_WIDE(name, predicate, doc) /* skip */
+#define X_GEN_PER_NODE_COUNT(scope, name, predicate, doc) \
+    X_GEN_PER_NODE_COUNT_DISPATCH_##scope(name, predicate, doc)
+#define FOREACH_SLOW_PATH_GATE_PER_NODE_COUNT (0 FOREACH_SLOW_PATH_GATE(X_GEN_PER_NODE_COUNT))
 
-#define X_GEN_ENGINE_WIDE_COUNT_DISPATCH_PER_CORE(name, predicate, doc) /* skip */
+#define X_GEN_ENGINE_WIDE_COUNT_DISPATCH_PER_NODE(name, predicate, doc) /* skip */
 #define X_GEN_ENGINE_WIDE_COUNT_DISPATCH_ENGINE_WIDE(name, predicate, doc) +1
 #define X_GEN_ENGINE_WIDE_COUNT(scope, name, predicate, doc) \
     X_GEN_ENGINE_WIDE_COUNT_DISPATCH_##scope(name, predicate, doc)
@@ -204,7 +204,7 @@ static_assert(GATE_SLOW_PATH_TOTAL_COUNT <= 16,
 // uint16_t flags both: bits matching the struct's scope are set; other-scope
 // bits stay 0 (always). Total bits ≤ 16 per static_assert above.
 
-// Per-core gate cache. Lives on CoreContext<F>.gate_state. AUTOPOPULATE
+// Per-core gate cache. Lives on NodeContext<F>.gate_state. AUTOPOPULATE
 // called per-core after ControllerConfig_ResolveForCore (so cfg has
 // per-core overrides merged).
 struct SlowPathGateState {
@@ -220,8 +220,8 @@ struct GlobalGateState {
 //======================================================================================================
 // [AUTOPOPULATE COMPANION MACROS]
 //======================================================================================================
-// SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, _resolved_cfg)
-//   Walks PER_CORE entries; sets each bit via mask OR-reduction.
+// SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE(state, _resolved_cfg)
+//   Walks PER_NODE entries; sets each bit via mask OR-reduction.
 //   Caller invokes ControllerConfig_ResolveForCore upstream so the cfg
 //   already has per-core overrides merged.
 //
@@ -235,11 +235,11 @@ struct GlobalGateState {
 // Pattern: same shape as STAMP_CFG_AUTOPOPULATE (v5.14.1.B.3).
 //======================================================================================================
 
-#define SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, _cfg_arg)                                        \
+#define SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE(state, _cfg_arg)                                        \
     do {                                                                                             \
         const auto& _gate_cfg = (_cfg_arg);                                                          \
         uint16_t _new_flags = 0;                                                                     \
-        FOREACH_SLOW_PATH_GATE(X_AUTOPOP_PER_CORE_WALK)                                              \
+        FOREACH_SLOW_PATH_GATE(X_AUTOPOP_PER_NODE_WALK)                                              \
         (state).flags = _new_flags;                                                                  \
         (void)_gate_cfg;                                                                             \
     } while (0)
@@ -260,17 +260,17 @@ struct GlobalGateState {
 //======================================================================================================
 // Steps to add a new scope (e.g., HOT_PATH or BOOT) to FOREACH_SLOW_PATH_GATE:
 //
-// 1. Add scope-dispatch macros for EXISTING variants (PER_CORE, ENGINE_WIDE):
-//      #define X_AUTOPOP_PER_CORE_DISPATCH_<NEW_SCOPE>     X_AUTOPOP_PER_CORE_SKIP
+// 1. Add scope-dispatch macros for EXISTING variants (PER_NODE, ENGINE_WIDE):
+//      #define X_AUTOPOP_PER_NODE_DISPATCH_<NEW_SCOPE>     X_AUTOPOP_PER_NODE_SKIP
 //      #define X_AUTOPOP_ENGINE_WIDE_DISPATCH_<NEW_SCOPE>  X_AUTOPOP_ENGINE_WIDE_SKIP
-//      #define X_GEN_PER_CORE_COUNT_DISPATCH_<NEW_SCOPE>(...)     /* skip */
+//      #define X_GEN_PER_NODE_COUNT_DISPATCH_<NEW_SCOPE>(...)     /* skip */
 //      #define X_GEN_ENGINE_WIDE_COUNT_DISPATCH_<NEW_SCOPE>(...)  /* skip */
 //
-// 2. Add the new variant's dispatch chain (mirroring PER_CORE pattern):
+// 2. Add the new variant's dispatch chain (mirroring PER_NODE pattern):
 //      #define X_AUTOPOP_<NEW_SCOPE>_INCLUDE(name, predicate, doc) \
 //          _new_flags |= ((predicate) ? MASK_##name : 0u);
 //      #define X_AUTOPOP_<NEW_SCOPE>_SKIP(name, predicate, doc) /* skip */
-//      #define X_AUTOPOP_<NEW_SCOPE>_DISPATCH_PER_CORE     X_AUTOPOP_<NEW_SCOPE>_SKIP
+//      #define X_AUTOPOP_<NEW_SCOPE>_DISPATCH_PER_NODE     X_AUTOPOP_<NEW_SCOPE>_SKIP
 //      #define X_AUTOPOP_<NEW_SCOPE>_DISPATCH_ENGINE_WIDE  X_AUTOPOP_<NEW_SCOPE>_SKIP
 //      #define X_AUTOPOP_<NEW_SCOPE>_DISPATCH_<NEW_SCOPE>  X_AUTOPOP_<NEW_SCOPE>_INCLUDE
 //      #define X_AUTOPOP_<NEW_SCOPE>_WALK(scope, name, predicate, doc) \

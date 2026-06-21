@@ -39,7 +39,7 @@
 #pragma once
 
 #include "../CoreFrameworks/ControllerConfig.hpp"
-#include "../CoreFrameworks/ModelValidation.hpp"  // v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg (closes PARITY-012)
+#include "../CoreFrameworks/ModelValidation.hpp"  // v5.14.2.E.1 — NodeModelZoo_ValidateAgainstCfg (closes PARITY-012)
 #include "../ML_Headers/FeatureRegistryOverlay.hpp"  // v5.14.3.B — FeatureOverlay_PostLoadVerify
 #include "../CoreFrameworks/EventLoopAggregates.hpp"
 #include "../CoreFrameworks/ExecutionCore.hpp"
@@ -53,7 +53,7 @@
 #include "../GUI/CandleAccumulator.hpp"  // Track E.7 — chart panel feed
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML cores (E.2)
-#include "../ML_Headers/CoreModelZoo.hpp"     // E.2 — load per-core ML zoos
+#include "../ML_Headers/NodeModelZoo.hpp"     // E.2 — load per-core ML zoos
 #include "../ML_Headers/ModelInference.hpp"   // for stamp helpers
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../ML_Headers/ROR_regressor.hpp"
@@ -121,8 +121,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     cfg.slow_path_max_secs = 999999;
     results->config_used = cfg;
 
-    fprintf(stderr, "[backtest sharded] mode=sharded cores=%u default_strategy=%d\n",
-            (unsigned)cfg.num_execution_cores, cfg.default_strategy);
+    fprintf(stderr, "[backtest sharded] mode=sharded nodes=%u default_strategy=%d\n",
+            (unsigned)cfg.num_execution_nodes, cfg.default_strategy);
 
     // v5.10.0 Item C-stub — csv_load_workers cfg field is wired in v5.10.0D
     // but not yet consumed. Pipeline parallelism (load file f+1 while
@@ -138,7 +138,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     }
 
     // Partial exits P.1 — validate cfg before allocating cores. When
-    // partial_exit_enabled=1, refuses to run if num_execution_cores*2
+    // partial_exit_enabled=1, refuses to run if num_execution_nodes*2
     // exceeds MAX_PORTFOLIO_POSITIONS. Mirrors the EngineSharded_Run
     // boot-time check so backtest + live agree on cfg sanity.
     if (!Sharded_ValidatePartialExitCfg(&cfg)) {
@@ -148,7 +148,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     }
 
     // Track E.2 — multi-strategy support. The prior SimpleDip-only gate
-    // is gone; per-core strategy comes from cfg.core_strategies[i] (set
+    // is gone; per-core strategy comes from cfg.node_strategies[i] (set
     // by ControllerConfig_Load from `core_N_strategy=...` directives,
     // defaults to STRATEGY_SIMPLE_DIP when unset). Mirrors EngineSharded_Run
     // lines 559-648.
@@ -182,7 +182,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     int bt_partial_exit_enabled =
         BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` arg DELETED from OrderManager_Init; OMS fee_rate
-    // scalar fields deleted. Per-core fee_rate now flows via cfg.cores[c].fee_rate_maker/_taker
+    // scalar fields deleted. Per-core fee_rate now flows via cfg.nodes[c].fee_rate_maker/_taker
     // → Order_BindPreResolved at submit → o->pre_resolved.fee_rate → HandleFill.
     OrderManager_Init(&oms, empty_adapter, 0, bt_partial_exit_enabled,
                       cfg.starting_balance,
@@ -208,7 +208,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // calls same helper). Body preserved verbatim from prior inline at BACKTEST :198 +
     // :210-212 + :217-221 → CoreFrameworks/EngineCommon.hpp:181-200 (Init +
     // ConfigureKillSwitch + Regime_Init loop with cfg-driven hysteresis per
-    // cfg.cores[i].regime_hysteresis). Note: helper INTERNAL order is
+    // cfg.nodes[i].regime_hysteresis). Note: helper INTERNAL order is
     // Init → KillSwitch → Regime; prior BACKTEST inline order was Init → Regime →
     // KillSwitch. Order-of-operations bytewise-identical because each step is
     // independent — Init sets defaults; KillSwitch + Regime_Init both write to
@@ -216,35 +216,35 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // cross-dependency. Train-serve parity preserved.
     EngineCommon_BootGlobal(cfg, state, oms);
 
-    int num_cores = (int)cfg.num_execution_cores;
-    if (num_cores < 1) num_cores = 1;
-    if (num_cores > MAX_EXECUTION_CORES) num_cores = MAX_EXECUTION_CORES;
+    int num_nodes = (int)cfg.num_execution_nodes;
+    if (num_nodes < 1) num_nodes = 1;
+    if (num_nodes > MAX_EXECUTION_NODES) num_nodes = MAX_EXECUTION_NODES;
 
     // Allocate per-core resources on the stack — small fixed array, no malloc
-    static SPSCRing<Tick<BACKTEST_FP>, EXECUTION_CORE_TICK_RING_SIZE> tick_rings[MAX_EXECUTION_CORES];
-    static ExecutionCore<BACKTEST_FP> cores[MAX_EXECUTION_CORES];
+    static SPSCRing<Tick<BACKTEST_FP>, EXECUTION_NODE_TICK_RING_SIZE> tick_rings[MAX_EXECUTION_NODES];
+    static ExecutionCore<BACKTEST_FP> nodes[MAX_EXECUTION_NODES];
 
     // Risk slice per core: even split of (total_balance × risk_pct) across
-    // cores, with cfg.core_risk_pct[i] override allowed. Mirrors
+    // cores, with cfg.node_risk_pct[i] override allowed. Mirrors
     // EngineSharded_Run lines 549-557.
     double total_balance = Money_ToDouble(cfg.starting_balance);
     double default_risk = Money_ToDouble(cfg.risk_pct);
     if (default_risk <= 0.0) default_risk = 0.10;
-    double default_per_core = (total_balance * default_risk) / (double)num_cores;
-    if (default_per_core < 1.0) default_per_core = 1.0;
+    double default_per_node = (total_balance * default_risk) / (double)num_nodes;
+    if (default_per_node < 1.0) default_per_node = 1.0;
 
     // Track E.2 — per-core ML model zoos. Static so they persist across the
-    // call (CoreModelZoo holds open file/model handles); free + re-init each
+    // call (NodeModelZoo holds open file/model handles); free + re-init each
     // run to avoid stale state when the user runs multiple backtests with
     // different ML configs in one suite session.
-    static CoreModelZoo<BACKTEST_FP> ml_zoos[MAX_EXECUTION_CORES];
+    static NodeModelZoo<BACKTEST_FP> ml_zoos[MAX_EXECUTION_NODES];
     // v5.10.0a.G.5 — per-core ensemble zoo (multi-horizon). Allocated alongside
     // single-zoo; populated by EnsembleModelZoo_AutoDetectFromDir if base_dir
     // has _horizon_<H> siblings on disk. Default empty = ezoo->active=0 =
     // single-zoo path runs unchanged.
-    static EnsembleModelZoo<BACKTEST_FP> ml_ensemble_zoos[MAX_EXECUTION_CORES];
+    static EnsembleModelZoo<BACKTEST_FP> ml_ensemble_zoos[MAX_EXECUTION_NODES];
 
-    for (int i = 0; i < num_cores; ++i) {
+    for (int i = 0; i < num_nodes; ++i) {
         // v5.15.5.F.4d.1.B.4 Step C.2 — per-core boot extracted to
         // EngineCommon_BootPerCore (TECH_DEBT-119 closure + closes PARITY-027 +
         // PARITY-028 (BindCompositeCfg + RollingTurnover_Init NEW for BACKTEST) +
@@ -252,7 +252,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // sister at Step C.1 invokes same helper). Helper body preserved verbatim from
         // prior inline at BACKTEST :252-417 → CoreFrameworks/EngineCommon.hpp:233-427.
         //
-        // BACKTEST caller owns: core_balance precompute (O2 bytewise-identical math) +
+        // BACKTEST caller owns: node_balance precompute (O2 bytewise-identical math) +
         // ML zoo Free+Init prior-run state (static array vs LIVE aligned_alloc heap;
         // multi-run-per-process discipline frees accumulated state from prior backtest
         // in same suite session) + post-helper bandit_state_prior_path operator override
@@ -260,18 +260,18 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // analog at this scope).
 
         // Per-core risk: same as LIVE per v1.6 O2 bytewise-identical math discipline.
-        double core_balance = default_per_core;
-        if (!Money_IsZero(cfg.core_risk_pct[i])) {
-            core_balance = total_balance * Money_ToDouble(cfg.core_risk_pct[i]);
-            if (core_balance < 1.0) core_balance = 1.0;
+        double node_balance = default_per_node;
+        if (!Money_IsZero(cfg.node_risk_pct[i])) {
+            node_balance = total_balance * Money_ToDouble(cfg.node_risk_pct[i]);
+            if (node_balance < 1.0) node_balance = 1.0;
         }
 
-        // BACKTEST ML zoo Free+Init prior-run state. CoreModelZoo holds heap
+        // BACKTEST ML zoo Free+Init prior-run state. NodeModelZoo holds heap
         // allocations; double-Init without Free leaks the prior allocation.
-        CoreModelZoo<BACKTEST_FP>* zoo_ptr = nullptr;
+        NodeModelZoo<BACKTEST_FP>* zoo_ptr = nullptr;
         EnsembleModelZoo<BACKTEST_FP>* ezoo_ptr = nullptr;
-        if (cfg.core_strategies[i] == STRATEGY_ML) {
-            CoreModelZoo_Free(&ml_zoos[i]);
+        if (cfg.node_strategies[i] == STRATEGY_ML) {
+            NodeModelZoo_Free(&ml_zoos[i]);
             EnsembleModelZoo_Free(&ml_ensemble_zoos[i]);
             zoo_ptr  = &ml_zoos[i];
             ezoo_ptr = &ml_ensemble_zoos[i];
@@ -282,16 +282,16 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // ML branch (load/init/post-load/validate/overlay/ConfidenceScorer + NEW
         // BindCompositeCfg + NEW RollingTurnover_Init) + NEW Strategy_InitPerCore +
         // SetPermission.
-        EngineCommon_BootPerCore(cfg, i, state, tick_rings[i], cores[i],
+        EngineCommon_BootPerCore(cfg, i, state, tick_rings[i], nodes[i],
                                   zoo_ptr, ezoo_ptr,
-                                  Money{ money_from_double_payload(core_balance) });
+                                  Money{ money_from_double_payload(node_balance) });
 
         // Post-helper BACKTEST-only operator override (Decision B external wrapper).
         // v5.10.0a.next.1 — operator-explicit prior path overrides the default
         // LoadBanditState the helper just ran. Skips bundle-id check (operator may
         // be transferring weights from a sibling bundle deliberately for
         // transfer-learning experiments).
-        if (state.cores[i].ensemble_handle != nullptr && run_cfg && run_cfg->bandit_state_prior_path[0]) {
+        if (state.nodes[i].ensemble_handle != nullptr && run_cfg && run_cfg->bandit_state_prior_path[0]) {
             EnsembleModelZoo_LoadBanditStateFromPath(
                 &ml_ensemble_zoos[i],
                 run_cfg->bandit_state_prior_path,
@@ -422,7 +422,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // Train-serve regime parity via per-core read (PARITY-031 closure):
     // EngineCommon_SlowPathCycleAllCores fires Regime_Classify per-core
     // before this callback runs (ShardedBacktestDriver tick ordering);
-    // collector reads state.cores[BACKTEST_REGIME_SAMPLE_CORE].regime_state
+    // collector reads state.nodes[BACKTEST_REGIME_SAMPLE_CORE].regime_state
     // at feature-pack time — bytewise-identical to live serve path.
 
     if (run_cfg->collect_features) {
@@ -486,7 +486,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 FeatureComputeCtx<BACKTEST_FP> ctx{};
                 ctx.signals       = &sig;
                 ctx.short_rolling = d->rolling;
-                ctx.current_regime = d->state->cores[BACKTEST_REGIME_SAMPLE_CORE].regime_state.current_regime;
+                ctx.current_regime = d->state->nodes[BACKTEST_REGIME_SAMPLE_CORE].regime_state.current_regime;
                 int n = Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
                 if (n < 0) {
@@ -667,7 +667,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 
             // Step the per-core engine through this tick. Internally:
             //   1. RollingStats_Push so the slow path has fresh data
-            //   2. Fan out to every core (1..num_cores)
+            //   2. Fan out to every core (1..num_nodes)
             //   3. DrainEvents (process any entries / exits)
             //   4. On cadence: rebuild parameters, push, evaluate kill switch
             //   5. Track E.1 — fire on_slow_path hook (when registered)
@@ -697,9 +697,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 uint32_t min_samples = cfg.min_warmup_samples > 0
                     ? cfg.min_warmup_samples : 64;
                 if (rolling.count >= (int)min_samples) {
-                    for (int c = 0; c < num_cores; ++c) {
-                        if (state.cores[c].strategy_id != STRATEGY_NONE) {
-                            ExecutionCore_SetPermission(&cores[c], 1);
+                    for (int c = 0; c < num_nodes; ++c) {
+                        if (state.nodes[c].strategy_id != STRATEGY_NONE) {
+                            ExecutionCore_SetPermission(&nodes[c], 1);
                         }
                     }
                     warmup_permission_granted = 1;
@@ -719,19 +719,19 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 fprintf(stderr, "  rolling.volume_avg : %.4f\n", FPN_ToDouble(rolling.volume_avg));
                 fprintf(stderr, "  rolling_long.max   : %.4f\n", FPN_ToDouble(rolling_long.price_max));
                 fprintf(stderr, "  core[0] pending bg_threshold : %.4f\n",
-                        Money_ToDouble(state.cores[0].pending_params.bg_price_threshold));
+                        Money_ToDouble(state.nodes[0].pending_params.bg_price_threshold));
                 fprintf(stderr, "  core[0] pending tp_price     : %.4f\n",
-                        Money_ToDouble(state.cores[0].pending_params.sg_take_profit_price));
+                        Money_ToDouble(state.nodes[0].pending_params.sg_take_profit_price));
                 fprintf(stderr, "  core[0] pending sl_price     : %.4f\n",
-                        Money_ToDouble(state.cores[0].pending_params.sg_stop_loss_price));
+                        Money_ToDouble(state.nodes[0].pending_params.sg_stop_loss_price));
                 fprintf(stderr, "  core[0] pending trade_size   : %.8f\n",
-                        Money_ToDouble(state.cores[0].pending_params.trade_size));
+                        Money_ToDouble(state.nodes[0].pending_params.trade_size));
                 fprintf(stderr, "  core[0] pending strategy_id  : %u\n",
-                        (unsigned)state.cores[0].pending_params.strategy_id);
+                        (unsigned)state.nodes[0].pending_params.strategy_id);
                 fprintf(stderr, "  core[0] pending flags        : 0x%02x\n",
-                        (unsigned)state.cores[0].pending_params.flags);
+                        (unsigned)state.nodes[0].pending_params.flags);
                 fprintf(stderr, "  core[0] permission           : %u\n",
-                        (unsigned)__atomic_load_n(&cores[0].permission, __ATOMIC_ACQUIRE));
+                        (unsigned)__atomic_load_n(&nodes[0].permission, __ATOMIC_ACQUIRE));
             }
 
             // After the drain, check if any new exits happened by comparing
@@ -858,22 +858,22 @@ done:
     free(file_tick_counts);
 
     // v5.10.0a.G.9 — save bandit state on backtest completion. Each
-    // core writes to its own <core_model_dir>/bandit_state.json. This
+    // core writes to its own <node_model_dir>/bandit_state.json. This
     // is the "save at shutdown" trigger from the G.9 plan; periodic
     // saves (cfg.ensemble_bandit_save_interval) cover the in-flight
     // case but final flush ensures end-state is persisted even if
     // total updates < interval.
-    for (int i = 0; i < num_cores; ++i) {
+    for (int i = 0; i < num_nodes; ++i) {
         if (BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_ACTIVE) &&
             BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_BANDITS_READY) &&
-            cfg.core_model_dir[i][0]) {
+            cfg.node_model_dir[i][0]) {
             int saved = EnsembleModelZoo_SaveBanditState(
-                &ml_ensemble_zoos[i], cfg.core_model_dir[i],
+                &ml_ensemble_zoos[i], cfg.node_model_dir[i],
                 /*regime_names=*/nullptr);
             if (saved) {
                 fprintf(stderr, "[backtest sharded] core %d: saved bandit state to "
                                 "%s/bandit_state.json\n",
-                        i, cfg.core_model_dir[i]);
+                        i, cfg.node_model_dir[i]);
             }
         }
     }

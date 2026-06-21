@@ -303,7 +303,7 @@ template <unsigned F> inline void Portfolio_RemovePosition(Portfolio<F> *portfol
 // [PER-CORE SHARDING SLOT HELPERS]
 //======================================================================================================
 // per-core sharding (phase 04+) binds each execution core to a fixed portfolio
-// slot. slot index == core_id directly. these helpers open and close a slot by
+// slot. slot index == node_id directly. these helpers open and close a slot by
 // index instead of the auto-assigning __builtin_ctz path used by the legacy
 // hot path. controller core calls these from PortfolioController_OnEvent when
 // it processes a TradeEvent from a per-core event ring.

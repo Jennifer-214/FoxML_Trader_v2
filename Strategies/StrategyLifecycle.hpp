@@ -37,7 +37,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../CoreFrameworks/ControllerConfig.hpp"
-#include "../CoreFrameworks/ControllerEventLoop.hpp"  // CoreContext, EventLoopState
+#include "../CoreFrameworks/ControllerEventLoop.hpp"  // NodeContext, EventLoopState
 #include "Momentum.hpp"
 #include "MeanReversion.hpp"
 #include "SimpleDip.hpp"
@@ -117,8 +117,8 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
                                   uint8_t strategy_id,
                                   const RollingStats<F, W>* rolling,
                                   const ControllerConfig<F>* cfg) {
-    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
-    auto& ctx = state->cores[slot];
+    if (slot < 0 || slot >= MAX_EXECUTION_NODES) return;
+    auto& ctx = state->nodes[slot];
     if (ctx.strategy_state) {
         Strategy_FreePerCore(state, slot);
     }
@@ -185,8 +185,8 @@ inline void Strategy_AdaptPerCore(
     const ControllerConfig<F>* cfg,
     const FPN_Binary<F>* ema_price = nullptr   // v5.4.0 Phase 2.4 — EmaCross uses this; others ignore
 ) {
-    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
-    auto& ctx = state->cores[slot];
+    if (slot < 0 || slot >= MAX_EXECUTION_NODES) return;
+    auto& ctx = state->nodes[slot];
     if (!ctx.strategy_state) return;  // no allocated state → no Adapt
 
     // Stack-local scratch — legacy _Adapt signature wants buy_conds, sharded
@@ -264,7 +264,7 @@ template <unsigned F>
 inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
                                      Money proposed_sl, Money entry_price,
                                      const ControllerConfig<F>* cfg) {
-    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return false;
+    if (slot < 0 || slot >= MAX_EXECUTION_NODES) return false;
     if (Money_IsZero(entry_price)) return false;
 
     // Cap proposal at entry × (1 - 3 × fee_rate_taker). Same formula as the
@@ -272,18 +272,18 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
     // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
     // (UNINDEXED-GLOBAL closure). 5 callers (MeanReversion + MLStrategy +
     // EmaCross + Momentum + ControllerEventLoop) all pass per-core slot.
-    Money fee_taker = !Money_IsZero(cfg->cores[slot].fee_rate_taker)
-        ? cfg->cores[slot].fee_rate_taker : cfg->cores[slot].fee_rate;
+    Money fee_taker = !Money_IsZero(cfg->nodes[slot].fee_rate_taker)
+        ? cfg->nodes[slot].fee_rate_taker : cfg->nodes[slot].fee_rate;
     Money three     = Money_FromInt(3);
     Money floor_pct = Money_Mul(fee_taker, three);
     Money floor_mult = Money_Sub(Money_FromInt(1), floor_pct);
     Money sl_floor  = Money_Mul(entry_price, floor_mult);
     Money capped    = Money_Lt(proposed_sl, sl_floor) ? proposed_sl : sl_floor;
 
-    auto& ctx = state->cores[slot];
+    auto& ctx = state->nodes[slot];
     if (Money_Gt(capped, ctx.pending_params.ratchet_sl)) {
         ctx.pending_params.ratchet_sl = capped;
-        CORE_STATE_FLAG_SET(ctx, DIRTY);
+        NODE_STATE_FLAG_SET(ctx, DIRTY);
         return true;
     }
     return false;
@@ -303,13 +303,13 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
 template <unsigned F>
 inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
                                      Money proposed_tp) {
-    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return false;
+    if (slot < 0 || slot >= MAX_EXECUTION_NODES) return false;
     if (Money_IsZero(proposed_tp)) return false;
 
-    auto& ctx = state->cores[slot];
+    auto& ctx = state->nodes[slot];
     if (Money_Gt(proposed_tp, ctx.pending_params.ratchet_tp)) {
         ctx.pending_params.ratchet_tp = proposed_tp;
-        CORE_STATE_FLAG_SET(ctx, DIRTY);
+        NODE_STATE_FLAG_SET(ctx, DIRTY);
         return true;
     }
     return false;
@@ -341,8 +341,8 @@ inline void Strategy_ExitAdjustPerCore(
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* cfg
 ) {
-    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
-    auto& ctx = state->cores[slot];
+    if (slot < 0 || slot >= MAX_EXECUTION_NODES) return;
+    auto& ctx = state->nodes[slot];
     if (!ctx.strategy_state) return;
 
     // v5.8.0: dispatch via FOREACH_STRATEGY(X). SimpleDip's
@@ -373,8 +373,8 @@ inline void Strategy_ExitAdjustPerCore(
 //======================================================================================================
 template <unsigned F>
 inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
-    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
-    auto& ctx = state->cores[slot];
+    if (slot < 0 || slot >= MAX_EXECUTION_NODES) return;
+    auto& ctx = state->nodes[slot];
     if (!ctx.strategy_state) {
         ctx.strategy_state_kind = 0xFF;
         return;

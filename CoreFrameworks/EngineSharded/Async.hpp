@@ -24,7 +24,7 @@
 // thread body in EngineSharded.hpp). Lambda bodies never referenced BENCH.
 //
 // **Captures-as-args translation:** fan_out captured 21 by-ref/by-value bindings + 4
-// explicit params. Several were file-scope statics inside EngineSharded_Run (cores[],
+// explicit params. Several were file-scope statics inside EngineSharded_Run (nodes[],
 // tick_rings[], g_tick_rec, g_depth_shared, g_shared, g_candle_acc) which CANNOT be
 // referenced from a separate .hpp — they're function-local statics. They're passed as
 // explicit args. drain_with_submit captured 4 by-ref bindings; all become explicit args.
@@ -49,8 +49,8 @@
 #include "../../MemHeaders/LatencyHistogram.hpp"
 #include "../../MemHeaders/HealthLog.hpp"
 #include "../../MemHeaders/OmsFieldRegistry.hpp"          // OMS_RESET_AUTOPOPULATE
-#include "../../MemHeaders/CoreCtxInitRegistry.hpp"        // CORE_CTX_RESET_AUTOPOPULATE
-#include "../../MemHeaders/CoreStateFlagRegistry.hpp"      // CORE_STATE_FLAG_{SET,CLR}
+#include "../../MemHeaders/NodeCtxInitRegistry.hpp"        // NODE_CTX_RESET_AUTOPOPULATE
+#include "../../MemHeaders/NodeStateFlagRegistry.hpp"      // NODE_STATE_FLAG_{SET,CLR}
 
 #include "../ControllerConfig.hpp"          // ControllerConfig + ControllerConfig_Load
 #include "../ControllerEventLoop.hpp"       // EventLoop_OnEvent / _KillSwitchEvaluate / _UpdateEmaPriceAllCores / Sharded_LegSlot
@@ -122,7 +122,7 @@ inline LatencyHistogram g_engine_drainer_cycle_hist{};
 //   - by-ref captures (13): seq, ticks_produced, last_price, last_volume, cfg, state,
 //     oms, slow_path_counter, ema_price, paper_reset_in_progress, topo_hot_cpu,
 //     topo_slow_cpu, topo_poll_interval
-//   - by-value captures (8): num_cores, slow_path_interval, tsc_ghz, ema_alpha,
+//   - by-value captures (8): num_nodes, slow_path_interval, tsc_ghz, ema_alpha,
 //     live_trading, topo_producer_cpu, topo_drainer_cpu, topo_nproc
 //   - file-local-static args (6 — NOT captures; passed because they're function-local
 //     statics in EngineSharded_Run and CANNOT be referenced from header scope):
@@ -139,7 +139,7 @@ inline bool EngineSharded_Async_FanOut(
     uint64_t ts_us,
     int is_buyer_maker,
     // By-value captures
-    int num_cores,
+    int num_nodes,
     int slow_path_interval,
     double tsc_ghz,
     FPN_Binary<F> ema_alpha,
@@ -162,8 +162,8 @@ inline bool EngineSharded_Async_FanOut(
     int* topo_slow_cpu,       // 16-element
     uint32_t* topo_poll_interval,  // 16-element
     // File-local-static args (passed because not accessible from header scope)
-    SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE>* tick_rings,
-    ExecutionCore<F>* cores,
+    SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>* tick_rings,
+    ExecutionCore<F>* nodes,
     TickRecorder& tick_rec,
     DepthSharedState<F>& depth_shared,
     TUISharedState* shared_ptr,     // nullable; #ifdef USE_IMGUI_GUI gates dereference
@@ -181,7 +181,7 @@ inline bool EngineSharded_Async_FanOut(
     t.timestamp = ts_us;
     t.sequence = seq++;
     t.is_buyer_maker = (uint8_t)(is_buyer_maker ? 1 : 0);
-    for (int c = 0; c < num_cores; ++c) {
+    for (int c = 0; c < num_nodes; ++c) {
         while (!SPSCRing_TryPush(&tick_rings[c], t)) {
             if (g_engine_sharded_shutdown) return false;
         }
@@ -312,7 +312,7 @@ inline bool EngineSharded_Async_FanOut(
         // edited via the GUI never took effect until restart. Re-read
         // engine.cfg, copy reloadable fields into the in-memory cfg.
         //
-        // Boot-only fields are preserved (num_execution_cores,
+        // Boot-only fields are preserved (num_execution_nodes,
         // model paths, starting_balance, fee_rate_maker/taker, exchange
         // routing, recording flags). Tunables are bulk-copied including
         // the per-core overrides array.
@@ -322,15 +322,15 @@ inline bool EngineSharded_Async_FanOut(
             // boot-only: preserve fields that the running engine cannot
             // change live (would require thread restart, file I/O off
             // the controller thread, or different per-core wiring).
-            new_cfg.num_execution_cores = cfg.num_execution_cores;
+            new_cfg.num_execution_nodes = cfg.num_execution_nodes;
             new_cfg.starting_balance    = cfg.starting_balance;
             for (int c = 0; c < 16; ++c) {
-                memcpy(new_cfg.core_model_path[c],
-                       cfg.core_model_path[c],
-                       sizeof(cfg.core_model_path[c]));
-                memcpy(new_cfg.core_model_dir[c],
-                       cfg.core_model_dir[c],
-                       sizeof(cfg.core_model_dir[c]));
+                memcpy(new_cfg.node_model_path[c],
+                       cfg.node_model_path[c],
+                       sizeof(cfg.node_model_path[c]));
+                memcpy(new_cfg.node_model_dir[c],
+                       cfg.node_model_dir[c],
+                       sizeof(cfg.node_model_dir[c]));
             }
             cfg = new_cfg;
 
@@ -339,7 +339,7 @@ inline bool EngineSharded_Async_FanOut(
             // EngineSharded_Run init and never refreshed — changing
             // risk_pct or core_N_risk_pct in cfg was silently
             // stale. Mirror the startup formula here.
-            // NOTE: don't touch core_open_notional during reload —
+            // NOTE: don't touch node_open_notional during reload —
             // open positions still exist; the new allocation either
             // expands or shrinks the budget but the deployed
             // notional is unchanged.
@@ -347,15 +347,15 @@ inline bool EngineSharded_Async_FanOut(
                 double total_balance = Money_ToDouble(cfg.starting_balance);
                 double default_risk  = Money_ToDouble(cfg.risk_pct);
                 if (default_risk <= 0.0) default_risk = 0.10;
-                double default_per_core = (total_balance * default_risk) / (double)num_cores;
-                if (default_per_core < 1.0) default_per_core = 1.0;
-                for (int c = 0; c < num_cores; ++c) {
-                    double core_balance = default_per_core;
-                    if (!Money_IsZero(cfg.core_risk_pct[c])) {
-                        core_balance = total_balance * Money_ToDouble(cfg.core_risk_pct[c]);
-                        if (core_balance < 1.0) core_balance = 1.0;
+                double default_per_node = (total_balance * default_risk) / (double)num_nodes;
+                if (default_per_node < 1.0) default_per_node = 1.0;
+                for (int c = 0; c < num_nodes; ++c) {
+                    double node_balance = default_per_node;
+                    if (!Money_IsZero(cfg.node_risk_pct[c])) {
+                        node_balance = total_balance * Money_ToDouble(cfg.node_risk_pct[c]);
+                        if (node_balance < 1.0) node_balance = 1.0;
                     }
-                    state.cores[c].allocated_balance = Money{ money_from_double_payload(core_balance) };
+                    state.nodes[c].allocated_balance = Money{ money_from_double_payload(node_balance) };
                 }
             }
             fprintf(stderr, "[sharded] cfg hot-reloaded "
@@ -367,12 +367,12 @@ inline bool EngineSharded_Async_FanOut(
         // current value. GUI-only — shared_ptr lives inside the
         // USE_IMGUI_GUI ifdef.
         if (shared_ptr) {
-            for (int c = 0; c < num_cores; ++c) {
-                if (shared_ptr->kill_reset_per_core[c]) {
-                    shared_ptr->kill_reset_per_core[c] = 0;
-                    CORE_STATE_FLAG_CLR(state.cores[c], KILL_TRIPPED);
-                    state.cores[c].core_peak_balance = Money_Zero();
-                    state.cores[c].core_dd_pct = Money_Zero();
+            for (int c = 0; c < num_nodes; ++c) {
+                if (shared_ptr->kill_reset_per_node[c]) {
+                    shared_ptr->kill_reset_per_node[c] = 0;
+                    NODE_STATE_FLAG_CLR(state.nodes[c], KILL_TRIPPED);
+                    state.nodes[c].node_peak_balance = Money_Zero();
+                    state.nodes[c].node_dd_pct = Money_Zero();
                     fprintf(stderr, "[sharded] core %d kill switch RESET\n", c);
                 }
             }
@@ -482,13 +482,13 @@ inline bool EngineSharded_Async_FanOut(
             // populate from sharded state
             // v5.1.2: TUI snapshot reads engine 0's slow_state since
             // all engines have identical pushes (same input/cadence).
-            auto* sst0 = state.cores[0].slow_state;
+            auto* sst0 = state.nodes[0].slow_state;
             if (sst0) {
                 TUI_CopySnapshotSharded(bs, &state, &sst0->rolling_short,
                                          &sst0->rolling_long, &cfg, price_d, volume_d);
             }
-            TUI_PopulatePerCoreLatency(bs, cores, num_cores, tsc_ghz);
-            // v5.0.1 (Phase H): slow-path latency from CoreContext.
+            TUI_PopulatePerCoreLatency(bs, nodes, num_nodes, tsc_ghz);
+            // v5.0.1 (Phase H): slow-path latency from NodeContext.
             TUI_PopulatePerCoreSlowPathLatency(bs, &state, tsc_ghz);
             // v5.0.2 (Phase H): topology — system + thread layout.
             TUI_PopulateTopology(bs,
@@ -580,7 +580,7 @@ inline bool EngineSharded_Async_FanOut(
             // archived sessions in data/paper_resets/{start_iso}_to_{end_iso}.paper/
             //   - snapshot.dat: full OMS + per-core state (ShardedSnapshot_Save)
             //   - trades.csv:    copy of logging/SYMBOL_order_history.csv
-            //   - summary.json:  session + global + per_core + per_strategy +
+            //   - summary.json:  session + global + per_node + per_strategy +
             //                     per_regime (per_regime is empty placeholder;
             //                     Phase 5.B follow-up or focused aggregator
             //                     populates from trades.csv post-rotation)
@@ -652,32 +652,32 @@ inline bool EngineSharded_Async_FanOut(
                                       "%s/trades.csv", dirname);
                         copy_file(trade_src, trade_dst);
 
-                        // Per-core copies: <dirname>/trades/core_<N>.csv (N = 0..MAX_EXECUTION_CORES-1).
+                        // Per-core copies: <dirname>/trades/core_<N>.csv (N = 0..MAX_EXECUTION_NODES-1).
                         // Per-core source filename built via the single source of truth
                         // (ShardedTradeLog_FormatPerCoreFilename — also used by _Init + _Rotate).
                         char trades_subdir[384];
                         std::snprintf(trades_subdir, sizeof(trades_subdir),
                                       "%s/trades", dirname);
                         if (tt::PaperResetArchive_CreateDirectories(trades_subdir)) {
-                            for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
-                                if (!state.oms->trade_log->per_core_files[c]) continue;
+                            for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
+                                if (!state.oms->trade_log->per_node_files[c]) continue;
                                 char per_src[256], per_dst[512];
                                 if (!tt::ShardedTradeLog_FormatPerCoreFilename(
                                         per_src, sizeof(per_src),
                                         state.oms->trade_log->symbol, c)) continue;
                                 std::snprintf(per_dst, sizeof(per_dst),
-                                              "%s/core_%d.csv", trades_subdir, c);
+                                              "%s/node_%d.csv", trades_subdir, c);
                                 copy_file(per_src, per_dst);
                             }
                         }
                     }
 
-                    // 3) summary.json — session + global + per_core + per_strategy + per_regime
+                    // 3) summary.json — session + global + per_node + per_strategy + per_regime
                     char summary_path[512];
                     std::snprintf(summary_path, sizeof(summary_path),
                                   "%s/summary.json", dirname);
                     tt::Summary_WriteJson(summary_path, state, cfg,
-                                           num_cores, end_us);
+                                           num_nodes, end_us);
 
                     std::fprintf(stderr,
                         "[archive] paper-reset session archived: %s "
@@ -703,18 +703,18 @@ inline bool EngineSharded_Async_FanOut(
             state.total_entries = 0;
             state.total_exits   = 0;
             state.total_events_processed = 0;
-            // v5.15.5.B.7 — Per-slot paper-reset via CORE_CTX_RESET_AUTOPOPULATE
+            // v5.15.5.B.7 — Per-slot paper-reset via NODE_CTX_RESET_AUTOPOPULATE
             // companion macro. Closes the per-session-counter mirror class
             // structurally: ~16 explicit field resets pre-.B.7 (anchored by
             // Phase 2.1 P&L leak, Phase 3 kill switch, v4.7.26 partner pairing
             // + gross accumulator leak, v5.4.3 SL-cooldown / idle-cycle leak)
             // collapse to ONE registry-driven walk. Adding a new "per-session
-            // counter" in the future = ONE row in FOREACH_CORE_CTX_RESET_FIELD;
-            // every paper-reset site auto-flows. See MemHeaders/CoreCtxInitRegistry.hpp.
-            for (int c = 0; c < num_cores; ++c) {
-                CORE_CTX_RESET_AUTOPOPULATE(state, c);
-                // persist-8 (.E.0.10): CORE_CTX_RESET resets ctx VALUE fields, but the ExecutionCore is a
-                // pointer-target (CoreCtxInitRegistry.hpp:94 "pointer; registration persists") — its hot
+            // counter" in the future = ONE row in FOREACH_NODE_CTX_RESET_FIELD;
+            // every paper-reset site auto-flows. See MemHeaders/NodeCtxInitRegistry.hpp.
+            for (int c = 0; c < num_nodes; ++c) {
+                NODE_CTX_RESET_AUTOPOPULATE(state, c);
+                // persist-8 (.E.0.10): NODE_CTX_RESET resets ctx VALUE fields, but the ExecutionCore is a
+                // pointer-target (NodeCtxInitRegistry.hpp:94 "pointer; registration persists") — its hot
                 // mirror is outside the registry's reach. Clear the active flag so the (un-parked) hot path
                 // doesn't evaluate TP/SL on the now-wiped portfolio until the next cadence-gated slow-path
                 // re-arm. Single-byte flag (hardware-atomic on x86); once active=0 the hot path skips the
@@ -722,7 +722,7 @@ inline bool EngineSharded_Async_FanOut(
                 // is guarded downstream (OrderManager.hpp:1185 active_bitmap check) → hygiene, LOW severity.
                 // The robust version (full hot-path quiesce during reset, like the slow path at Run.hpp:1670)
                 // pairs with conc-5's concurrency pass.
-                cores[c].active = 0;
+                nodes[c].active = 0;
             }
             // v4.7.18: rotate the trade history CSV to a timestamped
             // backup so the GUI's Trade History panel goes blank
@@ -755,7 +755,7 @@ inline bool EngineSharded_Async_FanOut(
 //======================================================================================================
 // EngineSharded_Async_DrainWithSubmit — hoist of drainer-thread drain_with_submit lambda
 //======================================================================================================
-// Drains each core's TradeEvent ring (up to MAX_EVENTS_PER_DRAIN_PER_CORE per ring per
+// Drains each core's TradeEvent ring (up to MAX_EVENTS_PER_DRAIN_PER_NODE per ring per
 // cycle), calls EventLoop_OnEvent for bookkeeping, computes order qty (with partial-
 // exit-leg split), builds SubmitCommand, and pushes to OMS via OMS_PushSubmit (so the
 // drainer's later OMS_DrainSubmit pass serializes Submit calls). Returns the total
@@ -778,17 +778,17 @@ inline int EngineSharded_Async_DrainWithSubmit(
     // vs N events × 1 read. Saves ~16-32 cycles/cycle at typical burst.
     const int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     for (int slot = 0; slot < state.registered_count; ++slot) {
-        ExecutionCore<F>* core = state.cores[slot].core;
+        ExecutionCore<F>* core = state.nodes[slot].core;
         if (core == nullptr) continue;
-        for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_CORE; ++i) {
+        for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_NODE; ++i) {
             TradeEvent<F> event;
             if (!SPSCRing_TryPop(&core->event_ring, &event)) break;
 
             bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
             bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
 
-            // P.3: map (core_id, leg) → portfolio slot. When
-            // partial_exit_enabled=0, slot == core_id (1:1 mapping
+            // P.3: map (node_id, leg) → portfolio slot. When
+            // partial_exit_enabled=0, slot == node_id (1:1 mapping
             // preserves pre-P.3 behavior). When enabled, slot = 2*c+leg.
             // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
             // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
@@ -808,7 +808,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
             if (is_exit) {
                 // Exit qty: read from the LEG's portfolio slot (leg A's
                 // qty for leg A exit, leg B's for leg B exit). With
-                // partials disabled, portfolio_slot == slot == core_id
+                // partials disabled, portfolio_slot == slot == node_id
                 // and behavior is identical to pre-P.3.
                 order_qty_d = Money_ToDouble(
                     state.oms->portfolio.positions[portfolio_slot].quantity);
@@ -820,13 +820,13 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // v4.7.32: read partial_exit_pct from per-core override
                 // when set (0 = inherit). Pre-fix it always read global,
                 // making the per-core override a silent no-op.
-                // v5.15.5.C.4 Phase T1: hoisted core_overrides[slot] ref —
+                // v5.15.5.C.4 Phase T1: hoisted node_overrides[slot] ref —
                 // single deref shared with the tp2_mult read at line ~2386
                 // below (was two separate `const auto&` declarations).
-                double full_qty = Money_ToDouble(state.cores[slot].intended_qty);
-                const auto& ov_slot = cfg.core_overrides[slot];
+                double full_qty = Money_ToDouble(state.nodes[slot].intended_qty);
+                const auto& ov_slot = cfg.node_overrides[slot];
                 Money partial_pct = !Money_IsZero(ov_slot.partial_exit_pct)
-                    ? ov_slot.partial_exit_pct : cfg.cores[slot].partial_exit_pct;
+                    ? ov_slot.partial_exit_pct : cfg.nodes[slot].partial_exit_pct;
                 if (partial_on && event.leg == PARTIAL_LEG_A) {
                     order_qty_d = full_qty * Money_ToDouble(partial_pct);
                 } else if (partial_on && event.leg == PARTIAL_LEG_B) {
@@ -849,11 +849,11 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // the panel display honest AND prevents
                 // snapshot-restore-while-paired from reviving leg B
                 // with TP1 instead of TP2.
-                Money leg_tp = state.cores[slot].intended_tp;
+                Money leg_tp = state.nodes[slot].intended_tp;
                 if (is_entry && partial_on && event.leg == PARTIAL_LEG_B) {
                     // v5.15.5.C.4 Phase T1: use leg_tp local (already
                     // captured at line above) instead of re-reading
-                    // state.cores[slot].intended_tp; saves 1 indexed read.
+                    // state.nodes[slot].intended_tp; saves 1 indexed read.
                     Money tp_dist_a = Money_Sub(leg_tp, event.price);
                     // v4.7.32: per-core tp2_mult override (0 = inherit).
                     // v5.15.5.C.4 Phase T1: NOTE — `ov_slot` from earlier
@@ -863,9 +863,9 @@ inline int EngineSharded_Async_DrainWithSubmit(
                     // Future structural fix: hoist `ov_slot` to top of
                     // iteration (above is_exit/is_entry split) if more
                     // sites need it.
-                    const auto& ov_tp2 = cfg.core_overrides[slot];
+                    const auto& ov_tp2 = cfg.node_overrides[slot];
                     Money tp2_mult_eff = !Money_IsZero(ov_tp2.tp2_mult)
-                        ? ov_tp2.tp2_mult : cfg.cores[slot].tp2_mult;
+                        ? ov_tp2.tp2_mult : cfg.nodes[slot].tp2_mult;
                     Money tp_dist_b = Money_Mul(tp_dist_a, tp2_mult_eff);
                     leg_tp = Money_Add(event.price, tp_dist_b);
                 }
@@ -874,15 +874,15 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // queue + calls Submit serially — preserves OMS single-
                 // caller contract for when Phase C spawns N producers.
                 // v5.15.5.F.4c.3 WIP2d-1.B.1 option (A refined) — required-field ctor + optional .field = X.
-                // ctor: (core_id, type, qty, leg, core_cfg); optional intended_tp/intended_sl/strategy_id/event_price.
-                SubmitCommand<F> cmd((int16_t)portfolio_slot,                                       // P.3: actual slot, not core_id
+                // ctor: (node_id, type, qty, leg, node_cfg); optional intended_tp/intended_sl/strategy_id/event_price.
+                SubmitCommand<F> cmd((int16_t)portfolio_slot,                                       // P.3: actual slot, not node_id
                                       is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
                                       Money{ money_from_double_payload(order_qty_d) },  // partial-qty exact split rides P3
                                       event.leg,                                                    // P.3: leg propagated to Order
-                                      &cfg.cores[slot]);                                            // per-core cfg (sharded: core_id == slot)
+                                      &cfg.nodes[slot]);                                            // per-core cfg (sharded: node_id == slot)
                 cmd.intended_tp = leg_tp;
-                cmd.intended_sl = state.cores[slot].intended_sl;
-                cmd.strategy_id = state.cores[slot].strategy_id;
+                cmd.intended_sl = state.nodes[slot].intended_sl;
+                cmd.strategy_id = state.nodes[slot].strategy_id;
                 cmd.event_price = event.price;
                 // A25 (D-205): resolve the per-fill TP fraction (A1 SSoT — picks the per-node
                 // override, NOT global take_profit_pct) + carry it so handle_buy_fill arms
@@ -898,11 +898,11 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // strategy's tp_pct → original_tp != live_tp (the bug A25 fixes, for AUTO). This
                 // matches A1's restore path (ShardedSnapshotPersist.hpp uses resolved_strategy_id).
                 if (is_entry) {
-                    Money tp_pct_eff = ResolvePerFillTpPct(state.cores[slot].resolved_strategy_id, cfg.cores[slot]);
+                    Money tp_pct_eff = ResolvePerFillTpPct(state.nodes[slot].resolved_strategy_id, cfg.nodes[slot]);
                     if (partial_on && event.leg == PARTIAL_LEG_B) {
-                        const auto& ov_tp2b = cfg.core_overrides[slot];
+                        const auto& ov_tp2b = cfg.node_overrides[slot];
                         Money tp2m = !Money_IsZero(ov_tp2b.tp2_mult)
-                            ? ov_tp2b.tp2_mult : cfg.cores[slot].tp2_mult;
+                            ? ov_tp2b.tp2_mult : cfg.nodes[slot].tp2_mult;
                         tp_pct_eff = Money_Mul(tp_pct_eff, tp2m);
                     }
                     cmd.tp_pct = tp_pct_eff;
@@ -916,21 +916,21 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // Only on leg A entry — leg B is part of the same trade,
                 // shouldn't double-stamp the prediction.
                 if (is_entry && event.leg == PARTIAL_LEG_A &&
-                    state.cores[slot].strategy_id == STRATEGY_ML) {
-                    state.cores[slot].active_prediction =
-                        state.cores[slot].staged_prediction;
+                    state.nodes[slot].strategy_id == STRATEGY_ML) {
+                    state.nodes[slot].active_prediction =
+                        state.nodes[slot].staged_prediction;
                 }
                 // v4.0.3 spacing + time-based exit: stamp this entry
                 // for cross-cutting checks on the next rebuild. Only
                 // on leg A entry (one trade = one entry stamp).
                 if (is_entry && event.leg == PARTIAL_LEG_A) {
-                    state.cores[slot].last_entry_price = event.price;
-                    state.cores[slot].last_entry_tick  = ticks_produced.load(std::memory_order_relaxed);
+                    state.nodes[slot].last_entry_price = event.price;
+                    state.nodes[slot].last_entry_tick  = ticks_produced.load(std::memory_order_relaxed);
                     // v4.7.6: wall-clock entry time so GUI's "Hold"
                     // column can show real elapsed minutes for open
                     // positions. Microseconds since epoch — divide
                     // by 60_000_000 in the snapshot copy for minutes.
-                    state.cores[slot].last_entry_wall_us = (uint64_t)
+                    state.nodes[slot].last_entry_wall_us = (uint64_t)
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count();
                 }

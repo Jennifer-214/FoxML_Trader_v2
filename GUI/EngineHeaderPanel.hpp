@@ -16,7 +16,7 @@
 //   MODEL_FORMAT_VERSION (ModelInference.hpp)
 //
 // This panel is the operator-visible counterpart to the boot-log line
-// emitted by CoreModelZoo_TryLoadRole at model load. Shows what the
+// emitted by NodeModelZoo_TryLoadRole at model load. Shows what the
 // CURRENT BUILD speaks; per-loaded-model match state is in the boot log.
 // (Future ship can extend this panel with per-model match status if
 // the boot log proves insufficient — for now it's deliberately minimal.)

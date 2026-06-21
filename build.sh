@@ -260,15 +260,15 @@ run_tests() {
 
 # v5.15.5.F.4c.3 WIP2d-0 — per-core cfg registry integrity check (H17 STRONG enforcement).
 # Runs BEFORE any build to catch structural drift in:
-#   - FOREACH_PER_CORE_CFG_FIELD ↔ FOREACH_PER_CORE_FIELD_TYPE bidirectional sync
-#   - PerCoreCfg<F> body manual-field bypass (X-macro must be sole source)
-#   - ControllerConfig parallel arrays ↔ FOREACH_MANUAL_PER_CORE_FIELD ↔ MANUAL_FIELDS_INVENTORY.md
+#   - FOREACH_PER_NODE_CFG_FIELD ↔ FOREACH_PER_NODE_FIELD_TYPE bidirectional sync
+#   - PerNodeCfg<F> body manual-field bypass (X-macro must be sole source)
+#   - ControllerConfig parallel arrays ↔ FOREACH_MANUAL_PER_NODE_FIELD ↔ MANUAL_FIELDS_INVENTORY.md
 #   - Name duplication between registries
 # Failure = build aborted with diff suggesting registry migration.
-# See tools/check_per_core_registry_integrity.py for full check list.
-check_per_core_cfg_integrity() {
+# See tools/check_per_node_registry_integrity.py for full check list.
+check_per_node_cfg_integrity() {
     echo "--- per-core cfg integrity check (WIP2d-0) ---"
-    if [ -f tools/check_per_core_registry_integrity.py ] && ! python3 tools/check_per_core_registry_integrity.py; then
+    if [ -f tools/check_per_node_registry_integrity.py ] && ! python3 tools/check_per_node_registry_integrity.py; then
         echo "[build] ABORT: per-core cfg integrity check FAILED — fix violations above before build"
         exit 1
     fi
@@ -276,40 +276,40 @@ check_per_core_cfg_integrity() {
 
 case "$TARGET" in
     engine)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_engine
         ;;
     gui)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_gui
         ;;
     gui-lite)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_gui_lite
         ;;
     suite)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_suite
         ;;
     all)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_engine
         build_gui
         ;;
     test)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         run_tests
         ;;
     latency)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_latency
         ;;
     pgo)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_pgo
         ;;
     tsan)
-        check_per_core_cfg_integrity
+        check_per_node_cfg_integrity
         build_tsan
         ;;
     asan)

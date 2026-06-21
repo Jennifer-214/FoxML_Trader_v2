@@ -61,7 +61,7 @@
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_BIT_U8 + BITMAP_* accessors
 
 // NOTE: deliberately NOT wrapped in `namespace tt` — see EzooInitFlagRegistry.hpp
-// for rationale (matches CoreModelZoo.hpp consumer convention).
+// for rationale (matches NodeModelZoo.hpp consumer convention).
 
 //======================================================================================================
 // [REGISTRY TUPLE]
@@ -109,7 +109,7 @@ enum {
 // uint8_t bitmap fields. Each invocation expands to one
 // `uint8_t <field_name>;` line per registry entry.
 //
-// Usage in CoreModelZoo.hpp:
+// Usage in NodeModelZoo.hpp:
 //   struct EnsembleModelZoo<F> {
 //       // ... other fields ...
 //       PER_ARM_FLAG_DECLARE_FIELDS()  // expands to uint8_t per-flag bitmap fields

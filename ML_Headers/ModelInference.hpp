@@ -312,14 +312,14 @@ struct alignas(64) ModelHandle {
     int      backend;                //  4 B — MODEL_BACKEND_NONE / XGBOOST / LIGHTGBM
     int      num_features;           //  4 B — expected input dimension
     // v5.11.62 — buy class for multiclass models. Default 0 (binary positive
-    // class). CoreModelZoo loader sets: 0 for buy_signal; 1 for barrier
+    // class). NodeModelZoo loader sets: 0 for buy_signal; 1 for barrier
     // num_outputs=3 (PEAK_VALLEY_STABLE class 1 = peak); 0 for regime
     // (operator chooses semantics via cfg). Out-of-range falls back to 0.
     int      num_outputs;            //  4 B — 1 = binary/regression, ≥2 = multiclass softmax
     int      buy_class_idx;          //  4 B
-    // v5.9.3a — Gap H observability. Set by CoreModelZoo_TryLoadRole when
+    // v5.9.3a — Gap H observability. Set by NodeModelZoo_TryLoadRole when
     // scaler load fails in non-strict mode. Surfaces to
-    // PerCoreSnap.ml_scaler_load_failed for ML Status panel.
+    // PerNodeSnap.ml_scaler_load_failed for ML Status panel.
     int      scaler_load_failed;     //  4 B
     uint8_t  normalizer;             //  1 B — prediction_normalizer_t enum; default NORM_IDENTITY
     // v5.12.3.A — composite-signal extractor. When num_classes_active > 1,
@@ -339,7 +339,7 @@ struct alignas(64) ModelHandle {
     // chokepoint. Storage uses FOREACH_FAILURE_MODE bit positions via
     // FAILURE_MASK_<name> (e.g., FAILURE_MASK_feature_hash_drift). Read
     // by ShardedSnapshot_Publish which OR-aggregates across all 4 zoo
-    // roles into PerCoreSnap.failure_flags. Repurposes 2 B of v5.15.0's
+    // roles into PerNodeSnap.failure_flags. Repurposes 2 B of v5.15.0's
     // _hot_pad1; net cluster size unchanged.
     uint16_t drift_flags_at_load;    //  2 B
     // 14 B explicit zero-init padding (CLAUDE.md item 27) fills HOT
@@ -382,7 +382,7 @@ struct alignas(64) ModelHandle {
     // ModelHandle (sister to ModelStampResult struct-gen at line 1236 + StampInferenceCfgInputs at
     // line 1742). Same STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() macro; F=64 brought into struct scope
     // (sister pattern at lines 1173 + 1722). After Phase F HIGH-1 (b) row deletion at Step 2:
-    // handle.<name> auto-gen IS the sole source for cfg-derived field storage at runtime; CoreModelZoo
+    // handle.<name> auto-gen IS the sole source for cfg-derived field storage at runtime; NodeModelZoo
     // load-time copy `handle.<name> = sr.<name>` flows sr (cfg-derived auto-gen on ModelStampResult)
     // → handle (cfg-derived auto-gen here). Drift check via cfg_derived::drift_check_from_derived
     // reads handle.<name> (cfg-derived) + cfg.<name> (cfg-derived) — same source-of-truth surface.
@@ -450,7 +450,7 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->target_classes[0]  = m->buy_class_idx;
     // v5.9.3a — scaler init. FeatureStandardizer_Init sets non-zero
     // defaults (stddev[i]=1.0, winsor bounds=±INFINITY) beyond what
-    // brace-init zero-fills. CoreModelZoo_TryLoadRole calls
+    // brace-init zero-fills. NodeModelZoo_TryLoadRole calls
     // FeatureStandardizer_Load post-Model_Load to populate from sidecar.
     tt::FeatureStandardizer_Init(&m->scaler);
 }
@@ -594,7 +594,7 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
 //   3. (validation) — 1000-feature parity test: AOT == C API within 1e-6
 //
 // Failure-mode contract: the engine never fires Predict_AOT in this ship
-// because Model_LoadAOT always returns -1. Caller (CoreModelZoo) sees the
+// because Model_LoadAOT always returns -1. Caller (NodeModelZoo) sees the
 // failure, logs a single INFO line, and proceeds with MODEL_BACKEND_XGBOOST.
 // Operator behavior is bytewise identical to pre-.D when use_aot_inference=0
 // or when AOT load fails — the cfg flag is opt-in and load failure is
@@ -920,9 +920,9 @@ inline float Model_Predict_Ensemble_Weighted(
         return Model_Predict(&models[0], features, num_features);
     }
 
-    // Local buffers sized to match ENSEMBLE_HORIZON_MAX (CoreModelZoo.hpp);
+    // Local buffers sized to match ENSEMBLE_HORIZON_MAX (NodeModelZoo.hpp);
     // hardcoded 8 here to avoid circular include (this header is included
-    // by CoreModelZoo.hpp).
+    // by NodeModelZoo.hpp).
     float predictions[8];
     int   valid[8];
     if (count > 8) count = 8;  // bound safety

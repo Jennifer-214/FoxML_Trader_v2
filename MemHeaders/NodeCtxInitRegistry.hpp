@@ -7,7 +7,7 @@
 //======================================================================================================
 // X-macro registries + AUTOPOPULATE companion macros for per-core init
 // and paper-reset paths. Closes a Class-18 mirror class (CLAUDE.md item
-// 19): pre-.B.7, adding a new CoreContext field that needed boot-time
+// 19): pre-.B.7, adding a new NodeContext field that needed boot-time
 // init required touching `EventLoopState_Init` (~50 line loop body);
 // adding a per-session counter also required touching the paper-reset
 // path in `EngineSharded.hpp:2237+`. Forgetting either → silently wrong
@@ -19,29 +19,29 @@
 //
 // Two registries (intentional separation — semantic distinction):
 //
-//   FOREACH_CORE_CTX_INIT_FIELD(X)
-//     ~40 entries. ALL boot-init fields on CoreContext that take a
+//   FOREACH_NODE_CTX_INIT_FIELD(X)
+//     ~40 entries. ALL boot-init fields on NodeContext that take a
 //     value-init (FPN_Binary<F>=Zero, scalar=0/HALT_OK/STRATEGY_NONE/-1,
 //     pointer=nullptr, etc.). Walked at boot only.
 //
-//   FOREACH_CORE_CTX_RESET_FIELD(X)
+//   FOREACH_NODE_CTX_RESET_FIELD(X)
 //     ~15 entries. STRICT SUBSET of init fields — only the "per-session
 //     state that should reset between operator-initiated session
 //     boundaries" (paper reset). Carefully selected (NOT a blanket
-//     `core_state_flags = 0` or `pnl_feeder = Init()` which would
+//     `node_state_flags = 0` or `pnl_feeder = Init()` which would
 //     destroy load-bearing state like loaded models, IC history,
 //     regression feedback, regime hysteresis). v4.7.21 / v4.7.26 /
 //     v5.4.3 / Phase 2.1 / Phase 3 anchor each membership decision.
 //
 // AUTOPOPULATE macros (multi-target dispatch):
 //
-//   CORE_CTX_INIT_AUTOPOPULATE(state_ptr, i)
+//   NODE_CTX_INIT_AUTOPOPULATE(state_ptr, i)
 //     One-line per-slot boot init. Covers value-init registry walk +
 //     6 helper-Init calls (sub-structs) + 4 sp_telemetry atomic stores +
-//     slow_state arena allocation + CoreContextDisplayMeta_Init sibling
+//     slow_state arena allocation + NodeContextDisplayMeta_Init sibling
 //     init. The ONLY thing left at the call site is the for-loop.
 //
-//   CORE_CTX_RESET_AUTOPOPULATE(state_ref, c)
+//   NODE_CTX_RESET_AUTOPOPULATE(state_ref, c)
 //     One-line per-slot paper-reset. Covers reset-subset registry walk +
 //     selective KILL_TRIPPED bitmap clear + engine-wide partner_pending
 //     bitmap clear for core c. The ONLY thing left at the call site is
@@ -53,8 +53,8 @@
 // cleaner error diagnostics + lets the helpers be called independently
 // from outside the macros if ever needed.
 //
-// MUST be included AFTER CoreContext<F>, EventLoopState<F>,
-// CoreContextDisplayMeta<F>, SlowPathTelemetry, and all helper-Init
+// MUST be included AFTER NodeContext<F>, EventLoopState<F>,
+// NodeContextDisplayMeta<F>, SlowPathTelemetry, and all helper-Init
 // function declarations are visible (otherwise the inline helpers in
 // this header fail to compile).
 //
@@ -66,8 +66,8 @@
 //   DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md
 //   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
 //======================================================================================================
-#ifndef CORE_CTX_INIT_REGISTRY_HPP
-#define CORE_CTX_INIT_REGISTRY_HPP
+#ifndef NODE_CTX_INIT_REGISTRY_HPP
+#define NODE_CTX_INIT_REGISTRY_HPP
 
 #include <atomic>
 #include <cstdint>
@@ -78,18 +78,18 @@ namespace tt {
 // [BOOT-INIT FIELD REGISTRY]
 //======================================================================================================
 // Tuple: X(NAME, TYPE, INIT_VALUE)
-//   NAME       — field name on CoreContext (lowercase snake_case)
+//   NAME       — field name on NodeContext (lowercase snake_case)
 //   TYPE       — C++ field type; cast applied at write site via (TYPE)(INIT_VALUE)
 //   INIT_VALUE — initial value at boot; FPN_Binary<F>=FPN_Zero<F>(), scalar=numeric, ptr=nullptr
 //
 // Order matches the historical EventLoopState_Init body to preserve
 // review-readability + match documentation. Field grouping reflects the
-// CoreContext HOT/WARM/COLD cluster layout from v5.15.5.B.1.
+// NodeContext HOT/WARM/COLD cluster layout from v5.15.5.B.1.
 //
 // Adding a new boot-init field: append ONE row here. AUTOPOPULATE picks
 // it up at next compile.
 //======================================================================================================
-#define FOREACH_CORE_CTX_INIT_FIELD(X)                                                              \
+#define FOREACH_NODE_CTX_INIT_FIELD(X)                                                              \
     /* HOT cluster — dispatch metadata + handles */                                                 \
     X(core,                       ExecutionCore<F>*,  nullptr)                                      \
     X(model_handle,               void*,              nullptr)                                      \
@@ -98,7 +98,7 @@ namespace tt {
     X(strategy_id,                uint8_t,            STRATEGY_NONE)                                \
     X(resolved_strategy_id,       uint8_t,            STRATEGY_NONE)                                \
     X(strategy_state_kind,        uint8_t,            0xFF)                                         \
-    X(core_state_flags,           uint8_t,            0)                                            \
+    X(node_state_flags,           uint8_t,            0)                                            \
     /* HOT cluster — intended trade values */                                                       \
     X(intended_tp,                Money,                     Money_Zero())                                \
     X(intended_sl,                Money,                     Money_Zero())                                \
@@ -124,19 +124,19 @@ namespace tt {
     X(sl_cooldown_remaining,      uint32_t,           0)                                            \
     X(idle_cycles,                uint32_t,           0)                                            \
     /* WARM cluster — per-core P&L (v4.0.4) */                                                      \
-    X(core_realized,              Money,                     Money_Zero())                                \
-    X(core_fees,                  Money,                     Money_Zero())                                \
-    X(core_wins,                  uint32_t,           0)                                            \
-    X(core_losses,                uint32_t,           0)                                            \
+    X(node_realized,              Money,                     Money_Zero())                                \
+    X(node_fees,                  Money,                     Money_Zero())                                \
+    X(node_wins,                  uint32_t,           0)                                            \
+    X(node_losses,                uint32_t,           0)                                            \
     /* WARM cluster — partner pairing + gross accumulators (v4.7.21/26) */                          \
     X(partner_pending_pnl,        Money,                     Money_Zero())                                \
-    X(core_gross_wins,            Money,                     Money_Zero())                                \
-    X(core_gross_losses,          Money,                     Money_Zero())                                \
-    X(core_open_notional,         Money,                     Money_Zero())                                \
+    X(node_gross_wins,            Money,                     Money_Zero())                                \
+    X(node_gross_losses,          Money,                     Money_Zero())                                \
+    X(node_open_notional,         Money,                     Money_Zero())                                \
     /* WARM cluster — per-core kill switch (Phase 3) */                                             \
-    X(core_peak_balance,          Money,                     Money_Zero())                                \
-    X(core_dd_pct,                Money,                     Money_Zero())                                \
-    X(core_ks_trips_total,        uint32_t,           0)
+    X(node_peak_balance,          Money,                     Money_Zero())                                \
+    X(node_dd_pct,                Money,                     Money_Zero())                                \
+    X(node_ks_trips_total,        uint32_t,           0)
 
 //======================================================================================================
 // [PAPER-RESET FIELD REGISTRY]
@@ -146,12 +146,12 @@ namespace tt {
 // STRICT SUBSET of init fields — only state that MUST reset between
 // operator-initiated paper-reset boundaries (vs boot init which resets
 // EVERYTHING). Membership decisions anchored in:
-//   - Phase 2.1 (P&L + budget leak): core_realized, core_fees, core_wins,
-//     core_losses, core_open_notional
-//   - Phase 3 (kill switch leak): core_peak_balance, core_dd_pct,
-//     core_ks_trips_total + KILL_TRIPPED bitmap clear (in AUTOPOPULATE)
+//   - Phase 2.1 (P&L + budget leak): node_realized, node_fees, node_wins,
+//     node_losses, node_open_notional
+//   - Phase 3 (kill switch leak): node_peak_balance, node_dd_pct,
+//     node_ks_trips_total + KILL_TRIPPED bitmap clear (in AUTOPOPULATE)
 //   - v4.7.21/26 (partner pairing + gross accumulator leak):
-//     partner_pending_pnl, core_gross_wins, core_gross_losses +
+//     partner_pending_pnl, node_gross_wins, node_gross_losses +
 //     partner_pending_bitmap clear (in AUTOPOPULATE)
 //   - v5.4.3 (recurring-bugs Class 5): sl_cooldown_remaining, idle_cycles
 //   - Counter reset: entries_processed, exits_processed
@@ -170,24 +170,24 @@ namespace tt {
 // Adding a new field to the reset subset: append ONE row. AUTOPOPULATE
 // picks it up at next compile.
 //======================================================================================================
-#define FOREACH_CORE_CTX_RESET_FIELD(X)                                                             \
+#define FOREACH_NODE_CTX_RESET_FIELD(X)                                                             \
     /* Counter resets */                                                                            \
     X(entries_processed,          uint64_t,           0)                                            \
     X(exits_processed,            uint64_t,           0)                                            \
     /* Phase 2.1 — P&L + budget leak prevention */                                                  \
-    X(core_realized,              Money,                     Money_Zero())                                \
-    X(core_fees,                  Money,                     Money_Zero())                                \
-    X(core_wins,                  uint32_t,           0)                                            \
-    X(core_losses,                uint32_t,           0)                                            \
-    X(core_open_notional,         Money,                     Money_Zero())                                \
+    X(node_realized,              Money,                     Money_Zero())                                \
+    X(node_fees,                  Money,                     Money_Zero())                                \
+    X(node_wins,                  uint32_t,           0)                                            \
+    X(node_losses,                uint32_t,           0)                                            \
+    X(node_open_notional,         Money,                     Money_Zero())                                \
     /* Phase 3 — kill switch leak prevention */                                                     \
-    X(core_peak_balance,          Money,                     Money_Zero())                                \
-    X(core_dd_pct,                Money,                     Money_Zero())                                \
-    X(core_ks_trips_total,        uint32_t,           0)                                            \
+    X(node_peak_balance,          Money,                     Money_Zero())                                \
+    X(node_dd_pct,                Money,                     Money_Zero())                                \
+    X(node_ks_trips_total,        uint32_t,           0)                                            \
     /* v4.7.21/26 — partner pairing + gross accumulator leak prevention */                          \
     X(partner_pending_pnl,        Money,                     Money_Zero())                                \
-    X(core_gross_wins,            Money,                     Money_Zero())                                \
-    X(core_gross_losses,          Money,                     Money_Zero())                                \
+    X(node_gross_wins,            Money,                     Money_Zero())                                \
+    X(node_gross_losses,          Money,                     Money_Zero())                                \
     /* v5.4.3 (recurring-bugs Class 5) — cooldown + idle-cycle leak prevention */                   \
     X(sl_cooldown_remaining,      uint32_t,           0)                                            \
     X(idle_cycles,                uint32_t,           0)
@@ -201,16 +201,16 @@ namespace tt {
 //======================================================================================================
 
 template <unsigned F>
-inline void _core_ctx_init_value_fields(CoreContext<F>& ctx) {
+inline void _node_ctx_init_value_fields(NodeContext<F>& ctx) {
 #define X(NAME, TYPE, INIT_VAL) ctx.NAME = (TYPE)(INIT_VAL);
-    FOREACH_CORE_CTX_INIT_FIELD(X)
+    FOREACH_NODE_CTX_INIT_FIELD(X)
 #undef X
 }
 
 template <unsigned F>
-inline void _core_ctx_reset_value_fields(CoreContext<F>& ctx) {
+inline void _node_ctx_reset_value_fields(NodeContext<F>& ctx) {
 #define X(NAME, TYPE, INIT_VAL) ctx.NAME = (TYPE)(INIT_VAL);
-    FOREACH_CORE_CTX_RESET_FIELD(X)
+    FOREACH_NODE_CTX_RESET_FIELD(X)
 #undef X
 }
 
@@ -218,18 +218,18 @@ inline void _core_ctx_reset_value_fields(CoreContext<F>& ctx) {
 // Encapsulates the 2-branch dispatch so future allocator changes
 // (e.g., NUMA-aware arenas, huge-page pool selection) update ONE site.
 template <unsigned F>
-inline void _alloc_and_init_slow_state(CoreContext<F>& ctx) {
+inline void _alloc_and_init_slow_state(NodeContext<F>& ctx) {
     if (auto* arena = tt::InitArena_Global()) {
         void* mem = tt::InitArena_Alloc(arena,
-                                         sizeof(CoreSlowState<F>),
-                                         alignof(CoreSlowState<F>));
+                                         sizeof(NodeSlowState<F>),
+                                         alignof(NodeSlowState<F>));
         ctx.slow_state = mem
-            ? new (mem) CoreSlowState<F>()
-            : new CoreSlowState<F>();
+            ? new (mem) NodeSlowState<F>()
+            : new NodeSlowState<F>();
     } else {
-        ctx.slow_state = new CoreSlowState<F>();
+        ctx.slow_state = new NodeSlowState<F>();
     }
-    CoreSlowState_Init(ctx.slow_state);
+    NodeSlowState_Init(ctx.slow_state);
 }
 
 //======================================================================================================
@@ -238,20 +238,20 @@ inline void _alloc_and_init_slow_state(CoreContext<F>& ctx) {
 // Public counts via `>=` style (per /readiness Check 21) — useful for
 // downstream consumers + sanity checks.
 //======================================================================================================
-#define _CORE_CTX_INIT_COUNT_ONE(NAME, TYPE, INIT_VAL) +1
-constexpr int CORE_CTX_INIT_FIELD_COUNT =
-    0 FOREACH_CORE_CTX_INIT_FIELD(_CORE_CTX_INIT_COUNT_ONE);
-#undef _CORE_CTX_INIT_COUNT_ONE
-static_assert(CORE_CTX_INIT_FIELD_COUNT >= 30,
-              "FOREACH_CORE_CTX_INIT_FIELD must keep at least the v5.15.5.B.7 "
+#define _NODE_CTX_INIT_COUNT_ONE(NAME, TYPE, INIT_VAL) +1
+constexpr int NODE_CTX_INIT_FIELD_COUNT =
+    0 FOREACH_NODE_CTX_INIT_FIELD(_NODE_CTX_INIT_COUNT_ONE);
+#undef _NODE_CTX_INIT_COUNT_ONE
+static_assert(NODE_CTX_INIT_FIELD_COUNT >= 30,
+              "FOREACH_NODE_CTX_INIT_FIELD must keep at least the v5.15.5.B.7 "
               "set (30+ fields). Removing entries needs explicit justification.");
 
-#define _CORE_CTX_RESET_COUNT_ONE(NAME, TYPE, INIT_VAL) +1
-constexpr int CORE_CTX_RESET_FIELD_COUNT =
-    0 FOREACH_CORE_CTX_RESET_FIELD(_CORE_CTX_RESET_COUNT_ONE);
-#undef _CORE_CTX_RESET_COUNT_ONE
-static_assert(CORE_CTX_RESET_FIELD_COUNT >= 15,
-              "FOREACH_CORE_CTX_RESET_FIELD must keep at least the v5.15.5.B.7 "
+#define _NODE_CTX_RESET_COUNT_ONE(NAME, TYPE, INIT_VAL) +1
+constexpr int NODE_CTX_RESET_FIELD_COUNT =
+    0 FOREACH_NODE_CTX_RESET_FIELD(_NODE_CTX_RESET_COUNT_ONE);
+#undef _NODE_CTX_RESET_COUNT_ONE
+static_assert(NODE_CTX_RESET_FIELD_COUNT >= 15,
+              "FOREACH_NODE_CTX_RESET_FIELD must keep at least the v5.15.5.B.7 "
               "set (15 fields anchored by Phase 2.1/3 + v4.7.21/26 + v5.4.3).");
 
 }  // namespace tt
@@ -259,18 +259,18 @@ static_assert(CORE_CTX_RESET_FIELD_COUNT >= 15,
 //======================================================================================================
 // [AUTOPOPULATE COMPANION MACROS — multi-target dispatch]
 //======================================================================================================
-// CORE_CTX_INIT_AUTOPOPULATE(state_ptr, i)
+// NODE_CTX_INIT_AUTOPOPULATE(state_ptr, i)
 //   One-line per-slot boot init. Covers:
-//     1. ~40 value-init fields via templated helper _core_ctx_init_value_fields
+//     1. ~40 value-init fields via templated helper _node_ctx_init_value_fields
 //     2. 6 helper-Init calls (sub-structs)
 //     3. 4 sp_telemetry atomic stores
-//     4. slow_state arena allocation + CoreSlowState_Init via _alloc_and_init_slow_state
-//     5. CoreContextDisplayMeta_Init for the sibling display_meta[i] entry
+//     4. slow_state arena allocation + NodeSlowState_Init via _alloc_and_init_slow_state
+//     5. NodeContextDisplayMeta_Init for the sibling display_meta[i] entry
 //
-// CORE_CTX_RESET_AUTOPOPULATE(state_ref, c)
+// NODE_CTX_RESET_AUTOPOPULATE(state_ref, c)
 //   One-line per-slot paper-reset. Covers:
-//     1. ~15 reset-subset value-init via templated helper _core_ctx_reset_value_fields
-//     2. Selective CORE_STATE_FLAG_CLR(KILL_TRIPPED) bitmap op
+//     1. ~15 reset-subset value-init via templated helper _node_ctx_reset_value_fields
+//     2. Selective NODE_STATE_FLAG_CLR(KILL_TRIPPED) bitmap op
 //     3. Engine-wide partner_pending_bitmap clear for core c
 //
 // Multi-target dispatch: same registry + helpers serve BOTH boot init
@@ -280,13 +280,13 @@ static_assert(CORE_CTX_RESET_FIELD_COUNT >= 15,
 // or atomic cluster.
 //======================================================================================================
 
-#define CORE_CTX_INIT_AUTOPOPULATE(_state_ptr, _i)                                                  \
+#define NODE_CTX_INIT_AUTOPOPULATE(_state_ptr, _i)                                                  \
     do {                                                                                            \
         auto* _autop_state = (_state_ptr);                                                          \
         int   _autop_idx   = (_i);                                                                  \
-        auto& _autop_ctx   = _autop_state->cores[_autop_idx];                                       \
+        auto& _autop_ctx   = _autop_state->nodes[_autop_idx];                                       \
         /* Layer 1 — registry-driven value-init (~40 fields) */                                     \
-        tt::_core_ctx_init_value_fields(_autop_ctx);                                                \
+        tt::_node_ctx_init_value_fields(_autop_ctx);                                                \
         /* Layer 2 — helper-Init calls (sub-structs with boot defaults) */                          \
         GateParameters_Init(&_autop_ctx.pending_params);                                            \
         ConfidenceScorer_Init(&_autop_ctx.confidence,                                               \
@@ -301,22 +301,22 @@ static_assert(CORE_CTX_RESET_FIELD_COUNT >= 15,
         _autop_ctx.sp_telemetry.cycles_total.store(0, std::memory_order_relaxed);                   \
         _autop_ctx.sp_telemetry.yield_count.store(0, std::memory_order_relaxed);                    \
         _autop_ctx.sp_telemetry.state.store(0, std::memory_order_relaxed);                          \
-        /* Layer 4 — slow_state arena allocation + CoreSlowState_Init */                            \
+        /* Layer 4 — slow_state arena allocation + NodeSlowState_Init */                            \
         tt::_alloc_and_init_slow_state(_autop_ctx);                                                 \
-        /* Layer 5 — sibling-struct init (CoreContextDisplayMeta on EventLoopState) */              \
-        CoreContextDisplayMeta_Init(&_autop_state->display_meta[_autop_idx]);                       \
+        /* Layer 5 — sibling-struct init (NodeContextDisplayMeta on EventLoopState) */              \
+        NodeContextDisplayMeta_Init(&_autop_state->display_meta[_autop_idx]);                       \
     } while (0)
 
-#define CORE_CTX_RESET_AUTOPOPULATE(_state_ref, _c)                                                 \
+#define NODE_CTX_RESET_AUTOPOPULATE(_state_ref, _c)                                                 \
     do {                                                                                            \
         auto& _autop_s   = (_state_ref);                                                            \
         int   _autop_c2  = (_c);                                                                    \
-        auto& _autop_ctx = _autop_s.cores[_autop_c2];                                               \
+        auto& _autop_ctx = _autop_s.nodes[_autop_c2];                                               \
         /* Layer 1 — registry-driven reset-subset value-init (~15 fields) */                        \
-        tt::_core_ctx_reset_value_fields(_autop_ctx);                                               \
+        tt::_node_ctx_reset_value_fields(_autop_ctx);                                               \
         /* Layer 2 — selective bitmap operations (Phase 3 KILL_TRIPPED + v5.14.9.G partner) */      \
-        CORE_STATE_FLAG_CLR(_autop_ctx, KILL_TRIPPED);                                              \
+        NODE_STATE_FLAG_CLR(_autop_ctx, KILL_TRIPPED);                                              \
         BITMAP_CLR(_autop_s.partner_pending_bitmap, BITMAP_BIT_U16(_autop_c2));                     \
     } while (0)
 
-#endif  // CORE_CTX_INIT_REGISTRY_HPP
+#endif  // NODE_CTX_INIT_REGISTRY_HPP

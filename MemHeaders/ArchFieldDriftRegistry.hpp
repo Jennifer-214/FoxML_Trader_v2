@@ -7,7 +7,7 @@
 //======================================================================================================
 // X-macro registry for non-CFG-bound drift detection at model load time.
 // Sister registry to the existing CFG drift loop at
-// `CoreModelZoo.hpp` (post-verify_model_stamp; walks FOREACH_STAMP_BOUND_CFG
+// `NodeModelZoo.hpp` (post-verify_model_stamp; walks FOREACH_STAMP_BOUND_CFG
 // + compares stamp_value vs cfg_value + increments
 // sr.inference_cfg_drift_count).
 //
@@ -21,7 +21,7 @@
 // boot's TryLoadRole walks both registries (CFG + ARCH) + sets the
 // corresponding FOREACH_FAILURE_MODE BIT_FLAG drift entries on the
 // ModelHandle.drift_flags_at_load uint16_t. ShardedSnapshot_Publish
-// OR-aggregates across all 4 zoo roles into PerCoreSnap.failure_flags
+// OR-aggregates across all 4 zoo roles into PerNodeSnap.failure_flags
 // for GUI Model Health rendering + boot-gate consumption.
 //
 // CLOSES recurring "add new arch-field drift check requires touching the
@@ -61,7 +61,7 @@
 //                       Bit set on handle->drift_flags_at_load when stamp
 //                       value diverges from runtime value.
 //
-// Caller usage (in CoreModelZoo_TryLoadRole post-verify):
+// Caller usage (in NodeModelZoo_TryLoadRole post-verify):
 //
 //   #define X(name, stamp_field, runtime_value, fail_mask) \
 //       if ((stamp_field) != (runtime_value)) { \

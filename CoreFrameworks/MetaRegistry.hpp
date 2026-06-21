@@ -37,17 +37,17 @@
     X(FOREACH_REGISTRY,                     0,      ROOT_NONE,                         "Codebase-wide meta-registry of X-macro registries (this one).") \
     /* === Per-core cfg surface (.F.4c.3 framework — WIP2d-0 + WIP2d-0.B) === */                                                                          \
     X(FOREACH_GLOBAL_CFG_FIELD,             1,      FOREACH_REGISTRY,                  "Global cfg fields on ControllerConfig<F> (47 rows; system/training/mode/ack/etc.)") \
-    X(FOREACH_PER_CORE_CFG_FIELD,           1,      FOREACH_REGISTRY,                  "Per-core cfg surface (93 rows; X-macro struct gen + tt:: dispatch).") \
-    X(FOREACH_MANUAL_PER_CORE_FIELD,        1,      FOREACH_REGISTRY,                  "Per-core legacy parallel-array exemptions (12 rows; awaiting .F.4e KIND_STRING/_FILE_PATH/_HEX64).") \
-    X(FOREACH_PER_CORE_DOMAIN_BITMAP,       1,      FOREACH_REGISTRY,                  "Meta-registry of cfg-domain bitmap storage (5 rows; binds LIFECYCLE/GATE/ML/RISK/OPS to PerCoreCfg<F> fields).") \
-    X(FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC,  1,      FOREACH_REGISTRY,                  "AUTOPOPULATE sync sources for NO_FLAT_FIELD-tagged rows (1 row; future per-core-only fields land here mechanically).") \
+    X(FOREACH_PER_NODE_CFG_FIELD,           1,      FOREACH_REGISTRY,                  "Per-core cfg surface (93 rows; X-macro struct gen + tt:: dispatch).") \
+    X(FOREACH_MANUAL_PER_NODE_FIELD,        1,      FOREACH_REGISTRY,                  "Per-core legacy parallel-array exemptions (12 rows; awaiting .F.4e KIND_STRING/_FILE_PATH/_HEX64).") \
+    X(FOREACH_PER_NODE_DOMAIN_BITMAP,       1,      FOREACH_REGISTRY,                  "Meta-registry of cfg-domain bitmap storage (5 rows; binds LIFECYCLE/GATE/ML/RISK/OPS to PerNodeCfg<F> fields).") \
+    X(FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC,  1,      FOREACH_REGISTRY,                  "AUTOPOPULATE sync sources for NO_FLAT_FIELD-tagged rows (1 row; future per-core-only fields land here mechanically).") \
     X(FOREACH_METADATA_BIT,                 1,      FOREACH_REGISTRY,                  "Per-bit mask declarations for CfgFieldDescriptor::MetadataFlag (compile-time bitmap masks).") \
-    /* === Cfg-domain bitmap child registries (managed by FOREACH_PER_CORE_DOMAIN_BITMAP) === */                                                          \
-    X(FOREACH_LIFECYCLE_CFG_FLAG,           2,      FOREACH_PER_CORE_DOMAIN_BITMAP,    "Lifecycle cfg flags (8-bit bitmap; partial_exit_enabled / breakeven flags).") \
-    X(FOREACH_GATE_CFG_FLAG,                2,      FOREACH_PER_CORE_DOMAIN_BITMAP,    "Entry/exit gate cfg flags (8-bit bitmap).") \
-    X(FOREACH_ML_CFG_FLAG,                  2,      FOREACH_PER_CORE_DOMAIN_BITMAP,    "ML/confidence cfg flags (16-bit bitmap; bandit_enabled / composite_enabled / etc.).") \
-    X(FOREACH_RISK_CFG_FLAG,                2,      FOREACH_PER_CORE_DOMAIN_BITMAP,    "Risk/sizing cfg flags (8-bit bitmap).") \
-    X(FOREACH_OPS_CFG_FLAG,                 2,      FOREACH_PER_CORE_DOMAIN_BITMAP,    "Operational cfg flags (8-bit bitmap).") \
+    /* === Cfg-domain bitmap child registries (managed by FOREACH_PER_NODE_DOMAIN_BITMAP) === */                                                          \
+    X(FOREACH_LIFECYCLE_CFG_FLAG,           2,      FOREACH_PER_NODE_DOMAIN_BITMAP,    "Lifecycle cfg flags (8-bit bitmap; partial_exit_enabled / breakeven flags).") \
+    X(FOREACH_GATE_CFG_FLAG,                2,      FOREACH_PER_NODE_DOMAIN_BITMAP,    "Entry/exit gate cfg flags (8-bit bitmap).") \
+    X(FOREACH_ML_CFG_FLAG,                  2,      FOREACH_PER_NODE_DOMAIN_BITMAP,    "ML/confidence cfg flags (16-bit bitmap; bandit_enabled / composite_enabled / etc.).") \
+    X(FOREACH_RISK_CFG_FLAG,                2,      FOREACH_PER_NODE_DOMAIN_BITMAP,    "Risk/sizing cfg flags (8-bit bitmap).") \
+    X(FOREACH_OPS_CFG_FLAG,                 2,      FOREACH_PER_NODE_DOMAIN_BITMAP,    "Operational cfg flags (8-bit bitmap).") \
     /* === Stamp body registries (legacy; consolidates at .F.4d via STAMP_BOUND derived filter) === */                                                    \
     /* v5.15.5.F.4d.1.B.3 Step 3 (2026-05-24): FOREACH_STAMP_BOUND_CFG row DELETED at .B.3 — registry body deleted at Step 2; cfg_derived::populate_stamp_cfg_from_derived<F> framework call supersedes. */ \
     X(FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG,  1,  FOREACH_REGISTRY,                  "Stamp-bound model-const fields PRE-CFG (HMAC body emit order; v5.14.8.A pattern).") \
@@ -77,17 +77,17 @@
     X(FOREACH_HALT_REASON                       , 1,      FOREACH_REGISTRY                 , "Halt reason codes (kill switch / boot refusal / etc.).") \
     X(FOREACH_LIVE_READINESS_CHECK              , 1,      FOREACH_REGISTRY                 , "Live readiness boot checks (mlockall / model age / etc.).") \
     X(FOREACH_LIVES_IN_STRUCT                   , 1,      FOREACH_REGISTRY                 , "Cross-cfg-file LivesInStruct enum (STRUCT_CFG / BACKTEST_CFG / etc.).") \
-    X(FOREACH_CORE_STATE_FLAG                   , 1,      FOREACH_REGISTRY                 , "Core state bit flags (MODEL_LOAD_FAILED / KILL_TRIPPED / etc.).") \
-    X(FOREACH_PER_CORE_STATE_FLAG               , 1,      FOREACH_REGISTRY                 , "Per-core state bit flags (similar shape).") \
+    X(FOREACH_NODE_STATE_FLAG                   , 1,      FOREACH_REGISTRY                 , "Core state bit flags (MODEL_LOAD_FAILED / KILL_TRIPPED / etc.).") \
+    X(FOREACH_PER_NODE_STATE_FLAG               , 1,      FOREACH_REGISTRY                 , "Per-core state bit flags (similar shape).") \
     X(FOREACH_PER_ARM_FLAG                      , 1,      FOREACH_REGISTRY                 , "Per-bandit-arm flags (HAS_BARRIER / etc.).") \
     X(FOREACH_EZOO_INIT_FLAG                    , 1,      FOREACH_REGISTRY                 , "EnsembleModelZoo init flags (MASK_EZOO_ACTIVE / etc.).") \
     X(FOREACH_SESSION_PHASE                     , 1,      FOREACH_REGISTRY                 , "Session phase enum (boot/warmup/active/winddown).") \
-    X(FOREACH_CORE_CTX_INIT_FIELD               , 1,      FOREACH_REGISTRY                 , "Per-core context init fields.") \
-    X(FOREACH_CORE_CTX_RESET_FIELD              , 1,      FOREACH_REGISTRY                 , "Per-core context reset fields.") \
-    X(FOREACH_CORE_CTX_SUMMARY_FIELD            , 1,      FOREACH_REGISTRY                 , "Per-core context summary fields (TUI/snapshot).") \
+    X(FOREACH_NODE_CTX_INIT_FIELD               , 1,      FOREACH_REGISTRY                 , "Per-core context init fields.") \
+    X(FOREACH_NODE_CTX_RESET_FIELD              , 1,      FOREACH_REGISTRY                 , "Per-core context reset fields.") \
+    X(FOREACH_NODE_CTX_SUMMARY_FIELD            , 1,      FOREACH_REGISTRY                 , "Per-core context summary fields (TUI/snapshot).") \
     X(FOREACH_DISPLAY_META_FIELD                , 1,      FOREACH_REGISTRY                 , "Per-core display metadata fields.") \
     X(FOREACH_GATE_DIAG_PAIR                    , 1,      FOREACH_REGISTRY                 , "Gate diagnostic pairs (block/pass counters).") \
-    X(FOREACH_SINGLE_ZOO_POST_LOAD              , 1,      FOREACH_REGISTRY                 , "CoreModelZoo post-load setup steps.") \
+    X(FOREACH_SINGLE_ZOO_POST_LOAD              , 1,      FOREACH_REGISTRY                 , "NodeModelZoo post-load setup steps.") \
     X(FOREACH_ENSEMBLE_POST_LOAD                , 1,      FOREACH_REGISTRY                 , "EnsembleModelZoo post-load setup steps.") \
     X(FOREACH_OMS_PER_SLOT_FIELD                , 1,      FOREACH_REGISTRY                 , "OMS per-slot position fields.") \
     X(FOREACH_OMS_META_SLOT                     , 1,      FOREACH_REGISTRY                 , "OMS meta-slot fields (entry/exit tracking).") \
@@ -101,9 +101,9 @@
     X(FOREACH_CONFIDENCE_PERSIST_FIELD          , 1,      FOREACH_REGISTRY                 , "Confidence persistence fields.") \
     /* v5.15.5.F.4d.1.B.3 Step 3 (2026-05-24): FOREACH_CFG_DERIVED_INFERENCE_CFG row DELETED at .B.3 — registry file deleted at Step 2; cfg-derived consumer framework + StampBoundDerivedFilter at .B.1+ supersede. */ \
     X(FOREACH_CFG_DRIFT_CHECK                   , 1,      FOREACH_REGISTRY                 , "Stamp body drift check fields (legacy; folds into framework at .B.3).") \
-    X(FOREACH_CFG_GATE_PER_CORE                 , 1,      FOREACH_REGISTRY                 , "Per-row gate_when override sidecar for STAMP_BOUND_CFG_DERIVED-flagged per-core cfg fields (.B.1+; H18 first canonical of gate-type sidecar; empty at .B.1; populates at .B.2 cohort migration).") \
-    X(FOREACH_CFG_GATE_GLOBAL                   , 1,      FOREACH_REGISTRY                 , "Per-row gate_when override sidecar for STAMP_BOUND_CFG_DERIVED-flagged global cfg fields (.B.1+; sister to FOREACH_CFG_GATE_PER_CORE).") \
-    X(FOREACH_STAMP_BOUND_DERIVED_COHORT        , 1,      FOREACH_REGISTRY                 , "Action-parameterized meta-walker for STAMP_BOUND_CFG_DERIVED cohort (.B.3 Step 1.6.5b; dispatches to 4 cfg registries: per_core + global + ml_cfg_flag + gate_cfg_flag); single source of truth for cohort coverage; used by 4 cfg-derived consumer template fns + STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN struct-gen meta-walker. Drift impossible by construction per FOREACH_<COHORT>_COHORT pattern at cfg-derived-consumer-framework.md v1.2.") \
+    X(FOREACH_CFG_GATE_PER_NODE                 , 1,      FOREACH_REGISTRY                 , "Per-row gate_when override sidecar for STAMP_BOUND_CFG_DERIVED-flagged per-core cfg fields (.B.1+; H18 first canonical of gate-type sidecar; empty at .B.1; populates at .B.2 cohort migration).") \
+    X(FOREACH_CFG_GATE_GLOBAL                   , 1,      FOREACH_REGISTRY                 , "Per-row gate_when override sidecar for STAMP_BOUND_CFG_DERIVED-flagged global cfg fields (.B.1+; sister to FOREACH_CFG_GATE_PER_NODE).") \
+    X(FOREACH_STAMP_BOUND_DERIVED_COHORT        , 1,      FOREACH_REGISTRY                 , "Action-parameterized meta-walker for STAMP_BOUND_CFG_DERIVED cohort (.B.3 Step 1.6.5b; dispatches to 4 cfg registries: per_node + global + ml_cfg_flag + gate_cfg_flag); single source of truth for cohort coverage; used by 4 cfg-derived consumer template fns + STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN struct-gen meta-walker. Drift impossible by construction per FOREACH_<COHORT>_COHORT pattern at cfg-derived-consumer-framework.md v1.2.") \
     X(FOREACH_ARCH_FIELD_DRIFT                  , 1,      FOREACH_REGISTRY                 , "Architectural field drift check.") \
     X(FOREACH_SLOW_PATH_GATE                    , 1,      FOREACH_REGISTRY                 , "Slow-path gate registry (cfg-flag eligibility canon).") \
     X(FOREACH_SP_SECTION                        , 1,      FOREACH_REGISTRY                 , "Slow-path section enum (regime/rebuild/etc.).") \

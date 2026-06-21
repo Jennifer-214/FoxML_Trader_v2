@@ -7,7 +7,7 @@
 //======================================================================================================
 // X-macro registry for slow-path latency-profiling section indices.
 // Replaces the v5.1.3-era static constexpr int SP_SECTION_* declarations
-// previously nested inside CoreContext<F> (and their back-compat aliases
+// previously nested inside NodeContext<F> (and their back-compat aliases
 // SP_SECTION_OTHER / SP_SECTION_PUSH_PARAMS).
 //
 // Closes a small Class-18 mirror: adding a 6th slow-path section was a

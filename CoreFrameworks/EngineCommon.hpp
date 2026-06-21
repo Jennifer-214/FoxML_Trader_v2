@@ -8,7 +8,7 @@
 //
 // PURPOSE
 // -------
-// Both `EngineSharded_Run` (live; per_core_slow arch) and `BacktestSharded_Run`
+// Both `EngineSharded_Run` (live; per_node_slow arch) and `BacktestSharded_Run`
 // (backtest; iterates per-core via SlowPathCycleOneCore) delegate per-core boot +
 // per-core slow-path-cycle work to the helpers declared here. This collapses the
 // Class 18 mirror between EngineSharded.hpp + BacktestSharded.hpp at the
@@ -49,7 +49,7 @@
 //
 // Legitimate live-only exemptions (per M5 false-positive surface):
 //   - Persistence sinks: ShardedTradeLog_Init, OrderManager_OpenCalibrationLog
-//   - Threading observability: CoreLatencyStats_Enable
+//   - Threading observability: NodeLatencyStats_Enable
 // These STAY in EngineSharded_Run caller scope (NOT in helpers).
 //
 // STATIC-SCOPE DISCIPLINE (Decision G)
@@ -64,12 +64,12 @@
 // Backtest samples regime from a SINGLE canonical core to preserve the pre-.B.4
 // fc_ctx.regime_state semantic (single regime value per feature collector tick).
 // Per-core regime variance IS collected at per-core inference time
-// (state.cores[c].regime_state.current_regime in SlowPathCycleOneCore), but the
+// (state.nodes[c].regime_state.current_regime in SlowPathCycleOneCore), but the
 // backtest feature collector context downstream needs ONE regime value per tick
-// (not [MAX_EXECUTION_CORES]).
+// (not [MAX_EXECUTION_NODES]).
 //
 // Live engine doesn't have this constraint: live inference accesses
-// state.cores[c].regime_state per-core directly (canonical site EngineSharded:3194).
+// state.nodes[c].regime_state per-core directly (canonical site EngineSharded:3194).
 //
 // Rationale for core 0 specifically: preserves sample_regimes=0 semantic that
 // fc_ctx.regime_state held pre-.B.4. Future-readable: grep BACKTEST_REGIME_SAMPLE_CORE
@@ -83,20 +83,20 @@
 #include <x86intrin.h>  // __rdtsc (slow-path latency sampling — sister to EngineSharded.hpp:82)
 
 // Phase B includes (added as helper bodies land; sister-convention relative paths):
-//   B.0 ApplyBnbDiscount → ControllerConfig.hpp (cfg.cores[c].fee_rate_*) + FixedPointN.hpp (FPN_Binary<F> arithmetic)
+//   B.0 ApplyBnbDiscount → ControllerConfig.hpp (cfg.nodes[c].fee_rate_*) + FixedPointN.hpp (FPN_Binary<F> arithmetic)
 //   B.1 BootGlobal → ControllerEventLoop.hpp (EventLoopState_Init + ConfigureKillSwitch) + OrderManager.hpp (OrderManagerState<F>) + RegimeDetector.hpp (Regime_Init)
-#include "ControllerConfig.hpp"                  // ControllerConfig<F>, MAX_EXECUTION_CORES, MASK_RISK_CFG_KILL_SWITCH_ENABLED (transitive via RiskCfgFlagRegistry)
+#include "ControllerConfig.hpp"                  // ControllerConfig<F>, MAX_EXECUTION_NODES, MASK_RISK_CFG_KILL_SWITCH_ENABLED (transitive via RiskCfgFlagRegistry)
 #include "ControllerEventLoop.hpp"               // EventLoopState<F>, EventLoopState_Init, EventLoopState_ConfigureKillSwitch, EventLoopState_RegisterCore, EventLoopState_SetCoreStrategy
 #include "OrderManager.hpp"                      // OrderManagerState<F>
-#include "ExecutionCore.hpp"                     // ExecutionCore<F>, ExecutionCore_Init, ExecutionCore_SetPermission, SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE>
-#include "ModelValidation.hpp"                   // CoreModelZoo_ValidateAgainstCfg (extracted at v5.14.2.E.1; closes PARITY-012)
+#include "ExecutionCore.hpp"                     // ExecutionCore<F>, ExecutionCore_Init, ExecutionCore_SetPermission, SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>
+#include "ModelValidation.hpp"                   // NodeModelZoo_ValidateAgainstCfg (extracted at v5.14.2.E.1; closes PARITY-012)
 #include "../FixedPoint/FixedPointN.hpp"         // FPN_Binary<F>, FPN_Mul, FPN_FromDouble, FPN_Zero, FPN_ToDouble
-#include "../MemHeaders/CoreStateFlagRegistry.hpp"  // CORE_STATE_FLAG_SET, MASK_CORE_STATE_MODEL_LOAD_FAILED
+#include "../MemHeaders/NodeStateFlagRegistry.hpp"  // NODE_STATE_FLAG_SET, MASK_NODE_STATE_MODEL_LOAD_FAILED
 #include "../Strategies/RegimeDetector.hpp"      // Regime_Init
 #include "../Strategies/StrategyInterface.hpp"   // STRATEGY_ML, STRATEGY_NONE (auto-generated via FOREACH_STRATEGY X-macro)
 #include "../Strategies/StrategyLifecycle.hpp"   // tt::Strategy_InitPerCore (closes PARITY-029)
 #include "../ML_Headers/ModelInference.hpp"      // MODEL_BACKEND_XGBOOST
-#include "../ML_Headers/CoreModelZoo.hpp"        // CoreModelZoo<F>, EnsembleModelZoo<F>, CoreModelZoo_Init, EnsembleModelZoo_Init, CoreModelZoo_LoadFromDir, CoreModelZoo_LoadLegacy, CoreModelZoo_PostLoadSetup, EnsembleModelZoo_AutoDetectFromDir, EnsembleModelZoo_PostLoadSetup, CoreModelZoo_Free, MASK_EZOO_ACTIVE
+#include "../ML_Headers/NodeModelZoo.hpp"        // NodeModelZoo<F>, EnsembleModelZoo<F>, NodeModelZoo_Init, EnsembleModelZoo_Init, NodeModelZoo_LoadFromDir, NodeModelZoo_LoadLegacy, NodeModelZoo_PostLoadSetup, EnsembleModelZoo_AutoDetectFromDir, EnsembleModelZoo_PostLoadSetup, NodeModelZoo_Free, MASK_EZOO_ACTIVE
 #include "../ML_Headers/ConfidenceScore.hpp"     // ConfidenceScorer_Init, ConfidenceScorer_BindCompositeCfg, CONFIDENCE_FRESHNESS_TAU_DEFAULT
 #include "../ML_Headers/RollingTurnover.hpp"     // RollingTurnover_Init
 #include "../ML_Headers/FeatureRegistryOverlay.hpp"  // FeatureOverlay_PostLoadVerify
@@ -115,7 +115,7 @@
 //   #include "ML_Headers/ConfidenceScore.hpp"
 //   #include "ML_Headers/RollingTurnover.hpp"
 //   #include "ML_Headers/ModelInference.hpp"           // per-core model load
-//   #include "ML_Headers/CoreModelZoo.hpp"
+//   #include "ML_Headers/NodeModelZoo.hpp"
 //   #include "MemHeaders/BitmapMacros.hpp"
 //   #include "FixedPoint/FixedPointN.hpp"
 //   #include <cstdint>
@@ -148,18 +148,18 @@ constexpr int BACKTEST_REGIME_SAMPLE_CORE = 0;
 //    call this once, so BNB discount applies symmetrically.
 //
 //    Body extracted from EngineSharded.hpp:690-699 (verified at HEAD 64e7101).
-//    Loop uses MAX_EXECUTION_CORES (compile-time max), not cfg.num_execution_cores —
+//    Loop uses MAX_EXECUTION_NODES (compile-time max), not cfg.num_execution_nodes —
 //    preserves exact pre-extract semantic for any future-activated cores.
 template <unsigned F>
 inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
     if (cfg.pay_fees_in_bnb) {
         Money bnb_factor = Money{ 75000000 };  // exact 0.75 (D-173 BNB discount; runtime guard rides P3)
-        for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
-            cfg.cores[c].fee_rate_maker = Money_Mul(cfg.cores[c].fee_rate_maker, bnb_factor);
-            cfg.cores[c].fee_rate_taker = Money_Mul(cfg.cores[c].fee_rate_taker, bnb_factor);
+        for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
+            cfg.nodes[c].fee_rate_maker = Money_Mul(cfg.nodes[c].fee_rate_maker, bnb_factor);
+            cfg.nodes[c].fee_rate_taker = Money_Mul(cfg.nodes[c].fee_rate_taker, bnb_factor);
         }
         fprintf(stderr,
-            "[sharded] BNB fee discount ENABLED — applied per-core to cfg.cores[c].fee_rate_*"
+            "[sharded] BNB fee discount ENABLED — applied per-core to cfg.nodes[c].fee_rate_*"
             " (verify Binance UI 'pay fees in BNB' is also on)\n");
     }
 }
@@ -168,7 +168,7 @@ inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
 //    const cfg ONE-SHOT global boot work (post-BNB-mutation):
 //      - EventLoopState_Init(&state, &oms)
 //      - EventLoopState_ConfigureKillSwitch (per PARITY-026 hotfix; gated on MASK_RISK_CFG_KILL_SWITCH_ENABLED)
-//      - Regime_Init per-core loop (cfg.cores[i].regime_hysteresis → state.cores[i].regime_state)
+//      - Regime_Init per-core loop (cfg.nodes[i].regime_hysteresis → state.nodes[i].regime_state)
 //    EXCLUDES: function-scope statics (stay in caller per Decision G — trade_log + BinanceUserData
 //              + NotifyState + TickRecorder/DepthRecorder + Notify worker spawn are M5 LIVE-only
 //              persistence sinks / threading observability; stay in EngineSharded_Run caller scope)
@@ -195,8 +195,8 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 
     // 3. Regime_Init per-core (per Step A.4 :760-762; cfg-driven hysteresis;
     //    sister to BacktestSharded.hpp:210-212 — train-serve parity by-construction)
-    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
-        Regime_Init(&state.cores[i].regime_state, (int)cfg.cores[i].regime_hysteresis);
+    for (int i = 0; i < MAX_EXECUTION_NODES; ++i) {
+        Regime_Init(&state.nodes[i].regime_state, (int)cfg.nodes[i].regime_hysteresis);
     }
 }
 
@@ -205,9 +205,9 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //      - SPSCRing_Init(&tick_ring) + ExecutionCore_Init(&core, c, &tick_ring)
 //      - EventLoopState_RegisterCore (per v1.5 D1 correction; NOT
 //        OrderManager_RegisterCore which doesn't exist in the codebase)
-//      - EventLoopState_SetCoreStrategy(&state, c, cfg.core_strategies[c], core_balance)
-//      - ML branch (when cfg.core_strategies[c] == STRATEGY_ML && zoo_ptr && ezoo_ptr):
-//          CoreModelZoo_Init + EnsembleModelZoo_Init + Load + PostLoadSetup +
+//      - EventLoopState_SetCoreStrategy(&state, c, cfg.node_strategies[c], node_balance)
+//      - ML branch (when cfg.node_strategies[c] == STRATEGY_ML && zoo_ptr && ezoo_ptr):
+//          NodeModelZoo_Init + EnsembleModelZoo_Init + Load + PostLoadSetup +
 //          ValidateAgainstCfg + FeatureOverlay_PostLoadVerify +
 //          ConfidenceScorer_Init + ConfidenceScorer_BindCompositeCfg +
 //          RollingTurnover_Init
@@ -215,14 +215,14 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //      - ExecutionCore_SetPermission(&core, 0)
 //
 //    Called N times per boot (per-core loop). External wrappers (e.g.,
-//    bandit_state_prior_path; oms.ezoo_refs LIVE-only wire; CoreLatencyStats_Enable
+//    bandit_state_prior_path; oms.ezoo_refs LIVE-only wire; NodeLatencyStats_Enable
 //    LIVE-only) called AFTER this returns per Decision B + M5 false-positive surface.
 //
 //    Caller responsibilities per v1.7 O4:
-//      - Precompute core_balance per O2 bytewise-identical math (preserved from
+//      - Precompute node_balance per O2 bytewise-identical math (preserved from
 //        LIVE :898-906 + :915-920 + BACKTEST :234-238 + :258-263 verbatim)
 //      - Allocate zoo_ptr + ezoo_ptr per arch (LIVE: aligned_alloc(64) with
-//        null-check + CORE_STATE_FLAG_SET(MODEL_LOAD_FAILED) on alloc fail;
+//        null-check + NODE_STATE_FLAG_SET(MODEL_LOAD_FAILED) on alloc fail;
 //        BACKTEST: Free+Init static array element)
 //      - Pass nullptr for both zoo_ptr + ezoo_ptr when non-ML strategy
 //
@@ -230,16 +230,16 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //    RollingTurnover) + PARITY-029 (Strategy_InitPerCore) by-construction.
 //
 //    Signature (8 args per v1.7 O1 — drops unused oms; adds caller-owned
-//    statics + nullable ML zoos + caller-precomputed core_balance):
+//    statics + nullable ML zoos + caller-precomputed node_balance):
 template <unsigned F>
 inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                                       int c,
                                       EventLoopState<F>& state,
-                                      SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE>& tick_ring,
+                                      SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>& tick_ring,
                                       ExecutionCore<F>& core,
-                                      CoreModelZoo<F>* zoo_ptr,        // nullable: non-ML OR alloc-failed
+                                      NodeModelZoo<F>* zoo_ptr,        // nullable: non-ML OR alloc-failed
                                       EnsembleModelZoo<F>* ezoo_ptr,   // nullable: same
-                                      Money core_balance) {           // caller-precomputed (O2 bytewise-identical)
+                                      Money node_balance) {           // caller-precomputed (O2 bytewise-identical)
     // -------- Step 1-4: unconditional per-core init (per Step A.4 CSV ordering) --------
     //   LIVE :909, BACKTEST :252 — SPSC ring init for producer→hot path
     SPSCRing_Init(&tick_ring);
@@ -252,47 +252,47 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         Money_Zero(),  // intended_sl
         Money_Zero()); // intended_qty
     //   LIVE :921-923, BACKTEST :264-266 — wire per-core strategy + risk budget
-    //   (core_balance precomputed at caller per v1.6 O2 bytewise-identical math discipline)
-    EventLoopState_SetCoreStrategy(&state, c, cfg.core_strategies[c], core_balance);
+    //   (node_balance precomputed at caller per v1.6 O2 bytewise-identical math discipline)
+    EventLoopState_SetCoreStrategy(&state, c, cfg.node_strategies[c], node_balance);
 
     // -------- Step 5: ML branch (when STRATEGY_ML && zoo storage available) --------
     //   Per v1.7 P-B + Decision B: items 5a-5m ALL fire ONLY for ML strategy cores with
     //   caller-provided zoo storage. Non-ML cores OR LIVE alloc-failed cores skip entirely
     //   (zoo_ptr nullptr); preserves current behavior. CSV row 76 NOTE: post-`.B.4`, BACKTEST
-    //   also calls CORE_STATE_FLAG_SET(MODEL_LOAD_FAILED) on full-fail — acceptable; flag
+    //   also calls NODE_STATE_FLAG_SET(MODEL_LOAD_FAILED) on full-fail — acceptable; flag
     //   harmless in backtest (no display); train-serve identity preserved by-construction.
-    if (cfg.core_strategies[c] == STRATEGY_ML && zoo_ptr && ezoo_ptr) {
+    if (cfg.node_strategies[c] == STRATEGY_ML && zoo_ptr && ezoo_ptr) {
         // 5a. Zoo init (LIVE :949 + :962, BACKTEST :278 + :281; caller already Free'd backtest static)
-        CoreModelZoo_Init(zoo_ptr);
+        NodeModelZoo_Init(zoo_ptr);
         EnsembleModelZoo_Init(ezoo_ptr);
 
         // 5b. Backend resolution (LIVE :963, BACKTEST :282) — cfg-driven with XGBoost default
         int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
 
-        // 5c. Single-zoo load — path 1 (cfg.core_model_dir[c] set; LoadFromDir auto-discovery)
-        //   OR paths 2-3 (legacy single buy_signal via cfg.core_model_path[c] / cfg.ml_model_path)
+        // 5c. Single-zoo load — path 1 (cfg.node_model_dir[c] set; LoadFromDir auto-discovery)
+        //   OR paths 2-3 (legacy single buy_signal via cfg.node_model_path[c] / cfg.ml_model_path)
         int loaded = 0;
-        if (cfg.core_model_dir[c][0]) {
+        if (cfg.node_model_dir[c][0]) {
             // LIVE :978-985, BACKTEST :291-296 — full cfg-derived args (LIVE has extra
             // expected_feature_mask + cfg_ptr per v5.11.18 + v5.14.1.B.3; per Step A.4 CSV
             // row 72 MATCH — semantically identical 3-resolution-path; argument asymmetry
             // absorbed in body)
-            uint64_t mask_for_load = (cfg.core_feature_mask[c] != 0xFFFFFFFFFFFFFFFFULL)
-                ? cfg.core_feature_mask[c] : 0;
-            loaded = CoreModelZoo_LoadFromDir(zoo_ptr, cfg.core_model_dir[c],
+            uint64_t mask_for_load = (cfg.node_feature_mask[c] != 0xFFFFFFFFFFFFFFFFULL)
+                ? cfg.node_feature_mask[c] : 0;
+            loaded = NodeModelZoo_LoadFromDir(zoo_ptr, cfg.node_model_dir[c],
                 backend, /*secret=*/nullptr, /*gap=*/0.05,
                 /*strict=*/cfg.held_out_gate_strict,
                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                 /*expected_feature_mask=*/mask_for_load,
                 /*cfg_ptr=*/&cfg);
             fprintf(stderr, "[sharded] core %d: zoo from %s, %d role(s) loaded\n",
-                    c, cfg.core_model_dir[c], loaded);
+                    c, cfg.node_model_dir[c], loaded);
         } else {
             // LIVE :990-1001, BACKTEST :299-311 — legacy fallback chain
-            const char* model_path = cfg.core_model_path[c][0]
-                ? cfg.core_model_path[c] : cfg.ml_model_path;
+            const char* model_path = cfg.node_model_path[c][0]
+                ? cfg.node_model_path[c] : cfg.ml_model_path;
             if (model_path[0]) {
-                loaded = CoreModelZoo_LoadLegacy(zoo_ptr, model_path, backend);
+                loaded = NodeModelZoo_LoadLegacy(zoo_ptr, model_path, backend);
                 if (loaded) {
                     fprintf(stderr, "[sharded] core %d: legacy buy_signal model loaded from %s\n",
                             c, model_path);
@@ -308,15 +308,15 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         //   today's VerifyExpected step). Returns 1 if all steps OK; 0 if any failed.
         //   Strict-mode action stays at boot caller: Free + null + MODEL_LOAD_FAILED.
         if (loaded) {
-            state.cores[c].model_handle = zoo_ptr;
-            if (cfg.core_model_dir[c][0]) {
-                int post_ok = CoreModelZoo_PostLoadSetup<F>(zoo_ptr, cfg, c,
-                                                             cfg.core_model_dir[c]);
+            state.nodes[c].model_handle = zoo_ptr;
+            if (cfg.node_model_dir[c][0]) {
+                int post_ok = NodeModelZoo_PostLoadSetup<F>(zoo_ptr, cfg, c,
+                                                             cfg.node_model_dir[c]);
                 if (!post_ok && cfg.model_verify_strict > 0) {
                     fprintf(stderr, "[sharded] core %d: ML model UNLOADED due to strict verify failure\n", c);
-                    CoreModelZoo_Free(zoo_ptr);
-                    state.cores[c].model_handle = NULL;
-                    CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
+                    NodeModelZoo_Free(zoo_ptr);
+                    state.nodes[c].model_handle = NULL;
+                    NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
                 }
             }
         }
@@ -325,14 +325,14 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         //   sibling-dir support. v5.11.60 fix: runs REGARDLESS of single-zoo load result
         //   (multi-horizon-only deployments have no base dir; pre-fix path failed silently).
         //   v5.14.2.E.1 canonical PostLoadSetup walks FOREACH_ENSEMBLE_POST_LOAD steps.
-        //   M5/CSV row 75 NOTE: oms.ezoo_refs[c] + oms.core_cfg_refs[c] wires are LIVE-only
+        //   M5/CSV row 75 NOTE: oms.ezoo_refs[c] + oms.node_cfg_refs[c] wires are LIVE-only
         //   persistence sinks; STAY_IN_CALLER (caller wraps post-helper when ensemble_handle
         //   set). Same for BACKTEST bandit_state_prior_path override (Decision B).
         int ensemble_loaded = 0;
-        if (cfg.core_model_dir[c][0]) {
+        if (cfg.node_model_dir[c][0]) {
             int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
                 ezoo_ptr,
-                cfg.core_model_dir[c],
+                cfg.node_model_dir[c],
                 backend,
                 cfg.held_out_stamp_secret,
                 FPN_ToDouble(cfg.gap_acceptable_threshold),
@@ -346,23 +346,23 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                             ? ezoo_ptr->primary_role_name : "(none)",
                         ezoo_ptr->primary_count, n_loaded);
                 EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, c,
-                                                   cfg.core_model_dir[c]);
+                                                   cfg.node_model_dir[c]);
                 // v5.15.5.E.0.10 A6 ingress (D-221) — post-load corrupt finalize: union corrupt
                 // arms into disabled_horizon_mask + the per-node majority-corrupt verdict. Runs
                 // AFTER PostLoadSetup (incl. SetDisabledHorizons) so the disabled-union can't be
                 // wiped. Single-threaded at boot; sets MODEL_CORRUPT (distinct from MODEL_LOAD_FAILED).
                 if (EnsembleZoo_FinalizeCorrupt<F>(ezoo_ptr, FPN_ToDouble(cfg.model_corrupt_shalt_ratio))) {
-                    CORE_STATE_FLAG_SET(state.cores[c], MODEL_CORRUPT);
+                    NODE_STATE_FLAG_SET(state.nodes[c], MODEL_CORRUPT);
                     fprintf(stderr, "[model] core %d: ML barrier CORRUPT for the majority of "
                                     "ensemble arms (%d of %d) — node REFUSES new trades until "
                                     "RETRAIN (D-221)\n",
                             c, __builtin_popcount((unsigned)ezoo_ptr->corrupt_arms_mask),
                             ezoo_ptr->buy_signal_count);
                 }
-                state.cores[c].ensemble_handle = ezoo_ptr;
+                state.nodes[c].ensemble_handle = ezoo_ptr;
                 ensemble_loaded = 1;
             } else {
-                state.cores[c].ensemble_handle = nullptr;
+                state.nodes[c].ensemble_handle = nullptr;
             }
         }
 
@@ -371,63 +371,63 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         //   sets this flag (acceptable; harmless in backtest no-display context; train-serve
         //   identity preserved by-construction).
         if (!loaded && !ensemble_loaded) {
-            CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
+            NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
         }
 
         // 5g. Cfg drift validators (LIVE :1102-1126, BACKTEST :380-401) — v5.10.2.A extracted;
         //   PARITY-012 closure (BACKTEST gained equivalence at v5.14.2.E.1). Counters written;
         //   FATAL log fires on REFUSE in strict mode; engine continues (TODO v5.10: free + refuse).
         //   v5.14.3.B FeatureOverlay sidecar verification (3-layer fingerprinting).
-        if (loaded && cfg.core_model_dir[c][0]) {
+        if (loaded && cfg.node_model_dir[c][0]) {
             EnsembleModelZoo<F>* ezoo_for_validate =
-                state.cores[c].ensemble_handle ? ezoo_ptr : nullptr;
-            CoreModelZoo_ValidateAgainstCfg<F>(
-                zoo_ptr, ezoo_for_validate, cfg, /*core_id=*/c,
+                state.nodes[c].ensemble_handle ? ezoo_ptr : nullptr;
+            NodeModelZoo_ValidateAgainstCfg<F>(
+                zoo_ptr, ezoo_for_validate, cfg, /*node_id=*/c,
                 cfg.held_out_gate_strict,
                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                &state.display_meta[c], &state.cores[c]);
+                &state.display_meta[c], &state.nodes[c]);
             FeatureOverlay_PostLoadVerify<F>(
-                zoo_ptr, ezoo_for_validate, /*core_id=*/c, cfg.held_out_gate_strict);
+                zoo_ptr, ezoo_for_validate, /*node_id=*/c, cfg.held_out_gate_strict);
         }
 
         // 5h. ConfidenceScorer Init (LIVE :1136-1138, BACKTEST :408-410) — Phase 6prep
         //   sharded c12 + v5.14.9.D TECH_DEBT-004 close (tau hardcoded; legacy
         //   confidence_freshness_tau deleted; composite confidence v5.14.1 owns its own
-        //   freshness via cfg.cores[c].confidence_freshness_tau_secs).
-        ConfidenceScorer_Init(&state.cores[c].confidence,
-                              (int)cfg.cores[c].confidence_window,
+        //   freshness via cfg.nodes[c].confidence_freshness_tau_secs).
+        ConfidenceScorer_Init(&state.nodes[c].confidence,
+                              (int)cfg.nodes[c].confidence_window,
                               CONFIDENCE_FRESHNESS_TAU_DEFAULT);
 
         // 5i. ConfidenceScorer composite cfg bind (LIVE :1141-1146, BACKTEST :N/A)
         //   v5.14.1.B.1 PARITY-003 — push composite cfg into scorer. No-op when
         //   MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED unset (legacy path).
         //   NEW for BACKTEST per v1.7.2 PARITY-028 closure.
-        ConfidenceScorer_BindCompositeCfg(&state.cores[c].confidence,
+        ConfidenceScorer_BindCompositeCfg(&state.nodes[c].confidence,
             BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
-            FPN_ToDouble(cfg.cores[c].confidence_freshness_tau_secs),
-            FPN_ToDouble(cfg.cores[c].confidence_capacity_target_dollars),
-            FPN_ToDouble(cfg.cores[c].confidence_capacity_kappa),
-            FPN_ToDouble(cfg.cores[c].confidence_rmse_baseline));
+            FPN_ToDouble(cfg.nodes[c].confidence_freshness_tau_secs),
+            FPN_ToDouble(cfg.nodes[c].confidence_capacity_target_dollars),
+            FPN_ToDouble(cfg.nodes[c].confidence_capacity_kappa),
+            FPN_ToDouble(cfg.nodes[c].confidence_rmse_baseline));
 
         // 5j. RollingTurnover Init (LIVE :1149-1151, BACKTEST :N/A)
         //   v5.14.1.G — re-init turnover with cfg-tunable window/topk (overrides
         //   EventLoopState_Init defaults of 100/3).
         //   NEW for BACKTEST per v1.7.2 PARITY-028 sister closure.
-        RollingTurnover_Init(&state.cores[c].turnover,
-                              cfg.cores[c].confidence_turnover_window,
-                              cfg.cores[c].confidence_turnover_topk);
+        RollingTurnover_Init(&state.nodes[c].turnover,
+                              cfg.nodes[c].confidence_turnover_window,
+                              cfg.nodes[c].confidence_turnover_topk);
     }
 
     // -------- Step 6: Strategy_InitPerCore (OUTSIDE ML branch; gated by strategy_id) --------
     //   LIVE :1164-1168, BACKTEST :N/A pre-`.B.4` — v5.4.0 Phase 1.3 — wire Strategy_InitPerCore.
-    //   Allocates the strategy state struct matching state.cores[c].strategy_id. Pre-warmup
+    //   Allocates the strategy state struct matching state.nodes[c].strategy_id. Pre-warmup
     //   garbage initial values OK since permission=0 until warmup completes.
     //   PARITY-029 closure (pre-v5.4 F7 bug — BACKTEST never called this; entire strategy
     //   state lifecycle was orphaned for stateful strategies in backtest path).
-    if (state.cores[c].strategy_id != STRATEGY_NONE) {
-        tt::Strategy_InitPerCore(&state, c, state.cores[c].strategy_id,
-                                  &state.cores[c].slow_state->rolling_short,
+    if (state.nodes[c].strategy_id != STRATEGY_NONE) {
+        tt::Strategy_InitPerCore(&state, c, state.nodes[c].strategy_id,
+                                  &state.nodes[c].slow_state->rolling_short,
                                   &cfg);
     }
 
@@ -446,11 +446,11 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 //      - EventLoop_TimeExitOneCore
 //      - EventLoop_TrailingSLRatchetOneCore
 //      - EventLoop_BreakevenOnProfitOneCore (PARITY-032 fold-in; was MISSING
-//        from per_core_slow lambda pre-.B.4)
+//        from per_node_slow lambda pre-.B.4)
 //      - ML exit-prediction submit (when MASK_ML_CFG_USE_EXIT_MODEL set)
-//      - per-core regime collection (state.cores[c].regime_state populated)
+//      - per-core regime collection (state.nodes[c].regime_state populated)
 //
-//    Live: called per-core from per_core_slow thread (each thread invokes once
+//    Live: called per-core from per_node_slow thread (each thread invokes once
 //    per slow-path cycle).
 //    Backtest: called via SlowPathCycleAllCores wrapper (which loops N times
 //    per tick).
@@ -467,7 +467,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 // removed fabricated `enabled` field — BookSnapshot per DataStream/BinanceDepth.hpp:29-41
 // has NO `enabled` field; helper checks MASK_GATE_CFG_DEPTH_ENABLED internally at read
 // time per current LIVE pattern :3052-3058):
-//   - LIVE per_core_slow lambda: resolve volume from last_volume.load();
+//   - LIVE per_node_slow lambda: resolve volume from last_volume.load();
 //     now_tick from ticks_produced.load(); depth = g_depth_shared.snapshots[
 //     __atomic_load_n(&g_depth_shared.active_idx, __ATOMIC_ACQUIRE)] (existing
 //     BookSnapshot<F> ref; no new struct construction needed).
@@ -495,7 +495,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                                                uint64_t now_tick,
                                                const BookSnapshot<F>& depth) {
     // v1.7.3 HIGH-4 Telemetry Path A INTERNAL: helper computes own rdtsc bracket
-    // start + 5 CoreLatencyStats_Sample calls inside body. Slight BACKTEST
+    // start + 5 NodeLatencyStats_Sample calls inside body. Slight BACKTEST
     // overhead (~25-50ns per cycle for rdtsc + array writes) preserves LIVE
     // per-section breakdown semantic (M5 LIVE-only display surface kept
     // untouched). Per feedback_motivated_collaborator_for_caramel — preserve
@@ -552,8 +552,8 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     uint64_t rebuild_ts_us = ts_us;
 
     // v5.1.2 (full symmetric): use shared OneCore helper.
-    // Single-writer is this thread (per_core_slow's c).
-    auto* sst = state.cores[c].slow_state;
+    // Single-writer is this thread (per_node_slow's c).
+    auto* sst = state.nodes[c].slow_state;
     FPN_Binary<F> bs = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ?
         FPN_FromDouble<F>(book_spread_d) : FPN_Zero<F>();
     EventLoop_UpdateRollingStateOneCore(
@@ -567,7 +567,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // v5.1.1: bracket OTHER section (depth read + swap pickup
     // + per-cadence pushes setup).
     uint64_t _sec_t_rebuild_start = __rdtsc();
-    CoreLatencyStats_Sample(
+    NodeLatencyStats_Sample(
         &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_ROLLING],
         _sec_t_rebuild_start - _sec_t_other_start, _sec_t_rebuild_start);
 
@@ -592,7 +592,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
 
     // v5.1.1: bracket REBUILD section.
     uint64_t _sec_t_push_start = __rdtsc();
-    CoreLatencyStats_Sample(
+    NodeLatencyStats_Sample(
         &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_REBUILD],
         _sec_t_push_start - _sec_t_rebuild_start, _sec_t_push_start);
 
@@ -601,24 +601,24 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // v5.12.1.B.2 — pass publish_tick = now_tick (caller-precomputed
     // from ticks_produced.load() in LIVE; tick_index in BACKTEST)
     // so hot-path staleness gate sees fresh tick stamp.
-    if (CORE_STATE_FLAG_IS_SET(state.cores[c], DIRTY)) {
-        ExecutionCore<F>* core = state.cores[c].core;
+    if (NODE_STATE_FLAG_IS_SET(state.nodes[c], DIRTY)) {
+        ExecutionCore<F>* core = state.nodes[c].core;
         if (core) {
             ExecutionCore_SetParameters(core,
-                state.cores[c].pending_params,
+                state.nodes[c].pending_params,
                 now_tick);
         }
-        CORE_STATE_FLAG_CLR(state.cores[c], DIRTY);
+        NODE_STATE_FLAG_CLR(state.nodes[c], DIRTY);
     }
 
     // v5.1.1: bracket PUSH_PARAMS section.
     uint64_t _sec_t_te_start = __rdtsc();
-    CoreLatencyStats_Sample(
+    NodeLatencyStats_Sample(
         &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_PUSH],
         _sec_t_te_start - _sec_t_push_start, _sec_t_te_start);
 
     // === v5.13.0.B — sell-side ML exit-prediction submit ===
-    // RebuildOneCore wrote state.cores[c].last_exit_prediction
+    // RebuildOneCore wrote state.nodes[c].last_exit_prediction
     // (when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor models loaded).
     // If above threshold and any positions are open on this
     // core's slot(s), fire MARKET_SELL via OMS_PushSubmit and
@@ -626,8 +626,8 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // attribution. Default cfg path (use_exit_model=0): the
     // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
-        && state.cores[c].last_exit_prediction
-           > FPN_ToDouble(cfg.cores[c].exit_threshold)  // Class 25 scope-discipline: per-core read at per-core scope (value-equivalent via walker propagation; future-proofs against per-core override addition)
+        && state.nodes[c].last_exit_prediction
+           > FPN_ToDouble(cfg.nodes[c].exit_threshold)  // Class 25 scope-discipline: per-core read at per-core scope (value-equivalent via walker propagation; future-proofs against per-core override addition)
         && price_d > 0.01) {
         // Slot mask: under partials each core owns 2 slots
         // (legs A + B); single-leg under partial_exit_enabled=0.
@@ -653,7 +653,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                 // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
                 BITMAP_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(pidx));
                 oms.last_exit_predicted_p[pidx] =
-                    state.cores[c].last_exit_prediction;
+                    state.nodes[c].last_exit_prediction;
                 // v5.13.4 — capture chosen arm + regime per-slot
                 // for HandleFill's exit_bandit Update.
                 // v5.13.6.C — defensive bounds (parity-check
@@ -664,11 +664,11 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                 // CRITICAL log + clamp; doesn't refuse submit
                 // (exit fires for safety; bandit skips later).
                 int captured_arm =
-                    state.cores[c].last_exit_dominant_horizon;
+                    state.nodes[c].last_exit_dominant_horizon;
                 int captured_regime =
-                    state.cores[c].regime_state.current_regime;
+                    state.nodes[c].regime_state.current_regime;
                 EnsembleModelZoo<F>* ezoo_b = (EnsembleModelZoo<F>*)
-                    state.cores[c].ensemble_handle;
+                    state.nodes[c].ensemble_handle;
                 int n_arms_b = (ezoo_b
                     ? ezoo_b->exit_predictor_count : 0);
                 if (captured_arm < 0 ||
@@ -704,27 +704,27 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                 // v5.15.5.C.4 Phase D5 — Class-18 helper
                 // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit
                 tt::OMS_PushExitForSlot(&oms, (int16_t)pidx,
-                    qty, state.cores[c].strategy_id, price_fpn,
-                    /*leg*/(uint8_t)0, &cfg.cores[c]);
+                    qty, state.nodes[c].strategy_id, price_fpn,
+                    /*leg*/(uint8_t)0, &cfg.nodes[c]);
             }
-            state.cores[c].strategy_halt_reason =
+            state.nodes[c].strategy_halt_reason =
                 SHALT_EXIT_PREDICTED;
         }
     }
 
     // === Time exit + trailing SL ratchet (per-core) ===
-    if (cfg.cores[c].max_hold_ticks > 0 && price_d > 0.01) {
+    if (cfg.nodes[c].max_hold_ticks > 0 && price_d > 0.01) {
         EventLoop_TimeExitOneCore(&state, &oms, cfg,
             now_tick, price_d, c);
     }
     // v5.1.1: bracket TIME_EXIT section.
     uint64_t _sec_t_tsl_start = __rdtsc();
-    CoreLatencyStats_Sample(
+    NodeLatencyStats_Sample(
         &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_TIME_EXIT],
         _sec_t_tsl_start - _sec_t_te_start, _sec_t_tsl_start);
 
-    if (!FPN_IsZero(cfg.cores[c].sl_trail_mult) &&
-        !FPN_IsZero(cfg.cores[c].tp_hold_score) &&
+    if (!FPN_IsZero(cfg.nodes[c].sl_trail_mult) &&
+        !FPN_IsZero(cfg.nodes[c].tp_hold_score) &&
         !FPN_IsZero(sst->rolling_short.price_stddev) &&
         price_d > 0.01) {
         EventLoop_TrailingSLRatchetOneCore(&state, cfg,
@@ -735,9 +735,9 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // Cached gate bit refreshed at body entry via AUTOPOPULATE_ENGINE_WIDE.
     // Default cfg has MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT UNSET → cached
     // MASK_BREAKEVEN_ON_PROFIT bit = 0 → branchless BITMAP_IS_SET returns 0
-    // → no call (bytewise-identical to pre-`.B.4` per_core_slow behavior).
+    // → no call (bytewise-identical to pre-`.B.4` per_node_slow behavior).
     // Cohorts with cfg flag SET → cached bit = 1 → fires (5+ year correctness
-    // gap closed for per_core_slow arch). Sister consumers at
+    // gap closed for per_node_slow arch). Sister consumers at
     // ControllerEventLoop.hpp:2344 (MASK_LAZY_REBUILD_ACTIVE) + :3558
     // (MASK_WS_FLATTEN_ACTIVE). D1-B is legitimately NEW slow-path-gate
     // application — wrapper at :3799 reads cfg directly, NOT via cache.
@@ -752,7 +752,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // folds into the next iteration's _sec_t_other_start delta —
     // negligible (<100ns) so we don't add another bracket.
     uint64_t _sec_t_tail = __rdtsc();
-    CoreLatencyStats_Sample(
+    NodeLatencyStats_Sample(
         &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_TRAIL_SL],
         _sec_t_tail - _sec_t_tsl_start, _sec_t_tail);
 
@@ -760,17 +760,17 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     uint32_t min_samples = cfg.min_warmup_samples > 0
         ? cfg.min_warmup_samples : 64;
     if (sst->rolling_short.count >= (int)min_samples &&
-        state.cores[c].strategy_id != STRATEGY_NONE) {
-        // Original LIVE used producer-thread static `cores[c]` array
+        state.nodes[c].strategy_id != STRATEGY_NONE) {
+        // Original LIVE used producer-thread static `nodes[c]` array
         // address; helper uses the pointer stored on EventLoopState via
-        // EventLoopState_RegisterCore (registration sets state.cores[c].core
+        // EventLoopState_RegisterCore (registration sets state.nodes[c].core
         // = address of producer's static array element; identical pointer).
-        ExecutionCore_SetPermission(state.cores[c].core, 1);
+        ExecutionCore_SetPermission(state.nodes[c].core, 1);
     }
 
     // v4.7.42 (Phase E): close rdtsc bracket + sample.
     uint64_t _sp_t1 = __rdtsc();
-    CoreLatencyStats_Sample(&state.display_meta[c].slow_path_latency,
+    NodeLatencyStats_Sample(&state.display_meta[c].slow_path_latency,
                              _sp_t1 - _sp_t0, _sp_t1);
 
     // v5.12.1.B clock hoist: reuse rebuild_ts_us captured at
@@ -781,9 +781,9 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // irrelevant for both operator liveness display + CheckWsStaleness
     // 60s+ threshold math.
     {
-        state.cores[c].sp_telemetry.last_tick_us.store(rebuild_ts_us,
+        state.nodes[c].sp_telemetry.last_tick_us.store(rebuild_ts_us,
                                               std::memory_order_relaxed);
-        state.cores[c].sp_telemetry.cycles_total.fetch_add(1,
+        state.nodes[c].sp_telemetry.cycles_total.fetch_add(1,
                                                   std::memory_order_relaxed);
         EventLoop_CheckWsStaleness(&state, cfg, price_d,
                                     rebuild_ts_us);
@@ -811,7 +811,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
 //    viewer reuses this wrapper as the natural per-tick mmap-publish API.
 //
 //    Backtest calls this ONCE per tick (ShardedBacktest_RunTick).
-//    Live does NOT call this (each per_core_slow thread calls OneCore directly).
+//    Live does NOT call this (each per_node_slow thread calls OneCore directly).
 //
 //    Signature (v1.7.3 N-6 consequential: 8 args; pass-through to OneCore expanded args):
 template <unsigned F>
@@ -825,12 +825,12 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                                 const BookSnapshot<F>& depth) {
     // Fan wrapper: BACKTEST calls this ONCE per tick; loops over registered
     // cores firing SlowPathCycleOneCore per-core.
-    // LIVE per_core_slow does NOT call this (each per-core thread invokes
+    // LIVE per_node_slow does NOT call this (each per-core thread invokes
     // OneCore directly). Per Option D future-orientation for v6.0 viewer
     // decoupling boundary — viewer reuses this wrapper as natural per-tick
     // mmap-publish API.
     //
-    // Loop bound = state.registered_count; preserves num_cores-clamped
+    // Loop bound = state.registered_count; preserves num_nodes-clamped
     // iteration semantic at LIVE :622-624 + BACKTEST :223-225 by-construction
     // since EventLoopState_RegisterCore is the single increment site.
     for (int c = 0; c < state.registered_count; ++c) {

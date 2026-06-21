@@ -24,7 +24,7 @@
 #pragma once
 
 #include "ControllerConfig.hpp"
-#include "../ML_Headers/CoreModelZoo.hpp"
+#include "../ML_Headers/NodeModelZoo.hpp"
 
 #include <stdio.h>
 
@@ -44,13 +44,13 @@ namespace tt {
 template <unsigned F>
 inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
                                           const ControllerConfig<F>& cfg,
-                                          int core_id,
+                                          int node_id,
                                           const char* new_base_dir,
                                           int swap_backend) {
     if (!swap_ezoo || !new_base_dir || new_base_dir[0] == '\0') {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: empty path or null zoo\n",
-            core_id);
+            node_id);
         return 0;
     }
 
@@ -68,7 +68,7 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
     if (h_count == 0) {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: no cached horizons "
-            "to load (boot must have failed)\n", core_id);
+            "to load (boot must have failed)\n", node_id);
         return 0;
     }
 
@@ -97,7 +97,7 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
     if (total == 0) {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: 0 roles loaded "
-            "from %s\n", core_id, new_base_dir);
+            "from %s\n", node_id, new_base_dir);
         return 0;
     }
 
@@ -106,18 +106,18 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
     //    SetDisabledHorizons, LoadBanditState, SetBanditSaveInterval,
     //    LoadExitBanditState. v5.14.2.E.1 — closes PARITY-009.C/.D/.E:
     //    pre-fix only ran 4 of these.
-    EnsembleModelZoo_PostLoadSetup<F>(swap_ezoo, cfg, core_id, new_base_dir);
+    EnsembleModelZoo_PostLoadSetup<F>(swap_ezoo, cfg, node_id, new_base_dir);
 
     fprintf(stderr,
         "[hot_swap] ensemble core %d swapped to %s "
         "(%d roles loaded; primary=%s; exit=%d)\n",
-        core_id, new_base_dir, total,
+        node_id, new_base_dir, total,
         swap_ezoo->primary_role_name[0]
             ? swap_ezoo->primary_role_name : "(none)",
         swap_ezoo->exit_predictor_count);
 
     // NOTE: Post-load inference_cfg drift validation
-    // (CoreModelZoo_ValidateAgainstCfg) is intentionally called by the
+    // (NodeModelZoo_ValidateAgainstCfg) is intentionally called by the
     // CALLER in EngineSharded.hpp, NOT here — that function lives in
     // EngineSharded.hpp and including it here would create circular
     // dependency (EngineSharded.hpp includes this file). The caller has

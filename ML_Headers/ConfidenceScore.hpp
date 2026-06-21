@@ -862,11 +862,11 @@ static_assert(offsetof(DriftSample, ic) == 0, "DriftSample.ic at offset 0");
 static_assert(offsetof(DriftSample, ts) == 8, "DriftSample.ts at offset 8");
 static_assert(alignof(DriftSample) == 8, "DriftSample 8B aligned");
 
-// v5.15.5.E.B — breach_first_us EXTRACTED to existing CoreContextDisplayMeta
+// v5.15.5.E.B — breach_first_us EXTRACTED to existing NodeContextDisplayMeta
 // sibling via FOREACH_DISPLAY_META_FIELD registry row (drift_breach_first_us).
 // Per cache-layout-discipline-for-hot-side-structs.md Rule 1 (display-only
 // field extraction) + closes Class-18 mirror with other display-only fields
-// on CoreContext (avoids creating yet another DisplayMeta sister struct).
+// on NodeContext (avoids creating yet another DisplayMeta sister struct).
 // Audit verified 2026-05-13: breach_first_us is WRITE-ONLY in current code
 // (set at first-breach detection; never read; not in snapshot). Preserved
 // for future GUI consumption via DisplayMeta access.

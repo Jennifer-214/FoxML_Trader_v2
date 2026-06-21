@@ -348,7 +348,7 @@ inline void BanditAlgo_Thompson_Apply(BanditState* exp3, ThompsonBanditState* th
 // now reflects Exp3's argmax (NOT Thompson's pick) so reward attribution lands on the arm
 // that ACTUALLY drove the decision. Thompson_Sample still called for telemetry side effect
 // (RNG advances; caller captures last_predicted_buy_thompson_arm separately per § A.0 plan body).
-// Per-arm reward observability (CoreModelZoo.hpp:881-882) — both bandits learn from same
+// Per-arm reward observability (NodeModelZoo.hpp:881-882) — both bandits learn from same
 // per-arm signal regardless of which one chose; Thompson posterior NOW updates from rewards
 // (Class 24 fix — pre-.F.4d Thompson never updated despite mode being settable).
 inline void BanditAlgo_Exp3_Drives_Thompson_Ghost_Apply(BanditState* exp3, ThompsonBanditState* thompson,

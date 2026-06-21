@@ -48,8 +48,8 @@
 
 // Forward decl for Order_BindPreResolved (defined in CoreFrameworks/ControllerConfig.hpp).
 // Callers of Order_BindPreResolved MUST include ControllerConfig.hpp; the forward decl
-// allows Order.hpp to remain include-light. PerCoreCfg is in the global namespace.
-template <unsigned F> struct PerCoreCfg;
+// allows Order.hpp to remain include-light. PerNodeCfg is in the global namespace.
+template <unsigned F> struct PerNodeCfg;
 
 namespace tt {
 
@@ -92,7 +92,7 @@ static constexpr uint32_t MASK_ORDER_RETRY_COUNT   = 0x0000FF00u;  // bits 8-15
 static constexpr uint32_t SHIFT_ORDER_RETRY_COUNT  = 8;
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — pre-resolved bind discipline bit (Class 27 + silent-zero-fee closure).
 // Set by Order_BindPreResolved; checked at HandleFill via Order_WarnIfNotPreResolved.
-// Production: OrderManager_Submit sig requires core_cfg → BindPreResolved always called → bit always set.
+// Production: OrderManager_Submit sig requires node_cfg → BindPreResolved always called → bit always set.
 // Test fixtures constructing Order directly must call Order_BindPreResolved explicitly OR set
 // pre_resolved.* fields directly + Order_MarkPreResolvedBound.
 static constexpr uint32_t MASK_ORDER_PRE_RESOLVED  = 0x00010000u;  // bit 16
@@ -168,7 +168,7 @@ struct Order {
     // Access via Order_GetType / Order_SetType / etc. inline fns; NEVER direct bit-twiddle.
     // v5.15.5.F.4c.3 WIP2d-1.B.1: widened uint16_t → uint32_t for pre_resolved_bound bit.
     uint32_t              flags_packed;   // 4 B  @ 16
-    int16_t               core_id;        // 2 B  @ 20   which executor core, -1 for non-core orders
+    int16_t               node_id;        // 2 B  @ 20   which executor core, -1 for non-core orders
     uint8_t               strategy_id;    // 1 B  @ 22   STRATEGY_* constant, for trade log CSV
     // Ship-A 16B FPN_Binary: Money is now __int128 (alignof 16, was 8). The scalar prefix ends @ 23, so the FPN_Binary
     // block can't start until the next 16 B boundary (@ 32) — an 8 B alignment hole. _pad_hot1 grew 1→9 B to
@@ -315,10 +315,10 @@ inline void MBS_OrderSetBanditContext(Order<F>* o, int state, int regime, int ar
 // key. Phase 06 (production hardening) may decouple them if retry semantics require a stable
 // client_id across retries.
 template <unsigned F>
-inline void Order_Init(Order<F>* o, uint64_t id, int16_t core_id, OrderType type) {
+inline void Order_Init(Order<F>* o, uint64_t id, int16_t node_id, OrderType type) {
     o->id              = id;
     o->client_id       = id;
-    o->core_id         = core_id;
+    o->node_id         = node_id;
     o->strategy_id     = 0xFF;  // STRATEGY_NONE
     o->flags_packed    = 0;     // type/state/is_maker/leg/retry all zero; then set type+state via accessors
     Order_SetType(o, type);
@@ -352,16 +352,16 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t core_id, OrderType type
 // Future per-resolved fields extend OrderPreResolved + this fn body in lockstep. Consumer
 // sites unchanged when adding new fields.
 //
-// Template note: caller MUST include CoreFrameworks/ControllerConfig.hpp for PerCoreCfg<F>
-// definition; this fn body uses PerCoreCfg<F>'s field accessors.
+// Template note: caller MUST include CoreFrameworks/ControllerConfig.hpp for PerNodeCfg<F>
+// definition; this fn body uses PerNodeCfg<F>'s field accessors.
 //======================================================================================================
 template <unsigned F>
-inline void Order_BindPreResolved(Order<F>* o, const ::PerCoreCfg<F>& core_cfg) {
+inline void Order_BindPreResolved(Order<F>* o, const ::PerNodeCfg<F>& node_cfg) {
     bool is_maker = Order_GetIsMaker(o);
     o->pre_resolved.fee_rate = is_maker
-        ? core_cfg.fee_rate_maker
-        : core_cfg.fee_rate_taker;
-    o->pre_resolved.slippage_pct = core_cfg.slippage_pct;
+        ? node_cfg.fee_rate_maker
+        : node_cfg.fee_rate_taker;
+    o->pre_resolved.slippage_pct = node_cfg.slippage_pct;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — mark bit to satisfy Order_WarnIfNotPreResolved at HandleFill.
     Order_MarkPreResolvedBound(o);
 }
@@ -371,7 +371,7 @@ inline void Order_BindPreResolved(Order<F>* o, const ::PerCoreCfg<F>& core_cfg) 
 //======================================================================================================
 // Called at HandleFill entry. Always-on runtime check; cost = 1 bit-test + predicted-not-taken branch
 // (~0 cycles amortized in production). Production: bit always set because OrderManager_Submit sig
-// requires core_cfg → BindPreResolved always called inside Submit. Test fixtures constructing Order
+// requires node_cfg → BindPreResolved always called inside Submit. Test fixtures constructing Order
 // directly via Order_Init + HandleFill bypass: bit not set → stderr warn. Tests asserting on fee
 // accumulation will fail (visible canary); tests that don't care about fees get the warning but
 // continue (cosmetic only).
@@ -386,10 +386,10 @@ inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
     if (__builtin_expect(!Order_GetPreResolvedBound(o), 0)) {
         std::fprintf(stderr,
             "[OMS] WARN: %s called on Order id=%llu core=%d without Order_BindPreResolved; "
-            "pre_resolved.fee_rate=%f (expected explicit bind via core_cfg OR explicit "
-            "Order_MarkPreResolvedBound after manual set). Production paths require core_cfg "
+            "pre_resolved.fee_rate=%f (expected explicit bind via node_cfg OR explicit "
+            "Order_MarkPreResolvedBound after manual set). Production paths require node_cfg "
             "at OrderManager_Submit (sig-enforced); this Order bypassed Submit (test fixture path).\n",
-            site, (unsigned long long)o->id, (int)o->core_id,
+            site, (unsigned long long)o->id, (int)o->node_id,
             Money_ToDouble(o->pre_resolved.fee_rate));
     }
 }

@@ -634,7 +634,7 @@ inline int Regime_Classify(RegimeState<F> *state,
             debug_enabled = (e && e[0] && e[0] != '0') ? 1 : 0;
         }
         if (debug_enabled) {
-            // Per-engine call counter; thread_local so per_core_slow's
+            // Per-engine call counter; thread_local so per_node_slow's
             // independent threads don't race on it. Cap at 16 engines.
             static thread_local uint32_t dbg_cycle = 0;
             dbg_cycle++;

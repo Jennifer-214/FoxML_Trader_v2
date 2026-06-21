@@ -47,8 +47,8 @@ inline size_t STAMP_BOUND_CFG_emit_canonical_body(char* buf, size_t cap) {
     if (pinned) prev = uselocale(pinned);
 
     // Per-core walk first (canonical body order — per-core before global).
-    CFG_FIELD_FOR_EACH_SET_BIT(g_per_core_cfg_stamp_bound_cfg_derived_mask.words, idx, {
-        const CfgFieldDescriptor& d = g_per_core_cfg_field_descriptors[idx];
+    CFG_FIELD_FOR_EACH_SET_BIT(g_per_node_cfg_stamp_bound_cfg_derived_mask.words, idx, {
+        const CfgFieldDescriptor& d = g_per_node_cfg_field_descriptors[idx];
         if (pos >= cap) break;
         // .A placeholder: "<name>=stub\n". .B replaces with
         // tt::cfg_emit_synthetic_field<T>(d, idx, buf+pos, cap-pos).

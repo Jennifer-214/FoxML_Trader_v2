@@ -194,11 +194,11 @@ inline int Health_LogEnabled(int level) {
     return level <= s->min_level ? 1 : 0;
 }
 
-// Core append. Caller passes category, optional core_id (-1 = global),
+// Core append. Caller passes category, optional node_id (-1 = global),
 // and a printf-style payload string. Output is one JSONL line.
 //
 // Returns 1 on success, 0 on i/o failure (ignored by most callers).
-inline int Health_Log(int level, const char* category, int core_id,
+inline int Health_Log(int level, const char* category, int node_id,
                       const char* fmt, ...) {
     HealthLogState* s = HealthLog_Singleton();
     if (!s->path[0]) return 0;
@@ -265,7 +265,7 @@ inline int Health_Log(int level, const char* category, int core_id,
     int written = fprintf(f,
         "{\"ts\":\"%s\",\"level\":\"%s\",\"cat\":\"%s\","
          "\"core\":%d,\"msg\":\"%s\"}\n",
-        ts, level_str, category ? category : "?", core_id, escaped);
+        ts, level_str, category ? category : "?", node_id, escaped);
     int flush_ok = (fflush(f) == 0);
     int close_ok = (fclose(f) == 0);
 
@@ -299,13 +299,13 @@ inline int Health_Log(int level, const char* category, int core_id,
 // v5.9.0b — rate-limited critical log helper. Same semantics as
 // Health_Log() but suppresses repeat emissions within `gate_us`
 // microseconds. Caller owns the `last_emit_us` storage (typically
-// per-core: a uint64_t field on CoreContext, OR a static at the
+// per-core: a uint64_t field on NodeContext, OR a static at the
 // call site for per-process gating).
 //
 // Usage:
-//   static uint64_t last_us = 0;  // OR: CoreContext::last_ml_critical_log_us
+//   static uint64_t last_us = 0;  // OR: NodeContext::last_ml_critical_log_us
 //   Health_LogCriticalRateLimited(&last_us, /*gate_us=*/60000000ULL,  // 60s
-//                                  /*core=*/core_id, "ml",
+//                                  /*core=*/node_id, "ml",
 //                                  "fall-through to SimpleDip: %s", reason);
 //
 // Returns 1 if emitted, 0 if suppressed. Stamp on fail-loud errors;
@@ -318,7 +318,7 @@ inline int Health_Log(int level, const char* category, int core_id,
 // double-emit-once on race, not data corruption).
 inline int Health_LogCriticalRateLimited(uint64_t* last_emit_us,
                                           uint64_t gate_us,
-                                          int core_id,
+                                          int node_id,
                                           const char* category,
                                           const char* fmt, ...) {
     if (!last_emit_us) return 0;
@@ -340,7 +340,7 @@ inline int Health_LogCriticalRateLimited(uint64_t* last_emit_us,
     va_end(ap);
     if (p_len < 0) payload[0] = '\0';
 
-    return Health_Log(HEALTH_CRITICAL, category, core_id, "%s", payload);
+    return Health_Log(HEALTH_CRITICAL, category, node_id, "%s", payload);
 }
 
 } // namespace tt

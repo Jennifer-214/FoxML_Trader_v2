@@ -681,7 +681,7 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
 // :1184-1193 (exit). Class 18 mirror prevention per CLAUDE.md item 19.
 //
 // Templated on PredictionRecordT to avoid circular include with
-// CoreModelZoo.hpp. Caller provides concrete EnsembleModelZoo<F>::PredictionRecord
+// NodeModelZoo.hpp. Caller provides concrete EnsembleModelZoo<F>::PredictionRecord
 // type at instantiation; helper accesses .predictions[i] field.
 //
 // Walks ring backwards from ring_head; writes most-recent-first into

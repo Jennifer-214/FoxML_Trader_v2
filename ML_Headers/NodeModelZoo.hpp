@@ -10,16 +10,16 @@
 // timing, buy signal) from a single config-specified directory.
 //
 // usage:
-//   CoreModelZoo<F> zoo;
-//   CoreModelZoo_Init(&zoo);
-//   CoreModelZoo_LoadFromDir(&zoo, "models/aggressive/", MODEL_BACKEND_XGBOOST);
+//   NodeModelZoo<F> zoo;
+//   NodeModelZoo_Init(&zoo);
+//   NodeModelZoo_LoadFromDir(&zoo, "models/aggressive/", MODEL_BACKEND_XGBOOST);
 //   // dispatcher receives &zoo as model_ctx
-//   if (zoo.loaded_mask & CORE_MODEL_BARRIER) {
+//   if (zoo.loaded_mask & NODE_MODEL_BARRIER) {
 //       float multi[3];
 //       Model_PredictMulti(&zoo.barrier, features, n, multi, 3);
 //       // multi[0]=stable, multi[1]=peak, multi[2]=valley
 //   }
-//   CoreModelZoo_Free(&zoo);
+//   NodeModelZoo_Free(&zoo);
 //
 // directory layout:
 //   models/aggressive/
@@ -30,8 +30,8 @@
 //
 // missing files = role disabled (silently no-op). bundle deployment is atomic.
 //======================================================================================================
-#ifndef CORE_MODEL_ZOO_HPP
-#define CORE_MODEL_ZOO_HPP
+#ifndef NODE_MODEL_ZOO_HPP
+#define NODE_MODEL_ZOO_HPP
 
 #include <cstdint>  // v5.15.5.F.4d TECH_DEBT-083 close — explicit IWYU for uintN_t (was transitively pulled)
 #include "ModelInference.hpp"
@@ -58,24 +58,24 @@
 #include <dirent.h>      // v5.10.0a.G.5 — opendir/readdir for AutoDetect
 
 // role bitmap — set in zoo->loaded_mask when a model is successfully loaded
-#define CORE_MODEL_BARRIER     (1u << 0)  // 3-class softmax: stable/peak/valley
-#define CORE_MODEL_REGIME      (1u << 1)  // multi-class regime classifier
-#define CORE_MODEL_EXIT        (1u << 2)  // exit timing model
-#define CORE_MODEL_BUY_SIGNAL  (1u << 3)  // legacy single-binary buy signal
+#define NODE_MODEL_BARRIER     (1u << 0)  // 3-class softmax: stable/peak/valley
+#define NODE_MODEL_REGIME      (1u << 1)  // multi-class regime classifier
+#define NODE_MODEL_EXIT        (1u << 2)  // exit timing model
+#define NODE_MODEL_BUY_SIGNAL  (1u << 3)  // legacy single-binary buy signal
 
-// v5.15.4 — alignas(64) required so heap-allocated CoreModelZoo via
+// v5.15.4 — alignas(64) required so heap-allocated NodeModelZoo via
 // aligned_alloc(64) (HotSwap_ShadowLoad_SingleZoo) gives the embedded
 // ModelHandle<F> members (which are themselves alignas(64) since v5.15.0)
 // correctly-aligned addresses. Without container-level alignas(64), heap
 // allocation via plain malloc gives only 16-byte alignment + AVX-512
 // vector-load fields inside ModelHandle could fault or run slow.
 template <unsigned F>
-struct alignas(64) CoreModelZoo {
+struct alignas(64) NodeModelZoo {
     ModelHandle<F> barrier;     // 3-class P(stable)/P(peak)/P(valley) when num_outputs=3
     ModelHandle<F> regime;      // multi-class regime
     ModelHandle<F> exit;        // exit timing
     ModelHandle<F> buy_signal;  // legacy single-binary
-    unsigned int loaded_mask;   // bitmap of loaded roles (CORE_MODEL_*)
+    unsigned int loaded_mask;   // bitmap of loaded roles (NODE_MODEL_*)
     // v5.11.62 — primary-role indirection. Strategy code reads
     // zoo->primary_handle (set by LoadFromDir to whichever role file was
     // actually present in priority order: buy_signal > barrier > regime).
@@ -89,18 +89,18 @@ struct alignas(64) CoreModelZoo {
 
 // v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
 // Compiler enforces alignment + size %16 == 0 (alignas implies); we also
-// want size %64 == 0 so adjacent heap-allocated CoreModelZoo don't share
+// want size %64 == 0 so adjacent heap-allocated NodeModelZoo don't share
 // cache lines with neighboring allocations + cluster cleanly. Each
 // ModelHandle<F=64> is itself 64-byte aligned, so the struct sizeof
 // is already a multiple of 64 (verified by static_assert).
-static_assert(sizeof(CoreModelZoo<64>) % 64 == 0,
-              "v5.15.4: CoreModelZoo<64> size must be multiple of 64 for cache-line discipline");
-static_assert(alignof(CoreModelZoo<64>) == 64,
-              "v5.15.4: CoreModelZoo<64> must be cache-line aligned");
+static_assert(sizeof(NodeModelZoo<64>) % 64 == 0,
+              "v5.15.4: NodeModelZoo<64> size must be multiple of 64 for cache-line discipline");
+static_assert(alignof(NodeModelZoo<64>) == 64,
+              "v5.15.4: NodeModelZoo<64> must be cache-line aligned");
 
 //======================================================================================================
 template <unsigned F>
-inline void CoreModelZoo_Init(CoreModelZoo<F> *zoo) {
+inline void NodeModelZoo_Init(NodeModelZoo<F> *zoo) {
     Model_Init(&zoo->barrier);
     Model_Init(&zoo->regime);
     Model_Init(&zoo->exit);
@@ -121,7 +121,7 @@ inline void CoreModelZoo_Init(CoreModelZoo<F> *zoo) {
 //
 // Default args preserve pre-v5.2.0 callers — no gate when secret==nullptr.
 template <unsigned F>
-inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
+inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     const char *role_name, int backend,
                                     const char* held_out_stamp_secret = nullptr,
                                     double gap_threshold = 0.05,
@@ -375,7 +375,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             handle->effective_hash[n] = '\0';
         }
         // v5.14.8.E — copy stale-model gate fields from stamp to handle.
-        // Read by CoreModelZoo_CheckStaleModel at boot.
+        // Read by NodeModelZoo_CheckStaleModel at boot.
         if (STAMP_HAS(sr, training_timestamp_us)) {
             STAMP_SET(*handle, training_timestamp_us);
             handle->training_timestamp_us = sr.training_timestamp_us;
@@ -495,7 +495,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                 handle->scaler_load_failed = 1;
                 return 0;
             }
-            // warn-mode: identity applied, surface to operator via PerCoreSnap
+            // warn-mode: identity applied, surface to operator via PerNodeSnap
             fprintf(stderr,
                 "[CRITICAL] scaler load failed (reason=%s) but engine continuing "
                 "with identity (held_out_gate_strict=0). Predictions WILL drift "
@@ -516,7 +516,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     // handle for arch-field + CFG + HMAC + model-age drift bits).
     // Sets bits on handle->drift_flags_at_load using FOREACH_FAILURE_MODE
     // BIT_FLAG positions. ShardedSnapshot_Publish OR-aggregates across
-    // all 4 zoo roles into PerCoreSnap.failure_flags for GUI Model Health
+    // all 4 zoo roles into PerNodeSnap.failure_flags for GUI Model Health
     // panel + (future v5.15.2) live-readiness boot gate consumption.
     //
     // Boot-only path; runs once per handle load. No slow-path or hot-path
@@ -550,7 +550,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
 
         // (4) MODEL_AGE_WARN — set when stamp has training_timestamp_us
         //     + cfg.model_max_age_hours > 0 + age exceeds threshold.
-        //     Mirrors CoreModelZoo_CheckStaleModel's age check but sets
+        //     Mirrors NodeModelZoo_CheckStaleModel's age check but sets
         //     a snapshot-publishable bit (vs CheckStaleModel's CRITICAL
         //     log path). Both paths fire independently.
         if (cfg_ptr && cfg_ptr->model_max_age_hours > 0 &&
@@ -576,7 +576,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
 // disabled. returns the number of roles loaded.
 //======================================================================================================
 template <unsigned F>
-inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int backend,
+inline int NodeModelZoo_LoadFromDir(NodeModelZoo<F> *zoo, const char *dir, int backend,
                                      const char* held_out_stamp_secret = nullptr,
                                      double gap_threshold = 0.05,
                                      int held_out_gate_strict = 0,
@@ -598,32 +598,32 @@ inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int b
     if (!dir || dir[0] == '\0') return 0;
 
     int loaded = 0;
-    if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
+    if (NodeModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
             acknowledge_cross_binary_drift, expected_feature_mask,
             /*expected_horizon_ticks=*/0, cfg_ptr)) {
-        zoo->loaded_mask |= CORE_MODEL_BARRIER;
+        zoo->loaded_mask |= NODE_MODEL_BARRIER;
         loaded++;
     }
-    if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
+    if (NodeModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
             acknowledge_cross_binary_drift, expected_feature_mask,
             /*expected_horizon_ticks=*/0, cfg_ptr)) {
-        zoo->loaded_mask |= CORE_MODEL_REGIME;
+        zoo->loaded_mask |= NODE_MODEL_REGIME;
         loaded++;
     }
-    if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
+    if (NodeModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
             acknowledge_cross_binary_drift, expected_feature_mask,
             /*expected_horizon_ticks=*/0, cfg_ptr)) {
-        zoo->loaded_mask |= CORE_MODEL_EXIT;
+        zoo->loaded_mask |= NODE_MODEL_EXIT;
         loaded++;
     }
-    if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend,
+    if (NodeModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
             acknowledge_cross_binary_drift, expected_feature_mask,
             /*expected_horizon_ticks=*/0, cfg_ptr)) {
-        zoo->loaded_mask |= CORE_MODEL_BUY_SIGNAL;
+        zoo->loaded_mask |= NODE_MODEL_BUY_SIGNAL;
         loaded++;
     }
 
@@ -636,18 +636,18 @@ inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int b
     zoo->primary_handle = nullptr;
     zoo->primary_target_class = 0;
     zoo->primary_role_name[0] = '\0';
-    if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
+    if (zoo->loaded_mask & NODE_MODEL_BUY_SIGNAL) {
         zoo->primary_handle = &zoo->buy_signal;
         zoo->buy_signal.buy_class_idx = 0;
         strncpy(zoo->primary_role_name, "buy_signal",
                 sizeof(zoo->primary_role_name) - 1);
-    } else if (zoo->loaded_mask & CORE_MODEL_BARRIER) {
+    } else if (zoo->loaded_mask & NODE_MODEL_BARRIER) {
         zoo->primary_handle = &zoo->barrier;
         zoo->barrier.buy_class_idx = (zoo->barrier.num_outputs >= 2) ? 1 : 0;
         zoo->primary_target_class = zoo->barrier.buy_class_idx;
         strncpy(zoo->primary_role_name, "barrier",
                 sizeof(zoo->primary_role_name) - 1);
-    } else if (zoo->loaded_mask & CORE_MODEL_REGIME) {
+    } else if (zoo->loaded_mask & NODE_MODEL_REGIME) {
         zoo->primary_handle = &zoo->regime;
         zoo->regime.buy_class_idx = 0;  // operator opts in via cfg if 3-class regime
         strncpy(zoo->primary_role_name, "regime",
@@ -668,10 +668,10 @@ inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int b
 // path (backward compat with the old core_N_model_path config field).
 //======================================================================================================
 template <unsigned F>
-inline int CoreModelZoo_LoadLegacy(CoreModelZoo<F> *zoo, const char *path, int backend) {
+inline int NodeModelZoo_LoadLegacy(NodeModelZoo<F> *zoo, const char *path, int backend) {
     if (!path || path[0] == '\0') return 0;
     if (Model_Load(&zoo->buy_signal, path, backend)) {
-        zoo->loaded_mask |= CORE_MODEL_BUY_SIGNAL;
+        zoo->loaded_mask |= NODE_MODEL_BUY_SIGNAL;
         return 1;
     }
     return 0;
@@ -679,7 +679,7 @@ inline int CoreModelZoo_LoadLegacy(CoreModelZoo<F> *zoo, const char *path, int b
 
 //======================================================================================================
 template <unsigned F>
-inline void CoreModelZoo_Free(CoreModelZoo<F> *zoo) {
+inline void NodeModelZoo_Free(NodeModelZoo<F> *zoo) {
     Model_Free(&zoo->barrier);
     Model_Free(&zoo->regime);
     Model_Free(&zoo->exit);
@@ -689,7 +689,7 @@ inline void CoreModelZoo_Free(CoreModelZoo<F> *zoo) {
 
 //======================================================================================================
 template <unsigned F>
-inline int CoreModelZoo_HasAny(const CoreModelZoo<F> *zoo) {
+inline int NodeModelZoo_HasAny(const NodeModelZoo<F> *zoo) {
     return zoo->loaded_mask != 0;
 }
 
@@ -717,20 +717,20 @@ template <unsigned F>
 // expected.cfg recorded at training time. Mismatch on cadence = silent
 // train-serve drift; mismatch on feature format = wrong number of
 // features in the pack, model crashes or produces garbage.
-inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *dir,
+inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *dir,
                                        int live_barrier_gate_enabled,
                                        double live_ml_buy_threshold,
-                                       int strict_mode, int core_id,
+                                       int strict_mode, int node_id,
                                        unsigned live_poll_interval = 0,
                                        unsigned live_feature_format_version = 0) {
     // structural check: multiclass model + barrier_gate_enabled=0 → warn
-    int has_multiclass = (zoo->loaded_mask & CORE_MODEL_BARRIER) && zoo->barrier.num_outputs >= 2;
+    int has_multiclass = (zoo->loaded_mask & NODE_MODEL_BARRIER) && zoo->barrier.num_outputs >= 2;
     if (has_multiclass && !live_barrier_gate_enabled) {
         fprintf(stderr, "[ML] core %d: WARNING — model has %d output classes (multiclass softmax)\n"
                         "                  but barrier_gate_enabled=0. only P(valley) used,\n"
                         "                  P(peak)/P(stable) ignored. set barrier_gate_enabled=1\n"
                         "                  to use the full model.\n",
-                core_id, zoo->barrier.num_outputs);
+                node_id, zoo->barrier.num_outputs);
     }
 
     // read expected.cfg if present
@@ -807,7 +807,7 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
             "                  RollingStats time-windows differ %.1f×; "
             "predictions will diverge from training distribution.\n"
             "                  Set engine.cfg poll_interval=%d to match.\n",
-            core_id, expected_poll_interval, live_poll_interval,
+            node_id, expected_poll_interval, live_poll_interval,
             (double)live_poll_interval / (double)expected_poll_interval,
             expected_poll_interval);
         mismatches++;
@@ -822,7 +822,7 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
             "but engine runtime is v%u. Feature indices differ; model "
             "would interpret inputs as wrong features.\n"
             "                  Retrain the model on the current engine.\n",
-            core_id, expected_feature_format_ver, live_feature_format_version);
+            node_id, expected_feature_format_ver, live_feature_format_version);
         mismatches++;
     }
 
@@ -830,7 +830,7 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
     if (expected_barrier_gate >= 0 && expected_barrier_gate != live_barrier_gate_enabled) {
         fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says barrier_gate_enabled=%d, "
                         "engine.cfg has %d\n",
-                core_id, expected_barrier_gate, live_barrier_gate_enabled);
+                node_id, expected_barrier_gate, live_barrier_gate_enabled);
         mismatches++;
     }
     if (expected_threshold >= 0.0 &&
@@ -838,14 +838,14 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
          live_ml_buy_threshold > expected_threshold + 0.001)) {
         fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says ml_buy_threshold=%.3f, "
                         "engine.cfg has %.3f\n",
-                core_id, expected_threshold, live_ml_buy_threshold);
+                node_id, expected_threshold, live_ml_buy_threshold);
         mismatches++;
     }
-    if (expected_num_classes >= 2 && (zoo->loaded_mask & CORE_MODEL_BARRIER) &&
+    if (expected_num_classes >= 2 && (zoo->loaded_mask & NODE_MODEL_BARRIER) &&
         zoo->barrier.num_outputs != expected_num_classes) {
         fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says %d classes, "
                         "loaded model has %d outputs\n",
-                core_id, expected_num_classes, zoo->barrier.num_outputs);
+                node_id, expected_num_classes, zoo->barrier.num_outputs);
         mismatches++;
     }
 
@@ -854,14 +854,14 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
     // live cfg (yet); add comparison if drift becomes a real concern.
     if (expected_held_out_fraction >= 0.0 || expected_gap_threshold >= 0.0) {
         fprintf(stderr, "[ML] core %d: validation discipline — held_out=%.2f gap_threshold=%.3f\n",
-                core_id,
+                node_id,
                 expected_held_out_fraction >= 0.0 ? expected_held_out_fraction : 0.0,
                 expected_gap_threshold     >= 0.0 ? expected_gap_threshold     : 0.0);
     }
 
     if (mismatches == 0) {
         fprintf(stderr, "[ML] core %d: expected.cfg verified (role=%s, %d classes) ✓\n",
-                core_id, expected_role[0] ? expected_role : "?",
+                node_id, expected_role[0] ? expected_role : "?",
                 expected_num_classes >= 0 ? expected_num_classes : 0);
         return 1;
     }
@@ -870,12 +870,12 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
         fprintf(stderr, "[ML] core %d: %d MISMATCH(ES) — STRICT MODE refusing to load.\n"
                         "                update engine.cfg to match expected.cfg, or set\n"
                         "                model_verify_strict=0 to override.\n",
-                core_id, mismatches);
+                node_id, mismatches);
         return 0;
     } else {
         fprintf(stderr, "[ML] core %d: %d mismatch(es) — model may not behave as trained.\n"
                         "                fix engine.cfg to silence these warnings.\n",
-                core_id, mismatches);
+                node_id, mismatches);
         return 1;
     }
 }
@@ -883,8 +883,8 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
 //======================================================================================================
 // [v5.10.0a.G.3 — ENSEMBLE MODEL ZOO (multi-horizon sidecar struct)]
 //======================================================================================================
-// EnsembleModelZoo lives ALONGSIDE CoreModelZoo (not replacing it).
-// Single-horizon callers use CoreModelZoo unchanged; multi-horizon
+// EnsembleModelZoo lives ALONGSIDE NodeModelZoo (not replacing it).
+// Single-horizon callers use NodeModelZoo unchanged; multi-horizon
 // callers populate EnsembleModelZoo when cfg.horizon_list non-empty.
 //
 // G.4 inference path: at per-tick predict, if ensemble->active, iterate
@@ -920,7 +920,7 @@ static_assert(ENSEMBLE_HORIZON_MAX <= 8,
 // exactly = 1 cache line; alignas(64) prevents straddling.
 // Populated at LoadFromCfg per-arm copy site from each handle's
 // stamp-body label_tp_pct/label_sl_pct (already loaded by
-// CoreModelZoo_TryLoadRole at CoreModelZoo.hpp:349-350).
+// NodeModelZoo_TryLoadRole at NodeModelZoo.hpp:349-350).
 // Rationale: cache-miss cost (~100ns cold) is 75-100× cycle cost
 // per CLAUDE.md item 28 latency-vs-cache decision framework;
 // 1-cache-line read profile across both DOMINANT and BLEND modes
@@ -1075,7 +1075,7 @@ struct alignas(64) EnsembleModelZoo {
     // ============================================================================
     // v5.10.0a.G.9 — bandit state persistence config. base_dir captured at
     // AutoDetectFromDir / LoadFromCfg time; empty path = persistence disabled.
-    alignas(64) char bandit_save_path[400];   // <core_model_dir>/bandit_state.json
+    alignas(64) char bandit_save_path[400];   // <node_model_dir>/bandit_state.json
     int      bandit_save_interval;             // 0 = no periodic save (shutdown only)
     uint64_t bandit_update_count;              // monotonic; modulo'd against interval
 
@@ -1105,7 +1105,7 @@ static_assert(alignof(EnsembleModelZoo<64>) == 64,
 
 // v5.15.5.F.4d — bandit dispatch table consumer header (Step 1.B + Step 3 of merged plan body).
 // Included AFTER EnsembleModelZoo<F> struct + size/alignment static_asserts so the dispatch table's
-// templates can reference the struct. Include guard makes the re-include of CoreModelZoo.hpp from
+// templates can reference the struct. Include guard makes the re-include of NodeModelZoo.hpp from
 // inside bandit_dispatch_table.hpp a no-op; all needed symbols (EnsembleModelZoo<F>, NUM_REGIMES,
 // ENSEMBLE_HORIZON_MAX, MASK_ORDER_BANDIT_3BIT, ThompsonUpdateFn) are visible at this point.
 //
@@ -1149,7 +1149,7 @@ inline void ezoo_set_per_arm_barrier(EnsembleModelZoo<F>* ezoo, int arm_idx,
 // corrupt arms into disabled_horizon_mask (prediction-loop exclusion; applied HERE so
 // SetDisabledHorizons' reset can't wipe it). (2) Returns the per-node majority-corrupt verdict:
 // true when MORE than `shalt_ratio` of the barrier-bearing arms are corrupt (default 0.5 =
-// strict majority) OR all are. The caller sets MASK_CORE_STATE_MODEL_CORRUPT + the sticky
+// strict majority) OR all are. The caller sets MASK_NODE_STATE_MODEL_CORRUPT + the sticky
 // retrain log on a true verdict. H22: pure function of THIS node's own ezoo + its cfg ratio.
 template <unsigned F>
 inline bool EnsembleZoo_FinalizeCorrupt(EnsembleModelZoo<F>* ezoo, double shalt_ratio) {
@@ -1372,10 +1372,10 @@ inline void EnsembleModelZoo_UpdateDrift(EnsembleModelZoo<F>* ezoo,
 // prediction direction matched the price move (current_price vs
 // record.sample_price). Calls Bandit_Update on the matching regime's
 // bandit. Marks records as rewarded to avoid double-rewarding.
-// v5.15.5.F.4d — sig gained `core_cfg` param for per-core bandit_algorithm dispatch (Step 3 +
+// v5.15.5.F.4d — sig gained `node_cfg` param for per-core bandit_algorithm dispatch (Step 3 +
 // § H Class 25 sweep of merged plan body). Default nullptr preserves backward compat: nullptr →
 // algo=0 (EXP3) → leaf reward fn = exp3_only_reward → Bandit_Update call → bytewise identical to
-// pre-.F.4d behavior. Production callers pass core_cfg to enable Thompson + ghost-mode + BLENDED
+// pre-.F.4d behavior. Production callers pass node_cfg to enable Thompson + ghost-mode + BLENDED
 // reward attribution per FOREACH_BANDIT_ALGORITHM metadata. Closes Class 24 sister + Class 25 + Class 28
 // at the buy-side attribution surface.
 template <unsigned F>
@@ -1384,7 +1384,7 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
                                                        int forward_ticks,
                                                        int poll_interval,
                                                        double ic_floor,
-                                                       const PerCoreCfg<F>* core_cfg = nullptr) {
+                                                       const PerNodeCfg<F>* node_cfg = nullptr) {
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (poll_interval <= 0) poll_interval = 100;
     if (forward_ticks <= 0) forward_ticks = 1000;
@@ -1399,7 +1399,7 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
     // v5.15.5.F.4d — resolve per-core bandit algorithm + bounds-clamp defensively
     // (cfg parser clamps to [0,4] per CfgFieldRegistry.hpp; this guard is belt-and-suspenders).
     // Sister to BanditAlgorithm_Apply's bounds-check at BanditAlgorithmRegistry.hpp.
-    int algo = core_cfg ? core_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
+    int algo = node_cfg ? node_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
     if (algo < 0 || algo >= FOREACH_BANDIT_ALGORITHM_COUNT) algo = (int)BANDIT_ALGO_EXP3;
 
     // Walk all populated records; reward ones that are old enough + not
@@ -1457,16 +1457,16 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
 // reward_mult: cfg.ensemble_trade_reward_mult (default 4.0). Scales
 // |reward_bps| × mult; correct predictions → positive bps, wrong →
 // negative.
-// v5.15.5.F.4d — sig gained `core_cfg` param for per-core bandit_algorithm dispatch (Step 3 +
+// v5.15.5.F.4d — sig gained `node_cfg` param for per-core bandit_algorithm dispatch (Step 3 +
 // § H Class 25 sweep). Same backward-compat scheme as _TickRewardsFromLookback above: nullptr →
 // algo=0 (EXP3) → exp3_only_reward → Bandit_Update only → bytewise identical to pre-.F.4d behavior.
-// Production callers pass core_cfg to enable Thompson + ghost + BLENDED reward attribution. Closes
+// Production callers pass node_cfg to enable Thompson + ghost + BLENDED reward attribution. Closes
 // Class 24 sister + Class 25 + Class 28 at the buy-side trade-close attribution surface.
 template <unsigned F>
 inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
                                                 double realized_pnl_bps,
                                                 double reward_mult,
-                                                const PerCoreCfg<F>* core_cfg = nullptr) {
+                                                const PerNodeCfg<F>* node_cfg = nullptr) {
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (ezoo->predict_call_count == 0) return;  // no predictions yet
 
@@ -1493,7 +1493,7 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
 
     // v5.15.5.F.4d — resolve per-core bandit algorithm + bounds-clamp defensively (cfg parser
     // clamps to [0,4]; defensive belt-and-suspenders sister to BanditAlgorithm_Apply).
-    int algo = core_cfg ? core_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
+    int algo = node_cfg ? node_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
     if (algo < 0 || algo >= FOREACH_BANDIT_ALGORITHM_COUNT) algo = (int)BANDIT_ALGO_EXP3;
 
     int trade_updates = 0;
@@ -1812,7 +1812,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
         // v5.11.42 D.2 — pass H as expected_horizon_ticks so TryLoadRole
         // refuses if stamp's label_lookahead_ticks doesn't match the dir
         // we loaded from.
-        if (CoreModelZoo_TryLoadRole(&ezoo->barrier[ezoo->barrier_count],
+        if (NodeModelZoo_TryLoadRole(&ezoo->barrier[ezoo->barrier_count],
                                        per_horizon_dir, "barrier", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
@@ -1823,7 +1823,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
             ezoo->barrier_count++;
             total_loaded++;
         }
-        if (CoreModelZoo_TryLoadRole(&ezoo->regime[ezoo->regime_count],
+        if (NodeModelZoo_TryLoadRole(&ezoo->regime[ezoo->regime_count],
                                        per_horizon_dir, "regime", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
@@ -1833,7 +1833,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
             ezoo->regime_count++;
             total_loaded++;
         }
-        if (CoreModelZoo_TryLoadRole(&ezoo->exit_predictor[ezoo->exit_predictor_count],
+        if (NodeModelZoo_TryLoadRole(&ezoo->exit_predictor[ezoo->exit_predictor_count],
                                        per_horizon_dir, "exit", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
@@ -1843,7 +1843,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
             ezoo->exit_predictor_count++;
             total_loaded++;
         }
-        if (CoreModelZoo_TryLoadRole(&ezoo->buy_signal[ezoo->buy_signal_count],
+        if (NodeModelZoo_TryLoadRole(&ezoo->buy_signal[ezoo->buy_signal_count],
                                        per_horizon_dir, "buy_signal", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
@@ -1999,7 +1999,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
 // [v5.10.0a.G.5 — AUTO-DETECT ENSEMBLE FROM DISK]
 //======================================================================================================
 // Scans <base_dir>_horizon_* siblings on disk. For each sibling found:
-//   - Verify load via CoreModelZoo_TryLoadRole
+//   - Verify load via NodeModelZoo_TryLoadRole
 //   - Read stamp body's grid_member_count + grid_member_idx (v5.10.0a.G.2)
 //   - Validate consistency: all loaded siblings must agree on grid_member_count
 //   - Place each model at its grid_member_idx slot in the ensemble
@@ -2072,7 +2072,7 @@ inline int EnsembleZoo_VerifyGridMemberConsistency(
 
             // Re-parse stamp file from disk. Pass 0 for the registry hashes —
             // we already verified them on the original load via
-            // EnsembleModelZoo_LoadFromCfg → CoreModelZoo_TryLoadRole; here we
+            // EnsembleModelZoo_LoadFromCfg → NodeModelZoo_TryLoadRole; here we
             // just need grid_member_count out of the body.
             ModelStampResult sr = verify_model_stamp(
                 m->model_path,
@@ -2940,9 +2940,9 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
 template <unsigned F>
 inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
                                                   const ControllerConfig<F>& cfg,
-                                                  int core_id) {
-    const char* mode = cfg.core_ensemble_blend_mode[core_id][0]
-        ? cfg.core_ensemble_blend_mode[core_id]
+                                                  int node_id) {
+    const char* mode = cfg.node_ensemble_blend_mode[node_id][0]
+        ? cfg.node_ensemble_blend_mode[node_id]
         : cfg.ensemble_blend_mode;
     strncpy(ezoo->blend_mode, mode, sizeof(ezoo->blend_mode) - 1);
     ezoo->blend_mode[sizeof(ezoo->blend_mode) - 1] = '\0';
@@ -2950,7 +2950,7 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
 
 // Canonical post-load setup steps for ensemble.
 // Each entry: X(step_name, call_expression). Expression invoked with
-// (ezoo, cfg, core_id, base_run_path) in scope from helper body.
+// (ezoo, cfg, node_id, base_run_path) in scope from helper body.
 // Adding a new step: 1 line here. Boot, backtest, hot-swap inherit.
 #define FOREACH_ENSEMBLE_POST_LOAD(X)                                          \
     X(init_bandits,        EnsembleModelZoo_InitBandits(ezoo,                   \
@@ -2960,9 +2960,9 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
                                cfg.exit_bandit_lr,                                \
                                cfg.ensemble_min_warmup_predictions))             \
     X(blend_mode,          ensemble_post_load_apply_blend_mode(ezoo, cfg,        \
-                               core_id))                                          \
+                               node_id))                                          \
     X(disabled_horizons,   EnsembleModelZoo_SetDisabledHorizons(ezoo,            \
-                               cfg.core_disabled_horizons[core_id]))             \
+                               cfg.node_disabled_horizons[node_id]))             \
     X(load_bandit_state,   EnsembleModelZoo_LoadBanditState(ezoo,                \
                                base_run_path))                                    \
     X(save_interval,       EnsembleModelZoo_SetBanditSaveInterval(ezoo,          \
@@ -3006,7 +3006,7 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
 template <unsigned F>
 inline void EnsembleModelZoo_PostLoadSetup(EnsembleModelZoo<F>* ezoo,
                                              const ControllerConfig<F>& cfg,
-                                             int core_id,
+                                             int node_id,
                                              const char* base_run_path) {
     if (!ezoo || !base_run_path) return;
 #define X(name, expr) expr;
@@ -3048,10 +3048,10 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
 // (1=ok, 0=failure). Caller checks return code to decide strict-mode action
 // (Free+null at boot; flag-only at hot-swap per v5.10.0c semantics).
 #define FOREACH_SINGLE_ZOO_POST_LOAD(X)                                        \
-    X(verify_expected,     CoreModelZoo_VerifyExpected(zoo, base_run_path,      \
+    X(verify_expected,     NodeModelZoo_VerifyExpected(zoo, base_run_path,      \
                                BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED),                         \
                                FPN_ToDouble(cfg.ml_buy_threshold),               \
-                               cfg.model_verify_strict, core_id,                 \
+                               cfg.model_verify_strict, node_id,                 \
                                cfg.poll_interval,                                 \
                                (unsigned)MODEL_FORMAT_VERSION))
 
@@ -3064,9 +3064,9 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
 // Returns: 1 if all steps OK; 0 if any step failed (caller decides strict-mode
 // action — Free+null at boot; flag-only at hot-swap).
 template <unsigned F>
-inline int CoreModelZoo_PostLoadSetup(const CoreModelZoo<F>* zoo,
+inline int NodeModelZoo_PostLoadSetup(const NodeModelZoo<F>* zoo,
                                         const ControllerConfig<F>& cfg,
-                                        int core_id,
+                                        int node_id,
                                         const char* base_run_path) {
     if (!zoo || !base_run_path) return 0;
     int all_ok = 1;
@@ -3077,7 +3077,7 @@ inline int CoreModelZoo_PostLoadSetup(const CoreModelZoo<F>* zoo,
 }
 
 //======================================================================================================
-// [CoreModelZoo_CheckStaleModel — v5.14.8.E stale-model age gate]
+// [NodeModelZoo_CheckStaleModel — v5.14.8.E stale-model age gate]
 //======================================================================================================
 // Boot-time check: if the loaded model's stamp claims training_timestamp_us
 // older than cfg.model_max_age_hours, surface stale-model condition.
@@ -3097,7 +3097,7 @@ inline int CoreModelZoo_PostLoadSetup(const CoreModelZoo<F>* zoo,
 // the returned value.
 //======================================================================================================
 template <unsigned F>
-inline int CoreModelZoo_CheckStaleModel(const ModelHandle<F>* m,
+inline int NodeModelZoo_CheckStaleModel(const ModelHandle<F>* m,
                                           uint64_t now_us,
                                           uint32_t max_age_hours,
                                           int strict_mode) {
@@ -3128,4 +3128,4 @@ inline int CoreModelZoo_CheckStaleModel(const ModelHandle<F>* m,
     return strict_mode ? -1 : 0;  // REFUSE in strict; WARN otherwise
 }
 
-#endif // CORE_MODEL_ZOO_HPP
+#endif // NODE_MODEL_ZOO_HPP

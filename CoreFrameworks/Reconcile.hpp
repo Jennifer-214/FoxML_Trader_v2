@@ -174,9 +174,9 @@ inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
 //     (no double-apply across multiple boot reconciles)
 //   - last_seen_trade_id updated to max(seen) after replay so the next
 //     reconcile cycle skips replay-applied trades
-//   - core_id synthesis: ReconcileTrade doesn't carry core_id (boot-time
+//   - node_id synthesis: ReconcileTrade doesn't carry node_id (boot-time
 //     reconcile doesn't know which core a trade belonged to). Replay
-//     uses core_id=0 as default — operator-acceptable because boot
+//     uses node_id=0 as default — operator-acceptable because boot
 //     reconcile is a one-time recovery path, not steady-state attribution
 //   - Order_Init uses ORDER_MARKET_BUY for is_buyer=1 trades, ORDER_MARKET_SELL
 //     otherwise. Real order_type may have been LIMIT but boot replay can't
@@ -198,21 +198,21 @@ inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — `cores` param added (nullptr-tolerant) for per-core fee_rate
 // pre-resolution on reconciled-fill synth Orders. Per cfg-scope-discipline § "consumer over
 // per-core array" + Decision 2 recovery-path nullable pointer pattern. Branchless static stub
-// fallback if cores is null. Origin core_id resolved via Pattern 3 sub-variant bitmap-search
+// fallback if cores is null. Origin node_id resolved via Pattern 3 sub-variant bitmap-search
 // over OMS in-flight slots (closes Reconcile cross-core fee accuracy structurally for the
-// common case; fully-released Orders fall back to cores[0] — see DESIGN_NOTE below).
+// common case; fully-released Orders fall back to nodes[0] — see DESIGN_NOTE below).
 template <unsigned F>
 inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
                                         const ReconcileTrade* trades,
                                         int n_trades,
-                                        const PerCoreCfg<F>* cores = nullptr) {
+                                        const PerNodeCfg<F>* nodes = nullptr) {
     if (!oms || !trades || n_trades <= 0) return 0;
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; loop body uses
     // pure ALU. Stub array supports nullptr-tolerant callers (test fixtures, post-crash recovery
     // paths without cfg available). Per branchless-dispatch-discipline.md Pattern 3.
-    static const PerCoreCfg<F> NULL_PER_CORE_CFG_STUB_ARRAY[MAX_EXECUTION_CORES] = {};
-    const PerCoreCfg<F>* effective_cores = cores ? cores : NULL_PER_CORE_CFG_STUB_ARRAY;
+    static const PerNodeCfg<F> NULL_PER_NODE_CFG_STUB_ARRAY[MAX_EXECUTION_NODES] = {};
+    const PerNodeCfg<F>* effective_nodes = nodes ? nodes : NULL_PER_NODE_CFG_STUB_ARRAY;
 
     int replayed = 0;
     uint64_t max_trade_id = oms->last_seen_trade_id;
@@ -223,15 +223,15 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
             continue;  // already seen; skip (idempotent re-run safety)
         }
 
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless bitmap-search for originating Order's core_id.
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless bitmap-search for originating Order's node_id.
         // Pattern 3 sub-variant (bitmap-search via match-mask + tzcnt). Build match-mask via
         // fixed-cost order_id compare per slot (16 iterations); AND with order_bitmap; __builtin_ctz
         // picks first match. Cost ~120ns deterministic (16 × ALU + tzcnt + indirect cmov).
         // DESIGN_NOTE: when the originating Order is still in an OMS slot (PARTIAL or recently-FILLED),
-        // its core_id is recovered and cfg.cores[origin_core_id] supplies the per-core fee_rate.
+        // its node_id is recovered and cfg.nodes[origin_node_id] supplies the per-core fee_rate.
         // For fully-released Orders (FILLED + slot reclaimed before Reconcile fires; rare, bounded
-        // by slot churn dynamics), the bitmap search misses → origin_core_id stays -1 → fallback
-        // to cores[0] (canonical recovery-core). The corner case is documented as TECH_DEBT at
+        // by slot churn dynamics), the bitmap search misses → origin_node_id stays -1 → fallback
+        // to nodes[0] (canonical recovery-core). The corner case is documented as TECH_DEBT at
         // r-8 ship close (carry actual exchange-reported fee in ReconcileTrade — out of B.1 scope).
         uint16_t match_mask = 0;
         for (int s = 0; s < MAX_INFLIGHT_ORDERS; ++s) {
@@ -240,21 +240,21 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
             match_mask = (uint16_t)(match_mask | ((uint16_t)eq << s));
         }
         const uint16_t valid_match = (uint16_t)(match_mask & oms->order_bitmap);
-        const int origin_core_id = valid_match
-            ? (int)oms->orders[__builtin_ctz(valid_match)].core_id
-            : 0;  // fallback to cores[0] for released Orders
-        // Bounds-clamp via mask (branchless): origin_core_id is in [0, MAX_EXECUTION_CORES).
-        const int safe_core_id = origin_core_id & (MAX_EXECUTION_CORES - 1);
+        const int origin_node_id = valid_match
+            ? (int)oms->orders[__builtin_ctz(valid_match)].node_id
+            : 0;  // fallback to nodes[0] for released Orders
+        // Bounds-clamp via mask (branchless): origin_node_id is in [0, MAX_EXECUTION_NODES).
+        const int safe_node_id = origin_node_id & (MAX_EXECUTION_NODES - 1);
 
         // Synthesize an Order from the trade record. Defaults explained
         // in the function header comment.
         Order<F> synth;
         OrderType otype = t.is_buyer ? ORDER_MARKET_BUY : ORDER_MARKET_SELL;
-        Order_Init(&synth, (uint64_t)t.order_id, (int16_t)safe_core_id, otype);
+        Order_Init(&synth, (uint64_t)t.order_id, (int16_t)safe_node_id, otype);
         Order_SetIsMaker(&synth, (bool)t.is_maker);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order_BindPreResolved with originating core's cfg.
         // Closes Class 27 cross-core fee accuracy gap for the common (in-flight) case.
-        Order_BindPreResolved(&synth, effective_cores[safe_core_id]);
+        Order_BindPreResolved(&synth, effective_nodes[safe_node_id]);
         synth.requested_qty = Money{ money_from_double_payload(t.qty) };  // D-103 reconcile ingress
         synth.event_price   = Money{ money_from_double_payload(t.price) };
 

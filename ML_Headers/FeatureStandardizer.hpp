@@ -242,10 +242,10 @@ static inline int FeatureStandardizer_Apply(const FeatureStandardizer* sc,
 }
 
 //======================================================================================================
-// [LOAD] — engine boot, called from CoreModelZoo_TryLoadRole
+// [LOAD] — engine boot, called from NodeModelZoo_TryLoadRole
 //======================================================================================================
 // Read the .scaler sidecar binary. Validates magic, num_features, and
-// the body's embedded sha256. Caller (CoreModelZoo) compares the FULL
+// the body's embedded sha256. Caller (NodeModelZoo) compares the FULL
 // file's SHA against stamp's scaler_sha256 separately (using
 // sha256_file_hex_inproc). After Load returns 1, caller sets
 // has_scaler=1 if all upstream checks (registry_hash match) pass.

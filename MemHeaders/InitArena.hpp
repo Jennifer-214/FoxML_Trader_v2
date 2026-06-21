@@ -8,7 +8,7 @@
 // Replaces the per-struct `malloc(sizeof(...))` / `new T()` pattern at engine
 // boot with a single mmap(MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE) backing
 // store. All init-time allocations (RollingStats long/medium/baseline,
-// CumDeltaState, per-core CoreSlowState, strategy state factories) bump-pointer
+// CumDeltaState, per-core NodeSlowState, strategy state factories) bump-pointer
 // from this arena.
 //
 // Properties:

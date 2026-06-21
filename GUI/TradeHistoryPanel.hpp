@@ -14,7 +14,7 @@ struct TradeHistoryEntry {
     char reason[8];  // "TP", "SL", "TIME", etc.
     char strategy[8]; // "MR", "MOM", "DIP", "EMA"
     int tick;
-    int core_id;     // P.3 partials: which core fired this trade
+    int node_id;     // P.3 partials: which core fired this trade
     int leg;         // P.3 partials: 0 = leg A or single, 1 = leg B
     // v5.5.2: hold time. Computed from matching E (entry) row's timestamp_us
     // → X (exit) row's timestamp_us via a per-slot state machine in the
@@ -48,9 +48,9 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
     if (!f) return;
 
     // Sharded trade log format (CoreFrameworks/ShardedTradeLog.hpp v3):
-    //   E rows: timestamp,core_id,strategy_id,E,event_price,entry_price,
+    //   E rows: timestamp,node_id,strategy_id,E,event_price,entry_price,
     //           0,0,entry_fee,balance,trade_size                  (11 cols)
-    //   X rows: timestamp,core_id,strategy_id,X,event_price,entry_price,
+    //   X rows: timestamp,node_id,strategy_id,X,event_price,entry_price,
     //           exit_price,net_pnl,total_fees,balance,trade_size  (11 cols)
     //
     // The panel only displays X rows (completed exits). Each leg exit
@@ -87,10 +87,10 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         if (kind_s[0] != 'X') continue;
         if (th->count >= MAX_HISTORY) break;
 
-        char tick_s[24], core_s[8], strat_s[8];
+        char tick_s[24], node_s[8], strat_s[8];
         char entry_s[32], exit_s[32], qty_s[32], pnl_s[32], fees_s[32];
         csv_field(line, 0,  tick_s,  sizeof(tick_s));
-        csv_field(line, 1,  core_s,  sizeof(core_s));
+        csv_field(line, 1,  node_s,  sizeof(node_s));
         csv_field(line, 2,  strat_s, sizeof(strat_s));
         csv_field(line, 5,  entry_s, sizeof(entry_s));
         csv_field(line, 6,  exit_s,  sizeof(exit_s));
@@ -106,33 +106,33 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         e->pnl         = tt::parse_double_fast(pnl_s);
         e->fee         = tt::parse_double_fast(fees_s);
         e->tick        = (int)atoll(tick_s);
-        e->core_id     = atoi(core_s);
+        e->node_id     = atoi(node_s);
 
         // v5.5.2: compute hold_secs from entry-row timestamp. tick_s is
         // the X row's timestamp_us; entry_ts_us[slot] was set on the
         // matching E row above. If no E row was seen for this slot
         // (CSV truncated / log rotated), hold_secs = -1.0 sentinel.
-        if (e->core_id >= 0 && e->core_id < 16 && entry_ts_us[e->core_id] > 0) {
+        if (e->node_id >= 0 && e->node_id < 16 && entry_ts_us[e->node_id] > 0) {
             uint64_t exit_ts_us = (uint64_t)atoll(tick_s);
-            if (exit_ts_us > entry_ts_us[e->core_id]) {
-                e->hold_secs = (double)(exit_ts_us - entry_ts_us[e->core_id])
+            if (exit_ts_us > entry_ts_us[e->node_id]) {
+                e->hold_secs = (double)(exit_ts_us - entry_ts_us[e->node_id])
                                 / 1000000.0;
             } else {
                 e->hold_secs = 0.0;  // same-tick — same-second resolution
             }
-            entry_ts_us[e->core_id] = 0;  // consume — next E sets it again
+            entry_ts_us[e->node_id] = 0;  // consume — next E sets it again
         } else {
             e->hold_secs = -1.0;  // no matching E row
         }
 
-        // P.3 partials: core_id in the CSV is actually the PORTFOLIO SLOT
-        // (the drainer passes Sharded_LegSlot result as Submit's core_id).
+        // P.3 partials: node_id in the CSV is actually the PORTFOLIO SLOT
+        // (the drainer passes Sharded_LegSlot result as Submit's node_id).
         // Slot c → core (c/2), leg (c%2) when partials enabled. With
-        // partials disabled, slot == core_id and leg == 0.
+        // partials disabled, slot == node_id and leg == 0.
         // Heuristic: even slot = leg A, odd slot = leg B. Works for both
-        // single-position (slot==core_id, leg always 0) and paired
+        // single-position (slot==node_id, leg always 0) and paired
         // (slots 2c+0 + 2c+1) modes.
-        e->leg = e->core_id & 1;
+        e->leg = e->node_id & 1;
 
         // Reason: derive from price direction (exit vs entry), not P&L
         // sign. The sharded log doesn't carry an explicit reason field
@@ -189,8 +189,8 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
                             ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable;
 
     // v4.7.18: explicit Core + Leg columns. Pre-v4.7.18 the leg was buried
-    // as a ".B" suffix on the strategy name; the actual core_id was hidden
-    // entirely (CSV stores portfolio SLOT in the core_id field, which under
+    // as a ".B" suffix on the strategy name; the actual node_id was hidden
+    // entirely (CSV stores portfolio SLOT in the node_id field, which under
     // partials is 2*core+leg). Now: Core column shows real core (slot/2
     // when partials enabled, slot otherwise); Leg column shows A/B/–.
     if (ImGui::BeginTable("##trades", 12, flags, ImVec2(0, -1))) {  // v5.5.3: +Hold
@@ -217,10 +217,10 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
             ImGui::TableNextColumn();
             ImGui::Text("%d", th->count - 1 - i + 1);
 
-            // v4.7.18: actual core_id + leg breakdown. CSV's core_id field
+            // v4.7.18: actual node_id + leg breakdown. CSV's node_id field
             // is the portfolio SLOT (slot c → core c/2, leg c%2 under
             // partials). With partials disabled, slot == core, leg == 0.
-            int actual_core = partial_exit_enabled ? (e->core_id >> 1) : e->core_id;
+            int actual_core = partial_exit_enabled ? (e->node_id >> 1) : e->node_id;
             ImGui::TableNextColumn();
             ImGui::TextColored(FoxmlColors::wheat, "C%d", actual_core);
             ImGui::TableNextColumn();

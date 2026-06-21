@@ -25,7 +25,7 @@ namespace tt {
 
 // FNV-1a constexpr — matches the helper in FeatureRegistry.hpp pattern.
 // Local copy so this header is self-contained (no include dependency on
-// FeatureRegistry.hpp from CoreModelZoo / EngineSharded which load early).
+// FeatureRegistry.hpp from NodeModelZoo / EngineSharded which load early).
 constexpr uint64_t BUILD_FLAGS_FNV_OFFSET = 0xcbf29ce484222325ULL;
 constexpr uint64_t BUILD_FLAGS_FNV_PRIME  = 0x100000001b3ULL;
 

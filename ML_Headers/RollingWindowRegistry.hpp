@@ -5,13 +5,13 @@
 //======================================================================================================
 // [ROLLING WINDOW REGISTRY — v5.15.5.B.6]
 //======================================================================================================
-// X-macro registry for the per-cadence RollingStats cohort on CoreSlowState.
+// X-macro registry for the per-cadence RollingStats cohort on NodeSlowState.
 // Closes a small Class-18 mirror: the 4 windows (short/long/medium/baseline)
 // each get explicit field declarations + init calls + reset-path entries
 // across multiple files. Adding a 5th window (e.g., `rolling_micro` for
 // sub-second horizon experimentation) required touching:
-//   1. CoreSlowState struct field declaration
-//   2. CoreSlowState_Init RollingStats_Init call
+//   1. NodeSlowState struct field declaration
+//   2. NodeSlowState_Init RollingStats_Init call
 //   3. (Possibly) reset paths in EngineSharded.hpp / BacktestSharded.hpp
 //   4. Per-window consumer references (semantic — stay manual)
 //
@@ -42,7 +42,7 @@ namespace tt {
 //------------------------------------------------------------------------------
 // Tuple: X(name, window_size)
 //   name        — lower_snake_case suffix; produces `rolling_<name>` field
-//                 name on CoreSlowState
+//                 name on NodeSlowState
 //   window_size — uint compile-time constant; produces RollingStats<F, W>
 //                 template instantiation
 //

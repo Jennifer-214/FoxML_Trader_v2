@@ -14,7 +14,7 @@
 #include "../Version.hpp"
 #include "../Strategies/StrategyInterface.hpp"
 #include "SettingsPanel.hpp"  // cfg_write_field for hot-swap persistence
-#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
+#include "../MemHeaders/PerNodeStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
 #include <ctime>
 #include <chrono>  // v5.0.3: Engine Topology drift display
 
@@ -152,7 +152,7 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
     }
 
     // per-core strategy overview (sharded mode)
-    if (s->sharded_mode_active && s->per_core_count > 0) {
+    if (s->sharded_mode_active && s->per_node_count > 0) {
         static const ImVec4 sc[] = {
             {0.40f, 0.60f, 0.85f, 1.0f},  // 0 MR  blue
             {0.85f, 0.55f, 0.25f, 1.0f},  // 1 MOM orange
@@ -168,16 +168,16 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         static_assert(sizeof(sc)/sizeof(sc[0]) == NUM_STRATEGIES,
                       "sc[] color array out of sync with NUM_STRATEGIES");
         ImGui::TextColored(FoxmlColors::sand, "CORES:");
-        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+        for (int i = 0; i < s->per_node_count && i < 16; ++i) {
             ImGui::SameLine();
-            uint8_t sid = s->per_core[i].strategy_id_display;
+            uint8_t sid = s->per_node[i].strategy_id_display;
             // For AUTO, append the resolved strategy in parens so the header
             // matches the Buy Gate panel's "AUTO(MR)" / "AUTO(DIP)" labels.
             ImVec4 col = (sid < NUM_STRATEGIES) ? sc[sid] : FoxmlColors::comment;
             const char *name = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid]
                                : (sid == 0xFF ? "OFF" : "?");
             if (sid == STRATEGY_AUTO) {
-                uint8_t rsid = s->per_core[i].resolved_strategy_id;
+                uint8_t rsid = s->per_node[i].resolved_strategy_id;
                 const char *rname = (rsid < NUM_STRATEGIES && rsid != STRATEGY_AUTO)
                                     ? STRATEGY_SHORT_NAMES[rsid] : "?";
                 ImGui::TextColored(col, "C%d:%s(%s)", i, name, rname);
@@ -241,7 +241,7 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
                           (rj == REGIME_MILD_TREND) ? FoxmlColors::sand :
                           (rj == REGIME_VOLATILE || rj == REGIME_TRENDING_DOWN) ? FoxmlColors::red : FoxmlColors::comment;
 
-    if (s->sharded_mode_active && s->per_core_count > 0) {
+    if (s->sharded_mode_active && s->per_node_count > 0) {
         // v4.0.4: per-core strategy breakdown. The pre-sharded "headline
         // strategy" is meaningless when each core runs its own. Show:
         //   - regime headline (sourced from first AUTO core's hysteresis)
@@ -265,10 +265,10 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
         int strat_count[NUM_STRATEGIES] = {0};
         int auto_count = 0;
         int unresolved = 0;
-        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-            if (s->per_core[i].strategy_id_display == STRATEGY_AUTO) auto_count++;
-            uint8_t sid = s->per_core[i].resolved_strategy_id;
-            if (sid >= NUM_STRATEGIES) sid = s->per_core[i].strategy_id_display;
+        for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+            if (s->per_node[i].strategy_id_display == STRATEGY_AUTO) auto_count++;
+            uint8_t sid = s->per_node[i].resolved_strategy_id;
+            if (sid >= NUM_STRATEGIES) sid = s->per_node[i].strategy_id_display;
             if (sid >= NUM_STRATEGIES) { unresolved++; continue; }
             strat_count[sid]++;
         }
@@ -281,7 +281,7 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
             {0.35f, 0.75f, 0.80f, 0.9f},  // EMA
             {0.70f, 0.70f, 0.70f, 0.9f},  // AUTO (shouldn't appear post-resolve)
         };
-        ImGui::TextColored(FoxmlColors::sand, "cores (%d):", s->per_core_count);
+        ImGui::TextColored(FoxmlColors::sand, "nodes (%d):", s->per_node_count);
         for (int sid = 0; sid < NUM_STRATEGIES; ++sid) {
             if (strat_count[sid] == 0) continue;
             ImGui::SameLine(0, 8);
@@ -443,7 +443,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
     // v4.0 sharded: per-core gate table. Each core has its own gate price,
     // colored by the core's strategy (matches the chart's gate-line colors).
     // The detailed view below shows core 0; this table shows all cores.
-    if (s->sharded_mode_active && s->per_core_count > 0) {
+    if (s->sharded_mode_active && s->per_node_count > 0) {
         // strategy color palette — same indices as ChartPanel's strat_colors
         // so a row's color matches its line on the chart.
         static const ImVec4 strat_colors[NUM_STRATEGIES] = {
@@ -481,19 +481,19 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
             ImGui::TableSetupColumn("Dist",   ImGuiTableColumnFlags_WidthFixed, 80);
             ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableHeadersRow();
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+            for (int i = 0; i < s->per_node_count && i < 16; ++i) {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", i);
                 ImGui::TableNextColumn();
-                uint8_t sid = s->per_core[i].strategy_id_display;
+                uint8_t sid = s->per_node[i].strategy_id_display;
                 ImVec4 col = (sid < NUM_STRATEGIES) ? strat_colors[sid]
                                                    : ImVec4(0.6f,0.6f,0.6f,0.9f);
                 // v4.0.4: AUTO cores show "AUTO(DIP)" with the regime-resolved
                 // concrete strategy in parens. Color follows the resolved strategy
                 // so the chart's per-core gate line matches the row color.
                 if (sid == STRATEGY_AUTO) {
-                    uint8_t rs = s->per_core[i].resolved_strategy_id;
+                    uint8_t rs = s->per_node[i].resolved_strategy_id;
                     if (rs < NUM_STRATEGIES && rs != STRATEGY_AUTO) {
                         ImVec4 rcol = strat_colors[rs];
                         ImGui::TextColored(rcol, "AUTO(%s)", STRATEGY_SHORT_NAMES[rs]);
@@ -505,7 +505,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                         sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
                 }
                 ImGui::TableNextColumn();
-                double gate_p = s->per_core[i].buy_gate_price;
+                double gate_p = s->per_node[i].buy_gate_price;
                 if (gate_p > 0.01) {
                     ImGui::Text("$%.2f", gate_p);
                 } else {
@@ -534,7 +534,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 //                       v5.6.2 will replace with strategy_halt_reason)
                 //   5. wait            (gate live, price hasn't crossed)
                 //   6. READY           (price crossed, no other blocker)
-                const auto *pc = &s->per_core[i];
+                const auto *pc = &s->per_node[i];
                 // v5.6.1: priority chain extended for permission + bitmap
                 // drift. Permission=0 means the hot path will refuse
                 // entries regardless of price/flags (kill switch trip,
@@ -552,7 +552,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     // response.
                     if (s->state_warmup) {
                         ImGui::TextColored(FoxmlColors::yellow, "WARMUP");
-                    } else if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
+                    } else if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) {
                         ImGui::TextColored(FoxmlColors::red, "KILL");
                     } else if (pc->strategy_id_display == STRATEGY_AUTO &&
                                pc->resolved_strategy_id == STRATEGY_NONE) {
@@ -612,8 +612,8 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         // halt_names + halt_names_count declared at panel scope above so the
         // top-table Status column also has access. v5.6.0 — added "imbalance"
         // at index 10.
-        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-            const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+        for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+            const TUISnapshot::PerNodeSnap *pc = &s->per_node[i];
             uint8_t sid = pc->strategy_id_display;
             const char *sname = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";
             char hdr[64];
@@ -687,7 +687,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     if (s->state_warmup) {
                         perm_label = "WARMUP";
                         perm_color = FoxmlColors::yellow;
-                    } else if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
+                    } else if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) {
                         perm_label = "KILL";
                     } else if (pc->strategy_id_display == STRATEGY_AUTO &&
                                pc->resolved_strategy_id == STRATEGY_NONE) {
@@ -726,7 +726,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                         "  vol thr: %.4f", pc->bg_volume_threshold);
                 }
                 // v5.6.3: gate diagnostic comparands (single-source rule —
-                // values come from CoreContext::diag_*, captured by the
+                // values come from NodeContext::diag_*, captured by the
                 // controller's gate checks). Each pair shows actual vs
                 // threshold; green when actual passes, yellow/red when
                 // fails. Skip rows with both sides at zero (cfg disabled).
@@ -978,7 +978,7 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
     // total; this table splits it back out by which core booked each exit.
     // Useful for spotting a single core eating its allocation while the
     // others are flat.
-    if (s->sharded_mode_active && s->per_core_count > 0) {
+    if (s->sharded_mode_active && s->per_node_count > 0) {
         ImGui::Spacing();
         SectionHeader("PER-CORE P&L");
         // strategy palette — same as Market / Buy Gate / Chart
@@ -991,7 +991,7 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
             {0.70f, 0.70f, 0.70f, 0.9f},  // AUTO (shouldn't appear post-resolve)
         };
         ImGuiTableFlags tflags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("per_core_pnl", 7, tflags)) {
+        if (ImGui::BeginTable("per_node_pnl", 7, tflags)) {
             ImGui::TableSetupColumn("Core", ImGuiTableColumnFlags_WidthFixed, 36.0f);
             ImGui::TableSetupColumn("Strat", ImGuiTableColumnFlags_WidthFixed, 56.0f);
             ImGui::TableSetupColumn("Alloc",   ImGuiTableColumnFlags_WidthFixed, 80.0f);
@@ -1001,10 +1001,10 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
             ImGui::TableSetupColumn("Budget",  ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableHeadersRow();
 
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+            for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+                const TUISnapshot::PerNodeSnap *pc = &s->per_node[i];
                 ImGui::TableNextRow();
-                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
+                if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) {
                     // 2A: highlight killed cores. Subtle red row tint so the
                     // panel doesn't look broken when a core trips, just
                     // visibly distinct. Hover any cell for the dd% reason.
@@ -1012,11 +1012,11 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                         ImGui::GetColorU32(ImVec4(0.4f, 0.1f, 0.1f, 0.45f)));
                 }
                 ImGui::TableNextColumn();
-                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
+                if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) {
                     ImGui::TextColored(FoxmlColors::red, "%d!", i);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Core %d killed (dd %.2f%%) — entries halted "
-                                          "until manual reset", i, pc->core_dd_pct * 100.0);
+                                          "until manual reset", i, pc->node_dd_pct * 100.0);
                     }
                 } else {
                     ImGui::Text("%d", i);
@@ -1044,17 +1044,17 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 if (cfg_sid == STRATEGY_AUTO &&
                     live_sid < NUM_STRATEGIES && live_sid != STRATEGY_AUTO) {
                     ImVec4 c = strat_colors[live_sid];
-                    if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) c.w = 0.45f;
+                    if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) c.w = 0.45f;
                     ImGui::TextColored(c, "AUTO(%s)", STRATEGY_SHORT_NAMES[live_sid]);
                 } else if (live_sid < NUM_STRATEGIES) {
                     ImVec4 c = strat_colors[live_sid];
-                    if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) c.w = 0.45f;
+                    if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) c.w = 0.45f;
                     ImGui::TextColored(c, "%s%s", STRATEGY_SHORT_NAMES[live_sid], explicit_marker);
                     if (!STATE_FLAG_IS_SET(*pc, STRATEGY_EXPLICITLY_SET) && cfg_sid != STRATEGY_AUTO) {
                         ImGui::SetItemTooltip(
-                            "Strategy DEFAULTED — cfg lacked core_%d_strategy= line.\n"
+                            "Strategy DEFAULTED — cfg lacked node_%d_strategy= line.\n"
                             "All-default fallback per ControllerConfig_Default (line 847).\n"
-                            "If unintended, add `core_%d_strategy=mr` (or other) to cfg.\n"
+                            "If unintended, add `node_%d_strategy=mr` (or other) to cfg.\n"
                             "See V5_9_AUDIT-#5 in DOCS/V5_9_ML_HARDENING_AUDIT.md.",
                             i, i);
                     }
@@ -1063,20 +1063,20 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 }
 
                 ImGui::TableNextColumn();
-                ImGui::Text("$%.2f", pc->core_allocated);
+                ImGui::Text("$%.2f", pc->node_allocated);
 
                 ImGui::TableNextColumn();
-                ImGui::TextColored(PnlColor(pc->core_realized), "$%+.2f", pc->core_realized);
+                ImGui::TextColored(PnlColor(pc->node_realized), "$%+.2f", pc->node_realized);
 
                 ImGui::TableNextColumn();
-                ImGui::Text("$%.4f", pc->core_fees);
+                ImGui::Text("$%.4f", pc->node_fees);
 
                 ImGui::TableNextColumn();
-                uint32_t total = pc->core_wins + pc->core_losses;
+                uint32_t total = pc->node_wins + pc->node_losses;
                 if (total > 0) {
-                    double win_pct = (double)pc->core_wins / total * 100.0;
+                    double win_pct = (double)pc->node_wins / total * 100.0;
                     ImVec4 wlc = (win_pct >= 50.0) ? FoxmlColors::green : FoxmlColors::red;
-                    ImGui::TextColored(wlc, "%u/%u", pc->core_wins, pc->core_losses);
+                    ImGui::TextColored(wlc, "%u/%u", pc->node_wins, pc->node_losses);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("%.1f%% win rate (%u trades)", win_pct, total);
                     }
@@ -1089,18 +1089,18 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 // allocation is currently deployed. Color: green <50%,
                 // yellow 50-90%, red >90% (>90% means new entries will
                 // be clamped or rejected once Phase 2.2 enforcement lands).
-                if (pc->core_open_positions == 0) {
+                if (pc->node_open_positions == 0) {
                     ImGui::TextDisabled("0%%");
                 } else {
-                    double pct = pc->core_budget_used_pct;
+                    double pct = pc->node_budget_used_pct;
                     ImVec4 col = (pct < 50.0)  ? FoxmlColors::green
                                : (pct < 90.0)  ? FoxmlColors::yellow
                                                 : FoxmlColors::red;
                     ImGui::TextColored(col, "%.0f%%", pct);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Budget used: $%.2f / $%.2f (%u open position%s)",
-                            pc->core_open_notional, pc->core_allocated,
-                            pc->core_open_positions, pc->core_open_positions == 1 ? "" : "s");
+                            pc->node_open_notional, pc->node_allocated,
+                            pc->node_open_positions, pc->node_open_positions == 1 ? "" : "s");
                     }
                 }
             }
@@ -1235,18 +1235,18 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
             // # column — under partials, slot 2c+leg belongs to core c.
             // Show "0.A" and "0.B" so the pair is obvious; under
             // partials-off, show plain core id.
-            int row_core_id = s->partial_exit_enabled ? (ps->idx >> 1) : ps->idx;
+            int row_node_id = s->partial_exit_enabled ? (ps->idx >> 1) : ps->idx;
             int row_leg     = s->partial_exit_enabled ? (ps->idx & 1)  : 0;
             ImGui::TableNextColumn();
             if (s->partial_exit_enabled) {
                 ImGui::TextColored(FoxmlColors::wheat, "#%d.%c",
-                                    row_core_id, row_leg == 0 ? 'A' : 'B');
+                                    row_node_id, row_leg == 0 ? 'A' : 'B');
             } else {
                 ImGui::TextColored(FoxmlColors::wheat, "#%d", ps->idx);
             }
 
-            // strategy (color-coded). Under partials, look up core_id =
-            // slot/2 — both legs share the same per_core entry, so leg A
+            // strategy (color-coded). Under partials, look up node_id =
+            // slot/2 — both legs share the same per_node entry, so leg A
             // and leg B render with the same strategy color (correct —
             // they're one trade).
             ImGui::TableNextColumn();
@@ -1258,8 +1258,8 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
                     {0.65f, 0.45f, 0.80f, 1.0f},
                     {0.35f, 0.75f, 0.80f, 1.0f},
                 };
-                uint8_t sid = (row_core_id < 16 && s->sharded_mode_active)
-                    ? s->per_core[row_core_id].strategy_id_display : 0xFF;
+                uint8_t sid = (row_node_id < 16 && s->sharded_mode_active)
+                    ? s->per_node[row_node_id].strategy_id_display : 0xFF;
                 ImVec4 col = (sid < NUM_STRATEGIES) ? sc[sid] : FoxmlColors::comment;
                 const char *name = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";
                 // Dim leg B slightly so it visually nests under leg A
@@ -1282,11 +1282,11 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
             // TP — v5.6.5 adds enabled-flag indicator + original-TP
             // tooltip on hover. ps->tp is already the effective TP
             // (max of live + ratchet) per ShardedSnapshot.hpp:178.
-            // gate_flags from per_core: TP_ENABLED=0x01, SL_ENABLED=0x02.
+            // gate_flags from per_node: TP_ENABLED=0x01, SL_ENABLED=0x02.
             ImGui::TableNextColumn();
             {
-                uint8_t gf = (row_core_id < 16 && s->sharded_mode_active)
-                    ? s->per_core[row_core_id].gate_flags : 0xFF;  // unknown
+                uint8_t gf = (row_node_id < 16 && s->sharded_mode_active)
+                    ? s->per_node[row_node_id].gate_flags : 0xFF;  // unknown
                                                                      // → assume on
                 bool tp_enabled = (gf & 0x01) != 0;
                 if (!tp_enabled) {
@@ -1304,8 +1304,8 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
             // SL
             ImGui::TableNextColumn();
             {
-                uint8_t gf = (row_core_id < 16 && s->sharded_mode_active)
-                    ? s->per_core[row_core_id].gate_flags : 0xFF;
+                uint8_t gf = (row_node_id < 16 && s->sharded_mode_active)
+                    ? s->per_node[row_node_id].gate_flags : 0xFF;
                 bool sl_enabled = (gf & 0x02) != 0;
                 if (!sl_enabled) {
                     ImGui::TextColored(FoxmlColors::red, "OFF");
@@ -1458,7 +1458,7 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
 // Static state — single-instance panel, OK to keep in function-static.
 // Pure GUI thread, doesn't touch engine state.
 //==========================================================================
-static inline void GUI_Panel_PerCorePnL(const TUISnapshot *s) {
+static inline void GUI_Panel_PerNodePnL(const TUISnapshot *s) {
     static constexpr int PNL_HISTORY = 1800;
     static double pnl_history[PNL_HISTORY][16];  // [time_idx][core]
     static double time_history[PNL_HISTORY];
@@ -1486,7 +1486,7 @@ static inline void GUI_Panel_PerCorePnL(const TUISnapshot *s) {
     if (now_s - last_sample_t >= 1.0) {
         last_sample_t = now_s;
         for (int c = 0; c < 16; c++) {
-            double v = (c < s->per_core_count) ? s->per_core[c].core_realized : 0.0;
+            double v = (c < s->per_node_count) ? s->per_node[c].node_realized : 0.0;
             pnl_history[history_head][c] = v;
         }
         time_history[history_head] = now_s - session_t0;
@@ -1527,10 +1527,10 @@ static inline void GUI_Panel_PerCorePnL(const TUISnapshot *s) {
             {0.65f, 0.45f, 0.80f, 1.0f},  // core 3
             {0.35f, 0.75f, 0.80f, 1.0f},  // core 4+
         };
-        for (int c = 0; c < s->per_core_count && c < 16; c++) {
+        for (int c = 0; c < s->per_node_count && c < 16; c++) {
             char label[16];
-            uint8_t sid = s->per_core[c].resolved_strategy_id;
-            if (sid >= NUM_STRATEGIES) sid = s->per_core[c].strategy_id_display;
+            uint8_t sid = s->per_node[c].resolved_strategy_id;
+            if (sid >= NUM_STRATEGIES) sid = s->per_node[c].strategy_id_display;
             const char *strat = (sid < NUM_STRATEGIES)
                 ? STRATEGY_SHORT_NAMES[sid] : "?";
             snprintf(label, sizeof(label), "C%d %s", c, strat);
@@ -1705,13 +1705,13 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
                      s->ml.confidence_enabled | s->ml.bandit_enabled |
                      s->ml.ml_model_loaded | s->ml.regime_model_loaded;
     // v5.11.62 — sharded ensemble: per-core handles populated even when
-    // centralized snap isn't. Check per_core too so the panel doesn't
+    // centralized snap isn't. Check per_node too so the panel doesn't
     // hide itself when only ensemble is active.
     if (!any_active && s->sharded_mode_active) {
-        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-            if (STATE_FLAG_IS_SET(s->per_core[i], ML_MODEL_LOADED) ||
-                (s->per_core[i].ensemble_active &&
-                 s->per_core[i].ensemble_n_horizons > 0)) {
+        for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+            if (STATE_FLAG_IS_SET(s->per_node[i], ML_MODEL_LOADED) ||
+                (s->per_node[i].ensemble_active &&
+                 s->per_node[i].ensemble_n_horizons > 0)) {
                 any_active = 1;
                 break;
             }
@@ -1813,8 +1813,8 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
     // gets a row with prediction / confidence / IC / RMSE.
     if (s->sharded_mode_active) {
         int any_ml_core = 0;
-        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-            if (STATE_FLAG_IS_SET(s->per_core[i], IS_ML)) { any_ml_core = 1; break; }
+        for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+            if (STATE_FLAG_IS_SET(s->per_node[i], IS_ML)) { any_ml_core = 1; break; }
         }
         if (any_ml_core && ImGui::CollapsingHeader("Per-Core ML",
                             ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1829,27 +1829,27 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
                 ImGui::TableSetupColumn("IC",       ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableSetupColumn("RMSE",     ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableHeadersRow();
-                for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                    if (!STATE_FLAG_IS_SET(s->per_core[i], IS_ML)) continue;
+                for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+                    if (!STATE_FLAG_IS_SET(s->per_node[i], IS_ML)) continue;
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
                     ImGui::Text("%d", i);
                     ImGui::TableNextColumn();
                     // v5.11.62 — ensemble awareness
-                    if (STATE_FLAG_IS_SET(s->per_core[i], ML_MODEL_LOADED)) {
+                    if (STATE_FLAG_IS_SET(s->per_node[i], ML_MODEL_LOADED)) {
                         ImGui::TextColored(FoxmlColors::green, "loaded");
-                    } else if (s->per_core[i].ensemble_active &&
-                               s->per_core[i].ensemble_n_horizons > 0) {
+                    } else if (s->per_node[i].ensemble_active &&
+                               s->per_node[i].ensemble_n_horizons > 0) {
                         ImGui::TextColored(FoxmlColors::green,
-                            "ensemble(%d)", (int)s->per_core[i].ensemble_n_horizons);
+                            "ensemble(%d)", (int)s->per_node[i].ensemble_n_horizons);
                     } else {
                         ImGui::TextColored(FoxmlColors::comment, "none");
                     }
                     ImGui::TableNextColumn();
-                    ImGui::Text("%.4f", s->per_core[i].ml_last_prediction);
+                    ImGui::Text("%.4f", s->per_node[i].ml_last_prediction);
                     ImGui::TableNextColumn();
                     {
-                        float cf = (float)s->per_core[i].ml_last_confidence;
+                        float cf = (float)s->per_node[i].ml_last_confidence;
                         if (cf < 0.0f) cf = 0.0f; if (cf > 1.0f) cf = 1.0f;
                         ImVec4 bc = cf > 0.5f ? FoxmlColors::green
                                   : cf > 0.3f ? FoxmlColors::yellow
@@ -1862,14 +1862,14 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
                     }
                     ImGui::TableNextColumn();
                     {
-                        double ic = s->per_core[i].ml_confidence_ic;
+                        double ic = s->per_node[i].ml_confidence_ic;
                         ImVec4 cc = ic > 0.1 ? FoxmlColors::green
                                   : ic > 0.0 ? FoxmlColors::yellow
                                   : FoxmlColors::red;
                         ImGui::TextColored(cc, "%+.3f", ic);
                     }
                     ImGui::TableNextColumn();
-                    ImGui::Text("%.3f", s->per_core[i].ml_confidence_rmse);
+                    ImGui::Text("%.3f", s->per_node[i].ml_confidence_rmse);
                 }
                 ImGui::EndTable();
             }
@@ -1893,7 +1893,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     GUI_Panel_BuyGate(s);
     GUI_Panel_Account(s, shared);
     GUI_Panel_Positions(s, shared);
-    GUI_Panel_PerCorePnL(s);
+    GUI_Panel_PerNodePnL(s);
     GUI_Panel_Stats(s);
     GUI_Panel_MLIntelligence(s);
 #ifdef LATENCY_PROFILING
@@ -1908,7 +1908,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     // controls. Account panel stays read-only / monitoring; this panel
     // is for taking action when a core gets in trouble. Future home for
     // manual halt, force-close, drawdown override slider, etc.
-    if (s->sharded_mode_active && s->per_core_count > 0 && shared) {
+    if (s->sharded_mode_active && s->per_node_count > 0 && shared) {
         ImGui::Begin("Risk");
         SectionHeader("PER-CORE RISK");
         ImGui::TextColored(FoxmlColors::comment,
@@ -1918,7 +1918,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         ImGuiTableFlags rt = ImGuiTableFlags_BordersInnerV |
                               ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("risk_per_core", 8, rt)) {
+        if (ImGui::BeginTable("risk_per_node", 8, rt)) {
             ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 36);
             ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 56);
             ImGui::TableSetupColumn("Peak",   ImGuiTableColumnFlags_WidthFixed, 80);
@@ -1938,8 +1938,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 {0.70f, 0.70f, 0.70f, 0.9f},  // AUTO
             };
 
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+            for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+                const TUISnapshot::PerNodeSnap *pc = &s->per_node[i];
                 ImGui::PushID(i);
                 ImGui::TableNextRow();
 
@@ -1965,55 +1965,55 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 }
 
                 ImGui::TableNextColumn();
-                ImGui::Text("$%.2f", pc->core_peak_balance);
+                ImGui::Text("$%.2f", pc->node_peak_balance);
 
                 // Current value = allocated + realized (+ unrealized when MTM
                 // is on, but we don't surface unrealized separately yet —
                 // the dd% derives from the current that the engine saw).
                 // Reconstruct approximately: peak * (1 - dd) gives current
                 // at the time peak was last evaluated.
-                double approx_current = pc->core_peak_balance * (1.0 - pc->core_dd_pct);
+                double approx_current = pc->node_peak_balance * (1.0 - pc->node_dd_pct);
                 ImGui::TableNextColumn();
                 // Color Curr by direction vs allocation: green when above
                 // (core in profit overall), red when below (in loss),
                 // default neutral when flat. Same threshold semantics as
                 // the Realized column in PER-CORE P&L.
                 ImVec4 curr_col = FoxmlColors::text;
-                if (approx_current > pc->core_allocated + 0.005) {
+                if (approx_current > pc->node_allocated + 0.005) {
                     curr_col = FoxmlColors::green;
-                } else if (approx_current < pc->core_allocated - 0.005) {
+                } else if (approx_current < pc->node_allocated - 0.005) {
                     curr_col = FoxmlColors::red;
                 }
                 ImGui::TextColored(curr_col, "$%.2f", approx_current);
 
                 // DD%, color-coded
                 ImGui::TableNextColumn();
-                double dd = pc->core_dd_pct * 100.0;
+                double dd = pc->node_dd_pct * 100.0;
                 ImVec4 dd_col = (dd < 5.0)  ? FoxmlColors::green
                               : (dd < 10.0) ? FoxmlColors::yellow
                                             : FoxmlColors::red;
                 ImGui::TextColored(dd_col, "%.1f%%", dd);
 
                 ImGui::TableNextColumn();
-                if (pc->core_ks_trips_total > 0) {
-                    ImGui::TextColored(FoxmlColors::yellow, "%u", pc->core_ks_trips_total);
+                if (pc->node_ks_trips_total > 0) {
+                    ImGui::TextColored(FoxmlColors::yellow, "%u", pc->node_ks_trips_total);
                 } else {
                     ImGui::TextDisabled("0");
                 }
 
                 ImGui::TableNextColumn();
-                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
+                if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) {
                     ImGui::TextColored(FoxmlColors::red_b, "KILLED");
                 } else {
                     ImGui::TextColored(FoxmlColors::green, "armed");
                 }
 
                 ImGui::TableNextColumn();
-                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
+                if (STATE_FLAG_IS_SET(*pc, NODE_KILL_TRIPPED)) {
                     if (ImGui::Button("Reset")) {
                         // Per-core reset signal — engine slow path picks this
                         // up, clears trip flag, refreshes peak to current.
-                        shared->kill_reset_per_core[i] = 1;
+                        shared->kill_reset_per_node[i] = 1;
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Clear kill trip + refresh peak watermark.\n"
@@ -2033,7 +2033,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
 
     // Per-core latency panel (sharded mode only). v5.0.1 (Phase H): split
     // into HOT and SLOW sub-tables.
-    if (s->sharded_mode_active && s->per_core_count > 0) {
+    if (s->sharded_mode_active && s->per_node_count > 0) {
         ImGui::Begin("Per-Core Latency");
 
         SectionHeader("PER-ENGINE HOT-PATH LATENCY");
@@ -2052,8 +2052,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             ImGui::TableSetupColumn("p99",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("Max",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableHeadersRow();
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+            for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+                const TUISnapshot::PerNodeSnap *pc = &s->per_node[i];
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", i);
@@ -2094,8 +2094,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             ImGui::TableSetupColumn("p99",     ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableSetupColumn("Max",     ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableHeadersRow();
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+            for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+                const TUISnapshot::PerNodeSnap *pc = &s->per_node[i];
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", i);
@@ -2128,11 +2128,11 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         }
 
         // v5.1.1: per-section work breakdown — only meaningful in
-        // per_core_slow (centralized = section samples are zero).
+        // per_node_slow (centralized = section samples are zero).
         ImGui::Spacing();
         SectionHeader("PER-ENGINE SLOW-PATH WORK BREAKDOWN");
         ImGui::TextColored(FoxmlColors::comment,
-            "(per-section p50/p99 inside the slow-path cycle; per_core_slow only)");
+            "(per-section p50/p99 inside the slow-path cycle; per_node_slow only)");
 
         if (ImGui::BeginTable("##percore_breakdown", 11, tf)) {
             ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 45);
@@ -2153,8 +2153,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 else              snprintf(buf, sizeof(buf), "%.0fns", ns);
                 return buf;
             };
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+            for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+                const TUISnapshot::PerNodeSnap *pc = &s->per_node[i];
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn(); ImGui::Text("%d", i);
                 ImGui::TableNextColumn();
@@ -2196,7 +2196,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     // OS scheduling and explains "why is engine 3 a bit jittery on
     // this box".
     // ─────────────────────────────────────────────────────────────────────
-    if (s->sharded_mode_active && s->per_core_count > 0) {
+    if (s->sharded_mode_active && s->per_node_count > 0) {
         ImGui::Begin("Engine Topology");
 
         SectionHeader("SYSTEM");
@@ -2211,7 +2211,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                                (int)s->slow_path_pin_offset);
         } else if (s->slow_path_pin_offset == 0) {
             ImGui::TextColored(FoxmlColors::text, "0 (auto: base CPU %d)",
-                               s->per_core_count + 2);
+                               s->per_node_count + 2);
         } else {
             ImGui::TextColored(FoxmlColors::text, "%d (explicit base)",
                                (int)s->slow_path_pin_offset);
@@ -2262,8 +2262,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             uint64_t now_us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
 
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+            for (int i = 0; i < s->per_node_count && i < 16; ++i) {
+                const TUISnapshot::PerNodeSnap *pc = &s->per_node[i];
                 ImGui::PushID(i);
                 ImGui::TableNextRow();
 

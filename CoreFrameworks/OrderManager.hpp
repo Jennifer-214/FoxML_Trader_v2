@@ -69,7 +69,7 @@
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — FOREACH_OMS_STATE_FLAG bitmap cohort
 #include "../MemHeaders/OmsExitPredictorMetaRegistry.hpp"  // v5.15.5.C.2.1 (LOW-2) — FOREACH_OMS_META_SLOT multi-bit cohort
 #include "../MemHeaders/OmsFieldRegistry.hpp"              // v5.15.5.C.3 (Phase 3) — canonical FOREACH_OMS_FIELD + projections
-#include "../ML_Headers/CoreModelZoo.hpp"                  // v5.15.5.F.4d Step 7 § F — EnsembleModelZoo<F>* for real_on_exit_calibration ezoo_ref cast (transitively pulls PerCoreCfg<F> + BANDIT_MAX_ARMS + NUM_REGIMES + Bandit_GetProbabilities)
+#include "../ML_Headers/NodeModelZoo.hpp"                  // v5.15.5.F.4d Step 7 § F — EnsembleModelZoo<F>* for real_on_exit_calibration ezoo_ref cast (transitively pulls PerNodeCfg<F> + BANDIT_MAX_ARMS + NUM_REGIMES + Bandit_GetProbabilities)
 
 #include <atomic>
 #include <chrono>
@@ -124,10 +124,10 @@ constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 // All fields have default member init for safe value-initialization (required for OMS state
 // aggregate init: `OrderManagerState<F> oms{};` value-inits the SPSC ring slot array, which
 // in turn value-inits each SubmitCommand slot). C++17 friend-scope rules don't permit nested-
-// aggregate-init-through-private-default-ctor, so compile-time core_cfg enforcement isn't
+// aggregate-init-through-private-default-ctor, so compile-time node_cfg enforcement isn't
 // cleanly achievable until C++20 concepts.
 //
-// DISCIPLINE: production callers MUST use the required-field ctor + set core_cfg = &cfg.cores[c].
+// DISCIPLINE: production callers MUST use the required-field ctor + set node_cfg = &cfg.nodes[c].
 // Test fixtures may use default-construct + field-by-field assignment with explicit nullptr.
 // TT_ASSERT_PRE_RESOLVED_BOUND (Order.hpp) is the runtime backstop.
 //
@@ -141,11 +141,11 @@ constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 template <unsigned F>
 struct SubmitCommand {
     // ─── REQUIRED (semantic; ctor-signaled) ───
-    int16_t                 core_id      = 0;
+    int16_t                 node_id      = 0;
     uint8_t                 order_type   = 0;
     Money                  qty          = Money_Zero();
     uint8_t                 leg          = 0;
-    const ::PerCoreCfg<F>*  core_cfg     = nullptr;
+    const ::PerNodeCfg<F>*  node_cfg     = nullptr;
 
     // ─── OPTIONAL (default-init; caller overrides as needed) ───
     uint8_t                 strategy_id  = 0xFF;
@@ -160,8 +160,8 @@ struct SubmitCommand {
 
     // Required-field ctor — recommended form for production + test callers; signals
     // which fields a valid submit needs.
-    SubmitCommand(int16_t cid, OrderType t, Money q, uint8_t lg, const ::PerCoreCfg<F>* cfg)
-        : core_id(cid), order_type((uint8_t)t), qty(q), leg(lg), core_cfg(cfg) {}
+    SubmitCommand(int16_t cid, OrderType t, Money q, uint8_t lg, const ::PerNodeCfg<F>* cfg)
+        : node_id(cid), order_type((uint8_t)t), qty(q), leg(lg), node_cfg(cfg) {}
 };
 
 constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
@@ -262,7 +262,7 @@ struct OrderManagerState {
     alignas(64) SPSCRing<Command, 64> reconcile_queue;
 
     // v4.7.37: per-core submit queues. Producer threads (producer slow-path
-    // + per-core slow-path threads in SHARDED per_core_slow execution mode
+    // + per-core slow-path threads in SHARDED per_node_slow execution mode
     // since v5.0.0 default) push SubmitCommands here. The drainer thread pops
     // them in OMS_DrainSubmit and calls OrderManager_Submit serially —
     // preserving the documented "drainer is sole Submit caller" contract.
@@ -270,7 +270,7 @@ struct OrderManagerState {
     // Why per-core (not one queue): when per-core slow-paths spawn (Phase C),
     // each thread is the sole producer for its own ring. SPSC contract
     // holds. With one shared queue, multiple producers would need MPSC.
-    alignas(64) SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_EXECUTION_CORES];
+    alignas(64) SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_EXECUTION_NODES];
 
     // === EVENT LOG MODE (phase 03 chunk 3) ===
     // 0 = legacy: OMS_Tick only marks FILLED/REJECTED and frees slots.
@@ -310,9 +310,9 @@ struct OrderManagerState {
     Money       realized_pnl;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — DELETED: fee_rate, fee_rate_maker, fee_rate_taker, slippage_pct.
     // Per Class 27 structural closure: scalar cfg-mirror caches eliminated. Per-Order fee_rate
-    // now lives on Order::pre_resolved (set at submit via Order_BindPreResolved with cfg.cores[c]).
+    // now lives on Order::pre_resolved (set at submit via Order_BindPreResolved with cfg.nodes[c]).
     // HandleFill reads o->pre_resolved.fee_rate directly; DrainPostFill reads stored last_exit_fee
-    // (set by HandleFill SELL). slippage_pct migrated to cfg.cores[c].slippage_pct + read at
+    // (set by HandleFill SELL). slippage_pct migrated to cfg.nodes[c].slippage_pct + read at
     // EventLoop_OnEvent. Per decision-time-data-binding-pattern.md.
     // Phase 8 (post-coding c10) — maker/taker accounting counters parallel
     // to PortfolioController's (which only fire in legacy mode). HandleFill
@@ -342,7 +342,7 @@ struct OrderManagerState {
     // === PER-FILL BOOKKEEPING (mode 1 per-core accounting) ===
     // HandleFill writes one record per fill into last_fill[portfolio_slot].
     // The drainer reads after OrderManager_Tick and applies them to the
-    // matching CoreContext (mapped via Sharded_LegSlot under partials).
+    // matching NodeContext (mapped via Sharded_LegSlot under partials).
     // Same producer/consumer contract as last_closed_mask:
     //   - producer: HandleFill (drainer thread, OMS_Tick callee)
     //   - consumer: drainer thread post-Tick
@@ -354,8 +354,8 @@ struct OrderManagerState {
     //
     // exit_net_pnl / exit_entry_notional / exit_total_fees / was_win —
     //   populated on SELL fills; mask bit set in last_closed_mask
-    //   (existing). Drainer uses these for core_realized accumulation,
-    //   core_open_notional decrement, core_fees, core_wins/core_losses.
+    //   (existing). Drainer uses these for node_realized accumulation,
+    //   node_open_notional decrement, node_fees, node_wins/node_losses.
     // v5.15.5.C.4 Phase H — entry-side fields (entry_notional, entry_fee)
     // v5.15.5.C.4 Phase K — FillRecord struct + last_fill[] array DELETED
     // entirely. All 6 prior FillRecord fields are now Position-derived at
@@ -375,7 +375,7 @@ struct OrderManagerState {
     // cleared after.
     //
     // PARTIALS-AWARE: bit index = portfolio slot (0..MAX_PORTFOLIO_POSITIONS-1)
-    // not core_id. Under partials, slot 2c+0 and 2c+1 are independent legs;
+    // not node_id. Under partials, slot 2c+0 and 2c+1 are independent legs;
     // each has its OWN bit.
     //
     // Single-writer (slow-path MLStrategy thread per-core), single-reader
@@ -474,7 +474,7 @@ struct OrderManagerState {
     // === COLD-CLUSTER BOOLEAN STATE (v5.15.5.C.2 / S3a) ===
     // Bit-packed cohort of 3 single-thread boolean state flags:
     //   LIVE_TRADING         (bit 0) — boot-set; gates Submit adapter dispatch
-    //   PARTIAL_EXIT_ENABLED (bit 1) — boot-set; drainer slot→core_id mapping
+    //   PARTIAL_EXIT_ENABLED (bit 1) — boot-set; drainer slot→node_id mapping
     //   KILL_SWITCH_TRIPPED  (bit 2) — drainer-thread write; serialized as int
     //                                    in snapshot (wire format preserved)
     // Pre-.C.2 layout: int live_trading + uint8 + _pad_pe[7] + uint8 + _pad_ks[7]
@@ -618,15 +618,15 @@ struct OrderManagerState {
     void (*on_exit_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money)  = &noop_fill_emit<F>;
     void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
 
-    // v5.15.5.F.4d Step 7 § F — per-core ezoo + core_cfg lookup for calib log consumer.
-    // Per-core ARRAYS indexed by Order::core_id at consumer (sister to per-slot last_exit_fee[]
+    // v5.15.5.F.4d Step 7 § F — per-core ezoo + node_cfg lookup for calib log consumer.
+    // Per-core ARRAYS indexed by Order::node_id at consumer (sister to per-slot last_exit_fee[]
     // + bandit_reward_bps[] sibling-array pattern; OmsState is engine-wide single instance, NOT
-    // per-core). void* keeps OmsState ML-agnostic (sister to ctx.ensemble_handle on CoreContext);
-    // cast to EnsembleModelZoo<F>* / const PerCoreCfg<F>* in real_on_exit_calibration via
-    // oms->ezoo_refs[o->core_id]. Default nullptr (test fixtures + pre-boot state + non-ML cores);
-    // wired at EngineSharded per-core init alongside state.cores[i].ensemble_handle.
-    void*       ezoo_refs[MAX_EXECUTION_CORES]     = {nullptr};   // EnsembleModelZoo<F>* per-core (lazy-cast)
-    const void* core_cfg_refs[MAX_EXECUTION_CORES] = {nullptr};   // const PerCoreCfg<F>* per-core (lazy-cast)
+    // per-core). void* keeps OmsState ML-agnostic (sister to ctx.ensemble_handle on NodeContext);
+    // cast to EnsembleModelZoo<F>* / const PerNodeCfg<F>* in real_on_exit_calibration via
+    // oms->ezoo_refs[o->node_id]. Default nullptr (test fixtures + pre-boot state + non-ML cores);
+    // wired at EngineSharded per-core init alongside state.nodes[i].ensemble_handle.
+    void*       ezoo_refs[MAX_EXECUTION_NODES]     = {nullptr};   // EnsembleModelZoo<F>* per-core (lazy-cast)
+    const void* node_cfg_refs[MAX_EXECUTION_NODES] = {nullptr};   // const PerNodeCfg<F>* per-core (lazy-cast)
 
     ~OrderManagerState() {
         OrderManager_Shutdown(this);
@@ -648,7 +648,7 @@ inline void real_on_entry_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
-    synth.core_id   = (uint16_t)o->core_id;
+    synth.node_id   = (uint16_t)o->node_id;
     synth.type      = TRADE_EVENT_ENTRY;
     ShardedTradeLog_RecordEntry(oms->trade_log, synth, o->strategy_id,
                                 fill_price, fill_qty, entry_fee, oms->balance);
@@ -659,13 +659,13 @@ inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
                                     Money fill_price, Money net, Money total_fee) {
     // Re-read position state (preserved through CloseSlot per Phase F invariant — only the
     // active_bitmap bit was cleared; entry_price + quantity remain stored on Position).
-    const int pslot = (int)o->core_id;
+    const int pslot = (int)o->node_id;
     const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
     const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
-    synth.core_id   = (uint16_t)o->core_id;
+    synth.node_id   = (uint16_t)o->node_id;
     synth.type      = TRADE_EVENT_EXIT;
     ShardedTradeLog_RecordExit(oms->trade_log, synth, o->strategy_id,
                                entry_price_snap, fill_price,
@@ -675,7 +675,7 @@ inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
 template <unsigned F>
 inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
                                       Money fill_price, Money net, Money total_fee) {
-    const int pslot = (int)o->core_id;
+    const int pslot = (int)o->node_id;
     const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
     const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
     const uint64_t ts_us = (uint64_t)
@@ -703,17 +703,17 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
     // array (added Step 7 § N.2; written at HandleFill SELL).
     const double reward_bps_attributed = oms->bandit_reward_bps[pslot];
 
-    // v5.15.5.F.4d Step 7 § F — cast per-core ezoo_refs[core_id] / core_cfg_refs[core_id] to
+    // v5.15.5.F.4d Step 7 § F — cast per-core ezoo_refs[node_id] / node_cfg_refs[node_id] to
     // typed pointers for ML-side access. OmsState is engine-wide single instance (line 662 of
-    // EngineSharded boot); per-core ezoo + cfg slice lookup indexed by Order::core_id (== pslot
+    // EngineSharded boot); per-core ezoo + cfg slice lookup indexed by Order::node_id (== pslot
     // since each core owns 1 portfolio position). Nullptr-defensive: test fixtures + non-ML cores
     // have wiring pointers nullptr; telemetry coalesces to 0/0.0 placeholders.
     auto* ezoo     = static_cast<EnsembleModelZoo<F>*>(oms->ezoo_refs[pslot]);
-    auto* core_cfg = static_cast<const PerCoreCfg<F>*>(oms->core_cfg_refs[pslot]);
+    auto* node_cfg = static_cast<const PerNodeCfg<F>*>(oms->node_cfg_refs[pslot]);
 
     // Telemetry — null-coalesced.
     const int    thompson_telemetry_arm    = ezoo     ? ezoo->last_predicted_buy_thompson_arm               : 0;
-    const double thompson_exp3_blend_alpha = core_cfg ? FPN_ToDouble(core_cfg->thompson_exp3_blend_alpha) : 0.0;
+    const double thompson_exp3_blend_alpha = node_cfg ? FPN_ToDouble(node_cfg->thompson_exp3_blend_alpha) : 0.0;
 
     // Per-arm Exp3 probabilities (telemetry). bandit_regime bounds-clamped defensively
     // (cfg parser clamps but belt-and-suspenders for replay-from-old-stamp scenarios).
@@ -825,8 +825,8 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 //         (v5.15.5.C.3 MULTI_BIT slot — see FOREACH_OMS_STATE_MULTI_BIT).
 //
 // partial_exit_enabled parameter (v5.15.5.C.3 Finding A):
-//   0 = single-leg geometry; slot index == core_id (1:1 mapping).
-//   1 = paired-leg geometry; slot index = 2*core_id + leg (legs A+B per core).
+//   0 = single-leg geometry; slot index == node_id (1:1 mapping).
+//   1 = paired-leg geometry; slot index = 2*node_id + leg (legs A+B per core).
 //   Set as BIT in oms_state_flags (MASK_OMS_STATE_PARTIAL_EXIT_ENABLED).
 //   Pre-Finding A: engine boot called OMS_STATE_FLAG_SET(PARTIAL_EXIT_ENABLED)
 //   externally after OrderManager_Init returned (Class-18 mirror at the
@@ -855,7 +855,7 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // the canonical registry; INIT/RESET/PERSIST views auto-flow.
 //======================================================================================================
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` param DELETED. Per-Order fee_rate lives on
-// Order::pre_resolved (set at submit via Order_BindPreResolved with cfg.cores[c]). OMS no
+// Order::pre_resolved (set at submit via Order_BindPreResolved with cfg.nodes[c]). OMS no
 // longer holds a global fee_rate. Callers drop the arg.
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
@@ -905,9 +905,9 @@ template <unsigned F>
 inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitCommand<F>& cmd) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
     // Local extraction matches prior positional names so body internals are unchanged.
-    // Production callers MUST set cmd.core_cfg = &cfg.cores[c] (discipline; runtime TT_ASSERT
+    // Production callers MUST set cmd.node_cfg = &cfg.nodes[c] (discipline; runtime TT_ASSERT
     // backstop catches misses at HandleFill).
-    const int16_t                core_id     = cmd.core_id;
+    const int16_t                node_id     = cmd.node_id;
     const OrderType              type        = (OrderType)cmd.order_type;
     const Money                 qty         = cmd.qty;
     const Money                 intended_tp = cmd.intended_tp;
@@ -915,7 +915,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     const uint8_t                strategy_id = cmd.strategy_id;
     const Money                 event_price = cmd.event_price;
     const uint8_t                leg         = cmd.leg;
-    const ::PerCoreCfg<F>* const core_cfg    = cmd.core_cfg;
+    const ::PerNodeCfg<F>* const node_cfg    = cmd.node_cfg;
     uint64_t id = oms->next_order_id++;
 
     // Paper mode + legacy (mode 0): count and return. Never touch the
@@ -940,7 +940,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
         std::fprintf(stderr,
                      "[OMS] order table full (%d slots), dropping submission "
                      "for core=%d type=%u\n",
-                     MAX_INFLIGHT_ORDERS, (int)core_id, (unsigned)type);
+                     MAX_INFLIGHT_ORDERS, (int)node_id, (unsigned)type);
         return 0;
     }
     int slot = __builtin_ctz((unsigned int)free_mask);
@@ -959,7 +959,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 9. Plan: master plan
     // v5.11.5 item 3.
     uint64_t encoded_id = id | ((uint64_t)slot << 60);
-    Order_Init(&oms->orders[slot], encoded_id, core_id, type);
+    Order_Init(&oms->orders[slot], encoded_id, node_id, type);
     id = encoded_id;  // returned to caller + used in cmd.order_id below
     oms->orders[slot].submitted_at_us = (uint64_t)
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -979,8 +979,8 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     // discipline.md (branchless via cmov-to-stub; always-call Order_BindPreResolved
     // regardless of whether caller passed cfg). nullptr → zero-init stub → pre_resolved
     // values stay FPN_Zero (same effective behavior as skip-when-null, but no branch).
-    static const ::PerCoreCfg<F> NULL_PER_CORE_CFG_STUB{};
-    const ::PerCoreCfg<F>* effective_cfg = core_cfg ? core_cfg : &NULL_PER_CORE_CFG_STUB;
+    static const ::PerNodeCfg<F> NULL_PER_NODE_CFG_STUB{};
+    const ::PerNodeCfg<F>* effective_cfg = node_cfg ? node_cfg : &NULL_PER_NODE_CFG_STUB;
     Order_BindPreResolved(&oms->orders[slot], *effective_cfg);
     // A25 (D-205): tp_pct is resolved at the submit SITE (ResolvePerFillTpPct needs
     // StrategyParameters, not include-reachable here) + carried on the command; set it on
@@ -1072,7 +1072,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
 // OrderManager_Submit serially, preserving the documented "drainer is sole
 // Submit caller" OMS contract.
 //
-// Per-core SPSC: each core_id has its own queue. Today's caller (producer
+// Per-core SPSC: each node_id has its own queue. Today's caller (producer
 // slow-path) is the sole producer for ALL queues — still SPSC per ring.
 // When Phase C spawns per-core slow-paths, each thread is the sole producer
 // for its own ring. SPSC contract holds in both modes.
@@ -1086,18 +1086,18 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
     // No internal assembly; caller constructs the cmd struct directly + we push it.
     // Eliminates the prior 9-field unpack/repack ceremony.
-    if (cmd.core_id < 0 || cmd.core_id >= MAX_EXECUTION_CORES) {
+    if (cmd.node_id < 0 || cmd.node_id >= MAX_EXECUTION_NODES) {
         std::fprintf(stderr,
-                     "[OMS] PushSubmit: invalid core_id=%d (max=%d)\n",
-                     (int)cmd.core_id, MAX_EXECUTION_CORES);
+                     "[OMS] PushSubmit: invalid node_id=%d (max=%d)\n",
+                     (int)cmd.node_id, MAX_EXECUTION_NODES);
         return false;
     }
-    bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.core_id], cmd);
+    bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.node_id], cmd);
     if (!pushed) {
         std::fprintf(stderr,
                      "[OMS] PushSubmit: queue full for core=%d type=%u "
                      "(drainer starved?)\n",
-                     (int)cmd.core_id, (unsigned)cmd.order_type);
+                     (int)cmd.node_id, (unsigned)cmd.order_type);
     }
     return pushed;
 }
@@ -1113,9 +1113,9 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
 // Returns the number of commands drained.
 //======================================================================================================
 template <unsigned F>
-inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_cores) {
+inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
     int drained = 0;
-    int max = (num_cores > MAX_EXECUTION_CORES) ? MAX_EXECUTION_CORES : num_cores;
+    int max = (num_nodes > MAX_EXECUTION_NODES) ? MAX_EXECUTION_NODES : num_nodes;
     for (int c = 0; c < max; ++c) {
         SubmitCommand<F> cmd;
         while (SPSCRing_TryPop(&oms->submit_queues[c], &cmd)) {
@@ -1199,10 +1199,10 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
     const Money per_fill_tp = !Money_IsZero(o->pre_resolved.tp_pct)
         ? Money_Add(fill_price, Money_Mul(fill_price, o->pre_resolved.tp_pct))
         : o->intended_tp;
-    Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
+    Portfolio_OpenSlot(&oms->portfolio, (int)o->node_id,
                        fill_price, fill_qty,
                        per_fill_tp, o->intended_sl, entry_fee);
-    oms->last_opened_mask |= (uint16_t)(1u << (int)o->core_id);
+    oms->last_opened_mask |= (uint16_t)(1u << (int)o->node_id);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
     // Default = noop_fill_emit (no-op); set to real_on_entry_fill_emit at boot when trade_log Init succeeds.
     // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md.
@@ -1213,7 +1213,7 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
 template <unsigned F>
 inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty,
                              Money booked_fee) {
-    const int pslot = (int)o->core_id;
+    const int pslot = (int)o->node_id;
     // v4.7.19 race guard — H20 exception #4 (genuine predicate; alternative requires Portfolio refactor).
     // __builtin_expect-rare: production fires only on rare hot-path-SG / manual-close race.
     if (__builtin_expect((oms->portfolio.active_bitmap & (uint16_t)(1u << pslot)) == 0, 0)) {
@@ -1321,11 +1321,11 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
                                      double venue_commission = 0.0,
                                      const char* venue_commission_asset = nullptr) {
     // Bounds guard — H20 exception #4 (genuine predicate without alternative); __builtin_expect-rare.
-    if (__builtin_expect(o->core_id < 0 || o->core_id >= MAX_PORTFOLIO_POSITIONS, 0)) {
+    if (__builtin_expect(o->node_id < 0 || o->node_id >= MAX_PORTFOLIO_POSITIONS, 0)) {
         std::fprintf(stderr,
-                     "[OMS] fill handler: core_id %d out of range [0,%d), "
+                     "[OMS] fill handler: node_id %d out of range [0,%d), "
                      "skipping order %llu\n",
-                     (int)o->core_id, MAX_PORTFOLIO_POSITIONS,
+                     (int)o->node_id, MAX_PORTFOLIO_POSITIONS,
                      (unsigned long long)o->id);
         return;
     }
@@ -1355,7 +1355,7 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     OrderEventLog_Append(&oms->event_log,
         OrderEvent_MakeFill<F>(
             o->id, o->submitted_at_us,
-            Order_GetType(o), o->core_id,
+            Order_GetType(o), o->node_id,
             fill_price, fill_qty,
             o->intended_tp, o->intended_sl,
             booked_fee));
@@ -1454,7 +1454,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         std::fprintf(stderr,
                      "[OMS] order %llu FAIL core=%d code=%d msg=%s\n",
                      (unsigned long long)o->id,
-                     (int)o->core_id,
+                     (int)o->node_id,
                      cmd.result.error_code,
                      cmd.result.error_message);
         Order_SetState(o, ORDER_REJECTED);
@@ -1465,7 +1465,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             OrderEventLog_Append(&oms->event_log,
                 OrderEvent_MakeRejection<F>(
                     o->id, o->submitted_at_us,
-                    Order_GetType(o), o->core_id,
+                    Order_GetType(o), o->node_id,
                     cmd.result.error_message));
         }
     }
@@ -1483,7 +1483,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 // BUY never debits it -- Portfolio_OpenSlot only), so to predict the venue's FREE cash you
 // net this committed cost back out. Single-sourced (A21/D-216) so the reconciler and the
 // .E.1 venue-net aggregator share ONE body (avoids a Class-43 parallel-derivation vs
-// core_open_notional). entry_fee = the per-Position BOOKED fee (venue-exact in USDT, D-109).
+// node_open_notional). entry_fee = the per-Position BOOKED fee (venue-exact in USDT, D-109).
 template <unsigned F>
 inline Money OMS_OpenPositionCost(const OrderManagerState<F>* oms) {
     Money cost = Money_Zero();
@@ -1553,7 +1553,7 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
         std::memset(&recon_event, 0, sizeof(recon_event));
         recon_event.type       = OEVT_RECONCILED;
         recon_event.order_type = ORDER_MARKET_BUY;  // placeholder
-        recon_event.core_id    = -1;
+        recon_event.node_id    = -1;
         recon_event.price      = Money{ money_from_double_payload(drift) };
         std::strncpy(recon_event.reason, cmd.result.error_message,
                      sizeof(recon_event.reason) - 1);

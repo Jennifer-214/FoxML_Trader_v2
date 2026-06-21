@@ -14,7 +14,7 @@
 //     concurrency on the user's hardware
 //   - Synthetic tick generator (sawtooth around $60k) feeds N execution
 //     core threads via SPSC tick rings
-//   - Per-core CoreLatencyStats are enabled, so every tick gets sampled
+//   - Per-core NodeLatencyStats are enabled, so every tick gets sampled
 //   - On Ctrl+C the threads join cleanly and per-core latency is dumped
 //
 // What this is NOT yet:
@@ -59,7 +59,7 @@
 //   - Async.hpp: g_engine_drainer_cycle_hist inline global +
 //     EngineSharded_Async_FanOut (hoist of producer-thread fan_out lambda) +
 //     EngineSharded_Async_DrainWithSubmit (hoist of drainer-thread
-//     drain_with_submit lambda). File-local-static refs (cores[], tick_rings[],
+//     drain_with_submit lambda). File-local-static refs (nodes[], tick_rings[],
 //     g_tick_rec, g_depth_shared, g_shared, g_candle_acc) passed explicitly
 //     because they cannot be referenced from header scope.
 //   - Run.hpp: g_sharded_order_lat inline global + EngineSharded_CalibrateTscGhz

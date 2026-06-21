@@ -16,7 +16,7 @@
 //   value_expr  — expression read at row-build time; MUST be valid in caller scope
 //
 // CALLER SCOPE CONTRACT (both RecordEntry + RecordExit):
-//   uint64_t timestamp_us, uint32_t core_id, uint32_t strategy_id,
+//   uint64_t timestamp_us, uint32_t node_id, uint32_t strategy_id,
 //   char event_type, double price_v, double entry_price_v, double exit_price_v,
 //   double pnl_v, double fees_v, double balance_after_v, double trade_size_v,
 //   int regime_v (v5.15.5.C.3 Phase 5.A; -1 = unknown for non-strategy-aware callers),
@@ -63,7 +63,7 @@ namespace tt {
 // DO NOT reorder existing columns; APPEND new columns at the end.
 #define FOREACH_TRADE_LOG_COL(X)                                                              \
     X(timestamp_us,    "%lu",  (unsigned long)timestamp_us)                                   \
-    X(core_id,         "%u",   (unsigned)core_id)                                             \
+    X(node_id,         "%u",   (unsigned)node_id)                                             \
     X(strategy_id,     "%u",   (unsigned)strategy_id)                                         \
     X(event_type,      "%c",   event_type)                                                    \
     X(price,           "%.8f", price_v)                                                       \

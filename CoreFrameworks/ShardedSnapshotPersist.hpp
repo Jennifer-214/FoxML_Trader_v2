@@ -23,7 +23,7 @@
 // On load:
 //   - Refuse if magic doesn't match (legacy v11, corruption, wrong file).
 //   - Refuse if version != current (no migration logic — Phase 4 is v1).
-//   - Refuse if num_cores stored != num_cores configured (cfg changed
+//   - Refuse if num_nodes stored != num_nodes configured (cfg changed
 //     post-snapshot; safer to start fresh than guess at slot mapping).
 //   - On any error, log + start fresh — never crash the engine.
 //======================================================================================================
@@ -58,7 +58,7 @@ namespace tt {
 //     sessions reinterpreted single-position snapshot slots under the
 //     paired-leg geometry. v2 files refused on load (no migration —
 //     paired-leg state can't be reconstructed from single-leg).
-// v4 (v5.4.0 Phase 1.1): CoreContext gained `void* strategy_state`
+// v4 (v5.4.0 Phase 1.1): NodeContext gained `void* strategy_state`
 //     pointer + `uint8_t strategy_state_kind`. Persistence policy:
 //     kind-only is serialized (4 bytes/core); the void* is NOT
 //     serialized (pointers don't survive across processes). On load,
@@ -67,7 +67,7 @@ namespace tt {
 //     parameters reconverge within a few slow-path cadences. Full
 //     state persistence deferred to v5.5.0.
 //     v3 files rejected on load with a version-mismatch error.
-// v5: adds core_gross_wins / core_gross_losses (added in v4.7.25 but
+// v5: adds node_gross_wins / node_gross_losses (added in v4.7.25 but
 // silently skipped from persistence — Stats panel avg_win / avg_loss /
 // profit_factor read zero after restart). Plus idle_cycles for
 // death-spiral state continuity.
@@ -94,7 +94,7 @@ namespace tt {
 #define SHARDED_SNAPSHOT_VERSION  10u  // Ship-B DECIMAL epoch: per-core money re-encoded; v9 (16B binary, H21 tombstone) rejected. Was: // Ship-A 16B FPN_Binary: embedded Position/FPN_Binary-struct byte layouts changed; v8 version-rejected (H21/D-144)
 
 // Ship-B P2 epoch guard (S-4): this file raw-fwrites per-core money (allocated_balance /
-// core_realized / fees / notional / pnl_feeder / 16x Position). Encoding-keyed (the 16B->16B
+// node_realized / fees / notional / pnl_feeder / 16x Position). Encoding-keyed (the 16B->16B
 // decimal flip is layout-invisible): red-builds until the version rides the SAME commit.
 static_assert(MONEY_ENCODING_EPOCH == 0u || SHARDED_SNAPSHOT_VERSION >= 9u + MONEY_ENCODING_EPOCH,
               "Ship-B epoch: the engine money type flipped to decimal — bump "
@@ -129,7 +129,7 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
 
     uint32_t magic   = SHARDED_SNAPSHOT_MAGIC;
     uint32_t version = SHARDED_SNAPSHOT_VERSION;
-    uint32_t num_cores = (uint32_t)state->registered_count;
+    uint32_t num_nodes = (uint32_t)state->registered_count;
     uint64_t timestamp_us = (uint64_t)
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -137,7 +137,7 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     // ---- HEADER ----
     if (fwrite(&magic, 4, 1, f) != 1)         goto fail;
     if (fwrite(&version, 4, 1, f) != 1)       goto fail;
-    if (fwrite(&num_cores, 4, 1, f) != 1)     goto fail;
+    if (fwrite(&num_nodes, 4, 1, f) != 1)     goto fail;
     if (fwrite(&timestamp_us, 8, 1, f) != 1)  goto fail;
     // v3: partials toggle byte + 3 bytes pad (keeps subsequent block
     // 4-byte aligned). Loader refuses a file whose toggle state differs
@@ -169,8 +169,8 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     if (fwrite(state->oms->portfolio.positions, sizeof(Position<F>), 16, f) != 16) goto fail;
 
     // ---- PER-CORE BLOCKS ----
-    for (uint32_t i = 0; i < num_cores; ++i) {
-        const CoreContext<F>& ctx = state->cores[i];
+    for (uint32_t i = 0; i < num_nodes; ++i) {
+        const NodeContext<F>& ctx = state->nodes[i];
 
         // Identity / sizing
         if (fwrite(&ctx.strategy_id,         1, 1, f) != 1) goto fail;
@@ -189,18 +189,18 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         // Counters
         if (fwrite(&ctx.entries_processed,   8, 1, f) != 1) goto fail;
         if (fwrite(&ctx.exits_processed,     8, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_realized,       sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_fees,           sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_open_notional,  sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_wins,           4, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_losses,         4, 1, f) != 1) goto fail;
-        // v5.4.3 (recurring-bugs Class 4): core_gross_wins/losses were
+        if (fwrite(&ctx.node_realized,       sizeof(Money), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_fees,           sizeof(Money), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_open_notional,  sizeof(Money), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_wins,           4, 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_losses,         4, 1, f) != 1) goto fail;
+        // v5.4.3 (recurring-bugs Class 4): node_gross_wins/losses were
         // added in v4.7.25 but never persisted, so Stats panel avg_win,
         // avg_loss, profit_factor, expectancy all read $0.00 after
         // restart until the next post-restart trade. idle_cycles is
         // the death-spiral counter — also persisted for continuity.
-        if (fwrite(&ctx.core_gross_wins,     sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_gross_losses,   sizeof(Money), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_gross_wins,     sizeof(Money), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_gross_losses,   sizeof(Money), 1, f) != 1) goto fail;
         if (fwrite(&ctx.idle_cycles,         4, 1, f) != 1) goto fail;
 
         // Spacing state
@@ -209,22 +209,22 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         if (fwrite(&ctx.sl_cooldown_remaining, 4, 1, f) != 1) goto fail;
 
         // Kill switch
-        if (fwrite(&ctx.core_peak_balance,   sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_dd_pct,         sizeof(Money), 1, f) != 1) goto fail;
-        // v5.15.5.B.3 — core_kill_tripped migrated to core_state_flags bitmap
+        if (fwrite(&ctx.node_peak_balance,   sizeof(Money), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_dd_pct,         sizeof(Money), 1, f) != 1) goto fail;
+        // v5.15.5.B.3 — node_kill_tripped migrated to node_state_flags bitmap
         // bit. Format preservation: write as 1-byte 0/1 the same way pre-.B.3
         // saved the uint8_t field. Bytewise-identical wire format (no
         // SHARDED_SNAPSHOT_VERSION bump needed).
         {
             uint8_t kill_byte =
-                CORE_STATE_FLAG_IS_SET(ctx, KILL_TRIPPED) ? (uint8_t)1 : (uint8_t)0;
+                NODE_STATE_FLAG_IS_SET(ctx, KILL_TRIPPED) ? (uint8_t)1 : (uint8_t)0;
             if (fwrite(&kill_byte, 1, 1, f) != 1) goto fail;
         }
         {
             uint8_t pad8[3] = {0,0,0};
             if (fwrite(pad8, 3, 1, f) != 1) goto fail;
         }
-        if (fwrite(&ctx.core_ks_trips_total, 4, 1, f) != 1) goto fail;
+        if (fwrite(&ctx.node_ks_trips_total, 4, 1, f) != 1) goto fail;
 
         // Regime hysteresis (RegimeState — 4 ints + 1 uint64 + 1 time_t)
         if (fwrite(&ctx.regime_state.current_regime,        sizeof(int), 1, f) != 1) goto fail;
@@ -319,7 +319,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         return 0;
     }
 
-    uint32_t magic = 0, version = 0, file_num_cores = 0;
+    uint32_t magic = 0, version = 0, file_num_nodes = 0;
     uint64_t timestamp_us = 0;
     if (fread(&magic, 4, 1, f) != 1) {
         fprintf(stderr, "[snapshot] %s truncated at magic — refusing load\n", filepath);
@@ -343,13 +343,13 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
                 filepath, version, SHARDED_SNAPSHOT_VERSION);
         fclose(f); return 0;
     }
-    if (fread(&file_num_cores, 4, 1, f) != 1) {
+    if (fread(&file_num_nodes, 4, 1, f) != 1) {
         fclose(f); return 0;
     }
-    if ((int)file_num_cores != state->registered_count) {
-        fprintf(stderr, "[snapshot] %s has %u cores, current cfg has %d — "
+    if ((int)file_num_nodes != state->registered_count) {
+        fprintf(stderr, "[snapshot] %s has %u nodes, current cfg has %d — "
                         "refusing load, starting fresh (cfg likely changed)\n",
-                filepath, file_num_cores, state->registered_count);
+                filepath, file_num_nodes, state->registered_count);
         fclose(f); return 0;
     }
     if (fread(&timestamp_us, 8, 1, f) != 1) { fclose(f); return 0; }
@@ -395,24 +395,24 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
 
     // ---- PER-CORE BLOCKS ----
     // Read all cores into temporary storage first; only commit if all reads succeed.
-    struct CoreSnap {
+    struct NodeSnap {
         uint8_t  strategy_id;
         uint8_t  resolved_strategy_id;
         uint8_t  strategy_state_kind;  // v5.4.0 — used by load to dispatch Strategy_InitPerCore
         Money   allocated_balance;
         uint64_t entries_processed;
         uint64_t exits_processed;
-        Money   core_realized, core_fees, core_open_notional;
-        uint32_t core_wins, core_losses;
+        Money   node_realized, node_fees, node_open_notional;
+        uint32_t node_wins, node_losses;
         // v5.4.3 (snapshot v5): gross accumulators + idle counter
-        Money   core_gross_wins, core_gross_losses;
+        Money   node_gross_wins, node_gross_losses;
         uint32_t idle_cycles;
         Money   last_entry_price;
         uint64_t last_entry_tick;
         uint32_t sl_cooldown_remaining;
-        Money   core_peak_balance, core_dd_pct;
-        uint8_t  core_kill_tripped;
-        uint32_t core_ks_trips_total;
+        Money   node_peak_balance, node_dd_pct;
+        uint8_t  node_kill_tripped;
+        uint32_t node_ks_trips_total;
         // regime
         int      rs_current, rs_proposed, rs_count, rs_threshold, rs_last_strat;
         uint64_t rs_start_tick;
@@ -431,10 +431,10 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
         ConfidenceScorer staging_confidence;
     };
-    CoreSnap snaps[MAX_EXECUTION_CORES];
+    NodeSnap snaps[MAX_EXECUTION_NODES];
 
-    for (uint32_t i = 0; i < file_num_cores; ++i) {
-        CoreSnap& s = snaps[i];
+    for (uint32_t i = 0; i < file_num_nodes; ++i) {
+        NodeSnap& s = snaps[i];
         // v5.4.0: pad16_2 (2-byte pad after resolved_strategy_id) was
         // replaced by strategy_state_kind (1 byte) + 1-byte pad.
         uint8_t  pad8[3];
@@ -450,23 +450,23 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         if (fread(&s.allocated_balance, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.entries_processed, 8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.exits_processed,   8, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_realized,     sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_fees,         sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_open_notional,sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_wins,         4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_losses,       4, 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_realized,     sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_fees,         sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_open_notional,sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_wins,         4, 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_losses,       4, 1, f) != 1) { fclose(f); return 0; }
         // v5.4.3 (snapshot v5): gross accumulators + idle_cycles.
-        if (fread(&s.core_gross_wins,   sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_gross_losses, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_gross_wins,   sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_gross_losses, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.idle_cycles,       4, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_entry_price,  sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_entry_tick,   8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.sl_cooldown_remaining, 4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_peak_balance, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_dd_pct,       sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_kill_tripped, 1, 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_peak_balance, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_dd_pct,       sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_kill_tripped, 1, 1, f) != 1) { fclose(f); return 0; }
         if (fread(pad8,                 3, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.core_ks_trips_total, 4, 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.node_ks_trips_total, 4, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.rs_current,    sizeof(int), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.rs_proposed,   sizeof(int), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.rs_count,      sizeof(int), 1, f) != 1) { fclose(f); return 0; }
@@ -496,9 +496,9 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     state->oms->portfolio.active_bitmap = bitmap;
     memcpy(state->oms->portfolio.positions, positions, sizeof(positions));
 
-    for (uint32_t i = 0; i < file_num_cores; ++i) {
-        CoreSnap& s = snaps[i];
-        CoreContext<F>& ctx = state->cores[i];
+    for (uint32_t i = 0; i < file_num_nodes; ++i) {
+        NodeSnap& s = snaps[i];
+        NodeContext<F>& ctx = state->nodes[i];
         // Strategy id intentionally NOT restored — it comes from cfg.
         // resolved_strategy_id is per-tick output; restore it for display
         // continuity but the next rebuild will overwrite anyway.
@@ -507,16 +507,16 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // to drive Strategy_InitPerCore at boot (the comment said "engine's
         // init path checks strategy_state_kind and dispatches"). In
         // practice, EngineSharded.hpp:1183 dispatches on
-        // `state.cores[i].strategy_id` (cfg-derived), NOT the loaded kind.
+        // `state.nodes[i].strategy_id` (cfg-derived), NOT the loaded kind.
         // The persisted field is therefore dead weight — and worse,
         // restoring it here corrupts the invariant that `strategy_state_kind`
         // describes the C++ type of the allocated `strategy_state` pointer.
         //
         // Concrete repro of the kind/state mismatch the restore introduced:
         //
-        //   Run 1 cfg: core_0_strategy=auto         → state=nullptr, kind=AUTO
+        //   Run 1 cfg: node_0_strategy=auto         → state=nullptr, kind=AUTO
         //              snapshot saves kind=AUTO.
-        //   Run 2 cfg: core_0_strategy=mean_reversion
+        //   Run 2 cfg: node_0_strategy=mean_reversion
         //              Strategy_InitPerCore(MR) → state=non-null MR, kind=MR.
         //              Snapshot Load (this site) → kind = AUTO (from snap).
         //              Net: state=non-null + kind=AUTO. Mismatch.
@@ -540,28 +540,28 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         ctx.allocated_balance    = s.allocated_balance;
         ctx.entries_processed    = s.entries_processed;
         ctx.exits_processed      = s.exits_processed;
-        ctx.core_realized        = s.core_realized;
-        ctx.core_fees            = s.core_fees;
-        ctx.core_open_notional   = s.core_open_notional;
-        ctx.core_wins            = s.core_wins;
-        ctx.core_losses          = s.core_losses;
+        ctx.node_realized        = s.node_realized;
+        ctx.node_fees            = s.node_fees;
+        ctx.node_open_notional   = s.node_open_notional;
+        ctx.node_wins            = s.node_wins;
+        ctx.node_losses          = s.node_losses;
         // v5.4.3 (snapshot v5): apply gross accumulators + idle counter.
-        ctx.core_gross_wins      = s.core_gross_wins;
-        ctx.core_gross_losses    = s.core_gross_losses;
+        ctx.node_gross_wins      = s.node_gross_wins;
+        ctx.node_gross_losses    = s.node_gross_losses;
         ctx.idle_cycles          = s.idle_cycles;
         ctx.last_entry_price     = s.last_entry_price;
         ctx.last_entry_tick      = s.last_entry_tick;
         ctx.sl_cooldown_remaining= s.sl_cooldown_remaining;
-        ctx.core_peak_balance    = s.core_peak_balance;
-        ctx.core_dd_pct          = s.core_dd_pct;
-        // v5.15.5.B.3 — kill bit packed in core_state_flags; load 1 byte
+        ctx.node_peak_balance    = s.node_peak_balance;
+        ctx.node_dd_pct          = s.node_dd_pct;
+        // v5.15.5.B.3 — kill bit packed in node_state_flags; load 1 byte
         // into a temp + set/clear bit accordingly.
-        if (s.core_kill_tripped) {
-            CORE_STATE_FLAG_SET(ctx, KILL_TRIPPED);
+        if (s.node_kill_tripped) {
+            NODE_STATE_FLAG_SET(ctx, KILL_TRIPPED);
         } else {
-            CORE_STATE_FLAG_CLR(ctx, KILL_TRIPPED);
+            NODE_STATE_FLAG_CLR(ctx, KILL_TRIPPED);
         }
-        ctx.core_ks_trips_total  = s.core_ks_trips_total;
+        ctx.node_ks_trips_total  = s.node_ks_trips_total;
         ctx.regime_state.current_regime       = s.rs_current;
         ctx.regime_state.proposed_regime      = s.rs_proposed;
         ctx.regime_state.hysteresis_count     = s.rs_count;
@@ -620,11 +620,11 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     while (restored_bm) {
         int slot = __builtin_ctz(restored_bm);
         restored_bm &= (uint16_t)(restored_bm - 1);
-        int core_id = partial_exit_enabled ? (slot >> 1) : slot;
+        int node_id = partial_exit_enabled ? (slot >> 1) : slot;
         int leg     = partial_exit_enabled ? (slot & 1)  : 0;
-        if (core_id < 0 || core_id >= (int)state->registered_count) continue;
-        ExecutionCore<F>* core_ptr = state->cores[core_id].core;
-        if (!core_ptr) continue;
+        if (node_id < 0 || node_id >= (int)state->registered_count) continue;
+        ExecutionCore<F>* node_ptr = state->nodes[node_id].core;
+        if (!node_ptr) continue;
         const Position<F>& pos = state->oms->portfolio.positions[slot];
         // Active flag last (no atomic needed — core hot-path thread
         // isn't running yet at snapshot-load time).
@@ -649,11 +649,11 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         Money live_sl_a = pos.stop_loss_price;
         Money live_tp_b_val = pos.take_profit_price;
         if (cfg) {
-            ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, core_id);
+            ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, node_id);
             // .E.0.10 A1 (H22): resolve the per-NODE per-strategy override, NOT the GLOBAL pct —
             // single-sourced with the fresh-entry dispatcher (ResolvePerFillTpPct/SlPct) so a
             // restored SimpleDip/MR/EmaCross position exits at the SAME TP/SL it had while live.
-            const uint8_t a1_sid = state->cores[core_id].resolved_strategy_id;
+            const uint8_t a1_sid = state->nodes[node_id].resolved_strategy_id;
             Money tp_pct_a = ResolvePerFillTpPct(a1_sid, resolved);
             Money sl_pct_a = ResolvePerFillSlPct(a1_sid, resolved);
             if (!Money_IsZero(tp_pct_a))
@@ -667,15 +667,15 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
                 live_tp_b_val = Money_Add(entry, Money_Mul(entry, tp_pct_b));
         }
         if (leg == 0) {
-            core_ptr->entry_price = entry;
-            core_ptr->live_tp     = live_tp_a;
-            core_ptr->live_sl     = live_sl_a;
-            core_ptr->active      = 1;
+            node_ptr->entry_price = entry;
+            node_ptr->live_tp     = live_tp_a;
+            node_ptr->live_sl     = live_sl_a;
+            node_ptr->active      = 1;
         } else {
-            core_ptr->entry_price_b = entry;
-            core_ptr->live_tp_b     = live_tp_b_val;
-            core_ptr->live_sl_b     = live_sl_a;  // shared SL
-            core_ptr->active_b      = 1;
+            node_ptr->entry_price_b = entry;
+            node_ptr->live_tp_b     = live_tp_b_val;
+            node_ptr->live_sl_b     = live_sl_a;  // shared SL
+            node_ptr->active_b      = 1;
         }
         restored_count++;
     }
@@ -686,8 +686,8 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
             restored_count);
     }
 
-    fprintf(stderr, "[snapshot] loaded sharded snapshot from %s (%u cores, ts=%llu)\n",
-            filepath, file_num_cores, (unsigned long long)timestamp_us);
+    fprintf(stderr, "[snapshot] loaded sharded snapshot from %s (%u nodes, ts=%llu)\n",
+            filepath, file_num_nodes, (unsigned long long)timestamp_us);
     return 1;
 }
 

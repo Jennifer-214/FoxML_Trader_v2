@@ -17,7 +17,7 @@
 //     0 = Exp3 (default; bytewise-identical to pre-v5.14.10)
 //     1 = Thompson
 //     2 = Both (Exp3 drives action; Thompson logs choice for offline A/B)
-//   Per-arm reward observability (see CoreModelZoo.hpp:881-882 — every
+//   Per-arm reward observability (see NodeModelZoo.hpp:881-882 — every
 //   ensemble arm's prediction is independently graded against actual price)
 //   makes cfg=2 parallel-training MATHEMATICALLY VALID — both bandits learn
 //   from the same per-arm signal stream regardless of which one's CHOICE

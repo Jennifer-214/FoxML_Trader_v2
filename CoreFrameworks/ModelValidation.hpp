@@ -49,8 +49,8 @@
 #pragma once
 
 #include "ControllerConfig.hpp"
-#include "ControllerEventLoop.hpp"   // CoreContext<F> for cfg_drift_* writeback
-#include "../ML_Headers/CoreModelZoo.hpp"
+#include "ControllerEventLoop.hpp"   // NodeContext<F> for cfg_drift_* writeback
+#include "../ML_Headers/NodeModelZoo.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/BuildFlags.hpp"  // BUILD_FLAGS_HASH
 #include "../ML_Headers/CfgDriftCheckRegistry.hpp"  // v5.15.5.A.7: FOREACH_CFG_DRIFT_CHECK + Y3 dispatchers
@@ -133,16 +133,16 @@ inline void log_drift_pair(LogFn& log_fn, const char* name, const T1& stamp_v, c
 // content assertions without stderr-redirect.
 //======================================================================================================
 template <unsigned F, typename LogFn = tt::StderrLog>
-static inline int CoreModelZoo_ValidateAgainstCfg(
-    CoreModelZoo<F>* zoo,
+static inline int NodeModelZoo_ValidateAgainstCfg(
+    NodeModelZoo<F>* zoo,
     EnsembleModelZoo<F>* ezoo,                       // nullptr when ensemble inactive
     const ControllerConfig<F>& cfg,
-    int core_id,
+    int node_id,
     int strict_mode,                                  // cfg.held_out_gate_strict
     int acknowledge_inference_cfg_drift,              // ops_cfg_flags bit; suppresses INFERENCE_CFG category
     int acknowledge_cross_binary_version_drift,       // ops_cfg_flags bit; suppresses CROSS_BINARY category
-    CoreContextDisplayMeta<F>* meta,                  // for cfg_drift_tier*_count writeback (v5.15.5.B.2: extracted from CoreContext)
-    CoreContext<F>* ctx,                              // for cfg_drift_strict_refused bitmap bit (v5.15.5.B.3: bit-packed in core_state_flags)
+    NodeContextDisplayMeta<F>* meta,                  // for cfg_drift_tier*_count writeback (v5.15.5.B.2: extracted from NodeContext)
+    NodeContext<F>* ctx,                              // for cfg_drift_strict_refused bitmap bit (v5.15.5.B.3: bit-packed in node_state_flags)
     LogFn log_fn = LogFn{}                            // v5.15.5.A.7: injected logger (default = stderr)
 ) {
     int strict = (strict_mode == 1);
@@ -158,9 +158,9 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
         // Distinguishable log prefix: "core 0" vs "core 0 ensemble[2]"
         char loc[64];
         if (h_idx < 0) {
-            snprintf(loc, sizeof(loc), "core %d", core_id);
+            snprintf(loc, sizeof(loc), "core %d", node_id);
         } else {
-            snprintf(loc, sizeof(loc), "core %d ensemble[%d]", core_id, h_idx);
+            snprintf(loc, sizeof(loc), "core %d ensemble[%d]", node_id, h_idx);
         }
 
         // ──────────────────────────────────────────────────────────────────────
@@ -214,7 +214,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     };
 
     // 1. Single zoo: 4 roles (buy_signal, barrier, regime, exit).
-    //    CoreModelZoo struct uses `exit` (singular) per CoreModelZoo.hpp:60.
+    //    NodeModelZoo struct uses `exit` (singular) per NodeModelZoo.hpp:60.
     if (zoo) {
         check_handle(&zoo->buy_signal, "buy_signal", -1);
         check_handle(&zoo->barrier,    "barrier",    -1);
@@ -222,7 +222,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
         check_handle(&zoo->exit,       "exit",       -1);
     }
     // 2. Ensemble handles: 4 roles × N horizons (closes parity-check Finding #7).
-    //    EnsembleModelZoo struct uses `exit_predictor` per CoreModelZoo.hpp:616.
+    //    EnsembleModelZoo struct uses `exit_predictor` per NodeModelZoo.hpp:616.
     if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
         for (int h = 0; h < ezoo->buy_signal_count; ++h)
             check_handle(&ezoo->buy_signal[h], "buy_signal", h);
@@ -236,9 +236,9 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
 
     // Writeback drift counters + strict-refused flag (closes parity-check
     // Finding #10 — now updated on hot-swap too via shared helper).
-    // v5.15.5.B.2 — counters moved from CoreContext to CoreContextDisplayMeta.
+    // v5.15.5.B.2 — counters moved from NodeContext to NodeContextDisplayMeta.
     // v5.15.5.B.3 — cfg_drift_strict_refused migrated from DisplayMeta back
-    // to CoreContext as a core_state_flags bitmap bit. Final home — closes
+    // to NodeContext as a node_state_flags bitmap bit. Final home — closes
     // the byte-per-flag pattern that recurred through .B.2.
     if (meta) {
         meta->cfg_drift_tier1_count = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
@@ -246,9 +246,9 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     }
     if (ctx) {
         if (tier1_refused_count > 0) {
-            CORE_STATE_FLAG_SET(*ctx, CFG_DRIFT_STRICT_REFUSED);
+            NODE_STATE_FLAG_SET(*ctx, CFG_DRIFT_STRICT_REFUSED);
         } else {
-            CORE_STATE_FLAG_CLR(*ctx, CFG_DRIFT_STRICT_REFUSED);
+            NODE_STATE_FLAG_CLR(*ctx, CFG_DRIFT_STRICT_REFUSED);
         }
     }
 
@@ -258,7 +258,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
             "Set held_out_gate_strict=0 (warn-only) OR acknowledge_inference_cfg_drift=1 "
             "in cfg (ops_cfg_flags bitmap v5.15.5.A.7+) to bypass, OR retrain the model "
             "with current cfg.\n",
-            core_id, tier1_refused_count);
+            node_id, tier1_refused_count);
         return -1;  // REFUSE
     }
     return 0;

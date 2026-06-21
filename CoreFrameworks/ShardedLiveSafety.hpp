@@ -147,11 +147,11 @@ static inline int EngineSharded_ForceCloseOnShutdown(
     OrderManagerState<F>* oms,
     BinanceAdapterState* adapter,
     NotifyState* notify,
-    const PerCoreCfg<F>* cores,
+    const PerNodeCfg<F>* nodes,
     int timeout_secs = 30)
 {
     // v5.15.5.F.4c.3 WIP2d-1.B.1: `cores` REQUIRED — per-core array pointer (caller passes
-    // `cfg.cores`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core
+    // `cfg.nodes`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core
     // array." First canonical of the "consumer over per-core array" sig shape.
     if (!oms) return 0;
     uint16_t bitmap = oms->portfolio.active_bitmap;
@@ -187,7 +187,7 @@ static inline int EngineSharded_ForceCloseOnShutdown(
     // Submit a market sell for each open slot via OrderManager_Submit. This
     // is the same code path that regular SL/TP exits use, so fills come back
     // through the user-data WS → OMS result queue → drainer → OnEvent path
-    // and clear the bitmap bit naturally. core_id == slot under sharded's
+    // and clear the bitmap bit naturally. node_id == slot under sharded's
     // single-position-per-core invariant.
     //
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — bitmap iteration via __builtin_ctz (H20 + branchless-dispatch-discipline.md
@@ -209,7 +209,7 @@ static inline int EngineSharded_ForceCloseOnShutdown(
         }
         FPN_Binary<F> qty_rounded = FPN_FromDouble<F>(qty_d);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for Order_BindPreResolved at submit.
-        // Under sharded single-position-per-core invariant, slot == core_id; cores[slot] is the
+        // Under sharded single-position-per-core invariant, slot == node_id; nodes[slot] is the
         // originating core's cfg.
         uint64_t order_id = OrderManager_Submit<F>(oms, (int16_t)slot, ORDER_MARKET_SELL,
                                                     qty_rounded,
@@ -217,7 +217,7 @@ static inline int EngineSharded_ForceCloseOnShutdown(
                                                     /*strategy_id*/(uint8_t)0xFF,
                                                     FPN_Zero<F>(),
                                                     /*leg*/(uint8_t)0,
-                                                    &cores[slot]);
+                                                    &nodes[slot]);
         if (order_id == 0) {
             fprintf(stderr, "[sharded-safety] FORCE-CLOSE slot %d: OMS rejected submission\n", slot);
         } else {

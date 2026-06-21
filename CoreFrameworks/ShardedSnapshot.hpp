@@ -24,9 +24,9 @@
 
 #include "../DataStream/EngineTUI.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
-#include "../ML_Headers/CoreModelZoo.hpp"
+#include "../ML_Headers/NodeModelZoo.hpp"
 #include "../MemHeaders/FailureModeRegistry.hpp"  // v5.14.8.C — FAILURE_SET / FAILURE_IS_SET
-#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_SET / IS_SET
+#include "../MemHeaders/PerNodeStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_SET / IS_SET
 #include "SlowPathGateRegistry.hpp"  // v5.14.9.B.2 — MASK_LADDER_ACTIVE for ladder-bottom inference
 #include "ControllerEventLoop.hpp"
 #include "EventLoopAggregates.hpp"
@@ -132,12 +132,12 @@ static inline void TUI_CopySnapshotSharded(
     } else {
         snap->active_count = agg.active_position_count;
     }
-    snap->max_positions = (int)cfg->num_execution_cores;
+    snap->max_positions = (int)cfg->num_execution_nodes;
     snap->max_dd       = agg.max_drawdown;
     snap->max_drawdown = agg.max_drawdown;
     snap->max_drawdown_pct = agg.max_drawdown_pct * 100.0;
     // KEEP-AS-GLOBAL: engine-wide headline display shows GLOBAL fee_rate default;
-    // per-core deviations are surfaced via per_core_count panel + per-position
+    // per-core deviations are surfaced via per_node_count panel + per-position
     // net_pnl computation at line 249 (per-core fee_taker). Operator-facing summary.
     snap->fee_rate_pct = Money_ToDouble(cfg->fee_rate) * 100.0;
 
@@ -216,10 +216,10 @@ static inline void TUI_CopySnapshotSharded(
         // mirror SG_Evaluate's formula: effective = max(active, ratchet).
         // Falls back to pos->* when this slot's core isn't yet registered
         // (cold start) or when reading param_slot fails.
-        int core_id_for_pos = (BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? (idx >> 1) : idx);
+        int node_id_for_pos = (BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? (idx >> 1) : idx);
         bool resolved_effective = false;
-        if (core_id_for_pos >= 0 && core_id_for_pos < state->registered_count) {
-            tt::ExecutionCore<F>* xc = state->cores[core_id_for_pos].core;
+        if (node_id_for_pos >= 0 && node_id_for_pos < state->registered_count) {
+            tt::ExecutionCore<F>* xc = state->nodes[node_id_for_pos].core;
             if (xc) {
                 tt::GateParameters<F> params;
                 tt::ParameterSlot_Read(&xc->param_slot, &params);
@@ -252,26 +252,26 @@ static inline void TUI_CopySnapshotSharded(
             // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
             // (UNINDEXED-GLOBAL closure). TUI net_pnl now reflects per-core fee tier;
             // matches execution path which reads o->pre_resolved.fee_rate per-core.
-            // H20 branchless: pre-resolve core_cfg ref + ternary select (cmov-lowerable;
+            // H20 branchless: pre-resolve node_cfg ref + ternary select (cmov-lowerable;
             // sister to ControllerEventLoop HIGH-1/2 fix + StrategyParameters.hpp:1762).
-            const auto& core_cfg = cfg->cores[core_id_for_pos];
-            double fee_r = Money_ToDouble(!Money_IsZero(core_cfg.fee_rate_taker)
-                ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
+            const auto& node_cfg = cfg->nodes[node_id_for_pos];
+            double fee_r = Money_ToDouble(!Money_IsZero(node_cfg.fee_rate_taker)
+                ? node_cfg.fee_rate_taker : node_cfg.fee_rate);
             ps->net_pnl   = ps->gross_pnl - (fee_r * 200.0);
         }
         ps->is_trailing = (ps->tp != ps->orig_tp) ? 1 : 0;
         // v5.11.65 — prefer Position.entry_timestamp_us (per-slot, persisted
         // in snapshot via the Position struct dump → survives engine restart).
-        // Fall back to CoreContext.last_entry_wall_us (per-core, NOT persisted)
+        // Fall back to NodeContext.last_entry_wall_us (per-core, NOT persisted)
         // for in-memory state that hasn't been re-entered yet under v5.11.65.
         // Pre-fix: hold display always read last_entry_wall_us, which reset
         // to 0 on every restart → Hold column showed "0m" forever for
         // positions loaded from snapshot.
         uint64_t entry_wall = state->oms->portfolio.positions[idx].entry_timestamp_us;
         if (entry_wall == 0) {
-            int core_id = partial_on ? (idx >> 1) : idx;
-            if (core_id >= 0 && core_id < state->registered_count) {
-                entry_wall = state->cores[core_id].last_entry_wall_us;
+            int node_id = partial_on ? (idx >> 1) : idx;
+            if (node_id >= 0 && node_id < state->registered_count) {
+                entry_wall = state->nodes[node_id].last_entry_wall_us;
             }
         }
         if (entry_wall > 0 && now_wall_us > entry_wall) {
@@ -335,7 +335,7 @@ static inline void TUI_CopySnapshotSharded(
     int      any_model_loaded    = 0;
 
     // config display — KEEP-AS-GLOBAL: Settings panel shows GLOBAL cfg defaults;
-    // per-core deviations surfaced via per_core_count panel at line 339.
+    // per-core deviations surfaced via per_node_count panel at line 339.
     // Operator-facing summary semantic; per-core values are visible in the
     // dedicated per-core view rather than headline Settings.
     snap->cfg_tp  = Money_ToDouble(cfg->take_profit_pct) * 100.0;
@@ -349,15 +349,15 @@ static inline void TUI_CopySnapshotSharded(
     // and core 0's gate parameters for the Buy Gate panel.
     snap->sharded_mode_active = 1;
     snap->partial_exit_enabled = BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
-    snap->per_core_count = state->registered_count;
+    snap->per_node_count = state->registered_count;
     if (state->registered_count > 0) {
         // v4.0.4: use core 0's RESOLVED strategy as headline. For AUTO core 0
         // this gives the regime-resolved concrete strategy; for static cores
         // it equals strategy_id. Avoids showing "AUTO" raw which isn't a
         // real strategy the Market panel can label.
-        uint8_t headline_sid = (state->cores[0].resolved_strategy_id != STRATEGY_NONE)
-                                ? state->cores[0].resolved_strategy_id
-                                : state->cores[0].strategy_id;
+        uint8_t headline_sid = (state->nodes[0].resolved_strategy_id != STRATEGY_NONE)
+                                ? state->nodes[0].resolved_strategy_id
+                                : state->nodes[0].strategy_id;
         snap->strategy_id = headline_sid;
         // v5.15.5.B.8 — headline_regime AUTO-finder loop merged into the
         // unified per-core loop below. snap->current_regime assignment moved
@@ -367,15 +367,15 @@ static inline void TUI_CopySnapshotSharded(
     // ============================================================================
     // v5.15.5.B.8 — UNIFIED PER-CORE LOOP (T1 audit win)
     // ============================================================================
-    // Consolidates 4 previously-separate walks over state->cores[]:
+    // Consolidates 4 previously-separate walks over state->nodes[]:
     //   (1) bitmap consistency  — state_flags reset + BITMAP_CONSISTENT bit
     //   (2) wins/losses + gross — total_wins/losses + gross_wins/losses accum
     //   (3) headline_regime     — first AUTO match wins (flag-driven, no break)
-    //   (4) per_core publisher  — strategy_id_display / halt_reason / diag_* /
+    //   (4) per_node publisher  — strategy_id_display / halt_reason / diag_* /
     //                              ML telemetry / drift / kill / etc.
-    // Single walk over state->cores[i] per snapshot publish. Saves ~3 walks
-    // × ~7 KB per CoreContext × 16 cores × 60 Hz = ~20 MB/s memory bandwidth
-    // (audit synthesis line 96-101). PerCoreSnap output bytewise-identical
+    // Single walk over state->nodes[i] per snapshot publish. Saves ~3 walks
+    // × ~7 KB per NodeContext × 16 cores × 60 Hz = ~20 MB/s memory bandwidth
+    // (audit synthesis line 96-101). PerNodeSnap output bytewise-identical
     // post-consolidation (verified via 3027-test regression).
     // ============================================================================
     for (int i = 0; i < state->registered_count && i < 16; ++i) {
@@ -386,42 +386,42 @@ static inline void TUI_CopySnapshotSharded(
         // DRIFT(bitmap). Under partials, core c owns slots {2c, 2c+1};
         // without partials, core c owns slot c.
         {
-            tt::ExecutionCore<F>* xc = state->cores[i].core;
+            tt::ExecutionCore<F>* xc = state->nodes[i].core;
             bool hot_any_active = xc &&
                 ((xc->active | xc->active_b) & 1) != 0;
             int slot_a = partial_on ? (i * 2)     : i;
             int slot_b = partial_on ? (i * 2 + 1) : -1;
             bool gui_any_pos = (slot_a >= 0 && slot_a < 16 && snap->positions[slot_a].idx >= 0)
                            || (slot_b >= 0 && slot_b < 16 && snap->positions[slot_b].idx >= 0);
-            snap->per_core[i].state_flags = 0;
+            snap->per_node[i].state_flags = 0;
             if (hot_any_active == gui_any_pos) {
-                STATE_FLAG_SET(snap->per_core[i], BITMAP_CONSISTENT);
+                STATE_FLAG_SET(snap->per_node[i], BITMAP_CONSISTENT);
             }
         }
         // ---- (was Loop 2) wins/losses + gross accumulator aggregation ----
-        total_wins   += state->cores[i].core_wins;
-        total_losses += state->cores[i].core_losses;
-        gross_wins   = Money_Add(gross_wins,   state->cores[i].core_gross_wins);
-        gross_losses = Money_Add(gross_losses, state->cores[i].core_gross_losses);
+        total_wins   += state->nodes[i].node_wins;
+        total_losses += state->nodes[i].node_losses;
+        gross_wins   = Money_Add(gross_wins,   state->nodes[i].node_gross_wins);
+        gross_losses = Money_Add(gross_losses, state->nodes[i].node_gross_losses);
         // ---- (was Loop 3) headline regime — first AUTO match wins ----
         // Flag-driven; preserves the pre-.B.8 break-on-first-AUTO semantic
         // without an explicit break (which would prevent further loop work
         // for THIS i + skip subsequent cores' per-core publishing).
-        if (!headline_regime_set && state->cores[i].strategy_id == STRATEGY_AUTO) {
-            headline_regime = state->cores[i].regime_state.current_regime;
+        if (!headline_regime_set && state->nodes[i].strategy_id == STRATEGY_AUTO) {
+            headline_regime = state->nodes[i].regime_state.current_regime;
             headline_regime_set = true;
         }
-        // ---- (was Loop 4) per_core publisher body (continues below) ----
-        snap->per_core[i].strategy_id_display = state->cores[i].strategy_id;
+        // ---- (was Loop 4) per_node publisher body (continues below) ----
+        snap->per_node[i].strategy_id_display = state->nodes[i].strategy_id;
         // v4.0.4: resolved strategy after AUTO regime classification. For
         // non-AUTO cores this equals strategy_id_display.
-        snap->per_core[i].resolved_strategy_id = state->cores[i].resolved_strategy_id;
+        snap->per_node[i].resolved_strategy_id = state->nodes[i].resolved_strategy_id;
         // v5.9.0c — explicit-set bitmap (V5_9_AUDIT-#5). Drives tri-state
         // marker in Per-Core P&L panel: "i!" deliberate, "i?" defaulted,
         // "i" auto-regime. Read bit i from the cfg's bitmap.
         // v5.14.9.B.2 — strategy_was_explicit_set migrated to state_flags BIT_FLAG.
-        if ((cfg->core_strategies_explicit_set >> i) & 0x1) {
-            STATE_FLAG_SET(snap->per_core[i], STRATEGY_EXPLICITLY_SET);
+        if ((cfg->node_strategies_explicit_set >> i) & 0x1) {
+            STATE_FLAG_SET(snap->per_node[i], STRATEGY_EXPLICITLY_SET);
         }
         // v5.9.1 — per-core warmup % (rolling_short.count vs min_warmup_samples).
         // Defensive bounds: if min_warmup_samples is 0/unset, the engine
@@ -429,120 +429,120 @@ static inline void TUI_CopySnapshotSharded(
         {
             int wmin = (int)cfg->min_warmup_samples;
             if (wmin <= 0) wmin = 64;
-            int wnow = state->cores[i].slow_state ?
-                       state->cores[i].slow_state->rolling_short.count : 0;
+            int wnow = state->nodes[i].slow_state ?
+                       state->nodes[i].slow_state->rolling_short.count : 0;
             int pct = (wnow >= wmin) ? 100 : ((wnow * 100) / wmin);
             if (pct > 100) pct = 100;
             if (pct < 0) pct = 0;
-            snap->per_core[i].warmup_progress_pct = (uint8_t)pct;
+            snap->per_node[i].warmup_progress_pct = (uint8_t)pct;
         }
         // v5.9.5i — cfg drift summary mirror
-        // v5.15.5.B.2 — tier counters extracted to CoreContextDisplayMeta.
-        // v5.15.5.B.3 — strict_refused flag migrated to core_state_flags bitmap.
-        snap->per_core[i].cfg_drift_tier1_count    = state->display_meta[i].cfg_drift_tier1_count;
-        snap->per_core[i].cfg_drift_tier2_count    = state->display_meta[i].cfg_drift_tier2_count;
-        snap->per_core[i].cfg_drift_strict_refused =
-            CORE_STATE_FLAG_IS_SET(state->cores[i], CFG_DRIFT_STRICT_REFUSED) ? 1 : 0;
+        // v5.15.5.B.2 — tier counters extracted to NodeContextDisplayMeta.
+        // v5.15.5.B.3 — strict_refused flag migrated to node_state_flags bitmap.
+        snap->per_node[i].cfg_drift_tier1_count    = state->display_meta[i].cfg_drift_tier1_count;
+        snap->per_node[i].cfg_drift_tier2_count    = state->display_meta[i].cfg_drift_tier2_count;
+        snap->per_node[i].cfg_drift_strict_refused =
+            NODE_STATE_FLAG_IS_SET(state->nodes[i], CFG_DRIFT_STRICT_REFUSED) ? 1 : 0;
         // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
         // tracks the active regime's strategy. MOMENTUM buys above; everything
         // else buys below.
-        uint8_t dir_strat = (state->cores[i].resolved_strategy_id != STRATEGY_NONE)
-                              ? state->cores[i].resolved_strategy_id
-                              : state->cores[i].strategy_id;
+        uint8_t dir_strat = (state->nodes[i].resolved_strategy_id != STRATEGY_NONE)
+                              ? state->nodes[i].resolved_strategy_id
+                              : state->nodes[i].strategy_id;
         // v5.14.9.B.2 — gate_direction migrated to state_flags BIT_FLAG.
         // Bit set = buy ABOVE (MOM); bit clear = buy below (other strategies).
         if (dir_strat == STRATEGY_MOMENTUM) {
-            STATE_FLAG_SET(snap->per_core[i], GATE_BUY_ABOVE);
+            STATE_FLAG_SET(snap->per_node[i], GATE_BUY_ABOVE);
         }
         // v4.0.4: per-core diagnostic state for Buy Gate panel
-        snap->per_core[i].halt_reason            = state->cores[i].halt_reason;
+        snap->per_node[i].halt_reason            = state->nodes[i].halt_reason;
         // v5.6.2: strategy-internal halt reason (SHALT_*). Distinct from
         // halt_reason — set by strategy _BuildParameters when zero-gating
         // for strategy-specific reasons (no uptrend, fee-floor BUY_BLOCKED,
         // ML below threshold, etc).
-        snap->per_core[i].strategy_halt_reason   = state->cores[i].strategy_halt_reason;
+        snap->per_node[i].strategy_halt_reason   = state->nodes[i].strategy_halt_reason;
         // v5.6.3 — gate diagnostic comparands → FPN_ToDouble.
         // v5.15.5.B.2 — registry-generated read block per
         // FOREACH_GATE_DIAG_PAIR (MemHeaders/DisplayMetaRegistry.hpp).
         // Adding a 7th gate diag = one row in the registry; this block
-        // auto-flows + PerCoreSnap field decl + GUI render row similarly
+        // auto-flows + PerNodeSnap field decl + GUI render row similarly
         // pick up the new field with their own registry walks.
 #define X(FAMILY, ACTUAL_FIELD, OTHER_FIELD, _DOC) \
-        snap->per_core[i].diag_##ACTUAL_FIELD = FPN_ToDouble(state->display_meta[i].diag_##ACTUAL_FIELD); \
-        snap->per_core[i].diag_##OTHER_FIELD  = FPN_ToDouble(state->display_meta[i].diag_##OTHER_FIELD);
+        snap->per_node[i].diag_##ACTUAL_FIELD = FPN_ToDouble(state->display_meta[i].diag_##ACTUAL_FIELD); \
+        snap->per_node[i].diag_##OTHER_FIELD  = FPN_ToDouble(state->display_meta[i].diag_##OTHER_FIELD);
         FOREACH_GATE_DIAG_PAIR(X)
 #undef X
-        snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
+        snap->per_node[i].sl_cooldown_remaining  = state->nodes[i].sl_cooldown_remaining;
         // v4.0.4: per-core P&L for Account panel breakdown
-        snap->per_core[i].core_realized      = Money_ToDouble(state->cores[i].core_realized);
-        snap->per_core[i].core_fees          = Money_ToDouble(state->cores[i].core_fees);
-        snap->per_core[i].core_allocated     = Money_ToDouble(state->cores[i].allocated_balance);
-        snap->per_core[i].core_wins          = state->cores[i].core_wins;
-        snap->per_core[i].core_losses        = state->cores[i].core_losses;
+        snap->per_node[i].node_realized      = Money_ToDouble(state->nodes[i].node_realized);
+        snap->per_node[i].node_fees          = Money_ToDouble(state->nodes[i].node_fees);
+        snap->per_node[i].node_allocated     = Money_ToDouble(state->nodes[i].allocated_balance);
+        snap->per_node[i].node_wins          = state->nodes[i].node_wins;
+        snap->per_node[i].node_losses        = state->nodes[i].node_losses;
         // open positions = entries minus exits (single-position-per-core invariant
         // means this is 0 or 1 today, but kept generic for future multi-position).
-        uint64_t entries = state->cores[i].entries_processed;
-        uint64_t exits   = state->cores[i].exits_processed;
-        snap->per_core[i].core_open_positions = (uint32_t)(entries - exits);
+        uint64_t entries = state->nodes[i].entries_processed;
+        uint64_t exits   = state->nodes[i].exits_processed;
+        snap->per_node[i].node_open_positions = (uint32_t)(entries - exits);
         // Phase 2.1: per-core open notional + budget-used %. The % is
         // computed defensively — if allocated is zero or near-zero (rare
         // misconfiguration), report 0% rather than a divide-by-zero blowup.
-        double open_n  = Money_ToDouble(state->cores[i].core_open_notional);
-        double alloc_d = Money_ToDouble(state->cores[i].allocated_balance);
-        snap->per_core[i].core_open_notional = open_n;
-        snap->per_core[i].core_budget_used_pct = (alloc_d > 0.01) ? (open_n / alloc_d * 100.0) : 0.0;
+        double open_n  = Money_ToDouble(state->nodes[i].node_open_notional);
+        double alloc_d = Money_ToDouble(state->nodes[i].allocated_balance);
+        snap->per_node[i].node_open_notional = open_n;
+        snap->per_node[i].node_budget_used_pct = (alloc_d > 0.01) ? (open_n / alloc_d * 100.0) : 0.0;
         // Phase 3: per-core kill switch state for the Risk panel
-        snap->per_core[i].core_peak_balance    = Money_ToDouble(state->cores[i].core_peak_balance);
-        snap->per_core[i].core_dd_pct          = Money_ToDouble(state->cores[i].core_dd_pct);
-        snap->per_core[i].core_ks_trips_total  = state->cores[i].core_ks_trips_total;
-        // v5.15.1 — TECH_DEBT-028: core_kill_tripped + drift_breached +
+        snap->per_node[i].node_peak_balance    = Money_ToDouble(state->nodes[i].node_peak_balance);
+        snap->per_node[i].node_dd_pct          = Money_ToDouble(state->nodes[i].node_dd_pct);
+        snap->per_node[i].node_ks_trips_total  = state->nodes[i].node_ks_trips_total;
+        // v5.15.1 — TECH_DEBT-028: node_kill_tripped + drift_breached +
         // drift_kill_tripped migrated to state_flags bitmap. ExecutionCore
-        // side (state->cores[i].core_kill_tripped + drift_history.*) keeps
+        // side (state->nodes[i].node_kill_tripped + drift_history.*) keeps
         // its bool/struct storage — only the snapshot side moves to bitmap.
-        if (CORE_STATE_FLAG_IS_SET(state->cores[i], KILL_TRIPPED)) {
-            STATE_FLAG_SET(snap->per_core[i], CORE_KILL_TRIPPED);
+        if (NODE_STATE_FLAG_IS_SET(state->nodes[i], KILL_TRIPPED)) {
+            STATE_FLAG_SET(snap->per_node[i], NODE_KILL_TRIPPED);
         }
         // v5.10.3.B — runtime IC drift observability (parity-check Finding #9).
         // v5.15.5.E.B — breached + kill_tripped now packed in drift_state_flags
         // bitmap (uint8_t); ic_samples + ts_us merged into AoS samples[].ic.
         // Per bitmap-flag-api.md + latency-vs-cache-decision-framework.md.
-        if (BITMAP_IS_SET(state->cores[i].drift_history.drift_state_flags, MASK_DRIFT_BREACHED)) {
-            STATE_FLAG_SET(snap->per_core[i], DRIFT_BREACHED);
+        if (BITMAP_IS_SET(state->nodes[i].drift_history.drift_state_flags, MASK_DRIFT_BREACHED)) {
+            STATE_FLAG_SET(snap->per_node[i], DRIFT_BREACHED);
         }
-        if (BITMAP_IS_SET(state->cores[i].drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED)) {
-            STATE_FLAG_SET(snap->per_core[i], DRIFT_KILL_TRIPPED);
+        if (BITMAP_IS_SET(state->nodes[i].drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED)) {
+            STATE_FLAG_SET(snap->per_node[i], DRIFT_KILL_TRIPPED);
         }
-        snap->per_core[i].drift_n_samples    = (uint16_t)state->cores[i].drift_history.count;
+        snap->per_node[i].drift_n_samples    = (uint16_t)state->nodes[i].drift_history.count;
         {
             double sum = 0.0;
-            int cnt = state->cores[i].drift_history.count;
+            int cnt = state->nodes[i].drift_history.count;
             // v5.15.5.E.B — AoS interleave: read samples[k].ic (vs prior parallel-
             // array ic_samples[k]). Each iteration touches 1 cache line containing
             // both .ic + .ts (vs prior 2 cache lines from arrays 2048B apart).
-            for (int k = 0; k < cnt; ++k) sum += state->cores[i].drift_history.samples[k].ic;
-            snap->per_core[i].drift_avg_ic = (cnt > 0) ? (sum / (double)cnt) : 0.0;
+            for (int k = 0; k < cnt; ++k) sum += state->nodes[i].drift_history.samples[k].ic;
+            snap->per_node[i].drift_avg_ic = (cnt > 0) ? (sum / (double)cnt) : 0.0;
         }
-        tt::ExecutionCore<F>* core = state->cores[i].core;
+        tt::ExecutionCore<F>* core = state->nodes[i].core;
         if (core) {
             tt::GateParameters<F> params;
             tt::ParameterSlot_Read(&core->param_slot, &params);
-            snap->per_core[i].buy_gate_price = Money_ToDouble(params.bg_price_threshold);
+            snap->per_node[i].buy_gate_price = Money_ToDouble(params.bg_price_threshold);
             // v5.6.0: snapshot the flags byte so GUI can render BUY_BLOCKED /
             // VOLUME_REQUIRED / TP/SL ENABLED / BUY_ABOVE / PAIR_ACTIVE without
             // needing access to GateParameters internals. ParameterSlot_Read
             // is seqlock-published so flags + thresholds are consistent.
-            snap->per_core[i].gate_flags = params.flags;
+            snap->per_node[i].gate_flags = params.flags;
             // v5.6.1: bg_volume_threshold for collapsing-header readout. Only
             // meaningful when GATE_FLAG_VOLUME_REQUIRED is set, but copying
             // unconditionally is cheaper than branching.
-            snap->per_core[i].bg_volume_threshold =
+            snap->per_node[i].bg_volume_threshold =
                 Money_ToDouble(params.bg_volume_threshold);
             // v5.6.1: permission atomic snapshot. ACQUIRE load matches the
             // hot-path read in ExecutionCore.hpp:356, so we see the same
             // state the next tick would see. 0 = entries forbidden.
             // v5.14.9.B.2 — permission migrated to state_flags BIT_FLAG.
             if (__atomic_load_n(&core->permission, __ATOMIC_ACQUIRE)) {
-                STATE_FLAG_SET(snap->per_core[i], PERMISSION_ALLOWED);
+                STATE_FLAG_SET(snap->per_node[i], PERMISSION_ALLOWED);
             }
             // populate headline buy gate from core 0
             if (i == 0) {
@@ -556,81 +556,81 @@ static inline void TUI_CopySnapshotSharded(
         }
 
         // Phase 6prep sharded c16: per-core ML observability
-        if (state->cores[i].strategy_id == STRATEGY_ML) {
+        if (state->nodes[i].strategy_id == STRATEGY_ML) {
             // v5.14.9.B.2 — is_ml + ml_model_loaded migrated to state_flags BIT_FLAG.
-            STATE_FLAG_SET(snap->per_core[i], IS_ML);
+            STATE_FLAG_SET(snap->per_node[i], IS_ML);
             any_ml_active = 1;
-            CoreModelZoo<F>* zoo = (CoreModelZoo<F>*)state->cores[i].model_handle;
-            int loaded = (zoo && CoreModelZoo_HasAny(zoo)) ? 1 : 0;
+            NodeModelZoo<F>* zoo = (NodeModelZoo<F>*)state->nodes[i].model_handle;
+            int loaded = (zoo && NodeModelZoo_HasAny(zoo)) ? 1 : 0;
             if (loaded) {
-                STATE_FLAG_SET(snap->per_core[i], ML_MODEL_LOADED);
+                STATE_FLAG_SET(snap->per_node[i], ML_MODEL_LOADED);
                 any_model_loaded = 1;
             }
             // staged_prediction is the freshest rebuild output; active_prediction
             // is the snapshot at last entry submit (0 if no open position).
-            snap->per_core[i].ml_last_prediction   = state->cores[i].staged_prediction;
-            snap->per_core[i].ml_last_confidence   = state->cores[i].last_confidence;
-            snap->per_core[i].ml_active_prediction = state->cores[i].active_prediction;
+            snap->per_node[i].ml_last_prediction   = state->nodes[i].staged_prediction;
+            snap->per_node[i].ml_last_confidence   = state->nodes[i].last_confidence;
+            snap->per_node[i].ml_active_prediction = state->nodes[i].active_prediction;
             // v5.14.9.B — soft risk degradation ladder factor surface.
-            snap->per_core[i].ml_confidence_factor = state->cores[i].last_confidence_factor;
+            snap->per_node[i].ml_confidence_factor = state->nodes[i].last_confidence_factor;
             // v5.14.9.B.2 — ladder-bottom inference: ladder active for this core
             // (gate cache says LADDER_ACTIVE) AND factor written as exactly 0.0
             // by ML_BuildParameters → entry blocked + SHALT_LOW_CONFIDENCE fired.
             // STATE_FLAG_LADDER_BOTTOM_HIT surfaces this for ML Status panel +
             // entry log (operator sees per-cycle ladder behavior).
-            if (BITMAP_IS_SET(state->cores[i].gate_state.flags, tt::MASK_LADDER_ACTIVE)
-                && state->cores[i].last_confidence_factor == 0.0) {
-                STATE_FLAG_SET(snap->per_core[i], LADDER_BOTTOM_HIT);
+            if (BITMAP_IS_SET(state->nodes[i].gate_state.flags, tt::MASK_LADDER_ACTIVE)
+                && state->nodes[i].last_confidence_factor == 0.0) {
+                STATE_FLAG_SET(snap->per_node[i], LADDER_BOTTOM_HIT);
             }
             // v5.13.6.A — sell-side ML prediction surface (parity-check
             // Section J observability gap close). Operator sees per-cycle
             // exit_predictor blended prob + dominant horizon in dashboard.
-            snap->per_core[i].ml_last_exit_prediction       = state->cores[i].last_exit_prediction;
-            snap->per_core[i].ml_last_exit_dominant_horizon = state->cores[i].last_exit_dominant_horizon;
+            snap->per_node[i].ml_last_exit_prediction       = state->nodes[i].last_exit_prediction;
+            snap->per_node[i].ml_last_exit_dominant_horizon = state->nodes[i].last_exit_dominant_horizon;
             // v5.15.5.A.6 — buy-side per-horizon barrier observability snap.
-            snap->per_core[i].ml_last_buy_dominant_horizon   = state->cores[i].last_buy_dominant_horizon;
-            snap->per_core[i].ml_last_barrier_mode_used      = state->cores[i].last_barrier_mode_used;
-            snap->per_core[i].ml_barrier_shadow_event_count  = state->display_meta[i].barrier_shadow_event_count;
+            snap->per_node[i].ml_last_buy_dominant_horizon   = state->nodes[i].last_buy_dominant_horizon;
+            snap->per_node[i].ml_last_barrier_mode_used      = state->nodes[i].last_barrier_mode_used;
+            snap->per_node[i].ml_barrier_shadow_event_count  = state->display_meta[i].barrier_shadow_event_count;
             // Direct reads of scorer internals — these are double-only and safe
             // to compute on the snapshot path (snapshot is slow-path itself).
             // v5.14.1.F — variant-aware IC (default 0=Spearman). cfg in scope
             // via Snapshot fn parameter. Future Pearson/Kendall variants slot
             // in via FOREACH_IC_VARIANT registry; today's behavior bytewise
             // unchanged (single-case switch inlines to direct call).
-            snap->per_core[i].ml_confidence_ic   = ConfidenceScorer_ComputeICVariant(
-                &state->cores[i].confidence, cfg ? cfg->confidence_ic_variant : 0);
-            snap->per_core[i].ml_confidence_rmse = RollingRMSE_Compute(&state->cores[i].confidence.rmse);
+            snap->per_node[i].ml_confidence_ic   = ConfidenceScorer_ComputeICVariant(
+                &state->nodes[i].confidence, cfg ? cfg->confidence_ic_variant : 0);
+            snap->per_node[i].ml_confidence_rmse = RollingRMSE_Compute(&state->nodes[i].confidence.rmse);
             // v5.14.1.G — portfolio turnover. Reads per-core RollingTurnover
             // ring; ~500ns at window=100 (popcount-based; within slow-path
             // budget). HOT_PATH_CHANGELOG entry committed in this ship.
-            snap->per_core[i].ml_portfolio_turnover =
-                RollingTurnover_Compute(&state->cores[i].turnover);
+            snap->per_node[i].ml_portfolio_turnover =
+                RollingTurnover_Compute(&state->nodes[i].turnover);
             // v5.9.0b — ML observability extensions. Single-writer (slow path)
             // → snapshot read; no race. Counters are uint32 monotonic.
             // v5.14.8.C — failure_flags bitmap (FOREACH_FAILURE_MODE BIT_FLAG entries).
             // Reset all failure bits, then set per slow-path state.
-            snap->per_core[i].failure_flags = 0;
+            snap->per_node[i].failure_flags = 0;
             // v5.15.5.B.2 — model_load_failed + ML threshold/nan_* counters
             // moved to display_meta (.B.3 will bit-pack model_load_failed back
-            // onto CoreContext as a core_state_flags bit).
-            if (CORE_STATE_FLAG_IS_SET(state->cores[i], MODEL_LOAD_FAILED)) {
-                FAILURE_SET(snap->per_core[i], ml_model_load_failed);
+            // onto NodeContext as a node_state_flags bit).
+            if (NODE_STATE_FLAG_IS_SET(state->nodes[i], MODEL_LOAD_FAILED)) {
+                FAILURE_SET(snap->per_node[i], ml_model_load_failed);
             }
             // v5.15.5.E.0.10 A6 ingress (D-221) — sticky "model: CORRUPT — RETRAIN" alert on ANY
             // corrupt arm (a partial-drop graceful-degrade is NOT silent). Broader than the
-            // MODEL_CORRUPT CoreState SHALT (which is the MAJORITY case): the operator is alerted
+            // MODEL_CORRUPT NodeState SHALT (which is the MAJORITY case): the operator is alerted
             // to retrain whenever even one barrier is corrupt, while the node keeps trading on the
             // surviving clean arms until the majority threshold trips.
             {
-                EnsembleModelZoo<F>* ez_corrupt = (EnsembleModelZoo<F>*)state->cores[i].ensemble_handle;
+                EnsembleModelZoo<F>* ez_corrupt = (EnsembleModelZoo<F>*)state->nodes[i].ensemble_handle;
                 if (ez_corrupt && ez_corrupt->corrupt_arms_mask) {
-                    FAILURE_SET(snap->per_core[i], ml_model_corrupt);
+                    FAILURE_SET(snap->per_node[i], ml_model_corrupt);
                 }
             }
-            snap->per_core[i].ml_last_threshold          = state->display_meta[i].last_ml_threshold;
-            snap->per_core[i].ml_last_effective_threshold= state->display_meta[i].last_ml_effective_threshold;
-            snap->per_core[i].ml_nan_feature_events      = state->display_meta[i].nan_feature_events_total;
-            snap->per_core[i].ml_nan_prediction_events   = state->display_meta[i].nan_prediction_events_total;
+            snap->per_node[i].ml_last_threshold          = state->display_meta[i].last_ml_threshold;
+            snap->per_node[i].ml_last_effective_threshold= state->display_meta[i].last_ml_effective_threshold;
+            snap->per_node[i].ml_nan_feature_events      = state->display_meta[i].nan_feature_events_total;
+            snap->per_node[i].ml_nan_prediction_events   = state->display_meta[i].nan_prediction_events_total;
             // v5.9.3a — scaler observability (Gap H). Aggregate across all
             // 4 model roles in the zoo: scaler considered "present" if ANY
             // role's handle has has_scaler=1; "load_failed" if ANY role has
@@ -660,10 +660,10 @@ static inline void TUI_CopySnapshotSharded(
             }
             // v5.15.1 — TECH_DEBT-028: ml_scaler_present migrated to state_flags bitmap.
             if (BITMAP_IS_SET(scaler_summary_flags, MASK_SCALER_PRESENT)) {
-                STATE_FLAG_SET(snap->per_core[i], ML_SCALER_PRESENT);
+                STATE_FLAG_SET(snap->per_node[i], ML_SCALER_PRESENT);
             }
             if (BITMAP_IS_SET(scaler_summary_flags, MASK_SCALER_FAILED)) {
-                FAILURE_SET(snap->per_core[i], ml_scaler_load_failed);
+                FAILURE_SET(snap->per_node[i], ml_scaler_load_failed);
             }
             // v5.15.1 — Model Health drift aggregation. OR-combine each
             // role's handle->drift_flags_at_load (set at TryLoadRole
@@ -685,14 +685,14 @@ static inline void TUI_CopySnapshotSharded(
             // session post-v5.12. Fix: walk ezoo's handle arrays too;
             // chokepoint now sees BOTH load paths (single-zoo + ensemble).
             if (zoo) {
-                snap->per_core[i].failure_flags |= zoo->buy_signal.drift_flags_at_load;
-                snap->per_core[i].failure_flags |= zoo->barrier.drift_flags_at_load;
-                snap->per_core[i].failure_flags |= zoo->regime.drift_flags_at_load;
-                snap->per_core[i].failure_flags |= zoo->exit.drift_flags_at_load;
-                snap->per_core[i].handle_training_timestamp_us =
+                snap->per_node[i].failure_flags |= zoo->buy_signal.drift_flags_at_load;
+                snap->per_node[i].failure_flags |= zoo->barrier.drift_flags_at_load;
+                snap->per_node[i].failure_flags |= zoo->regime.drift_flags_at_load;
+                snap->per_node[i].failure_flags |= zoo->exit.drift_flags_at_load;
+                snap->per_node[i].handle_training_timestamp_us =
                     zoo->buy_signal.training_timestamp_us;
             } else {
-                snap->per_core[i].handle_training_timestamp_us = 0;
+                snap->per_node[i].handle_training_timestamp_us = 0;
             }
             // v5.15.5.F.3 — ensemble-path drift aggregation. Walk ezoo's
             // per-horizon handle arrays for ALL 4 roles + OR drift bits.
@@ -702,29 +702,29 @@ static inline void TUI_CopySnapshotSharded(
             // both load paths).
             {
                 auto* ezoo_drift = static_cast<EnsembleModelZoo<F>*>(
-                    state->cores[i].ensemble_handle);
+                    state->nodes[i].ensemble_handle);
                 if (ezoo_drift && BITMAP_IS_SET(ezoo_drift->init_flags, MASK_EZOO_ACTIVE)) {
                     for (int h = 0; h < ezoo_drift->buy_signal_count; ++h) {
-                        snap->per_core[i].failure_flags |=
+                        snap->per_node[i].failure_flags |=
                             ezoo_drift->buy_signal[h].drift_flags_at_load;
                     }
                     for (int h = 0; h < ezoo_drift->barrier_count; ++h) {
-                        snap->per_core[i].failure_flags |=
+                        snap->per_node[i].failure_flags |=
                             ezoo_drift->barrier[h].drift_flags_at_load;
                     }
                     for (int h = 0; h < ezoo_drift->regime_count; ++h) {
-                        snap->per_core[i].failure_flags |=
+                        snap->per_node[i].failure_flags |=
                             ezoo_drift->regime[h].drift_flags_at_load;
                     }
                     for (int h = 0; h < ezoo_drift->exit_predictor_count; ++h) {
-                        snap->per_core[i].failure_flags |=
+                        snap->per_node[i].failure_flags |=
                             ezoo_drift->exit_predictor[h].drift_flags_at_load;
                     }
                     // Adopt representative training_timestamp_us from arm 0
                     // (buy_signal) if zoo didn't set one above.
-                    if (snap->per_core[i].handle_training_timestamp_us == 0 &&
+                    if (snap->per_node[i].handle_training_timestamp_us == 0 &&
                         ezoo_drift->buy_signal_count > 0) {
-                        snap->per_core[i].handle_training_timestamp_us =
+                        snap->per_node[i].handle_training_timestamp_us =
                             ezoo_drift->buy_signal[0].training_timestamp_us;
                     }
                 }
@@ -734,9 +734,9 @@ static inline void TUI_CopySnapshotSharded(
             // type isn't visible here without a forward decl. Empty when
             // ensemble inactive (single-zoo path) → GUI hides the section.
             auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
-                state->cores[i].ensemble_handle);
+                state->nodes[i].ensemble_handle);
             if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
-                auto& es = snap->per_core[i];
+                auto& es = snap->per_node[i];
                 es.ensemble_active = 1;
                 // v5.11.62 — n_horizons reflects primary handles (set at
                 // load to whichever role was actually populated). Pre-fix
@@ -806,8 +806,8 @@ static inline void TUI_CopySnapshotSharded(
                     uint8_t arm_bits = (uint8_t)(ezoo->last_predicted_buy_thompson_arm >= 0
                         ? (ezoo->last_predicted_buy_thompson_arm & 0x07) : 0);
                     es.thompson_state = (uint8_t)(
-                        (uint8_t)TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE |
-                        (arm_bits << TUISnapshot::PerCoreSnap::SHIFT_THOMPSON_CHOSEN_ARM));
+                        (uint8_t)TUISnapshot::PerNodeSnap::MASK_THOMPSON_BANDIT_ACTIVE |
+                        (arm_bits << TUISnapshot::PerNodeSnap::SHIFT_THOMPSON_CHOSEN_ARM));
                 } else {
                     es.thompson_state = 0;
                     for (int a = 0; a < 8; ++a) {
@@ -817,25 +817,25 @@ static inline void TUI_CopySnapshotSharded(
                     }
                 }
             } else {
-                snap->per_core[i].ensemble_active = 0;
-                snap->per_core[i].ensemble_n_horizons = 0;
+                snap->per_node[i].ensemble_active = 0;
+                snap->per_node[i].ensemble_n_horizons = 0;
                 // Thompson cluster also zeroed when ezoo is not active
-                snap->per_core[i].thompson_state = 0;
+                snap->per_node[i].thompson_state = 0;
                 for (int a = 0; a < 8; ++a) {
-                    snap->per_core[i].thompson_mu_post[a]        = 0.0f;
-                    snap->per_core[i].thompson_precision_post[a] = 0.0f;
-                    snap->per_core[i].thompson_total_pulls[a]    = 0;
+                    snap->per_node[i].thompson_mu_post[a]        = 0.0f;
+                    snap->per_node[i].thompson_precision_post[a] = 0.0f;
+                    snap->per_node[i].thompson_total_pulls[a]    = 0;
                 }
             }
             // Track the highest-confidence ML core for the headline summary.
             // Tie-break: prefer the lowest core index (deterministic).
-            if (state->cores[i].last_confidence > headline_conf) {
-                headline_conf = state->cores[i].last_confidence;
+            if (state->nodes[i].last_confidence > headline_conf) {
+                headline_conf = state->nodes[i].last_confidence;
                 headline_ml_core = i;
             }
         } else {
-            snap->per_core[i].ensemble_active = 0;
-            snap->per_core[i].ensemble_n_horizons = 0;
+            snap->per_node[i].ensemble_active = 0;
+            snap->per_node[i].ensemble_n_horizons = 0;
         }
     }
 
@@ -883,16 +883,16 @@ static inline void TUI_CopySnapshotSharded(
     snap->ml.confidence_enabled = BITMAP_IS_SET(cfg->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) ? 1 : 0;
     snap->ml.ml_model_loaded    = any_model_loaded;
     if (headline_ml_core >= 0) {
-        const auto& core_pc = snap->per_core[headline_ml_core];
-        snap->ml.confidence            = core_pc.ml_last_confidence;
-        snap->ml.confidence_ic         = core_pc.ml_confidence_ic;
-        snap->ml.confidence_rmse       = core_pc.ml_confidence_rmse;
+        const auto& node_pc = snap->per_node[headline_ml_core];
+        snap->ml.confidence            = node_pc.ml_last_confidence;
+        snap->ml.confidence_ic         = node_pc.ml_confidence_ic;
+        snap->ml.confidence_rmse       = node_pc.ml_confidence_rmse;
         // Stability ≈ exp(-rmse) per Confidence_Stability; the GUI labels
         // this as "Stability" not "Freshness" despite the field name (legacy).
-        snap->ml.confidence_freshness  = (core_pc.ml_confidence_rmse > 0.0)
-                                          ? std::exp(-core_pc.ml_confidence_rmse)
+        snap->ml.confidence_freshness  = (node_pc.ml_confidence_rmse > 0.0)
+                                          ? std::exp(-node_pc.ml_confidence_rmse)
                                           : 1.0;
-        snap->ml.ml_last_prediction    = core_pc.ml_last_prediction;
+        snap->ml.ml_last_prediction    = node_pc.ml_last_prediction;
     }
     (void)any_ml_active;
 }

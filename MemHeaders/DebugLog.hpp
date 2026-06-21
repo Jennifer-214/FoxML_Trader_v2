@@ -48,8 +48,8 @@
 //
 // Macro usage:
 //
-//   LOG_DEBUG_HOT("cat", core_id, "fmt %d %g", x, y)
-//     -> Health_Log(HEALTH_DEBUG, "cat", core_id, "fmt %d %g", x, y) when
+//   LOG_DEBUG_HOT("cat", node_id, "fmt %d %g", x, y)
+//     -> Health_Log(HEALTH_DEBUG, "cat", node_id, "fmt %d %g", x, y) when
 //        FOXML_DEBUG_LOGS defined; ((void)0) otherwise.
 //
 //   LOG_DEBUG_ENGINE alias for LOG_DEBUG_HOT — semantically the engine
@@ -66,19 +66,19 @@
 
 #ifdef FOXML_DEBUG_LOGS
 
-#define LOG_DEBUG_HOT(cat, core_id, ...)    \
-    tt::Health_Log(tt::HEALTH_DEBUG, (cat), (core_id), __VA_ARGS__)
+#define LOG_DEBUG_HOT(cat, node_id, ...)    \
+    tt::Health_Log(tt::HEALTH_DEBUG, (cat), (node_id), __VA_ARGS__)
 
-#define LOG_DEBUG_ENGINE(cat, core_id, ...) \
-    tt::Health_Log(tt::HEALTH_DEBUG, (cat), (core_id), __VA_ARGS__)
+#define LOG_DEBUG_ENGINE(cat, node_id, ...) \
+    tt::Health_Log(tt::HEALTH_DEBUG, (cat), (node_id), __VA_ARGS__)
 
 #else
 
 // Stripped at compile time. Args NOT evaluated — caller must keep
 // side-effect-bearing expressions out of arguments (same discipline
 // as `assert()` under NDEBUG).
-#define LOG_DEBUG_HOT(cat, core_id, ...)    ((void)0)
-#define LOG_DEBUG_ENGINE(cat, core_id, ...) ((void)0)
+#define LOG_DEBUG_HOT(cat, node_id, ...)    ((void)0)
+#define LOG_DEBUG_ENGINE(cat, node_id, ...) ((void)0)
 
 #endif
 

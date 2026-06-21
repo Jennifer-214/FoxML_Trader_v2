@@ -195,7 +195,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     // 1. Fan out to every registered execution core. Order is fixed
     //    (slot 0 first) for determinism.
     for (int slot = 0; slot < drv->state->registered_count; ++slot) {
-        ExecutionCore<F>* core = drv->state->cores[slot].core;
+        ExecutionCore<F>* core = drv->state->nodes[slot].core;
         if (core) ExecutionCore_Tick(core, tick);
     }
 
@@ -225,12 +225,12 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
 
     // 2c. v4.7.15 — train-serve parity. When OMS runs in event_log_mode=1
     //     (live default since v4.7.1), per-fill bookkeeping
-    //     (core_open_notional, core_fees, ConfidenceScorer feedback,
+    //     (node_open_notional, node_fees, ConfidenceScorer feedback,
     //     wins/losses, SL cooldown) is populated by OrderManager_Tick
-    //     into FillRecords + masks but NOT applied to the CoreContexts
+    //     into FillRecords + masks but NOT applied to the NodeContexts
     //     until DrainPostFill consumes them. Live engine calls this on
     //     the drainer thread after each OrderManager_Tick (EngineSharded
-    //     line 1594). Mirror the same call here so backtest CoreContexts
+    //     line 1594). Mirror the same call here so backtest NodeContexts
     //     match live for identical inputs. Safe to call when masks are
     //     zero (no fills this tick) — the function early-exits per slot.
     if (drv->oms &&
@@ -414,7 +414,7 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     if (drv->oms) OrderManager_Tick(drv->oms);
     // v4.7.15: drain post-fill in mode 1 to match live's final-flush loop
     // (EngineSharded line 1597-1604). Without this, the last tick's
-    // FillRecords sit in the OMS buffers and never apply to CoreContexts.
+    // FillRecords sit in the OMS buffers and never apply to NodeContexts.
     if (drv->oms &&
         BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
         drv->config) {

@@ -356,8 +356,8 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   }
   // regime detector — legacy single_core uses core 0's per-core value
   // (sister to EngineCommon.hpp:199 SHARDED per-core convention;
-  // value-equivalent via EMIT_PER_CORE_COPY walker propagating global → cores)
-  Regime_Init(&ctrl->regime, config.cores[0].regime_hysteresis);
+  // value-equivalent via EMIT_PER_NODE_COPY walker propagating global → cores)
+  Regime_Init(&ctrl->regime, config.nodes[0].regime_hysteresis);
   ctrl->regime_ror = RORRegressor_Init<F>();
   ctrl->volume_spike_ratio = FPN_Zero<F>();
   ctrl->sl_cooldown_counter = 0;
@@ -379,7 +379,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->kill_recovery_counter = 0;
   ctrl->buying_halted = 0;
   // Legacy single-core controller halt_reason is a NARROWER namespace than
-  // sharded EventLoopState::cores[].halt_reason: only 0=ok / 1=kill apply
+  // sharded EventLoopState::nodes[].halt_reason: only 0=ok / 1=kill apply
   // here. The HALT_* enum from FOREACH_HALT_REASON is for the sharded path
   // only; reusing it here would semantically alias HALT_SPACING=1 with
   // "kill switch tripped". Leave as raw int — legacy controller is
@@ -1962,9 +1962,9 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     uint32_t saved_warmup_ticks = ctrl->config.warmup_ticks;
     uint32_t saved_min_warmup = ctrl->config.min_warmup_samples;
     uint8_t saved_trading_mode = ctrl->config.trading_mode; // NEW-1 — protect the capital-authority field across hot-reload (else a reload bulk-copy flips live/paper mid-session)
-    // num_execution_cores is STARTUP-ONLY because it determines the thread
+    // num_execution_nodes is STARTUP-ONLY because it determines the thread
     // layout. Changing it mid-session would tear down half the engine.
-    uint16_t saved_num_execution_cores = ctrl->config.num_execution_cores;
+    uint16_t saved_num_execution_nodes = ctrl->config.num_execution_nodes;
 
     // bulk copy — every field updates automatically
     ctrl->config = new_cfg;
@@ -1974,7 +1974,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.warmup_ticks = saved_warmup_ticks;
     ctrl->config.min_warmup_samples = saved_min_warmup;
     ctrl->config.trading_mode = saved_trading_mode; // NEW-1
-    ctrl->config.num_execution_cores = saved_num_execution_cores;
+    ctrl->config.num_execution_nodes = saved_num_execution_nodes;
 
     // reset adaptive filters to new values
     ctrl->mean_rev.live_offset_pct    = Money_ToBinary(new_cfg.entry_offset_pct);
@@ -1982,7 +1982,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->mean_rev.live_stddev_mult   = new_cfg.offset_stddev_mult;
     ctrl->momentum.live_breakout_mult = new_cfg.momentum_breakout_mult;
     ctrl->momentum.live_vol_mult      = new_cfg.volume_multiplier;
-    ctrl->regime.hysteresis_threshold = new_cfg.cores[0].regime_hysteresis;  // sister to Init at :358
+    ctrl->regime.hysteresis_threshold = new_cfg.nodes[0].regime_hysteresis;  // sister to Init at :358
 
     // live strategy switch
     // default_strategy >= 0: explicit strategy selection (0=MR, 1=Momentum, 2=SimpleDip)

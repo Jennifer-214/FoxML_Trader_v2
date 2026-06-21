@@ -11,9 +11,9 @@
 //   0.0 = identical sets every cycle (stable convictions)
 //   1.0 = fully disjoint sets every cycle (thrashing model)
 //
-// Per-core diagnostic surfaced via PerCoreSnap.ml_portfolio_turnover.
+// Per-core diagnostic surfaced via PerNodeSnap.ml_portfolio_turnover.
 // Operator visibility metric — does NOT influence trading decisions.
-// State lives on EventLoopState.cores[].turnover (per-core, ephemeral).
+// State lives on EventLoopState.nodes[].turnover (per-core, ephemeral).
 // NOT on ConfidenceScorer (would break PortfolioController.hpp:2094+2210
 // snapshot save/load per Class 4 — snapshot save/load asymmetry).
 //

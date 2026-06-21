@@ -71,7 +71,7 @@ struct EventLoopAggregates {
     double equity;               // balance + unrealized_pnl
 
     // counts
-    int registered_cores;        // == EventLoopState::registered_count
+    int registered_nodes;        // == EventLoopState::registered_count
     int active_position_count;   // popcount of portfolio.active_bitmap
     uint64_t total_entries;
     uint64_t total_exits;
@@ -110,7 +110,7 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
     agg.peak_balance = Money_ToDouble(state->oms->ks_peak_balance);
 
     // counts
-    agg.registered_cores = state->registered_count;
+    agg.registered_nodes = state->registered_count;
     agg.total_entries    = state->total_entries;
     agg.total_exits      = state->total_exits;
     // v5.15.5.C.2 (S3a) — kill_switch_tripped now lives in oms_state_flags bitmap.

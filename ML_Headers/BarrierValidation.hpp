@@ -8,7 +8,7 @@
 // SSoT predicate for detecting a CORRUPT model barrier (label_tp_pct / label_sl_pct).
 // Applied at BOTH seams of the SAME correctness invariant (adjacency by structure+function,
 // not file-location):
-//   - CONSUMER (ingress): ezoo_set_per_arm_barrier (CoreModelZoo.hpp) refuses a corrupt
+//   - CONSUMER (ingress): ezoo_set_per_arm_barrier (NodeModelZoo.hpp) refuses a corrupt
 //     arm at load → full-disable + majority-SHALT.
 //   - PRODUCER (trainer emit): Stamp_AssembleAndEmit (StampHelper.hpp) refuses to write a
 //     corrupt barrier into a stamp.

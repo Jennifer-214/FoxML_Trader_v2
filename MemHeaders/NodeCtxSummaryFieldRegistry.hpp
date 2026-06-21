@@ -5,12 +5,12 @@
 //======================================================================================================
 // [CORE-CONTEXT SUMMARY FIELD REGISTRY — v5.15.5.C.3 Phase 4]
 //======================================================================================================
-// FOREACH_CORE_CTX_SUMMARY_FIELD(X) — drives summary.json per_core array
+// FOREACH_NODE_CTX_SUMMARY_FIELD(X) — drives summary.json per_node array
 // emission for the paper-reset archive flow (Phase 6) + general operator-
 // facing per-core stats reporting.
 //
 // Tuple: X(field_name, type, json_key)
-//   field_name — bare identifier on CoreContext<F>; referenced as ctx.field_name
+//   field_name — bare identifier on NodeContext<F>; referenced as ctx.field_name
 //   type       — C++ type; dispatched via json_emit_value<T> for per-type
 //                 JSON formatting (FPN_Binary<F> → "%.6f" via FPN_ToDouble, uint8/16/32/64 → "%llu",
 //                 signed → "%lld", float/double → "%.6f")
@@ -29,13 +29,13 @@
 // AGGREGATION (per_strategy section of summary.json):
 //   Summary_EmitPerStrategy() hand-codes the aggregation for the 4 summable
 //   stats (entries, exits, realized, fees, wins, losses, gross_*). Future
-//   refactor: introduce FOREACH_CORE_CTX_SUMMABLE_FIELD sub-registry +
+//   refactor: introduce FOREACH_NODE_CTX_SUMMABLE_FIELD sub-registry +
 //   aggregation kind column if more aggregation cohorts emerge.
 //
 // PER_REGIME AGGREGATION (deferred to Phase 5):
 //   Requires per-trade regime data (Phase 5 ShardedTradeLog refactor adds
 //   regime column to trade log CSV). Phase 4 emits summary.json with
-//   per_core + per_strategy sections only; per_regime added at Phase 6
+//   per_node + per_strategy sections only; per_regime added at Phase 6
 //   archive flow integration.
 //
 // Cross-references:
@@ -45,21 +45,21 @@
 //   CLAUDE.md item 13 (X-macro registry for multi-site additions)
 //   CLAUDE.md item 23 (templated helpers; type-trait dispatch over branches)
 //   v5.14.10.D FOREACH_CALIB_LOG_COL (precedent — CSV row emit registry)
-//   v5.15.5.B.7 FOREACH_CORE_CTX_INIT_FIELD (sister registry — per-core init walk)
+//   v5.15.5.B.7 FOREACH_NODE_CTX_INIT_FIELD (sister registry — per-core init walk)
 //======================================================================================================
-#ifndef CORE_CTX_SUMMARY_FIELD_REGISTRY_HPP
-#define CORE_CTX_SUMMARY_FIELD_REGISTRY_HPP
+#ifndef NODE_CTX_SUMMARY_FIELD_REGISTRY_HPP
+#define NODE_CTX_SUMMARY_FIELD_REGISTRY_HPP
 
 #include <cstdint>
 #include <cstdio>
 #include <type_traits>
 #include "../FixedPoint/FixedPointN.hpp"
 
-// Forward declaration — CoreContext<F> is defined in
+// Forward declaration — NodeContext<F> is defined in
 // CoreFrameworks/ControllerEventLoop.hpp (line ~253). Callers of the per-core
 // emit function must include that header first.
 namespace tt {
-    template <unsigned F> struct CoreContext;
+    template <unsigned F> struct NodeContext;
 }  // namespace tt
 
 namespace tt {
@@ -135,7 +135,7 @@ inline void json_emit_pair(std::FILE* f, const char* key, const T& value, bool& 
 // downstream tooling indexes by position (currently keyed by json_key, but
 // keeping append-only discipline simplifies migrations).
 //======================================================================================================
-#define FOREACH_CORE_CTX_SUMMARY_FIELD(X)                                                       \
+#define FOREACH_NODE_CTX_SUMMARY_FIELD(X)                                                       \
     /* Identity + strategy */                                                                   \
     X(strategy_id,           uint8_t,  "strategy_id")                                           \
     X(resolved_strategy_id,  uint8_t,  "resolved_strategy_id")                                  \
@@ -149,18 +149,18 @@ inline void json_emit_pair(std::FILE* f, const char* key, const T& value, bool& 
     X(sl_cooldown_remaining, uint32_t, "sl_cooldown_remaining")                                 \
     X(idle_cycles,           uint32_t, "idle_cycles")                                           \
     /* P&L (net) */                                                                             \
-    X(core_realized,         Money,           "realized")                                              \
-    X(core_fees,             Money,           "fees")                                                  \
-    X(core_wins,             uint32_t, "wins")                                                  \
-    X(core_losses,           uint32_t, "losses")                                                \
+    X(node_realized,         Money,           "realized")                                              \
+    X(node_fees,             Money,           "fees")                                                  \
+    X(node_wins,             uint32_t, "wins")                                                  \
+    X(node_losses,           uint32_t, "losses")                                                \
     /* P&L (gross — per-side accumulators for avg_win, avg_loss, profit_factor, expectancy) */  \
-    X(core_gross_wins,       Money,           "gross_wins")                                            \
-    X(core_gross_losses,     Money,           "gross_losses")                                          \
-    X(core_open_notional,    Money,           "open_notional")                                         \
+    X(node_gross_wins,       Money,           "gross_wins")                                            \
+    X(node_gross_losses,     Money,           "gross_losses")                                          \
+    X(node_open_notional,    Money,           "open_notional")                                         \
     /* Kill switch / drawdown */                                                                \
-    X(core_peak_balance,     Money,           "peak_balance")                                          \
-    X(core_dd_pct,           Money,           "dd_pct")                                                \
-    X(core_ks_trips_total,   uint32_t, "ks_trips_total")                                        \
+    X(node_peak_balance,     Money,           "peak_balance")                                          \
+    X(node_dd_pct,           Money,           "dd_pct")                                                \
+    X(node_ks_trips_total,   uint32_t, "ks_trips_total")                                        \
     /* ML observability */                                                                      \
     X(last_confidence,       double,   "last_confidence")
 
@@ -168,45 +168,45 @@ inline void json_emit_pair(std::FILE* f, const char* key, const T& value, bool& 
 // [COMPILE-TIME COUNT SENTINEL]
 //======================================================================================================
 #define _CCSUM_COUNT_ONE(name, type, key) +1
-constexpr int FOREACH_CORE_CTX_SUMMARY_FIELD_COUNT =
-    0 FOREACH_CORE_CTX_SUMMARY_FIELD(_CCSUM_COUNT_ONE);
+constexpr int FOREACH_NODE_CTX_SUMMARY_FIELD_COUNT =
+    0 FOREACH_NODE_CTX_SUMMARY_FIELD(_CCSUM_COUNT_ONE);
 #undef _CCSUM_COUNT_ONE
 
-static_assert(FOREACH_CORE_CTX_SUMMARY_FIELD_COUNT >= 18,
-              "FOREACH_CORE_CTX_SUMMARY_FIELD must keep the v5.15.5.C.3 Phase 4 "
+static_assert(FOREACH_NODE_CTX_SUMMARY_FIELD_COUNT >= 18,
+              "FOREACH_NODE_CTX_SUMMARY_FIELD must keep the v5.15.5.C.3 Phase 4 "
               "minimum set (~20 per-core trading-relevant stats). Removing "
               "entries requires explicit justification + operator tooling audit.");
 
 namespace tt {
 
 //======================================================================================================
-// [Summary_EmitPerCoreEntry — emit one JSON object for a single CoreContext]
+// [Summary_EmitPerCoreEntry — emit one JSON object for a single NodeContext]
 //======================================================================================================
 // Emits a complete JSON object (with opening { / closing }) for one core's
 // summary fields. Caller manages the surrounding array brackets [...] +
 // inter-object commas.
 //
-// Usage from caller (per_core array writer):
+// Usage from caller (per_node array writer):
 //   std::fprintf(f, "[");
-//   for (int c = 0; c < num_cores; ++c) {
+//   for (int c = 0; c < num_nodes; ++c) {
 //       if (c > 0) std::fprintf(f, ",");
-//       Summary_EmitPerCoreEntry(f, state.cores[c], c);
+//       Summary_EmitPerCoreEntry(f, state.nodes[c], c);
 //   }
 //   std::fprintf(f, "]");
 //
 // JSON shape per core:
-//   {"core_id":0,"strategy_id":3,"resolved_strategy_id":3,"halt_reason":0,
+//   {"node_id":0,"strategy_id":3,"resolved_strategy_id":3,"halt_reason":0,
 //    "strategy_halt_reason":0,"allocated_balance":1000.000000,"entries":42,...}
 //======================================================================================================
 template <unsigned F>
-inline void Summary_EmitPerCoreEntry(std::FILE* f, const CoreContext<F>& ctx, int core_id) {
+inline void Summary_EmitPerCoreEntry(std::FILE* f, const NodeContext<F>& ctx, int node_id) {
     if (!f) return;
     std::fprintf(f, "{");
     bool first_field = true;
-    json_emit_pair(f, "core_id", static_cast<uint64_t>(core_id), first_field);
+    json_emit_pair(f, "node_id", static_cast<uint64_t>(node_id), first_field);
 #define _CCSUM_JSON_EMIT_ONE(NAME, TYPE, KEY) \
     json_emit_pair<TYPE>(f, KEY, ctx.NAME, first_field);
-    FOREACH_CORE_CTX_SUMMARY_FIELD(_CCSUM_JSON_EMIT_ONE)
+    FOREACH_NODE_CTX_SUMMARY_FIELD(_CCSUM_JSON_EMIT_ONE)
 #undef _CCSUM_JSON_EMIT_ONE
     std::fprintf(f, "}");
 }
@@ -229,13 +229,13 @@ inline void Summary_EmitPerCoreEntry(std::FILE* f, const CoreContext<F>& ctx, in
 //   1. Aggregation arithmetic differs per type (FPN_Add vs += vs no-op).
 //   2. The summable subset is stable today (4-7 fields); a 4th tuple column
 //      for aggregation kind would add complexity for marginal benefit.
-//   3. Future refactor possible: FOREACH_CORE_CTX_SUMMABLE_FIELD sub-registry
+//   3. Future refactor possible: FOREACH_NODE_CTX_SUMMABLE_FIELD sub-registry
 //      with FPN_AGG / INT_AGG / MAX_AGG dispatch when ≥3 aggregation
 //      patterns emerge.
 //======================================================================================================
 template <unsigned F>
-inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, int num_cores) {
-    if (!f || !cores) return;
+inline void Summary_EmitPerStrategy(std::FILE* f, const NodeContext<F>* nodes, int num_nodes) {
+    if (!f || !nodes) return;
     constexpr int MAX_STRAT = 256;  // full uint8_t range
     struct StratAgg {
         int      present;
@@ -250,20 +250,20 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, i
         Money    open_notional;
     };
     StratAgg agg[MAX_STRAT] = {};
-    for (int c = 0; c < num_cores; ++c) {
-        const uint8_t sid = cores[c].strategy_id;
+    for (int c = 0; c < num_nodes; ++c) {
+        const uint8_t sid = nodes[c].strategy_id;
         if (sid == 0xFF) continue;  // STRATEGY_NONE — skip
         StratAgg& a = agg[sid];
         a.present = 1;
-        a.entries      += cores[c].entries_processed;
-        a.exits        += cores[c].exits_processed;
-        a.realized      = Money_Add(a.realized,      cores[c].core_realized);
-        a.fees          = Money_Add(a.fees,          cores[c].core_fees);
-        a.wins         += cores[c].core_wins;
-        a.losses       += cores[c].core_losses;
-        a.gross_wins    = Money_Add(a.gross_wins,    cores[c].core_gross_wins);
-        a.gross_losses  = Money_Add(a.gross_losses,  cores[c].core_gross_losses);
-        a.open_notional = Money_Add(a.open_notional, cores[c].core_open_notional);
+        a.entries      += nodes[c].entries_processed;
+        a.exits        += nodes[c].exits_processed;
+        a.realized      = Money_Add(a.realized,      nodes[c].node_realized);
+        a.fees          = Money_Add(a.fees,          nodes[c].node_fees);
+        a.wins         += nodes[c].node_wins;
+        a.losses       += nodes[c].node_losses;
+        a.gross_wins    = Money_Add(a.gross_wins,    nodes[c].node_gross_wins);
+        a.gross_losses  = Money_Add(a.gross_losses,  nodes[c].node_gross_losses);
+        a.open_notional = Money_Add(a.open_notional, nodes[c].node_open_notional);
     }
     std::fprintf(f, "[");
     bool first_strat = true;
@@ -290,4 +290,4 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const CoreContext<F>* cores, i
 
 }  // namespace tt
 
-#endif  // CORE_CTX_SUMMARY_FIELD_REGISTRY_HPP
+#endif  // NODE_CTX_SUMMARY_FIELD_REGISTRY_HPP

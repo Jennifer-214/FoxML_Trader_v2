@@ -5,7 +5,7 @@
 //======================================================================================================
 // [CORE LATENCY STATS]
 //
-// Per-execution-core latency tracking. One CoreLatencyStats instance lives on
+// Per-execution-core latency tracking. One NodeLatencyStats instance lives on
 // each ExecutionCore. The execution core (single writer) samples its own tick
 // cost when the enabled flag is set; the controller (single reader) snapshots
 // the stats on its slow path for display in the TUI/GUI.
@@ -52,7 +52,7 @@ namespace tt {
 // (the execution core itself) so the only atomic is the enabled flag, which
 // the controller flips from outside.
 //======================================================================================================
-struct alignas(64) CoreLatencyStats {
+struct alignas(64) NodeLatencyStats {
     static constexpr int RING_SIZE = 256;  // power of 2 for cheap masking
     static_assert((RING_SIZE & (RING_SIZE - 1)) == 0, "RING_SIZE must be power of 2");
 
@@ -88,11 +88,11 @@ struct alignas(64) CoreLatencyStats {
 //======================================================================================================
 // [SNAPSHOT STRUCT]
 //======================================================================================================
-// Read-only view returned by CoreLatencyStats_Snapshot. Computed values are
+// Read-only view returned by NodeLatencyStats_Snapshot. Computed values are
 // converted to nanoseconds at the call site (the snapshot function takes the
 // TSC frequency in GHz so it can do the conversion in one place).
 //======================================================================================================
-struct CoreLatencySnapshot {
+struct NodeLatencySnapshot {
     int      enabled;            // 1 if stats are currently being collected
     uint64_t total_count;        // lifetime sample count
     double   avg_cycles;
@@ -125,7 +125,7 @@ struct CoreLatencySnapshot {
 // scalars + ring but does NOT change the enabled state — the caller can reset
 // stats mid-run without disabling them.
 //======================================================================================================
-inline void CoreLatencyStats_Init(CoreLatencyStats* s) {
+inline void NodeLatencyStats_Init(NodeLatencyStats* s) {
     s->enabled.store(0, std::memory_order_relaxed);
     s->total_count = 0;
     s->total_cycles = 0;
@@ -133,26 +133,26 @@ inline void CoreLatencyStats_Init(CoreLatencyStats* s) {
     s->max_cycles = 0;
     s->ring_head = 0;
     s->last_sample_tsc = 0;
-    for (int i = 0; i < CoreLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
-    for (int i = 0; i < CoreLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
+    for (int i = 0; i < NodeLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
+    for (int i = 0; i < NodeLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
 }
 
-inline void CoreLatencyStats_Reset(CoreLatencyStats* s) {
+inline void NodeLatencyStats_Reset(NodeLatencyStats* s) {
     s->total_count = 0;
     s->total_cycles = 0;
     s->min_cycles = UINT64_MAX;
     s->max_cycles = 0;
     s->ring_head = 0;
     s->last_sample_tsc = 0;
-    for (int i = 0; i < CoreLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
-    for (int i = 0; i < CoreLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
+    for (int i = 0; i < NodeLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
+    for (int i = 0; i < NodeLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
 }
 
-inline void CoreLatencyStats_Enable(CoreLatencyStats* s) {
+inline void NodeLatencyStats_Enable(NodeLatencyStats* s) {
     s->enabled.store(1, std::memory_order_release);
 }
 
-inline void CoreLatencyStats_Disable(CoreLatencyStats* s) {
+inline void NodeLatencyStats_Disable(NodeLatencyStats* s) {
     s->enabled.store(0, std::memory_order_release);
 }
 
@@ -167,21 +167,21 @@ inline void CoreLatencyStats_Disable(CoreLatencyStats* s) {
 // rdtsc reading at sample time, used for "last seen" tracking in the TUI.
 //======================================================================================================
 __attribute__((always_inline))
-static inline void CoreLatencyStats_Sample(CoreLatencyStats* s, uint64_t cycles, uint64_t now_tsc) {
+static inline void NodeLatencyStats_Sample(NodeLatencyStats* s, uint64_t cycles, uint64_t now_tsc) {
     s->total_count++;
     s->total_cycles += cycles;
     if (cycles < s->min_cycles) s->min_cycles = cycles;
     if (cycles > s->max_cycles) s->max_cycles = cycles;
     uint32_t clamped = (cycles > UINT32_MAX) ? UINT32_MAX : (uint32_t)cycles;
     s->recent[s->ring_head] = clamped;
-    s->ring_head = (s->ring_head + 1) & (CoreLatencyStats::RING_SIZE - 1);
+    s->ring_head = (s->ring_head + 1) & (NodeLatencyStats::RING_SIZE - 1);
     s->last_sample_tsc = now_tsc;
     // v4.7.36: lifetime histogram bucket increment. floor(log2(cycles))
     // gives bucket index. clzll counts leading zeros — 63 minus that is
     // the highest set bit position, i.e. floor(log2). Bucket 0 reserved
     // for cycles==0 (shouldn't happen but defensive).
     int bucket = (cycles == 0) ? 0 : (63 - __builtin_clzll(cycles));
-    if (bucket >= CoreLatencyStats::HIST_BUCKETS) bucket = CoreLatencyStats::HIST_BUCKETS - 1;
+    if (bucket >= NodeLatencyStats::HIST_BUCKETS) bucket = NodeLatencyStats::HIST_BUCKETS - 1;
     s->lifetime_buckets[bucket]++;
 }
 
@@ -195,8 +195,8 @@ static inline void CoreLatencyStats_Sample(CoreLatencyStats* s, uint64_t cycles,
 // tsc_ghz is the calibrated TSC frequency for cycle→ns conversion. Pass 0 to
 // skip the conversion (cycle counts only).
 //======================================================================================================
-inline CoreLatencySnapshot CoreLatencyStats_Snapshot(const CoreLatencyStats* s, double tsc_ghz) {
-    CoreLatencySnapshot out{};
+inline NodeLatencySnapshot NodeLatencyStats_Snapshot(const NodeLatencyStats* s, double tsc_ghz) {
+    NodeLatencySnapshot out{};
     out.enabled = s->enabled.load(std::memory_order_acquire);
     out.total_count = s->total_count;
 
@@ -217,10 +217,10 @@ inline CoreLatencySnapshot CoreLatencyStats_Snapshot(const CoreLatencyStats* s, 
     out.max_ns = cyc_to_ns((double)s->max_cycles);
 
     // Copy the ring into a local sortable buffer. The window is min(count, RING_SIZE).
-    uint32_t local[CoreLatencyStats::RING_SIZE];
-    int n = (s->total_count < (uint64_t)CoreLatencyStats::RING_SIZE)
+    uint32_t local[NodeLatencyStats::RING_SIZE];
+    int n = (s->total_count < (uint64_t)NodeLatencyStats::RING_SIZE)
         ? (int)s->total_count
-        : CoreLatencyStats::RING_SIZE;
+        : NodeLatencyStats::RING_SIZE;
     for (int i = 0; i < n; ++i) local[i] = s->recent[i];
     std::sort(local, local + n);
 
@@ -241,7 +241,7 @@ inline CoreLatencySnapshot CoreLatencyStats_Snapshot(const CoreLatencyStats* s, 
         uint64_t target = (uint64_t)((double)s->total_count * pct);
         if (target == 0) target = 1;
         uint64_t accum = 0;
-        for (int b = 0; b < CoreLatencyStats::HIST_BUCKETS; ++b) {
+        for (int b = 0; b < NodeLatencyStats::HIST_BUCKETS; ++b) {
             accum += s->lifetime_buckets[b];
             if (accum >= target) {
                 // Upper bound of bucket b is 2^(b+1) cycles.

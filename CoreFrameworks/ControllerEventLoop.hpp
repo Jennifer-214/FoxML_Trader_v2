@@ -12,7 +12,7 @@
 // Architecture:
 //   - controller core owns this loop, runs on its own pinned CPU
 //   - each execution core registered via EventLoopState_RegisterCore
-//   - core_id maps directly to portfolio slot (no indirection)
+//   - node_id maps directly to portfolio slot (no indirection)
 //   - drain happens round-robin with a per-core cap so one chatty core
 //     can't starve the others (pitfall P4.1)
 //   - events are processed in arrival-per-core order; cross-core ordering
@@ -38,7 +38,7 @@
 //   is reading those fields concurrently. Parameter writes are deferred to
 //   the parameter-push step (phase 05), which uses an atomic ParameterSlot.
 //   For phase 04 the intended TP/SL/qty are stored on the controller side
-//   (in CoreContext) and applied to the portfolio at entry-event time.
+//   (in NodeContext) and applied to the portfolio at entry-event time.
 //======================================================================================================
 
 #pragma once
@@ -50,18 +50,18 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/RollingWindowRegistry.hpp"  // v5.15.5.B.6 — FOREACH_ROLLING_WINDOW(name, W) cohort
 #include "../ML_Headers/RollingTurnover.hpp"  // v5.14.1.G — portfolio turnover
-#include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
-#include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
+#include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on NodeContext::slow_state
+#include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on NodeContext::slow_state
 #include "../MemHeaders/HealthLog.hpp"
 #include "../MemHeaders/InitArena.hpp"  // v5.11.6.A — unified mmap arena for init allocations
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.9.0b: FEATURE_REGISTRY_HASH() in entry log           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
 #include "../Strategies/StrategyParameters.hpp"
 // Strategies/StrategyLifecycle.hpp included LATER (post-EventLoopState
-// definition) to avoid the include cycle: SL needs CoreContext +
+// definition) to avoid the include cycle: SL needs NodeContext +
 // EventLoopState, and ControllerEventLoop.hpp defines them at line ~404.
-#include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
+#include "NodeLatencyStats.hpp"  // v4.7.42 — slow_path_latency on NodeContext
 #include "../MemHeaders/DisplayMetaRegistry.hpp"  // v5.15.5.B.2 — FOREACH_GATE_DIAG_PAIR + FOREACH_DISPLAY_META_FIELD
-#include "../MemHeaders/CoreStateFlagRegistry.hpp"  // v5.15.5.B.3 — FOREACH_CORE_STATE_FLAG bitmap for 5 booleans
+#include "../MemHeaders/NodeStateFlagRegistry.hpp"  // v5.15.5.B.3 — FOREACH_NODE_STATE_FLAG bitmap for 5 booleans
 #include "SpSectionRegistry.hpp"  // v5.15.5.B.5 — FOREACH_SP_SECTION enum + SP_SECTION_NAME/DOC helpers
 #include "ExecutionCore.hpp"
 #include "Notify.hpp"
@@ -85,13 +85,13 @@ namespace tt {
 // decouple.md for the full design.
 //
 // SINGLE-WRITER RULE per engine:
-//   - per_core_slow arch:  Producer writes per-tick (ema_price) to all N
+//   - per_node_slow arch:  Producer writes per-tick (ema_price) to all N
 //                          cores in fan_out; per-cadence updates done by
 //                          per-core slow-path c on its OWN slow_state
 //   - backtest:            Single thread; loops c=0..N
 //
 // READ PATTERN: per-core slow-path body (per-core thread) reads
-// state.cores[c].slow_state. ema_price is producer-written; per-cadence
+// state.nodes[c].slow_state. ema_price is producer-written; per-cadence
 // fields are written by the per-core thread itself (no cross-thread for
 // those). ema_price has eventual-consistency cross-thread reads (relaxed
 // loads — same as pre-v5.1.0 shared design but now per-core targets).
@@ -101,7 +101,7 @@ namespace tt {
 // sized buffers — currently every engine uses identical windows.
 //======================================================================================================
 template <unsigned F>
-struct CoreSlowState {
+struct NodeSlowState {
     // ---- v5.15.5.B.1 — HOT cluster at struct head (lazy-rebuild gate + ema_price) ----
     //
     // EventLoop_RebuildOneCore reads these THREE fields FIRST every cycle to
@@ -114,7 +114,7 @@ struct CoreSlowState {
     // subsequent fields).
     //
     // ema_price (per-tick: producer fan_out updates EVERY tick; slow-path
-    // consumers read at slow-path cadence; in per_core_slow this is a
+    // consumers read at slow-path cadence; in per_node_slow this is a
     // producer→slow-path cross-thread read — eventual consistency,
     // x86-acceptable on aligned word).
     FPN_Binary<F>                  ema_price;
@@ -153,17 +153,17 @@ struct CoreSlowState {
 };
 
 // v5.15.5.B.1 — Layout invariant. ema_price + lazy_rebuild gate fields MUST
-// sit at offset 0 of CoreSlowState (decision-first-cluster-layout-pattern.md
+// sit at offset 0 of NodeSlowState (decision-first-cluster-layout-pattern.md
 // Step 2). Hoisted from struct TAIL — the per-cycle lazy-rebuild gate at
 // EventLoop_RebuildOneCore reads them FIRST every cycle; offset-0 placement
 // means skip-eligible cycles touch one cache line and bail.
-static_assert(offsetof(CoreSlowState<64>, ema_price) == 0,
-              "ema_price MUST sit at CoreSlowState offset 0 — per-cycle lazy-"
+static_assert(offsetof(NodeSlowState<64>, ema_price) == 0,
+              "ema_price MUST sit at NodeSlowState offset 0 — per-cycle lazy-"
               "rebuild gate reads it first; see decision-first-cluster-layout-"
               "pattern.md Step 4 (forward-sequential subsequent fields).");
 
 template <unsigned F>
-inline void CoreSlowState_Init(CoreSlowState<F>* s) {
+inline void NodeSlowState_Init(NodeSlowState<F>* s) {
     // v5.15.5.B.6 — registry-driven init via FOREACH_ROLLING_WINDOW.
 #define X(name, W) s->rolling_##name = RollingStats_Init<F, W>();
     FOREACH_ROLLING_WINDOW(X)
@@ -189,7 +189,7 @@ inline void CoreSlowState_Init(CoreSlowState<F>* s) {
 // v5.0.3-era thread observability fields, wrapped in alignas(64) cluster for
 // cross-thread cache-line isolation. Single-writer is the slow-path thread
 // that owns this core (or producer in centralized mode); GUI publish reads
-// relaxed and copies into TUISnapshot::PerCoreSnap. Snapshot-publisher reads
+// relaxed and copies into TUISnapshot::PerNodeSnap. Snapshot-publisher reads
 // happen on a different thread → without alignas isolation, the read pulls
 // the cache line + invalidates neighbor slow-path-written fields, causing
 // cycle stalls at ~30Hz × 16 cores = ~480 invalidations/sec.
@@ -221,7 +221,7 @@ static_assert(sizeof(SlowPathTelemetry) == 64,
 // [CORE CONTEXT]
 //======================================================================================================
 // per-core controller-side state. one slot per registered execution core.
-// the core_id field is implicit: cores[i].core->core_id == i. holds the
+// the node_id field is implicit: nodes[i].core->node_id == i. holds the
 // "intended" trade parameters that the controller wants applied at the next
 // entry — phase 05 will replace this with a real parameter-slot push protocol,
 // for phase 04 it's just a hot-update field the controller writes between
@@ -237,27 +237,27 @@ static_assert(sizeof(SlowPathTelemetry) == 64,
 // subsequent fields for Intel/AMD stride-prefetcher friendliness.
 //
 // Explicit `struct alignas(64)` makes inter-slot false-sharing prevention
-// LOCAL — previously TRANSITIVE via embedded CoreLatencyStats's alignas(64);
-// a future refactor removing that would silently break the cores[16] inter-
+// LOCAL — previously TRANSITIVE via embedded NodeLatencyStats's alignas(64);
+// a future refactor removing that would silently break the nodes[16] inter-
 // slot guarantee. Static_asserts after the struct close lock the invariant
 // at compile time.
 //
 // Safe to reorder: ShardedSnapshotPersist is field-by-field fwrite (no memcpy
-// of struct bytes); no HMAC / SHA-256 / wire-format path uses raw CoreContext
+// of struct bytes); no HMAC / SHA-256 / wire-format path uses raw NodeContext
 // bytes; safety greps cleared 2026-05-12. CLAUDE.md item 27 (struct-padding
-// determinism) explicitly NOT in scope — CoreContext is not in byte-
+// determinism) explicitly NOT in scope — NodeContext is not in byte-
 // equivalence path.
 template <unsigned F>
-struct alignas(64) CoreContext {
+struct alignas(64) NodeContext {
     // ════════════════════════════════════════════════════════════════════
     // HOT CLUSTER — touched every slow-path cycle.
     // Decision-first ordering: dispatch metadata at offset 0 (gate_state
     // bitmap → handles → strategy enums) so skip-eligible cycles touch
-    // ONE cache line + the CoreSlowState head fields and bail.
+    // ONE cache line + the NodeSlowState head fields and bail.
     // ════════════════════════════════════════════════════════════════════
 
     // v5.14.9.B.0 — per-core slow-path gate cache (FOREACH_SLOW_PATH_GATE
-    // PER_CORE entries). Populated by SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE
+    // PER_NODE entries). Populated by SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE
     // at slow-path entry per core (after ControllerConfig_ResolveForCore).
     // Read via BITMAP_IS_SET(gate_state.flags, MASK_<NAME>) at use sites
     // in ML_BuildParameters body (mctx->gate_state pointer). Single-
@@ -266,13 +266,13 @@ struct alignas(64) CoreContext {
     SlowPathGateState gate_state;
     ExecutionCore<F>* core;             // registered execution core pointer
     // v5.1.0 (per-core data-plane decoupling): each engine OWNS its
-    // rolling/regime/flow state. POINTER (not inline) — CoreSlowState is
+    // rolling/regime/flow state. POINTER (not inline) — NodeSlowState is
     // ~272KB per engine; 16 inline copies would overflow the 8MB default
     // stack on tests. Heap-allocated in EventLoopState_Init; freed in
     // EventLoopState_Free. Slow-path-only access; indirection cost
     // negligible at slow-path cadence.
-    CoreSlowState<F>* slow_state;
-    void*    model_handle;              // CoreModelZoo<F>* for STRATEGY_ML cores (nullptr for others)
+    NodeSlowState<F>* slow_state;
+    void*    model_handle;              // NodeModelZoo<F>* for STRATEGY_ML cores (nullptr for others)
     void*    ensemble_handle;           // v5.10.0a.G.5 — EnsembleModelZoo<F>* when multi-horizon active; nullptr = single-zoo path
     // v5.4.0 Phase 1.1 — per-strategy state (lifecycle stage 1 + 2:
     // Init/Adapt). Heap-allocated by Strategy_InitPerCore at engine boot;
@@ -292,13 +292,13 @@ struct alignas(64) CoreContext {
     void*    strategy_state;
     uint8_t  strategy_id;               // STRATEGY_* constant; STRATEGY_NONE means "do not trade"
     uint8_t  resolved_strategy_id;      // v4.0.4 — after AUTO regime resolution; equals strategy_id for non-AUTO cores
-    // v5.15.5.B.3 — 5 boolean flags bit-packed into uint8_t core_state_flags.
-    // Replaces: dirty, core_kill_tripped, model_load_failed (was in DisplayMeta
+    // v5.15.5.B.3 — 5 boolean flags bit-packed into uint8_t node_state_flags.
+    // Replaces: dirty, node_kill_tripped, model_load_failed (was in DisplayMeta
     // v5.15.5.B.2), cfg_drift_strict_refused (same), warmup_log_emitted (same).
     // Per CLAUDE.md item 20 (BITMAP_* universalization) + item 1 (Portfolio
-    // bitmap precedent). Single-writer per core; readers via CORE_STATE_FLAG_
+    // bitmap precedent). Single-writer per core; readers via NODE_STATE_FLAG_
     // IS_SET / BITMAP_ANY for branchless multi-flag check.
-    uint8_t  core_state_flags;
+    uint8_t  node_state_flags;
     uint8_t  strategy_state_kind;       // matches strategy_id at allocation; 0xFF = uninitialized
 
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
@@ -352,7 +352,7 @@ struct alignas(64) CoreContext {
     // (default cfg) preserves pre-v5.14.9 behavior; (0, 1) when active +
     // composite ∈ [min, full]; 0.0 when ladder bottom hit (entry blocked
     // + SHALT_LOW_CONFIDENCE). Written by ML_BuildParameters via
-    // mctx.out_confidence_factor; copied to PerCoreSnap.ml_confidence_factor
+    // mctx.out_confidence_factor; copied to PerNodeSnap.ml_confidence_factor
     // by ShardedSnapshot for ML Status panel display.
     double last_confidence_factor;
     // v5.13.0.B — sell-side ML prediction. Written by ML_BuildParameters
@@ -364,7 +364,7 @@ struct alignas(64) CoreContext {
     int    last_exit_dominant_horizon;  // -1 = none; otherwise [0..exit_predictor_count)
     // v5.15.5.A.6 — buy-side per-horizon barrier dispatch observability.
     // Mirrors exit-side fields above; written by ML_BuildParameters when
-    // the per-horizon barrier feature is active. Surfaced via PerCoreSnap
+    // the per-horizon barrier feature is active. Surfaced via PerNodeSnap
     // to MLStatusPanel for the `tp: 0.050% (h2)` display pattern.
     int     last_buy_dominant_horizon;  // -1 = no buy-side dispatch this cycle
     uint8_t last_barrier_mode_used;     // active mode enum (FOREACH_BARRIER_BLEND_MODE)
@@ -408,17 +408,17 @@ struct alignas(64) CoreContext {
     // counters split it out by source core for the Account panel and any
     // future per-core kill switch / risk re-allocation logic. Updated in
     // EventLoop_OnEvent exit branch, alongside oms->realized_pnl.
-    Money   core_realized;             // sum of net P&L from this core's exits
-    Money   core_fees;                 // sum of fees paid by this core's fills
-    uint32_t core_wins;                 // exits with net > 0
-    uint32_t core_losses;               // exits with net <= 0
+    Money   node_realized;             // sum of net P&L from this core's exits
+    Money   node_fees;                 // sum of fees paid by this core's fills
+    uint32_t node_wins;                 // exits with net > 0
+    uint32_t node_losses;               // exits with net <= 0
     // v4.7.21: per-trade W/L pairing under partial exits. When partials are
     // enabled, leg A and leg B close as separate fills, but they belong to
     // ONE trade idea. Counting each leg independently overstates trade count
     // and loses the "did this idea make money?" signal — e.g. leg A=TP1
     // (+small) plus leg B=SL (-larger) is net negative but per-leg counts
     // 1W + 1L. We pair them by stashing the first leg's net P&L; when the
-    // partner closes we compute total net and bump core_wins/core_losses by 1.
+    // partner closes we compute total net and bump node_wins/node_losses by 1.
     // partials disabled → bypass pairing, per-leg-A logic is correct
     // (single-leg trades, no partner exists).
     Money   partner_pending_pnl;
@@ -427,14 +427,14 @@ struct alignas(64) CoreContext {
     // v4.7.25: per-core gross win/loss accumulators, mirroring the legacy
     // single_core's ctrl->gross_wins / ctrl->gross_losses. Sum of net P&L
     // for winning trades (gross_wins) and absolute net P&L for losing
-    // trades (gross_losses, stored unsigned). Updated alongside core_wins
-    // / core_losses — same per-trade semantics under partials (sum the
+    // trades (gross_losses, stored unsigned). Updated alongside node_wins
+    // / node_losses — same per-trade semantics under partials (sum the
     // pair, classify by sign, accumulate into the matching gross bucket).
     // Pre-v4.7.25 sharded snapshot left snap->avg_win / avg_loss /
     // profit_factor / expectancy at zero — these accumulators feed those
     // fields in TUI_CopySnapshotSharded.
-    Money   core_gross_wins;
-    Money   core_gross_losses;
+    Money   node_gross_wins;
+    Money   node_gross_losses;
     // Phase 2.1: per-core open notional. Sum of (entry_price × qty) across
     // currently-open positions for this core. Updated branchlessly in
     // EventLoop_OnEvent — entry adds notional, exit subtracts the SAME
@@ -449,7 +449,7 @@ struct alignas(64) CoreContext {
     // positions). Single-position-per-core invariant means this is the
     // entry notional of one position today, but the sum-of-positions
     // model survives future multi-position-per-core.
-    Money   core_open_notional;
+    Money   node_open_notional;
 
     // Phase 3: per-core kill switch state. Realized + MTM unrealized P&L
     // tracked against a peak-to-trough drawdown. When dd exceeds threshold
@@ -461,16 +461,16 @@ struct alignas(64) CoreContext {
     // peak          = FPN_Max(peak, current_value)  (slow path, branchless)
     // dd_pct        = (peak - current_value) / peak
     //
-    // Manual reset via TUISharedState::kill_reset_per_core[N] resets the
+    // Manual reset via TUISharedState::kill_reset_per_node[N] resets the
     // trip flag and refreshes peak to current. Aggregate OMS-level breaker
     // remains as backstop for whole-account drawdown.
-    Money   core_peak_balance;         // peak of current_value over core's lifetime
-    Money   core_dd_pct;               // current drawdown % (display field, recomputed each rebuild)
-    // v5.15.5.B.3 — core_kill_tripped migrated to core_state_flags bitmap on
-    // CoreContext HOT cluster (see core_state_flags above). _pad_kill[3]
+    Money   node_peak_balance;         // peak of current_value over core's lifetime
+    Money   node_dd_pct;               // current drawdown % (display field, recomputed each rebuild)
+    // v5.15.5.B.3 — node_kill_tripped migrated to node_state_flags bitmap on
+    // NodeContext HOT cluster (see node_state_flags above). _pad_kill[3]
     // eliminated as natural pad-collapse consequence — the kill trip is now
     // 1 bit in the bitmap word, not a byte with 3-byte alignment padding.
-    uint32_t core_ks_trips_total;       // lifetime trip count (for forensics)
+    uint32_t node_ks_trips_total;       // lifetime trip count (for forensics)
 
     // v4.0.3 D10: per-core P&L regression feeder for adaptive feedback.
     // Drainer pushes realized return on each exit; slow path reads slope
@@ -481,7 +481,7 @@ struct alignas(64) CoreContext {
     // v5.14.1.G — portfolio turnover diagnostic. Per-core; ephemeral
     // (NOT in PortfolioController.hpp:2094 fwrite path; sharded-only
     // state). Populated per slow-path cycle from weights_buf top-K.
-    // Surfaced via PerCoreSnap.ml_portfolio_turnover. State + math
+    // Surfaced via PerNodeSnap.ml_portfolio_turnover. State + math
     // in ML_Headers/RollingTurnover.hpp.
     RollingTurnover turnover;
     // v5.10.0e — drift detection. Sampled post-fill (when
@@ -492,7 +492,7 @@ struct alignas(64) CoreContext {
 
     // ════════════════════════════════════════════════════════════════════
     // COLD CLUSTER — display-only / cross-thread / lifetime / boot.
-    // (.B.2 will extract display-only fields → CoreContextDisplayMeta sibling
+    // (.B.2 will extract display-only fields → NodeContextDisplayMeta sibling
     // struct; .B.2 will also wrap sp_* atomics in alignas(64) sp_telemetry.)
     // ════════════════════════════════════════════════════════════════════
 
@@ -533,37 +533,37 @@ struct alignas(64) CoreContext {
 
     // v5.15.5.B.2 — DisplayMeta fields (12 diag_*, observability counters,
     // cfg-drift state, model_load_failed/warmup_log_emitted booleans,
-    // slow_path_latency + breakdown[]) EXTRACTED to CoreContextDisplayMeta<F>
+    // slow_path_latency + breakdown[]) EXTRACTED to NodeContextDisplayMeta<F>
     // sibling struct on EventLoopState. Per-cycle slow-path body no longer
     // pulls those ~9-10 KB of display-only data into HOT cluster L1 working
-    // set. Access via state->display_meta[core_id].<field>; registry-driven
+    // set. Access via state->display_meta[node_id].<field>; registry-driven
     // additions per MemHeaders/DisplayMetaRegistry.hpp.
     //
-    // Booleans flagged "(.B.3 → core_state_flags bit)" in the registry will
-    // migrate BACK to CoreContext as bitmap bits in v5.15.5.B.3 (uint8_t
-    // core_state_flags); this temporary residence in DisplayMeta is the
+    // Booleans flagged "(.B.3 → node_state_flags bit)" in the registry will
+    // migrate BACK to NodeContext as bitmap bits in v5.15.5.B.3 (uint8_t
+    // node_state_flags); this temporary residence in DisplayMeta is the
     // .B.2 staging step. Per CLAUDE.md item 19 + Caramel 2026-05-13.
 };
 
-// v5.15.5.B.1 — CoreContext layout invariants. Lock the brittleness class:
-// pre-v5.15.5.B.1 the alignas(64) was TRANSITIVE via embedded CoreLatencyStats
-// (CoreLatencyStats.hpp:55). A future refactor removing that alignas would
-// silently break inter-slot false-sharing on the cores[16] array. Explicit
+// v5.15.5.B.1 — NodeContext layout invariants. Lock the brittleness class:
+// pre-v5.15.5.B.1 the alignas(64) was TRANSITIVE via embedded NodeLatencyStats
+// (NodeLatencyStats.hpp:55). A future refactor removing that alignas would
+// silently break inter-slot false-sharing on the nodes[16] array. Explicit
 // alignas + these static_asserts make the invariant LOCAL and compile-time-
 // enforced. See cache-layout-discipline-for-hot-side-structs.md Rule 3+4 +
 // decision-first-cluster-layout-pattern.md Step 5.
-static_assert(sizeof(CoreContext<64>) % 64 == 0,
-              "CoreContext size MUST be a multiple of 64B for inter-slot "
-              "false-sharing prevention across cores[MAX_EXECUTION_CORES]. "
+static_assert(sizeof(NodeContext<64>) % 64 == 0,
+              "NodeContext size MUST be a multiple of 64B for inter-slot "
+              "false-sharing prevention across nodes[MAX_EXECUTION_NODES]. "
               "Future field-insertion that violates this is a regression.");
-static_assert(alignof(CoreContext<64>) >= 64,
-              "CoreContext MUST be 64-byte aligned (now explicit via the "
+static_assert(alignof(NodeContext<64>) >= 64,
+              "NodeContext MUST be 64-byte aligned (now explicit via the "
               "`struct alignas(64)` declaration, NOT transitive via embedded "
-              "CoreLatencyStats's alignas).");
+              "NodeLatencyStats's alignas).");
 // WARM cluster boundary anchor — entries_processed marks the per-event-cadence
 // cluster start. Hot-cluster footprint is everything before this offset; warm-
 // cluster everything between this and sp_last_tick_us; cold-cluster from there.
-static_assert(offsetof(CoreContext<64>, entries_processed) % 64 == 0,
+static_assert(offsetof(NodeContext<64>, entries_processed) % 64 == 0,
               "WARM cluster anchor MUST be 64-byte aligned. "
               "See decision-first-cluster-layout-pattern.md Step 5.");
 // COLD cluster atomics boundary — sp_telemetry (SlowPathTelemetry struct)
@@ -573,7 +573,7 @@ static_assert(offsetof(CoreContext<64>, entries_processed) % 64 == 0,
 // alignment assumption (alignas only enforces that the struct ITSELF is
 // 64-aligned; static_assert(offsetof%64==0) ensures cluster anchor remains
 // at a cache line boundary within the enclosing struct).
-static_assert(offsetof(CoreContext<64>, sp_telemetry) % 64 == 0,
+static_assert(offsetof(NodeContext<64>, sp_telemetry) % 64 == 0,
               "Cross-thread atomics cluster (sp_telemetry) MUST start at a "
               "cache line boundary. See "
               "cross-thread-snapshot-publish-cluster-isolation.md.");
@@ -589,7 +589,7 @@ static_assert(offsetof(CoreContext<64>, sp_telemetry) % 64 == 0,
 // invalidating cache lines holding producer-written neighbor fields.
 //
 // Pattern: cross-thread-snapshot-publish-cluster-isolation.md (ND1 — sister
-// application to SlowPathTelemetry on CoreContext). ~76 B used in 128 B
+// application to SlowPathTelemetry on NodeContext). ~76 B used in 128 B
 // (two cache lines); padding intentional for future heartbeat additions.
 //
 // Fields:
@@ -611,7 +611,7 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 //======================================================================================================
 // [CORE CONTEXT DISPLAY META — v5.15.5.B.2]
 //======================================================================================================
-// Per-core display-only state, extracted from CoreContext per
+// Per-core display-only state, extracted from NodeContext per
 // cache-layout-discipline-for-hot-side-structs.md Rule 1 (extract
 // display-only fields off the HOT cluster of slow-path-cycled structs).
 //
@@ -620,8 +620,8 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 // READ ONLY by ShardedSnapshot publisher (ShardedSnapshot.hpp + entry
 // log emission). They DO NOT influence per-cycle decision code.
 //
-// Parallel-array layout: EventLoopState has display_meta[MAX_EXECUTION_CORES]
-// paired by index with cores[] — meta for core i lives at display_meta[i].
+// Parallel-array layout: EventLoopState has display_meta[MAX_EXECUTION_NODES]
+// paired by index with nodes[] — meta for core i lives at display_meta[i].
 // Separate storage = slow-path cycle's HOT cluster access doesn't pull
 // display-meta cache lines into L1 unnecessarily; ~9-10 KB of cold data
 // stays out of the HOT/WARM working set.
@@ -630,7 +630,7 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 // per snapshot (publisher thread at ~30 Hz). Cross-thread accesses do
 // not happen on per-cycle cadence so no alignas isolation is needed
 // within DisplayMeta (homogeneous low-cadence access). The aggregate
-// `EventLoopState::display_meta[MAX_EXECUTION_CORES]` array IS sized to
+// `EventLoopState::display_meta[MAX_EXECUTION_NODES]` array IS sized to
 // be a multiple of 64 bytes via static_assert below.
 //
 // FIELDS ARE REGISTRY-GENERATED. See
@@ -643,12 +643,12 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 // See DESIGN_SPECS/display-execution-invariant-registry-pattern.md (ND2).
 //
 // `slow_path_latency` + `slow_path_breakdown[]` are KEPT as direct
-// fields because CoreLatencyStats has its own Init/Enable/Sample
+// fields because NodeLatencyStats has its own Init/Enable/Sample
 // helpers + alignas(64) discipline; shoehorning them into a uniform
 // registry shape would lose the type safety.
 //======================================================================================================
 template <unsigned F>
-struct CoreContextDisplayMeta {
+struct NodeContextDisplayMeta {
     // ------------------------------------------------------------------
     // Gate-diagnostic actual/threshold pairs — auto-generated.
     // Adding a 7th pair = one row in FOREACH_GATE_DIAG_PAIR.
@@ -672,15 +672,15 @@ struct CoreContextDisplayMeta {
     // v4.7.42 Phase E — per-core slow-path latency profiling. Mirrors
     // ExecutionCore::latency_stats (hot-path) for the slow-path.
     // Single-writer (this core's slow-path thread); single-reader
-    // (snapshot publisher). Each CoreLatencyStats is alignas(64) so
+    // (snapshot publisher). Each NodeLatencyStats is alignas(64) so
     // arrays of them are 64-aligned by ABI.
     // ------------------------------------------------------------------
-    CoreLatencyStats slow_path_latency;
+    NodeLatencyStats slow_path_latency;
 
     // v5.1.1 + v5.1.3 — per-section breakdown. Sections defined by
-    // CoreContext<F>::SP_SECTION_* constants. (.B.5 — FOREACH_SP_SECTION
+    // NodeContext<F>::SP_SECTION_* constants. (.B.5 — FOREACH_SP_SECTION
     // close removes the back-compat alias indirection.)
-    CoreLatencyStats slow_path_breakdown[tt::SP_SECTION_COUNT];
+    NodeLatencyStats slow_path_breakdown[tt::SP_SECTION_COUNT];
 };
 
 // Init helper — zero-init all registry fields + Init the latency stats.
@@ -688,7 +688,7 @@ struct CoreContextDisplayMeta {
 // flow through the registry expansion automatically — no manual init
 // per new field needed.
 template <unsigned F>
-inline void CoreContextDisplayMeta_Init(CoreContextDisplayMeta<F>* m) {
+inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
     // Gate-diagnostic FPN_Binary<F> pairs zeroed.
 #define X(FAMILY, ACTUAL_FIELD, OTHER_FIELD, _DOC) \
     m->diag_##ACTUAL_FIELD = FPN_Zero<F>(); \
@@ -702,9 +702,9 @@ inline void CoreContextDisplayMeta_Init(CoreContextDisplayMeta<F>* m) {
     FOREACH_DISPLAY_META_FIELD(X)
 #undef X
     // Latency profiling — init zeros + disabled until engine explicitly enables.
-    CoreLatencyStats_Init(&m->slow_path_latency);
+    NodeLatencyStats_Init(&m->slow_path_latency);
     for (int s = 0; s < tt::SP_SECTION_COUNT; ++s) {
-        CoreLatencyStats_Init(&m->slow_path_breakdown[s]);
+        NodeLatencyStats_Init(&m->slow_path_breakdown[s]);
     }
 }
 
@@ -713,7 +713,7 @@ inline void CoreContextDisplayMeta_Init(CoreContextDisplayMeta<F>* m) {
 //======================================================================================================
 // holds everything the controller core needs to process events from N
 // execution cores. cores array is indexed by registration order; once a core
-// is registered its slot index is its core_id forever (no compaction on
+// is registered its slot index is its node_id forever (no compaction on
 // unregister, just mark inactive).
 //
 // Phase 03 chunk 1B: all financial state (portfolio, balance, realized_pnl,
@@ -726,18 +726,18 @@ inline void CoreContextDisplayMeta_Init(CoreContextDisplayMeta<F>* m) {
 //======================================================================================================
 template <unsigned F>
 struct alignas(64) EventLoopState {
-    CoreContext<F> cores[MAX_EXECUTION_CORES];
-    // v5.15.5.B.2 — Per-core display-only state (extracted from CoreContext per
+    NodeContext<F> nodes[MAX_EXECUTION_NODES];
+    // v5.15.5.B.2 — Per-core display-only state (extracted from NodeContext per
     // cache-layout-discipline-for-hot-side-structs.md Rule 1). Parallel array;
-    // display_meta[i] is paired by index with cores[i]. Fields are registry-
+    // display_meta[i] is paired by index with nodes[i]. Fields are registry-
     // generated; see MemHeaders/DisplayMetaRegistry.hpp.
-    CoreContextDisplayMeta<F> display_meta[MAX_EXECUTION_CORES];
+    NodeContextDisplayMeta<F> display_meta[MAX_EXECUTION_NODES];
     int registered_count;
     uint64_t total_events_processed;
     uint64_t total_entries;
     uint64_t total_exits;
     // v5.14.9.G — per-core partner-pending bitmap (TECH_DEBT-013 candidate 6).
-    // Migrated from `uint8_t partner_pending_active` on each CoreContext (16 × 1 byte
+    // Migrated from `uint8_t partner_pending_active` on each NodeContext (16 × 1 byte
     // = 16 bytes; plus the 16 × 7 bytes _pad_partner alignment padding = 128 bytes).
     // Now 1 bit per core in a single uint16_t = 2 bytes. Memory saved: ~126 bytes per
     // EventLoopState; better cache locality (single load to query any core's state).
@@ -785,26 +785,26 @@ struct alignas(64) EventLoopState {
 // v5.4.0 Phase 2.1 — Strategy_AdaptPerCore / Strategy_InitPerCore /
 // Strategy_FreePerCore live in StrategyLifecycle.hpp. Included here
 // (post-EventLoopState definition) so the dispatcher can refer to
-// CoreContext / EventLoopState without an include cycle.
+// NodeContext / EventLoopState without an include cycle.
 #include "../Strategies/StrategyLifecycle.hpp"
 namespace tt {
 
 }  // namespace tt
-// v5.15.5.B.7 — CoreCtx init/reset registry + AUTOPOPULATE macros.
-// Included AFTER CoreContext + EventLoopState + CoreContextDisplayMeta +
+// v5.15.5.B.7 — NodeCtx init/reset registry + AUTOPOPULATE macros.
+// Included AFTER NodeContext + EventLoopState + NodeContextDisplayMeta +
 // all helper-Init declarations are visible so the templated helpers in
 // the registry header can resolve every type + function they invoke.
-#include "../MemHeaders/CoreCtxInitRegistry.hpp"
+#include "../MemHeaders/NodeCtxInitRegistry.hpp"
 namespace tt {
 
 //======================================================================================================
 // [v5.15.5.F.2 — RECONSTRUCT PER-CORE STATE FROM ORDER EVENT LOG]
 //======================================================================================================
 // Walks state->oms->event_log + reconstructs per-core attribution state
-// (entries_processed, exits_processed, core_realized, core_fees, core_open_
-// notional, core_wins, core_losses). Idempotent + safe to call multiple
+// (entries_processed, exits_processed, node_realized, node_fees, node_open_
+// notional, node_wins, node_losses). Idempotent + safe to call multiple
 // times on the same log content; expects per-core fields to be zero-init'd
-// before call (CORE_CTX_INIT_AUTOPOPULATE handles that).
+// before call (NODE_CTX_INIT_AUTOPOPULATE handles that).
 //
 // Closes the Class-18 mirror between:
 //   - ShardedSnapshot_Load (restores per-core fields field-by-field)
@@ -818,26 +818,26 @@ namespace tt {
 // Algorithm:
 //   1. Walk events in order; track per-slot "outstanding entry" record.
 //   2. BUY event → record (price, qty, entry_fee) for slot + bump entries_-
-//      processed + add notional to core_open_notional.
+//      processed + add notional to node_open_notional.
 //   3. SELL event → match against slot's outstanding entry → compute gross +
-//      net + fees → bump exits_processed + accumulate core_realized + fees +
-//      wins/losses + subtract entry_notional from core_open_notional.
+//      net + fees → bump exits_processed + accumulate node_realized + fees +
+//      wins/losses + subtract entry_notional from node_open_notional.
 //
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — `cores` param added (nullptr-tolerant) for per-core fee_rate
 // during replay. Per cfg-scope-discipline § "consumer over per-core array"; caller passes
-// `cfg.cores`. Recovery-path nullable semantic per Decision 2 — nullptr → FPN_Zero fees in
+// `cfg.nodes`. Recovery-path nullable semantic per Decision 2 — nullptr → FPN_Zero fees in
 // reconstructed accounting (acceptable for legacy replay; primary recovery is HandleFill).
 //
 // Branchless nullptr handling per H20 + branchless-dispatch-discipline.md Pattern 3:
-// hoist a SINGLE cmov at fn entry to select effective_cores; loop body reads
-// effective_cores[idx].field with zero per-iteration branches.
+// hoist a SINGLE cmov at fn entry to select effective_nodes; loop body reads
+// effective_nodes[idx].field with zero per-iteration branches.
 template <unsigned F>
 inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* state,
-                                                          const PerCoreCfg<F>* cores = nullptr) {
+                                                          const PerNodeCfg<F>* nodes = nullptr) {
     if (!state || !state->oms) return;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; loop reads pure ALU.
-    static const PerCoreCfg<F> NULL_PER_CORE_CFG_STUB_ARRAY[MAX_EXECUTION_CORES] = {};
-    const PerCoreCfg<F>* effective_cores = cores ? cores : NULL_PER_CORE_CFG_STUB_ARRAY;
+    static const PerNodeCfg<F> NULL_PER_NODE_CFG_STUB_ARRAY[MAX_EXECUTION_NODES] = {};
+    const PerNodeCfg<F>* effective_nodes = nodes ? nodes : NULL_PER_NODE_CFG_STUB_ARRAY;
     const tt::OrderEventLog<F>& log = state->oms->event_log;
     if (log.count == 0) return;  // no events → nothing to reconstruct (first boot)
 
@@ -848,16 +848,16 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
     for (size_t i = 0; i < log.count; ++i) {
         const tt::OrderEvent<F>& e = log.entries[i];
         if (e.type != tt::OEVT_FULL_FILL) continue;
-        int slot = (int)e.core_id;
+        int slot = (int)e.node_id;
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
         // Partial-exit slot layout: leg-A @ slot 2c, leg-B @ slot 2c+1 → core c.
         // Single-position mode: slot c → core c. Both work via slot>>1 = slot/2
         // when partial_exit_enabled (legs paired); shifts harmlessly otherwise.
-        int core_id = slot >> 1;
-        if (core_id < 0 || core_id >= MAX_EXECUTION_CORES) continue;
+        int node_id = slot >> 1;
+        if (node_id < 0 || node_id >= MAX_EXECUTION_NODES) continue;
 
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (hoisted above loop).
-        const Money fee_rate_taker_for_core = effective_cores[core_id].fee_rate_taker;
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (hoisted above loop).
+        const Money fee_rate_taker_for_core = effective_nodes[node_id].fee_rate_taker;
         if (e.order_type == tt::ORDER_MARKET_BUY) {
             Money notional  = Money_Mul(e.price, e.qty);
             Money entry_fee = Money_Mul(notional, fee_rate_taker_for_core);
@@ -865,9 +865,9 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
             slot_entries[slot].qty         = e.qty;
             slot_entries[slot].entry_fee   = entry_fee;
             slot_entries[slot].valid       = 1;
-            state->cores[core_id].entries_processed++;
-            state->cores[core_id].core_open_notional =
-                Money_Add(state->cores[core_id].core_open_notional, notional);
+            state->nodes[node_id].entries_processed++;
+            state->nodes[node_id].node_open_notional =
+                Money_Add(state->nodes[node_id].node_open_notional, notional);
         } else if (e.order_type == tt::ORDER_MARKET_SELL) {
             if (!slot_entries[slot].valid) continue;  // unmatched SELL — skip
             Money entry_price  = slot_entries[slot].entry_price;
@@ -878,17 +878,17 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
             Money total_fee    = Money_Add(entry_fee, exit_fee);
             Money gross        = Money_FillGross(entry_price, e.price, qty);  // D-190 single-source
             Money net          = Money_Sub(gross, total_fee);
-            state->cores[core_id].exits_processed++;
-            state->cores[core_id].core_realized =
-                Money_Add(state->cores[core_id].core_realized, net);
-            state->cores[core_id].core_fees     =
-                Money_Add(state->cores[core_id].core_fees, total_fee);
+            state->nodes[node_id].exits_processed++;
+            state->nodes[node_id].node_realized =
+                Money_Add(state->nodes[node_id].node_realized, net);
+            state->nodes[node_id].node_fees     =
+                Money_Add(state->nodes[node_id].node_fees, total_fee);
             Money entry_notional = Money_Mul(entry_price, qty);
-            state->cores[core_id].core_open_notional =
-                Money_Sub(state->cores[core_id].core_open_notional, entry_notional);
+            state->nodes[node_id].node_open_notional =
+                Money_Sub(state->nodes[node_id].node_open_notional, entry_notional);
             uint32_t is_win = (uint32_t)Money_Gt(net, Money_Zero());
-            state->cores[core_id].core_wins   += is_win;
-            state->cores[core_id].core_losses += (1u - is_win);
+            state->nodes[node_id].node_wins   += is_win;
+            state->nodes[node_id].node_losses += (1u - is_win);
             slot_entries[slot].valid = 0;  // slot freed for next match
         }
     }
@@ -922,14 +922,14 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->ws_telemetry.bucket_last_sec[i] = 0;
         state->ws_telemetry.bucket_count[i] = 0;
     }
-    // v5.15.5.B.7 — Per-slot init via CORE_CTX_INIT_AUTOPOPULATE companion
+    // v5.15.5.B.7 — Per-slot init via NODE_CTX_INIT_AUTOPOPULATE companion
     // macro. ~50 lines of per-field init / helper-Init calls / sp_telemetry
     // atomic stores / slow_state arena allocation / display_meta sibling init
-    // are now covered by one macro call. Adding a new CoreContext field that
-    // needs boot-init = ONE row in FOREACH_CORE_CTX_INIT_FIELD; macro picks
-    // it up at next compile. See MemHeaders/CoreCtxInitRegistry.hpp.
-    for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
-        CORE_CTX_INIT_AUTOPOPULATE(state, i);
+    // are now covered by one macro call. Adding a new NodeContext field that
+    // needs boot-init = ONE row in FOREACH_NODE_CTX_INIT_FIELD; macro picks
+    // it up at next compile. See MemHeaders/NodeCtxInitRegistry.hpp.
+    for (int i = 0; i < MAX_EXECUTION_NODES; i++) {
+        NODE_CTX_INIT_AUTOPOPULATE(state, i);
     }
 
     // v5.15.5.F.2 — reconstruct per-core attribution from any events that were
@@ -937,13 +937,13 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     // snapshot-restore (ShardedSnapshot restores per-core fields directly) and
     // OrderEventLog-replay (which previously only restored OMS-level state +
     // Portfolio, leaving per-core fields at Init defaults). Without this:
-    //   - core_open_notional starts at 0 after replay
+    //   - node_open_notional starts at 0 after replay
     //   - First live exit's FPN_SubSat(0, entry_notional) yields NEGATIVE
     //     (FPN_SubSat is magnitude-saturating, NOT zero-floored; comment at
     //      ControllerEventLoop.hpp:1825 was incorrect about zero-saturation)
     //   - Display shows "Budget -100%" + drainer risk gates (Phase 2.2 when
     //     enforced) misbehave on stale per-core notional state.
-    //   - entries_processed/exits_processed unbalanced → core_open_positions
+    //   - entries_processed/exits_processed unbalanced → node_open_positions
     //     wraparound (uint64 underflow → huge uint32_t).
     // Per CLAUDE.md item 19 (structural fix preferred when bug class can
     // recur) + DESIGN_SPECS/structural-fix-preferred-decision-framework.md.
@@ -964,8 +964,8 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
                                        OrderManagerState<F>* oms,
                                        Money starting_balance) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` param DELETED. OMS no longer holds scalar fee_rate;
-    // per-Order pre_resolved.fee_rate set at submit via Order_BindPreResolved with cfg.cores[c].
-    // Test fixtures that need non-zero fee accounting must populate cfg.cores[c].fee_rate_*.
+    // per-Order pre_resolved.fee_rate set at submit via Order_BindPreResolved with cfg.nodes[c].
+    // Test fixtures that need non-zero fee accounting must populate cfg.nodes[c].fee_rate_*.
     ExchangeAdapter<F> empty{};
     OrderManager_Init(oms, empty, 0, /*partial_exit_enabled=*/0, starting_balance);
     EventLoopState_Init(state, oms);
@@ -974,7 +974,7 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
 //======================================================================================================
 // [FREE — v5.1.0]
 //======================================================================================================
-// Free heap-allocated CoreSlowState pointers. Idempotent: safe to call
+// Free heap-allocated NodeSlowState pointers. Idempotent: safe to call
 // twice (NULLs the pointer). Tests + engine that init via
 // EventLoopState_Init / EventLoopState_InitLegacy must call this on
 // teardown to avoid LeakSanitizer noise.
@@ -998,36 +998,36 @@ inline void EventLoopState_Free(EventLoopState<F>* state) {
     // destructor (RAII at scope exit, OrderManager.hpp:316). Don't stop
     // the writer here — the test might still use `oms` after this Free
     // returns; premature stop would race with subsequent OMS work.
-    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
-        if (state->cores[i].slow_state) {
+    for (int i = 0; i < MAX_EXECUTION_NODES; ++i) {
+        if (state->nodes[i].slow_state) {
             // v5.11.6.A — if the arena owns this allocation, it's freed
             // by InitArena_Destroy at engine shutdown — skip delete here.
             // Otherwise (test path / no arena), `new` allocated it and
             // we delete normally.
             //
             // Placement-new'd objects need explicit destructor call before
-            // the arena reclaims their memory, but CoreSlowState is
+            // the arena reclaims their memory, but NodeSlowState is
             // trivially destructible (no pointers it owns; all FPN_Binary +
-            // POD). For non-trivial types, add a manual ->~CoreSlowState<F>()
+            // POD). For non-trivial types, add a manual ->~NodeSlowState<F>()
             // here when the arena is in use.
             if (!tt::InitArena_Owns(tt::InitArena_Global(),
-                                     state->cores[i].slow_state)) {
-                delete state->cores[i].slow_state;
+                                     state->nodes[i].slow_state)) {
+                delete state->nodes[i].slow_state;
             }
-            state->cores[i].slow_state = nullptr;
+            state->nodes[i].slow_state = nullptr;
         }
         // strategy_state is freed by caller via Strategy_FreePerCore
         // before this function (see contract above). If it's still
         // non-null here, it's a leak — log to help catch the missing
         // call. Continue rather than dispatch (we don't know the kind
         // here without the strategy headers).
-        if (state->cores[i].strategy_state) {
+        if (state->nodes[i].strategy_state) {
             fprintf(stderr,
                 "[EventLoopState_Free] WARN: slot %d has non-null strategy_state "
                 "kind=%u — caller forgot to call Strategy_FreePerCore. Leaking.\n",
-                i, state->cores[i].strategy_state_kind);
-            state->cores[i].strategy_state = nullptr;  // prevent dangling
-            state->cores[i].strategy_state_kind = 0xFF;
+                i, state->nodes[i].strategy_state_kind);
+            state->nodes[i].strategy_state = nullptr;  // prevent dangling
+            state->nodes[i].strategy_state_kind = 0xFF;
         }
     }
 }
@@ -1035,10 +1035,10 @@ inline void EventLoopState_Free(EventLoopState<F>* state) {
 //======================================================================================================
 // [REGISTER CORE]
 //======================================================================================================
-// claim a slot for this execution core. core_id is set to the slot index so
+// claim a slot for this execution core. node_id is set to the slot index so
 // future events from this core route to the right portfolio slot.
 //
-// returns the assigned slot (== core_id), or -1 if MAX_EXECUTION_CORES is full.
+// returns the assigned slot (== node_id), or -1 if MAX_EXECUTION_NODES is full.
 //
 // the intended_tp / intended_sl / intended_qty parameters are the trade
 // parameters the controller wants to apply on the next entry. phase 05 will
@@ -1051,15 +1051,15 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
                                        Money intended_tp,
                                        Money intended_sl,
                                        Money intended_qty) {
-    if (state->registered_count >= MAX_EXECUTION_CORES) return -1;
+    if (state->registered_count >= MAX_EXECUTION_NODES) return -1;
     int slot = state->registered_count++;
-    state->cores[slot].core         = core;
-    state->cores[slot].intended_tp  = intended_tp;
-    state->cores[slot].intended_sl  = intended_sl;
-    state->cores[slot].intended_qty = intended_qty;
-    state->cores[slot].entries_processed = 0;
-    state->cores[slot].exits_processed   = 0;
-    core->core_id = (uint16_t)slot;
+    state->nodes[slot].core         = core;
+    state->nodes[slot].intended_tp  = intended_tp;
+    state->nodes[slot].intended_sl  = intended_sl;
+    state->nodes[slot].intended_qty = intended_qty;
+    state->nodes[slot].entries_processed = 0;
+    state->nodes[slot].exits_processed   = 0;
+    core->node_id = (uint16_t)slot;
     return slot;
 }
 
@@ -1070,7 +1070,7 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 // `cfg.partial_exit_enabled=1`, each core owns TWO portfolio slots — one
 // for leg A (first half exits at TP1), one for leg B (second half rides
 // to TP2 or shared SL). When disabled, each core owns ONE slot at index
-// == core_id (legacy single-position behavior).
+// == node_id (legacy single-position behavior).
 //
 // Slot layout with partials:
 //   core 0 → slots {0, 1}  (leg A=0, leg B=1)
@@ -1083,7 +1083,7 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 //
 // CAPACITY: with partials enabled, max cores caps at MAX_PORTFOLIO_POSITIONS
 // / 2 = 8 (assuming MAX_PORTFOLIO_POSITIONS=16). Boot-time validation
-// refuses to start if num_execution_cores × 2 > MAX_PORTFOLIO_POSITIONS.
+// refuses to start if num_execution_nodes × 2 > MAX_PORTFOLIO_POSITIONS.
 //
 // LEG INDICES — the constants live in CoreFrameworks/TradeEvent.hpp so
 // ExecutionCore_Tick (which doesn't include this header) can use the same
@@ -1091,20 +1091,20 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 //   PARTIAL_LEG_A = 0
 //   PARTIAL_LEG_B = 1
 
-// Returns the portfolio slot index for (core_id, leg) given the cfg.
+// Returns the portfolio slot index for (node_id, leg) given the cfg.
 // leg=0 always returns a valid slot; leg=1 returns -1 when partial_exit_-
 // enabled=0. Caller-side: ignore leg=1 result when partials disabled.
 //
 // All slow-path / boot-time. Trivially inlined.
-static inline int Sharded_LegSlot(int core_id, int leg, int partial_exit_enabled) {
-    if (core_id < 0) return -1;
+static inline int Sharded_LegSlot(int node_id, int leg, int partial_exit_enabled) {
+    if (node_id < 0) return -1;
     if (!partial_exit_enabled) {
-        // Single-slot mode: leg index ignored, slot == core_id
-        return (leg == PARTIAL_LEG_A) ? core_id : -1;
+        // Single-slot mode: leg index ignored, slot == node_id
+        return (leg == PARTIAL_LEG_A) ? node_id : -1;
     }
     // Pair mode: leg A = 2c, leg B = 2c+1
     if (leg != PARTIAL_LEG_A && leg != PARTIAL_LEG_B) return -1;
-    int slot = core_id * 2 + leg;
+    int slot = node_id * 2 + leg;
     if (slot >= MAX_PORTFOLIO_POSITIONS) return -1;
     return slot;
 }
@@ -1114,14 +1114,14 @@ static inline int Sharded_LegSlot(int core_id, int leg, int partial_exit_enabled
 // core c owns just slot c. Used by slow-path checks that ask "is core
 // c currently in any position?" or "what portfolio slots does this
 // core occupy?".
-static inline uint16_t Sharded_CoreSlotMask(int core_id, int partial_exit_enabled) {
-    if (core_id < 0 || core_id >= MAX_PORTFOLIO_POSITIONS) return 0;
+static inline uint16_t Sharded_NodeSlotMask(int node_id, int partial_exit_enabled) {
+    if (node_id < 0 || node_id >= MAX_PORTFOLIO_POSITIONS) return 0;
     if (partial_exit_enabled) {
-        int sa = core_id * 2, sb = core_id * 2 + 1;
+        int sa = node_id * 2, sb = node_id * 2 + 1;
         if (sb >= MAX_PORTFOLIO_POSITIONS) return 0;
         return (uint16_t)((1u << sa) | (1u << sb));
     }
-    return (uint16_t)(1u << core_id);
+    return (uint16_t)(1u << node_id);
 }
 
 // Boot-time validation. Returns 1 if cfg + capacity are consistent, 0
@@ -1129,29 +1129,29 @@ static inline uint16_t Sharded_CoreSlotMask(int core_id, int partial_exit_enable
 // AFTER cfg load, BEFORE core registration.
 //
 // Failure modes:
-//   - partial_exit_enabled=1 AND num_execution_cores * 2 > MAX_PORTFOLIO_POSITIONS
-//   - num_execution_cores < 1 (caller should already validate)
+//   - partial_exit_enabled=1 AND num_execution_nodes * 2 > MAX_PORTFOLIO_POSITIONS
+//   - num_execution_nodes < 1 (caller should already validate)
 //   - partial_exit_pct outside (0.0, 1.0) when partials enabled
 template <unsigned F>
 static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg) {
     if (!BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) return 1;  // disabled = always valid
-    int n_cores = (int)cfg->num_execution_cores;
-    if (n_cores < 1) {
+    int n_nodes = (int)cfg->num_execution_nodes;
+    if (n_nodes < 1) {
         std::fprintf(stderr,
-            "[partial-exits] num_execution_cores=%d invalid; needs >= 1\n",
-            n_cores);
+            "[partial-exits] num_execution_nodes=%d invalid; needs >= 1\n",
+            n_nodes);
         return 0;
     }
-    int max_pair_cores = MAX_PORTFOLIO_POSITIONS / 2;
-    if (n_cores > max_pair_cores) {
+    int max_pair_nodes = MAX_PORTFOLIO_POSITIONS / 2;
+    if (n_nodes > max_pair_nodes) {
         std::fprintf(stderr,
-            "[partial-exits] partial_exit_enabled=1 caps num_execution_cores "
+            "[partial-exits] partial_exit_enabled=1 caps num_execution_nodes "
             "at %d (got %d). Each core uses TWO portfolio slots in pair mode "
-            "(leg A + leg B); MAX_PORTFOLIO_POSITIONS=%d → %d cores max.\n"
-            "  Either: (a) reduce num_execution_cores to %d or fewer, or\n"
+            "(leg A + leg B); MAX_PORTFOLIO_POSITIONS=%d → %d nodes max.\n"
+            "  Either: (a) reduce num_execution_nodes to %d or fewer, or\n"
             "          (b) set partial_exit_enabled=0 in your cfg.\n",
-            max_pair_cores, n_cores, MAX_PORTFOLIO_POSITIONS, max_pair_cores,
-            max_pair_cores);
+            max_pair_nodes, n_nodes, MAX_PORTFOLIO_POSITIONS, max_pair_nodes,
+            max_pair_nodes);
         return 0;
     }
     double pct = Money_ToDouble(cfg->partial_exit_pct);
@@ -1163,9 +1163,9 @@ static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg)
         return 0;
     }
     std::fprintf(stderr,
-        "[partial-exits] enabled: %d cores using %d slots (legs A+B), "
+        "[partial-exits] enabled: %d nodes using %d slots (legs A+B), "
         "TP1 exits %.0f%% of qty\n",
-        n_cores, n_cores * 2, pct * 100.0);
+        n_nodes, n_nodes * 2, pct * 100.0);
     return 1;
 }
 
@@ -1188,13 +1188,13 @@ template <unsigned F>
 inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
                                             uint8_t strategy_id,
                                             Money allocated_balance) {
-    // The MAX_EXECUTION_CORES clause is compiler-provable bound hygiene (TECH_DEBT-160): the
-    // registered_count invariant (<= MAX_EXECUTION_CORES, enforced at registration) already bounds
+    // The MAX_EXECUTION_NODES clause is compiler-provable bound hygiene (TECH_DEBT-160): the
+    // registered_count invariant (<= MAX_EXECUTION_NODES, enforced at registration) already bounds
     // slot at runtime, but value-range analysis can't see it -> gui-lane -Wstringop-overflow FP.
     // Never fires alone; boot/setup cadence (not hot path).
-    if (slot < 0 || slot >= state->registered_count || slot >= MAX_EXECUTION_CORES) return;
-    state->cores[slot].strategy_id       = strategy_id;
-    state->cores[slot].allocated_balance = allocated_balance;
+    if (slot < 0 || slot >= state->registered_count || slot >= MAX_EXECUTION_NODES) return;
+    state->nodes[slot].strategy_id       = strategy_id;
+    state->nodes[slot].allocated_balance = allocated_balance;
 }
 
 //======================================================================================================
@@ -1256,7 +1256,7 @@ inline FPN_Binary<F> EventLoopState_RealizedPnl(const EventLoopState<F>* state) 
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — EventLoopState_FeeRate getter DELETED.
 // Was a proxy for state->oms->fee_rate which is also being deleted at r-5. Zero production
 // callers (verified via codebase grep at r-2 audit). Per-core fee rates now live on
-// cfg.cores[c].fee_rate_taker / fee_rate_maker; HandleFill reads Order::pre_resolved.fee_rate
+// cfg.nodes[c].fee_rate_taker / fee_rate_maker; HandleFill reads Order::pre_resolved.fee_rate
 // (pre-resolved at submit via Order_BindPreResolved). No getter needed at this scope.
 
 template <unsigned F>
@@ -1307,16 +1307,16 @@ inline ShardedTradeLog* EventLoopState_TradeLog(const EventLoopState<F>* state) 
 // directly through this helper. phase 05 replaces it with an atomic
 // ParameterSlot push that races safely against the execution core. for now
 // it's just a write to the controller-side struct, no synchronization needed
-// because the execution core never reads from CoreContext (only from its own
+// because the execution core never reads from NodeContext (only from its own
 // gate_params, which we DO NOT touch from this function — see P4.7).
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
                                               FPN_Binary<F> tp, FPN_Binary<F> sl, Money qty) {
     if (slot < 0 || slot >= state->registered_count) return;
-    state->cores[slot].intended_tp  = tp;
-    state->cores[slot].intended_sl  = sl;
-    state->cores[slot].intended_qty = qty;
+    state->nodes[slot].intended_tp  = tp;
+    state->nodes[slot].intended_sl  = sl;
+    state->nodes[slot].intended_qty = qty;
 }
 
 //======================================================================================================
@@ -1324,22 +1324,22 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 //======================================================================================================
 // Run by the drainer thread after every OrderManager_Tick. Consumes the
 // FillRecords + masks populated by OrderManager_HandleFill and applies
-// per-core CoreContext updates that the legacy mode-0 path used to do
-// inside EventLoop_OnEvent: core_open_notional, core_realized, core_fees,
-// core_wins/core_losses, ConfidenceScorer feedback, SL cooldown,
+// per-core NodeContext updates that the legacy mode-0 path used to do
+// inside EventLoop_OnEvent: node_open_notional, node_realized, node_fees,
+// node_wins/node_losses, ConfidenceScorer feedback, SL cooldown,
 // pnl_feeder push.
 //
-// Slot → core_id mapping is partials-aware via oms_state_flags
+// Slot → node_id mapping is partials-aware via oms_state_flags
 // PARTIAL_EXIT_ENABLED bit (v5.15.5.C.2 / S3a).
-// Both legs of a paired trade route their stats to the SAME CoreContext
+// Both legs of a paired trade route their stats to the SAME NodeContext
 // (one per core, not one per leg) — partials only split the exit
 // schedule, not the allocation.
 //
 // Per-leg vs per-trade fields (load-bearing under partials):
-//   - PER-LEG (every exit fill contributes): core_realized,
-//     core_open_notional, core_fees. Each leg has its own qty + entry
+//   - PER-LEG (every exit fill contributes): node_realized,
+//     node_open_notional, node_fees. Each leg has its own qty + entry
 //     notional + fee, so all aggregate.
-//   - PER-TRADE (leg-A only fires the signal): core_wins/core_losses,
+//   - PER-TRADE (leg-A only fires the signal): node_wins/node_losses,
 //     ConfidenceScorer_Update, active_prediction reset, pnl_feeder push,
 //     sl_cooldown_remaining. One trade = one outcome signal. Mirrors the
 //     entry-side rule that last_entry_tick + last_entry_price +
@@ -1370,7 +1370,7 @@ template <unsigned F>
 inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              OrderManagerState<F>* oms,
                                              uint32_t sl_cooldown_cycles,
-                                             int core_id,
+                                             int node_id,
                                              double ensemble_trade_reward_mult = 4.0,
                                              // v5.10.0e — runtime IC drift detection.
                                              // Defaults preserve pre-v5.10.0e behavior:
@@ -1393,17 +1393,17 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              double   fee_rate_taker_for_cf    = 0.001,
                                              // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg slice (nullptr fallback).
                                              // Per cfg-scope-discipline § "consumer function signatures over per-core slices"
-                                             // — single-slice form (this fn is single-core-scoped via the `core_id` param).
-                                             const PerCoreCfg<F>* core_cfg     = nullptr) {
+                                             // — single-slice form (this fn is single-core-scoped via the `node_id` param).
+                                             const PerNodeCfg<F>* node_cfg     = nullptr) {
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
-        : (uint16_t)(1u << core_id);
+        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
+        : (uint16_t)(1u << node_id);
     const int max_slot = partial_on ? state->registered_count * 2
                                     : state->registered_count;
 
-    CoreContext<F>& ctx = state->cores[core_id];
+    NodeContext<F>& ctx = state->nodes[node_id];
 
     // v5.4.1 Bug B diagnostic: log when this core has bits to process.
     // Cheap (cfg-gated, no-op when disabled). Helps narrow whether the
@@ -1413,15 +1413,15 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         uint16_t hit_open  = (uint16_t)(oms->last_opened_mask & my_mask);
         uint16_t hit_close = (uint16_t)(oms->last_closed_mask & my_mask);
         if ((hit_open || hit_close) && tt::Health_LogEnabled(tt::HEALTH_INFO)) {
-            tt::Health_Log(tt::HEALTH_INFO, "drain", core_id,
+            tt::Health_Log(tt::HEALTH_INFO, "drain", node_id,
                 "my_mask=0x%x last_open=0x%x last_close=0x%x partial=%d realized_pre=%g fees_pre=%g wins=%u losses=%u",
                 (unsigned)my_mask,
                 (unsigned)oms->last_opened_mask,
                 (unsigned)oms->last_closed_mask,
                 partial_on,
-                Money_ToDouble(ctx.core_realized),
-                Money_ToDouble(ctx.core_fees),
-                ctx.core_wins, ctx.core_losses);
+                Money_ToDouble(ctx.node_realized),
+                Money_ToDouble(ctx.node_fees),
+                ctx.node_wins, ctx.node_losses);
         }
     }
 
@@ -1438,7 +1438,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         const auto& pos_entry = oms->portfolio.positions[slot];
         const Money entry_notional_derived = Money_Mul(pos_entry.entry_price, pos_entry.quantity);
         const Money entry_fee_derived      = pos_entry.entry_fee;
-        ctx.core_open_notional = Money_Add(ctx.core_open_notional, entry_notional_derived);
+        ctx.node_open_notional = Money_Add(ctx.node_open_notional, entry_notional_derived);
         // v5.3.1 (Phase D fee accounting fix): do NOT add entry_fee here.
         // The exit pass below adds rec.exit_total_fees which already equals
         // entry_fee + exit_fee (set in OMS_HandleFill). Adding entry_fee
@@ -1464,7 +1464,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             // now answerable from the log alone (prediction, threshold,
             // confidence, registry hash).
             int is_ml = (ctx.resolved_strategy_id == STRATEGY_ML);
-            tt::Health_Log(tt::HEALTH_INFO, "entry", core_id,
+            tt::Health_Log(tt::HEALTH_INFO, "entry", node_id,
                 "slot=%d strat=%u resolved=%u regime=%d "
                 "trend_score=%d vol_score=%d hyst=%d/%d "
                 "entry_px=%g qty=%g entry_notional=%g entry_fee=%g "
@@ -1484,15 +1484,15 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 Money_ToDouble(entry_fee_derived),       // v5.15.5.C.4 Phase H — derived
                 // v5.15.5.B.2 — diag_* + last_ml_* fields extracted to
                 // display_meta. Use the per-core meta alias for readability.
-                FPN_ToDouble(state->display_meta[core_id].diag_tp_pct_actual),
-                FPN_ToDouble(state->display_meta[core_id].diag_tp_pct_floor),
-                FPN_ToDouble(state->display_meta[core_id].diag_stddev_pct),
-                FPN_ToDouble(state->display_meta[core_id].diag_long_slope),
-                FPN_ToDouble(state->display_meta[core_id].diag_volume_delta),
+                FPN_ToDouble(state->display_meta[node_id].diag_tp_pct_actual),
+                FPN_ToDouble(state->display_meta[node_id].diag_tp_pct_floor),
+                FPN_ToDouble(state->display_meta[node_id].diag_stddev_pct),
+                FPN_ToDouble(state->display_meta[node_id].diag_long_slope),
+                FPN_ToDouble(state->display_meta[node_id].diag_volume_delta),
                 // v5.9.0b — ML decision context. Zero for non-ML cores.
                 is_ml ? ctx.active_prediction : 0.0,
-                is_ml ? state->display_meta[core_id].last_ml_threshold : 0.0,
-                is_ml ? state->display_meta[core_id].last_ml_effective_threshold : 0.0,
+                is_ml ? state->display_meta[node_id].last_ml_threshold : 0.0,
+                is_ml ? state->display_meta[node_id].last_ml_effective_threshold : 0.0,
                 is_ml ? ctx.last_confidence : 0.0,
                 (unsigned long)FEATURE_REGISTRY_HASH());
         }
@@ -1528,19 +1528,19 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — read authoritative exit_fee from OMS sibling array (set by HandleFill
         // SELL from o->pre_resolved.fee_rate). Replaces the prior cfg-recompute which lost the Order's
         // captured fee_rate. Per decision-time-data-binding-pattern.md: Order pre_resolved is canonical;
-        // DrainPostFill is a CONSUMER, not a re-deriver. Eliminates the core_cfg param dependency at this site.
+        // DrainPostFill is a CONSUMER, not a re-deriver. Eliminates the node_cfg param dependency at this site.
         const Money exit_fee            = oms->last_exit_fee[slot];
         const Money exit_total_fees     = Money_Add(pos.entry_fee, exit_fee);
         // D-190: gross via the SINGLE-SOURCE Money_FillGross (was 2-mul Sub(exit_notional, exit_entry_notional)
         // — the lone site that diverged from the 1-mul OMS books by 1 ULP under decimal). exit_entry_notional
-        // is kept for the core_open_notional decrement below; the standalone exit_notional is no longer needed.
+        // is kept for the node_open_notional decrement below; the standalone exit_notional is no longer needed.
         const Money gross               = Money_FillGross(pos.entry_price, oms->last_exit_fill_price[slot], pos.quantity);
         const Money exit_net_pnl        = Money_Sub(gross, exit_total_fees);
 
         // Per-leg accounting: every exit fill contributes.
-        ctx.core_realized      = Money_Add(ctx.core_realized, exit_net_pnl);
-        ctx.core_open_notional = Money_Sub(ctx.core_open_notional, exit_entry_notional);
-        ctx.core_fees          = Money_Add(ctx.core_fees, exit_total_fees);
+        ctx.node_realized      = Money_Add(ctx.node_realized, exit_net_pnl);
+        ctx.node_open_notional = Money_Sub(ctx.node_open_notional, exit_entry_notional);
+        ctx.node_fees          = Money_Add(ctx.node_fees, exit_total_fees);
         ctx.exits_processed++;
         state->total_exits++;
         state->total_events_processed++;
@@ -1557,7 +1557,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         const bool slot_was_win = BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(slot));
         if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
             double realized = oms->last_realized_return[slot];
-            tt::Health_Log(tt::HEALTH_INFO, "exit", core_id,
+            tt::Health_Log(tt::HEALTH_INFO, "exit", node_id,
                 "slot=%d strat=%u resolved=%u was_win=%d realized_ret=%g "
                 "net_pnl=%g entry_notional=%g total_fees=%g leg_a=%d",
                 slot, (unsigned)ctx.strategy_id,
@@ -1572,22 +1572,22 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // v4.7.21 W/L pairing under partials.
         // v5.14.9.G — partner_pending_active is now BITMAP_IS_SET(state->partner_pending_bitmap, bit)
         if (partial_on) {
-            if (BITMAP_IS_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id))) {
+            if (BITMAP_IS_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(node_id))) {
                 // v5.15.5.C.4 Phase G — exit_net_pnl is derived (see top of slot iter).
                 Money total_net = Money_Add(ctx.partner_pending_pnl, exit_net_pnl);
                 if (Money_Gt(total_net, Money_Zero())) {
-                    ctx.core_wins++;
-                    ctx.core_gross_wins = Money_Add(ctx.core_gross_wins, total_net);
+                    ctx.node_wins++;
+                    ctx.node_gross_wins = Money_Add(ctx.node_gross_wins, total_net);
                 } else {
-                    ctx.core_losses++;
-                    ctx.core_gross_losses = Money_Add(ctx.core_gross_losses,
+                    ctx.node_losses++;
+                    ctx.node_gross_losses = Money_Add(ctx.node_gross_losses,
                                                     Money_Negate(total_net));
                 }
                 ctx.partner_pending_pnl = Money_Zero();
-                BITMAP_CLR(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id));
+                BITMAP_CLR(state->partner_pending_bitmap, BITMAP_BIT_U16(node_id));
             } else {
                 ctx.partner_pending_pnl = exit_net_pnl;  // v5.15.5.C.4 Phase G — derived
-                BITMAP_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id));
+                BITMAP_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(node_id));
             }
         }
 
@@ -1595,12 +1595,12 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         if (is_leg_a) {
             if (!partial_on) {
                 // v5.15.5.C.4 Phase J — uses hoisted slot_was_win from above.
-                ctx.core_wins   += (slot_was_win ? 1u : 0u);
-                ctx.core_losses += (slot_was_win ? 0u : 1u);
+                ctx.node_wins   += (slot_was_win ? 1u : 0u);
+                ctx.node_losses += (slot_was_win ? 0u : 1u);
                 if (slot_was_win) {
-                    ctx.core_gross_wins = Money_Add(ctx.core_gross_wins, exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
+                    ctx.node_gross_wins = Money_Add(ctx.node_gross_wins, exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
                 } else {
-                    ctx.core_gross_losses = Money_Add(ctx.core_gross_losses,
+                    ctx.node_gross_losses = Money_Add(ctx.node_gross_losses,
                                                     Money_Negate(exit_net_pnl));
                 }
             }
@@ -1648,22 +1648,22 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                         // Rate-limit at 60s per core to avoid log spam if
                         // breach toggles around the threshold.
                         BITMAP_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED);
-                        state->display_meta[core_id].drift_breach_first_us = now_us;
+                        state->display_meta[node_id].drift_breach_first_us = now_us;
                         static uint64_t s_drift_log_us[16] = {0};
                         Health_LogCriticalRateLimited(
-                            &s_drift_log_us[core_id & 15], 60000000ULL,
-                            core_id, "drift",
+                            &s_drift_log_us[node_id & 15], 60000000ULL,
+                            node_id, "drift",
                             "IC=%.4f below floor=%.4f over %us window (%d samples)",
                             avg_ic, drift_floor,
                             (unsigned)drift_window_seconds, n_samples);
                         if (drift_auto_kill && !BITMAP_IS_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED)) {
-                            CORE_STATE_FLAG_SET(state->cores[core_id], KILL_TRIPPED);
-                            state->cores[core_id].core_ks_trips_total++;
+                            NODE_STATE_FLAG_SET(state->nodes[node_id], KILL_TRIPPED);
+                            state->nodes[node_id].node_ks_trips_total++;
                             BITMAP_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED);
                             static uint64_t s_drift_kill_log_us[16] = {0};
                             Health_LogCriticalRateLimited(
-                                &s_drift_kill_log_us[core_id & 15], 60000000ULL,
-                                core_id, "drift",
+                                &s_drift_kill_log_us[node_id & 15], 60000000ULL,
+                                node_id, "drift",
                                 "AUTO-KILL: per-core kill_switch tripped due to "
                                 "sustained IC drift");
                         }
@@ -1672,7 +1672,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                         BITMAP_CLR(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED);
                         fprintf(stderr,
                             "[drift] core %d RECOVERED: IC=%.4f above floor=%.4f\n",
-                            core_id, avg_ic, drift_floor);
+                            node_id, avg_ic, drift_floor);
                     }
                 }
             }
@@ -1684,7 +1684,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             // v5.10.0a.G.8 — trade-close reward hook for ensemble bandit.
             // Real-money signal (incl. fees + slippage) carries higher
             // weight than slow-path lookback (default ×4). Cast through
-            // void* since CoreContext can't depend on EnsembleModelZoo<F>
+            // void* since NodeContext can't depend on EnsembleModelZoo<F>
             // directly (would force ML_Headers visibility). Bandit feed
             // is rare (~1 per closed trade) — cost negligible.
             if (ctx.ensemble_handle) {
@@ -1694,13 +1694,13 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                     if (bal_d > 0.0) {
                         double pnl_d = Money_ToDouble(exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
                         double pnl_bps = (pnl_d / bal_d) * 10000.0;
-                        // v5.15.5.F.4d — pass core_cfg for per-core bandit_algorithm dispatch
+                        // v5.15.5.F.4d — pass node_cfg for per-core bandit_algorithm dispatch
                         // (Step 3 + § H Class 25 sweep). Inside _TradeCloseReward, reward attribution
                         // routes through g_buy_reward_dispatch[algo] — for THOMPSON / ghost / BLENDED
                         // modes, Thompson_Update fires too (was silently never called pre-.F.4d).
                         EnsembleModelZoo_TradeCloseReward(ezoo, pnl_bps,
                                                             ensemble_trade_reward_mult,
-                                                            core_cfg);
+                                                            node_cfg);
                     }
                 }
             }
@@ -1771,7 +1771,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                     // real_thompson_update if _InitExitThompsonBandits boot-wired). Closes exit-side
                     // Class 24 sister attribution gap structurally + closes asymmetry where buy-side
                     // had Thompson reward but exit-side was Exp3-only.
-                    int exit_algo = core_cfg ? core_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
+                    int exit_algo = node_cfg ? node_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
                     if (exit_algo < 0 || exit_algo >= FOREACH_BANDIT_ALGORITHM_COUNT) exit_algo = (int)BANDIT_ALGO_EXP3;
                     g_exit_reward_dispatch<F>[exit_algo](ezoo, regime, chosen_arm, reward_bps);
                 }
@@ -1831,7 +1831,7 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
 // (those go through deferred dirty-flag mechanisms in later phases).
 //
 // entry handling:
-//   - look up CoreContext for event.core_id (the source core)
+//   - look up NodeContext for event.node_id (the source core)
 //   - read intended TP/SL/qty from the context (set by controller earlier)
 //   - call Portfolio_OpenSlot to write the position fields and set the bit
 //   - bump per-core entries_processed counter
@@ -1850,14 +1850,14 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
 template <unsigned F>
 inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& event_in,
                               // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg array (nullptr fallback).
-                              // OnEvent reads event.core_id then indexes cores[event.core_id] for
+                              // OnEvent reads event.node_id then indexes nodes[event.node_id] for
                               // per-core fee_rate / slippage_pct. Mode-1 path returns early (sharded
                               // production); mode-0 legacy body uses these. Per cfg-scope-discipline
                               // § "consumer over per-core array."
-                              const PerCoreCfg<F>* cores = nullptr) {
+                              const PerNodeCfg<F>* nodes = nullptr) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; subsequent reads pure ALU.
-    static const PerCoreCfg<F> NULL_PER_CORE_CFG_STUB_ARRAY[MAX_EXECUTION_CORES] = {};
-    const PerCoreCfg<F>* effective_cores = cores ? cores : NULL_PER_CORE_CFG_STUB_ARRAY;
+    static const PerNodeCfg<F> NULL_PER_NODE_CFG_STUB_ARRAY[MAX_EXECUTION_NODES] = {};
+    const PerNodeCfg<F>* effective_nodes = nodes ? nodes : NULL_PER_NODE_CFG_STUB_ARRAY;
     // v5.15.5.F.4d.1.E.0.10 A9 — paper/backtest SLIPPAGE moved to the OrderManager_Submit synthetic-fill
     // chokepoint: the SINGLE production slip SSoT (D-202 + adversarial-pessimistic-simulation-discipline.md).
     // This OnEvent slip was DEAD on the production (mode-1) path — the should_apply gate below returns BEFORE
@@ -1865,7 +1865,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // removed; the mode-0 / test-only bookkeeping path below books the raw trigger price (slip lives at Submit).
     // Mutate a local copy so the caller's event is untouched.
     TradeEvent<F> event = event_in;
-    int slot = (int)event.core_id;
+    int slot = (int)event.node_id;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 option C — combined-mask collapse: 3 separate predicate branches
     // (bounds + mutex + mode-1 fast-path) collapsed into 1 combined-mask + single guard branch.
     // Reduces predictor entries 3 → 1; bounds variance to a single source. Per Caramel's
@@ -1874,7 +1874,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // Branchless mask compute (pure ALU; ~5ns):
     bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
     bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
-    const bool valid_slot   = slot < state->registered_count;     // uint16_t event.core_id → slot >= 0 always
+    const bool valid_slot   = slot < state->registered_count;     // uint16_t event.node_id → slot >= 0 always
     const bool valid_mutex  = !(is_entry && is_exit);              // same-tick entry+exit impossible by ExecutionCore_Tick construction
     const bool mode_0_body  = !MBS_EQ_U8(state->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
                                           tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);  // mode-1 (production sharded) → false → skip body
@@ -1889,15 +1889,15 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // above filters out mode-1 + invalid input in single branch; mode-0 body only runs when
     // valid + mode-0. Per v4.7.19 doctrine: production counter bumps happen via DrainPostFill,
     // not here. Mode-0 path is legacy / test-only (sharded production is mode-1).
-    CoreContext<F>* ctx = &state->cores[slot];
+    NodeContext<F>* ctx = &state->nodes[slot];
     if (is_entry) {
         // Compute entry fee = entry_price * qty * fee_rate
         // Phase 8: synchronous market BUY = taker by exchange definition.
         // OMS HandleFill (mode 1) will book the actual maker/taker fee from
         // the WS executionReport. This sync accounting is optimistic.
         Money notional = Money_Mul(event.price, ctx->intended_qty);
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (slot already validated above).
-        const Money entry_fee_rate = effective_cores[slot].fee_rate_taker;
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (slot already validated above).
+        const Money entry_fee_rate = effective_nodes[slot].fee_rate_taker;
         Money entry_fee = Money_Mul(notional, entry_fee_rate);
         Portfolio_OpenSlot(&state->oms->portfolio, slot,
                            event.price,
@@ -1914,7 +1914,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // exit branch subtracts the SAME (entry_price × qty) snapshot so
         // round-trips return to exactly zero — never use exit_price × qty
         // here (asymmetric subtraction would leak residue per trade).
-        ctx->core_open_notional = Money_Add(ctx->core_open_notional, notional);
+        ctx->node_open_notional = Money_Add(ctx->node_open_notional, notional);
         // CSV: record AFTER portfolio mutation so the slot is consistent if the
         // log call inspects it (currently it doesn't, but kept defensive).
         if (state->oms->trade_log) {
@@ -1940,8 +1940,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         Money gross = Portfolio_CloseSlot(&state->oms->portfolio, slot, event.price);
         Money exit_notional = Money_Mul(event.price, qty_snap);
         // Phase 8: TP/SL exit = market sell = always taker by exchange def.
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (slot already validated above).
-        const Money exit_fee_rate = effective_cores[slot].fee_rate_taker;
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (slot already validated above).
+        const Money exit_fee_rate = effective_nodes[slot].fee_rate_taker;
         Money exit_fee = Money_Mul(exit_notional, exit_fee_rate);
         Money total_fee = Money_Add(entry_fee, exit_fee);
         Money net = Money_Sub(gross, total_fee);
@@ -1950,17 +1950,17 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // v4.0.4: per-core P&L bookkeeping. The OMS keeps a single global
         // accumulator (one portfolio); we split it back out by source core
         // for the Account panel so users can see which core is making/losing
-        // money. core_fees adds the entry+exit fee for this fill.
+        // money. node_fees adds the entry+exit fee for this fill.
         // Branchless win/loss: Money_Gt returns 1/0, used as integer
         // mask. Slow path so cost is irrelevant — kept branchless for
         // consistency with the rest of the engine.
         // (.E.0.10: comment de-rotted FPN_GreaterThan→Money_Gt — the line below
         //  is decimal Money_Gt; the stale name caused a false register finding.)
-        ctx->core_realized = Money_Add(ctx->core_realized, net);
-        ctx->core_fees = Money_Add(ctx->core_fees, total_fee);
+        ctx->node_realized = Money_Add(ctx->node_realized, net);
+        ctx->node_fees = Money_Add(ctx->node_fees, total_fee);
         uint32_t is_win = (uint32_t)Money_Gt(net, Money_Zero());
-        ctx->core_wins   += is_win;
-        ctx->core_losses += (1u - is_win);
+        ctx->node_wins   += is_win;
+        ctx->node_losses += (1u - is_win);
         // Phase 2.1: subtract the SAME entry notional we added at entry time.
         // Use entry_price_snap × qty_snap, NOT exit_price × qty_snap — the
         // latter would leak residue per round trip (positive when winning,
@@ -1968,7 +1968,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // FPN_SubSat saturates at zero if state ever becomes inconsistent
         // (defensive against future bugs; should never trigger in practice).
         Money entry_notional_snap = Money_Mul(entry_price_snap, qty_snap);
-        ctx->core_open_notional = Money_Sub(ctx->core_open_notional, entry_notional_snap);
+        ctx->node_open_notional = Money_Sub(ctx->node_open_notional, entry_notional_snap);
         // Phase 09: track peak balance for drawdown-based kill switch.
         // Cheap on the slow path; the comparison is one FPN_Binary compare per exit.
         if (Money_Gt(state->oms->balance, state->oms->ks_peak_balance)) {
@@ -1997,7 +1997,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
 // [DRAIN EVENTS]
 //======================================================================================================
 // round-robin across all registered cores. for each core, pop up to
-// MAX_EVENTS_PER_DRAIN_PER_CORE events from its event ring and process each
+// MAX_EVENTS_PER_DRAIN_PER_NODE events from its event ring and process each
 // via _OnEvent. returns total events processed in this pass.
 //
 // the per-core cap prevents one chatty core from monopolizing a drain pass
@@ -2010,10 +2010,10 @@ template <unsigned F>
 inline int EventLoop_DrainEvents(EventLoopState<F>* state) {
     int total_drained = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
-        ExecutionCore<F>* core = state->cores[slot].core;
+        ExecutionCore<F>* core = state->nodes[slot].core;
         if (core == nullptr) continue;
 
-        for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_CORE; ++i) {
+        for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_NODE; ++i) {
             TradeEvent<F> event;
             if (!SPSCRing_TryPop(&core->event_ring, &event)) break;
             EventLoop_OnEvent(state, event);
@@ -2044,8 +2044,8 @@ template <unsigned F>
 inline void EventLoop_QueueParameters(EventLoopState<F>* state, int slot,
                                        const GateParameters<F>& new_params) {
     if (slot < 0 || slot >= state->registered_count) return;
-    state->cores[slot].pending_params = new_params;
-    CORE_STATE_FLAG_SET(state->cores[slot], DIRTY);
+    state->nodes[slot].pending_params = new_params;
+    NODE_STATE_FLAG_SET(state->nodes[slot], DIRTY);
 }
 
 //======================================================================================================
@@ -2128,7 +2128,7 @@ inline int EventLoop_RebuildAllParameters(
     // by sharing the SAME function across all execution paths. STRATEGY_NONE
     // skip is the caller's responsibility (cheap conditional).
     for (int slot = 0; slot < state->registered_count; ++slot) {
-        if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
+        if (state->nodes[slot].strategy_id == STRATEGY_NONE) continue;
         EventLoop_RebuildOneCore(
             state, slot, rolling, config, rolling_long, ror_regressor, ema_price,
             current_price, rolling_medium, rolling_baseline, cumdelta_state,
@@ -2145,14 +2145,14 @@ inline int EventLoop_RebuildAllParameters(
 // [PER-CORE ROLLING STATE UPDATE — v5.1.2]
 //======================================================================================================
 // Pushes (price, volume, timestamp, depth) into ONE engine's slow_state.
-// Single-writer rule: caller must be the sole writer of state.cores[c].slow_state
+// Single-writer rule: caller must be the sole writer of state.nodes[c].slow_state
 // for the duration of this call:
-//   - per_core_slow: per-core slow-path c writes own only
+//   - per_node_slow: per-core slow-path c writes own only
 //   - backtest: linear iteration, single-thread
 //
 // Mirrors the cadence-update logic that v5.0.x had in producer's fan_out
 // (lines ~881-915 of EngineSharded.hpp pre-v5.1.2). Centralized in this
-// helper so both callers (per_core_slow + backtest) do exactly the same
+// helper so both callers (per_node_slow + backtest) do exactly the same
 // work — train-serve parity is structural.
 //
 // Inputs:
@@ -2170,8 +2170,8 @@ inline void EventLoop_UpdateRollingStateOneCore(
     int is_buyer_maker,
     FPN_Binary<F> depth_imbalance, FPN_Binary<F> depth_spread,
     int depth_enabled) {
-    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
-    auto* sst = state->cores[slot].slow_state;
+    if (slot < 0 || slot >= MAX_EXECUTION_NODES) return;
+    auto* sst = state->nodes[slot].slow_state;
     if (!sst) return;
     if (Money_IsZero(price_m)) return;  // pre-warmup tick — skip pushes
 
@@ -2210,8 +2210,8 @@ template <unsigned F>
 inline void EventLoop_UpdateEmaPriceAllCores(
     EventLoopState<F>* state, FPN_Binary<F> ema_price) {
     for (int c = 0; c < state->registered_count; ++c) {
-        if (state->cores[c].slow_state) {
-            state->cores[c].slow_state->ema_price = ema_price;
+        if (state->nodes[c].slow_state) {
+            state->nodes[c].slow_state->ema_price = ema_price;
         }
     }
 }
@@ -2266,8 +2266,8 @@ inline void EventLoop_RebuildOneCore(
     // Otherwise check the time-bound + price-delta predicates.
     if (state && BITMAP_IS_SET(state->global_gate_state.flags, MASK_LAZY_REBUILD_ACTIVE)
         && now_us != 0
-        && slot >= 0 && slot < MAX_EXECUTION_CORES) {
-        auto* sst_lazy = state->cores[slot].slow_state;
+        && slot >= 0 && slot < MAX_EXECUTION_NODES) {
+        auto* sst_lazy = state->nodes[slot].slow_state;
         if (sst_lazy && sst_lazy->us_at_last_rebuild != 0
             && !FPN_IsZero(sst_lazy->price_at_last_rebuild)
             && rolling) {
@@ -2290,7 +2290,7 @@ inline void EventLoop_RebuildOneCore(
                 // staleness gate stays satisfied). pending_params payload
                 // is unchanged from the last full rebuild — the republish
                 // is purely for tick freshness.
-                CORE_STATE_FLAG_SET(state->cores[slot], DIRTY);
+                NODE_STATE_FLAG_SET(state->nodes[slot], DIRTY);
                 return;
             }
         }
@@ -2302,13 +2302,13 @@ inline void EventLoop_RebuildOneCore(
         // resolved" cfg and don't need to know about the override mechanism.
         ControllerConfig<F> resolved_cfg =
             ControllerConfig_ResolveForCore(*config, slot);
-        // v5.14.9.B.0 — populate per-core slow-path gate cache (PER_CORE
+        // v5.14.9.B.0 — populate per-core slow-path gate cache (PER_NODE
         // entries of FOREACH_SLOW_PATH_GATE) from resolved_cfg. ML_BuildParameters
         // reads via BITMAP_IS_SET(mctx->gate_state->flags, MASK_<NAME>); the
         // mctx.gate_state pointer is wired downstream where mctx is constructed.
-        if (state && slot >= 0 && slot < MAX_EXECUTION_CORES) {
-            SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(
-                state->cores[slot].gate_state, resolved_cfg);
+        if (state && slot >= 0 && slot < MAX_EXECUTION_NODES) {
+            SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE(
+                state->nodes[slot].gate_state, resolved_cfg);
         }
         // v4.0.3 D6: session-aware volume multiplier. Each session has its
         // own typical volume profile — cfg can require lower volume during
@@ -2334,14 +2334,14 @@ inline void EventLoop_RebuildOneCore(
         if (hour > 23) hour = 23;
         session_mult = session_mult_lookup[tt::SESSION_BY_HOUR[hour]];
         if (!FPN_IsZero(session_mult)) {
-            // A24 (.E.0.10, D-211 option c): write the per-NODE slice cores[slot], NOT the
+            // A24 (.E.0.10, D-211 option c): write the per-NODE slice nodes[slot], NOT the
             // flat resolved_cfg field. The live consumer (Strategy_BuildParameters @ :2677)
-            // reads &resolved_cfg.cores[slot]; ResolveForCore populates the slice but the
+            // reads &resolved_cfg.nodes[slot]; ResolveForCore populates the slice but the
             // session/D10/spike mutations historically wrote the flat field → silently inert
-            // (Class 44-B, H22 per-node-purity violation). cores[slot] is the canonical
+            // (Class 44-B, H22 per-node-purity violation). nodes[slot] is the canonical
             // per-node view. resolved_cfg is stack-local → no seqlock concern.
-            resolved_cfg.cores[slot].volume_multiplier =
-                FPN_Mul(resolved_cfg.cores[slot].volume_multiplier, session_mult);
+            resolved_cfg.nodes[slot].volume_multiplier =
+                FPN_Mul(resolved_cfg.nodes[slot].volume_multiplier, session_mult);
         }
 
         // v4.2.1: idle-cycle counter. Bump every rebuild; reset to 0 in
@@ -2352,14 +2352,14 @@ inline void EventLoop_RebuildOneCore(
         // intent of legacy `idle_reset_cycles` without the filter-decay
         // step (sharded recomputes resolved_cfg fresh each rebuild, so
         // there's no live-filter drift to undo).
-        state->cores[slot].idle_cycles++;
+        state->nodes[slot].idle_cycles++;
         // v5.9.1 — boot-time per-core warmup-complete log (V5_9_AUDIT-#9).
         // Fires once per session per core, on the rebuild cycle that first
         // observes rolling.count >= min_warmup_samples. Distinct from the
         // global startup gate that releases all cores from CONTROLLER_WARMUP
         // simultaneously — operator wants per-core readiness because in
-        // per_core_slow arch each core's slow path runs at its own cadence.
-        if (!CORE_STATE_FLAG_IS_SET(state->cores[slot], WARMUP_LOG_EMITTED)) {
+        // per_node_slow arch each core's slow path runs at its own cadence.
+        if (!NODE_STATE_FLAG_IS_SET(state->nodes[slot], WARMUP_LOG_EMITTED)) {
             int wmin = (int)config->min_warmup_samples;
             if (wmin <= 0) wmin = 64;  // engine default (matches ShardedSnapshot fallback)
             if (rolling->count >= wmin) {
@@ -2367,18 +2367,18 @@ inline void EventLoop_RebuildOneCore(
                 // vs non-ML cores in mixed deployments. Bounds-checked via
                 // static_assert on STRATEGY_SHORT_NAMES at the X-macro
                 // declaration (StrategyInterface.hpp:151).
-                int sid = state->cores[slot].strategy_id;
+                int sid = state->nodes[slot].strategy_id;
                 const char* sname = (sid >= 0 && sid < NUM_STRATEGIES)
                                   ? STRATEGY_SHORT_NAMES[sid] : "unknown";
                 fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — %s active\n",
                         slot, rolling->count, wmin, sname);
-                CORE_STATE_FLAG_SET(state->cores[slot], WARMUP_LOG_EMITTED);
+                NODE_STATE_FLAG_SET(state->nodes[slot], WARMUP_LOG_EMITTED);
             }
         }
         if (config->idle_reset_cycles > 0 &&
-            state->cores[slot].idle_cycles >= config->idle_reset_cycles) {
-            state->cores[slot].pnl_feeder.head  = 0;
-            state->cores[slot].pnl_feeder.count = 0;
+            state->nodes[slot].idle_cycles >= config->idle_reset_cycles) {
+            state->nodes[slot].pnl_feeder.head  = 0;
+            state->nodes[slot].pnl_feeder.count = 0;
             // Don't clear the actual price_samples — they're FPN_Zero already
             // when count==0 since the regression code reads only [0..count).
         }
@@ -2390,10 +2390,10 @@ inline void EventLoop_RebuildOneCore(
         // cfg.filter_scale and clamped to [offset_min, offset_max] +
         // [vol_mult_min, vol_mult_max] bounds. Mirrors legacy
         // MeanReversion_Adapt / Momentum_Adapt feedback loops.
-        if (state->cores[slot].pnl_feeder.count >= 4 &&
+        if (state->nodes[slot].pnl_feeder.count >= 4 &&
             !FPN_IsZero(resolved_cfg.filter_scale)) {
             LinearRegression3XResult<F> reg =
-                RegressionFeederX_Compute(&state->cores[slot].pnl_feeder);
+                RegressionFeederX_Compute(&state->nodes[slot].pnl_feeder);
             FPN_Binary<F> slope = reg.model.slope;
             // Only apply if R² is meaningful (otherwise slope is noise).
             if (FPN_GreaterThan(reg.r_squared, FPN_FromDouble<F>(0.20))) {
@@ -2401,24 +2401,24 @@ inline void EventLoop_RebuildOneCore(
                 FPN_Binary<F> shift = FPN_Mul(slope, resolved_cfg.filter_scale);
                 shift = FPN_Negate(shift);  // negate (was a sign-bit flip; 16B two's-comp)
                 // Apply to entry_offset_pct, clamped to [offset_min, offset_max]
-                // A24 (.E.0.10, D-211 option c): read+write the per-NODE slice cores[slot]
+                // A24 (.E.0.10, D-211 option c): read+write the per-NODE slice nodes[slot]
                 // (the value the consumer reads + the value D6 just mutated above). The
                 // clamp BOUNDS (offset_min/max, vol_mult_min/max) are read-only + resolve-
                 // equal on flat vs slice (ResolveForCore folds overrides into both), so they
                 // stay flat — only the MUTATED fields move to the slice.
-                Money new_offset = Money_Add(resolved_cfg.cores[slot].entry_offset_pct, Money_FromBinary(shift));  // D-170 egress
+                Money new_offset = Money_Add(resolved_cfg.nodes[slot].entry_offset_pct, Money_FromBinary(shift));  // D-170 egress
                 if (Money_Lt(new_offset, resolved_cfg.offset_min))
                     new_offset = resolved_cfg.offset_min;
                 if (Money_Gt(new_offset, resolved_cfg.offset_max))
                     new_offset = resolved_cfg.offset_max;
-                resolved_cfg.cores[slot].entry_offset_pct = new_offset;
+                resolved_cfg.nodes[slot].entry_offset_pct = new_offset;
                 // Apply to volume_multiplier same direction (tighter when losing)
-                FPN_Binary<F> new_vmult = FPN_Add(resolved_cfg.cores[slot].volume_multiplier, shift);
+                FPN_Binary<F> new_vmult = FPN_Add(resolved_cfg.nodes[slot].volume_multiplier, shift);
                 if (FPN_LessThan(new_vmult, resolved_cfg.vol_mult_min))
                     new_vmult = resolved_cfg.vol_mult_min;
                 if (FPN_GreaterThan(new_vmult, resolved_cfg.vol_mult_max))
                     new_vmult = resolved_cfg.vol_mult_max;
-                resolved_cfg.cores[slot].volume_multiplier = new_vmult;
+                resolved_cfg.nodes[slot].volume_multiplier = new_vmult;
             }
         }
 
@@ -2434,8 +2434,8 @@ inline void EventLoop_RebuildOneCore(
         //
         // AUTO-mode-only logic (strategy resolution + ratchet adjustment on
         // transition) stays gated separately below.
-        uint8_t effective_strategy_id = state->cores[slot].strategy_id;
-        int old_regime = state->cores[slot].regime_state.current_regime;
+        uint8_t effective_strategy_id = state->nodes[slot].strategy_id;
+        int old_regime = state->nodes[slot].regime_state.current_regime;
         int new_regime = old_regime;  // default if compute path not active
         if (ror_regressor && ema_price && rolling_long) {
             const RORRegressor<F>* ror_in = (const RORRegressor<F>*)ror_regressor;
@@ -2451,7 +2451,7 @@ inline void EventLoop_RebuildOneCore(
                                    timestamp_us,
                                    book_imb_history, flow_state, large_trade_state,
                                    spread_state, current_spread, current_mid_price);
-            new_regime = Regime_Classify(&state->cores[slot].regime_state,
+            new_regime = Regime_Classify(&state->nodes[slot].regime_state,
                                           &sig, &resolved_cfg);
 
             // v5.4.0 Phase 0.1 — log per-cycle regime classification
@@ -2464,8 +2464,8 @@ inline void EventLoop_RebuildOneCore(
                     FPN_ToDouble(sig.ema_sma_spread),
                     FPN_ToDouble(sig.short_r2),
                     FPN_ToDouble(sig.ror_slope),
-                    state->cores[slot].regime_state.hysteresis_count,
-                    state->cores[slot].regime_state.hysteresis_threshold,
+                    state->nodes[slot].regime_state.hysteresis_count,
+                    state->nodes[slot].regime_state.hysteresis_threshold,
                     sig.short_count);
             }
         }
@@ -2475,7 +2475,7 @@ inline void EventLoop_RebuildOneCore(
         // just consumes the result.
         if (effective_strategy_id == STRATEGY_AUTO &&
             ror_regressor && ema_price && rolling_long) {
-            int resolved = Regime_ToStrategy(state->cores[slot].regime_state.current_regime);
+            int resolved = Regime_ToStrategy(state->nodes[slot].regime_state.current_regime);
             // v5.4.0 Phase 0.1 health log moved to universal classification
             // block above (v5.14.5.B.0.A). AUTO-only emission would log
             // resolved_strat=N — that field is recoverable from regime via
@@ -2500,7 +2500,7 @@ inline void EventLoop_RebuildOneCore(
             // which the hot path doesn't read).
             if (new_regime != old_regime &&
                 (state->oms->portfolio.active_bitmap &
-                 Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)))) {
+                 Sharded_NodeSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)))) {
                 // v5.5.4 (Class 2 / Class 9 hybrid): SL tighten on regime
                 // transition. The legacy D11 path here wrote ratchet_sl
                 // DIRECTLY without the v5.1.7 fee-floor cap. Symptom (user
@@ -2569,12 +2569,12 @@ inline void EventLoop_RebuildOneCore(
         MLBuildContext ml_ctx{};
         void* dispatch_ctx = nullptr;
         if (effective_strategy_id == STRATEGY_ML) {
-            ml_ctx.model_handle   = state->cores[slot].model_handle;
-            ml_ctx.ensemble_zoo   = state->cores[slot].ensemble_handle;  // v5.10.0a.G.5 — nullptr-safe; single-zoo when null
-            ml_ctx.current_regime_id = state->cores[slot].regime_state.current_regime;  // v5.10.0a.G.7
-            ml_ctx.confidence     = &state->cores[slot].confidence;
-            ml_ctx.out_prediction = &state->cores[slot].staged_prediction;
-            ml_ctx.out_confidence = &state->cores[slot].last_confidence;
+            ml_ctx.model_handle   = state->nodes[slot].model_handle;
+            ml_ctx.ensemble_zoo   = state->nodes[slot].ensemble_handle;  // v5.10.0a.G.5 — nullptr-safe; single-zoo when null
+            ml_ctx.current_regime_id = state->nodes[slot].regime_state.current_regime;  // v5.10.0a.G.7
+            ml_ctx.confidence     = &state->nodes[slot].confidence;
+            ml_ctx.out_prediction = &state->nodes[slot].staged_prediction;
+            ml_ctx.out_confidence = &state->nodes[slot].last_confidence;
             // v4.0 train-serve parity: pass through ROR + EMA from engine
             // slow path so Regime_ComputeSignals can produce the full
             // feature set the backtest path produces during training.
@@ -2598,11 +2598,11 @@ inline void EventLoop_RebuildOneCore(
             // Caller-owned per-core storage; ML_BuildParameters reads/writes
             // through these pointers + the entry log emitter reads them at
             // fill time.
-            // v5.15.5.B.3 — model_load_failed migrated from CoreContext int (was display_meta after .B.2)
-            // to a core_state_flags bitmap bit. mctx field changed from int* to int-by-value;
+            // v5.15.5.B.3 — model_load_failed migrated from NodeContext int (was display_meta after .B.2)
+            // to a node_state_flags bitmap bit. mctx field changed from int* to int-by-value;
             // copy current bit state into the int.
-            ml_ctx.model_load_failed           = CORE_STATE_FLAG_IS_SET(state->cores[slot], MODEL_LOAD_FAILED) ? 1 : 0;
-            ml_ctx.model_corrupt               = CORE_STATE_FLAG_IS_SET(state->cores[slot], MODEL_CORRUPT) ? 1 : 0;  // v5.15.5.E.0.10 A6 (D-221)
+            ml_ctx.model_load_failed           = NODE_STATE_FLAG_IS_SET(state->nodes[slot], MODEL_LOAD_FAILED) ? 1 : 0;
+            ml_ctx.model_corrupt               = NODE_STATE_FLAG_IS_SET(state->nodes[slot], MODEL_CORRUPT) ? 1 : 0;  // v5.15.5.E.0.10 A6 (D-221)
             ml_ctx.last_ml_critical_log_us     = &state->display_meta[slot].last_ml_critical_log_us;
             ml_ctx.out_threshold               = &state->display_meta[slot].last_ml_threshold;
             ml_ctx.out_effective_threshold     = &state->display_meta[slot].last_ml_effective_threshold;
@@ -2613,7 +2613,7 @@ inline void EventLoop_RebuildOneCore(
             // Same address the dispatcher passes via its strategy_halt_reason
             // parameter; ml_ctx is the only path ML_BuildParameters has into
             // it without changing the dispatcher signature.
-            ml_ctx.out_strategy_halt_reason    = &state->cores[slot].strategy_halt_reason;
+            ml_ctx.out_strategy_halt_reason    = &state->nodes[slot].strategy_halt_reason;
             // v5.11.18 main — per-core feature mask. Pointer to the cfg
             // field directly; no copy. Features_PackAll inside
             // ML_BuildParameters reads through this pointer when non-null.
@@ -2621,44 +2621,44 @@ inline void EventLoop_RebuildOneCore(
             // the cfg parser at v5.11.18a defaults to 0xFFFF..F (all
             // features enabled); pointer is non-null but mask = all-on
             // produces bytewise-identical output to pre-v5.11.18.
-            ml_ctx.feature_mask = &resolved_cfg.core_feature_mask[slot];
+            ml_ctx.feature_mask = &resolved_cfg.node_feature_mask[slot];
             // v5.14.9.B.0 — pointer to the per-core slow-path gate cache
-            // populated above by SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE.
+            // populated above by SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE.
             // ML_BuildParameters reads gate predicates via BITMAP_IS_SET.
-            ml_ctx.gate_state = (void*)&state->cores[slot].gate_state;
+            ml_ctx.gate_state = (void*)&state->nodes[slot].gate_state;
             // v5.14.9.B — soft risk degradation ladder factor sink. ML_BuildParameters
-            // writes per-cycle factor; ShardedSnapshot mirrors to PerCoreSnap.
-            ml_ctx.out_confidence_factor = &state->cores[slot].last_confidence_factor;
+            // writes per-cycle factor; ShardedSnapshot mirrors to PerNodeSnap.
+            ml_ctx.out_confidence_factor = &state->nodes[slot].last_confidence_factor;
             // v5.14.1.G — portfolio turnover wire. Pointer to per-core
-            // CoreContext.turnover; ML_BuildParameters' buy-side blend
+            // NodeContext.turnover; ML_BuildParameters' buy-side blend
             // populator pushes top-K mask each cycle. void* in MLBuildContext
             // avoids include cycle (StrategyParameters.hpp doesn't include
             // ControllerEventLoop.hpp). topk read from resolved cfg.
-            ml_ctx.turnover_state = (void*)&state->cores[slot].turnover;
+            ml_ctx.turnover_state = (void*)&state->nodes[slot].turnover;
             ml_ctx.turnover_topk  = resolved_cfg.confidence_turnover_topk;
             // v5.13.0.B — sell-side ML wiring. Reset per-cycle; ML_Build-
             // Parameters writes the blended exit_predictor probability when
             // BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor_count > 0. Slow-path body
             // post-RebuildOneCore reads + acts on the value (fires OMS submit
             // if above cfg.exit_threshold and any positions are open).
-            state->cores[slot].last_exit_prediction       = 0.0;
-            state->cores[slot].last_exit_dominant_horizon = -1;
-            ml_ctx.out_exit_prediction       = &state->cores[slot].last_exit_prediction;
-            ml_ctx.out_exit_dominant_horizon = &state->cores[slot].last_exit_dominant_horizon;
+            state->nodes[slot].last_exit_prediction       = 0.0;
+            state->nodes[slot].last_exit_dominant_horizon = -1;
+            ml_ctx.out_exit_prediction       = &state->nodes[slot].last_exit_prediction;
+            ml_ctx.out_exit_dominant_horizon = &state->nodes[slot].last_exit_dominant_horizon;
             // v5.15.5.A.6 — buy-side per-horizon barrier observability sinks.
             // Reset per-cycle dispatch fields; shadow event counter stays
             // monotonic (don't reset across cycles).
-            state->cores[slot].last_buy_dominant_horizon = -1;
-            state->cores[slot].last_barrier_mode_used    = 0;  // LEGACY default
-            ml_ctx.out_buy_dominant_horizon   = &state->cores[slot].last_buy_dominant_horizon;
-            ml_ctx.out_barrier_mode_used      = &state->cores[slot].last_barrier_mode_used;
+            state->nodes[slot].last_buy_dominant_horizon = -1;
+            state->nodes[slot].last_barrier_mode_used    = 0;  // LEGACY default
+            ml_ctx.out_buy_dominant_horizon   = &state->nodes[slot].last_buy_dominant_horizon;
+            ml_ctx.out_barrier_mode_used      = &state->nodes[slot].last_barrier_mode_used;
             ml_ctx.barrier_shadow_event_count = &state->display_meta[slot].barrier_shadow_event_count;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO
         // cores this just mirrors strategy_id; for AUTO it's the regime-
         // resolved concrete strategy.
-        state->cores[slot].resolved_strategy_id = effective_strategy_id;
+        state->nodes[slot].resolved_strategy_id = effective_strategy_id;
 
         // v5.4.0 Phase 2.1 — Adapt before BuildParameters. Per the strategy
         // contract (StrategyInterface.hpp), Adapt mutates per-core state and
@@ -2681,18 +2681,18 @@ inline void EventLoop_RebuildOneCore(
 
         // v5.15.5.F.4c.3 WIP2c.2 — per-core single-param sig (Class 25 closure).
         // resolved_cfg already merged per-core overrides via ResolveForCore at
-        // slow-path entry; its .cores[slot] reflects the post-resolve view.
+        // slow-path entry; its .nodes[slot] reflects the post-resolve view.
         // poll_interval pre-resolved from global cfg as scalar arg.
         Strategy_BuildParameters(
             effective_strategy_id,
             rolling,
-            &resolved_cfg.cores[slot],
-            state->cores[slot].allocated_balance,
-            &state->cores[slot].pending_params,
+            &resolved_cfg.nodes[slot],
+            state->nodes[slot].allocated_balance,
+            &state->nodes[slot].pending_params,
             rolling_long,
             dispatch_ctx,
-            state->cores[slot].strategy_state,   // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
-            &state->cores[slot].strategy_halt_reason,  // v5.6.2 — dispatcher writes
+            state->nodes[slot].strategy_state,   // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
+            &state->nodes[slot].strategy_halt_reason,  // v5.6.2 — dispatcher writes
                                                        // SHALT_* codes for fee-floor /
                                                        // cost-gate / no-signal paths.
             now_us,  // v5.14.1.B.2 (PARITY-001) — threaded through to ML_BuildParameters
@@ -2710,14 +2710,14 @@ inline void EventLoop_RebuildOneCore(
         // Partials-aware: core's portfolio slot(s) come from the helper
         // (slot N or 2N+0/2N+1 depending on partial_exit_enabled).
         bool slot_active = (state->oms->portfolio.active_bitmap &
-                             Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED))) != 0;
+                             Sharded_NodeSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED))) != 0;
         if (!slot_active) {
-            state->cores[slot].pending_params.ratchet_sl = Money_Zero();
+            state->nodes[slot].pending_params.ratchet_sl = Money_Zero();
             // A19 (.E.0.10): clear ratchet_tp SYMMETRICALLY — a stale TP-ratchet from a prior
             // trade must not leak into the next entry's effective_tp = Money_Max(tp, ratchet_tp)
             // (H22 per-trade purity; the SL side already clears above — the TP side was the
             // missing half, a cross-trade representation leak per representation-migration-completeness.md).
-            state->cores[slot].pending_params.ratchet_tp = Money_Zero();
+            state->nodes[slot].pending_params.ratchet_tp = Money_Zero();
         }
 
         // v5.4.0 Phase 2.2: strategy-specific exit-adjust for cores with
@@ -2738,11 +2738,11 @@ inline void EventLoop_RebuildOneCore(
         //
         // v5.8.3: halt_reason is now a HALT_* enum from FOREACH_HALT_REASON
         // (StrategyInterface.hpp). See registry there for code semantics.
-        state->cores[slot].halt_reason = HALT_OK;
+        state->nodes[slot].halt_reason = HALT_OK;
         // v5.6.2: reset strategy_halt_reason every rebuild. Strategies
         // set this to a SHALT_* code when zero-gating for strategy-
         // internal reasons. SHALT_OK = no veto.
-        state->cores[slot].strategy_halt_reason = SHALT_OK;
+        state->nodes[slot].strategy_halt_reason = SHALT_OK;
 
         // v5.12.1.A.3 — post-flatten recovery refusal. Gated on
         // recovery_until_us > 0 so the common case (no recovery active)
@@ -2758,10 +2758,10 @@ inline void EventLoop_RebuildOneCore(
         // bit is OR'd in; max_age value is unconditional. Hot path's
         // branchless mask check uses these.
         if (BITMAP_IS_SET(config->gate_cfg_flags, MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED)) {
-            state->cores[slot].pending_params.flags
+            state->nodes[slot].pending_params.flags
                 |= GATE_FLAG_STALENESS_ENABLED;
         }
-        state->cores[slot].pending_params.param_max_age_ticks
+        state->nodes[slot].pending_params.param_max_age_ticks
             = config->param_max_age_ticks;
 
         {
@@ -2776,9 +2776,9 @@ inline void EventLoop_RebuildOneCore(
                     // works for buy-above (Momentum) AND buy-below
                     // (DIP/MR) strategies. SHALT_RECOVERY surfaces in
                     // GUI / health log for operator forensics.
-                    state->cores[slot].pending_params.flags
+                    state->nodes[slot].pending_params.flags
                         |= GATE_FLAG_BUY_BLOCKED;
-                    state->cores[slot].strategy_halt_reason = SHALT_RECOVERY;
+                    state->nodes[slot].strategy_halt_reason = SHALT_RECOVERY;
                 } else {
                     // Recovery window elapsed — clear flatten state so
                     // a future staleness event can re-fire. CAS-based;
@@ -2802,10 +2802,10 @@ inline void EventLoop_RebuildOneCore(
         // write for backward compat with buy-below paths and for any
         // downstream code that special-cases the zero threshold.
         auto zero_gate = [&](uint8_t reason) {
-            state->cores[slot].pending_params.bg_price_threshold = Money_Zero();
-            state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
-            if (state->cores[slot].halt_reason == HALT_OK)  // first reason wins
-                state->cores[slot].halt_reason = reason;
+            state->nodes[slot].pending_params.bg_price_threshold = Money_Zero();
+            state->nodes[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
+            if (state->nodes[slot].halt_reason == HALT_OK)  // first reason wins
+                state->nodes[slot].halt_reason = reason;
         };
 
         // Track E.3 (2026-04-26) — book_imbalance veto via flag (not
@@ -2817,9 +2817,9 @@ inline void EventLoop_RebuildOneCore(
         // imbalance recovers Strategy_BuildParameters' fresh `out->flags`
         // assignment naturally drops the BLOCKED bit.
         if (book_imbalance_blocked) {
-            state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
-            if (state->cores[slot].halt_reason == HALT_OK)
-                state->cores[slot].halt_reason = HALT_IMBALANCE;
+            state->nodes[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
+            if (state->nodes[slot].halt_reason == HALT_OK)
+                state->nodes[slot].halt_reason = HALT_IMBALANCE;
         }
 
         // Phase 2.2: per-core budget enforcement. Clamp the strategy's
@@ -2835,16 +2835,16 @@ inline void EventLoop_RebuildOneCore(
         // compare open_notional >= allocated (rather than relying on
         // FPN_SubSat saturating to zero on underflow, which it doesn't).
         {
-            Money alloc       = state->cores[slot].allocated_balance;
-            Money open_n      = state->cores[slot].core_open_notional;
-            Money entry_price = state->cores[slot].pending_params.bg_price_threshold;
+            Money alloc       = state->nodes[slot].allocated_balance;
+            Money open_n      = state->nodes[slot].node_open_notional;
+            Money entry_price = state->nodes[slot].pending_params.bg_price_threshold;
             if (Money_Ge(open_n, alloc)) {
                 // Fully or over-deployed — no slot-room for another entry.
-                // Zero-gate with HALT_CORE_BUDGET. Trade size also clamped
+                // Zero-gate with HALT_NODE_BUDGET. Trade size also clamped
                 // to zero so any downstream consumer of trade_size sees
                 // an honest zero rather than a stale value.
-                state->cores[slot].pending_params.trade_size = Money_Zero();
-                zero_gate(HALT_CORE_BUDGET);
+                state->nodes[slot].pending_params.trade_size = Money_Zero();
+                zero_gate(HALT_NODE_BUDGET);
             } else if (!Money_IsZero(entry_price)) {
                 // Budget remaining is positive — clamp qty to
                 // (budget_remaining / entry_price). Under single-position-
@@ -2854,8 +2854,8 @@ inline void EventLoop_RebuildOneCore(
                 // would land here with partial budget, producing a real clamp.
                 Money budget_remaining = Money_Sub(alloc, open_n);  // > 0 by branch
                 Money max_qty = Money_Div(budget_remaining, entry_price);
-                state->cores[slot].pending_params.trade_size =
-                    Money_Min(state->cores[slot].pending_params.trade_size, max_qty);
+                state->nodes[slot].pending_params.trade_size =
+                    Money_Min(state->nodes[slot].pending_params.trade_size, max_qty);
             }
         }
 
@@ -2873,8 +2873,8 @@ inline void EventLoop_RebuildOneCore(
         // without the unrealized term. enable_mtm_kill_switch=0 forces this
         // realized-only mode regardless of whether current_price was passed.
         {
-            Money alloc     = state->cores[slot].allocated_balance;
-            Money realized  = state->cores[slot].core_realized;
+            Money alloc     = state->nodes[slot].allocated_balance;
+            Money realized  = state->nodes[slot].node_realized;
             Money unrealized = Money_Zero();
             const Money* px_in = (const Money*)current_price;
             // Partials-aware MTM walk: under partials, core c's positions
@@ -2882,7 +2882,7 @@ inline void EventLoop_RebuildOneCore(
             // independent qty). Sum unrealized across both. Without
             // partials, only slot c is walked.
             if (BITMAP_IS_SET(config->risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED) && px_in && !Money_IsZero(*px_in)) {
-                uint16_t mask = Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+                uint16_t mask = Sharded_NodeSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
                 uint16_t bm   = state->oms->portfolio.active_bitmap & mask;
                 while (bm) {
                     int s = __builtin_ctz(bm);
@@ -2895,42 +2895,42 @@ inline void EventLoop_RebuildOneCore(
             Money current_value = Money_Add(alloc, Money_Add(realized, unrealized));
             // Peak ratchet (branchless via FPN_Max). Initialize to alloc on
             // first sight if peak is still zero (first rebuild after init).
-            if (Money_IsZero(state->cores[slot].core_peak_balance)) {
-                state->cores[slot].core_peak_balance = alloc;
+            if (Money_IsZero(state->nodes[slot].node_peak_balance)) {
+                state->nodes[slot].node_peak_balance = alloc;
             }
-            state->cores[slot].core_peak_balance =
-                Money_Max(state->cores[slot].core_peak_balance, current_value);
+            state->nodes[slot].node_peak_balance =
+                Money_Max(state->nodes[slot].node_peak_balance, current_value);
             // Drawdown computation. Skip if peak is zero (defensive — should
             // never happen after the init bump above, but handles a freshly
             // reset state). dd = (peak - current) / peak.
-            Money drop = Money_Sub(state->cores[slot].core_peak_balance, current_value);
+            Money drop = Money_Sub(state->nodes[slot].node_peak_balance, current_value);
             if (Money_Gt(drop, Money_Zero()) &&
-                Money_Gt(state->cores[slot].core_peak_balance, Money_Zero())) {
-                state->cores[slot].core_dd_pct = Money_Div(drop,
-                    state->cores[slot].core_peak_balance);
+                Money_Gt(state->nodes[slot].node_peak_balance, Money_Zero())) {
+                state->nodes[slot].node_dd_pct = Money_Div(drop,
+                    state->nodes[slot].node_peak_balance);
             } else {
-                state->cores[slot].core_dd_pct = Money_Zero();
+                state->nodes[slot].node_dd_pct = Money_Zero();
             }
             // Trip evaluation. Threshold: per-core override if set, else
             // global max_drawdown_pct. Trip ALSO requires drop > min_kill_loss
             // so a tiny allocation doesn't trip on rounding noise.
-            if (!CORE_STATE_FLAG_IS_SET(state->cores[slot], KILL_TRIPPED)) {
-                Money threshold = !Money_IsZero(config->core_max_drawdown_pct[slot])
-                    ? config->core_max_drawdown_pct[slot]
+            if (!NODE_STATE_FLAG_IS_SET(state->nodes[slot], KILL_TRIPPED)) {
+                Money threshold = !Money_IsZero(config->node_max_drawdown_pct[slot])
+                    ? config->node_max_drawdown_pct[slot]
                     : config->max_drawdown_pct;
-                if (Money_Gt(state->cores[slot].core_dd_pct, threshold) &&
+                if (Money_Gt(state->nodes[slot].node_dd_pct, threshold) &&
                     Money_Gt(drop, config->min_kill_loss)) {
-                    CORE_STATE_FLAG_SET(state->cores[slot], KILL_TRIPPED);
-                    state->cores[slot].core_ks_trips_total++;
-                    double dd_pct_d  = Money_ToDouble(state->cores[slot].core_dd_pct) * 100.0;
+                    NODE_STATE_FLAG_SET(state->nodes[slot], KILL_TRIPPED);
+                    state->nodes[slot].node_ks_trips_total++;
+                    double dd_pct_d  = Money_ToDouble(state->nodes[slot].node_dd_pct) * 100.0;
                     double drop_d    = Money_ToDouble(drop);
-                    double peak_d    = Money_ToDouble(state->cores[slot].core_peak_balance);
+                    double peak_d    = Money_ToDouble(state->nodes[slot].node_peak_balance);
                     double current_d = Money_ToDouble(current_value);
                     fprintf(stderr, "[sharded] CORE KILL: core %d tripped — "
                             "dd=%.2f%% drop=$%.2f peak=$%.2f current=$%.2f\n",
                             slot, dd_pct_d, drop_d, peak_d, current_d);
                     // 2A — alert via Notify subsystem alongside stderr log.
-                    // Per-kind cooldown (NK_CORE_KILL_TRIP=10) collapses
+                    // Per-kind cooldown (NK_NODE_KILL_TRIP=10) collapses
                     // back-to-back trips on the same core to one alert per
                     // window. Backtest leaves g_notify null → no-op.
                     if (g_notify) {
@@ -2940,19 +2940,19 @@ inline void EventLoop_RebuildOneCore(
                                  "peak=$%.2f current=$%.2f. Entries halted on "
                                  "this core until manual reset.",
                                  slot, dd_pct_d, drop_d, peak_d, current_d);
-                        Notify_Send(g_notify, NOTIFY_ALERT, NK_CORE_KILL_TRIP,
+                        Notify_Send(g_notify, NOTIFY_ALERT, NK_NODE_KILL_TRIP,
                                     "Per-core kill switch tripped", body);
                     }
                 }
             }
-            if (CORE_STATE_FLAG_IS_SET(state->cores[slot], KILL_TRIPPED)) {
-                zero_gate(HALT_CORE_KILL);
+            if (NODE_STATE_FLAG_IS_SET(state->nodes[slot], KILL_TRIPPED)) {
+                zero_gate(HALT_NODE_KILL);
             }
         }
 
         // SL COOLDOWN: decrement counter; if still active, zero-gate.
-        if (state->cores[slot].sl_cooldown_remaining > 0) {
-            state->cores[slot].sl_cooldown_remaining--;
+        if (state->nodes[slot].sl_cooldown_remaining > 0) {
+            state->nodes[slot].sl_cooldown_remaining--;
             zero_gate(HALT_SL_COOLDOWN);
         }
         // SPACING: zero-gate if proposed entry too close to last entry.
@@ -2969,13 +2969,13 @@ inline void EventLoop_RebuildOneCore(
             // Equivalent: current >= max / spike_threshold.
             // We check the latest volume_avg as the "current" representative.
             if (FPN_GreaterThanOrEqual(rolling->volume_avg, ratio_thresh)) {
-                // A24 (.E.0.10, D-211 option c): relax the per-NODE slice cores[slot] — the
+                // A24 (.E.0.10, D-211 option c): relax the per-NODE slice nodes[slot] — the
                 // gate Strategy_SpacingOk (:2980) + the GUI diag (:2974, A32 display↔exec
-                // inversion) both read spacing_cfg.cores[slot]. Writing the flat field left
+                // inversion) both read spacing_cfg.nodes[slot]. Writing the flat field left
                 // both the gate inert AND the diag lying. spacing_cfg is the scratch copy
                 // that isolates the relaxation to this spacing check (kept deliberately).
-                spacing_cfg.cores[slot].spacing_multiplier = FPN_Mul(
-                    spacing_cfg.cores[slot].spacing_multiplier,
+                spacing_cfg.nodes[slot].spacing_multiplier = FPN_Mul(
+                    spacing_cfg.nodes[slot].spacing_multiplier,
                     resolved_cfg.spike_spacing_reduction);
             }
         }
@@ -2983,18 +2983,18 @@ inline void EventLoop_RebuildOneCore(
         // Single-source rule — these are the SAME values
         // Strategy_SpacingOk reads internally, exposed for display.
         {
-            Money a = state->cores[slot].pending_params.bg_price_threshold;
-            Money b = state->cores[slot].last_entry_price;
+            Money a = state->nodes[slot].pending_params.bg_price_threshold;
+            Money b = state->nodes[slot].last_entry_price;
             Money abs_dist = Money_Ge(a, b)
                 ? Money_Sub(a, b) : Money_Sub(b, a);
             FPN_Binary<F> min_dist = FPN_Mul(rolling->price_stddev,
-                                       spacing_cfg.cores[slot].spacing_multiplier);  // A24: read the slice the gate reads (A32 display↔exec fix)
+                                       spacing_cfg.nodes[slot].spacing_multiplier);  // A24: read the slice the gate reads (A32 display↔exec fix)
             state->display_meta[slot].diag_spacing_actual = Money_ToBinary(abs_dist);  // display mirror stays binary
             state->display_meta[slot].diag_spacing_floor  = min_dist;
         }
-        if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
-                                 state->cores[slot].last_entry_price,
-                                 rolling, &spacing_cfg.cores[slot])) {
+        if (!Strategy_SpacingOk(state->nodes[slot].pending_params.bg_price_threshold,
+                                 state->nodes[slot].last_entry_price,
+                                 rolling, &spacing_cfg.nodes[slot])) {
             zero_gate(HALT_SPACING);
         }
         // VWAP gate: forces entries below VWAP — buy retracements, not pumps.
@@ -3003,9 +3003,9 @@ inline void EventLoop_RebuildOneCore(
                 FPN_Mul(rolling->vwap, resolved_cfg.vwap_offset));
             // v5.6.3: capture both sides for GUI.
             state->display_meta[slot].diag_vwap_actual    =
-                Money_ToBinary(state->cores[slot].pending_params.bg_price_threshold);
+                Money_ToBinary(state->nodes[slot].pending_params.bg_price_threshold);
             state->display_meta[slot].diag_vwap_threshold = vwap_threshold;
-            if (Money_Gt(state->cores[slot].pending_params.bg_price_threshold,
+            if (Money_Gt(state->nodes[slot].pending_params.bg_price_threshold,
                                  Money_FromBinary(vwap_threshold))) {
                 zero_gate(HALT_VWAP);
             }
@@ -3053,13 +3053,13 @@ inline void EventLoop_RebuildOneCore(
             // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
             // (UNINDEXED-GLOBAL closure for display↔execution divergence at fee-floor diag).
             // resolved_cfg.fee_rate_taker stays at GLOBAL post-ResolveForCore (fee_rate_taker NOT
-            // in PER_CORE_OVERRIDE_FIELDS at ControllerConfig.hpp:119); per-core value lives at
-            // resolved_cfg.cores[slot].fee_rate_taker. Sister-pattern at line 3061 (Strategy_TpFloor)
-            // correctly uses &resolved_cfg.cores[slot] — proven right shape.
-            Money fee_taker = !Money_IsZero(resolved_cfg.cores[slot].fee_rate_taker)
-                ? resolved_cfg.cores[slot].fee_rate_taker : resolved_cfg.cores[slot].fee_rate;
+            // in PER_NODE_OVERRIDE_FIELDS at ControllerConfig.hpp:119); per-core value lives at
+            // resolved_cfg.nodes[slot].fee_rate_taker. Sister-pattern at line 3061 (Strategy_TpFloor)
+            // correctly uses &resolved_cfg.nodes[slot] — proven right shape.
+            Money fee_taker = !Money_IsZero(resolved_cfg.nodes[slot].fee_rate_taker)
+                ? resolved_cfg.nodes[slot].fee_rate_taker : resolved_cfg.nodes[slot].fee_rate;
             state->display_meta[slot].diag_tp_pct_actual =
-                Money_ToBinary(state->cores[slot].pending_params.tp_pct);
+                Money_ToBinary(state->nodes[slot].pending_params.tp_pct);
             state->display_meta[slot].diag_tp_pct_floor =
                 Money_ToBinary(Money_Mul(fee_taker, Money_FromInt(3)));
         }
@@ -3068,16 +3068,16 @@ inline void EventLoop_RebuildOneCore(
         // so fee_floor_mult=5 means TP must clear ~2.5× round-trip fees + margin.
         // No-op when bg_price_threshold is zero (no entry), or
         // fee_floor_mult/fee_rate is zero.
-        if (!Money_IsZero(state->cores[slot].pending_params.bg_price_threshold)) {
-            Money entry = state->cores[slot].pending_params.bg_price_threshold;
-            Money current_tp = state->cores[slot].pending_params.sg_take_profit_price;
+        if (!Money_IsZero(state->nodes[slot].pending_params.bg_price_threshold)) {
+            Money entry = state->nodes[slot].pending_params.bg_price_threshold;
+            Money current_tp = state->nodes[slot].pending_params.sg_take_profit_price;
             // tp_amount = current_tp - entry; if it's negative that's already broken
             // (means strategy set TP below entry — leave alone, it's strategy's bug).
             if (Money_Gt(current_tp, entry)) {
                 Money tp_amount = Money_Sub(current_tp, entry);
-                Money floored = Strategy_TpFloor(entry, tp_amount, &resolved_cfg.cores[slot]);
+                Money floored = Strategy_TpFloor(entry, tp_amount, &resolved_cfg.nodes[slot]);
                 if (Money_Gt(floored, tp_amount)) {
-                    state->cores[slot].pending_params.sg_take_profit_price =
+                    state->nodes[slot].pending_params.sg_take_profit_price =
                         Money_Add(entry, floored);
                 }
             }
@@ -3085,10 +3085,10 @@ inline void EventLoop_RebuildOneCore(
         // Mirror the pack's TP/SL/qty into the controller-side intended_*
         // fields so OnEvent uses the freshly computed values when the next
         // entry fires. This ties the strategy output to the entry handler.
-        state->cores[slot].intended_tp  = state->cores[slot].pending_params.sg_take_profit_price;
-        state->cores[slot].intended_sl  = state->cores[slot].pending_params.sg_stop_loss_price;
-        state->cores[slot].intended_qty = state->cores[slot].pending_params.trade_size;
-        CORE_STATE_FLAG_SET(state->cores[slot], DIRTY);
+        state->nodes[slot].intended_tp  = state->nodes[slot].pending_params.sg_take_profit_price;
+        state->nodes[slot].intended_sl  = state->nodes[slot].pending_params.sg_stop_loss_price;
+        state->nodes[slot].intended_qty = state->nodes[slot].pending_params.trade_size;
+        NODE_STATE_FLAG_SET(state->nodes[slot], DIRTY);
 
         // v5.6.6: gate-state edge-trigger health log emit. Pack the four
         // hot-path-relevant fields into a single uint16_t and compare
@@ -3103,12 +3103,12 @@ inline void EventLoop_RebuildOneCore(
         //   bit   8     : BUY_BLOCKED
         //   bit   9     : permission
         if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
-            uint8_t  hr   = state->cores[slot].halt_reason          & 0x0F;
-            uint8_t  shr  = state->cores[slot].strategy_halt_reason & 0x0F;
-            uint8_t  bb   = (state->cores[slot].pending_params.flags
+            uint8_t  hr   = state->nodes[slot].halt_reason          & 0x0F;
+            uint8_t  shr  = state->nodes[slot].strategy_halt_reason & 0x0F;
+            uint8_t  bb   = (state->nodes[slot].pending_params.flags
                               & GATE_FLAG_BUY_BLOCKED) ? 1 : 0;
-            uint8_t  perm = state->cores[slot].core
-                ? __atomic_load_n(&state->cores[slot].core->permission,
+            uint8_t  perm = state->nodes[slot].core
+                ? __atomic_load_n(&state->nodes[slot].core->permission,
                                    __ATOMIC_ACQUIRE)
                 : 0;
             uint16_t packed = (uint16_t)(hr | (shr << 4)
@@ -3119,7 +3119,7 @@ inline void EventLoop_RebuildOneCore(
                     "gate=%g price=%g",
                     (unsigned)hr, (unsigned)shr,
                     (unsigned)bb, (unsigned)perm,
-                    Money_ToDouble(state->cores[slot].pending_params.bg_price_threshold),
+                    Money_ToDouble(state->nodes[slot].pending_params.bg_price_threshold),
                     FPN_ToDouble(rolling->price_avg));
                 state->display_meta[slot].prev_gate_log_state = packed;
             }
@@ -3128,8 +3128,8 @@ inline void EventLoop_RebuildOneCore(
         // v5.12.2.B — record the full-rebuild bookkeeping so the next
         // call's lazy predicate can compare against it. Only reaches here
         // when we DIDN'T take the lazy-skip path (= a real rebuild ran).
-        if (state && slot >= 0 && slot < MAX_EXECUTION_CORES) {
-            auto* sst_lazy = state->cores[slot].slow_state;
+        if (state && slot >= 0 && slot < MAX_EXECUTION_NODES) {
+            auto* sst_lazy = state->nodes[slot].slow_state;
             if (sst_lazy && rolling) {
                 sst_lazy->us_at_last_rebuild = now_us;
                 sst_lazy->price_at_last_rebuild = rolling->price_avg;
@@ -3163,15 +3163,15 @@ inline int EventLoop_PushParameters(EventLoopState<F>* state,
     // back-compat for legacy + test callers (warmup sentinel; gate inert).
     int pushed = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
-        if (!CORE_STATE_FLAG_IS_SET(state->cores[slot], DIRTY)) continue;
-        ExecutionCore<F>* core = state->cores[slot].core;
+        if (!NODE_STATE_FLAG_IS_SET(state->nodes[slot], DIRTY)) continue;
+        ExecutionCore<F>* core = state->nodes[slot].core;
         if (core == nullptr) {
-            CORE_STATE_FLAG_CLR(state->cores[slot], DIRTY);
+            NODE_STATE_FLAG_CLR(state->nodes[slot], DIRTY);
             continue;
         }
-        ExecutionCore_SetParameters(core, state->cores[slot].pending_params,
+        ExecutionCore_SetParameters(core, state->nodes[slot].pending_params,
                                      publish_tick);
-        CORE_STATE_FLAG_CLR(state->cores[slot], DIRTY);
+        NODE_STATE_FLAG_CLR(state->nodes[slot], DIRTY);
         ++pushed;
     }
     return pushed;
@@ -3203,7 +3203,7 @@ inline void EventLoopState_ConfigureKillSwitch(EventLoopState<F>* state,
 template <unsigned F>
 inline void EventLoop_ClearAllPermissions(EventLoopState<F>* state) {
     for (int slot = 0; slot < state->registered_count; ++slot) {
-        ExecutionCore<F>* core = state->cores[slot].core;
+        ExecutionCore<F>* core = state->nodes[slot].core;
         if (core) ExecutionCore_SetPermission(core, 0);
     }
 }
@@ -3320,24 +3320,24 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
                                        const ControllerConfig<F>& cfg,
                                        uint64_t now_tick,
                                        double current_price,
-                                       int core_id) {
+                                       int node_id) {
     // Build per-core slot mask: slot c (partials off) or slots 2c+0..1 (on).
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
-        : (uint16_t)(1u << core_id);
+        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
+        : (uint16_t)(1u << node_id);
     uint16_t bm = (uint16_t)(oms->portfolio.active_bitmap & my_mask);
 
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
 
-        // Note: state->cores[] is indexed by core_id, not slot. With partials,
-        // both leg-A (slot 2c) and leg-B (slot 2c+1) share the same CoreContext
-        // at index core_id. last_entry_tick is stamped only on leg-A entries
-        // by design (per-trade signal), so checking via core_id is correct.
-        uint64_t entry_t = state->cores[core_id].last_entry_tick;
+        // Note: state->nodes[] is indexed by node_id, not slot. With partials,
+        // both leg-A (slot 2c) and leg-B (slot 2c+1) share the same NodeContext
+        // at index node_id. last_entry_tick is stamped only on leg-A entries
+        // by design (per-trade signal), so checking via node_id is correct.
+        uint64_t entry_t = state->nodes[node_id].last_entry_tick;
         if (entry_t == 0) continue;  // never stamped (shouldn't happen if active)
         if (entry_t > now_tick) {
             // Snapshot-drift guard. See "Snapshot Tick-Counter Drift"
@@ -3345,17 +3345,17 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
             fprintf(stderr,
                 "[time-exit] core %d slot %d: stale entry_tick from snapshot "
                 "(entry_t=%llu > now_tick=%llu); resetting.\n",
-                core_id, slot, (unsigned long long)entry_t,
+                node_id, slot, (unsigned long long)entry_t,
                 (unsigned long long)now_tick);
-            state->cores[core_id].last_entry_tick = now_tick;
+            state->nodes[node_id].last_entry_tick = now_tick;
             continue;
         }
         uint64_t elapsed = now_tick - entry_t;
         // v5.12.3.C — per-core override. 0 = use global; >0 = override.
         // Branchless mask-select would obscure intent; slow-path branch is
         // negligible (~1ns per cycle).
-        uint32_t max_hold = cfg.core_time_exit_ticks[core_id];
-        if (max_hold == 0) max_hold = cfg.cores[core_id].max_hold_ticks;
+        uint32_t max_hold = cfg.node_time_exit_ticks[node_id];
+        if (max_hold == 0) max_hold = cfg.nodes[node_id].max_hold_ticks;
         if (elapsed < max_hold) continue;
 
         double entry_d = Money_ToDouble(oms->portfolio.positions[slot].entry_price);
@@ -3370,12 +3370,12 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
         Money qty       = oms->portfolio.positions[slot].quantity;
         Money price_fpn = Money{ money_from_double_payload(current_price) };  // D-103 ingress bridge
         tt::OMS_PushExitForSlot(oms, (int16_t)slot,
-                                qty, state->cores[core_id].strategy_id, price_fpn,
-                                /*leg*/(uint8_t)0, &cfg.cores[core_id]);
+                                qty, state->nodes[node_id].strategy_id, price_fpn,
+                                /*leg*/(uint8_t)0, &cfg.nodes[node_id]);
 
         fprintf(stderr,
             "[time-exit] core %d slot %d: held %lu ticks, gain %.3f%%\n",
-            core_id, slot, (unsigned long)elapsed, gain_pct * 100.0);
+            node_id, slot, (unsigned long)elapsed, gain_pct * 100.0);
     }
 }
 
@@ -3412,11 +3412,11 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
 template <unsigned F>
 inline int EventLoop_FlattenAll(EventLoopState<F>* state,
                                  OrderManagerState<F>* oms,
-                                 const PerCoreCfg<F>* cores,
+                                 const PerNodeCfg<F>* nodes,
                                  double current_price,
                                  int reason_code) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1: `cores` REQUIRED — per-core array pointer (caller passes
-    // `cfg.cores`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core array."
+    // `cfg.nodes`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core array."
     int submitted = 0;
     uint16_t bm = oms->portfolio.active_bitmap;
     // A3 (.E.0.10): snapshot the requested count BEFORE the loop consumes `bm`, so a
@@ -3439,7 +3439,7 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         // shift instruction; no cmov, no conditional move at all. Same semantic, tighter ALU.
         int logical_core = slot >> (uint32_t)partial_on;
         Money qty = oms->portfolio.positions[slot].quantity;
-        uint8_t sid = state->cores[logical_core].strategy_id;
+        uint8_t sid = state->nodes[logical_core].strategy_id;
         // A8 (.E.0.10): the leg index is meaningful ONLY under partials (even slot = leg A,
         // odd = leg B); without partials there is no leg, so gate on partial_on (branchless
         // ALU; 0 or 1). NOTE: corrects the bare `slot&1` first proposed for A8 — that would
@@ -3453,7 +3453,7 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         // prior unconditional `submitted++` reported it as flattened while the leg stayed
         // OPEN on the emergency path.
         submitted += (int)tt::OMS_PushExitForSlot(oms, (int16_t)slot, qty, sid, price_fpn,
-                                                  leg, &cores[logical_core]);
+                                                  leg, &nodes[logical_core]);
     }
     if (submitted < requested) {
         // A3 (.E.0.10): the durable HONEST-COUNT half of the half-flatten fix — make the
@@ -3553,7 +3553,7 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
         (double)gap_us / 1.0e6,
         cfg.ws_dead_time_flatten_threshold_secs,
         cfg.recovery_delay_secs);
-    return EventLoop_FlattenAll(state, state->oms, cfg.cores, current_price,
+    return EventLoop_FlattenAll(state, state->oms, cfg.nodes, current_price,
                                  /*reason*/1);
 }
 
@@ -3611,25 +3611,25 @@ inline int EventLoop_TryClearRecovery(OrderManagerState<F>* oms,
 //======================================================================================================
 // v4.7.38 (Phase C.1): per-core helper. Caller-checked preconditions.
 // Implicitly fixes a pre-existing bug where the original walked
-// active_bitmap by slot but indexed state->cores[slot] (per-core array) —
+// active_bitmap by slot but indexed state->nodes[slot] (per-core array) —
 // under partials, slot 1 (core 0's leg B) wrongly read/wrote core 1's
-// pending_params. OneCore correctly uses core_id for cores[] indexing
+// pending_params. OneCore correctly uses node_id for nodes[] indexing
 // while still iterating per-slot for portfolio.positions[].
 template <unsigned F, unsigned W>
 inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
                                                  const ControllerConfig<F>& cfg,
                                                  const RollingStats<F, W>& rolling,
                                                  double current_price,
-                                                 int core_id) {
+                                                 int node_id) {
     double stddev_d     = FPN_ToDouble(rolling.price_stddev);
-    double trail_dist_d = stddev_d * FPN_ToDouble(cfg.cores[core_id].sl_trail_mult);
-    double hold_thresh  = FPN_ToDouble(cfg.cores[core_id].tp_hold_score);
+    double trail_dist_d = stddev_d * FPN_ToDouble(cfg.nodes[node_id].sl_trail_mult);
+    double hold_thresh  = FPN_ToDouble(cfg.nodes[node_id].tp_hold_score);
 
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
-        : (uint16_t)(1u << core_id);
+        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
+        : (uint16_t)(1u << node_id);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     // v5.1.7: fee-floor on the ratchet. The trailing-SL ratchet writes
@@ -3641,12 +3641,12 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
     // to guarantee any SG-fired exit clears fees with at least 1× fee_rate
     // of margin.
     // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker (UNINDEXED-GLOBAL closure).
-    // cfg.fee_rate_taker is GLOBAL; per-core consumers MUST read cfg.cores[core_id].fee_rate_taker.
-    // H20 branchless: pre-resolve core_cfg ref (single array index via CSE) + ternary select (cmov-lowerable).
-    // Sister-canonical: StrategyParameters.hpp:1762 (core_cfg->X pattern).
-    const auto& core_cfg = cfg.cores[core_id];
-    double fee_taker_d = Money_ToDouble(!Money_IsZero(core_cfg.fee_rate_taker)
-        ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
+    // cfg.fee_rate_taker is GLOBAL; per-core consumers MUST read cfg.nodes[node_id].fee_rate_taker.
+    // H20 branchless: pre-resolve node_cfg ref (single array index via CSE) + ternary select (cmov-lowerable).
+    // Sister-canonical: StrategyParameters.hpp:1762 (node_cfg->X pattern).
+    const auto& node_cfg = cfg.nodes[node_id];
+    double fee_taker_d = Money_ToDouble(!Money_IsZero(node_cfg.fee_rate_taker)
+        ? node_cfg.fee_rate_taker : node_cfg.fee_rate);
     double fee_floor_pct = 3.0 * fee_taker_d;
 
     while (bm) {
@@ -3667,12 +3667,12 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
         }
 
         // Note: pending_params is per-CORE (one queue per core). Both legs
-        // share it under partials. Index via core_id, not slot.
+        // share it under partials. Index via node_id, not slot.
         Money new_ratchet = Money{ money_from_double_payload(new_ratchet_d) };
-        Money existing    = state->cores[core_id].pending_params.ratchet_sl;
+        Money existing    = state->nodes[node_id].pending_params.ratchet_sl;
         if (Money_Gt(new_ratchet, existing)) {
-            state->cores[core_id].pending_params.ratchet_sl = new_ratchet;
-            CORE_STATE_FLAG_SET(state->cores[core_id], DIRTY);  // force push next cycle
+            state->nodes[node_id].pending_params.ratchet_sl = new_ratchet;
+            NODE_STATE_FLAG_SET(state->nodes[node_id], DIRTY);  // force push next cycle
         }
     }
 }
@@ -3698,12 +3698,12 @@ template <unsigned F>
 inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
                                                 const ControllerConfig<F>& cfg,
                                                 double current_price,
-                                                int core_id) {
+                                                int node_id) {
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
-        : (uint16_t)(1u << core_id);
+        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
+        : (uint16_t)(1u << node_id);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     // Net-profit threshold: round-trip taker fees (entry + exit). Below
@@ -3711,10 +3711,10 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
     // fee floor on the ratchet_sl prevents that, but skipping the math
     // when gain_pct < 2*fee saves the FPN_FromDouble + compare per cycle.
     // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker (UNINDEXED-GLOBAL closure).
-    // H20 branchless: pre-resolve core_cfg ref + ternary select (sister to HIGH-1 above + StrategyParameters.hpp:1762).
-    const auto& core_cfg = cfg.cores[core_id];
-    double fee_taker_d = Money_ToDouble(!Money_IsZero(core_cfg.fee_rate_taker)
-        ? core_cfg.fee_rate_taker : core_cfg.fee_rate);
+    // H20 branchless: pre-resolve node_cfg ref + ternary select (sister to HIGH-1 above + StrategyParameters.hpp:1762).
+    const auto& node_cfg = cfg.nodes[node_id];
+    double fee_taker_d = Money_ToDouble(!Money_IsZero(node_cfg.fee_rate_taker)
+        ? node_cfg.fee_rate_taker : node_cfg.fee_rate);
     double net_profit_threshold = 2.0 * fee_taker_d;
     double fee_floor_pct        = 3.0 * fee_taker_d;
 
@@ -3730,10 +3730,10 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
         // pending_params.ratchet_sl is max-only; if trailing-SL already
         // proposed a higher floor (gain > tp_hold_score path), that wins.
         Money breakeven_sl = Money{ money_from_double_payload(entry_d * (1.0 - fee_floor_pct)) };
-        Money existing     = state->cores[core_id].pending_params.ratchet_sl;
+        Money existing     = state->nodes[node_id].pending_params.ratchet_sl;
         if (Money_Gt(breakeven_sl, existing)) {
-            state->cores[core_id].pending_params.ratchet_sl = breakeven_sl;
-            CORE_STATE_FLAG_SET(state->cores[core_id], DIRTY);
+            state->nodes[node_id].pending_params.ratchet_sl = breakeven_sl;
+            NODE_STATE_FLAG_SET(state->nodes[node_id], DIRTY);
         }
     }
 }
@@ -3744,9 +3744,9 @@ inline int EventLoop_Unpause(EventLoopState<F>* state) {
     BITMAP_CLR(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
     int resumed = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
-        ExecutionCore<F>* core = state->cores[slot].core;
+        ExecutionCore<F>* core = state->nodes[slot].core;
         if (!core) continue;
-        if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
+        if (state->nodes[slot].strategy_id == STRATEGY_NONE) continue;
         ExecutionCore_SetPermission(core, 1);
         ++resumed;
     }

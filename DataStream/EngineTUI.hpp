@@ -31,7 +31,7 @@
 #include "../CoreFrameworks/SPSCRing.hpp"  // v5.0.3: SPSCRing_Depth for Q-depth display
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
-#include "../CoreFrameworks/CoreLatencyStats.hpp"
+#include "../CoreFrameworks/NodeLatencyStats.hpp"
 #include <fcntl.h>
 #include <sys/ioctl.h>
 
@@ -940,11 +940,11 @@ struct TUISnapshot {
     uint64_t oms_log_writer_realloc_failed;  // realloc failures inside async writer thread (legacy — should stay 0 post-v5.11.5.C)
     uint64_t oms_log_full_drops;             // v5.11.5.D — events dropped because mmap'd capacity exhausted (parity-check J.1)
     // Phase 14: per-core latency stats. Populated only when engine_mode ==
-    // sharded AND CoreLatencyStats are enabled. Display panel renders only
+    // sharded AND NodeLatencyStats are enabled. Display panel renders only
     // when sharded_mode_active is set.
     int sharded_mode_active;       // 1 = sharded engine running, 0 = legacy
     int partial_exit_enabled;      // 1 = paired-leg geometry (slot 2c+leg)
-    int per_core_count;            // number of cores actively reporting
+    int per_node_count;            // number of cores actively reporting
     // v5.0.2 (Engine Topology): system + thread layout for the GUI
     // Engine Topology panel. Populated once at boot in EngineSharded_Run
     // (values are static after thread spawn).
@@ -953,7 +953,7 @@ struct TUISnapshot {
     int16_t nproc;                 // sysconf(_SC_NPROCESSORS_ONLN)
     int16_t slow_path_pin_offset;  // raw cfg value (-1 disabled, 0 auto, >0 explicit)
     // ─────────────────────────────────────────────────────────────────
-    // PerCoreSnap field-init discipline (v5.9.2c)
+    // PerNodeSnap field-init discipline (v5.9.2c)
     // ─────────────────────────────────────────────────────────────────
     // Adding a new field here requires updating BOTH places:
     //
@@ -974,11 +974,11 @@ struct TUISnapshot {
     //
     // Sentinel test below in tests/controller_test.cpp v5.9.2c
     // EXTENSIBILITY block exercises the populator end-to-end with a
-    // synthesized CoreContext + asserts representative fields land
+    // synthesized NodeContext + asserts representative fields land
     // correctly. This catches "added field but forgot populator" at
     // PR time rather than runtime.
     // ─────────────────────────────────────────────────────────────────
-    struct PerCoreSnap {
+    struct PerNodeSnap {
         // Hot-path latency (per-tick gate eval cycles).
         uint64_t samples;
         double   min_ns;
@@ -1004,7 +1004,7 @@ struct TUISnapshot {
                                         // 2=vwap, 3=long-slope, 4=vol-delta, 5=min-stddev,
                                         // 6=sl-cooldown, 7=warmup, 8=core-budget,
                                         // 9=core-kill, 10=imbalance — v5.6.0 added 10).
-                                        // Source: CoreContext::halt_reason. Names array
+                                        // Source: NodeContext::halt_reason. Names array
                                         // in DashboardPanels.hpp must stay in sync; bound
                                         // check is sizeof(halt_names)/sizeof(halt_names[0]).
         uint8_t  strategy_halt_reason; // v5.6.2: strategy-internal halt reason. Codes
@@ -1022,7 +1022,7 @@ struct TUISnapshot {
         // bitmap (TECH_DEBT-013 candidate (3) close). Read via:
         //   STATE_FLAG_IS_SET(pc, PERMISSION_ALLOWED)   — entries allowed
         //   STATE_FLAG_IS_SET(pc, BITMAP_CONSISTENT)    — display↔execution invariant
-        // See MemHeaders/PerCoreStateFlagsRegistry.hpp for full inventory.
+        // See MemHeaders/PerNodeStateFlagsRegistry.hpp for full inventory.
         uint32_t sl_cooldown_remaining;// v4.0.4: per-core SL cooldown counter
         double   buy_gate_price;       // current buy gate threshold (for chart overlay)
         double   bg_volume_threshold;  // v5.6.1: cached_params.bg_volume_threshold —
@@ -1117,8 +1117,8 @@ struct TUISnapshot {
         // candidate (3) close). 7 bits today (PERMISSION_ALLOWED,
         // BITMAP_CONSISTENT, GATE_BUY_ABOVE, IS_ML, ML_MODEL_LOADED,
         // STRATEGY_EXPLICITLY_SET, LADDER_BOTTOM_HIT). Adding a new bit:
-        // 1 row to FOREACH_PER_CORE_STATE_FLAG in
-        // MemHeaders/PerCoreStateFlagsRegistry.hpp.
+        // 1 row to FOREACH_PER_NODE_STATE_FLAG in
+        // MemHeaders/PerNodeStateFlagsRegistry.hpp.
         // Read via STATE_FLAG_IS_SET(pc, NAME); set via STATE_FLAG_SET / CLR.
         uint16_t state_flags;                // BIT_FLAG entries (up to 16 today; 7 used)
         double   ml_last_threshold;          // ml_buy_threshold at last decision
@@ -1150,31 +1150,31 @@ struct TUISnapshot {
         uint8_t  cfg_drift_tier2_count;  // hard_block, bandit, fees, hyperparams, build_flags
         uint8_t  cfg_drift_strict_refused; // 1 = Tier 1 + strict mode
         // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
-        // CoreContext::core_realized / core_wins / core_losses / core_fees.
+        // NodeContext::node_realized / node_wins / node_losses / node_fees.
         // The aggregate equals oms->realized_pnl modulo timing (snapshot
         // taken between updates can show transient skew).
-        double   core_realized;        // net P&L from this core's exits
-        double   core_fees;            // fees paid by this core's fills
-        double   core_allocated;       // capital share (cores[i].allocated_balance)
-        uint32_t core_wins;            // exit count with net > 0
-        uint32_t core_losses;          // exit count with net <= 0
-        uint32_t core_open_positions;  // entries_processed - exits_processed
+        double   node_realized;        // net P&L from this core's exits
+        double   node_fees;            // fees paid by this core's fills
+        double   node_allocated;       // capital share (nodes[i].allocated_balance)
+        uint32_t node_wins;            // exit count with net > 0
+        uint32_t node_losses;          // exit count with net <= 0
+        uint32_t node_open_positions;  // entries_processed - exits_processed
         // Phase 2.1: per-core open notional (sum of entry_price × qty for
         // open positions). Tracks how much of allocated_balance is currently
         // deployed. Phase 2.2 uses (allocated - open_notional) as the
         // sizing budget for new entries.
-        double   core_open_notional;   // raw notional of open positions
-        double   core_budget_used_pct; // open_notional / allocated × 100
+        double   node_open_notional;   // raw notional of open positions
+        double   node_budget_used_pct; // open_notional / allocated × 100
         // Phase 3: per-core kill switch state for the Risk panel
-        double   core_peak_balance;    // peak watermark (allocated + realized + MTM)
-        double   core_dd_pct;          // current drawdown fraction (0..1)
-        uint32_t core_ks_trips_total;  // historical trip count
-        // v5.15.1 — core_kill_tripped + drift_breached + drift_kill_tripped
+        double   node_peak_balance;    // peak watermark (allocated + realized + MTM)
+        double   node_dd_pct;          // current drawdown fraction (0..1)
+        uint32_t node_ks_trips_total;  // historical trip count
+        // v5.15.1 — node_kill_tripped + drift_breached + drift_kill_tripped
         // MIGRATED to state_flags bitmap (TECH_DEBT-028; matches cohort
-        // homogeneity rule). Read via STATE_FLAG_IS_SET(pc, CORE_KILL_TRIPPED)
+        // homogeneity rule). Read via STATE_FLAG_IS_SET(pc, NODE_KILL_TRIPPED)
         // / STATE_FLAG_IS_SET(pc, DRIFT_BREACHED) / STATE_FLAG_IS_SET(pc,
         // DRIFT_KILL_TRIPPED). drift-kill vs MTM-kill vs manual-kill all
-        // set CORE_KILL_TRIPPED at snapshot; DRIFT_KILL_TRIPPED distinguishes
+        // set NODE_KILL_TRIPPED at snapshot; DRIFT_KILL_TRIPPED distinguishes
         // the drift sub-case (auto_kill_on_drift triggered).
         uint16_t drift_n_samples;      // current ic_samples count (0..256)
         double   drift_avg_ic;         // live-computed avg IC over the ring
@@ -1256,11 +1256,11 @@ struct TUISnapshot {
         // registry). Drift bits + tooltips give enough operator signal today.
         uint64_t handle_training_timestamp_us;                    // 8 B (representative role; 0 if no timestamp)
     };
-    PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
+    PerNodeSnap per_node[16];      // up to MAX_EXECUTION_NODES
 };
 
 // ───────────────────────────────────────────────────────────────────────────
-// v5.14.10.0 — PerCoreSnap layout discipline (per-snapshot-cluster-layout-pattern.md)
+// v5.14.10.0 — PerNodeSnap layout discipline (per-snapshot-cluster-layout-pattern.md)
 // ───────────────────────────────────────────────────────────────────────────
 //
 // Compile-time enforcement that the bandit telemetry cluster starts on a
@@ -1272,12 +1272,12 @@ struct TUISnapshot {
 //   2. Add a static_assert here mirroring this pattern
 //   3. Update per-snapshot-cluster-layout-pattern.md "Reference applications"
 //
-// Substantial close of TECH_DEBT-011 (PerCoreSnap layout discipline).
+// Substantial close of TECH_DEBT-011 (PerNodeSnap layout discipline).
 // Future ships will apply the same pattern to other clusters (ML
 // observability, gate diagnostics, slow-path observability) per the
 // DESIGN_SPECS doc; remaining clusters tracked as deferred items.
-static_assert(offsetof(TUISnapshot::PerCoreSnap, ensemble_active) % 64 == 0,
-    "v5.14.10.0: bandit telemetry cluster (PerCoreSnap::ensemble_active) "
+static_assert(offsetof(TUISnapshot::PerNodeSnap, ensemble_active) % 64 == 0,
+    "v5.14.10.0: bandit telemetry cluster (PerNodeSnap::ensemble_active) "
     "must start on 64-byte cache-line boundary. Did a new field land before "
     "ensemble_active without preserving the alignas(64) marker?");
 
@@ -1336,9 +1336,9 @@ struct TUISharedState {
     volatile uint8_t swap_strategy_requested[16];
     // Phase 3: per-core kill switch reset. GUI writes 1 to reset the trip
     // for that specific core. Controller resets the flag back to 0 after
-    // clearing core_kill_tripped + refreshing core_peak_balance to current.
+    // clearing node_kill_tripped + refreshing node_peak_balance to current.
     // Independent per core — resetting core 0 doesn't touch core 3.
-    volatile sig_atomic_t kill_reset_per_core[16];
+    volatile sig_atomic_t kill_reset_per_node[16];
     // v4.7.8: manual close per portfolio slot. GUI writes 1 to force-close
     // the position at that slot (bypasses hot-path SG; emits a synthetic
     // exit event from the drainer). Drainer reads + acts + clears the
@@ -1354,7 +1354,7 @@ struct TUISharedState {
     // v5.10.0c — Hot model swap. GUI's "Apply (live)" button next to the
     // Model Dir Combo writes the new path + sets the request flag for
     // that core. Engine slow-path consumes: verifies the new model via
-    // CoreModelZoo_TryLoadRole, swaps the active handle on success, frees
+    // NodeModelZoo_TryLoadRole, swaps the active handle on success, frees
     // the old handle after one slow-path grace period. Single-writer
     // (GUI) / single-reader (engine slow-path); per-core array.
     // Sentinel: pending_model_path[c][0]=='\0' AND swap_model_path_requested[c]==0
@@ -1474,7 +1474,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // TUI panel just doesn't render the per-core section.
     snap->sharded_mode_active = 0;
     snap->partial_exit_enabled = 0;
-    snap->per_core_count = 0;
+    snap->per_node_count = 0;
     // v5.0.2: topology — zeroed in legacy mode (panel won't render).
     snap->producer_cpu = -1;
     snap->drainer_cpu = -1;
@@ -1729,57 +1729,57 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
 // [PER-CORE LATENCY POPULATOR — Phase 14, sharded mode only]
 //======================================================================================================
 // Called from the sharded engine's controller core. Walks the registered
-// execution cores, snapshots each one's CoreLatencyStats, and writes the
+// execution cores, snapshots each one's NodeLatencyStats, and writes the
 // per-core fields into the TUISnapshot. The render path checks
 // snap->sharded_mode_active to decide whether to render the panel.
 //
 // CoresT is templated so this header doesn't need to know about the
 // ExecutionCore type. The caller passes a pointer to the core array and
-// num_cores; the lambda accesses each core's latency_stats by index.
+// num_nodes; the lambda accesses each core's latency_stats by index.
 //======================================================================================================
 template <typename CoresT>
 static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
-                                                CoresT *cores,
-                                                int num_cores,
+                                                CoresT *nodes,
+                                                int num_nodes,
                                                 double tsc_ghz) {
     snap->sharded_mode_active = 1;
-    if (num_cores < 0) num_cores = 0;
-    if (num_cores > 16) num_cores = 16;
-    snap->per_core_count = num_cores;
-    for (int i = 0; i < num_cores; ++i) {
-        tt::CoreLatencySnapshot ls = tt::CoreLatencyStats_Snapshot(
-            &cores[i].latency_stats, tsc_ghz);
-        snap->per_core[i].samples = ls.total_count;
-        snap->per_core[i].min_ns  = ls.min_ns;
-        snap->per_core[i].p50_ns  = ls.p50_ns;
-        snap->per_core[i].p95_ns  = ls.p95_ns;
-        snap->per_core[i].p99_ns  = ls.p99_ns;
-        snap->per_core[i].max_ns  = ls.max_ns;
-        snap->per_core[i].avg_ns  = ls.avg_ns;
+    if (num_nodes < 0) num_nodes = 0;
+    if (num_nodes > 16) num_nodes = 16;
+    snap->per_node_count = num_nodes;
+    for (int i = 0; i < num_nodes; ++i) {
+        tt::NodeLatencySnapshot ls = tt::NodeLatencyStats_Snapshot(
+            &nodes[i].latency_stats, tsc_ghz);
+        snap->per_node[i].samples = ls.total_count;
+        snap->per_node[i].min_ns  = ls.min_ns;
+        snap->per_node[i].p50_ns  = ls.p50_ns;
+        snap->per_node[i].p95_ns  = ls.p95_ns;
+        snap->per_node[i].p99_ns  = ls.p99_ns;
+        snap->per_node[i].max_ns  = ls.max_ns;
+        snap->per_node[i].avg_ns  = ls.avg_ns;
     }
     // Zero unused slots so renderer doesn't show stale data from a previous
-    // tick when num_cores changes
-    for (int i = num_cores; i < 16; ++i) {
-        snap->per_core[i].samples = 0;
-        snap->per_core[i].min_ns  = 0;
-        snap->per_core[i].p50_ns  = 0;
-        snap->per_core[i].p95_ns  = 0;
-        snap->per_core[i].p99_ns  = 0;
-        snap->per_core[i].max_ns  = 0;
-        snap->per_core[i].avg_ns  = 0;
+    // tick when num_nodes changes
+    for (int i = num_nodes; i < 16; ++i) {
+        snap->per_node[i].samples = 0;
+        snap->per_node[i].min_ns  = 0;
+        snap->per_node[i].p50_ns  = 0;
+        snap->per_node[i].p95_ns  = 0;
+        snap->per_node[i].p99_ns  = 0;
+        snap->per_node[i].max_ns  = 0;
+        snap->per_node[i].avg_ns  = 0;
         // v5.0.1 (Phase H): slow-path latency too
-        snap->per_core[i].sp_samples = 0;
-        snap->per_core[i].sp_min_ns  = 0;
-        snap->per_core[i].sp_p50_ns  = 0;
-        snap->per_core[i].sp_p95_ns  = 0;
-        snap->per_core[i].sp_p99_ns  = 0;
-        snap->per_core[i].sp_max_ns  = 0;
-        snap->per_core[i].sp_avg_ns  = 0;
+        snap->per_node[i].sp_samples = 0;
+        snap->per_node[i].sp_min_ns  = 0;
+        snap->per_node[i].sp_p50_ns  = 0;
+        snap->per_node[i].sp_p95_ns  = 0;
+        snap->per_node[i].sp_p99_ns  = 0;
+        snap->per_node[i].sp_max_ns  = 0;
+        snap->per_node[i].sp_avg_ns  = 0;
     }
 }
 
 // v5.0.1 (Phase H): populate per-core SLOW-path latency stats from
-// EventLoopState's CoreContext::slow_path_latency. Sibling to
+// EventLoopState's NodeContext::slow_path_latency. Sibling to
 // TUI_PopulatePerCoreLatency (which handles hot-path). Caller invokes
 // AFTER TUI_PopulatePerCoreLatency so the per-core slot count is set.
 //
@@ -1788,25 +1788,25 @@ template <typename StateT>
 static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
                                                        const StateT *state,
                                                        double tsc_ghz) {
-    int n = snap->per_core_count;
+    int n = snap->per_node_count;
     if (n < 0) n = 0;
     if (n > 16) n = 16;
     for (int i = 0; i < n; ++i) {
-        tt::CoreLatencySnapshot ls = tt::CoreLatencyStats_Snapshot(
+        tt::NodeLatencySnapshot ls = tt::NodeLatencyStats_Snapshot(
             &state->display_meta[i].slow_path_latency, tsc_ghz);
-        snap->per_core[i].sp_samples = ls.total_count;
-        snap->per_core[i].sp_min_ns  = ls.min_ns;
-        snap->per_core[i].sp_p50_ns  = ls.p50_ns;
-        snap->per_core[i].sp_p95_ns  = ls.p95_ns;
-        snap->per_core[i].sp_p99_ns  = ls.p99_ns;
-        snap->per_core[i].sp_max_ns  = ls.max_ns;
-        snap->per_core[i].sp_avg_ns  = ls.avg_ns;
+        snap->per_node[i].sp_samples = ls.total_count;
+        snap->per_node[i].sp_min_ns  = ls.min_ns;
+        snap->per_node[i].sp_p50_ns  = ls.p50_ns;
+        snap->per_node[i].sp_p95_ns  = ls.p95_ns;
+        snap->per_node[i].sp_p99_ns  = ls.p99_ns;
+        snap->per_node[i].sp_max_ns  = ls.max_ns;
+        snap->per_node[i].sp_avg_ns  = ls.avg_ns;
         // v5.1.1: per-section breakdown.
         for (int s = 0; s < 5; ++s) {
-            tt::CoreLatencySnapshot ss = tt::CoreLatencyStats_Snapshot(
+            tt::NodeLatencySnapshot ss = tt::NodeLatencyStats_Snapshot(
                 &state->display_meta[i].slow_path_breakdown[s], tsc_ghz);
-            snap->per_core[i].sp_breakdown_p50_ns[s] = ss.p50_ns;
-            snap->per_core[i].sp_breakdown_p99_ns[s] = ss.p99_ns;
+            snap->per_node[i].sp_breakdown_p50_ns[s] = ss.p50_ns;
+            snap->per_node[i].sp_breakdown_p99_ns[s] = ss.p99_ns;
         }
     }
 }
@@ -1815,7 +1815,7 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
 // [ADVANCED TOPOLOGY POPULATION (v5.0.3)]
 //======================================================================================================
 // Sibling to TUI_PopulateTopology — copies the live observability fields
-// from CoreContext into TUISnapshot::PerCoreSnap for the Engine Topology
+// from NodeContext into TUISnapshot::PerNodeSnap for the Engine Topology
 // panel's State/Cycles/LastCycle/Q-depth columns. Called from the GUI
 // snapshot publish each cycle (cheap — handful of relaxed loads).
 //
@@ -1828,25 +1828,25 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
                                                   const OmsT *oms) {
     // v5.12.1.C — heartbeat: snapshot WS freshness for header render
     // v5.15.5.B.2 — source-side reads now hit the WsHeartbeatTelemetry cluster
-    // (alignas(64) isolated). PerCoreSnap field names unchanged.
+    // (alignas(64) isolated). PerNodeSnap field names unchanged.
     snap->ws_last_tick_us = state->ws_telemetry.last_tick_us.load(std::memory_order_acquire);
     snap->ws_ticks_per_5s = state->ws_telemetry.ticks_per_5s.load(std::memory_order_relaxed);
-    int n = snap->per_core_count;
+    int n = snap->per_node_count;
     if (n < 0) n = 0;
     if (n > 16) n = 16;
     for (int i = 0; i < n; ++i) {
         // v5.15.5.B.2 — source-side reads now hit the SlowPathTelemetry cluster
         // (alignas(64) isolated; cross-thread-snapshot-publish-cluster-isolation.md).
-        // PerCoreSnap field names unchanged — only the source-of-truth changed.
-        snap->per_core[i].sp_last_tick_us =
-            state->cores[i].sp_telemetry.last_tick_us.load(std::memory_order_relaxed);
-        snap->per_core[i].sp_cycles_total =
-            state->cores[i].sp_telemetry.cycles_total.load(std::memory_order_relaxed);
-        snap->per_core[i].sp_yield_count =
-            state->cores[i].sp_telemetry.yield_count.load(std::memory_order_relaxed);
-        snap->per_core[i].sp_state =
-            state->cores[i].sp_telemetry.state.load(std::memory_order_relaxed);
-        snap->per_core[i].sp_submit_q_depth =
+        // PerNodeSnap field names unchanged — only the source-of-truth changed.
+        snap->per_node[i].sp_last_tick_us =
+            state->nodes[i].sp_telemetry.last_tick_us.load(std::memory_order_relaxed);
+        snap->per_node[i].sp_cycles_total =
+            state->nodes[i].sp_telemetry.cycles_total.load(std::memory_order_relaxed);
+        snap->per_node[i].sp_yield_count =
+            state->nodes[i].sp_telemetry.yield_count.load(std::memory_order_relaxed);
+        snap->per_node[i].sp_state =
+            state->nodes[i].sp_telemetry.state.load(std::memory_order_relaxed);
+        snap->per_node[i].sp_submit_q_depth =
             (uint16_t)SPSCRing_Depth(&oms->submit_queues[i]);
     }
 }
@@ -1860,7 +1860,7 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
 //
 // Args:
 //   producer_cpu        — pin assignment for producer thread (always 0 today)
-//   drainer_cpu         — pin assignment for drainer thread (num_cores + 1)
+//   drainer_cpu         — pin assignment for drainer thread (num_nodes + 1)
 //   nproc               — sysconf(_SC_NPROCESSORS_ONLN)
 //   slow_path_pin_off   — raw cfg.slow_path_pin_offset (-1 disabled, 0 auto, >0 explicit)
 //   hot_cpu[i]          — per-core hot-path pin (i + 1 in current layout)
@@ -1879,13 +1879,13 @@ static inline void TUI_PopulateTopology(TUISnapshot *snap,
     snap->drainer_cpu          = (int16_t)drainer_cpu;
     snap->nproc                = (int16_t)nproc;
     snap->slow_path_pin_offset = (int16_t)slow_path_pin_off;
-    int n = snap->per_core_count;
+    int n = snap->per_node_count;
     if (n < 0) n = 0;
     if (n > 16) n = 16;
     for (int i = 0; i < n; ++i) {
-        snap->per_core[i].hot_path_cpu  = (int16_t)hot_cpu[i];
-        snap->per_core[i].slow_path_cpu = (int16_t)slow_cpu[i];
-        snap->per_core[i].poll_interval_ticks = poll_interval[i];
+        snap->per_node[i].hot_path_cpu  = (int16_t)hot_cpu[i];
+        snap->per_node[i].slow_path_cpu = (int16_t)slow_cpu[i];
+        snap->per_node[i].poll_interval_ticks = poll_interval[i];
     }
 }
 

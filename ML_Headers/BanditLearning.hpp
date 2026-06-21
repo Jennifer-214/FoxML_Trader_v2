@@ -548,7 +548,7 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
 // until ']'. Sufficient for state-persistence sidecar files (bandit_state.json,
 // thompson_state.json) where format is operator-controlled + tiny.
 //
-// Used by Bandit_LoadJSON below + EnsembleModelZoo_LoadThompsonState in CoreModelZoo.hpp.
+// Used by Bandit_LoadJSON below + EnsembleModelZoo_LoadThompsonState in NodeModelZoo.hpp.
 namespace tt { namespace json_io {
 
 // Scan for a JSON key and return position past the ':'. Returns nullptr if

@@ -19,7 +19,7 @@
 // WHAT THIS REGISTRY ENCODES
 //======================================================================================================
 //
-// Each row in master FOREACH_PER_CORE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD that flags the
+// Each row in master FOREACH_PER_NODE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD that flags the
 // STAMP_BOUND_CFG_DERIVED metadata bit can OPTIONALLY have a custom gate_when expression
 // here. Default gates apply if no entry exists:
 //
@@ -60,7 +60,7 @@
 // (most rows at .B.2 cohort migration) have NO entry here.
 //
 // 2-tuple shape: X(name, gate_when_expr)
-//   name        — must match a FOREACH_PER_CORE_CFG_FIELD or FOREACH_GLOBAL_CFG_FIELD row name
+//   name        — must match a FOREACH_PER_NODE_CFG_FIELD or FOREACH_GLOBAL_CFG_FIELD row name
 //                 with STAMP_BOUND_CFG_DERIVED metadata bit set
 //   gate_when_expr — C++ expression returning bool; references cfg (typed ControllerConfig<F>);
 //                    evaluated at consumer macro expansion time (slow-path / stamp-emit cadence)
@@ -74,7 +74,7 @@
 // .B.3 may extract shared COHORT_GATE_* macros to dedupe across registries (Path γ #3
 // structural close); .B.2 keeps inline for minimum viable scope (replacing 3 registries'
 // inline predicates is .B.3 work alongside legacy registry deletion).
-#define FOREACH_CFG_GATE_PER_CORE(X) \
+#define FOREACH_CFG_GATE_PER_NODE(X) \
     /* Bandit/Thompson cohort — MATCHES legacy FOREACH_STAMP_BOUND_CFG emit_when semantic \
      * (cfg.bandit_algorithm != 0) at lines 162-170. Coding-time discovery: my initial \
      * BITMAP_IS_SET(MASK_ML_CFG_BANDIT_ENABLED) attempt diverged from legacy → wire byte \
@@ -126,14 +126,14 @@ namespace cfg_gate {
     // [POPULATE lookup — default true; cohort entries override]
     //==================================================================================================
     template <unsigned F>
-    inline bool lookup_populate(size_t idx, bool is_per_core, const ControllerConfig<F>& cfg) {
+    inline bool lookup_populate(size_t idx, bool is_per_node, const ControllerConfig<F>& cfg) {
         (void)cfg;  // unused at .B.1 (no per-core or global entries yet); .B.2 entries reference cfg
-        if (is_per_core) {
+        if (is_per_node) {
             switch (idx) {
-                #define X_CFG_GATE_PER_CORE_POPULATE_CASE(name, expr) \
-                    case FIELD_IDX_PER_CORE_##name: return (expr);
-                FOREACH_CFG_GATE_PER_CORE(X_CFG_GATE_PER_CORE_POPULATE_CASE)
-                #undef X_CFG_GATE_PER_CORE_POPULATE_CASE
+                #define X_CFG_GATE_PER_NODE_POPULATE_CASE(name, expr) \
+                    case FIELD_IDX_PER_NODE_##name: return (expr);
+                FOREACH_CFG_GATE_PER_NODE(X_CFG_GATE_PER_NODE_POPULATE_CASE)
+                #undef X_CFG_GATE_PER_NODE_POPULATE_CASE
                 default: return true;  // DEFAULT: always populate per always-emit canonical Q3.G
             }
         } else {
@@ -156,16 +156,16 @@ namespace cfg_gate {
     // STAMP_HAS(*handle, inference_cfg) and pass the result.
     //
     template <unsigned F>
-    inline bool lookup_drift(size_t idx, bool is_per_core,
+    inline bool lookup_drift(size_t idx, bool is_per_node,
                               const ControllerConfig<F>& cfg,
                               bool stamp_has_inference_cfg) {
         (void)cfg;  // unused at .B.1; .B.2 entries may reference cfg state
-        if (is_per_core) {
+        if (is_per_node) {
             switch (idx) {
-                #define X_CFG_GATE_PER_CORE_DRIFT_CASE(name, expr) \
-                    case FIELD_IDX_PER_CORE_##name: return stamp_has_inference_cfg && (expr);
-                FOREACH_CFG_GATE_PER_CORE(X_CFG_GATE_PER_CORE_DRIFT_CASE)
-                #undef X_CFG_GATE_PER_CORE_DRIFT_CASE
+                #define X_CFG_GATE_PER_NODE_DRIFT_CASE(name, expr) \
+                    case FIELD_IDX_PER_NODE_##name: return stamp_has_inference_cfg && (expr);
+                FOREACH_CFG_GATE_PER_NODE(X_CFG_GATE_PER_NODE_DRIFT_CASE)
+                #undef X_CFG_GATE_PER_NODE_DRIFT_CASE
                 default: return stamp_has_inference_cfg;
             }
         } else {
@@ -192,7 +192,7 @@ namespace cfg_gate {
 // Closes Class 21 instance at cfg-derived consumer template fn surface (sister-consumer asymmetric
 // registry-coverage drift). Caught at Session E 2026-05-18 after 3 consumer template fns at HEAD
 // drifted across .B.1/.B.2/.B.3 incremental extension:
-//   - populate_inference_cfg_from_derived walked 2 of 4 (per_core + global only)
+//   - populate_inference_cfg_from_derived walked 2 of 4 (per_node + global only)
 //   - drift_check_from_derived walked 3 of 4 (missing gate_cfg_flag per Step 0.5d.d DEFERRED)
 //   - populate_stamp_cfg_from_derived walked all 4 (complete)
 //   - parse_stamp_cfg_to_derived walked all 4 (complete; Step 1.6.3 Approach A option (e))
@@ -209,7 +209,7 @@ namespace cfg_gate {
 // Pattern shape per DESIGN_SPECS/cfg-derived-consumer-framework.md v1.2 § "Action-parameterized
 // meta-walker for cohort consumer template fns".
 // Sister memory: feedback_prefer_action_parameterized_walker_over_per_consumer_walker_bodies.md
-// Class 18/21 closure precedent: v5.14.2.E.1 EnsembleModelZoo_PostLoadSetup + CoreModelZoo_PostLoadSetup
+// Class 18/21 closure precedent: v5.14.2.E.1 EnsembleModelZoo_PostLoadSetup + NodeModelZoo_PostLoadSetup
 //   + FOREACH_ENSEMBLE_POST_LOAD / FOREACH_SINGLE_ZOO_POST_LOAD (single source of truth + many
 //   consumer views with compile-time enforced inclusion at all sites).
 //
@@ -221,11 +221,11 @@ namespace cfg_gate {
 //   - STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN (file-scope; UNCONDITIONAL struct-field decl; no filter)
 //
 // Enrolled in FOREACH_REGISTRY at CoreFrameworks/MetaRegistry.hpp per H15 + H19 (Level 1 meta-walker
-// over cfg-derived cohort; sister to FOREACH_PER_CORE_DOMAIN_BITMAP shape but for consumer cohort
+// over cfg-derived cohort; sister to FOREACH_PER_NODE_DOMAIN_BITMAP shape but for consumer cohort
 // rather than storage cohort).
 
 #define FOREACH_STAMP_BOUND_DERIVED_COHORT(BASE_X)                                                  \
-    FOREACH_PER_CORE_CFG_FIELD(BASE_X##_PER_CORE)                                                   \
+    FOREACH_PER_NODE_CFG_FIELD(BASE_X##_PER_NODE)                                                   \
     FOREACH_GLOBAL_CFG_FIELD(BASE_X##_GLOBAL)                                                       \
     FOREACH_ML_CFG_FLAG(BASE_X##_ML_CFG_FLAG)                                                       \
     FOREACH_GATE_CFG_FLAG(BASE_X##_GATE_CFG_FLAG)
@@ -239,7 +239,7 @@ namespace cfg_gate {
 //   STAMP_CFG_POPULATE_FROM_DERIVED    — emits canonical body bytes for HMAC chain
 //   DRIFT_CHECK_FROM_DERIVED           — checks drift between stamp + runtime cfg
 //
-// Each walks FOREACH_PER_CORE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD via X-macro filtered
+// Each walks FOREACH_PER_NODE_CFG_FIELD + FOREACH_GLOBAL_CFG_FIELD via X-macro filtered
 // iteration with `if constexpr ((meta) & STAMP_BOUND_CFG_DERIVED)` filter. Compile-time name
 // access (cfg.<name>, inf.<name>, handle.<name>) — distinct from CFG_FIELD_FOR_EACH_SET_BIT
 // mask-bit walker which gives runtime idx only (suitable for synthetic-emit test cases but
@@ -252,7 +252,7 @@ namespace cfg_gate {
 // Caller context: macros expect cfg.<name> + inf.<name> + handle.<name> + FAILURE_MASK_cfg_inference_drift
 // + STAMP_HAS macro to be in scope. Typical callers are in ML_Headers (where stamp helpers are
 // defined) and CoreFrameworks (where cfg fields are defined). Per-core field access pattern
-// (cfg.name direct vs cfg.per_core[N].name indexed) follows H17 cfg struct auto-gen convention
+// (cfg.name direct vs cfg.per_node[N].name indexed) follows H17 cfg struct auto-gen convention
 // — verified at .B.2 first cohort migration when actual rows flag the bit.
 
 //==================================================================================================
@@ -288,17 +288,17 @@ namespace cfg_derived {
     inline void populate_inference_cfg_from_derived(InfT& inf, const ControllerConfig<F>& cfg) {
         (void)inf; (void)cfg;
 
-        #define X_INFERENCE_CFG_POPULATE_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+        #define X_INFERENCE_CFG_POPULATE_PER_NODE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
-                constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
-                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/true, cfg); \
+                constexpr size_t _idx = FIELD_IDX_PER_NODE_##name; \
+                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_node*/true, cfg); \
                 tt::cfg_populate_inf_field(cfg.name, inf.name, inf.has_##name, _gate); \
             }
 
         #define X_INFERENCE_CFG_POPULATE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
-                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/false, cfg); \
+                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_node*/false, cfg); \
                 tt::cfg_populate_inf_field(cfg.name, inf.name, inf.has_##name, _gate); \
             }
 
@@ -324,7 +324,7 @@ namespace cfg_derived {
 
         FOREACH_STAMP_BOUND_DERIVED_COHORT(X_INFERENCE_CFG_POPULATE)
 
-        #undef X_INFERENCE_CFG_POPULATE_PER_CORE
+        #undef X_INFERENCE_CFG_POPULATE_PER_NODE
         #undef X_INFERENCE_CFG_POPULATE_GLOBAL
         #undef X_INFERENCE_CFG_POPULATE_ML_CFG_FLAG
         #undef X_INFERENCE_CFG_POPULATE_GATE_CFG_FLAG
@@ -343,14 +343,14 @@ namespace cfg_derived {
         size_t written = 0u;
         (void)buf; (void)cap; (void)cfg; (void)written;
 
-        #define X_STAMP_CFG_POPULATE_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+        #define X_STAMP_CFG_POPULATE_PER_NODE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
-                constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
-                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/true, cfg); \
+                constexpr size_t _idx = FIELD_IDX_PER_NODE_##name; \
+                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_node*/true, cfg); \
                 if (_gate) { \
                     written += tt::cfg_emit_field( \
                         cfg.name, \
-                        g_per_core_cfg_field_descriptors[_idx], \
+                        g_per_node_cfg_field_descriptors[_idx], \
                         buf + written, \
                         (cap > written) ? (cap - written) : 0u); \
                 } \
@@ -359,7 +359,7 @@ namespace cfg_derived {
         #define X_STAMP_CFG_POPULATE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
-                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/false, cfg); \
+                const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_node*/false, cfg); \
                 if (_gate) { \
                     written += tt::cfg_emit_field( \
                         cfg.name, \
@@ -397,7 +397,7 @@ namespace cfg_derived {
 
         FOREACH_STAMP_BOUND_DERIVED_COHORT(X_STAMP_CFG_POPULATE)
 
-        #undef X_STAMP_CFG_POPULATE_PER_CORE
+        #undef X_STAMP_CFG_POPULATE_PER_NODE
         #undef X_STAMP_CFG_POPULATE_GLOBAL
         #undef X_STAMP_CFG_POPULATE_ML_CFG_FLAG
         #undef X_STAMP_CFG_POPULATE_GATE_CFG_FLAG
@@ -414,7 +414,7 @@ namespace cfg_derived {
     // v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
     // meta-walker. NEW X_DRIFT_CHECK_GATE_CFG_FLAG walker added (closes Step 0.5d.d drift_check
     // side; requires handle.<legacy_field> discrete fields which Step 1.6.3 Decision C Approach A
-    // unconditional struct-gen provides via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN). PER_CORE +
+    // unconditional struct-gen provides via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN). PER_NODE +
     // GLOBAL + ML_CFG_FLAG X-macros VERBATIM from pre-refactor (drift-comparison semantics
     // preserved).
     template <unsigned F, typename HandleT>
@@ -435,10 +435,10 @@ namespace cfg_derived {
         // attribution into caller-allocated reason_buf ONLY IF buf empty + trigger fires.
         // Caller passes nullptr to opt out (no snprintf overhead).
 
-        #define X_DRIFT_CHECK_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+        #define X_DRIFT_CHECK_PER_NODE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
-                constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
-                const bool _gate = cfg_gate::lookup_drift(_idx, /*is_per_core*/true, cfg, stamp_has_inference_cfg); \
+                constexpr size_t _idx = FIELD_IDX_PER_NODE_##name; \
+                const bool _gate = cfg_gate::lookup_drift(_idx, /*is_per_node*/true, cfg, stamp_has_inference_cfg); \
                 const bool _drifted = tt::cfg_drift_compare(handle.name, cfg.name); \
                 const bool _trigger = _gate & _drifted; \
                 failure_flags |= ((uint64_t)_trigger * failure_mask); \
@@ -451,7 +451,7 @@ namespace cfg_derived {
         #define X_DRIFT_CHECK_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
-                const bool _gate = cfg_gate::lookup_drift(_idx, /*is_per_core*/false, cfg, stamp_has_inference_cfg); \
+                const bool _gate = cfg_gate::lookup_drift(_idx, /*is_per_node*/false, cfg, stamp_has_inference_cfg); \
                 const bool _drifted = tt::cfg_drift_compare(handle.name, cfg.name); \
                 const bool _trigger = _gate & _drifted; \
                 failure_flags |= ((uint64_t)_trigger * failure_mask); \
@@ -499,7 +499,7 @@ namespace cfg_derived {
 
         FOREACH_STAMP_BOUND_DERIVED_COHORT(X_DRIFT_CHECK)
 
-        #undef X_DRIFT_CHECK_PER_CORE
+        #undef X_DRIFT_CHECK_PER_NODE
         #undef X_DRIFT_CHECK_GLOBAL
         #undef X_DRIFT_CHECK_ML_CFG_FLAG
         #undef X_DRIFT_CHECK_GATE_CFG_FLAG
@@ -527,11 +527,11 @@ namespace cfg_derived {
     // for future cohort registry additions (consumer template fn auto-extends with cohort).
     template <unsigned F, typename ResultT>
     inline bool parse_stamp_cfg_to_derived(ResultT& r, const char* key, const char* val) {
-        #define X_PARSE_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+        #define X_PARSE_PER_NODE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 if (strcmp(key, #name) == 0) { \
-                    constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
-                    tt::cfg_parse_field(r.name, g_per_core_cfg_field_descriptors[_idx], val, /*wire_context=*/true); \
+                    constexpr size_t _idx = FIELD_IDX_PER_NODE_##name; \
+                    tt::cfg_parse_field(r.name, g_per_node_cfg_field_descriptors[_idx], val, /*wire_context=*/true); \
                     r.has_##name = 1; \
                     return true; \
                 } \
@@ -570,7 +570,7 @@ namespace cfg_derived {
 
         FOREACH_STAMP_BOUND_DERIVED_COHORT(X_PARSE)
 
-        #undef X_PARSE_PER_CORE
+        #undef X_PARSE_PER_NODE
         #undef X_PARSE_GLOBAL
         #undef X_PARSE_ML_CFG_FLAG
         #undef X_PARSE_GATE_CFG_FLAG
@@ -626,7 +626,7 @@ namespace cfg_derived {
 // meta-walker token-paste (`BASE_X##_<SCOPE>` where BASE_X=`_STAMP_RESULT`).
 // v5.15.5.F.4d.1.B.3 Step 1.6.5b — renamed from `_STAMP_RESULT_<SCOPE>_FIELD` (4 sites) to
 // match meta-walker naming convention. Bodies VERBATIM.
-#define _STAMP_RESULT_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+#define _STAMP_RESULT_PER_NODE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
     uint8_t has_##name; STORAGE_T name;
 #define _STAMP_RESULT_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
     uint8_t has_##name; STORAGE_T name;
@@ -700,7 +700,7 @@ namespace cfg_derived {
 //
 // CLAUDE.md:
 //   - H15: every FOREACH_X registry enrolled in FOREACH_REGISTRY meta-registry (4 enrollments
-//     pending at Step 4: FOREACH_CFG_GATE_PER_CORE + _GLOBAL + 3 consumer macros)
+//     pending at Step 4: FOREACH_CFG_GATE_PER_NODE + _GLOBAL + 3 consumer macros)
 //   - H18: custom-semantics via sidecar override pattern (this file's structural shape)
 //   - H19: meta-registry topology — sidecar Level 1 with PARENT = FOREACH_METADATA_BIT
 //   - item 31: framework-driven extensibility (this file IS the framework infrastructure)

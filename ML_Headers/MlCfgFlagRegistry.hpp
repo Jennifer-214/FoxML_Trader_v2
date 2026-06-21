@@ -96,7 +96,7 @@ FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 // Shared cohort gate predicates across 3 registries:
 //   - FOREACH_STAMP_BOUND_CFG col 5 (emit_when) at ML_Headers/StampBoundCfgRegistry.hpp
 //   - FOREACH_CFG_DRIFT_CHECK col 8 (gate_when) at ML_Headers/CfgDriftCheckRegistry.hpp
-//   - FOREACH_CFG_GATE_PER_CORE entries at MemHeaders/CfgGateRegistry.hpp
+//   - FOREACH_CFG_GATE_PER_NODE entries at MemHeaders/CfgGateRegistry.hpp
 //
 // Path γ #3 structural close (audit synthesis CRIT-CONV-5): 3-way drift surface where
 // same conceptual cohort gates were encoded inline at multiple registries. Adding a new

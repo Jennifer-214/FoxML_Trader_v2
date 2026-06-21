@@ -44,7 +44,7 @@
 #define BANDIT_DISPATCH_TABLE_HPP
 
 #include "BanditAlgorithmRegistry.hpp"      // FOREACH_BANDIT_ALGORITHM + FOREACH_BANDIT_ALGORITHM_COUNT
-#include "CoreModelZoo.hpp"                  // EnsembleModelZoo<F> + ENSEMBLE_HORIZON_MAX
+#include "NodeModelZoo.hpp"                  // EnsembleModelZoo<F> + ENSEMBLE_HORIZON_MAX
 #include "../Strategies/StrategyInterface.hpp"   // NUM_REGIMES
 #include "../CoreFrameworks/Order.hpp"       // MASK_ORDER_BANDIT_3BIT (referenced by bit-cap static_asserts below)
 
@@ -59,7 +59,7 @@
 //   - g_<side>_reward_dispatch<F>[N] dispatch tables (per Step 1.B)
 //   - ezoo-><side>_thompson_update_fn Pattern 5 sink fields (per Step 1.D)
 //   - MASK_EZOO_<SIDE>_THOMPSON_READY init flags (per § G.3 — FOREACH_EZOO_INIT_FLAG)
-//   - EnsembleModelZoo_Init<Side>ThompsonBandits init fns (per Step 1.D — CoreModelZoo.hpp)
+//   - EnsembleModelZoo_Init<Side>ThompsonBandits init fns (per Step 1.D — NodeModelZoo.hpp)
 //   - EnsembleModelZoo_Load<Side>ThompsonState / _Save<Side>ThompsonState (per Step 1.D)
 //   - FOREACH_ENSEMBLE_POST_LOAD rows for init + load (per Step 1.E)
 //
@@ -176,7 +176,7 @@ template <unsigned F, BanditSide Side>
 inline void both_reward(EnsembleModelZoo<F>* ezoo, int regime, int arm, double r) {
     // Both update — used by EXP3_OP_THOMPSON_GHOST (cfg=2; Exp3 drives + Thompson shadow-learns)
     // + THOMPSON_OP_EXP3_GHOST (cfg=3; mirror) + BLENDED (cfg=4; both update; argmax over blend).
-    // Per per-arm reward observability invariant (CoreModelZoo.hpp:881-882) — both bandits learn
+    // Per per-arm reward observability invariant (NodeModelZoo.hpp:881-882) — both bandits learn
     // from the same per-arm reward signal regardless of which one's CHOICE drove the trading decision.
     if constexpr (Side == BanditSide::Buy) {
         Bandit_Update(&ezoo->bandits[regime], arm, r);
@@ -193,8 +193,8 @@ inline void both_reward(EnsembleModelZoo<F>* ezoo, int regime, int arm, double r
 // `?:` chain auto-selects one of 3 leaf fns per row. Adding a 6th algorithm row with metadata bits
 // (e.g., `(1, 1)` → both_reward) extends this table by 1 entry — zero callsite changes.
 //
-// Consumer dispatch at reward-attribution sites (CoreModelZoo.hpp:1341/1402, ControllerEventLoop.hpp:1755):
-//   int algo = core_cfg->bandit_algorithm;   // per-core read via Class 25 sweep (§ H of plan body)
+// Consumer dispatch at reward-attribution sites (NodeModelZoo.hpp:1341/1402, ControllerEventLoop.hpp:1755):
+//   int algo = node_cfg->bandit_algorithm;   // per-core read via Class 25 sweep (§ H of plan body)
 //   tt::g_buy_reward_dispatch<F>[algo](ezoo, regime, arm, reward_bps);
 // Branchless; ~1-2ns indirect call.
 

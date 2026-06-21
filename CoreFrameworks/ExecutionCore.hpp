@@ -42,7 +42,7 @@
 #pragma once
 
 #include "../FixedPoint/FixedPointN.hpp"
-#include "CoreLatencyStats.hpp"
+#include "NodeLatencyStats.hpp"
 #include "GateParameters.hpp"
 #include "ParameterSlot.hpp"
 #include "SPSCRing.hpp"
@@ -55,8 +55,8 @@
 namespace tt {
 
 // Sized for the i5-1035G4 microbenchmark. Production sizing tuned per use case.
-constexpr size_t EXECUTION_CORE_TICK_RING_SIZE  = 4096;
-constexpr size_t EXECUTION_CORE_EVENT_RING_SIZE = 1024;
+constexpr size_t EXECUTION_NODE_TICK_RING_SIZE  = 4096;
+constexpr size_t EXECUTION_NODE_EVENT_RING_SIZE = 1024;
 
 template <unsigned F>
 struct alignas(64) ExecutionCore {
@@ -132,24 +132,24 @@ struct alignas(64) ExecutionCore {
     uint64_t cached_publish_tick;
 
     // --- Identity ---
-    uint16_t core_id;
+    uint16_t node_id;
     uint8_t  _pad1[6];
 
     // --- Communication rings ---
     // Event ring: this core's outbound trade events. The controller is the consumer.
-    SPSCRing<TradeEvent<F>, EXECUTION_CORE_EVENT_RING_SIZE> event_ring;
+    SPSCRing<TradeEvent<F>, EXECUTION_NODE_EVENT_RING_SIZE> event_ring;
 
     // Tick ring: this core's inbound tick stream. The market reader is the producer.
     // Pointer (not embedded) because the ring is owned by the market reader, which
     // creates one per execution core at startup.
-    SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE>* tick_ring;
+    SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>* tick_ring;
 
     // --- Latency monitoring (Phase 13 / per-core observability) ---
     // Lives at the tail of the struct so it doesn't pollute the hot fields
     // in cache line 0. Single writer (this core's hot path), single reader
     // (the controller's snapshot helper). Disabled by default; flip the
     // enable flag from the controller to start sampling.
-    CoreLatencyStats latency_stats;
+    NodeLatencyStats latency_stats;
 
     // --- v5.11.0.1: Hot-path failure counters (no I/O on hot path) ---
     // Replaces inline fprintf on the rare ring-push-failure branch
@@ -194,8 +194,8 @@ static_assert(offsetof(ExecutionCore<64>, live_tp) >= 8,
 template <unsigned F>
 static inline void ExecutionCore_Init(
     ExecutionCore<F>* core,
-    uint16_t core_id,
-    SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE>* tick_ring
+    uint16_t node_id,
+    SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>* tick_ring
 ) {
     core->permission = 0;
     core->active     = 0;
@@ -209,7 +209,7 @@ static inline void ExecutionCore_Init(
     core->entry_price_b = Money_Zero();
     core->live_tp_b     = Money_Zero();
     core->live_sl_b     = Money_Zero();
-    core->core_id    = core_id;
+    core->node_id    = node_id;
     core->tick_ring  = tick_ring;
     GateParameters<F> initial;
     GateParameters_Init(&initial);
@@ -222,7 +222,7 @@ static inline void ExecutionCore_Init(
     // v5.12.1.B.3 — warmup sentinel; hot-path treats 0 as "no stamp" → no gate fires.
     core->cached_publish_tick = 0;
     SPSCRing_Init(&core->event_ring);
-    CoreLatencyStats_Init(&core->latency_stats);
+    NodeLatencyStats_Init(&core->latency_stats);
     core->ring_push_failures = 0;  // v5.11.0.1: hot-path failure counter
 }
 
@@ -309,7 +309,7 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     // miss path falls through to the full ParameterSlot_Read protocol below.
     //
     // Saves ~12 ns per tick vs unconditional memcpy. Validated by
-    // experiments/per_core_sharding/bench_batch_floor.cpp: cached_v2 ~35 ns
+    // experiments/per_node_sharding/bench_batch_floor.cpp: cached_v2 ~35 ns
     // vs the original ~50 ns at the batch floor on i5-1035G4.
     uint64_t s_now = core->param_slot.seq.load(std::memory_order_acquire);
     if (__builtin_expect(s_now != core->cached_seq || (s_now & 1ULL), 0)) {
@@ -507,7 +507,7 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
             TradeEvent<F> event{};
             event.price     = tick.price;
             event.timestamp = tick.timestamp;
-            event.core_id   = core->core_id;
+            event.node_id   = core->node_id;
             event.type      = TRADE_EVENT_EXIT;
             event.leg       = PARTIAL_LEG_A;
             exit_a_pushed = SPSCRing_TryPush(&core->event_ring, event) ? 1 : 0;
@@ -517,7 +517,7 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
             TradeEvent<F> event{};
             event.price     = tick.price;
             event.timestamp = tick.timestamp;
-            event.core_id   = core->core_id;
+            event.node_id   = core->node_id;
             event.type      = TRADE_EVENT_EXIT;
             event.leg       = PARTIAL_LEG_B;
             exit_b_pushed = SPSCRing_TryPush(&core->event_ring, event) ? 1 : 0;
@@ -528,7 +528,7 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
             TradeEvent<F> event_a{};
             event_a.price     = tick.price;
             event_a.timestamp = tick.timestamp;
-            event_a.core_id   = core->core_id;
+            event_a.node_id   = core->node_id;
             event_a.type      = TRADE_EVENT_ENTRY;
             event_a.leg       = PARTIAL_LEG_A;
             entry_a_pushed = SPSCRing_TryPush(&core->event_ring, event_a) ? 1 : 0;
@@ -558,7 +558,7 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
                     TradeEvent<F> event_b{};
                     event_b.price     = tick.price;
                     event_b.timestamp = tick.timestamp;
-                    event_b.core_id   = core->core_id;
+                    event_b.node_id   = core->node_id;
                     event_b.type      = TRADE_EVENT_ENTRY;
                     event_b.leg       = PARTIAL_LEG_B;
                     entry_b_pushed = SPSCRing_TryPush(&core->event_ring, event_b) ? 1 : 0;
@@ -615,7 +615,7 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
             uint32_t hi, lo;
             asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo), "=d"(hi) : : "rcx");
             uint64_t lat_t1 = ((uint64_t)hi << 32) | lo;
-            CoreLatencyStats_Sample(&core->latency_stats, lat_t1 - lat_t0, lat_t1);
+            NodeLatencyStats_Sample(&core->latency_stats, lat_t1 - lat_t0, lat_t1);
         }
     }
 }

@@ -74,9 +74,9 @@ namespace tt {
         // PushID(cfg_field_name), uniqueness comes from the X-macro-guaranteed
         // unique cfg_field_name; display label can repeat safely across
         // sections/per-core tabs. Closes the Class 24-shape regression caught
-        // at paper-test 2026-05-14. PushID composes with outer PushID(core_id)
+        // at paper-test 2026-05-14. PushID composes with outer PushID(node_id)
         // at per-core tab sites — full uniqueness tuple becomes
-        // (core_id, cfg_field_name, label).
+        // (node_id, cfg_field_name, label).
         ImGui::PushID(desc.cfg_field_name);
 
         bool changed = false;
@@ -180,15 +180,15 @@ namespace tt {
 //   CFG_FIELD_FOR_EACH_SET_BIT(g_global_cfg_render_mask.words, idx, {
 //       GlobalCfgRenderTable<64>::fns[idx](cfg, g_global_cfg_field_descriptors[idx], cfg_path);
 //   });
-//   CFG_FIELD_FOR_EACH_SET_BIT(g_per_core_cfg_render_mask.words, idx, {
-//       PerCoreCfgRenderTable<64>::fns[idx](cfg, g_per_core_cfg_field_descriptors[idx], cfg_path);
+//   CFG_FIELD_FOR_EACH_SET_BIT(g_per_node_cfg_render_mask.words, idx, {
+//       PerNodeCfgRenderTable<64>::fns[idx](cfg, g_per_node_cfg_field_descriptors[idx], cfg_path);
 //   });
 //
-// .F.4c.3 — split into GlobalCfgRenderTable + PerCoreCfgRenderTable per the
+// .F.4c.3 — split into GlobalCfgRenderTable + PerNodeCfgRenderTable per the
 // two-registry architecture. Each table's `fns[]` sized to its registry's
 // FIELD_IDX_*_END sentinel. Today both render against `gui_engine_cfg` (the
 // flat ControllerConfig<F> instance — fields haven't moved yet). Step 2 will
-// restructure to PerCoreCfgRenderTable receiving cfg.cores[c] reference.
+// restructure to PerNodeCfgRenderTable receiving cfg.nodes[c] reference.
 //==========================================================================
 template <unsigned F>
 struct GlobalCfgRenderTable {
@@ -214,21 +214,21 @@ struct GlobalCfgRenderTable {
 };
 
 template <unsigned F>
-struct PerCoreCfgRenderTable {
+struct PerNodeCfgRenderTable {
     // Per-core render table. .F.4c.3 — still consumes ControllerConfig<F>&
-    // (fields haven't moved yet); Step 2 restructures to PerCoreCfg<F>& cores[c].
+    // (fields haven't moved yet); Step 2 restructures to PerNodeCfg<F>& nodes[c].
     using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&, const char*);
 
     // WIP2d-1.B.0 — render walker filters by NO_FLAT_FIELD (was HAS_SIDE_EFFECT, overloaded).
-    // PerCoreCfgRenderTable<F> is a class template; member fns instantiate with F. If-constexpr discards
+    // PerNodeCfgRenderTable<F> is a class template; member fns instantiate with F. If-constexpr discards
     // the cfg-access branch for NO_FLAT_FIELD rows at instantiation — the false branch's `cfg.name`
     // reference is NOT syntax-checked when name maps to a per-core-only field (e.g., `strategy` which
-    // doesn't exist on ControllerConfig<F> directly; only on cores[c]). NO_FLAT_FIELD rows render a
+    // doesn't exist on ControllerConfig<F> directly; only on nodes[c]). NO_FLAT_FIELD rows render a
     // STUB returning false (manual handling at designated site; per-core Settings tabs at Step 6).
     //
     // Rows with MANUAL_PARSER (but NOT NO_FLAT_FIELD) DO have flat scalars — render works correctly
     // via `cfg.name` access. Pre-WIP2d-1.B.0 these were incorrectly stubbed via overloaded HAS_SIDE_EFFECT.
-    #define X_GEN_PER_CORE_RENDER_FN(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+    #define X_GEN_PER_NODE_RENDER_FN(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                        applies_to_strategy, applies_to_op_mode, \
                                        applies_to_regime, applies_to_risk, lives_in_struct) \
         static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc, const char* cfg_path) { \
@@ -239,15 +239,15 @@ struct PerCoreCfgRenderTable {
                 return false; \
             } \
         }
-    FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_RENDER_FN)
-    #undef X_GEN_PER_CORE_RENDER_FN
+    FOREACH_PER_NODE_CFG_FIELD(X_GEN_PER_NODE_RENDER_FN)
+    #undef X_GEN_PER_NODE_RENDER_FN
 
-    #define X_GEN_PER_CORE_RENDER_PTR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
-        &PerCoreCfgRenderTable<F>::render_##name,
-    static constexpr RenderFn fns[FIELD_IDX_PER_CORE_END] = {
-        FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_RENDER_PTR)
+    #define X_GEN_PER_NODE_RENDER_PTR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
+        &PerNodeCfgRenderTable<F>::render_##name,
+    static constexpr RenderFn fns[FIELD_IDX_PER_NODE_END] = {
+        FOREACH_PER_NODE_CFG_FIELD(X_GEN_PER_NODE_RENDER_PTR)
     };
-    #undef X_GEN_PER_CORE_RENDER_PTR
+    #undef X_GEN_PER_NODE_RENDER_PTR
 };
 
 // Forward decl — cfg_write_field is defined later in this file (line ~640).
@@ -450,14 +450,14 @@ static const CfgFieldDef field_defs[] = {
     // from the GUI — sharded is the only path users should see. Cfg parser
     // still accepts engine_mode= for backwards compat with old cfg files;
     // users who really want legacy can hand-edit. No UI surface = no foot-gun.
-    // v5.15.5.F.4c — num_execution_cores migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1, 16]).
-    // The field_defs[] entry is DELETED at .F.4c; live_core_count sync + per-core tab count
-    // now read/write s->gui_engine_cfg.num_execution_cores directly.
-    {"num_execution_cores_PLACEHOLDER","Cores",       "Per-Core", CFG_INT,  "%d",
-        "Number of execution cores in sharded mode (1-16).\n"
+    // v5.15.5.F.4c — num_execution_nodes migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1, 16]).
+    // The field_defs[] entry is DELETED at .F.4c; live_node_count sync + per-core tab count
+    // now read/write s->gui_engine_cfg.num_execution_nodes directly.
+    {"num_execution_nodes_PLACEHOLDER","Cores",       "Per-Core", CFG_INT,  "%d",
+        "Number of execution nodes in sharded mode (1-16).\n"
         "Each core handles one position at a time (or two with partial exits).\n"
         "Recommended: physical core count - 2 (one for controller, one for OS).\n"
-        "On AMD: pin all cores to the same CCD to avoid cross-die latency.\n"
+        "On AMD: pin all nodes to the same CCD to avoid cross-die latency.\n"
         "RESTART REQUIRED to take effect."},
     // v4.7.31: "Core Strategies" + "Core Risk" summary sections removed.
     // These were duplicate views of per-core Strategy + Risk %% controls
@@ -551,21 +551,21 @@ static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 // PER-CORE OVERRIDE FIELDS — v4.0
 //
 // One row per overridable field. The actual cfg key is built at render time:
-// "core_<N>_<key_suffix>". 0 / blank means "inherit from Global tab".
+// "node_<N>_<key_suffix>". 0 / blank means "inherit from Global tab".
 //
 // Adding a per-core field: add ONE entry here + ONE line in
-// PerCoreOverrides + ONE line in ControllerConfig_ResolveForCore + ONE
+// PerNodeOverrides + ONE line in ControllerConfig_ResolveForCore + ONE
 // parser case in ControllerConfig_Load. Four sites total.
 //==========================================================================
-struct PerCoreFieldDef {
-    const char *key_suffix;   // e.g. "take_profit_pct" → cfg key core_0_take_profit_pct
+struct PerNodeFieldDef {
+    const char *key_suffix;   // e.g. "take_profit_pct" → cfg key node_0_take_profit_pct
     const char *label;
     const char *section;      // "Trading" / "Entry Filters" / "Strategy-Specific"
     const char *fmt;
     const char *tooltip;
 };
 
-static const PerCoreFieldDef per_core_fields[] = {
+static const PerNodeFieldDef per_node_fields[] = {
     // Trading overrides
     {"take_profit_pct",   "TP %%",       "Trading",           "%.2f",
         "Override global TP %. 0 = inherit from Global tab."},
@@ -659,7 +659,7 @@ static const PerCoreFieldDef per_core_fields[] = {
     {"tp2_mult",          "TP2 Mult",     "Partial Exits",    "%.2f",
         "TP2 distance = TP1 distance * this for this core. 0 = inherit."},
     // v4.7.31: ML / FoxML overrides — only render when this core uses ML.
-    // Strategy filter (per_core_field_strategy) maps any "ml_*", "bandit_*",
+    // Strategy filter (per_node_field_strategy) maps any "ml_*", "bandit_*",
     // "foxml_*", "confidence_*" prefix to STRATEGY_ML so they only show on
     // ML cores (or AUTO — no, AUTO doesn't route to ML per v4.7.30).
     {"foxml_vol_scaling_z_max",   "Vol Z-Max",      "ML",  "%.1f",
@@ -671,9 +671,9 @@ static const PerCoreFieldDef per_core_fields[] = {
     {"confidence_threshold_scale","Conf Scale",     "ML",  "%.2f",
         "Confidence gate scale: effective_thr = base * (this - conf). 0 = inherit."},
 };
-static constexpr int NUM_PER_CORE_FIELDS =
-    sizeof(per_core_fields) / sizeof(per_core_fields[0]);
-static constexpr int MAX_GUI_CORES = 16;
+static constexpr int NUM_PER_NODE_FIELDS =
+    sizeof(per_node_fields) / sizeof(per_node_fields[0]);
+static constexpr int MAX_GUI_NODES = 16;
 
 //==========================================================================
 // SETTINGS STATE — auto-generated from field_defs (no manual struct)
@@ -696,15 +696,15 @@ struct SettingsState {
     char  path_vals[NUM_FIELDS][512]; // storage for path fields (Phase 8b: 256→512 to fit notify_command templates)
     // v4.0 per-core override storage. Indexed [core][field]. Floats only —
     // every per-core override is FPN_Binary<F> in the cfg.
-    float per_core_vals[MAX_GUI_CORES][NUM_PER_CORE_FIELDS];
+    float per_node_vals[MAX_GUI_NODES][NUM_PER_NODE_FIELDS];
     // v4.0.4 per-core "core configuration" — strategy / risk / model. These
-    // can't share per_core_vals[] because they have heterogeneous types
+    // can't share per_node_vals[] because they have heterogeneous types
     // (string + dropdown + float + path). Loaded by Settings_Load alongside
-    // per_core_vals.
-    int   per_core_strategy[MAX_GUI_CORES];   // chosen STRATEGY_* index for dropdown (-1 = unset / use cfg)
-    float per_core_risk_pct[MAX_GUI_CORES];   // 0 = inherit (risk_pct / num_cores)
-    char  per_core_model_path[MAX_GUI_CORES][256];
-    char  per_core_model_dir[MAX_GUI_CORES][256];
+    // per_node_vals.
+    int   per_node_strategy[MAX_GUI_NODES];   // chosen STRATEGY_* index for dropdown (-1 = unset / use cfg)
+    float per_node_risk_pct[MAX_GUI_NODES];   // 0 = inherit (risk_pct / num_nodes)
+    char  per_node_model_path[MAX_GUI_NODES][256];
+    char  per_node_model_dir[MAX_GUI_NODES][256];
     bool  loaded;
     char  cfg_path[256];
     // v5.9.5f — model directory cache. Refresh-button-driven (no per-frame
@@ -736,7 +736,7 @@ static inline void cfg_write_field(const char *path, const char *key, const char
     size_t klen = strlen(search);
 
     // Line-anchored search: walk lines, match start-of-line. Naive
-    // strstr matches `mr_tp_pct=` inside `core_0_mr_tp_pct=` — wrong key.
+    // strstr matches `mr_tp_pct=` inside `node_0_mr_tp_pct=` — wrong key.
     // v4.0 per-core keys make that collision common; line anchoring is
     // load-bearing.
     char *pos = NULL;
@@ -870,13 +870,13 @@ static inline void Settings_Init(SettingsState *s, const char *cfg_path) {
 
 static inline void Settings_Load(SettingsState *s) {
     // zero per-core overrides up front; populated below if cfg has them
-    for (int c = 0; c < MAX_GUI_CORES; ++c) {
-        for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j)
-            s->per_core_vals[c][j] = 0.0f;
-        s->per_core_strategy[c] = -1;
-        s->per_core_risk_pct[c] = 0.0f;
-        s->per_core_model_path[c][0] = '\0';
-        s->per_core_model_dir[c][0]  = '\0';
+    for (int c = 0; c < MAX_GUI_NODES; ++c) {
+        for (int j = 0; j < NUM_PER_NODE_FIELDS; ++j)
+            s->per_node_vals[c][j] = 0.0f;
+        s->per_node_strategy[c] = -1;
+        s->per_node_risk_pct[c] = 0.0f;
+        s->per_node_model_path[c][0] = '\0';
+        s->per_node_model_dir[c][0]  = '\0';
     }
 
     // v5.15.5.F.4c — populate gui_engine_cfg via ControllerConfig_Load (same path as engine
@@ -918,45 +918,45 @@ static inline void Settings_Load(SettingsState *s) {
         }
         if (matched) continue;
 
-        // v4.0 per-core override: parse `core_<N>_<suffix>=<value>`
-        if (strncmp(p, "core_", 5) == 0) {
-            int core_idx = atoi(p + 5);
+        // v4.0 per-core override: parse `node_<N>_<suffix>=<value>`
+        if (strncmp(p, "node_", 5) == 0) {
+            int node_idx = atoi(p + 5);
             const char *us = p + 5;
             while (*us && *us != '_') us++;
-            if (*us == '_' && core_idx >= 0 && core_idx < MAX_GUI_CORES) {
+            if (*us == '_' && node_idx >= 0 && node_idx < MAX_GUI_NODES) {
                 const char *suffix = us + 1;
                 bool pc_matched = false;
-                for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
-                    size_t slen = strlen(per_core_fields[j].key_suffix);
-                    if (strncmp(suffix, per_core_fields[j].key_suffix, slen) == 0 &&
+                for (int j = 0; j < NUM_PER_NODE_FIELDS; ++j) {
+                    size_t slen = strlen(per_node_fields[j].key_suffix);
+                    if (strncmp(suffix, per_node_fields[j].key_suffix, slen) == 0 &&
                         suffix[slen] == '=') {
-                        s->per_core_vals[core_idx][j] = (float)atof(suffix + slen + 1);
+                        s->per_node_vals[node_idx][j] = (float)atof(suffix + slen + 1);
                         pc_matched = true;
                         break;
                     }
                 }
                 if (pc_matched) continue;
                 // v4.0.4 core-configuration keys (heterogeneous types — not
-                // in per_core_fields[]).
+                // in per_node_fields[]).
                 if (strncmp(suffix, "strategy=", 9) == 0) {
                     char nm[32];
                     strncpy(nm, suffix + 9, sizeof(nm) - 1);
                     nm[sizeof(nm) - 1] = '\0';
                     char *end = nm + strlen(nm) - 1;
                     while (end > nm && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
-                    s->per_core_strategy[core_idx] = settings_strategy_name_to_id(nm);
+                    s->per_node_strategy[node_idx] = settings_strategy_name_to_id(nm);
                 } else if (strncmp(suffix, "risk_pct=", 9) == 0) {
-                    s->per_core_risk_pct[core_idx] = (float)atof(suffix + 9);
+                    s->per_node_risk_pct[node_idx] = (float)atof(suffix + 9);
                 } else if (strncmp(suffix, "model_path=", 11) == 0) {
-                    strncpy(s->per_core_model_path[core_idx], suffix + 11, 255);
-                    s->per_core_model_path[core_idx][255] = '\0';
-                    char *end = s->per_core_model_path[core_idx] + strlen(s->per_core_model_path[core_idx]) - 1;
-                    while (end > s->per_core_model_path[core_idx] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
+                    strncpy(s->per_node_model_path[node_idx], suffix + 11, 255);
+                    s->per_node_model_path[node_idx][255] = '\0';
+                    char *end = s->per_node_model_path[node_idx] + strlen(s->per_node_model_path[node_idx]) - 1;
+                    while (end > s->per_node_model_path[node_idx] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
                 } else if (strncmp(suffix, "model_dir=", 10) == 0) {
-                    strncpy(s->per_core_model_dir[core_idx], suffix + 10, 255);
-                    s->per_core_model_dir[core_idx][255] = '\0';
-                    char *end = s->per_core_model_dir[core_idx] + strlen(s->per_core_model_dir[core_idx]) - 1;
-                    while (end > s->per_core_model_dir[core_idx] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
+                    strncpy(s->per_node_model_dir[node_idx], suffix + 10, 255);
+                    s->per_node_model_dir[node_idx][255] = '\0';
+                    char *end = s->per_node_model_dir[node_idx] + strlen(s->per_node_model_dir[node_idx]) - 1;
+                    while (end > s->per_node_model_dir[node_idx] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
                 }
             }
         }
@@ -966,14 +966,14 @@ static inline void Settings_Load(SettingsState *s) {
 
     // v4.7.22: post-load defaults for fields the cfg may not have written.
     // Without this, the widget shows 0 even though the engine boots with
-    // the default. Only patch num_execution_cores here — engine_mode is
+    // the default. Only patch num_execution_nodes here — engine_mode is
     // boolean and we can't distinguish "missing from cfg" from "explicitly
     // 0", so flipping it would override user intent.
-    // v5.15.5.F.4c — num_execution_cores moved to gui_engine_cfg (FOREACH_CFG_FIELD).
+    // v5.15.5.F.4c — num_execution_nodes moved to gui_engine_cfg (FOREACH_CFG_FIELD).
     // Apply default-fallback when cfg-file omitted the key (Settings_Load left it at 0
     // since ControllerConfig_Load itself defaults to 4; this is the GUI-side safety net).
-    if (s->gui_engine_cfg.num_execution_cores < 1) {
-        s->gui_engine_cfg.num_execution_cores = 4;  // matches ControllerConfig_Default
+    if (s->gui_engine_cfg.num_execution_nodes < 1) {
+        s->gui_engine_cfg.num_execution_nodes = 4;  // matches ControllerConfig_Default
     }
 }
 
@@ -1000,11 +1000,11 @@ static inline int global_section_strategy(const char *section) {
 // sections (FoxML/Validation/Models/Barrier) in Global whenever any
 // core was AUTO, even though AUTO never routes to ML.
 //
-// Source of truth: SettingsState's per_core_strategy[] (user intent —
+// Source of truth: SettingsState's per_node_strategy[] (user intent —
 // what they have configured, may differ from live until Apply pressed).
-static inline bool any_core_uses_strategy(const SettingsState *s, int strat) {
-    for (int c = 0; c < MAX_GUI_CORES; ++c) {
-        int sid = s->per_core_strategy[c];
+static inline bool any_node_uses_strategy(const SettingsState *s, int strat) {
+    for (int c = 0; c < MAX_GUI_NODES; ++c) {
+        int sid = s->per_node_strategy[c];
         if (sid < 0) continue;
         if (sid == strat) return true;
         // AUTO routes to MR/MOM/EMA/DIP only — NOT ML.
@@ -1029,7 +1029,7 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
             // v4.7.23: hide strategy-specific sections when no configured
             // core uses that strategy. AUTO cores match all strategies.
             int sec_strat = global_section_strategy(current_section);
-            if (sec_strat >= 0 && !any_core_uses_strategy(s, sec_strat)) {
+            if (sec_strat >= 0 && !any_node_uses_strategy(s, sec_strat)) {
                 while (i + 1 < NUM_FIELDS &&
                        strcmp(field_defs[i + 1].section, current_section) == 0)
                     i++;
@@ -1107,14 +1107,14 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
     //==========================================================================
     // v5.15.5.F.4c.3 — Bitmap-dispatch walker for two-registry architecture
     //==========================================================================
-    // Two walks: first FOREACH_GLOBAL_CFG_FIELD rows, then FOREACH_PER_CORE_CFG_FIELD.
+    // Two walks: first FOREACH_GLOBAL_CFG_FIELD rows, then FOREACH_PER_NODE_CFG_FIELD.
     // Today both render into `gui_engine_cfg` (flat ControllerConfig<F> instance);
     // Step 2 of .F.4c.3 will restructure per-core rows to render against
-    // cfg.cores[c] in dedicated per-core tabs.
+    // cfg.nodes[c] in dedicated per-core tabs.
     //
     // Section-grouping mirrors the field_defs[] loop above; per-section
     // CollapsingHeader; strategy filter via global_section_strategy +
-    // any_core_uses_strategy; default_open whitelist for Trading / Entry Filters /
+    // any_node_uses_strategy; default_open whitelist for Trading / Entry Filters /
     // EMA Gate. Rows are declared section-grouped within each registry, so
     // iteration in FIELD_IDX_* order = section-grouped order.
     //==========================================================================
@@ -1131,7 +1131,7 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
                 cfg_walker_skip_section = false;
 
                 int sec_strat = global_section_strategy(cfg_walker_section);
-                if (sec_strat >= 0 && !any_core_uses_strategy(s, sec_strat)) {
+                if (sec_strat >= 0 && !any_node_uses_strategy(s, sec_strat)) {
                     cfg_walker_skip_section = true;
                     continue;
                 }
@@ -1156,18 +1156,18 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
         // === Per-core registry walk ===
         // .F.4c.3 Step 1: per-core rows still render against `gui_engine_cfg`
         // flat fields. Step 2 will move these into per-core tabs against
-        // `gui_engine_cfg.cores[c]`.
+        // `gui_engine_cfg.nodes[c]`.
         cfg_walker_section = NULL;
         cfg_walker_skip_section = false;
-        CFG_FIELD_FOR_EACH_SET_BIT(g_per_core_cfg_render_mask.words, idx, {
-            const CfgFieldDescriptor &desc = g_per_core_cfg_field_descriptors[idx];
+        CFG_FIELD_FOR_EACH_SET_BIT(g_per_node_cfg_render_mask.words, idx, {
+            const CfgFieldDescriptor &desc = g_per_node_cfg_field_descriptors[idx];
 
             if (!cfg_walker_section || strcmp(cfg_walker_section, desc.section) != 0) {
                 cfg_walker_section = desc.section;
                 cfg_walker_skip_section = false;
 
                 int sec_strat = global_section_strategy(cfg_walker_section);
-                if (sec_strat >= 0 && !any_core_uses_strategy(s, sec_strat)) {
+                if (sec_strat >= 0 && !any_node_uses_strategy(s, sec_strat)) {
                     cfg_walker_skip_section = true;
                     continue;
                 }
@@ -1184,7 +1184,7 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
             if (cfg_walker_skip_section) continue;
 
             ImGui::SetNextItemWidth(80);
-            if (PerCoreCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
+            if (PerNodeCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
                 changed = true;
             }
         });
@@ -1194,7 +1194,7 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
 }
 
 //==========================================================================
-// PER-CORE TAB — renders one core's PerCoreOverrides editor
+// PER-CORE TAB — renders one core's PerNodeOverrides editor
 //==========================================================================
 // Each row is one override. Empty/0 = inherit from Global. The current value
 // from the Global tab is shown next to the input as a small grey hint.
@@ -1214,7 +1214,7 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
 // Used by Settings_RenderPerCoreTab to scope the "Strategy-Specific" section
 // to fields relevant to THIS core's strategy. AUTO cores show all (since
 // AUTO routes to any strategy at runtime).
-static inline int per_core_field_strategy(const char *key_suffix) {
+static inline int per_node_field_strategy(const char *key_suffix) {
     if (strncmp(key_suffix, "simpledip_", 10) == 0) return STRATEGY_SIMPLE_DIP;
     if (strncmp(key_suffix, "mr_",         3) == 0) return STRATEGY_MEAN_REVERSION;
     if (strncmp(key_suffix, "momentum_",   9) == 0) return STRATEGY_MOMENTUM;
@@ -1231,22 +1231,22 @@ static inline int per_core_field_strategy(const char *key_suffix) {
 }
 
 // True when this per-core field should be VISIBLE on the tab for a core
-// running `core_strategy`. STRATEGY_NONE shows nothing strategy-specific
+// running `node_strategy`. STRATEGY_NONE shows nothing strategy-specific
 // (only the agnostic overrides).
 //
 // v4.7.30: AUTO routes to MR/Momentum/SimpleDip/EMA Cross only — NOT ML.
 // Pre-v4.7.30 AUTO showed ALL strategy-specific fields including ML's,
 // which never matter for an AUTO core. Now AUTO matches everything except ML.
-static inline bool per_core_field_visible(const char *key_suffix, int core_strategy) {
-    int field_strat = per_core_field_strategy(key_suffix);
+static inline bool per_node_field_visible(const char *key_suffix, int node_strategy) {
+    int field_strat = per_node_field_strategy(key_suffix);
     if (field_strat < 0) return true;       // agnostic
-    if (core_strategy == STRATEGY_AUTO) {
+    if (node_strategy == STRATEGY_AUTO) {
         return field_strat != STRATEGY_ML;
     }
-    return core_strategy == field_strat;
+    return node_strategy == field_strat;
 }
 
-static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
+static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                                               TUISharedState *shared = NULL,
                                               const TUISnapshot *snap = NULL) {
     bool changed = false;
@@ -1256,7 +1256,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         "Set any override to use that value for this core only.");
 
     // v4.0.4 — Core Configuration section. Strategy + risk + model path,
-    // pulling from cfg-only fields (not per_core_fields[] which is float-
+    // pulling from cfg-only fields (not per_node_fields[] which is float-
     // only). Strategy persists immediately on Apply via cfg_write_field
     // and signals the engine via swap_strategy_requested[] for hot-swap.
     if (ImGui::CollapsingHeader("Core Configuration", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1264,14 +1264,14 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         // Determine the live ACTIVE strategy from snapshot if present.
         // Otherwise read what's in cfg.
         int active_sid = -1;
-        if (snap && snap->sharded_mode_active && core_id < snap->per_core_count) {
-            active_sid = snap->per_core[core_id].strategy_id_display;
-        } else if (s->per_core_strategy[core_id] >= 0) {
-            active_sid = s->per_core_strategy[core_id];
+        if (snap && snap->sharded_mode_active && node_id < snap->per_node_count) {
+            active_sid = snap->per_node[node_id].strategy_id_display;
+        } else if (s->per_node_strategy[node_id] >= 0) {
+            active_sid = s->per_node_strategy[node_id];
         }
         // Initialize dropdown to the active strategy on first sight so it
         // doesn't default to "MR" for every core.
-        int *chosen = &s->per_core_strategy[core_id];
+        int *chosen = &s->per_node_strategy[node_id];
         if (*chosen < 0 && active_sid >= 0) *chosen = active_sid;
         if (*chosen < 0) *chosen = 0;  // fallback for cores w/o cfg + no snapshot
 
@@ -1298,7 +1298,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
             ImGui::PushID("strat_apply");
             if (ImGui::Button("Apply")) {
                 if (shared && *chosen >= 0 && *chosen < NUM_STRATEGIES) {
-                    __atomic_store_n(&shared->swap_strategy_requested[core_id],
+                    __atomic_store_n(&shared->swap_strategy_requested[node_id],
                                      (uint8_t)*chosen, __ATOMIC_RELEASE);
                 }
                 static const char* strat_cfg_names[NUM_STRATEGIES] = {
@@ -1306,7 +1306,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
                 };
                 if (*chosen >= 0 && *chosen < NUM_STRATEGIES) {
                     char key[64];
-                    snprintf(key, sizeof(key), "core_%d_strategy", core_id);
+                    snprintf(key, sizeof(key), "node_%d_strategy", node_id);
                     cfg_write_field(s->cfg_path, key, strat_cfg_names[*chosen]);
                     changed = true;
                 }
@@ -1315,7 +1315,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         }
         // pending swap status (when Apply was pressed but core still has open pos)
         if (shared) {
-            uint8_t pending = __atomic_load_n(&shared->swap_strategy_requested[core_id],
+            uint8_t pending = __atomic_load_n(&shared->swap_strategy_requested[node_id],
                                               __ATOMIC_ACQUIRE);
             if (pending != STRATEGY_NONE) {
                 ImGui::SameLine();
@@ -1328,32 +1328,32 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         // ---- risk_pct ----
         ImGui::SetNextItemWidth(80);
         ImGui::PushID("risk");
-        ImGui::InputFloat("Risk %", &s->per_core_risk_pct[core_id], 0, 0, "%.1f");
+        ImGui::InputFloat("Risk %", &s->per_node_risk_pct[node_id], 0, 0, "%.1f");
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             char key[64];
-            snprintf(key, sizeof(key), "core_%d_risk_pct", core_id);
+            snprintf(key, sizeof(key), "node_%d_risk_pct", node_id);
             char val[32];
-            snprintf(val, sizeof(val), "%.2f", s->per_core_risk_pct[core_id]);
+            snprintf(val, sizeof(val), "%.2f", s->per_node_risk_pct[node_id]);
             cfg_write_field(s->cfg_path, key, val);
             changed = true;
         }
         ImGui::PopID();
-        ImGui::SetItemTooltip("Override per-core risk %% (0 = inherit risk_pct/num_cores). "
-                              "Stored as `core_%d_risk_pct=N.NN` in cfg.", core_id);
+        ImGui::SetItemTooltip("Override per-core risk %% (0 = inherit risk_pct/num_nodes). "
+                              "Stored as `node_%d_risk_pct=N.NN` in cfg.", node_id);
 
         // ---- model_path / model_dir (ML cores) ----
         ImGui::SetNextItemWidth(360);
         ImGui::PushID("mpath");
-        ImGui::InputText("Model Path", s->per_core_model_path[core_id], 256);
+        ImGui::InputText("Model Path", s->per_node_model_path[node_id], 256);
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             char key[64];
-            snprintf(key, sizeof(key), "core_%d_model_path", core_id);
-            cfg_write_field(s->cfg_path, key, s->per_core_model_path[core_id]);
+            snprintf(key, sizeof(key), "node_%d_model_path", node_id);
+            cfg_write_field(s->cfg_path, key, s->per_node_model_path[node_id]);
             changed = true;
         }
         ImGui::PopID();
-        ImGui::SetItemTooltip("Single model file. Used by STRATEGY_ML cores. "
-                              "Use Model Dir below for a CoreModelZoo with role auto-discovery.");
+        ImGui::SetItemTooltip("Single model file. Used by STRATEGY_ML nodes. "
+                              "Use Model Dir below for a NodeModelZoo with role auto-discovery.");
 
         // v5.9.5f — Model Dir is now a Combo populated from a scan of
         // `models/` (operator no longer types paths). Falls back to
@@ -1366,9 +1366,9 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
             // Find current selection (match by dir name OR full path)
             int cur_sel = -1;  // -1 = "(none)" entry
             for (int i = 0; i < s->model_scan_count; ++i) {
-                if (strcmp(s->per_core_model_dir[core_id],
+                if (strcmp(s->per_node_model_dir[node_id],
                             s->model_scan_paths[i]) == 0 ||
-                    strcmp(s->per_core_model_dir[core_id],
+                    strcmp(s->per_node_model_dir[node_id],
                             s->model_scan_dirs[i]) == 0) {
                     cur_sel = i;
                     break;
@@ -1376,15 +1376,15 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
             }
             const char *preview = (cur_sel >= 0)
                 ? s->model_scan_dirs[cur_sel]
-                : (s->per_core_model_dir[core_id][0]
-                    ? s->per_core_model_dir[core_id] : "(none)");
+                : (s->per_node_model_dir[node_id][0]
+                    ? s->per_node_model_dir[node_id] : "(none)");
             if (ImGui::BeginCombo("Model Dir", preview)) {
                 // (none) entry to clear the field
-                bool sel_none = (s->per_core_model_dir[core_id][0] == '\0');
+                bool sel_none = (s->per_node_model_dir[node_id][0] == '\0');
                 if (ImGui::Selectable("(none)", sel_none)) {
-                    s->per_core_model_dir[core_id][0] = '\0';
+                    s->per_node_model_dir[node_id][0] = '\0';
                     char key[64];
-                    snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
+                    snprintf(key, sizeof(key), "node_%d_model_dir", node_id);
                     cfg_write_field(s->cfg_path, key, "");
                     changed = true;
                 }
@@ -1392,14 +1392,14 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
                     bool is_selected = (i == cur_sel);
                     if (ImGui::Selectable(s->model_scan_dirs[i], is_selected)) {
                         size_t n = strnlen(s->model_scan_paths[i],
-                                            sizeof(s->per_core_model_dir[core_id]) - 1);
-                        memcpy(s->per_core_model_dir[core_id],
+                                            sizeof(s->per_node_model_dir[node_id]) - 1);
+                        memcpy(s->per_node_model_dir[node_id],
                                 s->model_scan_paths[i], n);
-                        s->per_core_model_dir[core_id][n] = '\0';
+                        s->per_node_model_dir[node_id][n] = '\0';
                         char key[64];
-                        snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
+                        snprintf(key, sizeof(key), "node_%d_model_dir", node_id);
                         cfg_write_field(s->cfg_path, key,
-                                        s->per_core_model_dir[core_id]);
+                                        s->per_node_model_dir[node_id]);
                         changed = true;
                     }
                     if (is_selected) ImGui::SetItemDefaultFocus();
@@ -1409,11 +1409,11 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         } else {
             // No models found — fall back to InputText so operator can
             // type a path manually if needed.
-            ImGui::InputText("Model Dir", s->per_core_model_dir[core_id], 256);
+            ImGui::InputText("Model Dir", s->per_node_model_dir[node_id], 256);
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 char key[64];
-                snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
-                cfg_write_field(s->cfg_path, key, s->per_core_model_dir[core_id]);
+                snprintf(key, sizeof(key), "node_%d_model_dir", node_id);
+                cfg_write_field(s->cfg_path, key, s->per_node_model_dir[node_id]);
                 changed = true;
             }
         }
@@ -1432,17 +1432,17 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         ImGui::SetItemTooltip("Rescan models/ directory");
 
         // v5.10.0c — "Apply (live)" hot-swap button. Writes the current
-        // Model Dir into TUISharedState's pending_model_path[core_id]
+        // Model Dir into TUISharedState's pending_model_path[node_id]
         // then atomic-stores the request flag. Engine slow-path consumer
         // reads with __ATOMIC_ACQUIRE, frees+reloads ml_zoos[c], swaps
         // the handle. Mirrors the strategy hot-swap pattern at
         // SettingsPanel.hpp:945.
         ImGui::SameLine();
         bool can_swap = (shared != nullptr) &&
-                        (s->per_core_model_dir[core_id][0] != '\0') &&
-                        (core_id < 16);
-        uint8_t pending_swap = (shared && core_id < 16)
-            ? __atomic_load_n(&shared->swap_model_path_requested[core_id],
+                        (s->per_node_model_dir[node_id][0] != '\0') &&
+                        (node_id < 16);
+        uint8_t pending_swap = (shared && node_id < 16)
+            ? __atomic_load_n(&shared->swap_model_path_requested[node_id],
                               __ATOMIC_ACQUIRE)
             : 0;
         if (pending_swap) {
@@ -1466,11 +1466,11 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
             if (ImGui::Button("Apply (live)")) {
                 // Write-then-flag pattern: copy path, then atomic-store flag.
                 // Reader uses __ATOMIC_ACQUIRE so the path is visible.
-                size_t n = strnlen(s->per_core_model_dir[core_id], 255);
-                memcpy(shared->pending_model_path[core_id],
-                        s->per_core_model_dir[core_id], n);
-                shared->pending_model_path[core_id][n] = '\0';
-                __atomic_store_n(&shared->swap_model_path_requested[core_id],
+                size_t n = strnlen(s->per_node_model_dir[node_id], 255);
+                memcpy(shared->pending_model_path[node_id],
+                        s->per_node_model_dir[node_id], n);
+                shared->pending_model_path[node_id][n] = '\0';
+                __atomic_store_n(&shared->swap_model_path_requested[node_id],
                                  (uint8_t)1, __ATOMIC_RELEASE);
             }
             ImGui::PopID();
@@ -1493,11 +1493,11 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
     // them — not stay looking at EMA fields just because the engine is still
     // running EMA pre-Apply. Fall back to snapshot if no dropdown choice yet,
     // last resort STRATEGY_NONE.
-    int core_strategy = STRATEGY_NONE;
-    if (s->per_core_strategy[core_id] >= 0) {
-        core_strategy = s->per_core_strategy[core_id];
-    } else if (snap && snap->sharded_mode_active && core_id < snap->per_core_count) {
-        core_strategy = snap->per_core[core_id].strategy_id_display;
+    int node_strategy = STRATEGY_NONE;
+    if (s->per_node_strategy[node_id] >= 0) {
+        node_strategy = s->per_node_strategy[node_id];
+    } else if (snap && snap->sharded_mode_active && node_id < snap->per_node_count) {
+        node_strategy = snap->per_node[node_id].strategy_id_display;
     }
 
     // v5.11.61 — ML Ensemble panel. Surfaces what
@@ -1506,11 +1506,11 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
     // Read-only display + checkbox writes core_N_disabled_horizons CSV
     // back to cfg (operator must restart or 'r' reload to apply). Only
     // renders when this core is ML (strategy filter) AND ensemble is active.
-    if (core_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
-        core_id < snap->per_core_count &&
-        snap->per_core[core_id].ensemble_active) {
+    if (node_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
+        node_id < snap->per_node_count &&
+        snap->per_node[node_id].ensemble_active) {
         if (ImGui::CollapsingHeader("ML Ensemble", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const auto &pcs = snap->per_core[core_id];
+            const auto &pcs = snap->per_node[node_id];
             int n_h = (int)pcs.ensemble_n_horizons;
             ImGui::Text("Blend mode: %s   n_horizons: %d",
                         pcs.ensemble_blend_mode, n_h);
@@ -1594,7 +1594,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
                         }
                     }
                     char key[64];
-                    snprintf(key, sizeof(key), "core_%d_disabled_horizons", core_id);
+                    snprintf(key, sizeof(key), "node_%d_disabled_horizons", node_id);
                     cfg_write_field(s->cfg_path, key, csv);
                     fprintf(stderr, "[settings] wrote %s=%s — press 'r' in "
                                     "TUI or restart engine to apply\n",
@@ -1606,9 +1606,9 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
                 "Toggle requires engine restart OR 'r' hot-reload to apply.\n"
                 "Bandit weights drift toward better-performing horizons per regime.");
         }
-    } else if (core_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
-               core_id < snap->per_core_count &&
-               !snap->per_core[core_id].ensemble_active) {
+    } else if (node_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
+               node_id < snap->per_node_count &&
+               !snap->per_node[node_id].ensemble_active) {
         // ML core but no ensemble active — surface why
         if (ImGui::CollapsingHeader("ML Ensemble", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextColored(FoxmlColors::comment,
@@ -1616,54 +1616,54 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
                 "siblings detected at base path.");
             ImGui::TextColored(FoxmlColors::comment,
                 "If you trained multi-horizon models, check that "
-                "core_%d_model_dir points at the BASE path "
+                "node_%d_model_dir points at the BASE path "
                 "(without _horizon_<H> suffix) and engine.log shows "
-                "[sharded] core %d: ensemble active.", core_id, core_id);
+                "[sharded] core %d: ensemble active.", node_id, node_id);
         }
     }
 
     const char *current_section = NULL;
     bool current_section_open = false;
-    for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
-        const PerCoreFieldDef *pcf = &per_core_fields[j];
+    for (int j = 0; j < NUM_PER_NODE_FIELDS; ++j) {
+        const PerNodeFieldDef *pcf = &per_node_fields[j];
         if (!current_section || strcmp(current_section, pcf->section) != 0) {
             current_section = pcf->section;
             // v4.7.23: pre-scan section for any visible field. If none match
             // the core's strategy, skip the whole section silently.
             bool any_visible = false;
-            for (int k = j; k < NUM_PER_CORE_FIELDS &&
-                            strcmp(per_core_fields[k].section, current_section) == 0; ++k) {
-                if (per_core_field_visible(per_core_fields[k].key_suffix, core_strategy)) {
+            for (int k = j; k < NUM_PER_NODE_FIELDS &&
+                            strcmp(per_node_fields[k].section, current_section) == 0; ++k) {
+                if (per_node_field_visible(per_node_fields[k].key_suffix, node_strategy)) {
                     any_visible = true;
                     break;
                 }
             }
             if (!any_visible) {
-                while (j + 1 < NUM_PER_CORE_FIELDS &&
-                       strcmp(per_core_fields[j + 1].section, current_section) == 0)
+                while (j + 1 < NUM_PER_NODE_FIELDS &&
+                       strcmp(per_node_fields[j + 1].section, current_section) == 0)
                     ++j;
                 continue;
             }
             ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_DefaultOpen;
             current_section_open = ImGui::CollapsingHeader(current_section, fl);
             if (!current_section_open) {
-                while (j + 1 < NUM_PER_CORE_FIELDS &&
-                       strcmp(per_core_fields[j + 1].section, current_section) == 0)
+                while (j + 1 < NUM_PER_NODE_FIELDS &&
+                       strcmp(per_node_fields[j + 1].section, current_section) == 0)
                     ++j;
                 continue;
             }
         }
         if (!current_section_open) continue;
         // v4.7.23: skip individual fields that don't match this core's strategy.
-        if (!per_core_field_visible(pcf->key_suffix, core_strategy)) continue;
+        if (!per_node_field_visible(pcf->key_suffix, node_strategy)) continue;
         ImGui::PushID(j);  // disambiguate same-named labels across the 18 rows
         ImGui::SetNextItemWidth(80);
-        ImGui::InputFloat(pcf->label, &s->per_core_vals[core_id][j], 0, 0, pcf->fmt);
+        ImGui::InputFloat(pcf->label, &s->per_node_vals[node_id][j], 0, 0, pcf->fmt);
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             char key[64];
-            snprintf(key, sizeof(key), "core_%d_%s", core_id, pcf->key_suffix);
+            snprintf(key, sizeof(key), "node_%d_%s", node_id, pcf->key_suffix);
             char val[32];
-            snprintf(val, sizeof(val), pcf->fmt, s->per_core_vals[core_id][j]);
+            snprintf(val, sizeof(val), pcf->fmt, s->per_node_vals[node_id][j]);
             cfg_write_field(s->cfg_path, key, val);
             changed = true;
         }
@@ -1677,12 +1677,12 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
 //==========================================================================
 // RENDER — tabbed: Global + Core 0..N
 //==========================================================================
-// live_core_count > 0 → use it (number of cores actually registered with the
-// engine). 0 → fall back to the cfg's num_execution_cores field. Reflects
+// live_node_count > 0 → use it (number of cores actually registered with the
+// engine). 0 → fall back to the cfg's num_execution_nodes field. Reflects
 // running cores, not cfg-only intent — engine doesn't add/remove cores live.
 static inline void GUI_Panel_Settings(SettingsState *s,
                                        volatile sig_atomic_t *reload_flag,
-                                       int live_core_count = 0,
+                                       int live_node_count = 0,
                                        TUISharedState *shared = NULL,
                                        const TUISnapshot *snap = NULL) {
     ImGui::Begin("Settings");
@@ -1690,11 +1690,11 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     if (!s->loaded) Settings_Load(s);
 
     // v4.7.22: when the engine is running with N cores live, sync the
-    // num_execution_cores widget to that value so it doesn't read stale-
+    // num_execution_nodes widget to that value so it doesn't read stale-
     // 0 or a stale cfg value while the live count is authoritative.
-    if (live_core_count > 0 && live_core_count <= MAX_GUI_CORES) {
-        // v5.15.5.F.4c — sync live_core_count into gui_engine_cfg (was: float_vals[i]).
-        s->gui_engine_cfg.num_execution_cores = (uint16_t)live_core_count;
+    if (live_node_count > 0 && live_node_count <= MAX_GUI_NODES) {
+        // v5.15.5.F.4c — sync live_node_count into gui_engine_cfg (was: float_vals[i]).
+        s->gui_engine_cfg.num_execution_nodes = (uint16_t)live_node_count;
     }
 
     ImGui::TextColored(FoxmlColors::primary, "ENGINE SETTINGS");
@@ -1737,25 +1737,25 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     }
 
     // Tabs match live registered cores when available; else fall back to
-    // cfg num_execution_cores; else default 4. Avoids the "I have 4 cores
-    // but only 1 tab" bug when num_execution_cores is missing from cfg
+    // cfg num_execution_nodes; else default 4. Avoids the "I have 4 cores
+    // but only 1 tab" bug when num_execution_nodes is missing from cfg
     // (cfg defaults to 4 on the engine side, but Settings_Load only sees
     // what's literally written in the file).
-    int num_cores = 0;
-    if (live_core_count > 0 && live_core_count <= MAX_GUI_CORES) {
-        num_cores = live_core_count;
+    int num_nodes = 0;
+    if (live_node_count > 0 && live_node_count <= MAX_GUI_NODES) {
+        num_nodes = live_node_count;
     } else {
-        // v5.15.5.F.4c — read num_cores from gui_engine_cfg (was: field_defs[]+float_vals[]).
-        num_cores = (int)s->gui_engine_cfg.num_execution_cores;
-        if (num_cores < 1) num_cores = 4;  // safe default = engine's default
-        if (num_cores > MAX_GUI_CORES) num_cores = MAX_GUI_CORES;
+        // v5.15.5.F.4c — read num_nodes from gui_engine_cfg (was: field_defs[]+float_vals[]).
+        num_nodes = (int)s->gui_engine_cfg.num_execution_nodes;
+        if (num_nodes < 1) num_nodes = 4;  // safe default = engine's default
+        if (num_nodes > MAX_GUI_NODES) num_nodes = MAX_GUI_NODES;
     }
 
     bool changed = false;
     if (ImGui::BeginTabBar("##settings_tabs")) {
         if (ImGui::BeginTabItem("Global")) {
             // Defensive ID scope per tab — section labels in Global may
-            // collide with per_core_fields section labels (both have
+            // collide with per_node_fields section labels (both have
             // "Trading", "Entry Filters") even though only one tab renders
             // at a time. Cheap insurance.
             ImGui::PushID("global_tab");
@@ -1763,7 +1763,7 @@ static inline void GUI_Panel_Settings(SettingsState *s,
             ImGui::PopID();
             ImGui::EndTabItem();
         }
-        for (int c = 0; c < num_cores; ++c) {
+        for (int c = 0; c < num_nodes; ++c) {
             char tab_label[16];
             // v4.7.41 (Phase G): "Engine N" reframes each tab as a strategy
             // engine (slow + hot pair) rather than just an exec core.

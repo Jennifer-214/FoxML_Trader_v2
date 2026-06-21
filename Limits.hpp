@@ -11,13 +11,13 @@
 #define LOG_BUFFER_SIZE 32768
 
 // per-core sharding (phase 04+)
-// MAX_EXECUTION_CORES caps the number of execution cores the controller can
-// register. one core per pinned CPU. core_id maps directly to portfolio slot.
-// MAX_EVENTS_PER_DRAIN_PER_CORE caps how many events one drain pass will pull
+// MAX_EXECUTION_NODES caps the number of execution cores the controller can
+// register. one core per pinned CPU. node_id maps directly to portfolio slot.
+// MAX_EVENTS_PER_DRAIN_PER_NODE caps how many events one drain pass will pull
 // from a single core's event ring before moving to the next core. prevents one
 // chatty core from starving the others (pitfall P4.1).
-#define MAX_EXECUTION_CORES 16
-#define MAX_EVENTS_PER_DRAIN_PER_CORE 16
+#define MAX_EXECUTION_NODES 16
+#define MAX_EVENTS_PER_DRAIN_PER_NODE 16
 
 // OMS (Order Management System, phase 01+)
 // MAX_INFLIGHT_ORDERS caps the OrderManager in-flight order table. orders

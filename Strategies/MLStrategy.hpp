@@ -20,7 +20,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ModelInference.hpp"
-#include "../ML_Headers/CoreModelZoo.hpp"  // v5.10.0a.G.4: EnsembleModelZoo for multi-horizon
+#include "../ML_Headers/NodeModelZoo.hpp"  // v5.10.0a.G.4: EnsembleModelZoo for multi-horizon
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — MASK_OMS_STATE_*

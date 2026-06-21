@@ -74,7 +74,7 @@
 //     promotes pattern toward CLAUDE.md item — see CLAUDE.local.md "codify"
 //     rule 2026-05-13)
 //   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
-//   v5.15.5.B.3 FOREACH_CORE_STATE_FLAG (CoreStateFlagRegistry.hpp) — sister registry
+//   v5.15.5.B.3 FOREACH_NODE_STATE_FLAG (NodeStateFlagRegistry.hpp) — sister registry
 //   v5.15.5.C.2.1 FOREACH_OMS_META_SLOT (OmsExitPredictorMetaRegistry.hpp) —
 //     1st multi-bit application (per-slot scope; this is struct-level analog)
 //======================================================================================================
@@ -103,9 +103,9 @@ namespace tt {
     X(LIVE_TRADING,                                                                                     \
       "live-trading mode: 0 = paper (adapter callbacks suppressed); 1 = live (adapter required)")       \
     /* Partials geometry mirrored from cfg.lifecycle_cfg_flags. Set ONCE at engine init; drainer     */ \
-    /* uses it for slot→core_id mapping (Sharded_LegSlot). Toggle requires snapshot v3 reload.      */ \
+    /* uses it for slot→node_id mapping (Sharded_LegSlot). Toggle requires snapshot v3 reload.      */ \
     X(PARTIAL_EXIT_ENABLED,                                                                             \
-      "partials enabled: 0 = slot==core_id; 1 = slot = 2*core_id+leg (leg A/B per core)")               \
+      "partials enabled: 0 = slot==node_id; 1 = slot = 2*node_id+leg (leg A/B per core)")               \
     /* Kill switch trip state. Set by per-OMS drawdown gate (drainer thread); cleared by             */ \
     /* EventLoop_Unpause (same thread). Tripping clears every registered core's permission with      */ \
     /* RELEASE; idempotent. Persisted as int (4 bytes) in snapshot — wire format preserved.          */ \
@@ -218,7 +218,7 @@ static_assert(OMS_EVENT_LOG_MODE_COUNT <= (1u << BITS_OMS_STATE_EVENT_LOG_MODE),
 //======================================================================================================
 // [OMS_STATE_FLAG_* convenience macros]
 //======================================================================================================
-// Mirror CORE_STATE_FLAG_* shape. Reads naturally:
+// Mirror NODE_STATE_FLAG_* shape. Reads naturally:
 //   Set:    OMS_STATE_FLAG_SET(oms, KILL_SWITCH_TRIPPED)
 //   Clear:  OMS_STATE_FLAG_CLR(oms, KILL_SWITCH_TRIPPED)
 //   Read:   OMS_STATE_FLAG_IS_SET(oms, KILL_SWITCH_TRIPPED)
