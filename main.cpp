@@ -20,27 +20,17 @@
 //======================================================================================================
 #include <locale.h>   // .E.0.1: LC_NUMERIC=C boot pin (locale-determinism class close)
 #include "DataStream/BinanceCrypto.hpp"
-#include "DataStream/BinanceOrderAPI.hpp"
-#include "DataStream/BinanceDepth.hpp"
-#include "DataStream/EngineTUI.hpp"
 #include "CoreFrameworks/Notify.hpp"
 // Phase 8b — g_notify is a C++17 inline variable defined in Notify.hpp,
 // nullptr by default. Live engine assigns &g_notify_state in main() after
 // NotifyState_Init when cfg.notify_enabled=1 (lands in c3+c4).
 #include "CoreFrameworks/EngineSharded.hpp"
-#include "CoreFrameworks/PortfolioController.hpp"
-#include "MemHeaders/PoolAllocator.hpp"
-#include "DataStream/TradeLog.hpp"
-#include "DataStream/MetricsLog.hpp"
-#include "DataStream/TickRecorder.hpp"
 #include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 
 #ifdef USE_IMGUI_GUI
 #include "GUI/CandleAccumulator.hpp"
 #include "GUI/GuiThread.hpp"
 #endif
-
-#include "Licensing.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>     // v5.11.0.B — mlockall
