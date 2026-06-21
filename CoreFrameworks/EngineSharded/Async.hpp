@@ -312,7 +312,7 @@ inline bool EngineSharded_Async_FanOut(
         // edited via the GUI never took effect until restart. Re-read
         // engine.cfg, copy reloadable fields into the in-memory cfg.
         //
-        // Boot-only fields are preserved (engine_mode, num_execution_cores,
+        // Boot-only fields are preserved (num_execution_cores,
         // model paths, starting_balance, fee_rate_maker/taker, exchange
         // routing, recording flags). Tunables are bulk-copied including
         // the per-core overrides array.
@@ -322,7 +322,6 @@ inline bool EngineSharded_Async_FanOut(
             // boot-only: preserve fields that the running engine cannot
             // change live (would require thread restart, file I/O off
             // the controller thread, or different per-core wiring).
-            new_cfg.engine_mode         = cfg.engine_mode;
             new_cfg.num_execution_cores = cfg.num_execution_cores;
             new_cfg.starting_balance    = cfg.starting_balance;
             for (int c = 0; c < 16; ++c) {

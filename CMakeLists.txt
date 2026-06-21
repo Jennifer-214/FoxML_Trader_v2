@@ -232,17 +232,6 @@ target_include_directories(depth_recorder_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(depth_recorder_test PRIVATE ssl crypto pthread)
 # (F-057 native-FP-path pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 
-# Track E.6 — parity validation harness. Runs the legacy + sharded backtest
-# paths on the same tick file and diffs feature_matrix output. Final gate
-# before E.7 deletes the legacy backtest body. Compiled with the same
-# MULTICORE_TUI definition controller_test uses (BacktestEngine.hpp pulls
-# in TUISnapshot transitively).
-add_executable(parity_harness tests/parity_harness.cpp)
-target_compile_options(parity_harness PRIVATE -O3 -march=native -funroll-loops -flto)
-target_include_directories(parity_harness PRIVATE ${CMAKE_SOURCE_DIR}/..)
-target_compile_definitions(parity_harness PRIVATE MULTICORE_TUI)
-# (F-057 native-FP-path pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
-target_link_libraries(parity_harness PRIVATE Threads::Threads ssl crypto)
 endif()  # tests/ present
 
 # v5.11.14 — standalone CLI that diffs two FeatureStandardizer .scaler

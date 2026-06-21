@@ -30,27 +30,8 @@
 #include <string.h>
 #include <errno.h>      // v5.11.18a: ERANGE detection in feature_mask hex parser
 
-//======================================================================================================
-// [ENGINE MODE]
-//======================================================================================================
-// Phase 13 of the per-core sharding migration. Selects which hot-path
-// architecture the engine runs:
-//   ENGINE_MODE_SINGLE_CORE (default): legacy single-threaded engine. all
-//     existing behavior unchanged. PortfolioController_Tick walks the
-//     portfolio bitmap on every tick.
-//   ENGINE_MODE_SHARDED: experimental per-core risk-sharded engine. one
-//     position per pinned cpu core, controller core drains events on its
-//     own thread. branchless ~60ns hot path. requires num_execution_cores
-//     to be set; defaults to 4.
-//
-// engine_mode is STARTUP-ONLY — changes via hot reload are ignored. switching
-// modes requires a restart so the thread layout can be torn down and rebuilt.
-//======================================================================================================
-constexpr uint8_t ENGINE_MODE_SINGLE_CORE = 0;
-constexpr uint8_t ENGINE_MODE_SHARDED = 1;
-
 // v5.15.2 — TradingMode constants (paper / live / shadow). File-scope
-// uint8_t constants matching ENGINE_MODE_* / RECONCILE_MODE_* style.
+// uint8_t constants matching RECONCILE_MODE_* style.
 // Paper = default safe-mode (gates default-off; no live exchange writes).
 // Live = pre-flight REFUSE on missing safety items (held_out_stamp_secret,
 // mlockall, per-core strategy, ...). Shadow = future (live data + simulated
@@ -958,15 +939,13 @@ template <unsigned F> struct ControllerConfig {
                                       // (avoid pulling Reconcile.hpp into universal-include
                                       //  ControllerConfig.hpp; cast at point of use)
   // v5.15.2 — TradingMode discriminates paper vs live vs shadow operation.
-  // Distinct from engine_mode (sharded vs single_core architectural).
   // Default PAPER preserves pre-v5.15 behavior; legacy cfgs unset →
   // PAPER → no behavior change.
   // Stamp-bound via FOREACH_STAMP_BOUND_CFG so every model carries its
   // training-time mode for audit trail. Read at boot for
   // LiveReadiness_Verify dispatch — REFUSE on live + missing pre-flight
   // items; WARN-only on paper/shadow. Values defined at file scope below
-  // (TRADING_MODE_PAPER / LIVE / SHADOW; matches engine_mode constant
-  // style for consistency).
+  // (TRADING_MODE_PAPER / LIVE / SHADOW).
   // v5.15.4 — bitmap of "operator explicitly set this key" flags. Used
   // by ControllerConfig_NormalizeForMode<F> to honor operator overrides
   // when applying mode-specific defaults. Adding a new tracked key = 1
@@ -1850,14 +1829,6 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.model_verify_strict = 0;  // KEEP — registry INT(-1) SKIP would silently miss model mismatches; manual=0=WARN surfaces them
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
-  // Per-core sharding (Phase 13+) — DEFAULT IS SHARDED. Sharded is the
-  // production engine: per-core ExecutionCore + per-core PortfolioController
-  // + central OMS, branchless ~60ns hot path, risk distributed across cores.
-  // ENGINE_MODE_SINGLE_CORE remains available for benchmark/regression
-  // baselines but is DEPRECATED and emits a runtime warning at startup.
-  // Adding new features in legacy-only paths = silent production gap;
-  // see CLAUDE.md "Cross-Mode Init Placement" invariant.
-  cfg.engine_mode = ENGINE_MODE_SHARDED;
   // v5.0.0 (Phase F): per-core slow-path is the only sharded execution
   // mode. Each engine = a self-contained strategy unit (slow + hot
   // pthread pair). Train-serve parity preserved structurally: all
@@ -2857,16 +2828,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         continue;
     }
 
-    // Per-core sharding (Phase 13) — engine_mode accepts both string and int
-    // forms. The GUI SettingsPanel uses CFG_BOOL which writes "0"/"1"; manual
-    // edits to engine.cfg can use "single_core"/"sharded" for clarity.
-    if (strcmp(key, "engine_mode") == 0) {
-      if (strcmp(val, "sharded") == 0 || strcmp(val, "1") == 0)
-        cfg.engine_mode = ENGINE_MODE_SHARDED;
-      else
-        cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
-      continue;
-    }
     // v5.15.5.F.4c — slow_path_pin_offset + num_execution_cores migrated to FOREACH_CFG_FIELD (KIND_INT).
     // num_execution_cores clamp [1, 16] preserved in INT(1, 1, 16) payload.
     // v5.15.5.F.4c — sharded_force_synthetic migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint8_t storage).
