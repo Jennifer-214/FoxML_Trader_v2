@@ -346,7 +346,9 @@ template <unsigned F> struct ControllerConfig {
   // F-076 / PARITY-035: zero-init the WHOLE struct (fields + inter-field padding) at
   // construction. The model fingerprint hashes this struct RAW (BacktestPanels.hpp:3157
   // -> Fingerprint.hpp:180, SHA-256 over &cfg, sizeof(cfg)); the hash is embedded in the
-  // trained model + re-checked at serve (ModelInference.hpp). Inter-field padding around
+  // trained model (stored at serve in ModelInference.hpp, but NOT recomputed/gated there
+  // today — ③ D-254 corrected the old "re-checked at serve" claim: it's lineage metadata,
+  // not an enforced gate). Inter-field padding around
   // the alignas(64)/H6 fields is otherwise indeterminate -> identical cfg VALUES would
   // hash differently across runs (silent train-serve lineage non-determinism; H9/H12).
   // A default CONSTRUCTOR (not per-site `{}`) makes padding=0 a PROPERTY OF THE TYPE: no
@@ -574,6 +576,12 @@ template <unsigned F> struct ControllerConfig {
   // live trading — `use_real_money` field RETIRED (NEW-1, H21): capital authority is now
   // `trading_mode` (ControllerConfig_IsLiveCapital). The cfg-file KEY stays a parse-alias.
   uint8_t live_capital_cfg_conflict; // NEW-1/D-218 — Load sets =1 when use_real_money=1 conflicts with an explicit non-LIVE trading_mode; main.cpp HARD-REFUSES boot (ambiguous capital intent must not run).
+  // ③ D-254 — capital-validation fault bitmap. The post-resolve sweep ORs a bit here per
+  // fault class (out-of-range CAPITAL_BOUND_LOSS/GAIN value, malformed numeric, etc.);
+  // cfg_compile_ok() ALWAYS-ABORTs boot if any bit is set (ALL modes — no-margin is
+  // non-negotiable, D2). Determinism-safe: F-076 ctor memsets it to 0, and a faulted cfg
+  // aborts BEFORE the fingerprint, so the RAW-struct hash only ever sees fault_flags=0.
+  uint32_t cfg_load_fault_flags;
   // v5.7.2: explicit acknowledgment that the operator wants to run a
   // hardcoded (non-AUTO) strategy in live mode. Default 0 — the boot
   // path refuses to start with trading_mode=live AND any
@@ -1310,6 +1318,20 @@ template <unsigned F> struct ControllerConfig {
   // SEE DESIGN_SPECS/universal-cfg-field-registry-pattern.md for the full pattern doc.
   FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD)
 };
+
+// ③ D-254 — FINGERPRINT SIZE-PIN (H9/H12; closes the F-I gap the pre-coding gate found).
+// ControllerConfig<F> is hashed RAW into the model lineage (BacktestPanels.hpp:3157 ->
+// Fingerprint.hpp:180, SHA-256 over &cfg + sizeof). sizeof is F-independent (every field is a
+// 16B Money/FPN_Binary). This exact pin makes a future layout change a COMPILE ERROR instead of
+// a silent fingerprint shift: when it fires, the layout (hence the lineage hash) changed — bump
+// N to the new sizeof AND regen the backtest golden (free per project_no_live_models_dev_test_only).
+// NOTE: Check-K (check_struct_alignment.py) can't enforce this — Fingerprint_Compute takes a
+// void* (generic byte-hasher), so sizeof(ControllerConfig) isn't visible at the SHA256_Update
+// site. THIS static_assert is the drift guard, not the CI tool.
+static_assert(sizeof(ControllerConfig<64>) == 53056,
+              "ControllerConfig<F> layout changed -> the RAW model-fingerprint shifts. Bump N to "
+              "the new sizeof AND regen the backtest golden (no live models; free). H9/H12 "
+              "byte-equivalence size-pin for the fingerprinted cfg struct (D-254).");
 
 //======================================================================================================
 // [FEE_COMPUTE — Phase 8 maker/taker helper]

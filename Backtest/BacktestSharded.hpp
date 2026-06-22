@@ -120,6 +120,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     }
     cfg.slow_path_max_secs = 999999;
     results->config_used = cfg;
+    results->config_used.cfg_load_fault_flags = 0;  // ③ D-254 — keep the capital-fault bitmap out of the RAW fingerprint (a faulted cfg aborts pre-fingerprint; this closes the class for any future capture path that skips the abort).
 
     fprintf(stderr, "[backtest sharded] mode=sharded nodes=%u default_strategy=%d\n",
             (unsigned)cfg.num_execution_nodes, cfg.default_strategy);
