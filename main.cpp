@@ -197,6 +197,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // ③ D-254 — HARD-REFUSE a capital-validation fault (malformed/out-of-range capital cfg).
+    // ALWAYS-ABORT, all modes (no-margin is non-negotiable; D2). Reasoned per-fault [cfg] FATAL
+    // lines were printed by ControllerConfig_Load at detection.
+    if (!cfg_compile_ok(ccfg)) {
+        fprintf(stderr, "[ENGINE] FATAL: capital cfg validation failed (flags=0x%x) -> boot "
+                        "REFUSED. Fix the [cfg] FATAL line(s) above in engine.cfg.\n",
+                        ccfg.cfg_load_fault_flags);
+        return 1;
+    }
+
     // Sharded is the sole engine path (.E.1.1 removed engine_mode + legacy single_core).
     // v5.15.5.C.3 Phase 7.B — runtime bench gate boot dispatch. Two template
     // instantiations of EngineSharded_Run exist in the binary: <64, false>

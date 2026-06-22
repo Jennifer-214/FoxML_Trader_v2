@@ -64,7 +64,7 @@ namespace tt {
     // is wire-context by definition (no scaling); cfg_parse_field needs the flag for symmetric semantic.
     template <typename T>
     inline void cfg_parse_field(T& dst, const CfgFieldDescriptor& desc, const char* val,
-                                 bool wire_context = false) {
+                                 bool wire_context = false, uint32_t* fault_out = nullptr) {
         // BARRIER 3: compile-time type-family guard.
         // Adding a cfg field of an unrecognized type FAILS THE BUILD here, forcing
         // a deliberate decision (extend tt::cfg_parse_field<T> with a new branch)
@@ -91,6 +91,24 @@ namespace tt {
                 fprintf(stderr, "[cfg] WARN: %s='%s' decimal parse flags=0x%x "
                         "(1=malformed 2=overflow 4=excess-dp); LIVE boot refuses these (D-174c).\n",
                         desc.cfg_field_name, val, p.flags);
+            }
+            // ③ D-254 — a CAPITAL field that's MALFORMED/OVERFLOW is a HARD fault: it parsed to 0,
+            // indistinguishable from a legit sentinel post-parse, so the post-resolve value-sweep
+            // can't catch it — catch it HERE at the flag (the founding silent-disabled bug). EXCESS_DP
+            // (>8dp, half-even-rounded-but-VALID) stays a WARN above, NOT a fault. wire_context stays
+            // corrupt-only (a stamped historical value never faults on reload — B2).
+            if (!wire_context && fault_out
+                && (desc.metadata_flags & (CfgFieldDescriptor::CAPITAL_BOUND_LOSS
+                                         | CfgFieldDescriptor::CAPITAL_BOUND_GAIN))
+                && (p.flags & (MONEY_PARSE_MALFORMED | MONEY_PARSE_OVERFLOW))) {
+                *fault_out |= CFG_FAULT_CAPITAL_MALFORMED;
+                fprintf(stderr, "[cfg] FATAL: capital field %s='%s' is %s -> boot REFUSED (D-254). "
+                        "Likely: locale comma (1,5->1.5), a trailing unit (1.5%%->1.5), a "
+                        "letter-for-digit (0.o3), or an empty/placeholder value. A capital field "
+                        "cannot silently default.\n",
+                        desc.cfg_field_name, val,
+                        (p.flags & MONEY_PARSE_MALFORMED) ? "MALFORMED (not a number)"
+                                                          : "OVERFLOW (too large; saturated)");
             }
             // Clamp parity with the binary branch (same numbers, same vacuousness for
             // percent-form rows) — converted ONCE to .v space; the VALUE never round-trips

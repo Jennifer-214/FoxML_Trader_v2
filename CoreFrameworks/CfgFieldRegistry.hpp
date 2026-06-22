@@ -218,6 +218,12 @@ static_assert(sizeof(CfgFieldDescriptor) <= 128,
 static_assert(CfgFieldDescriptor::CAPITAL_BOUND_GAIN < (1u << 16),  // ③ D-254: watch the HIGHEST bit (bit 15); was WARN_ON_CLAMP/bit 11 — stale once bits 12-15 landed
               "CfgFieldDescriptor::MetadataFlag bitmap overflowed uint16_t — upgrade to uint32_t");
 
+// ③ D-254 — cfg-load fault flags (set into ControllerConfig::cfg_load_fault_flags). The
+// capital-validation sets these; cfg_compile_ok() ALWAYS-ABORTs boot if any bit is set (D2,
+// all modes — no-margin is non-negotiable). Reasoned per-fault messages print at detection.
+inline constexpr uint32_t CFG_FAULT_CAPITAL_MALFORMED    = 1u << 0;  // parse-point: a CAPITAL_BOUND field was MALFORMED/OVERFLOW (banana / 1,5 / 1.5% / saturated)
+inline constexpr uint32_t CFG_FAULT_CAPITAL_OUT_OF_RANGE = 1u << 1;  // post-resolve sweep: a CAPITAL_BOUND value exceeded the no-margin cap (loss>100% / gain>1000%)
+
 //======================================================================================================
 // [FOREACH_*_CFG_FIELD — 13-col tuple (per-core + global uniform at v5.15.5.F.4d.1.B.3+)]
 //======================================================================================================

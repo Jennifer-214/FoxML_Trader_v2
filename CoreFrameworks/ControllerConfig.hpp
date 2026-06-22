@@ -1333,6 +1333,16 @@ static_assert(sizeof(ControllerConfig<64>) == 53056,
               "the new sizeof AND regen the backtest golden (no live models; free). H9/H12 "
               "byte-equivalence size-pin for the fingerprinted cfg struct (D-254).");
 
+// ③ D-254 — cfg_compile_ok: the capital-validation boot gate. Returns false iff
+// ControllerConfig_Load flagged ANY capital fault (malformed/overflow at parse OR out-of-range at
+// the post-resolve sweep) into cfg_load_fault_flags. Reasoned per-fault [cfg] FATAL lines already
+// printed at detection. A bool (not an exit) so tests can assert it; production callers (main.cpp
+// boot, backtest, GUI) ALWAYS-ABORT on false (D2 — no-margin, all modes).
+template <unsigned F>
+inline bool cfg_compile_ok(const ControllerConfig<F>& cfg) {
+    return cfg.cfg_load_fault_flags == 0u;
+}
+
 //======================================================================================================
 // [FEE_COMPUTE — Phase 8 maker/taker helper]
 //======================================================================================================
@@ -2156,7 +2166,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
                                          applies_to_strategy, applies_to_op_mode, \
                                          applies_to_regime, applies_to_risk, lives_in_struct) \
         if (strcmp(key, #name) == 0 && !((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
-            tt::cfg_parse_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name], val); \
+            tt::cfg_parse_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name], val, /*wire_context=*/false, &cfg.cfg_load_fault_flags); \
             continue; \
         }
     FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_PARSER_CASE)
@@ -2174,7 +2184,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         if constexpr (!((meta) & CfgFieldDescriptor::MANUAL_PARSER) && \
                       !((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
             if (strcmp(key, #name) == 0) { \
-                tt::cfg_parse_field(cfg.name, g_per_node_cfg_field_descriptors[FIELD_IDX_PER_NODE_##name], val); \
+                tt::cfg_parse_field(cfg.name, g_per_node_cfg_field_descriptors[FIELD_IDX_PER_NODE_##name], val, /*wire_context=*/false, &cfg.cfg_load_fault_flags); \
                 continue; \
             } \
         }
