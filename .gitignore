@@ -157,3 +157,11 @@ DOCS/TOOLS.md
 /DOCS
 /build_probe/
 /build_ubsan/
+
+# strategy privacy (2026-06-22): ALL real/tuned strategy logic is private alpha
+# going forward (operator policy — alpha never public; career-load-bearing repo).
+# Strategies/private/ holds the tuned implementations; the __has_include seam
+# (StrategyInterface/Lifecycle/Parameters) compiles them in locally. Public repo
+# ships the strategy FRAMEWORK + a reference strategy only. Backed up to the
+# private workspace via /sync-workspace (same mechanism as plans/ + claude-skills).
+Strategies/private/
