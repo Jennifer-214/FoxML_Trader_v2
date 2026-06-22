@@ -147,7 +147,14 @@ struct CfgFieldDescriptor {
         // INFERENCE-time cfg fields specifically; training-time AFFECTS_STAMP_PARITY uses different
         // derived filter). Closes Class 21 at derived-filter surface per H16 invariant.
         STAMP_BOUND_CFG_DERIVED = 1u << 13,
-        // ... 2 bits headroom for future ...
+        // ③ D-254 — capital no-margin caps (asymmetric; cap VALUES come from the
+        // BarrierValidation constants, never re-stated). A row carries AT MOST ONE of
+        // {LOSS, GAIN} — both-active is a compile error (see cfg_mask_overlap_count assert
+        // below). loss ≤ BARRIER_SANE_MAX_SL (100%); gain ≤ BARRIER_SANE_MAX_TP (1000%).
+        CAPITAL_BOUND_LOSS      = 1u << 14,
+        CAPITAL_BOUND_GAIN      = 1u << 15,
+        // ... 0 bits headroom — the next bit widens metadata_flags uint16→uint32
+        // (absorb _reserved above + widen cfg_compute_mask<uint16_t Bit> template param) ...
 
         // Legacy alias — HAS_SIDE_EFFECT was overloaded; new code uses MANUAL_PARSER.
         // The 6 rows that used HAS_SIDE_EFFECT pre-WIP2d-1.B.0 migrate to MANUAL_PARSER
@@ -208,7 +215,7 @@ static_assert(sizeof(CfgFieldDescriptor) <= 128,
 
 // Bitmap overflow guards per DESIGN_SPECS/bitmap-overflow-protection-discipline.md.
 // CLAUDE.local.md going-forward rule "Bitmap overflow static_assert is mandatory" (2026-05-14).
-static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
+static_assert(CfgFieldDescriptor::CAPITAL_BOUND_GAIN < (1u << 16),  // ③ D-254: watch the HIGHEST bit (bit 15); was WARN_ON_CLAMP/bit 11 — stale once bits 12-15 landed
               "CfgFieldDescriptor::MetadataFlag bitmap overflowed uint16_t — upgrade to uint32_t");
 
 //======================================================================================================
@@ -467,15 +474,15 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //======================================================================================================
 #define FOREACH_PER_NODE_CFG_FIELD(X)                                                                                                                                                                                \
     /* === Trading (6) === */                                                                                                                                                                                         \
-    X(Money, KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         0,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, stop_loss_pct,               "SL %%",                "Trading",         0,                                  DBL(1.5, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         CfgFieldDescriptor::CAPITAL_BOUND_GAIN,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, stop_loss_pct,               "SL %%",                "Trading",         CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(1.5, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE_PCT, fee_rate,                    "Fee %%",               "Trading",         0,                                  DBL(0.1, 0.0, 5.0),                                                                                                              \
         "Legacy fee rate (% per trade) — used for pre-trade quantity computations\n"                                                                                                                                                                              \
         "(no-trade band, fee floor for TP, kill switch estimate, spread display)\n"                                                                                                                                                                               \
         "and as the default for fee_rate_maker / fee_rate_taker if those aren't set.",                                                                                                                                                                            \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE_PCT, slippage_pct,                "Slippage %%",          "Trading",         0,                                  DBL(0.05, 0.0, 5.0),     nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, risk_pct,                    "Risk/Pos %%",          "Trading",         0,                                  DBL(2.0, 0.0, 100.0),    nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, risk_pct,                    "Risk/Pos %%",          "Trading",         CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(2.0, 0.0, 100.0),    nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE, fee_floor_mult,              "Fee Floor",            "Trading",         0,                                  DBL(3.0, 1.0, 20.0),                                                                                                             \
         "TP floor = entry * fee_rate * this\n3.0 = TP must clear round-trip fees + margin",                                                                                                                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -509,14 +516,14 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         "Close position after this many ticks (engine-wide).\n0 = disabled, 75000 ≈ 4-5 hours.\nPer-core min-gain floor lives in each core's Time Exit override.",                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Risk per-core — kill switches + max-drawdown (6) === */                                                                                                                                                    \
-    X(Money, KIND_DOUBLE_PCT, max_drawdown_pct,            "Max DD %%",            "Risk Management", 0,                                  DBL(20.0, 0.0, 100.0),                                                                                                           \
+    X(Money, KIND_DOUBLE_PCT, max_drawdown_pct,            "Max DD %%",            "Risk Management", CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(20.0, 0.0, 100.0),                                                                                                           \
         "Circuit breaker: halt trading if total P&L\ndrops below this %% of starting balance",                                                                                                                                                                    \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, max_exposure_pct,            "Max Exp %%",           "Risk Management", 0,                                  DBL(50.0, 0.0, 100.0),   nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, kill_switch_daily_loss_pct,  "Daily Loss %%",        "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(3.0, 0.0, 100.0),                                                                                                           \
+    X(Money, KIND_DOUBLE_PCT, max_exposure_pct,            "Max Exp %%",           "Risk Management", CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(50.0, 0.0, 100.0),   nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, kill_switch_daily_loss_pct,  "Daily Loss %%",        "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL | CfgFieldDescriptor::CAPITAL_BOUND_LOSS,DBL(3.0, 0.0, 100.0),                                                                                                           \
         "Max session loss before kill switch triggers\n3.0 = halt if equity drops 3%% from session start",                                                                                                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, kill_switch_drawdown_pct,    "Drawdown %%",          "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(5.0, 0.0, 100.0),                                                                                                           \
+    X(Money, KIND_DOUBLE_PCT, kill_switch_drawdown_pct,    "Drawdown %%",          "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL | CfgFieldDescriptor::CAPITAL_BOUND_LOSS,DBL(5.0, 0.0, 100.0),                                                                                                           \
         "Max drawdown from session peak before kill\n5.0 = halt if 5%% below intra-session high",                                                                                                                                                                 \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* v5.15.5.F.4d.1.B.4 Phase Cx-D: enable_mtm_kill_switch + kill_recovery_warmup + sl_cooldown_adaptive/base/extra/cycles + idle_reset_cycles per-core registry rows DELETED (GLOBAL_ONLY_READERS — production consumers at ControllerEventLoop.hpp read via const ControllerConfig<F>* config global pointer; per-core auto-gen was dead code). Global manual struct fields at ControllerConfig.hpp KEPT as canonical (load-bearing for actual consumers). Sister to feedback_cfg_field_categorization_at_registry_add_time + Class 26 worked instances. */ \
@@ -550,8 +557,8 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         STRAT_CAT_REGIME_AWARE,                              OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML — entry threshold + TP/SL (3) === */                                                                                                                                                                    \
     X(FPN_Binary<F>                , KIND_DOUBLE, ml_buy_threshold,            "ML Buy Thresh",        "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(0.5, 0.0, 1.0), "Buy threshold for ML strategy (predictions above this enter; pre-canonical parity gap closed at .B.2 — STAMP_BOUND added to master; legacy FOREACH_STAMP_BOUND_CFG entry at StampBoundCfgRegistry.hpp:157-158 deleted at .B.3 along with macro body)", STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, ml_tp_pct,                   "ML TP %%",             "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(2.0, 0.0, 100.0),    "ML strategy take profit (overrides take_profit_pct); .B.3 Step 1.6.2 cohort bit-add (Decision D mechanism 1; legacy FOREACH_STAMP_BOUND_CFG entry deleted at Step 2)", STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, ml_sl_pct,                   "ML SL %%",             "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(1.0, 0.0, 100.0),    "ML strategy stop loss (overrides stop_loss_pct); .B.3 Step 1.6.2 cohort bit-add", STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, ml_tp_pct,                   "ML TP %%",             "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::CAPITAL_BOUND_GAIN, DBL(2.0, 0.0, 100.0),    "ML strategy take profit (overrides take_profit_pct); .B.3 Step 1.6.2 cohort bit-add (Decision D mechanism 1; legacy FOREACH_STAMP_BOUND_CFG entry deleted at Step 2)", STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, ml_sl_pct,                   "ML SL %%",             "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::CAPITAL_BOUND_LOSS, DBL(1.0, 0.0, 100.0),    "ML strategy stop loss (overrides stop_loss_pct); .B.3 Step 1.6.2 cohort bit-add", STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML — Bandit/Confidence/Ensemble (per-core authoritative) (11) === */                                                                                                                                       \
     X(FPN_Binary<F>                , KIND_DOUBLE, bandit_blend_ratio,          "Bandit Blend",         "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(0.5, 0.0, 1.0),      "Mix of bandit picks vs base model; .B.3 Step 1.6.2 cohort bit-add (was standalone inference_cfg_bandit_blend_ratio at StampBoundModelConstRegistry.hpp:296; framework walker emits unprefixed)", STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN_Binary<F>                , KIND_DOUBLE, confidence_threshold_scale,  "Conf Thresh Scale",    "ML",              CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(1.0, 0.0, 5.0),      "Confidence-weighted entry threshold scaling; .B.3 Step 1.6.2 v1.6 cohort bit-add (Class 32 full closure; replaces inference_cfg_confidence_threshold_scale legacy wire key)", STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -649,12 +656,12 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(Money, KIND_DOUBLE_PCT, breakeven_buffer_pct,        "Breakeven Buf %%",     "Partial Exits",   0,                                  DBL(0.0, 0.0, 5.0),      "SL offset from entry once breakeven ratchet fires",                                              STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Strategy-specific TP/SL overrides (6 — FPN_Binary<F>) — v5.15.5.F.4c.3 WIP2c.1 classify-first === */                                                                                                              \
     /* 0 = fall back to global take_profit_pct / stop_loss_pct (strategy parameter dispatcher applies). Per-core authoritative when set. */                                                                           \
-    X(Money, KIND_DOUBLE_PCT, simpledip_tp_pct,            "SimpleDip TP %%",      "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, simpledip_sl_pct,            "SimpleDip SL %%",      "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, mr_tp_pct,                   "MR TP %%",             "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",            STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, mr_sl_pct,                   "MR SL %%",             "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",              STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, emacross_tp_pct,             "EMACross TP %%",       "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(Money, KIND_DOUBLE_PCT, emacross_sl_pct,             "EMACross SL %%",       "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, simpledip_tp_pct,            "SimpleDip TP %%",      "Strategies",      CfgFieldDescriptor::CAPITAL_BOUND_GAIN,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, simpledip_sl_pct,            "SimpleDip SL %%",      "Strategies",      CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, mr_tp_pct,                   "MR TP %%",             "Strategies",      CfgFieldDescriptor::CAPITAL_BOUND_GAIN,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",            STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, mr_sl_pct,                   "MR SL %%",             "Strategies",      CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",              STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, emacross_tp_pct,             "EMACross TP %%",       "Strategies",      CfgFieldDescriptor::CAPITAL_BOUND_GAIN,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, emacross_sl_pct,             "EMACross SL %%",       "Strategies",      CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Entry stddev mode (1 — FPN_Binary<F>) — v5.15.5.F.4c.3 WIP2c.1 classify-first === */                                                                                                                              \
     X(FPN_Binary<F>                , KIND_DOUBLE, offset_stddev_mult,          "Offset Stddev Mult",   "Entry Filters",   0,                                  DBL(0.0, 0.0, 10.0),     "stddev-scaled offset multiplier (0 = use offset_pct mode; non-zero = stddev-adaptive mode)",    STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML hard-block + ensemble + barrier (3 — 1 FPN_Binary<F> + 1 double + 1 INT_ENUM) — v5.15.5.F.4c.3 WIP2c.1 classify-first === */                                                                                   \
@@ -1149,6 +1156,17 @@ constexpr size_t cfg_field_count(const CfgMaskArray<N_WORDS>& mask) {
     return n;
 }
 
+// cfg_mask_overlap_count(a,b) — popcount over the bitwise-AND of two mask arrays. constexpr.
+// ③ D-254: asserts no cfg row carries BOTH CAPITAL_BOUND_LOSS and CAPITAL_BOUND_GAIN.
+template <size_t N_WORDS>
+constexpr size_t cfg_mask_overlap_count(const CfgMaskArray<N_WORDS>& a,
+                                        const CfgMaskArray<N_WORDS>& b) {
+    size_t n = 0;
+    for (size_t i = 0; i < N_WORDS; ++i)
+        n += static_cast<size_t>(__builtin_popcountll(a.words[i] & b.words[i]));
+    return n;
+}
+
 // FOREACH_METADATA_BIT(X) — tuple: X(lowercase_name, UPPERCASE_BIT_NAME).
 // .F.4c.3 — PER_NODE_OK removed (redundant under per-core authoritative registry).
 // Each remaining row adds a per-bit precomputed mask array per registry.
@@ -1164,7 +1182,9 @@ constexpr size_t cfg_field_count(const CfgMaskArray<N_WORDS>& mask) {
     X(log_value_forbidden,      LOG_VALUE_FORBIDDEN)                       \
     X(has_side_effect,          HAS_SIDE_EFFECT)                           \
     X(warn_on_clamp,            WARN_ON_CLAMP)                              \
-    X(stamp_bound_cfg_derived,  STAMP_BOUND_CFG_DERIVED)  /* v5.15.5.F.4d.1.A — Path γ first canonical consumer */
+    X(stamp_bound_cfg_derived,  STAMP_BOUND_CFG_DERIVED)  /* v5.15.5.F.4d.1.A — Path γ first canonical consumer */ \
+    X(capital_bound_loss,       CAPITAL_BOUND_LOSS)        /* ③ D-254 — loss-side no-margin cap (≤ BARRIER_SANE_MAX_SL) */ \
+    X(capital_bound_gain,       CAPITAL_BOUND_GAIN)        /* ③ D-254 — gain-side cap (≤ BARRIER_SANE_MAX_TP) */
 
 // Per-registry per-bit precomputed mask arrays — X-macro generated.
 // Each lands in .rodata as a compile-time constant.
@@ -1209,6 +1229,19 @@ static_assert(
     "If you DIDN'T remove a row, find what regressed (likely accidental metadata-flag drop)."
 );
 
+// ③ D-254 — both-active guard: a capital cfg row is loss-side XOR gain-side, never both.
+// Closes the uniform-bound-over-heterogeneous-cohort anti-pattern structurally (a both-tagged
+// field would get whichever cap the post-resolve sweep checks first = a silent wrong cap on a
+// capital field). Masks auto-generated above by FOREACH_METADATA_BIT.
+static_assert(
+    cfg_mask_overlap_count(g_per_node_cfg_capital_bound_loss_mask,
+                           g_per_node_cfg_capital_bound_gain_mask) == 0
+    && cfg_mask_overlap_count(g_global_cfg_capital_bound_loss_mask,
+                              g_global_cfg_capital_bound_gain_mask) == 0,
+    "③ D-254: a cfg row carries BOTH CAPITAL_BOUND_LOSS and CAPITAL_BOUND_GAIN. "
+    "A capital field is loss-side OR gain-side, never both — pick one in the registry row."
+);
+
 //------------------------------------------------------------------------------
 // [H16 COMPILE-TIME ENFORCEMENT — Path γ correction (v5.15.5.F.4d.1.A)]
 //------------------------------------------------------------------------------
@@ -1251,7 +1284,9 @@ inline constexpr uint16_t ALL_METADATA_BITS_IN_USE =
     | CfgFieldDescriptor::MANUAL_PARSER       // bit 10; HAS_SIDE_EFFECT alias same bit
     | CfgFieldDescriptor::WARN_ON_CLAMP
     | CfgFieldDescriptor::NO_FLAT_FIELD
-    | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED;  // bit 13 (v5.15.5.F.4d reserved; enrolled at .F.4d.1.A)
+    | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED  // bit 13 (v5.15.5.F.4d reserved; enrolled at .F.4d.1.A)
+    | CfgFieldDescriptor::CAPITAL_BOUND_LOSS        // bit 14 (③ D-254)
+    | CfgFieldDescriptor::CAPITAL_BOUND_GAIN;       // bit 15 (③ D-254)
 
 static_assert(
     (ALL_METADATA_BITS_IN_USE & ~(ENROLLED_METADATA_BITS | EXEMPT_FROM_FOREACH_METADATA_BIT)) == 0u,
@@ -1279,7 +1314,7 @@ static_assert(
 //   save_mask        = ~has_side_effect (bit 10 / MANUAL_PARSER)
 //   cli_explain_mask = ~(has_side_effect | hidden_by_default)  [fixed at .A Step 4b]
 //
-// 12 enrolled bits × 3 composed masks = 36 cells.
+// 12 enrolled bits × 3 composed masks = 42 cells (③ D-254 added capital_bound_loss/gain).
 //------------------------------------------------------------------------------
 
 #define CFG_COMPOSE_AUDIT_DECISIONS(X)                                              \
@@ -1296,6 +1331,8 @@ static_assert(
     X(render_mask, has_side_effect,          COMPOSE_NA)                            \
     X(render_mask, warn_on_clamp,            COMPOSE_NA)                            \
     X(render_mask, stamp_bound_cfg_derived,  COMPOSE_NA)                            \
+    X(render_mask, capital_bound_loss,       COMPOSE_NA)                            \
+    X(render_mask, capital_bound_gain,       COMPOSE_NA)                            \
     /* save_mask = ~has_side_effect */                                              \
     X(save_mask, restart_required,           COMPOSE_NA)                            \
     X(save_mask, safety_critical,            COMPOSE_NA)                            \
@@ -1309,6 +1346,8 @@ static_assert(
     X(save_mask, has_side_effect,            COMPOSE_EXCLUDE)                       \
     X(save_mask, warn_on_clamp,              COMPOSE_NA)                            \
     X(save_mask, stamp_bound_cfg_derived,    COMPOSE_NA)                            \
+    X(save_mask, capital_bound_loss,         COMPOSE_NA)                            \
+    X(save_mask, capital_bound_gain,         COMPOSE_NA)                            \
     /* cli_explain_mask = ~(has_side_effect | hidden_by_default) [fixed .A Step 4b] */ \
     X(cli_explain_mask, restart_required,         COMPOSE_NA)                       \
     X(cli_explain_mask, safety_critical,          COMPOSE_NA)                       \
@@ -1321,7 +1360,9 @@ static_assert(
     X(cli_explain_mask, log_value_forbidden,      COMPOSE_NA)                       \
     X(cli_explain_mask, has_side_effect,          COMPOSE_EXCLUDE)                  \
     X(cli_explain_mask, warn_on_clamp,            COMPOSE_NA)                       \
-    X(cli_explain_mask, stamp_bound_cfg_derived,  COMPOSE_NA)
+    X(cli_explain_mask, stamp_bound_cfg_derived,  COMPOSE_NA)                       \
+    X(cli_explain_mask, capital_bound_loss,       COMPOSE_NA)                       \
+    X(cli_explain_mask, capital_bound_gain,       COMPOSE_NA)
 
 // Compile-time count verification:
 #define X_COUNT_METADATA_BIT(lname, BITNAME) +1
