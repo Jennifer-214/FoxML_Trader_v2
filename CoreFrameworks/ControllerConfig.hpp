@@ -1343,6 +1343,20 @@ inline bool cfg_compile_ok(const ControllerConfig<F>& cfg) {
     return cfg.cfg_load_fault_flags == 0u;
 }
 
+// ③ D-255 (C-1) — single-source the capital-gate REPORT. The predicate is cfg_compile_ok (bool,
+// testable); this wraps it with the reasoned operator FATAL so EVERY boot path emits the same message
+// and can't silently skip the gate (pre-D-255 only main.cpp gated → the suite/backtest ran a malformed
+// cfg with a silently-disabled stop). Boot paths still respond context-appropriately on false (engine
+// returns 1 / backtest fails the run / GUI keeps-old) — they just share this predicate+report. The
+// recurrence guard enforces caller-coverage.
+template <unsigned F>
+inline bool cfg_capital_gate_ok(const ControllerConfig<F>& cfg, const char* who) {
+    if (cfg_compile_ok(cfg)) return true;
+    fprintf(stderr, "[%s] FATAL: capital cfg validation failed (flags=0x%x) -> REFUSED. "
+                    "Fix the [cfg] FATAL line(s) above.\n", who, (unsigned)cfg.cfg_load_fault_flags);
+    return false;
+}
+
 //======================================================================================================
 // [FEE_COMPUTE — Phase 8 maker/taker helper]
 //======================================================================================================

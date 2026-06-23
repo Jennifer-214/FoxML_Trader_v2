@@ -118,9 +118,17 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     } else {
         cfg = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
     }
+    // ③ D-255 (C-1) — gate the backtest on capital validation. The suite + CLI run through here; pre-D-255
+    // this path ZEROED the fault flag and ran a malformed cfg silently (a `stop_loss_pct=banana` → SL off).
+    // Fail the run (do NOT process-abort — the GUI must stay alive); results stay reset/empty from
+    // BacktestResults_Reset above. This is pre-fingerprint, so the golden is not perturbed.
+    if (!cfg_capital_gate_ok(cfg, "backtest sharded")) {
+        results->config_used = cfg;
+        return;
+    }
     cfg.slow_path_max_secs = 999999;
     results->config_used = cfg;
-    results->config_used.cfg_load_fault_flags = 0;  // ③ D-254 — keep the capital-fault bitmap out of the RAW fingerprint (a faulted cfg aborts pre-fingerprint; this closes the class for any future capture path that skips the abort).
+    results->config_used.cfg_load_fault_flags = 0;  // ③ D-254 — keep the capital-fault bitmap out of the RAW fingerprint (gate above guarantees flags==0 here; this stays as defense for any future capture path).
 
     fprintf(stderr, "[backtest sharded] mode=sharded nodes=%u default_strategy=%d\n",
             (unsigned)cfg.num_execution_nodes, cfg.default_strategy);
