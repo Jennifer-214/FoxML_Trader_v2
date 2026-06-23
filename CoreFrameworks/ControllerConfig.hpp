@@ -1375,6 +1375,27 @@ inline Money cfg_capture_node_money_override(ControllerConfig<F>& cfg, const cha
     return pct_scale ? Money{ money_scale_down_pow10(mp.value, 2) } : mp.value;
 }
 
+// ③ D-256 (b) — per-node RAW (FPN_Binary) override malformed-capture: the sibling of the money helper for
+// the _PARSE_OV_RAW channel (winsor_pct_*, the *_mult / *_threshold feature params). The old form used
+// atof(val) — which (1) DISCARDED the parse status (momentum_r2_min=banana → 0 = silent inherit-collision,
+// the founding bug on the RAW surface) AND (2) is LC_NUMERIC-dependent (a comma-locale could mis-parse a
+// dot-decimal — the determinism reason ParseFast/parse_double_fast exists). Now both holes close at once:
+// tt::parse_double_fast_checked is locale-immune (std::from_chars, value byte-identical to the flat-registry
+// RAW path at CfgFieldDispatch.hpp) AND reports malformed → the SAME shared CFG_FAULT_CAPITAL_MALFORMED bit
+// (no parallel mirror — Class-18). Empty = clean inherit (parse_double_fast_checked's empty guard). NO clamp
+// (item-2; 0=inherit preserved → winsor_pct_high's clamp_min=0.5 Class-48 trap avoided by construction).
+template <unsigned F>
+inline FPN_Binary<F> cfg_capture_node_raw_override(ControllerConfig<F>& cfg, const char* key, const char* val) {
+    bool malformed = false;
+    double d = tt::parse_double_fast_checked(val, &malformed);
+    if (malformed) {
+        cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_MALFORMED;
+        fprintf(stderr, "[cfg] FATAL: per-node override %s='%s' is MALFORMED (not a number) -> boot REFUSED "
+                "(D-256/B1). An override cannot silently default to inherit.\n", key, val);
+    }
+    return FPN_FromDouble<F>(d);
+}
+
 //======================================================================================================
 // [FEE_COMPUTE — Phase 8 maker/taker helper]
 //======================================================================================================
@@ -2991,7 +3012,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         suffix = p + 1;
         PerNodeOverrides<F>& ov = cfg.node_overrides[node_idx];
 #define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/true); continue; }
-#define _PARSE_OV_RAW(name) if (strcmp(suffix, #name) == 0) { ov.name = FPN_FromDouble<F>(atof(val));       continue; }
+#define _PARSE_OV_RAW(name) if (strcmp(suffix, #name) == 0) { ov.name = cfg_capture_node_raw_override<F>(cfg, key, val); continue; }
         PER_NODE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
         if (strcmp(suffix, "fee_floor_mult") == 0) { ov.fee_floor_mult = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/false); continue; }
         if (strcmp(suffix, "partial_exit_pct") == 0) { ov.partial_exit_pct = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/false); continue; }

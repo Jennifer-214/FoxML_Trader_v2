@@ -50,6 +50,22 @@ static inline double parse_double_fast(const char *s) {
     return (r.ec == std::errc()) ? d : 0.0;
 }
 
+// Checked variant of parse_double_fast: same value AND the same locale-immune std::from_chars backend,
+// plus it reports whether a NON-EMPTY value failed to parse. Empty/NULL stays clean (0.0, malformed=false)
+// — the cfg "empty = inherit/default" convention; only a non-empty unparseable string (e.g. "banana") is
+// malformed. Lets a caller distinguish a real 0 from a malformed→0 silent default WITHOUT falling back to
+// atof (whose LC_NUMERIC dependence is the determinism reason this family exists). The returned value is
+// byte-identical to parse_double_fast for every input (③ D-256(b) per-node RAW-override flag-capture).
+static inline double parse_double_fast_checked(const char *s, bool *malformed_out) {
+    if (s == nullptr || *s == '\0') { if (malformed_out) *malformed_out = false; return 0.0; }
+    size_t n = std::strlen(s);
+    double d;
+    auto r = std::from_chars(s, s + n, d);
+    bool ok = (r.ec == std::errc());
+    if (malformed_out) *malformed_out = !ok;
+    return ok ? d : 0.0;
+}
+
 // Length-aware variant — caller already knows the byte count, skipping
 // the strlen scan. Use when parsing a slice of a JSON message buffer
 // (e.g. extract returned a span with explicit length).
