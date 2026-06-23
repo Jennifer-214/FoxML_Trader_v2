@@ -467,6 +467,19 @@ inline constexpr uint32_t CFG_FAULT_CAPITAL_OUT_OF_RANGE = 1u << 1;  // post-res
         "Refuse model load if file mtime older than N hours. 0 = disabled (legacy default; v5.14.8.E).",                                                                                                              \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Slow Path (1) === */ \
+    /* === Capital (4; migrated from manual ControllerConfig fields at item-2 / D-256 -- malformed-capture rides B1 [step 2, unit-agnostic]; >0 + per-field caps ride items 3-4; clamps intentionally NON-binding) === */ \
+    X(Money, KIND_DOUBLE, starting_balance, "Starting Balance", "Trading", 0, DBL(1000000.0, 0.0, 1000000000.0), \
+        "Paper/initial account balance -- the exposure/drawdown DENOMINATOR. >0 enforced at boot (item-3); the clamp is intentionally NON-binding (the real gate is the >0/sane fault, not this clamp).", \
+        STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE, min_kill_loss, "Min Kill Loss ($)", "Kill Switch", 0, DBL(5.0, 0.0, 1000000000.0), \
+        "Absolute USDT loss floor for the per-core kill switch (trip needs BOTH dd_pct>thresh AND drop>this floor; default $5). >0/sane enforced at boot (item-3); clamp non-binding.", \
+        STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE, min_sl_tp_ratio, "Min SL/TP Ratio", "Trading", 0, DBL(0.5, 0.0, 1000000.0), \
+        "Min SL/TP distance ratio (0.5 = 2:1 reward/risk floor). 0 = disabled. Malformed-capture only (not a capital cap -- no out-of-range bound invented).", \
+        STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(Money, KIND_DOUBLE_PCT, min_hold_gain_pct, "Min Hold Gain %%", "Time Exit", 0, DBL(0.1, 0.0, 100.0), \
+        "Only time-exit if gain < this %% (default 0.1%% -> stored fraction 0.001). 0 = time-exit even at break-even. Malformed-capture only (hold-gate, not a capital cap).", \
+        STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE_PCT, lazy_rebuild_price_threshold_pct, "Lazy Rebuild Price Thresh %%", "Slow Path", CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 10.0),                                                        \
         "Per-tick price-delta threshold below which slow-path cycle is 'no material change' (skips RebuildOneCore). Default 0.05% (stored fraction 0.0005). Payload re-authored PERCENT-space at Ship-B P0.3 — value-identical through cfg_assign_field's PCT scaling (this row was the one fraction-authored outlier).",                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)

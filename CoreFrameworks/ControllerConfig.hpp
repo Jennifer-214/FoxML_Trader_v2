@@ -363,7 +363,6 @@ template <unsigned F> struct ControllerConfig {
   FPN_Binary<F> max_shift;        // max drift from initial buy conditions
   Money take_profit_pct;  // per-position take profit (e.g. 0.03 = 3%)
   Money stop_loss_pct;    // per-position stop loss (e.g. 0.015 = 1.5%)
-  Money starting_balance; // paper trading starting balance (e.g. 10000.0)
   Money fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
                            // Phase 8: legacy field. Pre-Phase-8 behavior preserved
                            // when fee_rate_maker == fee_rate_taker == fee_rate.
@@ -425,7 +424,6 @@ template <unsigned F> struct ControllerConfig {
   Money fee_floor_mult; // TP floor = entry × fee_rate × this (default 3.0,
                          // try 5.0 for wider)
   // risk ratios
-  Money min_sl_tp_ratio; // min SL/TP distance ratio (0.5 = 2:1 reward/risk floor)
   FPN_Binary<F> ror_tp_bonus; // TP multiplier when ROR positive (1.2 = 20% wider)
   FPN_Binary<F> momentum_tp_r2_min; // TP scale at R²=0 (0.5 = half base TP,
                              // conservative on uncertainty)
@@ -447,7 +445,6 @@ template <unsigned F> struct ControllerConfig {
   // or where strategy comparison wants different time horizons per core.
   // Cfg parser pattern: node_<N>_time_exit_ticks=<int>
   // node_time_exit_ticks: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
-  Money min_hold_gain_pct; // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
   FPN_Binary<F> regime_slope_threshold;     // relative slope magnitude for TRENDING
                                      // (legacy, kept for compat)
@@ -1022,12 +1019,6 @@ template <unsigned F> struct ControllerConfig {
   // this specific core. Default 0 = use shared. Config syntax:
   // node_0_max_drawdown_pct=15.0 (stored as 0.15).
   // node_max_drawdown_pct: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
-  // min_kill_loss: absolute USDT floor for the per-core kill switch. The
-  // trip fires only when BOTH dd_pct exceeds threshold AND drop exceeds
-  // this floor. Without it, a tiny allocation ($10) loses $0.50, dd=5%,
-  // and the kill trips on rounding noise. Default $5. Config syntax:
-  // min_kill_loss=5.0
-  Money min_kill_loss;
   // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch H14 migration — moved from `uint32_t`
   // scalar to MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit in cfg.risk_cfg_flags. Default ENABLED
   // (safety-critical; sister to MASK_RISK_CFG_KILL_SWITCH_ENABLED). MTM catches "position riding
@@ -1549,8 +1540,6 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       FPN_FromDouble<F>(0.0001); // 0.01% of price — e.g. $7 at BTC $70k
   cfg.take_profit_pct = Money{ money_from_double_payload(0.03) };
   cfg.stop_loss_pct = Money{ money_from_double_payload(0.015) };
-  cfg.starting_balance =
-      Money{ money_from_double_payload(1000000.0) }; // 1M default so tests arent balance-limited
   cfg.fee_rate = Money{ money_from_double_payload(0.001) }; // 0.1% per trade (Binance default)
   // Phase 8 — Binance tier 0 BNB-discount default rates. Live engine uses
   // these per-fill based on order->is_maker. If user sets only fee_rate
@@ -1588,7 +1577,6 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.fee_floor_mult =
       Money{ money_from_double_payload(3.0) };      // TP floor = entry × fee_rate × 3
   cfg.vwap_offset = FPN_Zero<F>(); // 0 = disabled (backward compat)
-  cfg.min_sl_tp_ratio = Money{ money_from_double_payload(0.5) }; // 2:1 reward/risk floor
   cfg.ror_tp_bonus =
       FPN_FromDouble<F>(1.2); // 20% wider TP on accelerating trend
   cfg.momentum_tp_r2_min = FPN_FromDouble<F>(0.5); // TP scale at R²=0
@@ -1606,8 +1594,6 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.3.C — all per-core overrides default 0 (use global). Operator
   // sets specific cores via node_<N>_time_exit_ticks=<value> in cfg.
   for (int i = 0; i < 16; ++i) cfg.node_time_exit_ticks[i] = 0;
-  cfg.min_hold_gain_pct =
-      Money{ money_from_double_payload(0.001) }; // 0.1% — only time-exit if below this gain
   // regime detection
   cfg.regime_slope_threshold =
       FPN_FromDouble<F>(0.00002); // legacy (unused by crossover classifier)
@@ -1891,7 +1877,6 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   for (int i = 0; i < 16; ++i) cfg.node_risk_pct[i] = Money_Zero();  // 0 = shared
   // Phase 3: per-core kill switch overrides default to 0 (= use shared).
   for (int i = 0; i < 16; ++i) cfg.node_max_drawdown_pct[i] = Money_Zero();
-  cfg.min_kill_loss = Money{ money_from_double_payload(5.0) };   // $5 absolute-loss floor for trip
   // v5.15.5.F.4d.1.B.4 Cx-T: enable_mtm_kill_switch default (ENABLED) now applied via RISK_CFG_FLAG_AUTOPOPULATE_FROM_QUINTUPLE above (MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED bit ON; safety-critical).
   // v5.12.1.A — disabled by default. Operator opts in for live deployment;
   // backtest MUST keep this off (live-only safety net).
@@ -2264,7 +2249,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(r2_threshold)
     CFG_PARSE_FPN(slope_scale_buy)
     CFG_PARSE_FPN(max_shift)
-    CFG_PARSE_MONEY(starting_balance)
     CFG_PARSE_FPN(volume_multiplier)
     CFG_PARSE_FPN(spacing_multiplier)
     CFG_PARSE_FPN(vol_mult_min)
@@ -2275,7 +2259,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(vwap_offset)
     CFG_PARSE_FPN(min_stddev_pct)
     CFG_PARSE_FPN(momentum_r2_min)
-    CFG_PARSE_MONEY(min_sl_tp_ratio)
     CFG_PARSE_FPN(ror_tp_bonus)
     CFG_PARSE_FPN(momentum_tp_r2_min)
     CFG_PARSE_FPN(momentum_sl_r2_max)
@@ -2329,7 +2312,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(offset_max)
     CFG_PARSE_PCT(max_drawdown_pct)
     // Phase 3: kill switch tunables
-    CFG_PARSE_MONEY_POS(min_kill_loss)
     // v5.15.5.F.4c — enable_mtm_kill_switch migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint32 storage).
     // v5.12.1.A — WS dead-time emergency-flatten (live-only safety net)
     // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
@@ -2457,7 +2439,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       continue;
     }
     CFG_PARSE_PCT(max_exposure_pct)
-    CFG_PARSE_PCT(min_hold_gain_pct)
     // regime_r2_threshold is FEATURE-domain (binary) — keeps the legacy /100 double parse.
     if (strcmp(key, "regime_r2_threshold") == 0) {
       cfg.regime_r2_threshold = FPN_FromDouble<F>(atof(val) / 100.0);
