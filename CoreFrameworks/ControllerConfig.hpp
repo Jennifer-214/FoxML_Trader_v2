@@ -1348,6 +1348,33 @@ inline bool cfg_capital_gate_ok(const ControllerConfig<F>& cfg, const char* who)
     return false;
 }
 
+// ③ D-256 (b/c) — per-node money-override malformed-capture: the IN-MACRO flag-capture seam for the
+// per-node parser (which writes cfg directly, unlike the registry walker's fault_out param). The walker
+// (CfgFieldDispatch.hpp, B1) only reaches the FLAT/registry fields; the per-node OVERRIDE channel
+// (_PARSE_OV_PCT + the 3 hand-rolled money outliers) and the legacy ARRAYS used the bare
+// `Money_FromString(val).value` form, DISCARDING .flags → the founding silent-disable bug on the
+// per-node surface (node_0_stop_loss_pct=banana → 0 → SL off, uncaught between item-2's globals and
+// item-4's ≤100% cap which 0 passes). This single-sources the fault-capture so every per-node money
+// site shares ONE bit-set (no parallel mirror — Class-18). MALFORMED/OVERFLOW ONLY (item-2 scope; the
+// ≤100% cap is item-4 — there is NO clamp here, so 0=inherit is preserved, the winsor_pct_high Class-48
+// trap avoided by construction). Empty value = clean inherit (the per-node "empty/0 = inherit global"
+// convention, ControllerConfig.hpp parser comment) — NEVER a fault (over-fire guard; Money_FromString("")
+// flags MALFORMED via FP_SCAN_NO_DIGITS). Value path is byte-identical to the old form (same scale, same
+// saturate) for every input the old form accepted — only the fault bit is added.
+template <unsigned F>
+inline Money cfg_capture_node_money_override(ControllerConfig<F>& cfg, const char* key,
+                                             const char* val, bool pct_scale) {
+    MoneyParse mp = Money_FromString(val);
+    if (val[0] != '\0' && (mp.flags & (MONEY_PARSE_MALFORMED | MONEY_PARSE_OVERFLOW))) {
+        cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_MALFORMED;
+        fprintf(stderr, "[cfg] FATAL: per-node money override %s='%s' is %s -> boot REFUSED (D-256/B1). "
+                "A money override cannot silently default.\n", key, val,
+                (mp.flags & MONEY_PARSE_MALFORMED) ? "MALFORMED (not a number)"
+                                                   : "OVERFLOW (too large; saturated)");
+    }
+    return pct_scale ? Money{ money_scale_down_pow10(mp.value, 2) } : mp.value;
+}
+
 //======================================================================================================
 // [FEE_COMPUTE — Phase 8 maker/taker helper]
 //======================================================================================================
@@ -2963,12 +2990,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       if (*p == '_' && node_idx >= 0 && node_idx < 16) {
         suffix = p + 1;
         PerNodeOverrides<F>& ov = cfg.node_overrides[node_idx];
-#define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) }; continue; }
+#define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/true); continue; }
 #define _PARSE_OV_RAW(name) if (strcmp(suffix, #name) == 0) { ov.name = FPN_FromDouble<F>(atof(val));       continue; }
         PER_NODE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
-        if (strcmp(suffix, "fee_floor_mult") == 0) { ov.fee_floor_mult = Money_FromString(val).value; continue; }
-        if (strcmp(suffix, "partial_exit_pct") == 0) { ov.partial_exit_pct = Money_FromString(val).value; continue; }
-        if (strcmp(suffix, "tp2_mult") == 0) { ov.tp2_mult = Money_FromString(val).value; continue; }
+        if (strcmp(suffix, "fee_floor_mult") == 0) { ov.fee_floor_mult = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/false); continue; }
+        if (strcmp(suffix, "partial_exit_pct") == 0) { ov.partial_exit_pct = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/false); continue; }
+        if (strcmp(suffix, "tp2_mult") == 0) { ov.tp2_mult = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/false); continue; }
 #undef _PARSE_OV_PCT
 #undef _PARSE_OV_RAW
 // v4.7.40: INT overrides — atoi parse, 0 = inherit.
