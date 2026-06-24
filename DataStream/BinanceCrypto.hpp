@@ -69,6 +69,7 @@ struct BinanceConfig {
     uint32_t wind_down_minutes; // stop buys X minutes before reconnect
     int tui_enabled;            // 0 = headless mode, 1 = terminal dashboard
     char log_file[256];         // stderr redirect when headless (empty = no redirect)
+    uint32_t cfg_load_fault_flags = 0;  // N1 (③ reuse) — set on a MALFORMED venue selector; binance_config_ok() => boot REFUSED
 };
 
 //======================================================================================================
@@ -831,6 +832,28 @@ static inline int BinanceStream_HasPending(BinanceStream *bs) {
 // parses binance-specific fields from the engine config file
 // same key=value format as ControllerConfig_Load, skips # comments and empty lines
 //======================================================================================================
+// N1 (③ config-compiler reuse) — BinanceConfig venue-selector malformed-capture. `atoi` swallows a
+// malformed value ->0, and 0 is the MORE-DANGEROUS value (use_testnet=0 = PRODUCTION venue) -> a typo
+// silently flips testnet->PROD (capital-conditional; the H22 cross-parser asymmetry the swallow-coerce
+// sweep found -- ControllerConfig now refuses malformed capital cfg, so this sibling boot parser must too).
+// Detect malformed (locale-immune parse_int_checked) -> set a fault bit; main.cpp's boot gate refuses
+// (refuse-don't-coerce, the SAME model as ControllerConfig's cfg_compile_ok). Empty = keep the default.
+inline constexpr uint32_t BINANCE_CFG_FAULT_VENUE_MALFORMED = 1u << 0;
+inline int binance_cfg_selector(BinanceConfig& config, const char* key, const char* val, int current) {
+    if (val[0] == '\0') return current;  // empty = keep default
+    bool malformed = false;
+    long v = tt::parse_int_checked(val, &malformed);
+    if (malformed) {
+        config.cfg_load_fault_flags |= BINANCE_CFG_FAULT_VENUE_MALFORMED;
+        fprintf(stderr, "[cfg] FATAL: venue selector %s='%s' is MALFORMED (expected 0/1) -> boot REFUSED. "
+                "A typo here can silently flip testnet->PRODUCTION; be explicit.\n", key, val);
+        return current;  // value moot -- boot will refuse
+    }
+    return (int)v;
+}
+// N1 -- boot-gate predicate (sister to ControllerConfig's cfg_compile_ok); main.cpp refuses on false.
+inline bool binance_config_ok(const BinanceConfig& c) { return c.cfg_load_fault_flags == 0u; }
+
 static inline BinanceConfig BinanceConfig_Load(const char *filepath) {
     BinanceConfig config;
     memset(&config, 0, sizeof(config));
@@ -876,9 +899,9 @@ static inline BinanceConfig BinanceConfig_Load(const char *filepath) {
         if (strcmp(key, "symbol") == 0) {
             strncpy(config.symbol, val, sizeof(config.symbol) - 1);
         } else if (strcmp(key, "use_testnet") == 0) {
-            config.use_testnet = atoi(val);
+            config.use_testnet = binance_cfg_selector(config, key, val, config.use_testnet);
         } else if (strcmp(key, "use_binance_us") == 0) {
-            config.use_binance_us = atoi(val);
+            config.use_binance_us = binance_cfg_selector(config, key, val, config.use_binance_us);
         } else if (strcmp(key, "poll_timeout_ms") == 0) {
             config.poll_timeout_ms = (uint32_t)atol(val);
         } else if (strcmp(key, "reconnect_delay") == 0) {

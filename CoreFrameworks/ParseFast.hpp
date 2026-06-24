@@ -66,6 +66,21 @@ static inline double parse_double_fast_checked(const char *s, bool *malformed_ou
     return ok ? d : 0.0;
 }
 
+// Checked base-10 integer parse (locale-immune std::from_chars). Returns the value; sets *malformed_out
+// true iff a NON-EMPTY value failed to parse OR wasn't fully consumed. Empty/NULL = clean (0, not
+// malformed) — the "empty = default" cfg convention. Lets a caller refuse a malformed int instead of the
+// atoi/atol silent→0 coercion (③ config-compiler reuse for non-registry int cfg parsers, e.g. BinanceConfig
+// venue selectors where →0 is the DANGEROUS value: use_testnet=0 = PRODUCTION).
+static inline long parse_int_checked(const char *s, bool *malformed_out) {
+    if (s == nullptr || *s == '\0') { if (malformed_out) *malformed_out = false; return 0; }
+    size_t n = std::strlen(s);
+    long v;
+    auto r = std::from_chars(s, s + n, v);
+    bool ok = (r.ec == std::errc()) && (r.ptr == s + n);
+    if (malformed_out) *malformed_out = !ok;
+    return ok ? v : 0;
+}
+
 // Length-aware variant — caller already knows the byte count, skipping
 // the strlen scan. Use when parsing a slice of a JSON message buffer
 // (e.g. extract returned a span with explicit length).

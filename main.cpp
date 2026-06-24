@@ -201,6 +201,14 @@ int main(int argc, char *argv[]) {
     // ALWAYS-ABORT, all modes (no-margin is non-negotiable; D2). Reasoned per-fault [cfg] FATAL
     // lines were printed by ControllerConfig_Load at detection.
     if (!cfg_capital_gate_ok(ccfg, "ENGINE")) return 1;  // ③ D-255 — shared single-source gate (was inline)
+    // N1 (③ reuse) — the sibling boot parser (BinanceConfig, read from the SAME cfg) validates its venue
+    // selectors too; a malformed use_testnet/use_binance_us would silently flip testnet->PRODUCTION (atoi
+    // swallow) -> REFUSE (refuse-don't-coerce, the same config-compiler model).
+    if (!binance_config_ok(bcfg)) {
+        fprintf(stderr, "[ENGINE] FATAL: BinanceConfig venue validation failed -> REFUSED. "
+                "Fix the [cfg] FATAL line(s) above.\n");
+        return 1;
+    }
 
     // Sharded is the sole engine path (.E.1.1 removed engine_mode + legacy single_core).
     // v5.15.5.C.3 Phase 7.B — runtime bench gate boot dispatch. Two template
