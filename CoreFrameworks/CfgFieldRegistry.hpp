@@ -223,6 +223,8 @@ static_assert(CfgFieldDescriptor::CAPITAL_BOUND_GAIN < (1u << 16),  // ③ D-254
 // all modes — no-margin is non-negotiable). Reasoned per-fault messages print at detection.
 inline constexpr uint32_t CFG_FAULT_CAPITAL_MALFORMED    = 1u << 0;  // parse-point: a CAPITAL_BOUND field was MALFORMED/OVERFLOW (banana / 1,5 / 1.5% / saturated)
 inline constexpr uint32_t CFG_FAULT_CAPITAL_OUT_OF_RANGE = 1u << 1;  // post-resolve sweep: a CAPITAL_BOUND value exceeded the no-margin cap (loss>100% / gain>1000%)
+inline constexpr uint32_t CFG_FAULT_UNKNOWN_KEY          = 1u << 2;  // loop-tail: an unrecognized SHARDED key (core_*/node_*) — a retired-prefix or typo'd/out-of-range per-node key (③ clean-break, D-223/D-255)
+inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-point: a non-capital FEATURE field (FPN/float regime/ema/rolling/ML threshold) was MALFORMED — determinism-bearing, refuse-don't-coerce (C1/C2; DISTINCT from CAPITAL_MALFORMED to keep the severities separable — no Class-49 merge)
 
 //======================================================================================================
 // [FOREACH_*_CFG_FIELD — 13-col tuple (per-core + global uniform at v5.15.5.F.4d.1.B.3+)]

@@ -2654,10 +2654,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.14.9.D — DELETED legacy `confidence_freshness_tau` parser branch
     // (TECH_DEBT-004 close). Cfg field deleted; legacy 3-factor formula
     // uses CONFIDENCE_FRESHNESS_TAU_DEFAULT (300.0) hardcoded constant.
-    // Operator who has confidence_freshness_tau=N in their cfg file gets
-    // unknown-key error at parse — clean signal to remove the line per
-    // CHANGELOG migration note. Heavy-WIP stance accepted — no
-    // tolerant parser shim.
+    // Operator who has confidence_freshness_tau=N in their cfg file: the line is currently SILENTLY
+    // IGNORED — it's a non-sharded GLOBAL key, so the ③ clean-break's core_*/node_*-scoped unknown-key
+    // refuse (loop tail) does NOT catch it; the global-unknown-key refuse needs the multi-parser
+    // unification (N1, task #10). Remove the line per the CHANGELOG migration note. Heavy-WIP stance
+    // accepted — no tolerant parser shim.
     CFG_PARSE_FPN(confidence_threshold_scale)
     CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — held_out_fraction manual parser removed (was CFG_PARSE_FPN).
@@ -3131,6 +3132,23 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 #undef CFG_PARSE_U32
 #undef CFG_PARSE_INT
 #undef CFG_PARSE_FPN_POS
+    // ③ clean-break (D-223/D-255) — unrecognized SHARDED key HARD-REFUSE (the loop-tail fall-through;
+    // reached only when NO handler matched, since every handler `continue`s). SCOPED to the core_*/node_*
+    // namespace ControllerConfig EXCLUSIVELY owns: a non-sharded unknown key may belong to a sibling
+    // parser (BinanceConfig reads use_testnet/symbol/... from this SAME cfg path, main.cpp:75) —
+    // false-refusing those would break boot, so the broader global-unknown refuse waits on the
+    // multi-parser unification (N1, task #10). Exclusivity verified: the per-node block above is the SOLE
+    // node_ handler and no core_ handler survives the ② rename. The refuse rides cfg_compile_ok (any bit
+    // set => boot REFUSED) — no new gate.
+    if (strncmp(key, "core_", 5) == 0) {
+      cfg.cfg_load_fault_flags |= CFG_FAULT_UNKNOWN_KEY;
+      fprintf(stderr, "[cfg] FATAL: '%s' uses the RETIRED 'core_' key prefix (the .E.1.1 Core->Node "
+              "rename) -> rename it to 'node_%s'. Boot REFUSED.\n", key, key + 5);
+    } else if (strncmp(key, "node_", 5) == 0) {
+      cfg.cfg_load_fault_flags |= CFG_FAULT_UNKNOWN_KEY;
+      fprintf(stderr, "[cfg] FATAL: '%s' is an unrecognized per-node key (a typo, an out-of-range node "
+              "index >=16, or a retired field). Boot REFUSED.\n", key);
+    }
   }
 
   fclose(f);
