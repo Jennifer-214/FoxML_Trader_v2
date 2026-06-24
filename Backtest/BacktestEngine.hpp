@@ -2365,6 +2365,9 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
 
     // load base config once
     ControllerConfig<BACKTEST_FP> base = ControllerConfig_Load<BACKTEST_FP>(base_cfg->config_path);
+    // GAP-1 (③ caller-coverage) — gate the optimizer's base cfg: a malformed / unknown-sharded-key capital
+    // fault poisons EVERY sweep run (all share `base`). Fail the run (abort), matching BacktestSharded's gate.
+    if (!cfg_capital_gate_ok(base, "backtest optimizer")) return;
 
     for (int i0 = 0; i0 < opt->dims[0]; i0++) {
         for (int i1 = 0; i1 < opt->dims[1]; i1++) {
