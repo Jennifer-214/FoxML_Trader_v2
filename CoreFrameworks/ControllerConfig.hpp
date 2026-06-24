@@ -72,7 +72,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 // with different tunings on different cores, without touching the global
 // defaults.
 //
-// Cfg syntax: `core_N_<field>=<value>`
+// Cfg syntax: `node_N_<field>=<value>`
 //   node_0_take_profit_pct=4.0
 //   node_1_take_profit_pct=6.0
 //   node_2_mr_tp_pct=3.5
@@ -181,7 +181,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
     /* v5.14.9.B.1: per-core ladder curve override (CURVE_OFF/LINEAR/EXP/STEP). */ \
     /* 0 = inherit global cfg.risk_degradation_curve; non-zero overrides. Sentinel: */ \
     /* operator who wants to FORCE OFF on a specific core when global=LINEAR sets */ \
-    /* core_N_risk_degradation_curve=0 (which is also the inherit signal — but */ \
+    /* node_N_risk_degradation_curve=0 (which is also the inherit signal — but */ \
     /* the global being non-zero means inherit yields LINEAR; cannot per-core- */ \
     /* disable). Trade-off accepted; matches existing INT-override sentinel pattern. */ \
     INT(risk_degradation_curve) \
@@ -582,7 +582,7 @@ template <unsigned F> struct ControllerConfig {
   // v5.7.2: explicit acknowledgment that the operator wants to run a
   // hardcoded (non-AUTO) strategy in live mode. Default 0 — the boot
   // path refuses to start with trading_mode=live AND any
-  // core_N_strategy != auto unless this flag is set. AUTO (regime-
+  // node_N_strategy != auto unless this flag is set. AUTO (regime-
   // gated) is preferred for live capital because hardcoded strategies
   // fire regardless of regime. Setting this to 1 is the operator
   // saying "I know what I'm doing" and is logged.
@@ -672,7 +672,7 @@ template <unsigned F> struct ControllerConfig {
   // 3-factor IC scale). Stamp-bound via FOREACH_STAMP_BOUND_CFG (v5.14.9.C);
   // drift detection fires at boot if cfg differs from training-time stamp.
   //
-  // Per-core override: core_N_risk_degradation_curve (RUNTIME-ONLY; not
+  // Per-core override: node_N_risk_degradation_curve (RUNTIME-ONLY; not
   // stamp-bound — operator policy, matches existing per-core risk_pct
   // precedent). See v5.14.9.B.1.
   int    risk_degradation_curve;             // default 0 (OFF)
@@ -686,7 +686,7 @@ template <unsigned F> struct ControllerConfig {
   // Per CLAUDE.md item 13 X-macro: enum + ToString/FromString + branchless
   // dispatch via MODE_FLAGS[] table auto-generated from FOREACH_BARRIER_BLEND_MODE
   // (see ML_Headers/BarrierBlendModeRegistry.hpp).
-  // Per-core override: core_N_barrier_blend_mode (INT-enum, mirrors
+  // Per-core override: node_N_barrier_blend_mode (INT-enum, mirrors
   // risk_degradation_curve v5.14.9.C precedent).
   int    barrier_blend_mode;                  // default 0 (LEGACY)
   // Threshold above which factor=1.0 (full size at high confidence).
@@ -971,7 +971,7 @@ template <unsigned F> struct ControllerConfig {
   char peak_model_path[256];   // path to P(will_peak) model
   char valley_model_path[256]; // path to P(will_valley) model
   // Phase 5c stupid-proofing: when a model is loaded from a run bundle
-  // (core_N_model_dir), the engine reads models/{dir}/expected.cfg and
+  // (node_N_model_dir), the engine reads models/{dir}/expected.cfg and
   // compares ML-relevant fields against the live config. mismatches are
   // a) warnings (default), b) load failures (strict=1), or c) ignored (=-1).
   // strict mode is recommended for production deployment; default mode
@@ -1056,7 +1056,7 @@ template <unsigned F> struct ControllerConfig {
   // pre-v5.11.18a behavior bytewise.
   //
   // Config syntax: `node_0_feature_mask=0xFFFFFFFFFFFFFFFF` (matches the
-  // existing per-core field convention: core_N_strategy, core_N_risk_pct,
+  // existing per-core field convention: node_N_strategy, node_N_risk_pct,
   // etc.). Parser accepts 0x-prefixed hex (any case) or plain decimal.
   // Stored uint64_t.
   // Parity binding (Surface G stamp body extension at v5.11.18a, ML
@@ -1161,7 +1161,7 @@ template <unsigned F> struct ControllerConfig {
   int      horizon_count;                    // number of populated slots
 
   // v5.10.0a.G.6 — global ensemble cfg (per-core overrides via
-  // core_N_ensemble_blend_mode / core_N_horizon_list / core_N_disabled_horizons).
+  // node_N_ensemble_blend_mode / node_N_horizon_list / node_N_disabled_horizons).
   // Used when ensemble auto-detect (G.5) finds horizon siblings on disk
   // OR operator explicitly populates horizon_list.
   //
@@ -2929,7 +2929,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     if (strncmp(key, "node_", 5) == 0) {
       int node_idx = -1;
       const char* suffix = nullptr;
-      // parse core_N_<suffix>
+      // parse node_N_<suffix>
       const char* p = key + 5;
       node_idx = atoi(p);
       while (*p && *p != '_') p++;
@@ -2973,7 +2973,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 #define _PARSE_OV_INT(name) if (strcmp(suffix, #name) == 0) { ov.name = (uint32_t)atoi(val); continue; }
         PER_NODE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
 #undef _PARSE_OV_INT
-// v5.14.9.F.6: BITMAP per-bit overrides. `core_N_<legacy_field> = X` sets the
+// v5.14.9.F.6: BITMAP per-bit overrides. `node_N_<legacy_field> = X` sets the
 // corresponding bit on <domain>_cfg_flags_override + marks it in
 // <domain>_cfg_flags_override_set so the resolver knows to use the override
 // for that specific bit. Other bits in the domain inherit from global.
@@ -3147,16 +3147,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   fclose(f);
 
   // v5.9.0c — surface "all per-core strategies defaulted" silent failure.
-  // V5_9_AUDIT-#5. The today-bug: backtest.cfg lacked core_N_strategy=
+  // V5_9_AUDIT-#5. The today-bug: backtest.cfg lacked node_N_strategy=
   // lines → all 16 cores fell to STRATEGY_SIMPLE_DIP default → operator
   // saw "0!" hardcoded warnings, couldn't distinguish defaulted from
   // deliberate. Stderr WARN at boot makes the silent fallback visible.
   //
   // Fires only when num_execution_nodes > 0 (we have actual cores) AND
-  // explicit_set bitmap is zero (no core_N_strategy= lines parsed).
+  // explicit_set bitmap is zero (no node_N_strategy= lines parsed).
   if (cfg.num_execution_nodes > 0 && cfg.node_strategies_explicit_set == 0) {
     fprintf(stderr,
-        "[cfg] WARN: %s has no `core_N_strategy=` lines. "
+        "[cfg] WARN: %s has no `node_N_strategy=` lines. "
         "All %u nodes defaulting to SIMPLE_DIP (per ControllerConfig_Default). "
         "If this is unintended (e.g., you copied backtest.cfg without "
         "the per-core fields), add `node_0_strategy=mr` etc. to the cfg.\n",

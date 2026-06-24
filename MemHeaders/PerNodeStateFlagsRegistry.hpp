@@ -82,7 +82,7 @@ namespace tt {
       "zoo has at least one role loaded; non-zero prediction expected")                             \
     /* Migrated from PerNodeSnap.strategy_was_explicit_set (v5.9.0c) — cfg explicit-set bit */     \
     X(STRATEGY_EXPLICITLY_SET,                                                                       \
-      "operator set core_N_strategy= explicitly in cfg (vs defaulted)")                             \
+      "operator set node_N_strategy= explicitly in cfg (vs defaulted)")                             \
     /* v5.14.9.B.2 NEW — soft risk degradation ladder bottom hit this cycle */                      \
     X(LADDER_BOTTOM_HIT,                                                                             \
       "ladder factor=0 fired this cycle → entry blocked + SHALT_LOW_CONFIDENCE")                    \

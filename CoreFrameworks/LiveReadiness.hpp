@@ -216,9 +216,9 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
     X(mlockall_required,           check_mlockall_required,           LR_SEV_REFUSE, \
       "set require_mlockall=1 in cfg (deterministic latency)") \
     X(all_cores_strategy_explicit, check_all_cores_strategy_explicit, LR_SEV_REFUSE, \
-      "set core_<N>_strategy explicitly for all N in [0, num_execution_nodes)") \
+      "set node_<N>_strategy explicitly for all N in [0, num_execution_nodes)") \
     X(all_ml_cores_have_model,     check_all_ml_cores_have_model,     LR_SEV_REFUSE, \
-      "set core_<N>_model_path or core_<N>_model_dir for all ML nodes") \
+      "set node_<N>_model_path or node_<N>_model_dir for all ML nodes") \
     X(model_max_age_set,           check_model_max_age_set,           LR_SEV_REFUSE, \
       "set model_max_age_hours > 0; retrain stale models") \
     X(no_feature_hash_drift,       check_no_feature_hash_drift,       LR_SEV_REFUSE, \

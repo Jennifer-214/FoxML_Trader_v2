@@ -431,13 +431,13 @@ static const CfgFieldDef field_defs[] = {
     // Manual cfg storage at ControllerConfig.hpp:889/:1729/:2554 stays at .B.2 (deferred to .B.3
     // with cfg-storage-discipline amendment).
     // v4.7.31: ML model paths + barrier gate stay engine-wide for now.
-    // ml_model_path is already overridable per-core via core_N_model_path;
+    // ml_model_path is already overridable per-core via node_N_model_path;
     // regime / peak / valley paths don't have per-core storage yet —
     // adding it requires struct/parser changes across ControllerConfig
     // (deferred). Hidden when no core uses STRATEGY_ML by v4.7.30 filter.
     {"ml_model_path",            "Buy Model",         "Models", CFG_PATH,  NULL,
         "Path to XGBoost/LightGBM buy-signal model.\n"
-        "Per-core override available via core_N_model_path in each ML core's tab."},
+        "Per-core override available via node_N_model_path in each ML core's tab."},
     {"regime_model_path",        "Regime Model",      "Models", CFG_PATH,  NULL,
         "Path to regime enrichment model (engine-wide). Per-core deferred."},
     // barrier_gate_enabled migrated to FOREACH_GATE_CFG_FLAG (v5.14.9.F.5; auto-extended below)
@@ -462,7 +462,7 @@ static const CfgFieldDef field_defs[] = {
     // v4.7.31: "Core Strategies" + "Core Risk" summary sections removed.
     // These were duplicate views of per-core Strategy + Risk %% controls
     // already present in each per-core tab's "Core Configuration" section.
-    // Cfg parser still accepts core_N_strategy / core_N_risk_pct.
+    // Cfg parser still accepts node_N_strategy / node_N_risk_pct.
     // v4.7.27: strategy-tuning sections moved EXCLUSIVELY to per-core tabs.
     // Pre-v4.7.27 the Global tab also exposed SimpleDip/MR/Momentum/EMA Cross
     // Tuning fields as "shared default with per-core override" — that
@@ -1503,7 +1503,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
     // v5.11.61 — ML Ensemble panel. Surfaces what
     // EnsembleModelZoo_AutoDetectFromDir found at boot (per-horizon
     // detection, scaler/stamp state, current bandit weights per regime).
-    // Read-only display + checkbox writes core_N_disabled_horizons CSV
+    // Read-only display + checkbox writes node_N_disabled_horizons CSV
     // back to cfg (operator must restart or 'r' reload to apply). Only
     // renders when this core is ML (strategy filter) AND ensemble is active.
     if (node_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
@@ -1542,7 +1542,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                     int H = pcs.ensemble_horizon_ticks[h];
                     bool enabled = !(pcs.ensemble_disabled_horizon_mask & (1u << h));
                     ImGui::TableNextRow();
-                    // Enabled checkbox — writes core_N_disabled_horizons CSV
+                    // Enabled checkbox — writes node_N_disabled_horizons CSV
                     ImGui::TableNextColumn();
                     ImGui::PushID(h);
                     bool prev_enabled = enabled;

@@ -154,7 +154,7 @@ the `floor` is the algorithmic limit — what gate evaluation costs without para
 
 ## ML pipeline
 
-cores running `core_N_strategy=ml` load XGBoost models via `core_N_model_dir=<base_path>`. engine auto-detects multi-horizon siblings (`<base>_horizon_<N>/`) and runs Bandit-Exp3 weighted blend per regime.
+cores running `node_N_strategy=ml` load XGBoost models via `node_N_model_dir=<base_path>`. engine auto-detects multi-horizon siblings (`<base>_horizon_<N>/`) and runs Bandit-Exp3 weighted blend per regime.
 
 **training:** foxml_suite GUI runs walk-forward CV + held-out validation + auto-stamp. label kinds: binary buy_signal, 3-class barrier (PEAK_VALLEY_STABLE), regression. multi-horizon training writes per-horizon model files; live engine auto-detects.
 
@@ -203,9 +203,9 @@ fee_rate_taker = 0.00100
 risk_pct = 5.00                  # per-core risk %
 
 # per-core strategy + ML model
-core_0_strategy = ml
-core_0_model_dir = models/classification/my_run
-core_0_disabled_horizons = 1000  # CSV; freeze underperforming horizons
+node_0_strategy = ml
+node_0_model_dir = models/classification/my_run
+node_0_disabled_horizons = 1000  # CSV; freeze underperforming horizons
 
 # train-serve parity gate
 held_out_gate_strict = 0         # 0 = warn-only, 1 = refuse on stamp failure

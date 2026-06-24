@@ -1668,7 +1668,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
         // Path hint for engine.cfg — v5.11.55 use full_path so kind-
         // organized subdirs (classification/, regression/) appear correctly.
         ImGui::TextColored(FoxmlColors::sand,
-            "To use in engine: set core_N_model_dir=%s/ in engine.cfg",
+            "To use in engine: set node_N_model_dir=%s/ in engine.cfg",
             r->full_path);
 
         // v5.15.5 — Open Folder Path actually opens the directory via
@@ -5440,7 +5440,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             // v4.3 — kind-organized layout: models/{kind}/{run_name}/.
             // Classification models go under classification/; regression
             // under regression/. Engine cfg path is the full subdir-prefix
-            // path: core_N_model_dir=models/classification/your_run/.
+            // path: node_N_model_dir=models/classification/your_run/.
             const char *kind_dir = (expected_num_classes == 1) ? "regression"
                                                                 : "classification";
             char run_dir[400];
@@ -5501,7 +5501,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (cdst) fclose(cdst);
 
             // write expected.cfg — ML-relevant fields only. when the engine
-            // loads this run via core_N_model_dir, it reads expected.cfg and
+            // loads this run via node_N_model_dir, it reads expected.cfg and
             // compares against the live engine.cfg. mismatches → loud warnings
             // (or strict failure if model_verify_strict=1). this is the
             // stupid-proof check: prevents accidentally deploying a 3-class
@@ -5658,7 +5658,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::SetItemTooltip("Bundles model + expected.cfg + summary into models/{name}/.\n"
                               "Filename is role-derived (barrier/regime/buy_signal) so the\n"
                               "engine's NodeModelZoo auto-discovers it.\n"
-                              "Deploy: set core_N_model_dir = models/{name}/ in engine.cfg.");
+                              "Deploy: set node_N_model_dir = models/{name}/ in engine.cfg.");
     }
 
     //==================================================================
