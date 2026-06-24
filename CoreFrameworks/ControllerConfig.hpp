@@ -2249,20 +2249,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     continue;                                                                  \
   }
 
-// Ship-B P2b: legacy-parser route for DECIMAL money fields — exact string parse
-// (fraction-authored values, same semantics the FPN route had, now lossless).
-#define CFG_PARSE_MONEY_POS(name)                                              \
-  if (strcmp(key, #name) == 0) {                                               \
-    cfg.name = Money_FromString(val).value;                                    \
-    if (cfg.name.v < 0) cfg.name = Money_Zero();                               \
-    continue;                                                                  \
-  }
-
-#define CFG_PARSE_MONEY(name)                                                  \
-  if (strcmp(key, #name) == 0) {                                               \
-    cfg.name = Money_FromString(val).value;                                    \
-    continue;                                                                  \
-  }
+// CFG_PARSE_MONEY / CFG_PARSE_MONEY_POS (the Ship-B P2b legacy DECIMAL-money route) DELETED here as
+// dead code (③ item-2-adjacent, TD-215 hygiene): they were walker-shadowed — momentum_min_tp_margin_pct
+// / partial_exit_pct / tp2_mult are FOREACH_*_CFG_FIELD registry rows the walker parses first (continue),
+// and CFG_PARSE_MONEY_POS's sole user min_kill_loss migrated into the registry at 890b368. (The ~24 dead
+// CFG_PARSE_PCT registry-field branches below stay D-253's bulk delete — NOT folded here, per ship-boundary
+// discipline.) Removing the #defines also closes the missing-#undef leak (the #undef block omitted both).
 
 // FPN_Binary fields parsed as atof(val) / 100.0 (percentage: config says 15.0, stored
 // as 0.15)
@@ -2324,7 +2316,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(regime_volatile_stddev)
     CFG_PARSE_FPN(regime_vol_spike_ratio)
     CFG_PARSE_FPN(momentum_breakout_mult)
-    CFG_PARSE_MONEY(momentum_min_tp_margin_pct)     // v5.7.5
     CFG_PARSE_FPN(momentum_min_buy_delta_recent)  // v5.7.5
     CFG_PARSE_FPN(momentum_min_r2)                // v5.7.5
     // v5.15.5.F.4c — momentum_require_last_win migrated to FOREACH_CFG_FIELD (KIND_BOOL).
@@ -2619,8 +2610,6 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.15.5.F.4c — ml_backend + regime_model_backend migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY; pending TECH_DEBT-068).
 
     //--- partial exit + depth + EMA FPN_Binary ---
-    CFG_PARSE_MONEY(partial_exit_pct)
-    CFG_PARSE_MONEY(tp2_mult)
     CFG_PARSE_FPN(min_book_imbalance)
     CFG_PARSE_FPN(vol_scale_min)
     CFG_PARSE_FPN(vol_scale_max)
