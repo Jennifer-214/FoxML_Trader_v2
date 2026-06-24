@@ -2907,92 +2907,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // num_execution_nodes clamp [1, 16] preserved in INT(1, 1, 16) payload.
     // v5.15.5.F.4c — sharded_force_synthetic migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint8_t storage).
     // Registry walker's KIND_BOOL branch handles truthy-int normalization.
-    // v5.12.3.C — per-core time-exit override: node_0_time_exit_ticks=5000
-    // means core 0 forces exit after 5000 ticks held (overrides global
-    // cfg.max_hold_ticks for this core). Match BEFORE generic _exit_*
-    // patterns to avoid substring collisions.
-    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_time_exit_ticks")) {
-      int node_idx = atoi(key + 5);
-      if (node_idx >= 0 && node_idx < 16) {
-        cfg.node_time_exit_ticks[node_idx] = (uint32_t)atol(val);
-      }
-      continue;
-    }
-    // Per-core risk: node_0_risk_pct=20.0 means core 0 risks 20% of balance
-    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_risk_pct")) {
-      int node_idx = atoi(key + 5);
-      if (node_idx >= 0 && node_idx < 16) {
-        cfg.node_risk_pct[node_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
-      }
-      continue;
-    }
-    // Phase 3: per-core kill switch override. node_0_max_drawdown_pct=15.0
-    // means core 0 trips at 15% drawdown (overrides shared max_drawdown_pct).
-    // Match must come before _max checks (substring "_max" is in
-    // "_max_drawdown_pct"). Specific suffix match keeps it safe.
-    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_max_drawdown_pct")) {
-      int node_idx = atoi(key + 5);
-      if (node_idx >= 0 && node_idx < 16) {
-        cfg.node_max_drawdown_pct[node_idx] = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
-      }
-      continue;
-    }
-    // Per-core model path: node_0_model_path=models/aggressive.xgb
-    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_model_path")) {
-      int node_idx = atoi(key + 5);
-      if (node_idx >= 0 && node_idx < 16) {
-        strncpy(cfg.node_model_path[node_idx], val,
-                sizeof(cfg.node_model_path[node_idx]) - 1);
-        cfg.node_model_path[node_idx][sizeof(cfg.node_model_path[node_idx]) - 1] = '\0';
-      }
-      continue;
-    }
-    // WIP2d-1.A — Per-core symbol: node_0_symbol=BTCUSDT
-    // Forward-compat for multi-symbol DataStream. Uniformity-checked at boot (main.cpp);
-    // bridges to BinanceConfig.symbol if operator set a non-empty value.
-    // strstr "_symbol" comes BEFORE _strategy block (avoid match-substring shadowing).
-    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_symbol")) {
-      int node_idx = atoi(key + 5);
-      if (node_idx >= 0 && node_idx < 16) {
-        strncpy(cfg.node_symbol[node_idx], val,
-                sizeof(cfg.node_symbol[node_idx]) - 1);
-        cfg.node_symbol[node_idx][sizeof(cfg.node_symbol[node_idx]) - 1] = '\0';
-      }
-      continue;
-    }
-    // Per-core model dir: node_0_model_dir=models/aggressive/
-    // when set, engine auto-discovers role-specific models in the directory
-    // (barrier.json, buy_signal.json, regime.json, exit.json) and loads each
-    // present file into the per-core NodeModelZoo.
-    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_model_dir")) {
-      int node_idx = atoi(key + 5);
-      if (node_idx >= 0 && node_idx < 16) {
-        strncpy(cfg.node_model_dir[node_idx], val,
-                sizeof(cfg.node_model_dir[node_idx]) - 1);
-        cfg.node_model_dir[node_idx][sizeof(cfg.node_model_dir[node_idx]) - 1] = '\0';
-      }
-      continue;
-    }
-    // Per-core strategy: node_0_strategy=simple_dip, node_1_strategy=none, etc.
-    if (strncmp(key, "node_", 5) == 0 && strstr(key, "_strategy")) {
-      int node_idx = atoi(key + 5);
-      if (node_idx >= 0 && node_idx < 16) {
-        uint8_t sid = 0xFF; // STRATEGY_NONE
-        if (strcmp(val, "mr") == 0 || strcmp(val, "mean_reversion") == 0) sid = 0;
-        else if (strcmp(val, "momentum") == 0 || strcmp(val, "mom") == 0) sid = 1;
-        else if (strcmp(val, "simple_dip") == 0 || strcmp(val, "dip") == 0) sid = 2;
-        else if (strcmp(val, "ml") == 0) sid = 3;
-        else if (strcmp(val, "ema_cross") == 0 || strcmp(val, "ema") == 0) sid = 4;
-        else if (strcmp(val, "auto") == 0 || strcmp(val, "regime") == 0) sid = 5;  // v4.0.3 STRATEGY_AUTO
-        else if (strcmp(val, "none") == 0) sid = 0xFF;
-        else sid = (uint8_t)atoi(val);  // numeric fallback
-        cfg.node_strategies[node_idx] = sid;
-        // v5.9.0c — set explicit bit so TUI can distinguish deliberate from defaulted.
-        cfg.node_strategies_explicit_set |= (uint16_t)(1u << node_idx);
-      }
-      continue;
-    }
-    // Per-core overrides (v4.0). Parses `core_N_<field>=<value>` for any
+    // ③ item-2d — the 7 legacy per-node `node_<idx>_<suffix>` fields (time_exit_ticks / risk_pct /
+    // max_drawdown_pct / model_path / symbol / model_dir / strategy) were FOLDED into the exact-suffix
+    // dispatch in the node_-override block below (see the "Legacy per-node ARRAY fields" group). They
+    // were 7 separate `strncmp + strstr` branches; `strstr` SUBSTRING-matched `node_0_risk_pct_typo`
+    // → `_risk_pct` → silently wrote slot 0 from a typo'd key (G5/G6 swallow-and-coerce). Exact `strcmp`
+    // on the index-stripped suffix kills that under-fire; the 2 loss-side CAPITAL arrays now route
+    // through the shared malformed-capture helper (item-2c). One tokenizer, no Class-21 parallel parser.
+    // Per-core overrides (v4.0). Parses `node_N_<field>=<value>` for any
     // PerNodeOverrides field. Empty/0 = inherit global; resolver handles
     // the fallback. Two categories — pct (atof/100, e.g. take_profit_pct)
     // and raw FPN_Binary (atof, e.g. ml_buy_threshold).
@@ -3010,6 +2932,31 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       while (*p && *p != '_') p++;
       if (*p == '_' && node_idx >= 0 && node_idx < 16) {
         suffix = p + 1;
+        // ── Legacy per-node ARRAY fields (③ item-2d: folded from the old strncmp+strstr branches).
+        // Exact-suffix `strcmp` (NOT strstr substring) — kills the node_0_risk_pct_typo→slot-0 under-fire.
+        // These node_*[] arrays are WIP2g-deletion-bound (nodes[c] becomes authoritative); hand-rolled
+        // now per D-255 D1. The 2 loss-side CAPITAL arrays route through the shared malformed-capture
+        // helper (item-2c); the INT/string/strategy fields preserve their exact prior behavior.
+        if (strcmp(suffix, "time_exit_ticks") == 0) { cfg.node_time_exit_ticks[node_idx] = (uint32_t)atol(val); continue; }
+        if (strcmp(suffix, "risk_pct") == 0) { cfg.node_risk_pct[node_idx] = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/true); continue; }
+        if (strcmp(suffix, "max_drawdown_pct") == 0) { cfg.node_max_drawdown_pct[node_idx] = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/true); continue; }
+        if (strcmp(suffix, "model_path") == 0) { strncpy(cfg.node_model_path[node_idx], val, sizeof(cfg.node_model_path[node_idx]) - 1); cfg.node_model_path[node_idx][sizeof(cfg.node_model_path[node_idx]) - 1] = '\0'; continue; }
+        if (strcmp(suffix, "symbol") == 0) { strncpy(cfg.node_symbol[node_idx], val, sizeof(cfg.node_symbol[node_idx]) - 1); cfg.node_symbol[node_idx][sizeof(cfg.node_symbol[node_idx]) - 1] = '\0'; continue; }
+        if (strcmp(suffix, "model_dir") == 0) { strncpy(cfg.node_model_dir[node_idx], val, sizeof(cfg.node_model_dir[node_idx]) - 1); cfg.node_model_dir[node_idx][sizeof(cfg.node_model_dir[node_idx]) - 1] = '\0'; continue; }
+        if (strcmp(suffix, "strategy") == 0) {
+            uint8_t sid = 0xFF; // STRATEGY_NONE
+            if (strcmp(val, "mr") == 0 || strcmp(val, "mean_reversion") == 0) sid = 0;
+            else if (strcmp(val, "momentum") == 0 || strcmp(val, "mom") == 0) sid = 1;
+            else if (strcmp(val, "simple_dip") == 0 || strcmp(val, "dip") == 0) sid = 2;
+            else if (strcmp(val, "ml") == 0) sid = 3;
+            else if (strcmp(val, "ema_cross") == 0 || strcmp(val, "ema") == 0) sid = 4;
+            else if (strcmp(val, "auto") == 0 || strcmp(val, "regime") == 0) sid = 5;  // v4.0.3 STRATEGY_AUTO
+            else if (strcmp(val, "none") == 0) sid = 0xFF;
+            else sid = (uint8_t)atoi(val);  // numeric fallback (node_0_strategy=3) — PRESERVED
+            cfg.node_strategies[node_idx] = sid;
+            cfg.node_strategies_explicit_set |= (uint16_t)(1u << node_idx);  // v5.9.0c deliberate-vs-defaulted
+            continue;
+        }
         PerNodeOverrides<F>& ov = cfg.node_overrides[node_idx];
 #define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/true); continue; }
 #define _PARSE_OV_RAW(name) if (strcmp(suffix, #name) == 0) { ov.name = cfg_capture_node_raw_override<F>(cfg, key, val); continue; }
