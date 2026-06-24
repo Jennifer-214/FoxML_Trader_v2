@@ -1348,29 +1348,32 @@ inline bool cfg_capital_gate_ok(const ControllerConfig<F>& cfg, const char* who)
     return false;
 }
 
-// ③ D-256 (b/c) — per-node money-override malformed-capture: the IN-MACRO flag-capture seam for the
-// per-node parser (which writes cfg directly, unlike the registry walker's fault_out param). The walker
-// (CfgFieldDispatch.hpp, B1) only reaches the FLAT/registry fields; the per-node OVERRIDE channel
-// (_PARSE_OV_PCT + the 3 hand-rolled money outliers) and the legacy ARRAYS used the bare
-// `Money_FromString(val).value` form, DISCARDING .flags → the founding silent-disable bug on the
-// per-node surface (node_0_stop_loss_pct=banana → 0 → SL off, uncaught between item-2's globals and
-// item-4's ≤100% cap which 0 passes). This single-sources the fault-capture so every per-node money
-// site shares ONE bit-set (no parallel mirror — Class-18). MALFORMED/OVERFLOW ONLY (item-2 scope; the
-// ≤100% cap is item-4 — there is NO clamp here, so 0=inherit is preserved, the winsor_pct_high Class-48
-// trap avoided by construction). Empty value = clean inherit (the per-node "empty/0 = inherit global"
-// convention, ControllerConfig.hpp parser comment) — NEVER a fault (over-fire guard; Money_FromString("")
-// flags MALFORMED via FP_SCAN_NO_DIGITS). Value path is byte-identical to the old form (same scale, same
-// saturate) for every input the old form accepted — only the fault bit is added.
+// ③ D-256 (b/c) + B — capital-money cfg malformed-capture SSoT (name retained for boundary-stability;
+// this is the capital-money capture for ALL surfaces, not only per-node overrides). Every
+// `Money_FromString(val).value` cfg WRITE that the registry walker doesn't reach routes through this:
+// the per-node OVERRIDE channel (_PARSE_OV_PCT + the 3 hand-rolled money outliers), the 2 legacy ARRAYS,
+// AND the GLOBAL fee_rate_maker/taker (manual-parsed via the explicitly_set side-effect, so the B1 walker
+// never sees them). Each used the bare `.value` form DISCARDING .flags → the founding silent-disable bug
+// on a different surface (node_0_stop_loss_pct=banana → 0 → SL off; fee_rate_taker=1,5 → 0 → silent 0%
+// fee). ONE capture site, ONE shared CFG_FAULT_CAPITAL_MALFORMED bit (no parallel mirror — Class-18).
+// MALFORMED/OVERFLOW always faults. NO clamp (item-2 scope; 0=inherit preserved → winsor_pct_high Class-48
+// trap avoided). EMPTY: per-node overrides have a documented "empty/0 = inherit" sentinel → empty is clean
+// (empty_is_fault=false, the default); a GLOBAL money field (fee rate) has no inherit → an empty value is
+// operator error (empty_is_fault=true), matching the B1 walker's global treatment. Value path is
+// byte-identical to the old form for every input the old form accepted — only the fault bit is added.
 template <unsigned F>
 inline Money cfg_capture_node_money_override(ControllerConfig<F>& cfg, const char* key,
-                                             const char* val, bool pct_scale) {
+                                             const char* val, bool pct_scale, bool empty_is_fault = false) {
     MoneyParse mp = Money_FromString(val);
-    if (val[0] != '\0' && (mp.flags & (MONEY_PARSE_MALFORMED | MONEY_PARSE_OVERFLOW))) {
+    bool empty = (val[0] == '\0');
+    bool bad   = (mp.flags & (MONEY_PARSE_MALFORMED | MONEY_PARSE_OVERFLOW)) != 0;
+    if ((bad && !empty) || (empty && empty_is_fault)) {
         cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_MALFORMED;
-        fprintf(stderr, "[cfg] FATAL: per-node money override %s='%s' is %s -> boot REFUSED (D-256/B1). "
-                "A money override cannot silently default.\n", key, val,
-                (mp.flags & MONEY_PARSE_MALFORMED) ? "MALFORMED (not a number)"
-                                                   : "OVERFLOW (too large; saturated)");
+        fprintf(stderr, "[cfg] FATAL: money cfg field %s='%s' is %s -> boot REFUSED (D-256/B1). "
+                "A money field cannot silently default.\n", key, val,
+                empty ? "EMPTY (no value)"
+                      : (mp.flags & MONEY_PARSE_MALFORMED) ? "MALFORMED (not a number)"
+                                                           : "OVERFLOW (too large; saturated)");
     }
     return pct_scale ? Money{ money_scale_down_pow10(mp.value, 2) } : mp.value;
 }
@@ -2345,12 +2348,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // Inline parse instead of CFG_PARSE_PCT macro (which would `continue;`
     // before setting the flag). Same divide-by-100 semantics.
     if (strcmp(key, "fee_rate_maker") == 0) {
-        cfg.fee_rate_maker = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
+        cfg.fee_rate_maker = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/true, /*empty_is_fault=*/true);
         maker_explicitly_set = 1;
         continue;
     }
     if (strcmp(key, "fee_rate_taker") == 0) {
-        cfg.fee_rate_taker = Money{ money_scale_down_pow10(Money_FromString(val).value, 2) };
+        cfg.fee_rate_taker = cfg_capture_node_money_override<F>(cfg, key, val, /*pct_scale=*/true, /*empty_is_fault=*/true);
         taker_explicitly_set = 1;
         continue;
     }
