@@ -350,9 +350,10 @@ inline bool EngineSharded_Async_FanOut(
                 double default_per_node = (total_balance * default_risk) / (double)num_nodes;
                 if (default_per_node < 1.0) default_per_node = 1.0;
                 for (int c = 0; c < num_nodes; ++c) {
+                    // E.1.1 ③/B — reads nodes[c].risk_pct (raw-copied from node_risk_pct[c]; 0=inherit) — byte-identical.
                     double node_balance = default_per_node;
-                    if (!Money_IsZero(cfg.node_risk_pct[c])) {
-                        node_balance = total_balance * Money_ToDouble(cfg.node_risk_pct[c]);
+                    if (!Money_IsZero(cfg.nodes[c].risk_pct)) {
+                        node_balance = total_balance * Money_ToDouble(cfg.nodes[c].risk_pct);
                         if (node_balance < 1.0) node_balance = 1.0;
                     }
                     state.nodes[c].allocated_balance = Money{ money_from_double_payload(node_balance) };

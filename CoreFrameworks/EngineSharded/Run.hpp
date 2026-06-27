@@ -919,9 +919,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
         // Per-core risk: use core-specific override if set, else shared/even split
         // (preserved verbatim per v1.6 O2 bytewise-identical math discipline).
+        // E.1.1 ③/B — reads nodes[i].risk_pct (raw-copied from node_risk_pct[i] in
+        // PopulateCoresFromFlat, 0=inherit preserved) — byte-identical to the legacy array read.
         double node_balance = default_per_node;
-        if (!Money_IsZero(cfg.node_risk_pct[i])) {
-            node_balance = total_balance * Money_ToDouble(cfg.node_risk_pct[i]);
+        if (!Money_IsZero(cfg.nodes[i].risk_pct)) {
+            node_balance = total_balance * Money_ToDouble(cfg.nodes[i].risk_pct);
             if (node_balance < 1.0) node_balance = 1.0;
         }
 

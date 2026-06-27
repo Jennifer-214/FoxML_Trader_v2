@@ -939,6 +939,44 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
     cfg->nodes[c].target = cfg->source[c];
 
 //======================================================================================================
+// [FOREACH_PER_NODE_ARRAY_OVERRIDE — legacy capital parallel-array → nodes[c] merge (E.1.1 ③ item-4 / B)]
+//======================================================================================================
+// PURPOSE: the two TRANSITIONAL capital arrays (node_risk_pct / node_max_drawdown_pct) carry the LIVE
+// per-node override value, but ControllerConfig_ResolveForCore does NOT merge them — they are standalone
+// FOREACH_MANUAL_PER_NODE_FIELD arrays, NOT PER_NODE_OVERRIDE_FIELDS — so nodes[c].<field> was a dead
+// mirror equal to the global. This sidecar merges the RAW array into nodes[c] so nodes[c] is the ONE
+// authoritative per-node read (the dual-source-storage hazard, D-273/B, closes). Consumers (allocation +
+// per-node kill-switch) then read nodes[c].<field> and keep their two-branch divided-vs-direct math
+// VERBATIM — byte-identical.
+//
+// DISTINCT from FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC: those rows have NO flat scalar (the copy walker
+// skips them). THESE rows HAVE a flat scalar, so the copy walker (EMIT_PER_NODE_COPY) already wrote
+// nodes[c]=global; this sidecar runs AFTER it and OVERWRITES with the raw array (LAST-WINS). The copy is
+// RAW (0=inherit PRESERVED — a 0 array slot stays 0 in nodes[c], so the consumer's
+// `!Money_IsZero ? direct : divided` two-branch is unchanged). NEVER collapse to array-if-set-else-global:
+// that destroys the 0=inherit sentinel and forces every node onto the direct branch (D-I2 / A-B
+// byte-identity invariant).
+//
+// CRITICAL ORDER: MUST be applied AFTER FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_COPY) in
+// PopulateCoresFromFlat (last-wins overwrite). A-B HIGH: applied BEFORE the walker, the override is
+// silently dropped (reverts to global-divided default) = re-arms the founding bug.
+//
+// TRANSITIONAL: retires at WIP2g/E.1.2 — the parser writes nodes[c] directly + the arrays + this sidecar
+// retire together (the NodeState relayout leaf owns that layout change).
+//
+// Row shape: X(target_field, source_array_field)  [target on PerNodeCfg<F>; source on ControllerConfig<F>]
+//======================================================================================================
+#define FOREACH_PER_NODE_ARRAY_OVERRIDE(X)                                                               \
+    /* target_field,      source_array_field */                                                          \
+    X(risk_pct,           node_risk_pct)                                                                  \
+    X(max_drawdown_pct,   node_max_drawdown_pct)
+
+// Payload macro: emit per-core raw-copy overwrite. Used by PopulateCoresFromFlat AFTER the copy walker
+// (last-wins; `cfg` + `c` in scope from caller's per-core loop).
+#define EMIT_PER_NODE_ARRAY_OVERRIDE(target, source) \
+    cfg->nodes[c].target = cfg->source[c];
+
+//======================================================================================================
 // [PerNodeCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)]
 //======================================================================================================
 // PURPOSE: closes Shortsighted #3 (CI regex heuristic) to ~99.9% structural strength via

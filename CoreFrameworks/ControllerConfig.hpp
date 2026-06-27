@@ -1541,6 +1541,14 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
         // mechanically. Closes Shortsighted #4 (manual sync line ad-hoc).
         FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC(EMIT_NO_FLAT_FIELD_SYNC)
 
+        // E.1.1 ③ item-4 / B — legacy capital parallel-array → nodes[c] merge (D-273/B). RUNS AFTER the
+        // copy walker above (LAST-WINS): node_risk_pct/node_max_drawdown_pct are standalone arrays that
+        // ResolveForCore does NOT see, so the walker wrote nodes[c]=global; this overwrites with the RAW
+        // array (0=inherit preserved) so nodes[c] is the ONE authoritative per-node read. Consumers
+        // (allocation + per-node kill-switch) read nodes[c].<field> + keep their two-branch math verbatim
+        // (byte-identical). Retires with the arrays at WIP2g/E.1.2.
+        FOREACH_PER_NODE_ARRAY_OVERRIDE(EMIT_PER_NODE_ARRAY_OVERRIDE)
+
         // 5 cfg-domain bitmap STORAGE fields — manual copies (not in registry; A2 flat KIND_BOOL
         // rows ship at WIP2e and rebuild these bitmaps from rows at slow-path rebuild). The
         // resolved view already merges per-core bitmap overrides via the legacy

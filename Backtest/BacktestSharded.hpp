@@ -269,9 +269,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // analog at this scope).
 
         // Per-core risk: same as LIVE per v1.6 O2 bytewise-identical math discipline.
+        // E.1.1 ③/B — reads nodes[i].risk_pct (raw-copied from node_risk_pct[i]; 0=inherit) — byte-identical.
         double node_balance = default_per_node;
-        if (!Money_IsZero(cfg.node_risk_pct[i])) {
-            node_balance = total_balance * Money_ToDouble(cfg.node_risk_pct[i]);
+        if (!Money_IsZero(cfg.nodes[i].risk_pct)) {
+            node_balance = total_balance * Money_ToDouble(cfg.nodes[i].risk_pct);
             if (node_balance < 1.0) node_balance = 1.0;
         }
 

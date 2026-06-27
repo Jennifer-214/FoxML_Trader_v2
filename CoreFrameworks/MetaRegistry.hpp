@@ -41,6 +41,7 @@
     X(FOREACH_MANUAL_PER_NODE_FIELD,        1,      FOREACH_REGISTRY,                  "Per-core legacy parallel-array exemptions (12 rows; awaiting .F.4e KIND_STRING/_FILE_PATH/_HEX64).") \
     X(FOREACH_PER_NODE_DOMAIN_BITMAP,       1,      FOREACH_REGISTRY,                  "Meta-registry of cfg-domain bitmap storage (5 rows; binds LIFECYCLE/GATE/ML/RISK/OPS to PerNodeCfg<F> fields).") \
     X(FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC,  1,      FOREACH_REGISTRY,                  "AUTOPOPULATE sync sources for NO_FLAT_FIELD-tagged rows (1 row; future per-core-only fields land here mechanically).") \
+    X(FOREACH_PER_NODE_ARRAY_OVERRIDE,      1,      FOREACH_REGISTRY,                  "Legacy capital parallel-array -> nodes[c] merge (2 rows: risk_pct/max_drawdown_pct; raw-copy last-wins, 0=inherit; E.1.1 item-4/B; retires WIP2g/E.1.2).") \
     X(FOREACH_METADATA_BIT,                 1,      FOREACH_REGISTRY,                  "Per-bit mask declarations for CfgFieldDescriptor::MetadataFlag (compile-time bitmap masks).") \
     /* === Cfg-domain bitmap child registries (managed by FOREACH_PER_NODE_DOMAIN_BITMAP) === */                                                          \
     X(FOREACH_LIFECYCLE_CFG_FLAG,           2,      FOREACH_PER_NODE_DOMAIN_BITMAP,    "Lifecycle cfg flags (8-bit bitmap; partial_exit_enabled / breakeven flags).") \

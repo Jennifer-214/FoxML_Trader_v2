@@ -2915,8 +2915,10 @@ inline void EventLoop_RebuildOneCore(
             // global max_drawdown_pct. Trip ALSO requires drop > min_kill_loss
             // so a tiny allocation doesn't trip on rounding noise.
             if (!NODE_STATE_FLAG_IS_SET(state->nodes[slot], KILL_TRIPPED)) {
-                Money threshold = !Money_IsZero(config->node_max_drawdown_pct[slot])
-                    ? config->node_max_drawdown_pct[slot]
+                // E.1.1 ③/B — reads nodes[slot].max_drawdown_pct (raw-copied from node_max_drawdown_pct[slot]
+                // in PopulateCoresFromFlat, 0=inherit preserved) — byte-identical to the legacy array read.
+                Money threshold = !Money_IsZero(config->nodes[slot].max_drawdown_pct)
+                    ? config->nodes[slot].max_drawdown_pct
                     : config->max_drawdown_pct;
                 if (Money_Gt(state->nodes[slot].node_dd_pct, threshold) &&
                     Money_Gt(drop, config->min_kill_loss)) {
