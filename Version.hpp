@@ -5,7 +5,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.0"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.1"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -17,6 +17,65 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// .F.4d.1.E.1.1 (v5.15.5.F.4d.1.E.1.1) — Core→Node rename + cfg-key CLEAN-BREAK + single_core LIVE
+// deletion + the ③ config-compiler capital/feature-cfg VALIDATION arc. SECOND leaf of the decomposed
+// `.E.1` foundation (D-225 N=7: E.1.0 guards → **E.1.1 rename/clean-break** → E.1.2 SoA relayout → …
+// → E.1.5 per-cluster purity). Multi-session arc; full record in MASTER banners s1–s10 + decision log
+// D-239..D-281. NAMES change here; BYTES change at E.1.2 (separate bisect anchors per D-225 #2).
+// Headline deliverables:
+//   - single_core LIVE DELETION (3 phases): the legacy single-threaded engine is GONE — main.cpp legacy
+//     block (1116 lines) + `engine_force_close_all` + unconditional sharded dispatch (`7eacb80`) +
+//     9-orphan #include prune (`2baf0f6`); then the `engine_mode` cfg field deleted via its
+//     `FOREACH_GLOBAL_CFG_FIELD` row (H17 auto-cascade: struct field + both ENGINE_MODE_* enums + parser
+//     branch + 2 hot-reload readers) + `parity_harness` retired (its single_core↔sharded diff is a
+//     tautology now `Backtest_Run`→`BacktestSharded_Run` unconditionally) (`b9ce419`). TD-140 CLOSED;
+//     TD-185 → E.1.3. H21: `engine_mode` confirmed non-persisted (46 wire-ids match the ledger).
+//   - Core→Node MECHANICAL RENAME (`1da1c1c`): 3633 content sites + 6 engine git-mv (CoreModelZoo /
+//     CoreCtx* / CoreStateFlagRegistry / PerCoreStateFlagsRegistry / CoreLatencyStats → Node*) + the
+//     identifier-ledger NODE_STATE_FLAG re-key (values preserved; H21 Check-H 46/46). De-risked by
+//     `tools/cascade.py rename` (enumerate-only, TD-175a — the compiler is the code-token oracle; no
+//     code `--apply`) + a family-regex completeness audit (2118→3645 sites; closes AR-8 self-attestation).
+//     PRESERVE held: ExecutionCore / FoxML_Core / CoreFrameworks / CPU-core / persisted `core=`/`"core"`
+//     wire-ids UNTOUCHED (glossary §15: a NODE owns 2 CPUs, node_id ≠ cpu_id). D-239/D-240.
+//   - ③ CONFIG-COMPILER capital/feature-cfg VALIDATION (the founding-bug closure: `risk_pct=999` /
+//     `stop_loss_pct=banana` silently disabling capital controls). A one-pass collect-all-faults config
+//     compiler (ERRORS block / WARNINGS proceed) gating every fresh start (live AND backtest), flag-based
+//     (NEVER abort-in-Load), key-match faults. Items: single-source `cfg_capital_gate_ok` (C-1, all 6
+//     ControllerConfig_Load callers gated/exempt) + the 4 capital globals MIGRATED into the registry +
+//     B1 unit-agnostic malformed-refuse + the unknown-SHARDED-key HARD-REFUSE clean-break (own UNKNOWN_KEY
+//     bit) + N1 BinanceConfig venue-selector malformed-capture (silent testnet→PROD flip CLOSED) + GAP-1
+//     optimizer base-cfg gate + item-4 CORE: the per-node out-of-range sweep
+//     `ControllerConfig_CapitalRangeSweep<F>` (if-constexpr over FOREACH_PER_NODE_CFG_FIELD + F3
+//     exhaustiveness static_assert) + the global-flat F1 leg (a 4-agent sweep caught the global-inherit
+//     hole — an inheriting node's nodes[c]==0 passed the nodes[c]-only sweep while the allocator used the
+//     un-swept global) + F2 optimizer range-endpoint gate + explicit dollar floors (`starting_balance>0` /
+//     `min_kill_loss≥0` / `min_kill_loss<starting_balance`) + the B-merge sidecar
+//     (FOREACH_PER_NODE_ARRAY_OVERRIDE: legacy capital arrays → `nodes[c]`, last-wins, byte-identical —
+//     kills the dual-source dead-mirror) + item-5 live-reload re-validate (warn-keep-old) + C1/C2
+//     feature-malformed tier (~47 FPN_Binary/float → parse_double_fast_checked → CFG_FAULT_FEATURE_MALFORMED;
+//     byte-identical for valid inputs → NO determinism shift) + item-6 recurrence guard
+//     (no-MANUAL_PARSER-on-a-CAPITAL_BOUND static_assert + check_cfg_gate_caller_coverage.py,
+//     selftest-proven, wired into run_all_tests). D-242..D-280; RBP Class 52/53/54/55;
+//     config-compiler-validation-pattern.md; FEATURE_LOOKUP entry; TD-212 PARTIAL-CLOSED (capital subset;
+//     non-capital ~36 fields → E.2). DEFERRED: the metadata_flags uint16→uint32 widening + `*_mult` / FEE
+//     (venue-sourced) / partial_exit cap-bits → E.1.6 (TD-224).
+//   - VOCAB SWEEP #13 (`baf5e5a`): ~190 operator-facing Core→Node strings / 24 files (runtime logs, GUI
+//     labels/tooltips, cfg display names, rendered registry descriptions) + a CORRECTNESS fix (main.cpp
+//     help pointed at the now-boot-refused `core_<N>_symbol=`; the real key is `node_<N>_symbol=`). KEEP
+//     per H21/glossary §15: persisted trade-log/health-log keys + fn-symbols + CPU-core refs. Residuals →
+//     TD-225. D-281.
+//   - HOMED follow-ups (NOT E.1.1-blocking, by design): #11 GUI warn-banner + global-unknown-key refuse
+//     (the refuse half BLOCKED on the multi-parser unification, TD-223) · OQ1 #14 WIRE the inert sharded
+//     kill/exposure controls (decided-WIRE D-273; its own capital ship, TD-220) · GAP-2 #15 strategy-state
+//     OOB → E.1.2 · the legacy capital-array DELETION → E.1.2 (the B-merge teed it up).
+//   - VERIFY at close (HEAD `baf5e5a`): build.sh test 3693/0 · run_all_tests --full ALL HARD PASS (suite +
+//     doc-CI + orphan + determinism + conformance + 6×teeth + cfg-gate caller-coverage) · FRESH asan 3693/0
+//     + ubsan 3693/0 (0 sanitizer errors) · calls_graph_diff CLEAN (hot path UNTOUCHED through the rename) ·
+//     doc-CI SWEEP CLEAN. The E.1.0 H8 conformance gate held GREEN. Decision log D-239..D-281; arc record
+//     in MASTER banners s1–s10 (consolidated postmortem deferred — the arc is captured there + in the log).
+//   - NEXT = E.1.2 (NodeState SoA / `Money` relayout — the BYTES leaf; owns the legacy capital-array
+//     DELETION + GAP-2 + the snapshot VERSION bump).
+//
 // .F.4d.1.E.1.0 (v5.15.5.F.4d.1.E.1.0) — H8 STATIC latency-path CONFORMANCE ANALYZER + the §4d guard-NET
 // close. Zero engine-code change (private CI apparatus in tools/ + the ship-close codifications, all
 // gitignored-in-place/workspace-backed); FIRST leaf of the decomposed `.E.1` foundation (D-225 N=7:
