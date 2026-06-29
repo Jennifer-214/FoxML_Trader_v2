@@ -332,6 +332,20 @@ inline bool EngineSharded_Async_FanOut(
                        cfg.node_model_dir[c],
                        sizeof(cfg.node_model_dir[c]));
             }
+            // ③ item-5 (E.1.1, D-256 #5 / D-130 / D-270) — re-validate the MERGED reload BEFORE applying.
+            // ControllerConfig_Load already ran the capital sweep on the reloaded values, but the boot-only
+            // fields (starting_balance) were restored ABOVE, so re-derive OUT_OF_RANGE against the merged cfg
+            // (clear only that bit; KEEP the parse-time MALFORMED/UNKNOWN_KEY faults) so the dollar-floor
+            // cross-field (min_kill_loss < starting_balance) checks the LIVE starting_balance. A reload that
+            // fails capital validation KEEPS the running config — warn-keep-old, never fail-stop a live engine
+            // (D-242/D-262; inherits item-4's global-inherit F1 fix → a reloaded risk_pct=999 is refused).
+            new_cfg.cfg_load_fault_flags &= ~CFG_FAULT_CAPITAL_OUT_OF_RANGE;
+            ControllerConfig_CapitalRangeSweep(new_cfg);
+            if (!cfg_compile_ok(new_cfg)) {
+                fprintf(stderr, "[reload] WARN: reloaded engine.cfg FAILED capital validation (flags=0x%x) "
+                        "-> KEEPING the running config (fix the [cfg] FATAL line(s) above, then re-request reload).\n",
+                        (unsigned)new_cfg.cfg_load_fault_flags);
+            } else {
             cfg = new_cfg;
 
             // Phase 2.1: recompute allocated_balance after reload.
@@ -361,6 +375,7 @@ inline bool EngineSharded_Async_FanOut(
             }
             fprintf(stderr, "[sharded] cfg hot-reloaded "
                     "(per-core overrides + tunables refreshed, allocations recomputed)\n");
+            }
         }
         // Phase 3: process per-core kill resets BEFORE the rebuild
         // so a freshly-reset core can be re-evaluated this cycle.

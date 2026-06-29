@@ -41,6 +41,8 @@ namespace tt {
     // ML_Headers/ModelInference.hpp's namespace tt; same precedent as
     // StampBoundModelConstRegistry.hpp:97-99 forward-decl-to-avoid-include-cycle).
     inline double parse_double_fast(const char* s);
+    // ③ C1/C2 (D-261) — checked variant for FEATURE-field malformed-capture (definition in ParseFast.hpp:59).
+    inline double parse_double_fast_checked(const char* s, bool* malformed_out);
 
     // Dependent-false for exhaustive if-constexpr chains (Ship-B P0, S-5/V5).
     // A dispatcher chain's final `else { static_assert(always_false_v<T>, ...) }` turns an
@@ -122,14 +124,23 @@ namespace tt {
         } else if constexpr (is_fp_binary_v<T>) {
             // FPN_Binary<F>: parse double, apply percent scaling if KIND_DOUBLE_PCT (cfg-file context only),
             // clamp to descriptor range, convert to FPN_Binary<T::F>.
-            double v = parse_double_fast(val);
+            // ③ C1/C2 (D-261) — FEATURE fields are determinism-bearing: a malformed value silently coercing
+            // to 0 is a reproducibility hole. Route through the CHECKED parser → CFG_FAULT_FEATURE_MALFORMED
+            // (DISTINCT bit per D-259, NEVER the capital bit — no Class-49). Refuse-don't-coerce (lean-refuse,
+            // D-261). EMPTY = clean inherit/default; wire_context never faults (stamp-body reload, B2).
+            bool malformed = false;
+            double v = parse_double_fast_checked(val, &malformed);
+            if (!wire_context && malformed && val[0] != '\0' && fault_out) *fault_out |= CFG_FAULT_FEATURE_MALFORMED;
             if (!wire_context && desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) {
                 v /= 100.0;  // operator types "15.0" → stored as 0.15 (cfg-FILE convention)
             }
             v = std::clamp(v, desc.payload.as_double.clamp_min, desc.payload.as_double.clamp_max);
             dst = FPN_FromDouble<T::F>(v);
         } else if constexpr (std::is_floating_point_v<T>) {
-            double v = parse_double_fast(val);
+            // ③ C1/C2 (D-261) — same FEATURE-malformed capture for the legacy float branch.
+            bool malformed = false;
+            double v = parse_double_fast_checked(val, &malformed);
+            if (!wire_context && malformed && val[0] != '\0' && fault_out) *fault_out |= CFG_FAULT_FEATURE_MALFORMED;
             if (!wire_context && desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v /= 100.0;
             v = std::clamp(v, desc.payload.as_double.clamp_min, desc.payload.as_double.clamp_max);
             dst = static_cast<T>(v);

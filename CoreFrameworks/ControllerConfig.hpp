@@ -1372,6 +1372,19 @@ static constexpr unsigned CAPITAL_BOUND_SWEEP_HANDLED =
 FOREACH_PER_NODE_CFG_FIELD(CFG_ASSERT_CAPITAL_VARIANT_HANDLED)
 #undef CFG_ASSERT_CAPITAL_VARIANT_HANDLED
 
+// ③ item-6 (E.1.1, D-256 #6 / D-260 C-5) — the compile-time recurrence guard. A CAPITAL_BOUND field MUST be
+// parsed by the registry WALKER (tt::cfg_parse_field, which malformed-captures via CFG_FAULT_CAPITAL_MALFORMED);
+// a MANUAL_PARSER capital row would bypass that and silently coerce-to-0 — re-arming the founding bug invisibly
+// to the whole build→test→V-class→boot-gate pipeline (the Class-51-vacuous gap a grep can't see, D-260 C-5).
+// static_assert no capital row is MANUAL_PARSER → a future tag mistake is a COMPILE ERROR, not a live hole.
+#define CFG_ASSERT_CAPITAL_NOT_MANUAL_PARSER(STORAGE_T, KIND, name, label, section, meta, payload, ...) \
+    static_assert(!(((unsigned)(meta) & CfgFieldDescriptor::ALL_CAPITAL_BOUND_VARIANTS)                 \
+                  && ((unsigned)(meta) & (unsigned)CfgFieldDescriptor::MANUAL_PARSER)),                 \
+        "cfg field '" #name "' is CAPITAL_BOUND + MANUAL_PARSER — it bypasses the walker's malformed-capture "\
+        "(re-arms the founding bug); a capital field MUST be walker-parsed (drop MANUAL_PARSER or the cap bit).");
+FOREACH_PER_NODE_CFG_FIELD(CFG_ASSERT_CAPITAL_NOT_MANUAL_PARSER)
+#undef CFG_ASSERT_CAPITAL_NOT_MANUAL_PARSER
+
 // ③ item-4 (E.1.1) — post-resolve CAPITAL VALUE-RANGE sweep: the founding-bug closure (risk_pct=999 /
 // max_drawdown_pct=999 silently disabling capital controls). BOOT-time (ControllerConfig_Load, after
 // PopulateCoresFromFlat) — NOT hot/slow path, so the H7/H20 branchless discipline is exempt; the per-field
