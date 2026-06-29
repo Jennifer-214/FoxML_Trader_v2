@@ -726,7 +726,7 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
     // structural check: multiclass model + barrier_gate_enabled=0 → warn
     int has_multiclass = (zoo->loaded_mask & NODE_MODEL_BARRIER) && zoo->barrier.num_outputs >= 2;
     if (has_multiclass && !live_barrier_gate_enabled) {
-        fprintf(stderr, "[ML] core %d: WARNING — model has %d output classes (multiclass softmax)\n"
+        fprintf(stderr, "[ML] node %d: WARNING — model has %d output classes (multiclass softmax)\n"
                         "                  but barrier_gate_enabled=0. only P(valley) used,\n"
                         "                  P(peak)/P(stable) ignored. set barrier_gate_enabled=1\n"
                         "                  to use the full model.\n",
@@ -802,7 +802,7 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
     if (expected_poll_interval > 0 && live_poll_interval > 0 &&
         (unsigned)expected_poll_interval != live_poll_interval) {
         fprintf(stderr,
-            "[ML] core %d: MISMATCH — model trained at poll_interval=%d, "
+            "[ML] node %d: MISMATCH — model trained at poll_interval=%d, "
             "engine running at poll_interval=%u\n"
             "                  RollingStats time-windows differ %.1f×; "
             "predictions will diverge from training distribution.\n"
@@ -818,7 +818,7 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
     if (expected_feature_format_ver > 0 && live_feature_format_version > 0 &&
         (unsigned)expected_feature_format_ver != live_feature_format_version) {
         fprintf(stderr,
-            "[ML] core %d: FATAL — model trained with feature_format=v%d "
+            "[ML] node %d: FATAL — model trained with feature_format=v%d "
             "but engine runtime is v%u. Feature indices differ; model "
             "would interpret inputs as wrong features.\n"
             "                  Retrain the model on the current engine.\n",
@@ -828,7 +828,7 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
 
     // compare each field, log mismatches
     if (expected_barrier_gate >= 0 && expected_barrier_gate != live_barrier_gate_enabled) {
-        fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says barrier_gate_enabled=%d, "
+        fprintf(stderr, "[ML] node %d: MISMATCH — expected.cfg says barrier_gate_enabled=%d, "
                         "engine.cfg has %d\n",
                 node_id, expected_barrier_gate, live_barrier_gate_enabled);
         mismatches++;
@@ -836,14 +836,14 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
     if (expected_threshold >= 0.0 &&
         (live_ml_buy_threshold < expected_threshold - 0.001 ||
          live_ml_buy_threshold > expected_threshold + 0.001)) {
-        fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says ml_buy_threshold=%.3f, "
+        fprintf(stderr, "[ML] node %d: MISMATCH — expected.cfg says ml_buy_threshold=%.3f, "
                         "engine.cfg has %.3f\n",
                 node_id, expected_threshold, live_ml_buy_threshold);
         mismatches++;
     }
     if (expected_num_classes >= 2 && (zoo->loaded_mask & NODE_MODEL_BARRIER) &&
         zoo->barrier.num_outputs != expected_num_classes) {
-        fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says %d classes, "
+        fprintf(stderr, "[ML] node %d: MISMATCH — expected.cfg says %d classes, "
                         "loaded model has %d outputs\n",
                 node_id, expected_num_classes, zoo->barrier.num_outputs);
         mismatches++;
@@ -853,27 +853,27 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
     // what validation regime the model was trained under. Not compared to
     // live cfg (yet); add comparison if drift becomes a real concern.
     if (expected_held_out_fraction >= 0.0 || expected_gap_threshold >= 0.0) {
-        fprintf(stderr, "[ML] core %d: validation discipline — held_out=%.2f gap_threshold=%.3f\n",
+        fprintf(stderr, "[ML] node %d: validation discipline — held_out=%.2f gap_threshold=%.3f\n",
                 node_id,
                 expected_held_out_fraction >= 0.0 ? expected_held_out_fraction : 0.0,
                 expected_gap_threshold     >= 0.0 ? expected_gap_threshold     : 0.0);
     }
 
     if (mismatches == 0) {
-        fprintf(stderr, "[ML] core %d: expected.cfg verified (role=%s, %d classes) ✓\n",
+        fprintf(stderr, "[ML] node %d: expected.cfg verified (role=%s, %d classes) ✓\n",
                 node_id, expected_role[0] ? expected_role : "?",
                 expected_num_classes >= 0 ? expected_num_classes : 0);
         return 1;
     }
 
     if (strict_mode > 0) {
-        fprintf(stderr, "[ML] core %d: %d MISMATCH(ES) — STRICT MODE refusing to load.\n"
+        fprintf(stderr, "[ML] node %d: %d MISMATCH(ES) — STRICT MODE refusing to load.\n"
                         "                update engine.cfg to match expected.cfg, or set\n"
                         "                model_verify_strict=0 to override.\n",
                 node_id, mismatches);
         return 0;
     } else {
-        fprintf(stderr, "[ML] core %d: %d mismatch(es) — model may not behave as trained.\n"
+        fprintf(stderr, "[ML] node %d: %d mismatch(es) — model may not behave as trained.\n"
                         "                fix engine.cfg to silence these warnings.\n",
                 node_id, mismatches);
         return 1;
@@ -3117,7 +3117,7 @@ inline int NodeModelZoo_CheckStaleModel(const ModelHandle<F>* m,
     tt::Health_LogCriticalRateLimited(
         &last_stale_model_log_us,
         60000000ULL,    // 60s rate-limit gate
-        -1,              // global (not per-core)
+        -1,              // global (not per-node)
         "stale_model",   // category
         "[stale_model] %s is %lluh old > max %uh (strict=%d)",
         run_name,

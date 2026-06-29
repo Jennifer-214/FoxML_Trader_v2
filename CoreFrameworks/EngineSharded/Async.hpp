@@ -374,7 +374,7 @@ inline bool EngineSharded_Async_FanOut(
                 }
             }
             fprintf(stderr, "[sharded] cfg hot-reloaded "
-                    "(per-core overrides + tunables refreshed, allocations recomputed)\n");
+                    "(per-node overrides + tunables refreshed, allocations recomputed)\n");
             }
         }
         // Phase 3: process per-core kill resets BEFORE the rebuild
@@ -389,7 +389,7 @@ inline bool EngineSharded_Async_FanOut(
                     NODE_STATE_FLAG_CLR(state.nodes[c], KILL_TRIPPED);
                     state.nodes[c].node_peak_balance = Money_Zero();
                     state.nodes[c].node_dd_pct = Money_Zero();
-                    fprintf(stderr, "[sharded] core %d kill switch RESET\n", c);
+                    fprintf(stderr, "[sharded] node %d kill switch RESET\n", c);
                 }
             }
         }
@@ -813,7 +813,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // Defensive: malformed event (e.g. leg=1 without partials
                 // enabled). Drop + log; don't crash the drainer.
                 fprintf(stderr,
-                    "[sharded] drainer: invalid (core=%d, leg=%u) for "
+                    "[sharded] drainer: invalid (node=%d, leg=%u) for "
                     "partial_enabled=%d → dropping event\n",
                     slot, (unsigned)event.leg, partial_on);
                 continue;
@@ -895,7 +895,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                                       is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
                                       Money{ money_from_double_payload(order_qty_d) },  // partial-qty exact split rides P3
                                       event.leg,                                                    // P.3: leg propagated to Order
-                                      &cfg.nodes[slot]);                                            // per-core cfg (sharded: node_id == slot)
+                                      &cfg.nodes[slot]);                                            // per-node cfg (sharded: node_id == slot)
                 cmd.intended_tp = leg_tp;
                 cmd.intended_sl = state.nodes[slot].intended_sl;
                 cmd.strategy_id = state.nodes[slot].strategy_id;

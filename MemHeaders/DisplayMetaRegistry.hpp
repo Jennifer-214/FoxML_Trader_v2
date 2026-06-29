@@ -102,11 +102,11 @@ namespace tt {
     X(uint16_t,  prev_gate_log_state,         0xFFFF, "v5.6.6 packed gate-state for cat=\"gate\" health-log edge-trigger; sentinel 0xFFFF forces first-cycle baseline emit") \
     X(uint32_t,  barrier_shadow_event_count,  0,    "v5.15.5.A.6 shadow ring writes (barrier modes 3/4)")                          \
     /* ML rate-limit + decision-context counters */                                                \
-    X(uint64_t,  last_ml_critical_log_us,     0,    "v5.9.0b rate-limit gate for ML→SimpleDip CRITICAL log (per-core)")            \
+    X(uint64_t,  last_ml_critical_log_us,     0,    "v5.9.0b rate-limit gate for ML→SimpleDip CRITICAL log (per-node)")            \
     X(double,    last_ml_threshold,           0.0,  "v5.9.0b ml_buy_threshold at last decision (display + entry log)")             \
     X(double,    last_ml_effective_threshold, 0.0,  "v5.9.0b post-confidence-damping threshold actually used")                     \
-    X(uint32_t,  nan_feature_events_total,    0,    "v5.9.0b Features_PackAll -1 sentinel count on this core")                     \
-    X(uint32_t,  nan_prediction_events_total, 0,    "v5.9.0b Model_Predict NaN/Inf events on this core")                           \
+    X(uint32_t,  nan_feature_events_total,    0,    "v5.9.0b Features_PackAll -1 sentinel count on this node")                     \
+    X(uint32_t,  nan_prediction_events_total, 0,    "v5.9.0b Model_Predict NaN/Inf events on this node")                           \
     /* Cfg-drift counter state (booleans moved to node_state_flags bitmap in v5.15.5.B.3) */       \
     X(uint8_t,   cfg_drift_tier1_count,       0,    "v5.9.5i cfg drift Tier 1 count")                                              \
     X(uint8_t,   cfg_drift_tier2_count,       0,    "v5.9.5i cfg drift Tier 2 count")                                              \
@@ -114,7 +114,7 @@ namespace tt {
     /* Write-only currently (set at first-breach detection in ControllerEventLoop; never read).      */                            \
     /* Preserved for future GUI panel display + observability. Closes Class-18 mirror — would be     */                            \
     /* a 3rd DisplayMeta sibling-struct creation if not unified here.                                */                            \
-    X(uint64_t,  drift_breach_first_us,       0,    "v5.15.5.E.B wall-clock at first drift breach detection on this core")
+    X(uint64_t,  drift_breach_first_us,       0,    "v5.15.5.E.B wall-clock at first drift breach detection on this node")
     /* v5.15.5.B.3: model_load_failed, cfg_drift_strict_refused, warmup_log_emitted */                                             \
     /* migrated to node_state_flags bitmap on NodeContext (NodeStateFlagRegistry.hpp).             */                              \
     /* Final home — closes the Class 18 mirror they represented. */

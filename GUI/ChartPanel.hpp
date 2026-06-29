@@ -252,7 +252,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     // only that core's entry markers + TP/SL lines render — useful for
     // isolating one core's behavior when 4 strategies overlap.
     ImGui::SameLine(0, 15);
-    ImGui::TextColored(FoxmlColors::comment, "Core");
+    ImGui::TextColored(FoxmlColors::comment, "Node");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(70);
     {
@@ -264,7 +264,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Show entry markers + TP/SL lines for one core only.\n"
+        ImGui::SetTooltip("Show entry markers + TP/SL lines for one node only.\n"
                           "Candles + global indicators always render.");
     }
 

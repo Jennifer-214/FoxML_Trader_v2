@@ -154,7 +154,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
             strategy_id,
             fill_px,
             (uint8_t)leg,
-            &cfg.nodes[node_id]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-core cfg for pre-resolve at submit
+            &cfg.nodes[node_id]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-node cfg for pre-resolve at submit
         // v4.7.19: counter bumps moved to EventLoop_DrainPostFill —
         // see the doctrine note there. Pre-v4.7.19 we bumped here
         // BEFORE Submit could fail (queue full, slot already closed,
@@ -169,7 +169,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
             else          state.nodes[node_id].core->active_b = 0;
         }
         std::fprintf(stderr,
-            "[manual-close] slot %d (core %d leg %s): force-exit @ %.2f, qty %.6f\n",
+            "[manual-close] slot %d (node %d leg %s): force-exit @ %.2f, qty %.6f\n",
             slot, node_id, leg == 0 ? "A" : "B",
             Money_ToDouble(fill_px), Money_ToDouble(qty));
     }

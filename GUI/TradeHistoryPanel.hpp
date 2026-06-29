@@ -195,7 +195,7 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
     // when partials enabled, slot otherwise); Leg column shows A/B/–.
     if (ImGui::BeginTable("##trades", 12, flags, ImVec2(0, -1))) {  // v5.5.3: +Hold
         ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 30);
-        ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 35);
+        ImGui::TableSetupColumn("Node",   ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("Leg",    ImGuiTableColumnFlags_WidthFixed, 30);
         ImGui::TableSetupColumn("Entry",  ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("Exit",   ImGuiTableColumnFlags_WidthFixed, 70);

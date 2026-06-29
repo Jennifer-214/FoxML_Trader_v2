@@ -52,8 +52,8 @@
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
 #include "../GUI/CandleAccumulator.hpp"  // Track E.7 — chart panel feed
 #include "../FixedPoint/FixedPointN.hpp"
-#include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML cores (E.2)
-#include "../ML_Headers/NodeModelZoo.hpp"     // E.2 — load per-core ML zoos
+#include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML nodes (E.2)
+#include "../ML_Headers/NodeModelZoo.hpp"     // E.2 — load per-node ML zoos
 #include "../ML_Headers/ModelInference.hpp"   // for stamp helpers
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../ML_Headers/ROR_regressor.hpp"
@@ -881,7 +881,7 @@ done:
                 &ml_ensemble_zoos[i], cfg.node_model_dir[i],
                 /*regime_names=*/nullptr);
             if (saved) {
-                fprintf(stderr, "[backtest sharded] core %d: saved bandit state to "
+                fprintf(stderr, "[backtest sharded] node %d: saved bandit state to "
                                 "%s/bandit_state.json\n",
                         i, cfg.node_model_dir[i]);
             }

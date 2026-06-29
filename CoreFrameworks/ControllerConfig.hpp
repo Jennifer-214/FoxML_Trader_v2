@@ -11,7 +11,7 @@
 #ifndef CONTROLLER_CONFIG_HPP
 #define CONTROLLER_CONFIG_HPP
 
-#include "../Limits.hpp"                       // MAX_EXECUTION_NODES (per-core sharding cap; PerNodeCfg<F> nodes[] sizing)
+#include "../Limits.hpp"                       // MAX_EXECUTION_NODES (per-node sharding cap; PerNodeCfg<F> nodes[] sizing)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/LinearRegression3X.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // v5.14.9.A — DegradationCurve enum + ToString/FromString helpers
@@ -317,7 +317,7 @@ struct alignas(64) PerNodeCfg {
 // alignof must be 64 (alignas(64) decorator above); sizeof must be a multiple of 64
 // (compiler auto-tail-pads for array alignment).
 static_assert(alignof(PerNodeCfg<64>) == 64,
-              "PerNodeCfg<F> must be 64-byte aligned for cache-line discipline + per-core "
+              "PerNodeCfg<F> must be 64-byte aligned for cache-line discipline + per-node "
               "nodes[] array alignment");
 static_assert(sizeof(PerNodeCfg<64>) % 64 == 0,
               "sizeof(PerNodeCfg<F>) must be a multiple of 64 — compiler should auto-pad "
@@ -3178,7 +3178,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
                 cfg.node_feature_mask[node_idx] = parsed;
                 if (parsed == 0ULL) {
                     fprintf(stderr, "[cfg] WARN: node_%d_feature_mask=0x0 "
-                            "disables ALL features for this core. Did you "
+                            "disables ALL features for this node. Did you "
                             "mean 0xFFFFFFFFFFFFFFFF (all enabled)?\n",
                             node_idx);
                 }
@@ -3280,7 +3280,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         "[cfg] WARN: %s has no `node_N_strategy=` lines. "
         "All %u nodes defaulting to SIMPLE_DIP (per ControllerConfig_Default). "
         "If this is unintended (e.g., you copied backtest.cfg without "
-        "the per-core fields), add `node_0_strategy=mr` etc. to the cfg.\n",
+        "the per-node fields), add `node_0_strategy=mr` etc. to the cfg.\n",
         filepath ? filepath : "(unknown cfg)",
         (unsigned)cfg.num_execution_nodes);
   }

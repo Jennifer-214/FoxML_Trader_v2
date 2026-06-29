@@ -457,7 +457,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         }
         if (any_ladder_active && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) == 0) {
             fprintf(stderr,
-                "[boot] FATAL: core %d risk_degradation_curve=%s requires "
+                "[boot] FATAL: node %d risk_degradation_curve=%s requires "
                 "confidence_composite_enabled=1.\n"
                 "  Ladder thresholds are tuned for composite confidence scale; "
                 "legacy 3-factor IC scale would silently misbehave.\n"
@@ -468,7 +468,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 active_node_id);
             if (cfg.health_log_path[0]) {
                 tt::Health_Log(tt::HEALTH_CRITICAL, "boot", active_node_id,
-                    "REFUSE: ladder requires composite (core=%d, curve=%s, composite=0)",
+                    "REFUSE: ladder requires composite (node=%d, curve=%s, composite=0)",
                     active_node_id, DegradationCurve_ToString(active_curve));
             }
             return;  // refuse boot; engine doesn't start
@@ -511,7 +511,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (live && !ack) {
                 fprintf(stderr,
                     "[sharded] ERROR: live mode (trading_mode=live) with "
-                    "%d hardcoded strategy core(s): %s\n"
+                    "%d hardcoded strategy node(s): %s\n"
                     "[sharded]        AUTO is recommended for live capital "
                     "(regime-gated strategy selection).\n"
                     "[sharded]        To override: set "
@@ -524,7 +524,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             }
             // paper, or live+ack — WARN only
             fprintf(stderr,
-                "[sharded] WARN: %d hardcoded strategy core(s): %s. "
+                "[sharded] WARN: %d hardcoded strategy node(s): %s. "
                 "AUTO is recommended for live/paper runs (regime-gated). "
                 "Hardcoded is fine for backtest comparisons.\n",
                 hardcoded_count, hardcoded_list);
@@ -551,7 +551,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     fprintf(stderr, "\n");
     fprintf(stderr, "================================================================\n");
-    fprintf(stderr, "[sharded] STARTING in per-core sharded mode\n");
+    fprintf(stderr, "[sharded] STARTING in per-node sharded mode\n");
     fprintf(stderr, "[sharded] num_execution_nodes = %u\n", (unsigned)cfg.num_execution_nodes);
 
     // Partial exits P.1 (2026-04-27): validate cfg before allocating cores.
@@ -630,7 +630,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     } else {
         fprintf(stderr, "[sharded] mode: PAPER — internal state only, no orders submitted.\n");
     }
-    fprintf(stderr, "[sharded] Press Ctrl+C to stop and dump per-core stats.\n");
+    fprintf(stderr, "[sharded] Press Ctrl+C to stop and dump per-node stats.\n");
     fprintf(stderr, "================================================================\n");
 
     ShardedOrderLatency_Reset(&g_sharded_order_lat);
@@ -941,15 +941,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         if (cfg.node_strategies[i] == STRATEGY_ML) {
             zoo_ptr = (NodeModelZoo<F>*)aligned_alloc(64, sizeof(NodeModelZoo<F>));
             if (!zoo_ptr) {
-                fprintf(stderr, "[sharded] core %d: aligned_alloc(NodeModelZoo) "
-                                "failed; ML core cannot init\n", i);
+                fprintf(stderr, "[sharded] node %d: aligned_alloc(NodeModelZoo) "
+                                "failed; ML node cannot init\n", i);
                 NODE_STATE_FLAG_SET(state.nodes[i], MODEL_LOAD_FAILED);
                 continue;
             }
             ezoo_ptr = (EnsembleModelZoo<F>*)aligned_alloc(64, sizeof(EnsembleModelZoo<F>));
             if (!ezoo_ptr) {
-                fprintf(stderr, "[sharded] core %d: aligned_alloc(EnsembleModelZoo) "
-                                "failed; ML core cannot init\n", i);
+                fprintf(stderr, "[sharded] node %d: aligned_alloc(EnsembleModelZoo) "
+                                "failed; ML node cannot init\n", i);
                 free(zoo_ptr); zoo_ptr = nullptr;
                 NODE_STATE_FLAG_SET(state.nodes[i], MODEL_LOAD_FAILED);
                 continue;
@@ -1275,7 +1275,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         double tp_pct = Money_ToDouble(cfg.nodes[i].take_profit_pct);
         if (tp_pct > 0.0 && tp_pct < tp_floor_i) {
             fprintf(stderr,
-                "[sharded] WARN: core %d take_profit_pct=%.4f%% is below "
+                "[sharded] WARN: node %d take_profit_pct=%.4f%% is below "
                 "the fee floor (3 × taker=%.4f%% = %.4f%%). Winning trades "
                 "will be net-negative after fees. Recommend tp_pct >= %.4f%%.\n",
                 i, tp_pct * 100.0, fee_taker_i * 100.0,
@@ -1783,7 +1783,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                                 if (new_path[0] == '\0') {
                                     fprintf(stderr,
-                                        "[hot_swap] core %d REFUSED: empty path\n", c);
+                                        "[hot_swap] node %d REFUSED: empty path\n", c);
                                     __atomic_store_n(
                                         &g_shared.swap_model_path_requested[c], 0,
                                         __ATOMIC_RELEASE);
@@ -1797,7 +1797,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         (NodeModelZoo<F>*)state.nodes[c].model_handle;
                                     if (swap_zoo == nullptr) {
                                         fprintf(stderr,
-                                            "[hot_swap] core %d REFUSED: "
+                                            "[hot_swap] node %d REFUSED: "
                                             "core not ML at boot (set "
                                             "node_%d_strategy=ml + restart "
                                             "to enable hot-swap)\n", c, c);
@@ -1834,7 +1834,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             // at its pre-call value (likely 0 if
                                             // pre-swap was healthy).
                                             fprintf(stderr,
-                                                "[hot_swap] ensemble core %d shadow-load "
+                                                "[hot_swap] ensemble node %d shadow-load "
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
@@ -1858,7 +1858,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             if (validate_rc < 0) {
                                                 NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
                                                 fprintf(stderr,
-                                                    "[hot_swap] ensemble core %d "
+                                                    "[hot_swap] ensemble node %d "
                                                     "REFUSED post-load validation "
                                                     "in strict mode; new model "
                                                     "loaded but flagged degraded. "
@@ -1876,7 +1876,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             // the ACQ_REL ensemble_handle swap inside HotSwap_ShadowLoad_Ensemble).
                                             if (EnsembleZoo_FinalizeCorrupt<F>(swap_ezoo, FPN_ToDouble(cfg.model_corrupt_shalt_ratio))) {
                                                 NODE_STATE_FLAG_SET(state.nodes[c], MODEL_CORRUPT);
-                                                fprintf(stderr, "[hot_swap] core %d: ML barrier CORRUPT for the "
+                                                fprintf(stderr, "[hot_swap] node %d: ML barrier CORRUPT for the "
                                                                 "majority of arms — node REFUSES new trades; RETRAIN (D-221)\n", c);
                                             }
                                         }
@@ -1902,7 +1902,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             // log + continue. Don't null the handle;
                                             // pre-swap zoo remains active.
                                             fprintf(stderr,
-                                                "[hot_swap] single-zoo core %d shadow-load "
+                                                "[hot_swap] single-zoo node %d shadow-load "
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
@@ -1923,7 +1923,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             if (validate_rc < 0) {
                                                 NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
                                                 fprintf(stderr,
-                                                    "[hot_swap] core %d REFUSED post-load "
+                                                    "[hot_swap] node %d REFUSED post-load "
                                                     "validation in strict mode; new model "
                                                     "loaded but flagged degraded. Operator "
                                                     "must reconcile cfg vs stamp + restart.\n", c);
@@ -2036,7 +2036,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
         // Header
         fprintf(stdout, "\033[H");  // cursor home, no clear (avoids flicker)
-        fprintf(stdout, SH_BOLD SH_PEACH "  /l、" SH_RESET "  " SH_BOLD SH_PEACH "FOXML TRADER" SH_RESET "  " SH_DIM "(per-core sharded)" SH_RESET "\033[K\n");
+        fprintf(stdout, SH_BOLD SH_PEACH "  /l、" SH_RESET "  " SH_BOLD SH_PEACH "FOXML TRADER" SH_RESET "  " SH_DIM "(per-node sharded)" SH_RESET "\033[K\n");
         fprintf(stdout, SH_DIM " ( °_ ° 7" SH_RESET "  " SH_DIM "engine v3.7.2" SH_RESET "  " SH_FG "%s" SH_RESET "\033[K\n",
                 use_synthetic ? "synthetic ticks" : "real Binance feed");
         fprintf(stdout, SH_DIM "  ド  ヘ" SH_RESET "\033[K\n");
@@ -2094,7 +2094,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         fprintf(stdout, "\033[K\n");
 
         // Per-core latency table — the headline
-        fprintf(stdout, SH_BOLD SH_PEACH " PER-CORE LATENCY" SH_RESET SH_DIM "  (last 256 samples per core)" SH_RESET "\033[K\n");
+        fprintf(stdout, SH_BOLD SH_PEACH " PER-CORE LATENCY" SH_RESET SH_DIM "  (last 256 samples per node)" SH_RESET "\033[K\n");
         fprintf(stdout, "  " SH_DIM "core   samples       min        p50        p95        p99        max        avg" SH_RESET "\033[K\n");
         for (int i = 0; i < num_nodes; ++i) {
             NodeLatencySnapshot ls = NodeLatencyStats_Snapshot(&nodes[i].latency_stats, tsc_ghz);
@@ -2262,7 +2262,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 ezoo, cfg.node_model_dir[i],
                 /*regime_names=*/nullptr);
             if (saved) {
-                fprintf(stderr, "[sharded] core %d: saved bandit state to "
+                fprintf(stderr, "[sharded] node %d: saved bandit state to "
                                 "%s/bandit_state.json\n",
                         i, cfg.node_model_dir[i]);
             }
@@ -2272,7 +2272,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 ezoo, cfg.node_model_dir[i],
                 /*regime_names=*/nullptr);
             if (saved_exit) {
-                fprintf(stderr, "[sharded] core %d: saved exit_bandit "
+                fprintf(stderr, "[sharded] node %d: saved exit_bandit "
                                 "state to %s/exit_bandit_state.json\n",
                         i, cfg.node_model_dir[i]);
             }

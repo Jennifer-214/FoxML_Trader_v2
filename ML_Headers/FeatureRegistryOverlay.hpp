@@ -160,9 +160,9 @@ inline int FeatureOverlay_PostLoadVerify(
         // Format location string (single-zoo: "core 0"; ensemble: "core 0 ensemble[2]")
         char loc[64];
         if (h_idx < 0) {
-            snprintf(loc, sizeof(loc), "core %d", node_id);
+            snprintf(loc, sizeof(loc), "node %d", node_id);
         } else {
-            snprintf(loc, sizeof(loc), "core %d ensemble[%d]", node_id, h_idx);
+            snprintf(loc, sizeof(loc), "node %d ensemble[%d]", node_id, h_idx);
         }
 
         // Parse sidecar's computed_layer2_hash
@@ -215,7 +215,7 @@ inline int FeatureOverlay_PostLoadVerify(
 
     if (mismatch_count > 0 && strict) {
         fprintf(stderr,
-            "[overlay] FATAL: core %d had %d overlay mismatch(es) in "
+            "[overlay] FATAL: node %d had %d overlay mismatch(es) in "
             "strict mode. Set held_out_gate_strict=0 (warn-only) OR "
             "regenerate sidecar via tools/feature_overlay.py write OR "
             "retrain the model with current overlay.\n",

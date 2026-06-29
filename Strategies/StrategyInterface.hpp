@@ -129,7 +129,7 @@ enum StrategyId : uint8_t {
     NUM_STRATEGIES_REAL,                            // count of registered real strategies
     STRATEGY_AUTO    = NUM_STRATEGIES_REAL,         // v4.0.3 sentinel: regime-driven auto-select
     NUM_STRATEGIES   = NUM_STRATEGIES_REAL + 1,     // includes AUTO
-    STRATEGY_NONE    = 0xFF                         // per-core "no strategy assigned"
+    STRATEGY_NONE    = 0xFF                         // per-node "no strategy assigned"
 };
 
 // Names for display, indexed by strategy ID. Real strategies' names
@@ -317,8 +317,8 @@ static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHAL
     X(MIN_STDDEV,   "min-stddev",   "rolling stddev below floor (dead market)") \
     X(SL_COOLDOWN,  "sl-cooldown",  "stop-loss cooldown active") \
     X(WARMUP,       "warmup",       "reserved — warmup state via permission=0 instead") \
-    X(NODE_BUDGET,  "core-budget",  "core open_notional >= allocated") \
-    X(NODE_KILL,    "core-kill",    "per-core kill switch tripped") \
+    X(NODE_BUDGET,  "node-budget",  "node open_notional >= allocated") \
+    X(NODE_KILL,    "node-kill",    "per-node kill switch tripped") \
     X(IMBALANCE,    "imbalance",    "book imbalance below threshold (Track E.3)")
 
 // Auto-generated HALT_<id> constants. Underlying type uint8_t — matches

@@ -157,7 +157,7 @@ int main(int argc, char *argv[]) {
     //   - CoreFrameworks/OrderManager (OMS HandleFill — fee math + counters)
     //==================================================================================================
     // WIP2d-1.A — per-core symbol axis (partial advance of .F.4c.3.A; uniformity check
-    // + bridge to BinanceConfig.symbol). Operator can set core_<N>_symbol=BTCUSDT in
+    // + bridge to BinanceConfig.symbol). Operator can set node_<N>_symbol=BTCUSDT in
     // engine.cfg; this overrides binance.cfg's symbol field if uniformity holds. Multi-
     // symbol DataStream not yet supported — boot fails with clear error if cores have
     // mismatched non-empty symbols. Empty = no override (binance.cfg's symbol drives).
@@ -172,8 +172,8 @@ int main(int argc, char *argv[]) {
                     primary_symbol = sc;  // first non-empty wins as primary
                 } else if (strcmp(sc, primary_symbol) != 0) {
                     fprintf(stderr,
-                        "[boot] FATAL: per-core symbols differ (core %d='%s' vs primary='%s'); "
-                        "multi-symbol DataStream not yet supported. Set all core_<N>_symbol= "
+                        "[boot] FATAL: per-node symbols differ (node %d='%s' vs primary='%s'); "
+                        "multi-symbol DataStream not yet supported. Set all node_<N>_symbol= "
                         "identical OR leave all empty (binance.cfg's symbol drives).\n",
                         (int)c, sc, primary_symbol);
                     return 1;
@@ -183,8 +183,8 @@ int main(int argc, char *argv[]) {
         if (any_set) {
             strncpy(bcfg.symbol, primary_symbol, sizeof(bcfg.symbol) - 1);
             bcfg.symbol[sizeof(bcfg.symbol) - 1] = '\0';
-            fprintf(stderr, "[boot] per-core symbol override: BinanceConfig.symbol='%s' "
-                            "(from engine.cfg core_<N>_symbol=)\n", bcfg.symbol);
+            fprintf(stderr, "[boot] per-node symbol override: BinanceConfig.symbol='%s' "
+                            "(from engine.cfg node_<N>_symbol=)\n", bcfg.symbol);
         }
     }
 

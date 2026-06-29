@@ -1633,7 +1633,7 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             r.valid = 0;
             snprintf(r.reason, sizeof(r.reason),
                 "feature_mask mismatch: stamp=%016lx engine=%016lx "
-                "(per-core feature subset drift; retrain or restore "
+                "(per-node feature subset drift; retrain or restore "
                 "feature_mask cfg to training-time value)",
                 (unsigned long)r.feature_mask,
                 (unsigned long)expected_feature_mask);

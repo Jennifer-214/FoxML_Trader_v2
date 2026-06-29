@@ -49,7 +49,7 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
                                           int swap_backend) {
     if (!swap_ezoo || !new_base_dir || new_base_dir[0] == '\0') {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: empty path or null zoo\n",
+            "[hot_swap] ensemble node %d FAILED: empty path or null zoo\n",
             node_id);
         return 0;
     }
@@ -67,7 +67,7 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
     }
     if (h_count == 0) {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: no cached horizons "
+            "[hot_swap] ensemble node %d FAILED: no cached horizons "
             "to load (boot must have failed)\n", node_id);
         return 0;
     }
@@ -96,7 +96,7 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
         /*acknowledge_cross_binary_drift=*/(int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
     if (total == 0) {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: 0 roles loaded "
+            "[hot_swap] ensemble node %d FAILED: 0 roles loaded "
             "from %s\n", node_id, new_base_dir);
         return 0;
     }
@@ -109,7 +109,7 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
     EnsembleModelZoo_PostLoadSetup<F>(swap_ezoo, cfg, node_id, new_base_dir);
 
     fprintf(stderr,
-        "[hot_swap] ensemble core %d swapped to %s "
+        "[hot_swap] ensemble node %d swapped to %s "
         "(%d roles loaded; primary=%s; exit=%d)\n",
         node_id, new_base_dir, total,
         swap_ezoo->primary_role_name[0]

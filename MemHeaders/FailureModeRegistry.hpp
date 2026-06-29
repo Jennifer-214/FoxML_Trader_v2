@@ -134,19 +134,19 @@ enum FailureModeGroupId : int {
       "matches. Engine falls back to identity scaler (predictions degraded).",                          \
       tt::GROUP_STANDALONE)                                                                            \
     X(warmup_progress_pct,      PERCENT_U8,  SEV_SAND,   "warmup: %u%%",                                \
-      "Per-core slow path is still gathering rolling samples.\n"                                        \
+      "Per-node slow path is still gathering rolling samples.\n"                                        \
       "Model + features won't fire predictions until rolling\n"                                         \
       "count reaches min_warmup_samples. Once 100%%, expect a\n"                                        \
       "boot-time stderr line confirming readiness.",                                                    \
       tt::GROUP_STANDALONE)                                                                            \
     X(ml_nan_feature_events,    COUNTER_U32, SEV_YELLOW, "feat: %u",                                    \
-      "Total feature-pack NaN/Inf events on this core.\n"                                               \
+      "Total feature-pack NaN/Inf events on this node.\n"                                               \
       "Triggers when Features_PackAll's two-layer guard catches NaN/Inf\n"                              \
       "(FPN_Binary saturation past 1e15 OR IEEE-754 isnan/isinf post-cast).\n"                                 \
       "Counter increments per skipped prediction cycle.",                                               \
       tt::GROUP_NAN_EVENTS)                                                                             \
     X(ml_nan_prediction_events, COUNTER_U32, SEV_YELLOW, "pred: %u",                                    \
-      "Total prediction NaN/Inf events on this core.\n"                                                 \
+      "Total prediction NaN/Inf events on this node.\n"                                                 \
       "Triggers when Model_Predict returns NaN/Inf (degenerate model OR\n"                              \
       "post-scaler-apply NaN propagation).\n"                                                           \
       "Counter increments per skipped prediction cycle.",                                               \

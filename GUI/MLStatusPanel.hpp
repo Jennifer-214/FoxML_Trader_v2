@@ -46,7 +46,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
 
         // Header row.
         ImGui::TextColored(FoxmlColors::sand,
-            "Per-core ML state. Failed/NaN counters surface silent failures.");
+            "Per-node ML state. Failed/NaN counters surface silent failures.");
         ImGui::Separator();
 
         // Per-core rows.
@@ -63,7 +63,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                                  (STATE_FLAG_IS_SET(pc, IS_ML) && pc.warmup_progress_pct < 100);
             if (!has_ml_signal) continue;
 
-            ImGui::TextColored(FoxmlColors::sand, "core %d:", i);
+            ImGui::TextColored(FoxmlColors::sand, "node %d:", i);
             ImGui::SameLine(0, 8);
 
             // v5.9.1 — pre-warmup overlay. ML strategy is configured but
@@ -74,7 +74,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                 ImGui::TextColored(FoxmlColors::sand,
                     "warmup: %u%%", (unsigned)pc.warmup_progress_pct);
                 ImGui::SetItemTooltip(
-                    "Per-core slow path is still gathering rolling samples.\n"
+                    "Per-node slow path is still gathering rolling samples.\n"
                     "Model + features won't fire predictions until rolling\n"
                     "count reaches min_warmup_samples. Once 100%%, expect a\n"
                     "boot-time stderr line confirming readiness.");
@@ -203,9 +203,9 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                         "(blended across loaded exit_predictor horizons;\n"
                         "h<idx> = dominant arm with max single-model prob).\n"
                         "When > cfg.exit_threshold (default 0.6) and any\n"
-                        "position is open on this core, slow-path body\n"
+                        "position is open on this node, slow-path body\n"
                         "fires MARKET_SELL via OMS_PushSubmit + sets\n"
-                        "SHALT_EXIT_PREDICTED on this core's halt reason.");
+                        "SHALT_EXIT_PREDICTED on this node's halt reason.");
                 }
 
                 // v5.15.5.A.6 — buy-side per-horizon barrier dispatch display.
@@ -329,7 +329,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     "BREACHED: rolling avg IC stayed below floor for the\n"
                     "  configured window — model predictions diverging from\n"
                     "  realized P&L direction.\n"
-                    "KILLED: auto_kill_on_drift=1 + breach → core gated off.\n"
+                    "KILLED: auto_kill_on_drift=1 + breach → node gated off.\n"
                     "Recovery: restart engine OR retrain model.\n"
                     "Floor + window cfg: confidence_ic_floor / _floor_window.");
                 ImGui::Unindent(20);
@@ -374,7 +374,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     if (!cs.ensemble_active) continue;
 
                     ImGui::TextColored(FoxmlColors::sand,
-                        "core %d: %d horizons (mode: %s)",
+                        "node %d: %d horizons (mode: %s)",
                         i, (int)cs.ensemble_n_horizons, cs.ensemble_blend_mode);
                     // "Last predicted" callout — useful when bandit weights
                     // look noisy: shows what the dispatcher actually picked.
@@ -519,7 +519,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     const auto& pc = snap->per_node[i];
                     uint16_t drift = pc.failure_flags & MODEL_HEALTH_DRIFT_MASK;
                     if (drift == 0) continue;
-                    ImGui::TextColored(FoxmlColors::sand, "core %d:", i);
+                    ImGui::TextColored(FoxmlColors::sand, "node %d:", i);
                     ImGui::Indent(20);
 
                     auto render_bit = [&](uint16_t mask, const char *label, const char *tooltip,
@@ -614,7 +614,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                                        TUISnapshot::PerNodeSnap::MASK_THOMPSON_CHOSEN_ARM) >>
                                        TUISnapshot::PerNodeSnap::SHIFT_THOMPSON_CHOSEN_ARM;
                     ImGui::TextColored(FoxmlColors::sand,
-                        "core %d: Thompson active (last chose arm %d)",
+                        "node %d: Thompson active (last chose arm %d)",
                         i, chosen_arm);
 
                     char tbl_id[32];

@@ -12,7 +12,7 @@
 
 #include "imgui.h"
 #include "FoxmlTheme.hpp"
-#include "../DataStream/EngineTUI.hpp"  // TUISharedState, TUISnapshot for per-core core-config
+#include "../DataStream/EngineTUI.hpp"  // TUISharedState, TUISnapshot for per-node core-config
 #include "../Strategies/StrategyInterface.hpp"  // STRATEGY_* + NUM_STRATEGIES + SHORT_NAMES
 // v5.14.9.F.5 — registry headers for auto-extended field_defs[] entries
 #include "../CoreFrameworks/LifecycleCfgFlagRegistry.hpp"
@@ -421,7 +421,7 @@ static const CfgFieldDef field_defs[] = {
     //   cost_gate_enabled → GATE; bandit_enabled / confidence_enabled / foxml_vol_scaling_enabled → ML
     {"confidence_window",        "Conf Window",       "FoxML",  CFG_INT,   "%d",
         "RollingIC + RollingRMSE window size (engine-wide; cap 64).\n"
-        "Same window per ML core today; INT support for X-macro deferred."},
+        "Same window per ML node today; INT support for X-macro deferred."},
     // Validation — training-time held-out gating (engine-wide).
     {"held_out_fraction",        "Held-Out %",         "Validation", CFG_FLOAT, "%.2f",
         "Fraction of data reserved as held-out test set (training-time).\n"
@@ -437,14 +437,14 @@ static const CfgFieldDef field_defs[] = {
     // (deferred). Hidden when no core uses STRATEGY_ML by v4.7.30 filter.
     {"ml_model_path",            "Buy Model",         "Models", CFG_PATH,  NULL,
         "Path to XGBoost/LightGBM buy-signal model.\n"
-        "Per-core override available via node_N_model_path in each ML core's tab."},
+        "Per-node override available via node_N_model_path in each ML node's tab."},
     {"regime_model_path",        "Regime Model",      "Models", CFG_PATH,  NULL,
-        "Path to regime enrichment model (engine-wide). Per-core deferred."},
+        "Path to regime enrichment model (engine-wide). Per-node deferred."},
     // barrier_gate_enabled migrated to FOREACH_GATE_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     {"peak_model_path",          "Peak Model",        "Barrier", CFG_PATH, NULL,
-        "Path to P(will_peak) model (engine-wide). Per-core deferred."},
+        "Path to P(will_peak) model (engine-wide). Per-node deferred."},
     {"valley_model_path",        "Valley Model",      "Barrier", CFG_PATH, NULL,
-        "Path to P(will_valley) model (engine-wide). Per-core deferred."},
+        "Path to P(will_valley) model (engine-wide). Per-node deferred."},
     // Per-core sharded engine — production since v4.x; legacy single_core is
     // deprecated and warns on boot. v4.7.26: removed the "Sharded Mode" toggle
     // from the GUI — sharded is the only path users should see. Cfg parser
@@ -453,9 +453,9 @@ static const CfgFieldDef field_defs[] = {
     // v5.15.5.F.4c — num_execution_nodes migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1, 16]).
     // The field_defs[] entry is DELETED at .F.4c; live_node_count sync + per-core tab count
     // now read/write s->gui_engine_cfg.num_execution_nodes directly.
-    {"num_execution_nodes_PLACEHOLDER","Cores",       "Per-Core", CFG_INT,  "%d",
+    {"num_execution_nodes_PLACEHOLDER","Nodes",       "Per-Node", CFG_INT,  "%d",
         "Number of execution nodes in sharded mode (1-16).\n"
-        "Each core handles one position at a time (or two with partial exits).\n"
+        "Each node handles one position at a time (or two with partial exits).\n"
         "Recommended: physical core count - 2 (one for controller, one for OS).\n"
         "On AMD: pin all nodes to the same CCD to avoid cross-die latency.\n"
         "RESTART REQUIRED to take effect."},
@@ -586,23 +586,23 @@ static const PerNodeFieldDef per_node_fields[] = {
     // matching strategy. Useful for A/B testing same-strategy variants
     // across cores.
     {"simpledip_tp_pct",  "DIP TP %%",   "Strategy-Specific", "%.2f",
-        "DIP-only TP override for this core. 0 = inherit."},
+        "DIP-only TP override for this node. 0 = inherit."},
     {"simpledip_sl_pct",  "DIP SL %%",   "Strategy-Specific", "%.2f",
-        "DIP-only SL override for this core. 0 = inherit."},
+        "DIP-only SL override for this node. 0 = inherit."},
     {"mr_tp_pct",         "MR TP %%",    "Strategy-Specific", "%.2f",
-        "MR-only TP override for this core. 0 = inherit."},
+        "MR-only TP override for this node. 0 = inherit."},
     {"mr_sl_pct",         "MR SL %%",    "Strategy-Specific", "%.2f",
-        "MR-only SL override for this core. 0 = inherit."},
+        "MR-only SL override for this node. 0 = inherit."},
     {"momentum_tp_mult",  "MOM TP σ",    "Strategy-Specific", "%.2f",
-        "MOM-only TP stddev multiplier for this core. 0 = inherit."},
+        "MOM-only TP stddev multiplier for this node. 0 = inherit."},
     {"momentum_sl_mult",  "MOM SL σ",    "Strategy-Specific", "%.2f",
-        "MOM-only SL stddev multiplier for this core. 0 = inherit."},
+        "MOM-only SL stddev multiplier for this node. 0 = inherit."},
     {"momentum_r2_min",   "MOM R² Min",  "Strategy-Specific", "%.2f",
-        "Min R² to enter momentum trades on this core. 0 = inherit."},
+        "Min R² to enter momentum trades on this node. 0 = inherit."},
     {"emacross_tp_pct",   "EMA TP %%",   "Strategy-Specific", "%.2f",
-        "EMA-only TP override for this core. 0 = inherit."},
+        "EMA-only TP override for this node. 0 = inherit."},
     {"emacross_sl_pct",   "EMA SL %%",   "Strategy-Specific", "%.2f",
-        "EMA-only SL override for this core. 0 = inherit."},
+        "EMA-only SL override for this node. 0 = inherit."},
     {"emacross_dip_mult", "EMA Dip σ",   "Strategy-Specific", "%.2f",
         "Buy this many stddevs below EMA in uptrends. 0 = inherit."},
     {"emacross_crossover_min", "EMA Cross Min", "Strategy-Specific", "%.4f",
@@ -610,64 +610,64 @@ static const PerNodeFieldDef per_node_fields[] = {
     {"emacross_trail_mult", "EMA Trail σ", "Strategy-Specific", "%.2f",
         "Trailing TP factor when EMA rising. 0 = inherit."},
     {"ml_tp_pct",         "ML TP %%",    "Strategy-Specific", "%.2f",
-        "ML-only TP override for this core. 0 = inherit."},
+        "ML-only TP override for this node. 0 = inherit."},
     {"ml_sl_pct",         "ML SL %%",    "Strategy-Specific", "%.2f",
-        "ML-only SL override for this core. 0 = inherit."},
+        "ML-only SL override for this node. 0 = inherit."},
     {"ml_buy_threshold",  "ML Threshold","Strategy-Specific", "%.3f",
-        "ML buy threshold override for this core (0-1). 0 = inherit."},
+        "ML buy threshold override for this node (0-1). 0 = inherit."},
     // v4.7.29: per-core adaptation overrides — adaptive feedback per core.
     // Different strategies want different reactivity: MR with deep adaptation,
     // Momentum with tighter R² gates, etc.
     {"filter_scale",      "Filter Scale", "Adaptation",       "%.2f",
-        "How fast filters adapt to P&L regression for this core. 0 = inherit."},
+        "How fast filters adapt to P&L regression for this node. 0 = inherit."},
     {"r2_threshold",      "R² Threshold", "Adaptation",       "%.2f",
-        "Min R² to trust this core's regression model. 0 = inherit."},
+        "Min R² to trust this node's regression model. 0 = inherit."},
     {"slope_scale_buy",   "Slope Scale",  "Adaptation",       "%.2f",
-        "How much slope shifts buy threshold for this core. 0 = inherit."},
+        "How much slope shifts buy threshold for this node. 0 = inherit."},
     {"max_shift",         "Max Shift",    "Adaptation",       "%.4f",
-        "Max drift from initial buy conditions for this core. 0 = inherit."},
+        "Max drift from initial buy conditions for this node. 0 = inherit."},
     {"offset_min",        "Offset Min %%","Adaptation",       "%.3f",
-        "Most aggressive entry_offset_pct floor for this core. 0 = inherit."},
+        "Most aggressive entry_offset_pct floor for this node. 0 = inherit."},
     {"offset_max",        "Offset Max %%","Adaptation",       "%.3f",
-        "Most defensive entry_offset_pct ceiling for this core. 0 = inherit."},
+        "Most defensive entry_offset_pct ceiling for this node. 0 = inherit."},
     {"vol_mult_min",      "Vol Min",      "Adaptation",       "%.2f",
-        "Most aggressive volume_multiplier floor for this core. 0 = inherit."},
+        "Most aggressive volume_multiplier floor for this node. 0 = inherit."},
     {"vol_mult_max",      "Vol Max",      "Adaptation",       "%.2f",
-        "Most defensive volume_multiplier ceiling for this core. 0 = inherit."},
+        "Most defensive volume_multiplier ceiling for this node. 0 = inherit."},
     // v4.7.29: trailing TP/SL exit ratchet, per core.
     {"tp_hold_score",     "Hold Score",   "Trailing",         "%.2f",
-        "Min SNR*R² to activate trailing for this core. 0 = inherit."},
+        "Min SNR*R² to activate trailing for this node. 0 = inherit."},
     {"tp_trail_mult",     "Trail TP",     "Trailing",         "%.2f",
-        "Trailing TP distance multiplier for this core. 0 = inherit."},
+        "Trailing TP distance multiplier for this node. 0 = inherit."},
     {"sl_trail_mult",     "Trail SL",     "Trailing",         "%.2f",
-        "Trailing SL distance multiplier for this core. 0 = inherit."},
+        "Trailing SL distance multiplier for this node. 0 = inherit."},
     // v4.7.29: time exit gain floor, per core (max_hold_ticks stays global).
     {"min_hold_gain_pct", "Min Gain %%",  "Time Exit",        "%.2f",
-        "Only time-exit if gain below this %% for this core. 0 = inherit."},
+        "Only time-exit if gain below this %% for this node. 0 = inherit."},
     // v4.7.29: vol sizing curve, per core.
     {"vol_scale_min",     "Scale Min",    "Vol Sizing",       "%.2f",
-        "Min position scale factor for this core. 0 = inherit."},
+        "Min position scale factor for this node. 0 = inherit."},
     {"vol_scale_max",     "Scale Max",    "Vol Sizing",       "%.2f",
-        "Max position scale factor for this core. 0 = inherit."},
+        "Max position scale factor for this node. 0 = inherit."},
     // v4.7.29: no-trade band fee multiplier, per core.
     {"no_trade_band_mult","Band Mult",    "No-Trade Band",    "%.2f",
-        "Signal must exceed fee_rate * this to trade for this core. 0 = inherit."},
+        "Signal must exceed fee_rate * this to trade for this node. 0 = inherit."},
     // v4.7.29: partial exit geometry, per core. partial_exit_enabled stays
     // global (engine-architectural).
     {"partial_exit_pct",  "TP1 Split",    "Partial Exits",    "%.2f",
-        "Fraction to exit at TP1 for this core (0.5 = 50%). 0 = inherit."},
+        "Fraction to exit at TP1 for this node (0.5 = 50%). 0 = inherit."},
     {"tp2_mult",          "TP2 Mult",     "Partial Exits",    "%.2f",
-        "TP2 distance = TP1 distance * this for this core. 0 = inherit."},
+        "TP2 distance = TP1 distance * this for this node. 0 = inherit."},
     // v4.7.31: ML / FoxML overrides — only render when this core uses ML.
     // Strategy filter (per_node_field_strategy) maps any "ml_*", "bandit_*",
     // "foxml_*", "confidence_*" prefix to STRATEGY_ML so they only show on
     // ML cores (or AUTO — no, AUTO doesn't route to ML per v4.7.30).
     {"foxml_vol_scaling_z_max",   "Vol Z-Max",      "ML",  "%.1f",
-        "Z-score clipping for vol scaler on this core. 0 = inherit."},
+        "Z-score clipping for vol scaler on this node. 0 = inherit."},
     {"bandit_blend_ratio",        "Bandit Blend",   "ML",  "%.2f",
-        "Max bandit influence fraction for this core (0.30 = 30%). 0 = inherit."},
+        "Max bandit influence fraction for this node (0.30 = 30%). 0 = inherit."},
     {"confidence_freshness_tau",  "Conf Tau (s)",   "ML",  "%.0f",
-        "Freshness decay constant in seconds for this core. 0 = inherit."},
+        "Freshness decay constant in seconds for this node. 0 = inherit."},
     {"confidence_threshold_scale","Conf Scale",     "ML",  "%.2f",
         "Confidence gate scale: effective_thr = base * (this - conf). 0 = inherit."},
 };
@@ -1253,13 +1253,13 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
 
     ImGui::TextColored(FoxmlColors::comment,
         "Empty (0.00) means \"inherit from Global tab\". "
-        "Set any override to use that value for this core only.");
+        "Set any override to use that value for this node only.");
 
     // v4.0.4 — Core Configuration section. Strategy + risk + model path,
     // pulling from cfg-only fields (not per_node_fields[] which is float-
     // only). Strategy persists immediately on Apply via cfg_write_field
     // and signals the engine via swap_strategy_requested[] for hot-swap.
-    if (ImGui::CollapsingHeader("Core Configuration", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Node Configuration", ImGuiTreeNodeFlags_DefaultOpen)) {
         // ---- strategy dropdown + Apply ----
         // Determine the live ACTIVE strategy from snapshot if present.
         // Otherwise read what's in cfg.
@@ -1281,7 +1281,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
             ImGui::TextColored(FoxmlColors::primary, "active=%s",
                                STRATEGY_SHORT_NAMES[active_sid]);
         } else {
-            ImGui::TextDisabled("(no live core)");
+            ImGui::TextDisabled("(no live node)");
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(110);
@@ -1338,7 +1338,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
             changed = true;
         }
         ImGui::PopID();
-        ImGui::SetItemTooltip("Override per-core risk %% (0 = inherit risk_pct/num_nodes). "
+        ImGui::SetItemTooltip("Override per-node risk %% (0 = inherit risk_pct/num_nodes). "
                               "Stored as `node_%d_risk_pct=N.NN` in cfg.", node_id);
 
         // ---- model_path / model_dir (ML cores) ----
@@ -1618,7 +1618,7 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                 "If you trained multi-horizon models, check that "
                 "node_%d_model_dir points at the BASE path "
                 "(without _horizon_<H> suffix) and engine.log shows "
-                "[sharded] core %d: ensemble active.", node_id, node_id);
+                "[sharded] node %d: ensemble active.", node_id, node_id);
         }
     }
 

@@ -272,7 +272,7 @@ struct alignas(64) NodeContext {
     // EventLoopState_Free. Slow-path-only access; indirection cost
     // negligible at slow-path cadence.
     NodeSlowState<F>* slow_state;
-    void*    model_handle;              // NodeModelZoo<F>* for STRATEGY_ML cores (nullptr for others)
+    void*    model_handle;              // NodeModelZoo<F>* for STRATEGY_ML nodes (nullptr for others)
     void*    ensemble_handle;           // v5.10.0a.G.5 — EnsembleModelZoo<F>* when multi-horizon active; nullptr = single-zoo path
     // v5.4.0 Phase 1.1 — per-strategy state (lifecycle stage 1 + 2:
     // Init/Adapt). Heap-allocated by Strategy_InitPerCore at engine boot;
@@ -326,10 +326,10 @@ struct alignas(64) NodeContext {
 
     GateParameters<F> pending_params;   // staged params, pushed on next _PushParameters
 
-    Money intended_tp;                 // TP to apply when this core's next entry fires
-    Money intended_sl;                 // SL to apply when this core's next entry fires
+    Money intended_tp;                 // TP to apply when this node's next entry fires
+    Money intended_sl;                 // SL to apply when this node's next entry fires
     Money intended_qty;                // quantity to size the next entry to
-    Money allocated_balance;           // capital share for this core (set by Regime_AllocateCores in phase 06+)
+    Money allocated_balance;           // capital share for this node (set by Regime_AllocateCores in phase 06+)
 
     // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
     // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
@@ -408,8 +408,8 @@ struct alignas(64) NodeContext {
     // counters split it out by source core for the Account panel and any
     // future per-core kill switch / risk re-allocation logic. Updated in
     // EventLoop_OnEvent exit branch, alongside oms->realized_pnl.
-    Money   node_realized;             // sum of net P&L from this core's exits
-    Money   node_fees;                 // sum of fees paid by this core's fills
+    Money   node_realized;             // sum of net P&L from this node's exits
+    Money   node_fees;                 // sum of fees paid by this node's fills
     uint32_t node_wins;                 // exits with net > 0
     uint32_t node_losses;               // exits with net <= 0
     // v4.7.21: per-trade W/L pairing under partial exits. When partials are
@@ -874,7 +874,7 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
             Money qty          = slot_entries[slot].qty;
             Money entry_fee    = slot_entries[slot].entry_fee;
             Money exit_notional= Money_Mul(e.price, qty);
-            Money exit_fee     = Money_Mul(exit_notional, fee_rate_taker_for_core);  // per-core via cores param
+            Money exit_fee     = Money_Mul(exit_notional, fee_rate_taker_for_core);  // per-node via cores param
             Money total_fee    = Money_Add(entry_fee, exit_fee);
             Money gross        = Money_FillGross(entry_price, e.price, qty);  // D-190 single-source
             Money net          = Money_Sub(gross, total_fee);
@@ -1146,7 +1146,7 @@ static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg)
     if (n_nodes > max_pair_nodes) {
         std::fprintf(stderr,
             "[partial-exits] partial_exit_enabled=1 caps num_execution_nodes "
-            "at %d (got %d). Each core uses TWO portfolio slots in pair mode "
+            "at %d (got %d). Each node uses TWO portfolio slots in pair mode "
             "(leg A + leg B); MAX_PORTFOLIO_POSITIONS=%d → %d nodes max.\n"
             "  Either: (a) reduce num_execution_nodes to %d or fewer, or\n"
             "          (b) set partial_exit_enabled=0 in your cfg.\n",
@@ -1664,14 +1664,14 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                             Health_LogCriticalRateLimited(
                                 &s_drift_kill_log_us[node_id & 15], 60000000ULL,
                                 node_id, "drift",
-                                "AUTO-KILL: per-core kill_switch tripped due to "
+                                "AUTO-KILL: per-node kill_switch tripped due to "
                                 "sustained IC drift");
                         }
                     } else if (!breach && BITMAP_IS_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED)) {
                         // Recovery — clear breach state, log info
                         BITMAP_CLR(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED);
                         fprintf(stderr,
-                            "[drift] core %d RECOVERED: IC=%.4f above floor=%.4f\n",
+                            "[drift] node %d RECOVERED: IC=%.4f above floor=%.4f\n",
                             node_id, avg_ic, drift_floor);
                     }
                 }
@@ -2370,7 +2370,7 @@ inline void EventLoop_RebuildOneCore(
                 int sid = state->nodes[slot].strategy_id;
                 const char* sname = (sid >= 0 && sid < NUM_STRATEGIES)
                                   ? STRATEGY_SHORT_NAMES[sid] : "unknown";
-                fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — %s active\n",
+                fprintf(stderr, "[node %d] warmup complete (%d/%d samples) — %s active\n",
                         slot, rolling->count, wmin, sname);
                 NODE_STATE_FLAG_SET(state->nodes[slot], WARMUP_LOG_EMITTED);
             }
@@ -2699,7 +2699,7 @@ inline void EventLoop_RebuildOneCore(
                      // for composite confidence freshness. Already plumbed to this fn
                      // (param :1951) since v5.12.1.B clock hoist; live = clock_gettime
                      // at slow-path entry, backtest = tick.timestamp (deterministic).
-            (int)config->poll_interval   // WIP2c.2 — caller-resolved global; per-core consumer
+            (int)config->poll_interval   // WIP2c.2 — caller-resolved global; per-node consumer
                                           // reads tick→time conversion via this scalar arg.
         );
 
@@ -2928,7 +2928,7 @@ inline void EventLoop_RebuildOneCore(
                     double drop_d    = Money_ToDouble(drop);
                     double peak_d    = Money_ToDouble(state->nodes[slot].node_peak_balance);
                     double current_d = Money_ToDouble(current_value);
-                    fprintf(stderr, "[sharded] CORE KILL: core %d tripped — "
+                    fprintf(stderr, "[sharded] NODE KILL: node %d tripped — "
                             "dd=%.2f%% drop=$%.2f peak=$%.2f current=$%.2f\n",
                             slot, dd_pct_d, drop_d, peak_d, current_d);
                     // 2A — alert via Notify subsystem alongside stderr log.
@@ -2938,12 +2938,12 @@ inline void EventLoop_RebuildOneCore(
                     if (g_notify) {
                         char body[256];
                         snprintf(body, sizeof(body),
-                                 "Core %d kill tripped: dd=%.2f%% drop=$%.2f "
+                                 "Node %d kill tripped: dd=%.2f%% drop=$%.2f "
                                  "peak=$%.2f current=$%.2f. Entries halted on "
-                                 "this core until manual reset.",
+                                 "this node until manual reset.",
                                  slot, dd_pct_d, drop_d, peak_d, current_d);
                         Notify_Send(g_notify, NOTIFY_ALERT, NK_NODE_KILL_TRIP,
-                                    "Per-core kill switch tripped", body);
+                                    "Per-node kill switch tripped", body);
                     }
                 }
             }
@@ -3345,7 +3345,7 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
             // Snapshot-drift guard. See "Snapshot Tick-Counter Drift"
             // invariant in CLAUDE.md.
             fprintf(stderr,
-                "[time-exit] core %d slot %d: stale entry_tick from snapshot "
+                "[time-exit] node %d slot %d: stale entry_tick from snapshot "
                 "(entry_t=%llu > now_tick=%llu); resetting.\n",
                 node_id, slot, (unsigned long long)entry_t,
                 (unsigned long long)now_tick);
@@ -3376,7 +3376,7 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
                                 /*leg*/(uint8_t)0, &cfg.nodes[node_id]);
 
         fprintf(stderr,
-            "[time-exit] core %d slot %d: held %lu ticks, gain %.3f%%\n",
+            "[time-exit] node %d slot %d: held %lu ticks, gain %.3f%%\n",
             node_id, slot, (unsigned long)elapsed, gain_pct * 100.0);
     }
 }

@@ -625,8 +625,8 @@ struct OrderManagerState {
     // cast to EnsembleModelZoo<F>* / const PerNodeCfg<F>* in real_on_exit_calibration via
     // oms->ezoo_refs[o->node_id]. Default nullptr (test fixtures + pre-boot state + non-ML cores);
     // wired at EngineSharded per-core init alongside state.nodes[i].ensemble_handle.
-    void*       ezoo_refs[MAX_EXECUTION_NODES]     = {nullptr};   // EnsembleModelZoo<F>* per-core (lazy-cast)
-    const void* node_cfg_refs[MAX_EXECUTION_NODES] = {nullptr};   // const PerNodeCfg<F>* per-core (lazy-cast)
+    void*       ezoo_refs[MAX_EXECUTION_NODES]     = {nullptr};   // EnsembleModelZoo<F>* per-node (lazy-cast)
+    const void* node_cfg_refs[MAX_EXECUTION_NODES] = {nullptr};   // const PerNodeCfg<F>* per-node (lazy-cast)
 
     ~OrderManagerState() {
         OrderManager_Shutdown(this);
@@ -939,7 +939,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     if (free_mask == 0) {
         std::fprintf(stderr,
                      "[OMS] order table full (%d slots), dropping submission "
-                     "for core=%d type=%u\n",
+                     "for node=%d type=%u\n",
                      MAX_INFLIGHT_ORDERS, (int)node_id, (unsigned)type);
         return 0;
     }
@@ -1095,7 +1095,7 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.node_id], cmd);
     if (!pushed) {
         std::fprintf(stderr,
-                     "[OMS] PushSubmit: queue full for core=%d type=%u "
+                     "[OMS] PushSubmit: queue full for node=%d type=%u "
                      "(drainer starved?)\n",
                      (int)cmd.node_id, (unsigned)cmd.order_type);
     }
@@ -1452,7 +1452,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         }
     } else {
         std::fprintf(stderr,
-                     "[OMS] order %llu FAIL core=%d code=%d msg=%s\n",
+                     "[OMS] order %llu FAIL node=%d code=%d msg=%s\n",
                      (unsigned long long)o->id,
                      (int)o->node_id,
                      cmd.result.error_code,

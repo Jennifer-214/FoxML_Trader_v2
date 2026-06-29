@@ -139,7 +139,7 @@ static constexpr uint32_t MASK_ORDER_BANDIT_3BIT          = 0x7u;
 template <unsigned F>
 struct OrderPreResolved {
     Money fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
-    Money slippage_pct;   // pre-resolved per-core
+    Money slippage_pct;   // pre-resolved per-node
     Money tp_pct;         // A25 (D-205): per-fill TP fraction — leg-effective (ResolvePerFillTpPct base, ×tp2_mult for leg B). Carried on SubmitCommand (resolver not include-reachable at the OMS layer) → NOT bound in Order_BindPreResolved; set in OMS_Submit from cmd.tp_pct. Consumed @handle_buy_fill: original_tp = fill×(1+tp_pct); tp_pct==0 → fallback to intended_tp (bytewise-identical legacy path).
     // Future per-resolved fields (extend in lockstep with Order_BindPreResolved):
     //   - effective_kill_switch_threshold (per-core risk envelope at submit time)
@@ -385,7 +385,7 @@ template <unsigned F>
 inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
     if (__builtin_expect(!Order_GetPreResolvedBound(o), 0)) {
         std::fprintf(stderr,
-            "[OMS] WARN: %s called on Order id=%llu core=%d without Order_BindPreResolved; "
+            "[OMS] WARN: %s called on Order id=%llu node=%d without Order_BindPreResolved; "
             "pre_resolved.fee_rate=%f (expected explicit bind via node_cfg OR explicit "
             "Order_MarkPreResolvedBound after manual set). Production paths require node_cfg "
             "at OrderManager_Submit (sig-enforced); this Order bypassed Submit (test fixture path).\n",

@@ -80,7 +80,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
 
     if (!new_path || new_path[0] == '\0') {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: empty path\n", node_idx);
+            "[hot_swap] ensemble node %d FAILED: empty path\n", node_idx);
         return -2;
     }
 
@@ -94,7 +94,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
         (EnsembleModelZoo<F>*)state.nodes[node_idx].ensemble_handle;
     if (!pre_swap_ezoo) {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: pre-swap ezoo is null "
+            "[hot_swap] ensemble node %d FAILED: pre-swap ezoo is null "
             "(no boot ensemble); single-zoo branch should fire instead\n",
             node_idx);
         return -2;
@@ -109,7 +109,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     }
     if (h_count == 0) {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: no cached horizons "
+            "[hot_swap] ensemble node %d FAILED: no cached horizons "
             "(boot must have failed)\n", node_idx);
         return -2;
     }
@@ -122,7 +122,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
         (EnsembleModelZoo<F>*)aligned_alloc(64, sizeof(EnsembleModelZoo<F>));
     if (!new_ezoo) {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: aligned_alloc OOM\n",
+            "[hot_swap] ensemble node %d FAILED: aligned_alloc OOM\n",
             node_idx);
         return -1;
     }
@@ -140,7 +140,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
 
     if (total == 0) {
         fprintf(stderr,
-            "[hot_swap] ensemble core %d FAILED: 0 roles loaded from %s; "
+            "[hot_swap] ensemble node %d FAILED: 0 roles loaded from %s; "
             "pre-swap state preserved\n", node_idx, new_path);
         EnsembleModelZoo_Free(new_ezoo);
         free(new_ezoo);
@@ -184,7 +184,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     }
 
     fprintf(stderr,
-        "[hot_swap] ensemble core %d shadow-swapped to %s "
+        "[hot_swap] ensemble node %d shadow-swapped to %s "
         "(%d roles loaded; primary=%s; exit=%d)\n",
         node_idx, new_path, total,
         new_ezoo->primary_role_name[0]
@@ -217,7 +217,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
 
     if (!new_path || new_path[0] == '\0') {
         fprintf(stderr,
-            "[hot_swap] single-zoo core %d FAILED: empty path\n", node_idx);
+            "[hot_swap] single-zoo node %d FAILED: empty path\n", node_idx);
         return -2;
     }
 
@@ -225,7 +225,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
         (NodeModelZoo<F>*)aligned_alloc(64, sizeof(NodeModelZoo<F>));
     if (!new_zoo) {
         fprintf(stderr,
-            "[hot_swap] single-zoo core %d FAILED: aligned_alloc OOM\n",
+            "[hot_swap] single-zoo node %d FAILED: aligned_alloc OOM\n",
             node_idx);
         return -1;
     }
@@ -248,7 +248,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
 
     if (loaded == 0) {
         fprintf(stderr,
-            "[hot_swap] single-zoo core %d FAILED: 0 roles loaded from %s; "
+            "[hot_swap] single-zoo node %d FAILED: 0 roles loaded from %s; "
             "pre-swap state preserved\n", node_idx, new_path);
         NodeModelZoo_Free(new_zoo);
         free(new_zoo);
@@ -260,7 +260,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
     int post_ok = NodeModelZoo_PostLoadSetup<F>(new_zoo, cfg, node_idx, new_path);
     if (!post_ok && cfg.model_verify_strict > 0) {
         fprintf(stderr,
-            "[hot_swap] single-zoo core %d FAILED: post-load strict verify; "
+            "[hot_swap] single-zoo node %d FAILED: post-load strict verify; "
             "pre-swap state preserved\n", node_idx);
         NodeModelZoo_Free(new_zoo);
         free(new_zoo);
@@ -279,7 +279,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
     }
 
     fprintf(stderr,
-        "[hot_swap] single-zoo core %d shadow-swapped to %s "
+        "[hot_swap] single-zoo node %d shadow-swapped to %s "
         "(%d roles loaded; primary=%s)\n",
         node_idx, new_path, loaded,
         new_zoo->primary_role_name[0]

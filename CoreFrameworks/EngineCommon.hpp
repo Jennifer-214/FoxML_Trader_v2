@@ -159,7 +159,7 @@ inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
             cfg.nodes[c].fee_rate_taker = Money_Mul(cfg.nodes[c].fee_rate_taker, bnb_factor);
         }
         fprintf(stderr,
-            "[sharded] BNB fee discount ENABLED — applied per-core to cfg.nodes[c].fee_rate_*"
+            "[sharded] BNB fee discount ENABLED — applied per-node to cfg.nodes[c].fee_rate_*"
             " (verify Binance UI 'pay fees in BNB' is also on)\n");
     }
 }
@@ -285,7 +285,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                 /*expected_feature_mask=*/mask_for_load,
                 /*cfg_ptr=*/&cfg);
-            fprintf(stderr, "[sharded] core %d: zoo from %s, %d role(s) loaded\n",
+            fprintf(stderr, "[sharded] node %d: zoo from %s, %d role(s) loaded\n",
                     c, cfg.node_model_dir[c], loaded);
         } else {
             // LIVE :990-1001, BACKTEST :299-311 — legacy fallback chain
@@ -294,10 +294,10 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
             if (model_path[0]) {
                 loaded = NodeModelZoo_LoadLegacy(zoo_ptr, model_path, backend);
                 if (loaded) {
-                    fprintf(stderr, "[sharded] core %d: legacy buy_signal model loaded from %s\n",
+                    fprintf(stderr, "[sharded] node %d: legacy buy_signal model loaded from %s\n",
                             c, model_path);
                 } else {
-                    fprintf(stderr, "[sharded] core %d: ML model load FAILED (%s), "
+                    fprintf(stderr, "[sharded] node %d: ML model load FAILED (%s), "
                                     "falling back to SimpleDip\n", c, model_path);
                 }
             }
@@ -313,7 +313,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                 int post_ok = NodeModelZoo_PostLoadSetup<F>(zoo_ptr, cfg, c,
                                                              cfg.node_model_dir[c]);
                 if (!post_ok && cfg.model_verify_strict > 0) {
-                    fprintf(stderr, "[sharded] core %d: ML model UNLOADED due to strict verify failure\n", c);
+                    fprintf(stderr, "[sharded] node %d: ML model UNLOADED due to strict verify failure\n", c);
                     NodeModelZoo_Free(zoo_ptr);
                     state.nodes[c].model_handle = NULL;
                     NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
@@ -339,7 +339,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                 cfg.held_out_gate_strict,
                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
             if (n_loaded > 0 && BITMAP_IS_SET(ezoo_ptr->init_flags, MASK_EZOO_ACTIVE)) {
-                fprintf(stderr, "[sharded] core %d: ensemble active "
+                fprintf(stderr, "[sharded] node %d: ensemble active "
                                 "(primary=%s, %d horizons; %d total models)\n",
                         c,
                         ezoo_ptr->primary_role_name[0]
@@ -353,7 +353,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                 // wiped. Single-threaded at boot; sets MODEL_CORRUPT (distinct from MODEL_LOAD_FAILED).
                 if (EnsembleZoo_FinalizeCorrupt<F>(ezoo_ptr, FPN_ToDouble(cfg.model_corrupt_shalt_ratio))) {
                     NODE_STATE_FLAG_SET(state.nodes[c], MODEL_CORRUPT);
-                    fprintf(stderr, "[model] core %d: ML barrier CORRUPT for the majority of "
+                    fprintf(stderr, "[model] node %d: ML barrier CORRUPT for the majority of "
                                     "ensemble arms (%d of %d) — node REFUSES new trades until "
                                     "RETRAIN (D-221)\n",
                             c, __builtin_popcount((unsigned)ezoo_ptr->corrupt_arms_mask),
@@ -627,7 +627,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
         && state.nodes[c].last_exit_prediction
-           > FPN_ToDouble(cfg.nodes[c].exit_threshold)  // Class 25 scope-discipline: per-core read at per-core scope (value-equivalent via walker propagation; future-proofs against per-core override addition)
+           > FPN_ToDouble(cfg.nodes[c].exit_threshold)  // Class 25 scope-discipline: per-node read at per-node scope (value-equivalent via walker propagation; future-proofs against per-node override addition)
         && price_d > 0.01) {
         // Slot mask: under partials each core owns 2 slots
         // (legs A + B); single-leg under partial_exit_enabled=0.

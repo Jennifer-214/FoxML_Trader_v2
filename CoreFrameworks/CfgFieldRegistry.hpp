@@ -284,14 +284,14 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================================================
 #define FOREACH_GLOBAL_CFG_FIELD(X)                                                                                                                                                                                  \
     /* === System / Operational (5) === */                                                                                                                                                                            \
-    X(uint16_t,             KIND_INT,        num_execution_nodes,         "Execution Cores",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
-        "Number of per-core execution shards. Clamp [1, 16].",                                                                                                                                                     \
+    X(uint16_t,             KIND_INT,        num_execution_nodes,         "Execution Nodes",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
+        "Number of per-node execution shards. Clamp [1, 16].",                                                                                                                                                     \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(int,                  KIND_BOOL,       require_mlockall,            "Require mlockall",     "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
         "Pin engine memory at boot via mlockall(2) — prevents swap-out under memory pressure. Requires CAP_IPC_LOCK or root. Boot-only; runtime changes ignored.",                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(int,                  KIND_BOOL,       init_arena_use_hugepages,    "Use Hugepages",        "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
-        "Initialize per-core arenas with 2MB hugepages (MAP_HUGETLB). Reduces TLB pressure on hot path. Requires /sys/kernel/mm/hugepages configured. Boot-only.",                                                   \
+        "Initialize per-node arenas with 2MB hugepages (MAP_HUGETLB). Reduces TLB pressure on hot path. Requires /sys/kernel/mm/hugepages configured. Boot-only.",                                                   \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(uint8_t,              KIND_BOOL,       sharded_force_synthetic,     "Force Synthetic Ticks","Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
         "Debug/test toggle — force sharded engine to use synthetic tick generator instead of real Binance WS feed. Used for offline reproducibility tests. Boot-only.",                                              \
@@ -442,7 +442,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Drift Acknowledgments (3) === */                                                                                                                                                                            \
     X(int,                  KIND_BOOL,       acknowledge_hardcoded_strategy_in_live, "Ack Hardcoded Strategy in Live", "Drift Acknowledgments", CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),             \
-        "Explicit acknowledgment required to run hardcoded strategy (no per-core override) in live mode. Safety gate; operator must opt-in.",                                                                       \
+        "Explicit acknowledgment required to run hardcoded strategy (no per-node override) in live mode. Safety gate; operator must opt-in.",                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(int,                  KIND_BOOL,       acknowledge_hot_swap_with_open_positions, "Ack Hot Swap w/ Open Positions", "Drift Acknowledgments", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                              \
         "Explicit acknowledgment to hot-swap strategy/model while positions are open. Without this, hot-swap is DEFERRED until position closes (v5.10.0c default).",                                                 \
@@ -481,7 +481,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
         "Paper/initial account balance -- the exposure/drawdown DENOMINATOR. >0 enforced at boot (item-3); the clamp is intentionally NON-binding (the real gate is the >0/sane fault, not this clamp).", \
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE, min_kill_loss, "Min Kill Loss ($)", "Kill Switch", 0, DBL(5.0, 0.0, 1000000000.0), \
-        "Absolute USDT loss floor for the per-core kill switch (trip needs BOTH dd_pct>thresh AND drop>this floor; default $5). >0/sane enforced at boot (item-3); clamp non-binding.", \
+        "Absolute USDT loss floor for the per-node kill switch (trip needs BOTH dd_pct>thresh AND drop>this floor; default $5). >0/sane enforced at boot (item-3); clamp non-binding.", \
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE, min_sl_tp_ratio, "Min SL/TP Ratio", "Trading", 0, DBL(0.5, 0.0, 1000000.0), \
         "Min SL/TP distance ratio (0.5 = 2:1 reward/risk floor). 0 = disabled. Malformed-capture only (not a capital cap -- no out-of-range bound invented).", \
@@ -541,7 +541,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     X(FPN_Binary<F>                , KIND_DOUBLE, tp_trail_mult,               "TP Trail Mult",        "Time-Based Exit", 0,                                  DBL(1.0, 0.0, 10.0),     "Trailing distance: stddev * this (e.g. 1.0)",                                                    STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN_Binary<F>                , KIND_DOUBLE, sl_trail_mult,               "SL Trail Mult",        "Time-Based Exit", 0,                                  DBL(2.0, 0.0, 10.0),     "Trailing SL distance: stddev * this (e.g. 2.0)",                                                 STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(uint32_t              , KIND_INT, max_hold_ticks,              "Max Hold",             "Time-Based Exit", CfgFieldDescriptor::WARN_ON_CLAMP, INT(75000, 0, 100000000),                                                          \
-        "Close position after this many ticks (engine-wide).\n0 = disabled, 75000 ≈ 4-5 hours.\nPer-core min-gain floor lives in each core's Time Exit override.",                                                  \
+        "Close position after this many ticks (engine-wide).\n0 = disabled, 75000 ≈ 4-5 hours.\nPer-core min-gain floor lives in each node's Time Exit override.",                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Risk per-core — kill switches + max-drawdown (6) === */                                                                                                                                                    \
     X(Money, KIND_DOUBLE_PCT, max_drawdown_pct,            "Max DD %%",            "Risk Management", CfgFieldDescriptor::CAPITAL_BOUND_LOSS,                                  DBL(20.0, 0.0, 100.0),                                                                                                           \
@@ -591,7 +591,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     X(FPN_Binary<F>                , KIND_DOUBLE, bandit_blend_ratio,          "Bandit Blend",         "ML",              CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(0.5, 0.0, 1.0),      "Mix of bandit picks vs base model; .B.3 Step 1.6.2 cohort bit-add (was standalone inference_cfg_bandit_blend_ratio at StampBoundModelConstRegistry.hpp:296; framework walker emits unprefixed)", STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN_Binary<F>                , KIND_DOUBLE, confidence_threshold_scale,  "Conf Thresh Scale",    "ML",              CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED, DBL(1.0, 0.0, 5.0),      "Confidence-weighted entry threshold scaling; .B.3 Step 1.6.2 v1.6 cohort bit-add (Class 32 full closure; replaces inference_cfg_confidence_threshold_scale legacy wire key)", STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(uint32_t              , KIND_INT, confidence_window,           "Conf Window",          "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(64, 1, 64),                                                                    \
-        "RollingIC + RollingRMSE window size (engine-wide; cap 64).\nSame window per ML core today; INT support for X-macro deferred.",                                                                              \
+        "RollingIC + RollingRMSE window size (engine-wide; cap 64).\nSame window per ML node today; INT support for X-macro deferred.",                                                                              \
         STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(int                   , KIND_INT, confidence_turnover_window,  "Conf Turnover Window", "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000, 1, 100000),                                                              \
         "Turnover sample window for ML confidence (predictions over recent N ticks).",                                                                                                                              \
@@ -701,10 +701,10 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     /* === v5.15.5.F.4d TECH_DEBT-082 .F.5 residual close — 3 fields migrate from manual parser cases to auto-flow X-macro (Class 23 anti-pattern close at these 3 sites) === */                                          \
     /* v5.15.5.F.4d.1.B.4 Phase Cx-D: lazy_rebuild_price_threshold_pct per-core registry row DELETED (GLOBAL_ONLY_READERS — production consumer at ControllerEventLoop.hpp:2364 reads via config->lazy_rebuild_price_threshold_pct global pointer; per-core auto-gen was dead code). Global manual struct field at ControllerConfig.hpp:743 KEPT as canonical. Per-core eligibility framing in original tooltip was aspirational; no per-core override syntax exists (PER_NODE_OVERRIDE_INT_FIELDS doesn't include it). */ \
     X(FPN_Binary<F>                , KIND_DOUBLE, exit_threshold,              "Exit Threshold",       "ML/Exit",         CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.6, 0.0, 1.0),                                                  \
-        "Blended exit probability threshold for sell-side ML predictions (Path 3 architecture; v5.13.0). When blended exit_prob > exit_threshold AND position open, fires early market-exit. Default 0.6 (60%). Per-core eligible — each core has its own ML model with different exit calibration. .F.4d TECH_DEBT-082 close.", \
+        "Blended exit probability threshold for sell-side ML predictions (Path 3 architecture; v5.13.0). When blended exit_prob > exit_threshold AND position open, fires early market-exit. Default 0.6 (60%). Per-node eligible — each node has its own ML model with different exit calibration. .F.4d TECH_DEBT-082 close.", \
         STRAT_CAT_ML,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(double                , KIND_DOUBLE, confidence_ic_floor,         "Conf IC Floor",        "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.02, -1.0, 1.0),                                              \
-        "Min acceptable rolling Information Coefficient (Spearman correlation > random chance) for ML predictions. Sustained-breach over confidence_ic_floor_window seconds triggers drift gate (CRITICAL log + optional auto-kill via auto_kill_on_drift). Default 0.02. Per-core eligible — each core has independent ML model drift profile. .F.4d TECH_DEBT-082 close.", \
+        "Min acceptable rolling Information Coefficient (Spearman correlation > random chance) for ML predictions. Sustained-breach over confidence_ic_floor_window seconds triggers drift gate (CRITICAL log + optional auto-kill via auto_kill_on_drift). Default 0.02. Per-node eligible — each node has independent ML model drift profile. .F.4d TECH_DEBT-082 close.", \
         STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Maker/Taker fees + VolScaler (3) — WIP2c.2 inclusion (Strategy_BuildParameters reads these) === */                                                                                                          \
     X(Money, KIND_DOUBLE_PCT, fee_rate_maker,               "Fee Maker %%",         "Trading",         CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT, DBL(0.075, 0.0, 5.0), "Maker fill fee rate (% per trade; e.g. 0.075 = 0.075% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_taker. .B.3 Step 1.6.2 v1.6 cohort bit-add (Class 32 full closure).", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -716,7 +716,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     /* copy via explicit `nodes[c].strategy = node_strategies[c]` line after FOREACH walker; render via Step 6 per-core tabs. */                                                                                       \
     /* Default 2 = STRATEGY_SIMPLE_DIP per ControllerConfig_Default node_strategies[i]=2 legacy init. */                                                                                                                \
     X(uint8_t               , KIND_INT,    strategy,                     "Strategy",             "Strategies",      (CfgFieldDescriptor::MANUAL_PARSER | CfgFieldDescriptor::NO_FLAT_FIELD), INT(2, 0, 5),                                                                                              \
-        "Per-core strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `node_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; nodes[c].strategy auto-syncs from node_strategies[c] via FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
+        "Per-node strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `node_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; nodes[c].strategy auto-syncs from node_strategies[c] via FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
@@ -1056,7 +1056,7 @@ enum CfgGlobalFieldIdx : uint16_t {
 
 enum CfgPerCoreFieldIdx : uint16_t {
     FOREACH_PER_NODE_CFG_FIELD(X_GEN_PER_NODE_FIELD_IDX)
-    FIELD_IDX_PER_NODE_END  // sentinel; equals per-core registry entry count
+    FIELD_IDX_PER_NODE_END  // sentinel; equals per-node registry entry count
 };
 
 #undef X_GEN_GLOBAL_FIELD_IDX
@@ -1288,8 +1288,8 @@ FOREACH_METADATA_BIT(X_GEN_PER_NODE_MASK)
 static_assert(
     cfg_field_count(g_per_node_cfg_stamp_bound_cfg_derived_mask)
     + cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask) >= 20,
-    "STAMP_BOUND_CFG_DERIVED cohort coverage regression: per-core + global mask combined "
-    "should flag ≥ 20 fields (was 19 per-core + 1 global = 20 at .B.3 ship close 2026-05-24). "
+    "STAMP_BOUND_CFG_DERIVED cohort coverage regression: per-node + global mask combined "
+    "should flag ≥ 20 fields (was 19 per-node + 1 global = 20 at .B.3 ship close 2026-05-24). "
     "If you intentionally removed a STAMP_BOUND_CFG_DERIVED row from FOREACH_PER_NODE_CFG_FIELD "
     "or FOREACH_GLOBAL_CFG_FIELD, lower this threshold AND document rationale at the row deletion site. "
     "If you DIDN'T remove a row, find what regressed (likely accidental metadata-flag drop)."
