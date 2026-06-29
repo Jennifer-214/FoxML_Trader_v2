@@ -163,6 +163,13 @@ struct CfgFieldDescriptor {
         HAS_SIDE_EFFECT       = MANUAL_PARSER,
     };
 
+    // ③ item-4 (E.1.1) — SSoT for the SET of capital-cap variants. The post-resolve range sweep's
+    // exhaustiveness tripwire (ControllerConfig_CapitalRangeSweep) asserts every field carrying a
+    // CAPITAL_BOUND_* variant has a matching sweep branch; this is the one place E.1.6 EXTENDS (in
+    // lockstep with the enum) when it adds CAPITAL_BOUND_MULT/FEE under the uint16->uint32 widen.
+    // Typed `unsigned` (>=32b) so the widen needs no edit to the TYPE here — only the OR-list grows.
+    static constexpr unsigned ALL_CAPITAL_BOUND_VARIANTS = CAPITAL_BOUND_LOSS | CAPITAL_BOUND_GAIN;
+
     //---- LivesInStruct enum (uint8_t) — cross-cfg-file routing ----
     // .F.4b only populates STRUCT_CFG; full enum declared for v5.15.6 forward-compat.
     enum LivesInStruct : uint8_t {

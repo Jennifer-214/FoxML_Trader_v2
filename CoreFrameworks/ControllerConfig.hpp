@@ -20,6 +20,7 @@
 #include "../ML_Headers/MlCfgFlagRegistry.hpp" // v5.14.9.F.2 — FOREACH_ML_CFG_FLAG + MASK_ML_CFG_*
 #include "../ML_Headers/BanditAlgorithmRegistry.hpp" // v5.14.10.B — BanditAlgorithm_FromString for cfg.bandit_algorithm parser
 #include "../ML_Headers/BarrierBlendModeRegistry.hpp" // v5.15.5.A.5 — BarrierBlendMode_FromString + MODE_BARRIER_BLEND_COUNT for cfg.barrier_blend_mode parser
+#include "../ML_Headers/BarrierValidation.hpp"  // ③ item-4 (E.1.1) — tt::BARRIER_SANE_MAX_SL/TP (shared capital caps; constants-only, decoupled from barrier_is_corrupt per D-266)
 #include "RiskCfgFlagRegistry.hpp"             // v5.14.9.F.3 — FOREACH_RISK_CFG_FLAG + MASK_RISK_CFG_*
 #include "OpsCfgFlagRegistry.hpp"              // v5.14.9.F.3 — FOREACH_OPS_CFG_FLAG + MASK_OPS_CFG_*
 #include "SessionPhaseRegistry.hpp"            // v5.15.5.B.5 — FOREACH_SESSION_PHASE + SESSION_BY_HOUR[24] (closes TECH_DEBT-040)
@@ -1346,6 +1347,98 @@ inline bool cfg_capital_gate_ok(const ControllerConfig<F>& cfg, const char* who)
     fprintf(stderr, "[%s] FATAL: capital cfg validation failed (flags=0x%x) -> REFUSED. "
                     "Fix the [cfg] FATAL line(s) above.\n", who, (unsigned)cfg.cfg_load_fault_flags);
     return false;
+}
+
+// ③ item-4 (E.1.1, D-266) — Money-native single-field capital cap. Imports the SANE constants from
+// BarrierValidation (shares the CONSTANTS, decoupled from tt::barrier_is_corrupt — the dummy-slot reuse
+// is a cascade landmine). Stored value is a FRACTION (no /100). 0 PASSES (the legit inherit/unset
+// sentinel); negative or > cap faults. cap = the BARRIER_SANE_MAX_* for the field's LOSS/GAIN variant.
+inline bool capital_value_out_of_range(Money v, Money cap) {
+    return Money_Lt(v, Money_Zero()) || Money_Gt(v, cap);
+}
+
+// ③ item-4 (E.1.1) — the capital-variant SET the range sweep HANDLES (has a branch for). E.1.6 grows
+// this WITH the new branch when it adds CAPITAL_BOUND_MULT/FEE. The per-field static_assert below fires
+// if any field is tagged with a declared variant (ALL_CAPITAL_BOUND_VARIANTS) this sweep lacks a branch
+// for — converting "forgot the branch" into a compile error (forward guard; VACUOUS until E.1.6 widens).
+static constexpr unsigned CAPITAL_BOUND_SWEEP_HANDLED =
+    (unsigned)CfgFieldDescriptor::CAPITAL_BOUND_LOSS | (unsigned)CfgFieldDescriptor::CAPITAL_BOUND_GAIN;
+
+#define CFG_ASSERT_CAPITAL_VARIANT_HANDLED(STORAGE_T, KIND, name, label, section, meta, payload, ...) \
+    static_assert(((unsigned)(meta) & CfgFieldDescriptor::ALL_CAPITAL_BOUND_VARIANTS                  \
+                  & ~CAPITAL_BOUND_SWEEP_HANDLED) == 0u,                                              \
+        "cfg field '" #name "' carries a CAPITAL_BOUND_* variant the post-resolve range sweep has no "\
+        "branch for — add it to ControllerConfig_CapitalRangeSweep + extend CAPITAL_BOUND_SWEEP_HANDLED (E.1.6).");
+FOREACH_PER_NODE_CFG_FIELD(CFG_ASSERT_CAPITAL_VARIANT_HANDLED)
+#undef CFG_ASSERT_CAPITAL_VARIANT_HANDLED
+
+// ③ item-4 (E.1.1) — post-resolve CAPITAL VALUE-RANGE sweep: the founding-bug closure (risk_pct=999 /
+// max_drawdown_pct=999 silently disabling capital controls). BOOT-time (ControllerConfig_Load, after
+// PopulateCoresFromFlat) — NOT hot/slow path, so the H7/H20 branchless discipline is exempt; the per-field
+// `if`+FATAL diagnostic is preferred (the operator must know WHICH field). Sets CFG_FAULT_CAPITAL_OUT_OF_RANGE;
+// cfg_capital_gate_ok REFUSES boot on it (D2 — refuse, NEVER clamp/coerce). EXISTING LOSS/GAIN bits only
+// (no metadata widening — *_mult / FEE / partial_exit -> E.1.6 per D-275/D-276).
+template <unsigned F>
+inline void ControllerConfig_CapitalRangeSweep(ControllerConfig<F>& cfg) {
+    const Money cap_loss = Money{ money_from_double_payload(tt::BARRIER_SANE_MAX_SL) };  // 1.0  = 100%
+    const Money cap_gain = Money{ money_from_double_payload(tt::BARRIER_SANE_MAX_TP) };  // 10.0 = 1000%
+
+    // (1) per-node sweep — if-constexpr walk (mirrors EMIT_PER_NODE_COPY); reads the B-merged nodes[c].
+    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
+        #define CFG_SWEEP_CAPITAL_FIELD(STORAGE_T, KIND, name, label, section, meta, payload, ...)     \
+            if constexpr (((meta) & CfgFieldDescriptor::CAPITAL_BOUND_LOSS) != 0) {                    \
+                if (capital_value_out_of_range(cfg.nodes[c].name, cap_loss)) {                         \
+                    cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;                        \
+                    fprintf(stderr, "[cfg] FATAL: node %d capital field '%s' = %.4f exceeds the LOSS " \
+                        "cap (1.0 = 100%%) -> boot REFUSED.\n", c, #name,                              \
+                        Money_ToDouble(cfg.nodes[c].name));                                            \
+                }                                                                                     \
+            } else if constexpr (((meta) & CfgFieldDescriptor::CAPITAL_BOUND_GAIN) != 0) {             \
+                if (capital_value_out_of_range(cfg.nodes[c].name, cap_gain)) {                         \
+                    cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;                        \
+                    fprintf(stderr, "[cfg] FATAL: node %d capital field '%s' = %.4f exceeds the GAIN " \
+                        "cap (10.0 = 1000%%) -> boot REFUSED.\n", c, #name,                            \
+                        Money_ToDouble(cfg.nodes[c].name));                                            \
+                }                                                                                     \
+            }  /* non-capital fields: no-op (exhaustiveness enforced by the static_assert above) */
+        FOREACH_PER_NODE_CFG_FIELD(CFG_SWEEP_CAPITAL_FIELD)
+        #undef CFG_SWEEP_CAPITAL_FIELD
+    }
+
+    // (2) global-flat leg — risk_pct/max_drawdown_pct carry 0=inherit in nodes[c], so an inheriting node's
+    // EFFECTIVE value is the GLOBAL flat (Async.hpp:348 / ControllerEventLoop.hpp:2922), AND the optimizer
+    // config_override path writes the flat but leaves nodes[c] stale. Check the flat directly. DRIVEN OFF
+    // the sidecar registry that DEFINES these fields → can't drift + AUTO-DISSOLVES when E.1.2 deletes the
+    // arrays (deletable-by-construction). Array-channel fields are risk/drawdown = LOSS by construction.
+    #define CFG_CHECK_CAPITAL_GLOBAL_FLAT(target, source)                                              \
+        if (capital_value_out_of_range(cfg.target, cap_loss)) {                                        \
+            cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;                                \
+            fprintf(stderr, "[cfg] FATAL: global capital field '%s' = %.4f exceeds the LOSS cap "      \
+                "(1.0 = 100%%) -> boot REFUSED.\n", #target, Money_ToDouble(cfg.target));              \
+        }
+    FOREACH_PER_NODE_ARRAY_OVERRIDE(CFG_CHECK_CAPITAL_GLOBAL_FLAT)
+    #undef CFG_CHECK_CAPITAL_GLOBAL_FLAT
+
+    // (3) item-3 dollar floors (D-269/N3) — explicit, Money-space, no bit. starting_balance>0 (strict;
+    // =0 seeds peak=0 -> kills never compute + it's the return/exposure denominator); min_kill_loss>=0
+    // (reject NEGATIVE only — 0 = fire-on-pct-alone, fail-safe); min_kill_loss < starting_balance (else
+    // the kill never trips; the per-node-allocation tightening is homed E.5/TD-211).
+    if (!Money_Gt(cfg.starting_balance, Money_Zero())) {
+        cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;
+        fprintf(stderr, "[cfg] FATAL: starting_balance = %.2f must be > 0 -> boot REFUSED.\n",
+            Money_ToDouble(cfg.starting_balance));
+    }
+    if (Money_Lt(cfg.min_kill_loss, Money_Zero())) {
+        cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;
+        fprintf(stderr, "[cfg] FATAL: min_kill_loss = %.2f must be >= 0 -> boot REFUSED.\n",
+            Money_ToDouble(cfg.min_kill_loss));
+    }
+    if (Money_Gt(cfg.starting_balance, Money_Zero()) &&
+        !Money_Lt(cfg.min_kill_loss, cfg.starting_balance)) {
+        cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;
+        fprintf(stderr, "[cfg] FATAL: min_kill_loss = %.2f must be < starting_balance = %.2f -> boot REFUSED.\n",
+            Money_ToDouble(cfg.min_kill_loss), Money_ToDouble(cfg.starting_balance));
+    }
 }
 
 // ③ D-256 (b/c) + B — capital-money cfg malformed-capture SSoT (name retained for boundary-stability;
@@ -3293,6 +3386,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   // view (flat + PerNodeOverrides<F> merged via ControllerConfig_ResolveForCore).
   // Step 3 will replace this with [core N] section parser writing nodes[c] directly.
   ControllerConfig_PopulateCoresFromFlat(&cfg);
+
+  // ③ item-4 (E.1.1) — post-resolve capital value-range sweep (founding-bug closure). MUST run HERE:
+  // after PopulateCoresFromFlat (nodes[c] resolved; 0=inherit collapsed) and before return, so the boot
+  // gate (cfg_capital_gate_ok) sees the OUT_OF_RANGE faults. _Load only (NOT _Default — registry defaults
+  // are always valid; the sweep is deliberately NOT folded into PopulateCoresFromFlat). Refuse-not-clamp (D2).
+  ControllerConfig_CapitalRangeSweep(cfg);
 
   return cfg;
 }

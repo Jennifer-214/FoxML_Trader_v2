@@ -2369,6 +2369,21 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
     // fault poisons EVERY sweep run (all share `base`). Fail the run (abort), matching BacktestSharded's gate.
     if (!cfg_capital_gate_ok(base, "backtest optimizer")) return;
 
+    // ③ item-4 (E.1.1, F2) — gate the SWEEP RANGE, not just the base. ConfigField_Set mutates the FLAT
+    // fields WITHOUT re-running PopulateCoresFromFlat, so the base gate above never sees the swept values;
+    // the sweep's global-flat leg reads the freshly-mutated flats. Capital caps are bounds → the two range
+    // ENDPOINTS are the binding points; refuse the whole optimization if a swept capital param would go out
+    // of range (refuse-don't-coerce — an out-of-range sweep range is operator misconfiguration, not a point
+    // to silently skip). Two endpoint probes cover each field's lo+hi regardless of sweep direction.
+    for (int ep = 0; ep < 2; ++ep) {
+        ControllerConfig<BACKTEST_FP> probe = base;
+        ConfigField_Set(&probe, ranges[0].key, opt->param_vals[0][ep ? opt->dims[0] - 1 : 0]);
+        if (num_params > 1)
+            ConfigField_Set(&probe, ranges[1].key, opt->param_vals[1][ep ? opt->dims[1] - 1 : 0]);
+        ControllerConfig_CapitalRangeSweep(probe);
+        if (!cfg_capital_gate_ok(probe, "backtest optimizer sweep range")) return;
+    }
+
     for (int i0 = 0; i0 < opt->dims[0]; i0++) {
         for (int i1 = 0; i1 < opt->dims[1]; i1++) {
             if (*cancel_flag) return;
