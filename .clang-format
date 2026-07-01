@@ -1,0 +1,14 @@
+# FoxML_Trader_v2 house style is HAND-LAID — branchless/SIMD kernels with
+# deliberate column alignment, hand-wrapped comments, and the "preserve the
+# user's voice in comments" discipline (CLAUDE.md). clang-format's default
+# style fights all of that (it reflowed FixedPointN.hpp on a plugin save,
+# 2026-07-01).
+#
+# So: disable clang-format ENTIRELY on this repo. Any format-on-save path
+# (clangd LSP textDocument/formatting, conform.nvim, null-ls, vim.lsp.buf.format)
+# reads this file and becomes a NO-OP — it must never reflow the hand-alignment.
+# fox-symdeps.nvim (navigation/symbol-deps, clangd-backed) is unaffected; it
+# does not format. If a future need arises to auto-format NEW code, craft a
+# house-matching config then — do not enable a default style repo-wide.
+DisableFormat: true
+SortIncludes: false
