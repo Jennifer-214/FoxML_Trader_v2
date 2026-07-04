@@ -98,7 +98,7 @@
 //   CLAUDE.md item 20 (BITMAP_* hybrid: single-bit + multi-bit cohabitation)
 //   CLAUDE.md item 21 (AUTOPOPULATE companion macro)
 //   CLAUDE.md item 23 (templated helpers for dispatch — per .B.7 precedent)
-//   v5.15.5.B.7 FOREACH_NODE_CTX_INIT_FIELD (sister registry; 3-col tuple precedent)
+//   v5.15.5.B.7 FOREACH_NODE_CTX_FIELD (sister registry; unified init/reset tuple precedent)
 //   v5.15.5.C.2.1 FOREACH_OMS_META_SLOT (per-slot multi-bit; struct-level analog: this header's EVENT_LOG_MODE)
 //======================================================================================================
 #ifndef OMS_FIELD_REGISTRY_HPP

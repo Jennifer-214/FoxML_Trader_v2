@@ -45,7 +45,7 @@
 //   CLAUDE.md item 13 (X-macro registry for multi-site additions)
 //   CLAUDE.md item 23 (templated helpers; type-trait dispatch over branches)
 //   v5.14.10.D FOREACH_CALIB_LOG_COL (precedent — CSV row emit registry)
-//   v5.15.5.B.7 FOREACH_NODE_CTX_INIT_FIELD (sister registry — per-core init walk)
+//   v5.15.5.B.7 FOREACH_NODE_CTX_FIELD (sister registry — per-core init/reset walk)
 //======================================================================================================
 #ifndef NODE_CTX_SUMMARY_FIELD_REGISTRY_HPP
 #define NODE_CTX_SUMMARY_FIELD_REGISTRY_HPP

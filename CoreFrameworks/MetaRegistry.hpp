@@ -83,8 +83,7 @@
     X(FOREACH_PER_ARM_FLAG                      , 1,      FOREACH_REGISTRY                 , "Per-bandit-arm flags (HAS_BARRIER / etc.).") \
     X(FOREACH_EZOO_INIT_FLAG                    , 1,      FOREACH_REGISTRY                 , "EnsembleModelZoo init flags (MASK_EZOO_ACTIVE / etc.).") \
     X(FOREACH_SESSION_PHASE                     , 1,      FOREACH_REGISTRY                 , "Session phase enum (boot/warmup/active/winddown).") \
-    X(FOREACH_NODE_CTX_INIT_FIELD               , 1,      FOREACH_REGISTRY                 , "Per-core context init fields.") \
-    X(FOREACH_NODE_CTX_RESET_FIELD              , 1,      FOREACH_REGISTRY                 , "Per-core context reset fields.") \
+    X(FOREACH_NODE_CTX_FIELD                    , 1,      FOREACH_REGISTRY                 , "Per-core context init/reset fields (unified D-297; reset = RST-flagged subset view).") \
     X(FOREACH_NODE_CTX_SUMMARY_FIELD            , 1,      FOREACH_REGISTRY                 , "Per-core context summary fields (TUI/snapshot).") \
     X(FOREACH_DISPLAY_META_FIELD                , 1,      FOREACH_REGISTRY                 , "Per-core display metadata fields.") \
     X(FOREACH_GATE_DIAG_PAIR                    , 1,      FOREACH_REGISTRY                 , "Gate diagnostic pairs (block/pass counters).") \

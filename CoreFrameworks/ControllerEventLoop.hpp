@@ -931,7 +931,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     // macro. ~50 lines of per-field init / helper-Init calls / sp_telemetry
     // atomic stores / slow_state arena allocation / display_meta sibling init
     // are now covered by one macro call. Adding a new NodeContext field that
-    // needs boot-init = ONE row in FOREACH_NODE_CTX_INIT_FIELD; macro picks
+    // needs boot-init = ONE row in FOREACH_NODE_CTX_FIELD; macro picks
     // it up at next compile. See MemHeaders/NodeCtxInitRegistry.hpp.
     for (int i = 0; i < MAX_EXECUTION_NODES; i++) {
         NODE_CTX_INIT_AUTOPOPULATE(state, i);

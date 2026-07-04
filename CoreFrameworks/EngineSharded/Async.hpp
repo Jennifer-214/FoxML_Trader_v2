@@ -725,7 +725,7 @@ inline bool EngineSharded_Async_FanOut(
             // Phase 2.1 P&L leak, Phase 3 kill switch, v4.7.26 partner pairing
             // + gross accumulator leak, v5.4.3 SL-cooldown / idle-cycle leak)
             // collapse to ONE registry-driven walk. Adding a new "per-session
-            // counter" in the future = ONE row in FOREACH_NODE_CTX_RESET_FIELD;
+            // counter" in the future = ONE RST-flagged row in FOREACH_NODE_CTX_FIELD;
             // every paper-reset site auto-flows. See MemHeaders/NodeCtxInitRegistry.hpp.
             for (int c = 0; c < num_nodes; ++c) {
                 NODE_CTX_RESET_AUTOPOPULATE(state, c);

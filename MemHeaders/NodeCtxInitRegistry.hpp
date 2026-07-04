@@ -17,21 +17,20 @@
 // P&L leak; Phase 3 caught the kill-switch leak. All instances of the
 // same recurring class.
 //
-// Two registries (intentional separation — semantic distinction):
+// ONE unified registry (v5.15.5.F.4d.1.E.1.2 / D-297 — was two parallel lists,
+// FOREACH_NODE_CTX_INIT_FIELD + FOREACH_NODE_CTX_RESET_FIELD):
 //
-//   FOREACH_NODE_CTX_INIT_FIELD(X)
-//     ~40 entries. ALL boot-init fields on NodeContext that take a
-//     value-init (FPN_Binary<F>=Zero, scalar=0/HALT_OK/STRATEGY_NONE/-1,
-//     pointer=nullptr, etc.). Walked at boot only.
-//
-//   FOREACH_NODE_CTX_RESET_FIELD(X)
-//     ~15 entries. STRICT SUBSET of init fields — only the "per-session
-//     state that should reset between operator-initiated session
-//     boundaries" (paper reset). Carefully selected (NOT a blanket
-//     `node_state_flags = 0` or `pnl_feeder = Init()` which would
-//     destroy load-bearing state like loaded models, IC history,
-//     regression feedback, regime hysteresis). v4.7.21 / v4.7.26 /
-//     v5.4.3 / Phase 2.1 / Phase 3 anchor each membership decision.
+//   FOREACH_NODE_CTX_FIELD(X)  →  X(NAME, TYPE, INIT_VALUE, RESET)
+//     ~40 boot-init scalar fields on NodeContext that take a value-init
+//     (FPN_Binary<F>=Zero, scalar=0/HALT_OK/STRATEGY_NONE/-1, pointer=nullptr,
+//     etc.). The RESET column marks the strict subset (RST) that ALSO clears on
+//     operator paper-reset — the "per-session state that resets between session
+//     boundaries." NORST = boot-init only (kept load-bearing across reset: loaded
+//     models, IC history, regression feedback, regime hysteresis; a blanket
+//     `node_state_flags = 0` / `pnl_feeder = Init()` would destroy those).
+//     v4.7.21/26 / v5.4.3 / Phase 2.1 / Phase 3 anchor each RST membership.
+//     Init view walks ALL rows; reset view walks RST-flagged only — both from
+//     this ONE list, so the two can never drift (the former class-18 mirror).
 //
 // AUTOPOPULATE macros (multi-target dispatch):
 //
@@ -89,108 +88,84 @@ namespace tt {
 // Adding a new boot-init field: append ONE row here. AUTOPOPULATE picks
 // it up at next compile.
 //======================================================================================================
-#define FOREACH_NODE_CTX_INIT_FIELD(X)                                                              \
+// v5.15.5.F.4d.1.E.1.2 (D-297/D2) — UNIFIED into ONE registry (was FOREACH_NODE_CTX_INIT_FIELD
+// + FOREACH_NODE_CTX_RESET_FIELD, two parallel lists). Init + reset views now generate from
+// this single source (the persist view + wire metadata land in the E.1.2 serializer step —
+// Steps 2-4). `RESET` column: RST = also cleared on operator paper-reset (the strict subset —
+// per-session state); NORST = boot-init only (load-bearing across reset: handles, models,
+// intended trade values, IC/regime/feeder history). The RST set is byte-for-byte the former
+// FOREACH_NODE_CTX_RESET_FIELD (Phase 2.1 + Phase 3 + v4.7.21/26 + v5.4.3 anchored).
+#define FOREACH_NODE_CTX_FIELD(X)                                                                    \
     /* HOT cluster — dispatch metadata + handles */                                                 \
-    X(core,                       ExecutionCore<F>*,  nullptr)                                      \
-    X(model_handle,               void*,              nullptr)                                      \
-    X(ensemble_handle,            void*,              nullptr)                                      \
-    X(strategy_state,             void*,              nullptr)                                      \
-    X(strategy_id,                uint8_t,            STRATEGY_NONE)                                \
-    X(resolved_strategy_id,       uint8_t,            STRATEGY_NONE)                                \
-    X(strategy_state_kind,        uint8_t,            0xFF)                                         \
-    X(node_state_flags,           uint8_t,            0)                                            \
+    X(core,                       ExecutionCore<F>*,  nullptr,        NORST)                         \
+    X(model_handle,               void*,              nullptr,        NORST)                         \
+    X(ensemble_handle,            void*,              nullptr,        NORST)                         \
+    X(strategy_state,             void*,              nullptr,        NORST)                         \
+    X(strategy_id,                uint8_t,            STRATEGY_NONE,  NORST)                         \
+    X(resolved_strategy_id,       uint8_t,            STRATEGY_NONE,  NORST)                         \
+    X(strategy_state_kind,        uint8_t,            0xFF,           NORST)                         \
+    X(node_state_flags,           uint8_t,            0,              NORST)                         \
     /* HOT cluster — intended trade values */                                                       \
-    X(intended_tp,                Money,                     Money_Zero())                                \
-    X(intended_sl,                Money,                     Money_Zero())                                \
-    X(intended_qty,               Money,                     Money_Zero())                                \
-    X(allocated_balance,          Money,                     Money_Zero())                                \
-    X(halt_reason,                uint8_t,            HALT_OK)                                      \
-    X(strategy_halt_reason,       uint8_t,            SHALT_OK)                                     \
+    X(intended_tp,                Money,              Money_Zero(),   NORST)                         \
+    X(intended_sl,                Money,              Money_Zero(),   NORST)                         \
+    X(intended_qty,               Money,              Money_Zero(),   NORST)                         \
+    X(allocated_balance,          Money,              Money_Zero(),   NORST)                         \
+    X(halt_reason,                uint8_t,            HALT_OK,        NORST)                         \
+    X(strategy_halt_reason,       uint8_t,            SHALT_OK,       NORST)                         \
     /* HOT cluster — ML decision state (reset every cycle by RebuildOneCore; init for cold-boot safety) */ \
-    X(staged_prediction,          double,             0.0)                                          \
-    X(active_prediction,          double,             0.0)                                          \
-    X(last_confidence,            double,             0.0)                                          \
-    X(last_confidence_factor,     double,             0.0)                                          \
-    X(last_exit_prediction,       double,             0.0)                                          \
-    X(last_exit_dominant_horizon, int,                -1)                                           \
-    X(last_buy_dominant_horizon,  int,                -1)                                           \
-    X(last_barrier_mode_used,     uint8_t,            0)                                            \
+    X(staged_prediction,          double,             0.0,            NORST)                         \
+    X(active_prediction,          double,             0.0,            NORST)                         \
+    X(last_confidence,            double,             0.0,            NORST)                         \
+    X(last_confidence_factor,     double,             0.0,            NORST)                         \
+    X(last_exit_prediction,       double,             0.0,            NORST)                         \
+    X(last_exit_dominant_horizon, int,                -1,             NORST)                         \
+    X(last_buy_dominant_horizon,  int,                -1,             NORST)                         \
+    X(last_barrier_mode_used,     uint8_t,            0,              NORST)                         \
     /* WARM cluster — per-event accounting */                                                       \
-    X(entries_processed,          uint64_t,           0)                                            \
-    X(exits_processed,            uint64_t,           0)                                            \
-    X(last_entry_price,           Money,                     Money_Zero())                                \
-    X(last_entry_tick,            uint64_t,           0)                                            \
-    X(last_entry_wall_us,         uint64_t,           0)                                            \
-    X(sl_cooldown_remaining,      uint32_t,           0)                                            \
-    X(idle_cycles,                uint32_t,           0)                                            \
+    X(entries_processed,          uint64_t,           0,              RST)                           \
+    X(exits_processed,            uint64_t,           0,              RST)                           \
+    X(last_entry_price,           Money,              Money_Zero(),   NORST)                         \
+    X(last_entry_tick,            uint64_t,           0,              NORST)                         \
+    X(last_entry_wall_us,         uint64_t,           0,              NORST)                         \
+    X(sl_cooldown_remaining,      uint32_t,           0,              RST)                           \
+    X(idle_cycles,                uint32_t,           0,              RST)                           \
     /* WARM cluster — per-core P&L (v4.0.4) */                                                      \
-    X(node_realized,              Money,                     Money_Zero())                                \
-    X(node_fees,                  Money,                     Money_Zero())                                \
-    X(node_wins,                  uint32_t,           0)                                            \
-    X(node_losses,                uint32_t,           0)                                            \
+    X(node_realized,              Money,              Money_Zero(),   RST)                           \
+    X(node_fees,                  Money,              Money_Zero(),   RST)                           \
+    X(node_wins,                  uint32_t,           0,              RST)                           \
+    X(node_losses,                uint32_t,           0,              RST)                           \
     /* WARM cluster — partner pairing + gross accumulators (v4.7.21/26) */                          \
-    X(partner_pending_pnl,        Money,                     Money_Zero())                                \
-    X(node_gross_wins,            Money,                     Money_Zero())                                \
-    X(node_gross_losses,          Money,                     Money_Zero())                                \
-    X(node_open_notional,         Money,                     Money_Zero())                                \
+    X(partner_pending_pnl,        Money,              Money_Zero(),   RST)                           \
+    X(node_gross_wins,            Money,              Money_Zero(),   RST)                           \
+    X(node_gross_losses,          Money,              Money_Zero(),   RST)                           \
+    X(node_open_notional,         Money,              Money_Zero(),   RST)                           \
     /* WARM cluster — per-core kill switch (Phase 3) */                                             \
-    X(node_peak_balance,          Money,                     Money_Zero())                                \
-    X(node_dd_pct,                Money,                     Money_Zero())                                \
-    X(node_ks_trips_total,        uint32_t,           0)
+    X(node_peak_balance,          Money,              Money_Zero(),   RST)                           \
+    X(node_dd_pct,                Money,              Money_Zero(),   RST)                           \
+    X(node_ks_trips_total,        uint32_t,           0,              RST)
 
 //======================================================================================================
-// [PAPER-RESET FIELD REGISTRY]
+// [PAPER-RESET VIEW — the RST-flagged subset of FOREACH_NODE_CTX_FIELD]
 //======================================================================================================
-// Tuple: same shape X(NAME, TYPE, INIT_VALUE) as init registry.
-//
-// STRICT SUBSET of init fields — only state that MUST reset between
-// operator-initiated paper-reset boundaries (vs boot init which resets
-// EVERYTHING). Membership decisions anchored in:
-//   - Phase 2.1 (P&L + budget leak): node_realized, node_fees, node_wins,
-//     node_losses, node_open_notional
-//   - Phase 3 (kill switch leak): node_peak_balance, node_dd_pct,
-//     node_ks_trips_total + KILL_TRIPPED bitmap clear (in AUTOPOPULATE)
-//   - v4.7.21/26 (partner pairing + gross accumulator leak):
-//     partner_pending_pnl, node_gross_wins, node_gross_losses +
-//     partner_pending_bitmap clear (in AUTOPOPULATE)
+// Reset is NO LONGER a separate registry (D-297/D2) — it is the `RST`-flagged
+// subset of the unified FOREACH_NODE_CTX_FIELD above, generated by presence
+// dispatch in `_node_ctx_reset_value_fields`. The RST membership is byte-for-byte
+// the former FOREACH_NODE_CTX_RESET_FIELD (a `== 15` static_assert below pins it),
+// anchored by:
+//   - Phase 2.1 (P&L + budget leak): node_realized/fees/wins/losses/open_notional
+//   - Phase 3 (kill switch leak): node_peak_balance/dd_pct/ks_trips_total
+//     (+ KILL_TRIPPED bitmap clear in AUTOPOPULATE)
+//   - v4.7.21/26 (partner pairing + gross): partner_pending_pnl/gross_wins/gross_losses
+//     (+ partner_pending_bitmap clear in AUTOPOPULATE)
 //   - v5.4.3 (recurring-bugs Class 5): sl_cooldown_remaining, idle_cycles
-//   - Counter reset: entries_processed, exits_processed
-//
-// EXCLUDED (load-bearing — do NOT reset):
-//   - core (ExecutionCore* pointer; registration persists)
-//   - model_handle / ensemble_handle (loaded models persist)
-//   - confidence (ConfidenceScorer history; resetting would destroy
-//     drift detection state)
-//   - pnl_feeder (RegressionFeederX history; resetting would destroy
-//     adaptive feedback signal)
-//   - regime_state (hysteresis; resetting would cause regime thrash
-//     post-reset until RegimeDetector recomputes)
-//   - turnover, drift_history (similar accumulator-history concerns)
-//
-// Adding a new field to the reset subset: append ONE row. AUTOPOPULATE
-// picks it up at next compile.
+//   - counter reset: entries_processed, exits_processed
+// EXCLUDED (NORST — load-bearing across reset): core, model/ensemble handles,
+// and the sub-struct history (confidence / pnl_feeder / regime_state / turnover /
+// drift_history) — resetting those would destroy drift-detection / adaptive-feedback /
+// regime-hysteresis state (sub-structs aren't in this scalar registry anyway; they're
+// helper-Init'd at AUTOPOPULATE Layer 2).
+// Adding/removing a reset field: flip a NORST↔RST on its row above. ONE edit, ONE list.
 //======================================================================================================
-#define FOREACH_NODE_CTX_RESET_FIELD(X)                                                             \
-    /* Counter resets */                                                                            \
-    X(entries_processed,          uint64_t,           0)                                            \
-    X(exits_processed,            uint64_t,           0)                                            \
-    /* Phase 2.1 — P&L + budget leak prevention */                                                  \
-    X(node_realized,              Money,                     Money_Zero())                                \
-    X(node_fees,                  Money,                     Money_Zero())                                \
-    X(node_wins,                  uint32_t,           0)                                            \
-    X(node_losses,                uint32_t,           0)                                            \
-    X(node_open_notional,         Money,                     Money_Zero())                                \
-    /* Phase 3 — kill switch leak prevention */                                                     \
-    X(node_peak_balance,          Money,                     Money_Zero())                                \
-    X(node_dd_pct,                Money,                     Money_Zero())                                \
-    X(node_ks_trips_total,        uint32_t,           0)                                            \
-    /* v4.7.21/26 — partner pairing + gross accumulator leak prevention */                          \
-    X(partner_pending_pnl,        Money,                     Money_Zero())                                \
-    X(node_gross_wins,            Money,                     Money_Zero())                                \
-    X(node_gross_losses,          Money,                     Money_Zero())                                \
-    /* v5.4.3 (recurring-bugs Class 5) — cooldown + idle-cycle leak prevention */                   \
-    X(sl_cooldown_remaining,      uint32_t,           0)                                            \
-    X(idle_cycles,                uint32_t,           0)
 
 //======================================================================================================
 // [TEMPLATED HELPERS — registry walk encapsulation]
@@ -202,16 +177,21 @@ namespace tt {
 
 template <unsigned F>
 inline void _node_ctx_init_value_fields(NodeContext<F>& ctx) {
-#define X(NAME, TYPE, INIT_VAL) ctx.NAME = (TYPE)(INIT_VAL);
-    FOREACH_NODE_CTX_INIT_FIELD(X)
+#define X(NAME, TYPE, INIT_VAL, RESET) ctx.NAME = (TYPE)(INIT_VAL);
+    FOREACH_NODE_CTX_FIELD(X)
 #undef X
 }
 
 template <unsigned F>
 inline void _node_ctx_reset_value_fields(NodeContext<F>& ctx) {
-#define X(NAME, TYPE, INIT_VAL) ctx.NAME = (TYPE)(INIT_VAL);
-    FOREACH_NODE_CTX_RESET_FIELD(X)
+    // reset = the RST-flagged subset (presence dispatch on the RESET column)
+#define _NCF_RESET_APPLY_RST(NAME, TYPE, INIT_VAL)   ctx.NAME = (TYPE)(INIT_VAL);
+#define _NCF_RESET_APPLY_NORST(NAME, TYPE, INIT_VAL)
+#define X(NAME, TYPE, INIT_VAL, RESET) _NCF_RESET_APPLY_##RESET(NAME, TYPE, INIT_VAL)
+    FOREACH_NODE_CTX_FIELD(X)
 #undef X
+#undef _NCF_RESET_APPLY_RST
+#undef _NCF_RESET_APPLY_NORST
 }
 
 // Allocator policy helper: InitArena_Global → fallback to `new`.
@@ -238,21 +218,27 @@ inline void _alloc_and_init_slow_state(NodeContext<F>& ctx) {
 // Public counts via `>=` style (per /readiness Check 21) — useful for
 // downstream consumers + sanity checks.
 //======================================================================================================
-#define _NODE_CTX_INIT_COUNT_ONE(NAME, TYPE, INIT_VAL) +1
+#define _NODE_CTX_INIT_COUNT_ONE(NAME, TYPE, INIT_VAL, RESET) +1
 constexpr int NODE_CTX_INIT_FIELD_COUNT =
-    0 FOREACH_NODE_CTX_INIT_FIELD(_NODE_CTX_INIT_COUNT_ONE);
+    0 FOREACH_NODE_CTX_FIELD(_NODE_CTX_INIT_COUNT_ONE);
 #undef _NODE_CTX_INIT_COUNT_ONE
 static_assert(NODE_CTX_INIT_FIELD_COUNT >= 30,
-              "FOREACH_NODE_CTX_INIT_FIELD must keep at least the v5.15.5.B.7 "
+              "FOREACH_NODE_CTX_FIELD must keep at least the v5.15.5.B.7 "
               "set (30+ fields). Removing entries needs explicit justification.");
 
-#define _NODE_CTX_RESET_COUNT_ONE(NAME, TYPE, INIT_VAL) +1
+// reset count = the RST-flagged rows only (presence dispatch on the RESET column)
+#define _NODE_CTX_RESET_COUNT_RST   +1
+#define _NODE_CTX_RESET_COUNT_NORST +0
+#define _NODE_CTX_RESET_COUNT_ONE(NAME, TYPE, INIT_VAL, RESET) _NODE_CTX_RESET_COUNT_##RESET
 constexpr int NODE_CTX_RESET_FIELD_COUNT =
-    0 FOREACH_NODE_CTX_RESET_FIELD(_NODE_CTX_RESET_COUNT_ONE);
+    0 FOREACH_NODE_CTX_FIELD(_NODE_CTX_RESET_COUNT_ONE);
 #undef _NODE_CTX_RESET_COUNT_ONE
-static_assert(NODE_CTX_RESET_FIELD_COUNT >= 15,
-              "FOREACH_NODE_CTX_RESET_FIELD must keep at least the v5.15.5.B.7 "
-              "set (15 fields anchored by Phase 2.1/3 + v4.7.21/26 + v5.4.3).");
+#undef _NODE_CTX_RESET_COUNT_RST
+#undef _NODE_CTX_RESET_COUNT_NORST
+static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
+              "The RST-flagged subset of FOREACH_NODE_CTX_FIELD is EXACTLY the 15 former "
+              "FOREACH_NODE_CTX_RESET_FIELD rows (Phase 2.1/3 + v4.7.21/26 + v5.4.3). A "
+              "byte-identical-reset pin — flipping a NORST↔RST changes this count deliberately.");
 
 }  // namespace tt
 
