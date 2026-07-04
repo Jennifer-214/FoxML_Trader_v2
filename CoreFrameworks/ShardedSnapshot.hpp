@@ -216,7 +216,7 @@ static inline void TUI_CopySnapshotSharded(
         // mirror SG_Evaluate's formula: effective = max(active, ratchet).
         // Falls back to pos->* when this slot's core isn't yet registered
         // (cold start) or when reading param_slot fails.
-        int node_id_for_pos = (BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? (idx >> 1) : idx);
+        int node_id_for_pos = tt::Sharded_SlotNode(idx, BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
         bool resolved_effective = false;
         if (node_id_for_pos >= 0 && node_id_for_pos < state->registered_count) {
             tt::ExecutionCore<F>* xc = state->nodes[node_id_for_pos].core;
@@ -269,7 +269,7 @@ static inline void TUI_CopySnapshotSharded(
         // positions loaded from snapshot.
         uint64_t entry_wall = state->oms->portfolio.positions[idx].entry_timestamp_us;
         if (entry_wall == 0) {
-            int node_id = partial_on ? (idx >> 1) : idx;
+            int node_id = tt::Sharded_SlotNode(idx, partial_on);
             if (node_id >= 0 && node_id < state->registered_count) {
                 entry_wall = state->nodes[node_id].last_entry_wall_us;
             }

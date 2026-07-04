@@ -831,6 +831,10 @@ namespace tt {
 // Branchless nullptr handling per H20 + branchless-dispatch-discipline.md Pattern 3:
 // hoist a SINGLE cmov at fn entry to select effective_nodes; loop body reads
 // effective_nodes[idx].field with zero per-iteration branches.
+// Fwd-decl: Sharded_SlotNode is defined with its geometry family below (~:1135); this
+// early consumer precedes the definition (same tt namespace). (D-294)
+static inline int Sharded_SlotNode(int slot, int partial_exit_enabled);
+
 template <unsigned F>
 inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* state,
                                                           const PerNodeCfg<F>* nodes = nullptr) {
@@ -844,16 +848,17 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
     // Per-slot outstanding-entry tracker; transient (replay walk only).
     struct SlotEntry { Money entry_price; Money qty; Money entry_fee; int valid; };
     SlotEntry slot_entries[MAX_PORTFOLIO_POSITIONS] = {};
+    // partial-exit flag (hoisted; drives slot→node via Sharded_SlotNode). (D-294)
+    const int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
 
     for (size_t i = 0; i < log.count; ++i) {
         const tt::OrderEvent<F>& e = log.entries[i];
         if (e.type != tt::OEVT_FULL_FILL) continue;
         int slot = (int)e.node_id;
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
-        // Partial-exit slot layout: leg-A @ slot 2c, leg-B @ slot 2c+1 → core c.
-        // Single-position mode: slot c → core c. Both work via slot>>1 = slot/2
-        // when partial_exit_enabled (legs paired); shifts harmlessly otherwise.
-        int node_id = slot >> 1;
+        // slot → owning node: legs A/B at 2c/2c+1 → core c under partials; slot==core
+        // single-mode. (was: ungated `slot>>1` — HALVED the node in single mode; D-294.)
+        int node_id = Sharded_SlotNode(slot, partial_on);
         if (node_id < 0 || node_id >= MAX_EXECUTION_NODES) continue;
 
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (hoisted above loop).
@@ -1122,6 +1127,17 @@ static inline uint16_t Sharded_NodeSlotMask(int node_id, int partial_exit_enable
         return (uint16_t)((1u << sa) | (1u << sb));
     }
     return (uint16_t)(1u << node_id);
+}
+
+// Inverse of Sharded_LegSlot: the logical node that owns portfolio slot `slot`.
+// Branchless (H20): partial_on ∈ {0,1} IS the shift count — slot>>1 under partials (legs
+// A/B at 2c/2c+1 → core c), slot>>0 = slot single-slot. No cmov (matches the tuned :3450 site).
+// Caller contract: slot ≥ 0 (a valid portfolio slot); callers that may hold -1 guard first
+// (e.g. :852). THE single source for slot→node — replaces the open-coded shifts at
+// SlowPath.hpp:134, ShardedSnapshotPersist.hpp:623, :856 (was UNGATED = the bug), :3450,
+// ShardedSnapshot.hpp:219/272. GUI sites grandfathered for the E-series decouple. (D-294/D-295)
+static inline int Sharded_SlotNode(int slot, int partial_exit_enabled) {
+    return slot >> (uint32_t)partial_exit_enabled;  // SLOT_DERIVE_OK: THE canonical accessor (D-296)
 }
 
 // Boot-time validation. Returns 1 if cfg + capacity are consistent, 0
@@ -3435,11 +3451,9 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless via pure ALU shift (H20 + branchless-dispatch-discipline.md
-        // Pattern 3). With partials: slot >> 1 = core. Without: slot >> 0 = slot. `partial_on` is BITMAP_IS_SET
-        // result (0 or 1) — exactly the right shift count. Replaces the prior ternary (cmov-able) with a single
-        // shift instruction; no cmov, no conditional move at all. Same semantic, tighter ALU.
-        int logical_core = slot >> (uint32_t)partial_on;
+        // Branchless (H20): slot → owning node via the shared Sharded_SlotNode (pure ALU shift by
+        // partial_on ∈ {0,1}; no cmov — the accessor is THE single source, D-294/D-295).
+        int logical_core = Sharded_SlotNode(slot, partial_on);
         Money qty = oms->portfolio.positions[slot].quantity;
         uint8_t sid = state->nodes[logical_core].strategy_id;
         // A8 (.E.0.10): the leg index is meaningful ONLY under partials (even slot = leg A,

@@ -67,7 +67,7 @@ template <unsigned F> struct alignas(64) Position {
     // Manual padding to align Position to 8 bytes after int8_t pair_index.
     // Part of wire format (PORTFOLIO_SNAPSHOT_VERSION=6 byte layout; Ship-A 16B FPN_Binary).
     // POSITION_PERSIST_BYTES = offsetof(_pad_pos) + sizeof(_pad_pos) = 128 (was 184).
-    uint8_t _pad_pos[7];
+    uint8_t _pad_pos[7] = {0};   // H12: reaches the wire via the 128B blob dump → MUST be zero-init (D-295)
 
     // SKIP_PERSIST fields would expand here. Empty today per C.5 revert.
     // Ship-A 16B FPN_Binary: PERSIST data fills 128B = 2 cache lines exact, so the
@@ -219,15 +219,15 @@ inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
 // legs on slot reuse). Every reset site (Init/ClearPositions) calls this. pair_index defaults to -1 (unpaired),
 // NOT 0. Sets values only — no Position layout change, so no PORTFOLIO_SNAPSHOT_VERSION/H21 concern.
 template <unsigned F> inline void Position_Reset(Position<F>* p) {
-    p->take_profit_price  = Money_Zero();
-    p->stop_loss_price    = Money_Zero();
-    p->quantity           = Money_Zero();
-    p->entry_price        = Money_Zero();
-    p->entry_fee          = Money_Zero();
-    p->original_tp        = Money_Zero();
-    p->original_sl        = Money_Zero();
-    p->entry_timestamp_us = 0;
-    p->pair_index         = -1;
+    // Full-struct clear to defaults, single-sourced off FOREACH_POSITION_FIELD's `init`
+    // column (the DMIs) + zeroes _pad_pos (H12: the pad reaches the wire via the blob dump).
+    // `{}` is correct HERE because Position is a flat blob-serialized POD — every field is
+    // value-initializable and reset-default == construct-default; drift-proof (covers new
+    // fields AND the manual pad) + fails-safe. SWITCH to an OMS-style registry-walker +
+    // per-field reset ONLY if Position stops being a blob-POD: a field whose reset-value ≠
+    // construct-default, a SKIP_RESET (preserve-across-reuse) field, or a non-`{}`-able
+    // member (atomic / ring / RAII). (D-295)
+    *p = Position<F>{};
 }
 template <unsigned F> inline void Portfolio_Init(Portfolio<F> *portfolio) {
     for (int i = 0; i < 16; i++) Position_Reset(&portfolio->positions[i]);   // A28: full reset (was a 5-field subset → original_*/pair_index/ts stale)
