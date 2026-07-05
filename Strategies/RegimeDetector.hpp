@@ -42,6 +42,8 @@
 #include "../ML_Headers/FlowFeatures.hpp"  // v4.5 Wave 1 — D.1/D.2/D.4 state
 #include <time.h>
 #include <stdlib.h>  // v5.4.0 Phase A.2: getenv() for TT_REGIME_DEBUG diagnostic gate
+#include <stdio.h>   // v5.15.5.F.4d.1.E.1.2 Step-2: FILE*/fwrite/fread for the persist delegate
+#include <string.h>  // v5.15.5.F.4d.1.E.1.2 Step-2: memcpy for the commit walker
 
 // regime constants, RegimeInfo, and REGIME_STRATEGY_TABLE are in StrategyInterface.hpp
 
@@ -475,6 +477,70 @@ template <unsigned F> struct RegimeState {
 };
 
 //======================================================================================================
+// [REGIME STATE PERSISTENCE DELEGATE]  (v5.15.5.F.4d.1.E.1.2 — Step 2, D-305)
+//======================================================================================================
+// Field-by-field snapshot persistence for RegimeState<F>, mirroring the ConfidenceScorer
+// delegate (ML_Headers/ConfidenceScore.hpp FOREACH_CONFIDENCE_PERSIST_FIELD). Wire byte
+// sequence IDENTICAL to the pre-registry hand-loop (ShardedSnapshotPersist.hpp save block).
+// The 2 classifier score ints (last_trending_score / last_volatile_score) are NOT persisted —
+// re-derived on warmup (see above) — so a nested staging instance's copies stay uncommitted.
+// Adding a persisted field = ONE registry row + a SHARDED_SNAPSHOT_VERSION bump (H21). H15:
+// enrolled in CoreFrameworks/MetaRegistry.hpp. NEVER fwrite(&rs, sizeof(RegimeState)) — the
+// blob carries the 2 unpersisted ints + trailing pad (48B struct vs 36B wire): field-by-field only.
+//
+// 7 fields IN WIRE ORDER (int x5, then uint64_t, then time_t):
+#define FOREACH_REGIME_PERSIST_FIELD(X)   \
+    X(current_regime,       int,      1)  \
+    X(proposed_regime,      int,      1)  \
+    X(hysteresis_count,     int,      1)  \
+    X(hysteresis_threshold, int,      1)  \
+    X(last_strategy_id,     int,      1)  \
+    X(regime_start_tick,    uint64_t, 1)  \
+    X(regime_start_time,    time_t,   1)
+
+// AUTOPOPULATE fwrite — field-by-field write. Returns -1 on any fwrite failure.
+#define REGIME_FWRITE_FIELD_(name, type, n)  \
+    if (fwrite(&rs->name, sizeof(type), (size_t)(n), f) != (size_t)(n)) return -1;
+template <unsigned F>
+inline int RegimeState_FieldwiseWrite(const RegimeState<F> *rs, FILE *f) {
+    FOREACH_REGIME_PERSIST_FIELD(REGIME_FWRITE_FIELD_)
+    return 0;
+}
+
+// AUTOPOPULATE fread — field-by-field read into a staging instance. Same wire format.
+#define REGIME_FREAD_FIELD_(name, type, n)  \
+    if (fread(&rs->name, sizeof(type), (size_t)(n), f) != (size_t)(n)) return -1;
+template <unsigned F>
+inline int RegimeState_FieldwiseRead(RegimeState<F> *rs, FILE *f) {
+    FOREACH_REGIME_PERSIST_FIELD(REGIME_FREAD_FIELD_)
+    return 0;
+}
+
+// AUTOPOPULATE commit — copy the persisted subset staging->runtime (after all reads
+// validate; atomicity via the commit-after-read pattern). The 2 unpersisted score ints
+// are untouched, so ctx.regime_state retains its live/boot value for them.
+#define REGIME_COMMIT_FIELD_(name, type, n)  \
+    memcpy(&dst->name, &src->name, sizeof(type) * (size_t)(n));
+template <unsigned F>
+inline void RegimeState_CommitPersistedFields(RegimeState<F> *dst, const RegimeState<F> *src) {
+    FOREACH_REGIME_PERSIST_FIELD(REGIME_COMMIT_FIELD_)
+}
+
+#undef REGIME_FWRITE_FIELD_
+#undef REGIME_FREAD_FIELD_
+#undef REGIME_COMMIT_FIELD_
+
+// Count-lock (primary forcing function per D-302 Option B): EXACTLY 7 persisted fields.
+// A row add/drop trips this at compile time → forces a SHARDED_SNAPSHOT_VERSION bump (H21).
+#define REGIME_PERSIST_COUNT_ONE_(name, type, n) +1
+constexpr int FOREACH_REGIME_PERSIST_FIELD_COUNT = 0 FOREACH_REGIME_PERSIST_FIELD(REGIME_PERSIST_COUNT_ONE_);
+#undef REGIME_PERSIST_COUNT_ONE_
+static_assert(FOREACH_REGIME_PERSIST_FIELD_COUNT == 7,
+    "RegimeState wire format = EXACTLY 7 persisted fields (current/proposed_regime, "
+    "hysteresis_count/threshold, last_strategy_id, regime_start_tick/time); a change "
+    "requires a SHARDED_SNAPSHOT_VERSION bump + loader migration (H21).");
+
+//======================================================================================================
 // [INIT]
 //======================================================================================================
 template <unsigned F>
@@ -639,7 +705,7 @@ inline int Regime_Classify(RegimeState<F> *state,
             static thread_local uint32_t dbg_cycle = 0;
             dbg_cycle++;
             if ((dbg_cycle & 0x0F) == 0) {  // every 16 cycles
-                fprintf(stderr,
+                fprintf(stderr,  // [LAT_EXEMPT]_[env-gated cold debug]
                     "[regime-dbg] short_count=%d ema_sma_spread=%.6f "
                     "long_spread=%.6f r2=%.4f ror_slope=%.6f ror_ready=%d "
                     "vol_ratio=%.4f trending=%d volatile=%d "

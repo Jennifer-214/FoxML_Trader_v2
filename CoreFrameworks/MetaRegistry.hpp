@@ -99,6 +99,8 @@
     X(FOREACH_CALIB_LOG_COL                     , 1,      FOREACH_REGISTRY                 , "Calibration log CSV columns.") \
     X(FOREACH_TRADE_LOG_COL                     , 1,      FOREACH_REGISTRY                 , "Trade log CSV columns.") \
     X(FOREACH_CONFIDENCE_PERSIST_FIELD          , 1,      FOREACH_REGISTRY                 , "Confidence persistence fields.") \
+    X(FOREACH_REGIME_PERSIST_FIELD              , 1,      FOREACH_REGISTRY                 , "RegimeState snapshot-persist fields (7-field sharded delegate; E.1.2 Step-2, mirrors FOREACH_CONFIDENCE_PERSIST_FIELD).") \
+    X(FOREACH_FEEDER_PERSIST_FIELD              , 1,      FOREACH_REGISTRY                 , "RegressionFeederX snapshot-persist fields (3-field sharded delegate; E.1.2 Step-2).") \
     /* v5.15.5.F.4d.1.B.3 Step 3 (2026-05-24): FOREACH_CFG_DERIVED_INFERENCE_CFG row DELETED at .B.3 — registry file deleted at Step 2; cfg-derived consumer framework + StampBoundDerivedFilter at .B.1+ supersede. */ \
     X(FOREACH_CFG_DRIFT_CHECK                   , 1,      FOREACH_REGISTRY                 , "Stamp body drift check fields (legacy; folds into framework at .B.3).") \
     X(FOREACH_CFG_GATE_PER_NODE                 , 1,      FOREACH_REGISTRY                 , "Per-row gate_when override sidecar for STAMP_BOUND_CFG_DERIVED-flagged per-core cfg fields (.B.1+; H18 first canonical of gate-type sidecar; empty at .B.1; populates at .B.2 cohort migration).") \

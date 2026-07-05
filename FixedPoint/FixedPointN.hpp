@@ -1402,20 +1402,20 @@ inline FixedPoint<2,64> fp2_from_double(double input) {
     // Saturating to ±MAX makes FPN_IsValidFinite ALWAYS reject it, identically across every build.
     // __builtin_expect-rare (H20 sanctioned error-path branch): legit price/feature values sit far
     // inside ±9e18 (2^63); -FP2_64_MAX (not FP2_64_MIN, defined later) dodges the INT128_MIN edge.
-    if (__builtin_expect(!(input >= -9.0e18 && input <= 9.0e18), 0))
-        return { input < 0.0 ? -FP2_64_MAX : FP2_64_MAX };
-    int neg = (input < 0.0);
-    double abs_input = input * (1.0 - 2.0 * neg);
+    if (__builtin_expect(!(input >= -9.0e18 && input <= 9.0e18), 0))  // [LAT_EXEMPT]_[feature<->double seam; H4-exempt]
+        return { input < 0.0 ? -FP2_64_MAX : FP2_64_MAX };  // [LAT_EXEMPT]_[feature<->double seam; H4-exempt]
+    int neg = (input < 0.0);  // [LAT_EXEMPT]_[feature<->double seam; H4-exempt]
+    double abs_input = input * (1.0 - 2.0 * neg);  // [LAT_EXEMPT]_[feature<->double seam; H4-exempt]
     double int_part = floor(abs_input);
-    double frac_part = abs_input - int_part;
+    double frac_part = abs_input - int_part;  // [LAT_EXEMPT]_[feature<->double seam; H4-exempt]
     unsigned __int128 mag = ((unsigned __int128)(uint64_t)int_part << 64)
-                          | (unsigned __int128)(uint64_t)floor(frac_part * 18446744073709551616.0);
+                          | (unsigned __int128)(uint64_t)floor(frac_part * 18446744073709551616.0);  // [LAT_EXEMPT]_[feature<->double seam; H4-exempt]
     __int128 v = (__int128)mag;
     return { i128_cneg(v, neg & (int)(mag != 0)) };
 }
 inline double fp2_to_double(FixedPoint<2,64> a) {
     unsigned __int128 m = a.v < 0 ? (unsigned __int128)(-a.v) : (unsigned __int128)a.v;
-    double mag = (double)(uint64_t)(m >> 64) + (double)(uint64_t)m / 18446744073709551616.0;
+    double mag = (double)(uint64_t)(m >> 64) + (double)(uint64_t)m / 18446744073709551616.0;  // [LAT_EXEMPT]_[feature<->double seam; H4-exempt]
     return a.v < 0 ? -mag : mag;
 }
 // --- Feature-only transcendentals that round-trip through double (match FPN_Log/InvSqrt/Tan/Pow/Atan2

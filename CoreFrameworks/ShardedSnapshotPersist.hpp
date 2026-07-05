@@ -226,19 +226,14 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         }
         if (fwrite(&ctx.node_ks_trips_total, 4, 1, f) != 1) goto fail;
 
-        // Regime hysteresis (RegimeState — 4 ints + 1 uint64 + 1 time_t)
-        if (fwrite(&ctx.regime_state.current_regime,        sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.regime_state.proposed_regime,       sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.regime_state.hysteresis_count,      sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.regime_state.hysteresis_threshold,  sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.regime_state.last_strategy_id,      sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.regime_state.regime_start_tick,     sizeof(uint64_t), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.regime_state.regime_start_time,     sizeof(time_t), 1, f) != 1) goto fail;
+        // Regime hysteresis — registry-driven delegate (E.1.2 Step-2): 5 ints + uint64 + time_t,
+        // byte-identical to the pre-registry hand-loop. FOREACH_REGIME_PERSIST_FIELD (RegimeDetector.hpp).
+        if (RegimeState_FieldwiseWrite(&ctx.regime_state, f) != 0) goto fail;
 
-        // pnl_feeder ring buffer (size MAX_WINDOW = 8 FPN_Binary entries + 2 ints)
-        if (fwrite(ctx.pnl_feeder.price_samples, sizeof(Money), MAX_WINDOW, f) != MAX_WINDOW) goto fail;
-        if (fwrite(&ctx.pnl_feeder.head,  sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.pnl_feeder.count, sizeof(int), 1, f) != 1) goto fail;
+        // pnl_feeder ring buffer — registry-driven delegate (E.1.2 Step-2): price_samples
+        // [FPN_Binary<F> x MAX_WINDOW] + head + count. FOREACH_FEEDER_PERSIST_FIELD. The retype
+        // Money->FPN_Binary<F> is byte-identical (both 16B) + type-honest (R1).
+        if (RegressionFeederX_FieldwiseWrite(&ctx.pnl_feeder, f) != 0) goto fail;
 
         // Confidence scorer prediction snapshots (doubles)
         if (fwrite(&ctx.staged_prediction, 8, 1, f) != 1) goto fail;
@@ -413,13 +408,11 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         Money   node_peak_balance, node_dd_pct;
         uint8_t  node_kill_tripped;
         uint32_t node_ks_trips_total;
-        // regime
-        int      rs_current, rs_proposed, rs_count, rs_threshold, rs_last_strat;
-        uint64_t rs_start_tick;
-        time_t   rs_start_time;
-        // feeder
-        Money   feeder_samples[MAX_WINDOW];
-        int      feeder_head, feeder_count;
+        // regime — nested staging (E.1.2 Step-2, D-305): FieldwiseRead populates the 7
+        // persisted fields; the 2 unpersisted score ints stay default-init + uncommitted.
+        RegimeState<F> staging_regime;
+        // feeder — nested staging (E.1.2 Step-2, D-305): FieldwiseRead populates all 3 fields.
+        RegressionFeederX<F> staging_feeder;
         // confidence (v1)
         double   staged, active, last_confidence;
         // v5.15.5.E.0 — staging ConfidenceScorer instance replaces the prior
@@ -467,16 +460,8 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         if (fread(&s.node_kill_tripped, 1, 1, f) != 1) { fclose(f); return 0; }
         if (fread(pad8,                 3, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.node_ks_trips_total, 4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rs_current,    sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rs_proposed,   sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rs_count,      sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rs_threshold,  sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rs_last_strat, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rs_start_tick, sizeof(uint64_t), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rs_start_time, sizeof(time_t), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(s.feeder_samples, sizeof(Money), MAX_WINDOW, f) != MAX_WINDOW) { fclose(f); return 0; }
-        if (fread(&s.feeder_head,   sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.feeder_count,  sizeof(int), 1, f) != 1) { fclose(f); return 0; }
+        if (RegimeState_FieldwiseRead(&s.staging_regime, f) != 0) { fclose(f); return 0; }
+        if (RegressionFeederX_FieldwiseRead(&s.staging_feeder, f) != 0) { fclose(f); return 0; }
         if (fread(&s.staged,         8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.active,         8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_confidence,8, 1, f) != 1) { fclose(f); return 0; }
@@ -562,16 +547,8 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
             NODE_STATE_FLAG_CLR(ctx, KILL_TRIPPED);
         }
         ctx.node_ks_trips_total  = s.node_ks_trips_total;
-        ctx.regime_state.current_regime       = s.rs_current;
-        ctx.regime_state.proposed_regime      = s.rs_proposed;
-        ctx.regime_state.hysteresis_count     = s.rs_count;
-        ctx.regime_state.hysteresis_threshold = s.rs_threshold;
-        ctx.regime_state.last_strategy_id     = s.rs_last_strat;
-        ctx.regime_state.regime_start_tick    = s.rs_start_tick;
-        ctx.regime_state.regime_start_time    = s.rs_start_time;
-        memcpy(ctx.pnl_feeder.price_samples, s.feeder_samples, sizeof(s.feeder_samples));
-        ctx.pnl_feeder.head  = s.feeder_head;
-        ctx.pnl_feeder.count = s.feeder_count;
+        RegimeState_CommitPersistedFields(&ctx.regime_state, &s.staging_regime);
+        RegressionFeederX_CommitPersistedFields(&ctx.pnl_feeder, &s.staging_feeder);
         ctx.staged_prediction = s.staged;
         ctx.active_prediction = s.active;
         ctx.last_confidence   = s.last_confidence;

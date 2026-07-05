@@ -21,6 +21,8 @@
 #define LINEAR_REGRESSION_3X_H
 
 #include "../FixedPoint/FixedPointN.hpp"
+#include <stdio.h>   // v5.15.5.F.4d.1.E.1.2 Step-2: FILE*/fwrite/fread for the persist delegate
+#include <string.h>  // v5.15.5.F.4d.1.E.1.2 Step-2: memcpy for the commit walker
 
 #ifndef MAX_WINDOW
 #define MAX_WINDOW 8
@@ -46,6 +48,59 @@ template <unsigned F> struct RegressionFeederX {
     int head;
     int count;
 };
+
+//======================================================================================================
+// [FEEDER PERSISTENCE DELEGATE]  (v5.15.5.F.4d.1.E.1.2 — Step 2, D-305)
+//======================================================================================================
+// Field-by-field snapshot persistence for RegressionFeederX<F>, mirroring the ConfidenceScorer /
+// RegimeState delegates. Wire byte sequence IDENTICAL to the pre-registry hand-loop
+// (ShardedSnapshotPersist.hpp save block). price_samples is persisted with sizeof(FPN_Binary<F>)
+// (type-honest; the pre-registry loop wrote it as sizeof(Money) — byte-identical because both are
+// 16B __int128, but the field IS FPN_Binary<F> feature data, not Money — R1). All 3 fields persist.
+// H15: enrolled in CoreFrameworks/MetaRegistry.hpp. NEVER fwrite(&fx, sizeof(RegressionFeederX)) —
+// the blob carries 8B trailing pad (144B struct vs 136B wire): field-by-field only.
+#define FOREACH_FEEDER_PERSIST_FIELD(X)         \
+    X(price_samples, FPN_Binary<F>, MAX_WINDOW) \
+    X(head,          int,           1)          \
+    X(count,         int,           1)
+
+// AUTOPOPULATE fwrite — field-by-field write. Returns -1 on any fwrite failure.
+#define FEEDER_FWRITE_FIELD_(name, type, n)  \
+    if (fwrite(&fx->name, sizeof(type), (size_t)(n), f) != (size_t)(n)) return -1;
+template <unsigned F>
+inline int RegressionFeederX_FieldwiseWrite(const RegressionFeederX<F> *fx, FILE *f) {
+    FOREACH_FEEDER_PERSIST_FIELD(FEEDER_FWRITE_FIELD_)
+    return 0;
+}
+
+// AUTOPOPULATE fread — field-by-field read into a staging instance. Same wire format.
+#define FEEDER_FREAD_FIELD_(name, type, n)  \
+    if (fread(&fx->name, sizeof(type), (size_t)(n), f) != (size_t)(n)) return -1;
+template <unsigned F>
+inline int RegressionFeederX_FieldwiseRead(RegressionFeederX<F> *fx, FILE *f) {
+    FOREACH_FEEDER_PERSIST_FIELD(FEEDER_FREAD_FIELD_)
+    return 0;
+}
+
+// AUTOPOPULATE commit — copy the persisted subset staging->runtime (after all reads validate).
+#define FEEDER_COMMIT_FIELD_(name, type, n)  \
+    memcpy(&dst->name, &src->name, sizeof(type) * (size_t)(n));
+template <unsigned F>
+inline void RegressionFeederX_CommitPersistedFields(RegressionFeederX<F> *dst, const RegressionFeederX<F> *src) {
+    FOREACH_FEEDER_PERSIST_FIELD(FEEDER_COMMIT_FIELD_)
+}
+
+#undef FEEDER_FWRITE_FIELD_
+#undef FEEDER_FREAD_FIELD_
+#undef FEEDER_COMMIT_FIELD_
+
+// Count-lock (primary forcing function per D-302 Option B): EXACTLY 3 persisted fields.
+#define FEEDER_PERSIST_COUNT_ONE_(name, type, n) +1
+constexpr int FOREACH_FEEDER_PERSIST_FIELD_COUNT = 0 FOREACH_FEEDER_PERSIST_FIELD(FEEDER_PERSIST_COUNT_ONE_);
+#undef FEEDER_PERSIST_COUNT_ONE_
+static_assert(FOREACH_FEEDER_PERSIST_FIELD_COUNT == 3,
+    "RegressionFeederX wire format = EXACTLY 3 persisted fields (price_samples[MAX_WINDOW] + "
+    "head + count); a change requires a SHARDED_SNAPSHOT_VERSION bump + loader migration (H21).");
 //======================================================================================================
 // [RESULT STRUCT]
 //======================================================================================================
