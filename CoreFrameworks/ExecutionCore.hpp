@@ -55,6 +55,13 @@
 namespace tt {
 
 // Sized for the i5-1035G4 microbenchmark. Production sizing tuned per use case.
+//
+// EDIT[FROM OPERATOR]: 7-05-2026
+// we could probably make this defined at the build time, using the build.sh
+// script, just an idea, but it allows for different sizing easier, we could
+// ideally do this for anything thats set as a constexpr across the code base
+// where we set defintions, especially considering weve moved on from the i5
+// processor, back to an i7, just A THOUGHT,(like me)
 constexpr size_t EXECUTION_NODE_TICK_RING_SIZE  = 4096;
 constexpr size_t EXECUTION_NODE_EVENT_RING_SIZE = 1024;
 
