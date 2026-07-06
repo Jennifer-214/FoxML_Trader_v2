@@ -104,6 +104,15 @@
 #  define FOREACH_STRATEGY_EMACROSS(X) /* private/EmaCross.hpp absent */
 #endif
 
+//======================================================================
+// [REGISTRY]_[FOREACH_STRATEGY]
+//----------------------------------------------------------------------
+// [TAG]_[[FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[the strategy roster — add a strategy = 1 row; drives StrategyId enum + name table + dispatch]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_STRATEGY(X) \
     X(MEAN_REVERSION, "MR",   "MeanReversion", MeanReversionState, \
        MeanReversion_Init,   MeanReversion_BuildParameters, \
@@ -118,6 +127,31 @@
        MLStrategy_Init,      ML_BuildParameters, \
        MLStrategy_Adapt_Canonical, MLStrategy_ExitAdjustSharded) \
     FOREACH_STRATEGY_EMACROSS(X)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// [[2026] [v4.0.3]]
+//
+// the strategy roster (add a strategy = one X() row; EmaCross is
+// presence-dispatched — FOREACH_STRATEGY_EMACROSS is empty when
+// private/EmaCross.hpp is absent). Drives the StrategyId enum + the
+// name table + the slow-path dispatch. The IDs (MR=0, MOM=1, DIP=2,
+// ML=3, EMA=4) are append-only so cfg files / stamps survive (H21).
+// [SUPPORTING_DOCS]
+//   - [DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+//   - [INVARIANT]_[H15]
+//   - [INVARIANT]_[H21]
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [ROW_COUNT]_[<tool: 4 (+1 EmaCross when private/ present)>]
+// [ENROLLED]_[MetaRegistry.hpp]
+// [CONSUMERS]_[[StrategyId] [strategy-name-table] [StrategyParameters_Dispatch]]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_STRATEGY]
+//======================================================================
 
 // IDs — auto-generated. Order matches the historical assignment
 // (MR=0, MOM=1, DIP=2, ML=3, EMA=4) so cfg files / stamps survive the

@@ -2,9 +2,22 @@
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 // See LICENSE file in the project root for full license text.
 
-//======================================================================================================
-// [REGIME DETECTOR]
-//======================================================================================================
+//======================================================================
+// [FILE]_[RegimeDetector.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH]]
+// [SCOPE]_[NODE]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[classify market state (RANGING/TRENDING/VOLATILE/MILD_TREND) + switch the active strategy — score-based]
+// [DIAGRAM]
+//   slow_state{RollingStats x2, ROR, flow, depth} -> RegimeSignals -> Regime_Classify -> regime -> Regime_ToStrategy
+// [CONTAINS]_[[RegimeSignals] [CumDeltaState] [TickRateState] [RegimeState] [Regime_Classify] [Regime_ToStrategy]]
+// [CONSUMERS]_[[EventLoop_RebuildOneCore] [StrategyParameters_Dispatch]]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// [[2026] [regime-detector]]
+//
 // classifies market state and switches the active strategy using score-based detection
 //
 // regimes:
@@ -29,7 +42,15 @@
 //   momentum → MR: tighten TP (take profit), widen SL (allow chop)
 //   volatile: no adjustment (panic-adjusting causes more harm)
 //   adjustment is one-shot at transition. new positions get native TP/SL.
-//======================================================================================================
+// [SUPPORTING_DOCS]
+//   - [INVARIANT]_[H4]
+//   - [INVARIANT]_[H8]
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [INCLUDES]_[[StrategyInterface.hpp] [ControllerConfig.hpp] [RollingStats.hpp] [ROR_regressor.hpp] [FlowFeatures.hpp]]
+// [BINARIES]_[[engine] [controller_test]]
+//======================================================================
 #ifndef REGIME_DETECTOR_HPP
 #define REGIME_DETECTOR_HPP
 
@@ -47,13 +68,15 @@
 
 // regime constants, RegimeInfo, and REGIME_STRATEGY_TABLE are in StrategyInterface.hpp
 
-//======================================================================================================
-// [REGIME SIGNALS]
-//======================================================================================================
-// collected once per slow-path cycle from rolling stats, rolling_long, and ROR
-// this is the extensibility point: adding a new signal = adding a field here
-// + one comparison in Regime_Classify
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[RegimeSignals]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[per-slow-cycle signal vector — the ML extensibility point: add a signal = add a field + one Regime_Classify comparison]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct RegimeSignals {
     // short window (128-tick)
     FPN_Binary<F> short_slope;       // relative price slope (slope / avg)
@@ -105,15 +128,34 @@ template <unsigned F> struct RegimeSignals {
     double  spread_bps;          // current spread / mid_price × 10000 (basis points)
     double  spread_zscore;       // z-score of current spread vs trailing window
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// [[2026] [regime-signals]]
+//
+// collected once per slow-path cycle from rolling stats, rolling_long, and ROR.
+// this is the extensibility point: adding a new signal = adding a field here
+// + one comparison in Regime_Classify.
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [SIZE]_[448B]
+// [ALIGN]_[16]
+//======================================================================
+// [END_STRUCT]_[RegimeSignals]
+//======================================================================
 
-//======================================================================================================
-// v4.3 — auxiliary state for new features (not maintained by RollingStats)
-//======================================================================================================
-// Cumulative trade-side delta — running net buyer aggression over a rolling
-// window. is_buyer_maker=1 means the buyer was the maker → seller was the
-// taker → net delta -= qty. is_buyer_maker=0 → buyer was taker → +qty.
-// Ring buffer of recent N samples for windowed aggregation.
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[CumDeltaState]
+//----------------------------------------------------------------------
+// [TAG]_[[SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[rolling cumulative buyer-vs-seller aggression — a ring buffer of N signed-qty samples]
+//======================================================================
+// [CODE]
+//======================================================================
 #define CUMDELTA_WINDOW 1024
 template <unsigned F> struct CumDeltaState {
     FPN_Binary<F> sum;               // current window sum
@@ -121,7 +163,38 @@ template <unsigned F> struct CumDeltaState {
     int    head;
     int    count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// [[2026-04] [v4.3]]
+//
+// auxiliary state for new features (not maintained by RollingStats).
+// Cumulative trade-side delta — running net buyer aggression over a rolling
+// window. is_buyer_maker=1 means the buyer was the maker → seller was the
+// taker → net delta -= qty. is_buyer_maker=0 → buyer was taker → +qty.
+// Ring buffer of recent N samples for windowed aggregation.
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [SIZE]_[16416B]
+// [ALIGN]_[16]
+// [UPSTREAM]_[[FPN_Binary]]
+// [CONSUMERS]_[[CumDelta_Init] [CumDelta_Push] [Regime_ComputeSignals] [BacktestSharded_Run] [NodeSlowState] [EventLoop_RebuildOneCore] [PortfolioController_Init] [ShardedBacktestDriver] [ML_BuildParameters]]
+//======================================================================
+// [END_STRUCT]_[CumDeltaState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[CumDelta_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[zero-init the CumDeltaState ring — sum / head / count + every sample]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void CumDelta_Init(CumDeltaState<F>* s) {
     s->sum = FPN_Zero<F>();
@@ -129,6 +202,16 @@ inline void CumDelta_Init(CumDeltaState<F>* s) {
     s->count = 0;
     for (int i = 0; i < CUMDELTA_WINDOW; ++i) s->samples[i] = FPN_Zero<F>();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [UPSTREAM]_[[FPN_Zero]]
+// [CONSUMERS]_[[BacktestSharded_Run] [NodeSlowState_Init] [PortfolioController_Init]]
+//======================================================================
+// [END_FUNCTION]_[CumDelta_Init]
+//======================================================================
 
 template <unsigned F>
 inline void CumDelta_Push(CumDeltaState<F>* s, FPN_Binary<F> qty, int is_buyer_maker) {
@@ -210,17 +293,15 @@ static inline double TickRate_CurrentZ(const TickRateState* s) {
     return (current_rate - s->trailing_mean_rate) / s->trailing_stddev_rate;
 }
 
-//======================================================================================================
-// [COMPUTE SIGNALS]
-//======================================================================================================
-// fills RegimeSignals from current rolling stats, rolling_long, and ROR
-// called once per slow-path cycle before Regime_Classify
-//======================================================================================================
-// v4.3 — feature-pack expansion. Optional new state pointers populate the
-// new fields when non-null; when null, new fields stay zero-initialized so
-// older callers remain compatible at compile time. The FEAT_* indices in
-// the model still expect those features though — old v1 models will fail
-// the version check on load.
+//======================================================================
+// [FUNCTION]_[Regime_ComputeSignals]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[fill RegimeSignals from rolling stats + ROR + flow/depth — once per slow cycle, before Regime_Classify]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const RollingStats<F> *rolling,
@@ -247,7 +328,9 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const void *spread_state = nullptr,
                                    double current_spread = 0.0,
                                    double current_mid_price = 0.0) {
-    // short window signals
+    //------------------------------------------------------------
+    // [SECTION]_[short window signals]
+    //------------------------------------------------------------
     sig->short_count    = rolling->count;
     sig->short_r2       = rolling->price_r_squared;
     sig->short_variance = rolling->price_variance;
@@ -259,7 +342,9 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     else
         sig->short_slope = FPN_Zero<F>();
 
-    // long window signals
+    //------------------------------------------------------------
+    // [SECTION]_[long window signals]
+    //------------------------------------------------------------
     sig->long_count    = rolling_long->count;
     sig->long_r2       = rolling_long->price_r_squared;
     sig->long_variance = rolling_long->price_variance;
@@ -269,7 +354,10 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     else
         sig->long_slope = FPN_Zero<F>();
 
-    // variance ratio: current volatility relative to baseline
+    //------------------------------------------------------------
+    // [SECTION]_[variance ratio]
+    //------------------------------------------------------------
+    // current volatility relative to baseline
     // > 1.0 means volatility is elevated vs longer-term average
     // self-adapting: $50 stddev in calm market (baseline $20) = 6.25x, same $50 in volatile ($45) = 1.23x
     if (rolling_long->count >= 64 && !FPN_IsZero(rolling_long->price_variance))
@@ -277,8 +365,10 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     else
         sig->vol_ratio = FPN_FromDouble<F>(1.0); // default: no spike detected
 
-    // ROR: slope-of-slopes (trend acceleration)
-    // positive = trend getting steeper, negative = trend flattening/reversing
+    //------------------------------------------------------------
+    // [SECTION]_[ROR — trend acceleration]
+    //------------------------------------------------------------
+    // slope-of-slopes: positive = trend getting steeper, negative = trend flattening/reversing
     sig->ror_ready = (ror->count >= MAX_WINDOW);
     if (sig->ror_ready) {
         // compute ROR regression on slope samples
@@ -296,7 +386,10 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     // if a regime enrichment model is loaded
     sig->model_score = FPN_Zero<F>();
 
-    // EMA/SMA crossover: (ema - sma) / sma
+    //------------------------------------------------------------
+    // [SECTION]_[EMA/SMA crossover]
+    //------------------------------------------------------------
+    // (ema - sma) / sma
     // normalized so threshold is asset-independent (same value works for BTC and ETH)
     // branchless: compute the spread always (FPN_DivNoAssert by zero safely saturates → deterministic), then
     // mask to 0 when either operand is zero. H20: branchless even if slower — a mispredict's variance cascades.
@@ -313,7 +406,10 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->ema_sma_spread_long = FPN_Zero<F>();
     }
 
-    // v4.3 — medium-horizon features. Each one zero-defaults if its required
+    //------------------------------------------------------------
+    // [SECTION]_[v4.3 medium-horizon features]
+    //------------------------------------------------------------
+    // each one zero-defaults if its required
     // state isn't supplied; train-serve parity is preserved as long as both
     // backtest and live populate the same state with the same cadence.
 
@@ -383,7 +479,10 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->dist_to_low = FPN_Zero<F>();
     }
 
-    // v4.5 Wave 1 — D.1: book imbalance over time. Reads from
+    //------------------------------------------------------------
+    // [SECTION]_[v4.5 Wave 1 — flow/depth features]
+    //------------------------------------------------------------
+    // D.1: book imbalance over time. Reads from
     // BookImbalanceHistory; mean_short over last 64 samples, mean_long
     // over full window, drift = current - mean_long. Zero-default when
     // state pointer is null OR count < 2 (cold start).
@@ -435,7 +534,9 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->large_trade_z = 0.0;
     }
 
-    // v4.6 Wave 2 — D.3: spread dynamics.
+    //------------------------------------------------------------
+    // [SECTION]_[v4.6 Wave 2 — spread dynamics]
+    //------------------------------------------------------------
     //   spread_bps   = current_spread / mid_price × 10000 (basis points).
     //                  Zero-default when mid_price is zero (cold start) or
     //                  current_spread is zero (no depth feed).
@@ -455,10 +556,38 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->spread_zscore = 0.0;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// [[2026] [v4.3+]]
+//
+// fills RegimeSignals from current rolling stats, rolling_long, and ROR.
+// called once per slow-path cycle before Regime_Classify.
+//
+// v4.3 — feature-pack expansion. Optional new state pointers populate the
+// new fields when non-null; when null, new fields stay zero-initialized so
+// older callers remain compatible at compile time. The FEAT_* indices in
+// the model still expect those features though — old v1 models will fail
+// the version check on load.
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [UPSTREAM]_[<tool: :FoxSymdepsDerived!>]
+//======================================================================
+// [END_FUNCTION]_[Regime_ComputeSignals]
+//======================================================================
 
-//======================================================================================================
-// [STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[RegimeState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [PERSISTENCE]]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[the regime classifier's state — current/proposed regime + hysteresis + last scores; 7 fields wire-persisted (H21)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct RegimeState {
     int current_regime;          // REGIME_RANGING, REGIME_TRENDING, REGIME_VOLATILE
     int proposed_regime;         // what the classifier thinks (before hysteresis)
@@ -475,6 +604,16 @@ template <unsigned F> struct RegimeState {
     int last_trending_score;     // last classification cycle's trending_score
     int last_volatile_score;     // last classification cycle's volatile_score
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [SIZE]_[48B]
+// [ALIGN]_[8]
+//======================================================================
+// [END_STRUCT]_[RegimeState]
+//======================================================================
 
 //======================================================================================================
 // [REGIME STATE PERSISTENCE DELEGATE]  (v5.15.5.F.4d.1.E.1.2 — Step 2, D-305)
@@ -540,9 +679,15 @@ static_assert(FOREACH_REGIME_PERSIST_FIELD_COUNT == 7,
     "hysteresis_count/threshold, last_strategy_id, regime_start_tick/time); a change "
     "requires a SHARDED_SNAPSHOT_VERSION bump + loader migration (H21).");
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Regime_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1]
+// [OVERVIEW]_[zero-init a RegimeState — start conservative (RANGING / MR) with the given hysteresis threshold]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void Regime_Init(RegimeState<F> *state, int hysteresis_threshold) {
     state->current_regime = REGIME_RANGING;  // start conservative
@@ -555,6 +700,15 @@ inline void Regime_Init(RegimeState<F> *state, int hysteresis_threshold) {
     state->regime_start_tick = 0;
     state->regime_start_time = time(NULL);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+//----------------------------------------------------------------------
+// [UPSTREAM]_[<tool: :FoxSymdepsDerived!>]
+//======================================================================
+// [END_FUNCTION]_[Regime_Init]
+//======================================================================
 
 //======================================================================================================
 // [CLASSIFY — SCORE-BASED]
