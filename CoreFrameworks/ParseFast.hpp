@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [PARSE FAST — std::from_chars wrapper (v5.11.4.A)]
+// [FILE]_[CoreFrameworks/ParseFast.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PARSER] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the locale-immune std::from_chars parse family — the H5 replacement for atof/strtod on parsing paths]
+// [CONTAINS]
+//   - [FUNCTION]_[parse_double_fast]
 //======================================================================================================
 // Locale-independent double parser. Replaces atof / strtod on parsing hot
 // paths (Binance WS trade decoder, executionReport parser, REST response
@@ -38,6 +44,16 @@
 
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[parse_double_fast]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PARSER] [DETERMINISM] [CRITICAL]]
+// [REFERENCE]_[INVARIANT]_[H5]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE H5 canonical — locale-immune NUL-terminated double parse; atof's silent-0.0 semantic without its LC_NUMERIC hazard]
+//======================================================================
+// [CODE]
+//======================================================================
 // Parse a NUL-terminated decimal string to double. Returns 0.0 on parse
 // failure (matches atof's silent-failure semantic so existing callers
 // don't need new error handling — but unlike atof, doesn't depend on
@@ -49,6 +65,11 @@ static inline double parse_double_fast(const char *s) {
     auto r = std::from_chars(s, s + n, d);
     return (r.ec == std::errc()) ? d : 0.0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[parse_double_fast]
+//======================================================================
 
 // Checked variant of parse_double_fast: same value AND the same locale-immune std::from_chars backend,
 // plus it reports whether a NON-EMPTY value failed to parse. Empty/NULL stays clean (0.0, malformed=false)
