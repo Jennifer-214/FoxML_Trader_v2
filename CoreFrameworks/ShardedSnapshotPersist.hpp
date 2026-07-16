@@ -266,8 +266,9 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         // v5.15.5.E.0 — ConfidenceScorer fieldwise persistence via shared
         // FOREACH_CONFIDENCE_PERSIST_FIELD registry. Byte-identical to pre-.E
         // sharded wire format (predictions + actuals + count + head + rmse
-        // arrays + count + head). Closes Class-18 mirror with
-        // PortfolioController.hpp:2117 — both persistence sites now call the
+        // arrays + count + head). Closes Class-18 mirror with the legacy
+        // PortfolioController snapshot save (its ConfidenceScorer_FieldwiseWrite
+        // call) — both persistence sites now call the
         // same helper. Adding a new persisted field = 1 row in the registry.
         // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md +
         // DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md.
@@ -526,7 +527,8 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // v5.4.0: persisted `strategy_state_kind` was originally intended
         // to drive Strategy_InitPerCore at boot (the comment said "engine's
         // init path checks strategy_state_kind and dispatches"). In
-        // practice, EngineSharded.hpp:1183 dispatches on
+        // practice, the boot path (EngineCommon_BootPerCore, called from
+        // EngineSharded/Run.hpp) dispatches Strategy_InitPerCore on
         // `state.nodes[i].strategy_id` (cfg-derived), NOT the loaded kind.
         // The persisted field is therefore dead weight — and worse,
         // restoring it here corrupts the invariant that `strategy_state_kind`
@@ -549,13 +551,13 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         //
         // v5.11.15 (2026-05-07) — root-cause fix. Stop restoring kind from
         // snapshot. The persisted byte stays in the format (snapshot v4+
-        // back-compat — we still READ it at line 420 above, just don't
-        // APPLY it here). Future snapshot versions can drop the field
-        // entirely without breaking older saves.
+        // back-compat — the per-core read loop above still READS it into
+        // s.strategy_state_kind, just don't APPLY it here). Future snapshot
+        // versions can drop the field entirely without breaking older saves.
         //
         // The kind invariant is now: set ONLY by Strategy_InitPerCore at
-        // boot (StrategyLifecycle.hpp:160) and Strategy_FreePerCore on
-        // teardown (StrategyLifecycle.hpp:432). No other site mutates it.
+        // boot and Strategy_FreePerCore on teardown (both in
+        // Strategies/StrategyLifecycle.hpp). No other site mutates it.
         (void)s.strategy_state_kind;  // intentionally unused; see comment.
         ctx.allocated_balance    = s.allocated_balance;
         ctx.entries_processed    = s.entries_processed;
