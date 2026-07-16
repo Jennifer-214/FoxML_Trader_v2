@@ -1,5 +1,15 @@
 #pragma once
 //======================================================================================================
+// [FILE]_[CoreFrameworks/ShardedLiveSafety.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[live-safety helpers — orphan recovery (LIVE); force-close-on-shutdown (preserved but DISABLED + stale-signature, TECH_DEBT-192); reconcile lives in ReconciliationLoop]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-192]
+// [CONTAINS]
+//   - [FUNCTION]_[EngineSharded_OrphanRecovery]
+//   - [FUNCTION]_[EngineSharded_ForceCloseOnShutdown]
+//======================================================================================================
 // SHARDED LIVE SAFETY — orphan recovery, force-close on shutdown,
 // periodic reconciliation.
 //
@@ -9,6 +19,14 @@
 // use of sharded — without them, a crash + restart leaves orphan BTC,
 // shutdowns can leave open positions, and manual Binance trades silently
 // desync paper state from the exchange.
+//
+// CURRENT DISPOSITION (2026-06-13, TECH_DEBT-192 / D-211 sweep — supersedes the
+// "callable from EngineSharded_Run" framing above for 0.2): only 0.1 orphan
+// recovery is LIVE-called. 0.2 force-close was UNCALLED at v5.4.5 (positions
+// persist across restart instead; the Run.hpp shutdown site documents why) and
+// its body has since ROTTED (stale 9-positional OrderManager_Submit + pre-Ship-A
+// FPN money types — compiles only because the template is uninstantiated). A
+// re-enable is the .E.1 live-enable gate decision + requires the rewrite.
 //
 // All functions are paper-mode safe (early return when live_trading == 0
 // or notify == nullptr).
@@ -28,9 +46,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// 0.1 — ORPHAN RECOVERY ON STARTUP
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_OrphanRecovery]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[0.1 startup orphan recovery — non-zero venue BTC at boot is sold to USDT; balance-query failure refuses boot]
+//======================================================================
+// [CODE]
+//======================================================================
 // Query the exchange for current balances. If non-zero BTC exists at startup
 // (sharded has no persistent state, so any BTC is by definition orphan from
 // a prior session), market-sell it to recover USDT. Returns the post-
@@ -42,7 +66,6 @@ namespace tt {
 // Notify alerts fire if notify != nullptr; otherwise alerts are stderr-only.
 // Phase 4 (persistence) will refine this — once we have a snapshot of
 // expected positions, we can reconcile rather than blindly selling.
-//======================================================================================================
 static inline bool EngineSharded_OrphanRecovery(
     BinanceAdapterState* adapter,
     NotifyState* notify,
@@ -121,10 +144,22 @@ static inline bool EngineSharded_OrphanRecovery(
     if (btc_out)  *btc_out  = btc;
     return true;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_OrphanRecovery]
+//======================================================================
 
-//======================================================================================================
-// 0.2 — FORCE-CLOSE ON SHUTDOWN
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_ForceCloseOnShutdown]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [SUPPORTIVE]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-192]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[0.2 force-close on shutdown — UNCALLED since v5.4.5 (persist-across-restart won) + body ROTTED vs the F.4c.3 Submit signature; rewrite gated on the .E.1 live-enable decision, TECH_DEBT-192]
+//======================================================================
+// [CODE]
+//======================================================================
 // Walk the OMS portfolio bitmap, submit a market sell for each open position
 // via the BinanceAdapter queue, then wait (with timeout) for the bitmap to
 // clear as fills arrive through the user-data WS → drainer → OnEvent path.
@@ -141,7 +176,6 @@ static inline bool EngineSharded_OrphanRecovery(
 // Architecture note: uses queue-based BinanceAdapter_SubmitMarketSell, NOT
 // direct BinanceOrderAPI_MarketSell on workers_api[0]. The worker thread
 // owns workers_api[0] and we'd race if we touched it directly.
-//======================================================================================================
 template <unsigned F>
 static inline int EngineSharded_ForceCloseOnShutdown(
     OrderManagerState<F>* oms,
@@ -254,10 +288,15 @@ static inline int EngineSharded_ForceCloseOnShutdown(
     }
     return remaining;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_ForceCloseOnShutdown]
+//======================================================================
 
-//======================================================================================================
-// 0.3 — PERIODIC RECONCILIATION (already implemented)
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[0.3 — periodic reconciliation (already implemented — lives in ReconciliationLoop.hpp)]
+//----------------------------------------------------------------------
 // Sharded already has this via ReconciliationLoop (see ReconciliationLoop.hpp,
 // started by EngineSharded_Run). The existing implementation is more
 // sophisticated than a naive balance comparison — it accounts for inflight
