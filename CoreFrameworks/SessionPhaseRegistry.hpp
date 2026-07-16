@@ -3,45 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SESSION PHASE REGISTRY — v5.15.5.B.5]
-//======================================================================================================
-// Closes TECH_DEBT-040: the 4-cfg-field cohort (session_asian/european/us/
-// overnight_mult) was an X-macro registry candidate carrying:
-//   1. ControllerConfig FPN_Binary<F> field declarations (4 rows)
-//   2. ControllerConfig_Default initial-value assignments (4 rows)
-//   3. CFG_PARSE_FPN parser entries (4 rows)
-//   4. SettingsPanel GUI rows (4 rows)
-//   5. Consumer-side 4-way if/else dispatch (3 sites: RebuildOneCore,
-//      ShardedSnapshot publisher, legacy PortfolioController)
-//   6. cfg.example operator documentation (4 rows)
-//
-// 6 site categories × 4 entries each = 24 mirror touchpoints per session-
-// phase change. Adding a 5th session (e.g., "ROLLOVER" for daily futures
-// rollover window) would require synchronizing ALL of those. Now: ONE row
-// in this registry; all sites auto-flow.
-//
-// Float-cohort cfg-registry variant (first reference). Distinct from the
-// boolean-bitmap variant of FOREACH_<DOMAIN>_CFG_FLAG (FOREACH_OPS_CFG_FLAG,
-// FOREACH_RISK_CFG_FLAG, etc.). Cohorts of FPN_Binary<F> cfg fields with a
-// SHARED SEMANTIC ROLE + uniform consumer dispatch get this treatment;
-// the storage is direct (no bit-packing) but multi-site sync is registry-
-// driven. Subsection in cfg-flag-eligibility-criteria.md captures the
-// float-cohort variant promotion criteria.
-//
-// Branchless consumer dispatch via SESSION_BY_HOUR[24] table-lookup:
-// pre-.B.5 consumers had a 4-way data-dependent if/else cascade
-// (`if (h < 7) ... else if (h < 13) ... else if (h < 20) ... else ...`).
-// Per CLAUDE.md item 28 (latency-vs-cache decision framework): data-
-// dependent branches on a per-cycle hour read mispredict ~25% at session
-// transitions; SESSION_BY_HOUR[h] table-lookup is 1 load + 0 branches.
-//
-// Cross-references:
-//   CLAUDE.md item 13 (X-macro registry pattern)
-//   CLAUDE.md item 19 (structural fix preferred)
-//   CLAUDE.md item 28 (latency-vs-cache decision framework)
-//   DESIGN_SPECS/cfg-flag-eligibility-criteria.md (float-cohort variant)
-//   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
-//   DOCS/TECH_DEBT.md TECH_DEBT-040 (✅ CLOSED v5.15.5.B.5)
+// [FILE]_[CoreFrameworks/SessionPhaseRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[session-phase registry — the float-cohort cfg variant + the branchless SESSION_BY_HOUR dispatch table]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_SESSION_PHASE]
 //======================================================================================================
 #ifndef SESSION_PHASE_REGISTRY_HPP
 #define SESSION_PHASE_REGISTRY_HPP
@@ -50,22 +18,31 @@
 
 namespace tt {
 
-//------------------------------------------------------------------------------
-// Tuple: X(NAME_UPPER, name_lower, START, END, DEFAULT_MULT, DOC)
-//   NAME_UPPER    — UPPER_SNAKE_CASE; produces SESSION_PHASE_<NAME_UPPER> enum
-//   name_lower    — lower_snake_case; produces session_<name_lower>_mult cfg field
-//   START         — inclusive start hour (UTC, 0-23)
-//   END           — exclusive end hour (UTC, 1-24)
-//   DEFAULT_MULT  — default gate multiplier for this session (cfg default value)
-//   DOC           — human description (operator docs + GUI tooltips)
-//
+//======================================================================
+// [REGISTRY]_[FOREACH_SESSION_PHASE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[DESIGN_SPEC]_[cfg-flag-eligibility-criteria]
+// [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-040]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[UTC session phases — one row = cfg field + default + parser + GUI + branchless dispatch + cfg.example]
+// [COLUMN]_[NAME_UPPER]_[UPPER_SNAKE_CASE; produces SESSION_PHASE_<NAME_UPPER> enum]
+// [COLUMN]_[name_lower]_[lower_snake_case; produces session_<name_lower>_mult cfg field]
+// [COLUMN]_[START]_[inclusive start hour (UTC, 0-23)]
+// [COLUMN]_[END]_[exclusive end hour (UTC, 1-24)]
+// [COLUMN]_[DEFAULT_MULT]_[default gate multiplier for this session (cfg default value)]
+// [COLUMN]_[DOC]_[human description (operator docs + GUI tooltips)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Coverage: START/END ranges MUST collectively cover [0, 24) with no gaps
 // or overlaps. Validated via static_asserts below.
 //
 // Adding a 5th session: append one row. ControllerConfig field + default
 // + parser + GUI + consumer dispatch + cfg.example all auto-flow via the
 // FOREACH_SESSION_PHASE expansions at each site.
-//------------------------------------------------------------------------------
 #define FOREACH_SESSION_PHASE(X)                                                                    \
     X(ASIAN,     asian,      0,  7, 1.5, "00:00-06:59 UTC; thin liquidity, wider gates")            \
     X(EUROPEAN,  european,   7, 13, 1.0, "07:00-12:59 UTC; London open, normal liquidity")          \
@@ -154,6 +131,53 @@ static_assert(SESSION_BY_HOUR[20] < SESSION_PHASE_COUNT, "SESSION_BY_HOUR[20] ou
 static_assert(SESSION_BY_HOUR[21] < SESSION_PHASE_COUNT, "SESSION_BY_HOUR[21] out of range");
 static_assert(SESSION_BY_HOUR[22] < SESSION_PHASE_COUNT, "SESSION_BY_HOUR[22] out of range");
 static_assert(SESSION_BY_HOUR[23] < SESSION_PHASE_COUNT, "SESSION_BY_HOUR[23] out of range");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[TECH_DEBT-040 close + the float-cohort variant + branchless dispatch rationale]
+//----------------------------------------------------------------------
+// Closes TECH_DEBT-040: the 4-cfg-field cohort (session_asian/european/us/
+// overnight_mult) was an X-macro registry candidate carrying:
+//   1. ControllerConfig FPN_Binary<F> field declarations (4 rows)
+//   2. ControllerConfig_Default initial-value assignments (4 rows)
+//   3. CFG_PARSE_FPN parser entries (4 rows)
+//   4. SettingsPanel GUI rows (4 rows)
+//   5. Consumer-side 4-way if/else dispatch (3 sites: RebuildOneCore,
+//      ShardedSnapshot publisher, legacy PortfolioController)
+//   6. cfg.example operator documentation (4 rows)
+//
+// 6 site categories × 4 entries each = 24 mirror touchpoints per session-
+// phase change. Adding a 5th session (e.g., "ROLLOVER" for daily futures
+// rollover window) would require synchronizing ALL of those. Now: ONE row
+// in this registry; all sites auto-flow.
+//
+// Float-cohort cfg-registry variant (first reference). Distinct from the
+// boolean-bitmap variant of FOREACH_<DOMAIN>_CFG_FLAG (FOREACH_OPS_CFG_FLAG,
+// FOREACH_RISK_CFG_FLAG, etc.). Cohorts of FPN_Binary<F> cfg fields with a
+// SHARED SEMANTIC ROLE + uniform consumer dispatch get this treatment;
+// the storage is direct (no bit-packing) but multi-site sync is registry-
+// driven. Subsection in cfg-flag-eligibility-criteria.md captures the
+// float-cohort variant promotion criteria.
+//
+// Branchless consumer dispatch via SESSION_BY_HOUR[24] table-lookup:
+// pre-.B.5 consumers had a 4-way data-dependent if/else cascade
+// (`if (h < 7) ... else if (h < 13) ... else if (h < 20) ... else ...`).
+// Per CLAUDE.md item 28 (latency-vs-cache decision framework): data-
+// dependent branches on a per-cycle hour read mispredict ~25% at session
+// transitions; SESSION_BY_HOUR[h] table-lookup is 1 load + 0 branches.
+//
+// Cross-references:
+//   CLAUDE.md item 13 (X-macro registry pattern)
+//   CLAUDE.md item 19 (structural fix preferred)
+//   CLAUDE.md item 28 (latency-vs-cache decision framework)
+//   DESIGN_SPECS/cfg-flag-eligibility-criteria.md (float-cohort variant)
+//   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
+//   DOCS/TECH_DEBT.md TECH_DEBT-040 (✅ CLOSED v5.15.5.B.5)
+//======================================================================
+// [DERIVED]   (tool-refreshed — ROW_COUNT/CONSUMERS generators land with the drift-gate generalization; empty skeleton is correct, D-327)
+//======================================================================
+// [END_REGISTRY]_[FOREACH_SESSION_PHASE]
+//======================================================================
 
 }  // namespace tt
 
