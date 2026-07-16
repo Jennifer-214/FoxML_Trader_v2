@@ -1,14 +1,20 @@
 // Copyright (c) 2026 Jennifer Lewis. All rights reserved.
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 //======================================================================================================
-// [STRATEGY CATEGORIES]
+// [FILE]_[Strategies/StrategyCategories.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[capability-based strategy classification bitmap (tiered CORE/SPECIFIC/EXPERIMENTAL bits) — CfgFieldRegistry's applies_to_strategy_cat column]
+// [CONTAINS]
+//   - [ENUM]_[StrategyCategory]
 //======================================================================================================
 // v5.15.5.F.4b — categorical-applicability bitmap enum for strategy classification.
 // Used by CfgFieldRegistry's applies_to_strategy_cat column to declare WHICH KIND
 // of strategy a cfg field is relevant to (capability-based, not instance-named).
 //
 // Pattern: DESIGN_SPECS/categorical-tag-applicability-pattern.md
-// CLAUDE.md item 19 (structural fix preferred), item 20 (BITMAP_*).
+// Structural-fix-preferred gradient + bitmap-flag-api discipline.
 //
 // VOCABULARY DISCIPLINE (5 rules per spec):
 //   1. Functional capability, not implementation detail
@@ -24,6 +30,16 @@
 #pragma once
 #include <cstdint>
 
+//======================================================================
+// [ENUM]_[StrategyCategory]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [REFERENCE]_[DESIGN_SPEC]_[[categorical-tag-applicability-pattern] [bitmap-overflow-protection-discipline]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[capability bits, tier-allocated (CORE 0-7 / SPECIFIC 8-23 / EXPERIMENTAL 24-31) + ALL sentinel; vocabulary rules live in the file banner]
+//======================================================================
+// [CODE]
+//======================================================================
 enum StrategyCategory : uint32_t {
     // ─── TIER CORE (bits 0-7) — stable across major versions ─────────────────
     STRAT_CAT_STATIC_RULES         = 1u << 0,    // SimpleDip, EmaCross — fixed-rule strategies
@@ -54,3 +70,8 @@ enum StrategyCategory : uint32_t {
 static_assert(STRAT_CAT_USES_FLOW_DATA < (1ull << 32),
               "StrategyCategory bitmap overflowed uint32_t — upgrade to uint64_t "
               "OR split orthogonal axes into separate enums");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_ENUM]_[StrategyCategory]
+//======================================================================

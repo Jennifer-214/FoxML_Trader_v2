@@ -1,7 +1,13 @@
 // Copyright (c) 2026 Jennifer Lewis. All rights reserved.
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 //======================================================================================================
-// [OPERATIONAL MODE CATEGORIES]
+// [FILE]_[Strategies/OpModeCategories.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[categorical-applicability bitmap for operational modes (LIVE/PAPER/BACKTEST/TRAINING/OFFLINE) — CfgFieldRegistry's applies_to_op_mode_cat column]
+// [CONTAINS]
+//   - [ENUM]_[OpModeCategory]
 //======================================================================================================
 // v5.15.5.F.4b — categorical-applicability bitmap enum for operational mode classification.
 // Used by CfgFieldRegistry's applies_to_op_mode_cat column to declare WHICH MODES a cfg
@@ -16,6 +22,16 @@
 #pragma once
 #include <cstdint>
 
+//======================================================================
+// [ENUM]_[OpModeCategory]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [REFERENCE]_[DESIGN_SPEC]_[[categorical-tag-applicability-pattern] [bitmap-overflow-protection-discipline]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[op-mode applicability bits + the ALL sentinel; overflow static_assert guards the uint16_t]
+//======================================================================
+// [CODE]
+//======================================================================
 enum OpModeCategory : uint16_t {
     OP_MODE_CAT_LIVE        = 1u << 0,    // live trading via Binance REST
     OP_MODE_CAT_PAPER       = 1u << 1,    // paper trading (default)
@@ -30,3 +46,8 @@ enum OpModeCategory : uint16_t {
 // Bitmap overflow guard per DESIGN_SPECS/bitmap-overflow-protection-discipline.md
 static_assert(OP_MODE_CAT_OFFLINE < (1u << 16),
               "OpModeCategory bitmap overflowed uint16_t — upgrade to uint32_t");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_ENUM]_[OpModeCategory]
+//======================================================================

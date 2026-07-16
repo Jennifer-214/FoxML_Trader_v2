@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SIMPLE DIP STRATEGY]
+// [FILE]_[Strategies/SimpleDip.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the simplest strategy — buy X% below the recent high, fixed TP/SL, no regression/adaptation/regime; the 4-lifecycle stubs keep the dispatcher uniform]
+// [CONTAINS]
+//   - [STRUCT]_[SimpleDipState]
+//   - [FUNCTION]_[SimpleDip_BuySignal]   (Init / Adapt / ExitAdjustSharded stubs share the file)
 //======================================================================================================
 // buy when price drops X% below the recent high. fixed TP/SL. no regression,
 // no adaptation, no regime dependency. just price action.
@@ -20,10 +27,30 @@
 #include "../CoreFrameworks/ControllerConfig.hpp"
 #include "StrategyInterface.hpp"
 
+//======================================================================
+// [STRUCT]_[SimpleDipState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[rolling recent-high + init flag — the whole strategy state]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct SimpleDipState {
     FPN_Binary<F> recent_high;      // rolling max price (updated every slow path)
     int initialized;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[32B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[SimpleDipState]
+//======================================================================
 
 //======================================================================================================
 // INIT — called once after warmup
@@ -52,7 +79,15 @@ inline void SimpleDip_Adapt(SimpleDipState<F> *state, FPN_Binary<F> current_pric
 
 //======================================================================================================
 // BUY SIGNAL — buy when price is X% below the recent high
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[SimpleDip_BuySignal]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[buy gate = recent_high * (1 - entry_offset_pct); volume gate = avg * mult; buys below]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline BuySideGateConditions<F> SimpleDip_BuySignal(
     SimpleDipState<F> *state, const RollingStats<F> *rolling,
@@ -107,3 +142,8 @@ inline void SimpleDip_ExitAdjustSharded(
     (void)current_price; (void)rolling; (void)cfg;
 }
 } // namespace tt
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SimpleDip_BuySignal]
+//======================================================================
