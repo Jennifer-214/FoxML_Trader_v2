@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [METRIC COMPUTE HELPERS — v5.8.4c]
+// [FILE]_[CoreFrameworks/MetricCompute.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [BACKTEST] [FLOAT_DISPLAY_ONLY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the performance-metric SSoT — one canonical form per metric, shared by backtest + live TUI/snapshot]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_BACKTEST_METRIC]
 //======================================================================================================
 // Single source of truth for backtest + live performance metrics.
 // Called from BacktestStats_Compute / BacktestStats_ComputeFromEquity
@@ -100,13 +106,18 @@ static inline void MaxDrawdown_UpdateIncremental(
     if (dd_pct > *max_dd_pct) *max_dd_pct = dd_pct;
 }
 
-//======================================================================================================
-// [BACKTEST METRIC REGISTRY — v5.8.4c X-macro]
-//======================================================================================================
-// Display-side registry: each row pairs a metric name (for stamps,
-// JSONL output, GUI labels) with a printf format string. Adding a new
-// metric to display panels is a 1-line append.
-//
+//======================================================================
+// [REGISTRY]_[FOREACH_BACKTEST_METRIC]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[display-metadata registry — metric name + printf format; a new display metric = 1 appended row]
+// [COLUMN]_[id]_[UPPER token -> METRIC_<id> enum value (append-only order)]
+// [COLUMN]_[name]_[string key for stamps / JSONL / GUI labels / name lookup]
+// [COLUMN]_[printf_format]_[display format string]
+//======================================================================
+// [CODE]
+//======================================================================
 // IDs are append-only — never reorder. The values match the offset of
 // the corresponding field on BacktestStats; tests pin a few for
 // stability but most metrics are accessed via name lookup not enum ID,
@@ -117,9 +128,6 @@ static inline void MaxDrawdown_UpdateIncremental(
 // input shapes (equity arrays vs scalar inputs) and aren't dispatched
 // uniformly. This registry is for METADATA (name + format), not for
 // dispatch.
-//
-// Row format: X(<id>, <name>, <printf_format>)
-//======================================================================================================
 #define FOREACH_BACKTEST_METRIC(X) \
     X(SHARPE_RATIO,     "sharpe_ratio",     "%.3f") \
     X(PROFIT_FACTOR,    "profit_factor",    "%.2f") \
@@ -154,3 +162,8 @@ static_assert(sizeof(BACKTEST_METRIC_NAMES) / sizeof(*BACKTEST_METRIC_NAMES) == 
               "BACKTEST_METRIC_NAMES out of sync with NUM_BACKTEST_METRICS");
 static_assert(sizeof(BACKTEST_METRIC_FORMATS) / sizeof(*BACKTEST_METRIC_FORMATS) == NUM_BACKTEST_METRICS,
               "BACKTEST_METRIC_FORMATS out of sync with NUM_BACKTEST_METRICS");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_BACKTEST_METRIC]
+//======================================================================
