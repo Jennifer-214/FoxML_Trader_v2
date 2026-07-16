@@ -3,7 +3,23 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CONTROLLER CONFIG]
+// [FILE]_[CoreFrameworks/ControllerConfig.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE cfg model — ControllerConfig (hashed RAW into model lineage) + per-node overrides/PerNodeCfg + capital-fault gates + resolve/normalize/parse pipeline]
+// [CONTAINS]
+//   - [REGISTRY]_[PER_NODE_OVERRIDE_FIELDS]   (+ INT + BITMAP_DOMAINS sisters; PerNodeOverrides storage)
+//   - [STRUCT]_[PerNodeCfg]
+//   - [STRUCT]_[ControllerConfig]
+//   - [FUNCTION]_[ControllerConfig_CapitalRangeSweep] (+ cfg_compile_ok / cfg_capital_gate_ok /
+//       capital_value_out_of_range / cfg_capture_node_{money,raw}_override capital-fault family)
+//   - [FUNCTION]_[Fee_Compute]
+//   - [FUNCTION]_[ControllerConfig_ResolveForCore]
+//   - [FUNCTION]_[ControllerConfig_PopulateCoresFromFlat]
+//   - [FUNCTION]_[ControllerConfig_Default]
+//   - [FUNCTION]_[ControllerConfig_NormalizeForMode]  (+ IsLiveCapital)
+//   - [FUNCTION]_[ControllerConfig_Load]
 //======================================================================================================
 // configuration for the portfolio controller - all tunable parameters in one
 // place parsed from a simple key=value text file, no JSON, no external libs
@@ -49,7 +65,7 @@ constexpr uint8_t TRADING_MODE_SHADOW = 2; // RESERVED/UNIMPLEMENTED (NEW-1) —
 // trading_mode=LIVE flips model_verify_strict 0→1 unless operator
 // explicitly set it).
 //
-// Cohort discipline per CLAUDE.md item 20 (bitmap-flag-api): bit-pack
+// Cohort discipline per bitmap-flag-api: bit-pack
 // from start; adding next tracked key = 1 bit + 1 parser-side OR. 16 bits
 // of headroom; expected to grow with future mode-specific flip rules.
 constexpr uint16_t MASK_CFG_KEY_MODEL_VERIFY_STRICT = 1u << 0;
@@ -57,9 +73,20 @@ constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
 constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alias precedence: use_real_money promotes trading_mode=LIVE only if this bit is unset
 // Reserved bits 3..15 for future tracked keys.
 
-//======================================================================================================
-// [PER-CORE OVERRIDES — v4.0]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[PER_NODE_OVERRIDE_FIELDS]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW]]
+// [REFERENCE]_[INVARIANT]_[H22]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-node override registry (v4.0) — PCT/RAW + INT + BITMAP-domain sisters; struct decl, zeroing, resolver, parser ALL auto-derive; PerNodeOverrides is the generated storage]
+// [COLUMN]_[PCT(name)]_[percentage field; cfg writes 4.0, stored 0.04 (/100 at load)]
+// [COLUMN]_[RAW(name)]_[raw FPN_Binary field; parsed as-is]
+// [COLUMN]_[INT(name)]_[uint32_t; 0 = inherit global (sentinel)]
+// [COLUMN]_[BITMAP X(domain, DOMAIN, storage, FOREACH)]_[per-bit override pair: values + set-mask; branchless bit-select at resolve]
+//======================================================================
+// [CODE]
+//======================================================================
 // One slot per execution core (16 max). Each field shadows a same-named
 // `ControllerConfig` field; non-zero overrides the global; zero (default)
 // means "inherit from global". Resolved per-core via
@@ -242,6 +269,11 @@ template <unsigned F> struct PerNodeOverrides {
     PER_NODE_OVERRIDE_BITMAP_DOMAINS(_DECL_OV_BITMAP_FIELDS)
 #undef _DECL_OV_BITMAP_FIELDS
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[PER_NODE_OVERRIDE_FIELDS]
+//======================================================================
 
 // v5.9.2c — CSV tick-sort validation modes (csv_sort_check_mode field).
 // Backtest path checks tick timestamp ordering post-load; live engine
@@ -250,9 +282,17 @@ template <unsigned F> struct PerNodeOverrides {
 #define CSV_SORT_STRICT 1   // refuse load on any violation
 #define CSV_SORT_AUTO   2   // sort in-place + INFO log of violation count
 
-//======================================================================================================
-// [PER-CORE CONFIG — v5.15.5.F.4c.3 first canonical application of per-instance registry pattern]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[PerNodeCfg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [DATA_ORIENTED_DESIGN]]
+// [REFERENCE]_[INVARIANT]_[[H17] [H22]]
+// [REFERENCE]_[DESIGN_SPEC]_[[manual-fields-inventory-pattern] [meta-registry-pattern-for-codebase-registry-discipline]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-node cfg slice (v5.15.5.F.4c.3 first canonical of the per-instance registry pattern) — body is X-macro ONLY (H17, CI-enforced) + size-bound static_asserts close the manual-field hole]
+//======================================================================
+// [CODE]
+//======================================================================
 // 79 per-core scalar fields. Types preserved exactly from the existing flat
 // ControllerConfig<F> declarations. .F.4c.3 Step 2 shadow window: BOTH the
 // flat ControllerConfig<F>::<field> AND the per-core cfg.nodes[c].<field>
@@ -271,7 +311,7 @@ template <unsigned F> struct PerNodeOverrides {
 template <unsigned F>
 struct alignas(64) PerNodeCfg {
     // === Cfg surface (92 fields) — auto-generated from FOREACH_PER_NODE_FIELD_TYPE ===
-    // WIP2d-0 structural fix per CLAUDE.md item 31 + DESIGN_PHILOSOPHY § 1.5
+    // WIP2d-0 structural fix per H15 meta-registry discipline + DESIGN_PHILOSOPHY § 1.5
     // (framework discipline) + H17 STRONG codification:
     //
     // Single-path field declaration via X-macro; manual cfg-surface field
@@ -297,7 +337,7 @@ struct alignas(64) PerNodeCfg {
     FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
 
     // === Runtime bitmap cluster (5 fields — auto-generated via FOREACH_PER_NODE_DOMAIN_BITMAP meta-registry) ===
-    // WIP2d-0.B (.F.4c.3) — meta-registry pattern applied per CLAUDE.md item 31 framework
+    // WIP2d-0.B (.F.4c.3) — meta-registry pattern applied per H15 framework
     // discipline. The 5 bitmap fields are RUNTIME representations of FOREACH_*_CFG_FLAG bits,
     // rebuilt from flat KIND_BOOL rows at slow-path rebuild (WIP2e adds the rebuild walker).
     //
@@ -339,14 +379,32 @@ static_assert(sizeof(PerNodeCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
               "MANUAL FIELD ADDED to struct body outside FOREACH_PER_NODE_CFG_FIELD / "
               "FOREACH_PER_NODE_DOMAIN_BITMAP. Per H17 discipline: add field via X-macro row, "
               "or document exemption in MANUAL_FIELDS_INVENTORY.md.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[1344B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[21]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[PerNodeCfg]
+//======================================================================
 
-//======================================================================================================
-// [CONFIG]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[ControllerConfig]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING] [DETERMINISM]]
+// [REFERENCE]_[INVARIANT]_[[H12] [H9] [H17]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the flat cfg root — SHA-256 hashed RAW into model lineage (ctor zero-fills padding: identical VALUES must hash identically); nodes[] per-node slices + flat fields in shadow-window migration]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct ControllerConfig {
   // F-076 / PARITY-035: zero-init the WHOLE struct (fields + inter-field padding) at
-  // construction. The model fingerprint hashes this struct RAW (BacktestPanels.hpp:3157
-  // -> Fingerprint.hpp:180, SHA-256 over &cfg, sizeof(cfg)); the hash is embedded in the
+  // construction. The model fingerprint hashes this struct RAW (the training-side
+  // fingerprint call into Backtest/Fingerprint.hpp — SHA-256 over &cfg, sizeof(cfg)); the hash is embedded in the
   // trained model (stored at serve in ModelInference.hpp, but NOT recomputed/gated there
   // today — ③ D-254 corrected the old "re-checked at serve" claim: it's lineage metadata,
   // not an enforced gate). Inter-field padding around
@@ -478,7 +536,7 @@ template <unsigned F> struct ControllerConfig {
   // ROR / tick-rate features at training time.
   // v5.15.5.F.4d.1.B.4 Cx-D extension: sl_cooldown_cycles + sl_cooldown_base + sl_cooldown_extra
   // + idle_reset_cycles manual decls DELETED; auto-generated via FOREACH_GLOBAL_CFG_FIELD walker
-  // at line ~1326 per H17 STRONG→HARD progression at global surface (Phase Cx-D extension).
+  // via the FOREACH_GLOBAL_CFG_FIELD expansion below per H17 STRONG→HARD progression at global surface (Phase Cx-D extension).
   // Cx-U sister: sl_cooldown_adaptive (was BOOL int) H14-migrated to MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED bit.
   // momentum strategy
   FPN_Binary<F>
@@ -656,7 +714,7 @@ template <unsigned F> struct ControllerConfig {
   // conf_now ∈ [0.001, 0.3] against ml_buy_threshold ∈ [0.5, 0.7] → factor=0
   // always when composite enabled). Replaced by v5.14.9.A FOREACH_DEGRADATION_CURVE
   // registry + curve dispatch. Field kept for back-compat until v5.14.9.B
-  // replaces the caller at StrategyParameters.hpp:1291-1322. After .B ships,
+  // replaces the risk_scale_by_confidence caller block in StrategyParameters.hpp. After .B ships,
   // this field is unused; back-compat parser shim translates legacy cfg
   // `risk_scale_by_confidence=N` → `risk_degradation_curve=N` (boot WARN).
   // Will be deleted in a future cleanup ship.
@@ -684,7 +742,7 @@ template <unsigned F> struct ControllerConfig {
   //   one arm's barriers; exact train-serve match per trade), 3=BOTH_BLEND_DRIVES
   //   (blend drives + dominant logged for shadow-mode A/B compare),
   //   4=BOTH_DOMINANT_DRIVES (dominant drives + blend logged for shadow-mode).
-  // Per CLAUDE.md item 13 X-macro: enum + ToString/FromString + branchless
+  // Per the X-macro registry discipline: enum + ToString/FromString + branchless
   // dispatch via MODE_FLAGS[] table auto-generated from FOREACH_BARRIER_BLEND_MODE
   // (see ML_Headers/BarrierBlendModeRegistry.hpp).
   // Per-core override: node_N_barrier_blend_mode (INT-enum, mirrors
@@ -705,7 +763,7 @@ template <unsigned F> struct ControllerConfig {
   // v5.14.1 — composite confidence (IC × Freshness × Capacity × Stability)
   // Default 0 = legacy 3-factor ConfidenceScorer_Compute (bytewise-unchanged
   // pre-v5.14.1 behavior). Flip to 1 to swap in the 4-factor formula at the
-  // risk_scale_by_confidence sizing site (StrategyParameters.hpp:1099).
+  // risk_scale_by_confidence sizing site (in StrategyParameters.hpp).
   // Pairs with: confidence_freshness_tau_secs (decay constant),
   // confidence_capacity_target_dollars (0=unbounded), confidence_rmse_baseline
   // (training-time RMSE for stability normalization).
@@ -843,7 +901,7 @@ template <unsigned F> struct ControllerConfig {
   // when training/evaluating a model. Live engine reads via expected.cfg
   // mismatch checks (NodeModelZoo).
   // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — manual `FPN_Binary<F> held_out_fraction;` decl REMOVED;
-  // auto-gen via FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) at line 1338 (Path α)
+  // auto-gen via the FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) expansion below (Path α)
   // covers the field declaration from the new registry row at CfgFieldRegistry.hpp Validation.
   // v5.2.0 (held-out gate Phase 1) — model attestation infrastructure.
   // Each .bin model can have a paired .stamp file with hash+signature
@@ -1130,7 +1188,7 @@ template <unsigned F> struct ControllerConfig {
   // training / parallel CSV / larger budgets.
   //
   // Thread counts (default=1 matches current hardcoded behavior at
-  // BacktestEngine.hpp:1352, 1638). Setting >1 breaks bytewise reproducibility;
+  // the WF + HeldOut xgb-param sites in BacktestEngine.hpp). Setting >1 breaks bytewise reproducibility;
   // boot-time WARN fires when operator sets >1 to make the tradeoff explicit.
   // v5.11.41 — Multi-Horizon parallelism cap. Worker spawns
   //   min(N_horizons, multi_horizon_max_threads) pthreads, each running a
@@ -1303,17 +1361,38 @@ template <unsigned F> struct ControllerConfig {
   // through the registry).
   //
   // Step 0.5b.B closure: 48 manual cfg field decls atomically replaced by this single X-macro
-  // invocation. CI Check 9 (LANDED v5.15.5.F.4d.1.B.3 WIP-9 at CfgFieldRegistry.hpp:1156-1180) static_asserts STAMP_BOUND_CFG_DERIVED cohort
+  // invocation. CI Check 9 (LANDED v5.15.5.F.4d.1.B.3 WIP-9; the static_assert block in CfgFieldRegistry.hpp) static_asserts STAMP_BOUND_CFG_DERIVED cohort
   // coverage. Closes TECH_DEBT-093 (gap_acceptable_threshold manual storage cleanup);
   // ALSO closes 47 sibling cohort manual decls in same atomic edit (struct-gen + bulk delete).
   //
   // SEE DESIGN_SPECS/universal-cfg-field-registry-pattern.md for the full pattern doc.
   FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[53056B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[829]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ControllerConfig]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[ControllerConfig_CapitalRangeSweep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING] [BOOT_TIME]]
+// [REFERENCE]_[INVARIANT]_[[H12] [H9]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the capital-fault family (D-254/D-256) — fingerprint size-pin, cfg_compile_ok predicate + cfg_capital_gate_ok report, value-range sweep with compile-time variant-coverage guards; refuse-never-clamp]
+//======================================================================
+// [CODE]
+//======================================================================
 // ③ D-254 — FINGERPRINT SIZE-PIN (H9/H12; closes the F-I gap the pre-coding gate found).
-// ControllerConfig<F> is hashed RAW into the model lineage (BacktestPanels.hpp:3157 ->
-// Fingerprint.hpp:180, SHA-256 over &cfg + sizeof). sizeof is F-independent (every field is a
+// ControllerConfig<F> is hashed RAW into the model lineage (the training-side fingerprint call ->
+// Backtest/Fingerprint.hpp, SHA-256 over &cfg + sizeof). sizeof is F-independent (every field is a
 // 16B Money/FPN_Binary). This exact pin makes a future layout change a COMPILE ERROR instead of
 // a silent fingerprint shift: when it fires, the layout (hence the lineage hash) changed — bump
 // N to the new sizeof AND regen the backtest golden (free per project_no_live_models_dev_test_only).
@@ -1504,11 +1583,23 @@ inline FPN_Binary<F> cfg_capture_node_raw_override(ControllerConfig<F>& cfg, con
     }
     return FPN_FromDouble<F>(d);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ControllerConfig_CapitalRangeSweep]
+//======================================================================
 
-//======================================================================================================
-// [FEE_COMPUTE — Phase 8 maker/taker helper]
-//======================================================================================================
-// Apply the correct fee rate based on whether the fill was a maker or taker.
+//======================================================================
+// [FUNCTION]_[Fee_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING]]
+// [REFERENCE]_[CLASS]_[26]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[maker/taker fee SSoT — GLOBAL-ONLY scope: per-node paths read o->pre_resolved.fee_rate instead (decision-time binding; Check 10 enforces)]
+//======================================================================
+// [CODE]
+//======================================================================
+// Phase 8 — apply the correct fee rate based on whether the fill was a maker or taker.
 // Single source of truth for fee math on a per-fill basis.
 //
 // Caller-side discipline (CLAUDE.md "Maker/Taker Accuracy" invariant in c7):
@@ -1527,10 +1618,10 @@ inline FPN_Binary<F> cfg_capture_node_raw_override(ControllerConfig<F>& cfg, con
 // This helper reads cfg->fee_rate_{maker,taker} which are GLOBAL fields, NOT
 // per-core. Sharded per-core code paths MUST NOT call Fee_Compute() expecting
 // per-core fee rates — instead read from o->pre_resolved.fee_rate (decision-time
-// data binding pattern; captured at submit per Order.hpp:358-361). Class 26
+// data binding pattern; captured at submit via Order_BindPreResolved in Order.hpp). Class 26
 // sub-shape B prevention. Fee_Compute() remains canonical for:
-//   - tests (Phase 8 Maker/Taker Fee Accuracy invariant verification at
-//     tests/controller_test.cpp:5051-5052)
+//   - tests (the Phase 8 Maker/Taker Fee Accuracy invariant verification in
+//     tests/controller_test.cpp)
 //   - legacy single_core PortfolioController paths
 //   - global accounting display
 // New per-core consumer MUST NOT introduce a Fee_Compute() call site without
@@ -1542,9 +1633,22 @@ inline Money Fee_Compute(const ControllerConfig<F>* cfg, Money notional, int is_
     return Money_Mul(notional, rate);
 }
 
-//======================================================================================================
-// [PER-CORE CFG RESOLVE — v4.0]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Fee_Compute]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ControllerConfig_ResolveForCore]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [SLOW_PATH]]
+// [REFERENCE]_[INVARIANT]_[H22]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[global + node_overrides[node_id] -> a fully-resolved stack-local cfg; non-zero overrides win, bitmap domains via branchless bit-select]
+//======================================================================
+// [CODE]
+//======================================================================
 // Build a stack-local copy of the global cfg with per-core overrides applied.
 // Strategies receive the resolved config and don't need to know about the
 // override mechanism. Cost: one ~12.5KB struct copy + 18 conditionals per
@@ -1591,11 +1695,22 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 #undef _RESOLVE_OV_BITMAP_FIELDS
     return resolved;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ControllerConfig_ResolveForCore]
+//======================================================================
 
-//======================================================================================================
-// [PER-CORE SHADOW POPULATE — v5.15.5.F.4c.3 Step 2]
-//======================================================================================================
-// Copies the resolved per-core view (flat fields + legacy PerNodeOverrides
+//======================================================================
+// [FUNCTION]_[ControllerConfig_PopulateCoresFromFlat]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Step-2 shadow populate — resolved flat view copied into cfg->nodes[c] (X-macro walker + NO_FLAT_FIELD sync + legacy capital-array LAST-WINS merge); dissolves when the [core N] parser lands]
+//======================================================================
+// [CODE]
+//======================================================================
+// v5.15.5.F.4c.3 Step 2 — copies the resolved per-core view (flat fields + legacy PerNodeOverrides
 // merged via ControllerConfig_ResolveForCore) into cfg->nodes[c] for each
 // execution core. This is the Step 2 SHADOW transition: nodes[c] is populated
 // from the flat path so consumers migrating to read cfg.nodes[c].<field> see
@@ -1666,23 +1781,36 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
         cfg->nodes[c].ops_cfg_flags       = resolved.ops_cfg_flags;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ControllerConfig_PopulateCoresFromFlat]
+//======================================================================
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ControllerConfig_Default]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the default cfg — registry auto-defaults (global + per-node mirrors) first, then the documented KEEP manual lines where registry defaults diverge on purpose]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   ControllerConfig<F> cfg;
 
   // v5.15.5.F.4d.1.B.3 Step 1.6.1 — auto-defaults for all 48 global cfg fields via
   // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT). Sister to struct-gen invocation
-  // at line 1338+ (Step 0.5b.B). Closes TECH_DEBT-093 (gap_acceptable_threshold full closure)
+  // via the FOREACH_GLOBAL_CFG_FIELD default-emit walk (Step 0.5b.B). Closes TECH_DEBT-093 (gap_acceptable_threshold full closure)
   // + future-headache reducer for all 48 globals. Manual default lines DELETED below
   // (Python script /tmp/delete_manual_defaults.py).
   //
   // tt::cfg_assign_field reads descriptor.payload per KIND dispatch (FPN_Binary<F> from as_double;
   // int/uint{8,16,32,64}_t from as_int or as_bool; KIND_INT_ENUM from as_int_enum).
-  // Defaults baked in registry rows at CfgFieldRegistry.hpp:255-419 — single source of truth.
+  // Defaults baked in the FOREACH_GLOBAL_CFG_FIELD rows in CfgFieldRegistry.hpp — single source of truth.
   FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
   // v5.15.5.F.4d.1.B.4 Phase Cx-E.1 — sister walker for per-core registry rows' global manual struct
-  // field defaults (lands the "future work" noted at CfgFieldRegistry.hpp:739 comment). Per Registry
+  // field defaults (lands the "future work" noted in CfgFieldRegistry.hpp). Per Registry
   // default precedence v1.1: registry payload becomes single source of truth; manual init lines for
   // per-core registry rows (regime_hysteresis + exit_threshold + sl_cooldown_cycles + 9 others) deleted
   // at Phase Cx-E.3 atomically with this walker landing. Walker skips NO_FLAT_FIELD rows (strategy) via
@@ -1948,13 +2076,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // pre-v5.10 hardcoded sites:
   //   - Train Model worker (BacktestPanels.hpp:2056) was nthread=4 for
   //     faster GUI iter (exploratory; reproducibility not required)
-  //   - WF + HeldOut (BacktestEngine.hpp:1352, 1638) were nthread=1
+  //   - WF + HeldOut (their xgb-param sites in BacktestEngine.hpp) were nthread=1
   //     for deterministic per-fold output (validation parity)
   // Setting these NOW separable. Operators wanting all-deterministic
   // workflow set both to 1; operators with bigger boxes can bump both.
   // v5.15.5.F.4d.1.B.3 Step 8.6: xgb_train_nthread MATCH — registry INT(4) == manual 4; DELETED.
   // xgb_eval_nthread DIFFER — registry INT(4); manual=1 (determinism for validation parity).
-  cfg.xgb_eval_nthread        = 1;   // KEEP — registry INT(4) breaks per-fold determinism; manual=1 matches BacktestEngine.hpp:1352, 1638 pre-v5.10
+  cfg.xgb_eval_nthread        = 1;   // KEEP — registry INT(4) breaks per-fold determinism; manual=1 matches the WF + HeldOut sites in BacktestEngine.hpp pre-v5.10
   // csv_load_workers DIFFER — registry INT(4); manual=1 (serial CSV load for back-compat).
   cfg.csv_load_workers        = 1;   // KEEP — registry INT(4) would parallelize CSV load; manual=1 matches pre-v5.10 serial behavior
   // multi_horizon_max_threads DIFFER — registry INT(4); manual=1 (CRITICAL: v5.11.45 segfault avoidance).
@@ -2152,9 +2280,21 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 
   return cfg;
 }
-//======================================================================================================
-// [CONFIG NORMALIZE — v5.15.4]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ControllerConfig_Default]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ControllerConfig_NormalizeForMode]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v5.15.4 mode-normalize — LIVE flips defaults stricter unless the operator set the key explicitly (cfg_keys_explicit bitmap); IsLiveCapital (THE capital-authority predicate, Class-47 close) shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // Post-parse pass that applies mode-specific default tightening when the
 // operator hasn't explicitly set a key. Honors explicit overrides via
 // `cfg_keys_explicit` bitmap.
@@ -2212,13 +2352,24 @@ template <unsigned F>
 inline bool ControllerConfig_IsLiveCapital(const ControllerConfig<F>& cfg) {
     return cfg.trading_mode == TRADING_MODE_LIVE;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ControllerConfig_NormalizeForMode]
+//======================================================================
 
-//======================================================================================================
-// [CONFIG PARSER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ControllerConfig_Load]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME] [PARSER]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[key=value parser (no JSON, no libs) — registry walker + legacy CFG_PARSE_* macros + per-node override channel + alias tombstones; ends with PopulateCoresFromFlat + the capital range sweep]
+//======================================================================
+// [CODE]
+//======================================================================
 // simple key=value text file parser, no JSON, no external libs
 // returns defaults if file is missing or unreadable
-//======================================================================================================
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   ControllerConfig<F> cfg = ControllerConfig_Default<F>();
@@ -3408,6 +3559,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
   return cfg;
 }
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ControllerConfig_Load]
+//======================================================================
 #endif // CONTROLLER_CONFIG_HPP
