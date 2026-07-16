@@ -3,17 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [RISK_CFG_FLAG REGISTRY — v5.14.9.F.3]
-//======================================================================================================
-// Fourth domain registry. Risk/sizing-mechanic boolean cfg flags. uint8_t bitmap.
-//
-// Pattern: heterogeneous-registry-pattern.md DOMAIN SPLIT form (Form 2).
-// Cross-ref:
-//   - DESIGN_SPECS/heterogeneous-registry-pattern.md (decision framework)
-//   - DESIGN_SPECS/bitmap-flag-api.md (BITMAP_* primitives)
-//   - DOCS/TECH_DEBT.md TECH_DEBT-023 (cfg-flag-eligibility criteria)
-//
-// All 3 entries pass cfg-flag-eligibility: boot-frozen, engine-wide, slow-path-tolerant.
+// [FILE]_[CoreFrameworks/RiskCfgFlagRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[risk-domain boolean cfg flags — uint8_t bitmap registry + generated enum/masks/autopopulate]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_RISK_CFG_FLAG]
 //======================================================================================================
 #ifndef RISK_CFG_FLAG_REGISTRY_HPP
 #define RISK_CFG_FLAG_REGISTRY_HPP
@@ -21,7 +17,23 @@
 #include <cstdint>
 #include "../MemHeaders/BitmapMacros.hpp"
 
-// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
+//======================================================================
+// [REGISTRY]_[FOREACH_RISK_CFG_FLAG]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [REFERENCE]_[DESIGN_SPEC]_[heterogeneous-registry-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-023]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[risk/sizing-mechanic boolean cfg flags — one row = enum bit + mask + parser route + GUI render]
+// [COLUMN]_[NAME]_[flag identifier -> RISK_CFG_<NAME> enum bit + MASK_RISK_CFG_<NAME>]   (5-col tuple, v5.14.9.F.5+)
+// [COLUMN]_[legacy_field]_[cfg-file key the parser walker matches]
+// [COLUMN]_[display_label]_[GUI display string]
+// [COLUMN]_[section]_[GUI bucket]
+// [COLUMN]_[doc]_[operator-facing description]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_RISK_CFG_FLAG(X)                                                                                                                                                          \
     X(KILL_SWITCH_ENABLED,            kill_switch_enabled,            "Enabled",                "Kill Switch",     "engine-wide loss-cap kill switch (safety-first)")                      \
     X(VOL_SIZING_ENABLED,             vol_sizing_enabled,             "Vol Sizing##bool",       "Vol Sizing",      "scale trade size by realized vol (legacy ATR)")                       \
@@ -54,5 +66,24 @@ FOREACH_RISK_CFG_FLAG(X_GEN_RISK_CFG_MASK)
         _new_flags |= ((_sl_cooldown_adaptive) ? MASK_RISK_CFG_SL_COOLDOWN_ADAPTIVE_ENABLED   : (uint8_t)0u);                                                       \
         (target_flags) = _new_flags;                                                                                                                                \
     } while (0)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Fourth domain registry. Risk/sizing-mechanic boolean cfg flags. uint8_t bitmap.
+//
+// Pattern: heterogeneous-registry-pattern.md DOMAIN SPLIT form (Form 2).
+// Cross-ref:
+//   - DESIGN_SPECS/heterogeneous-registry-pattern.md (decision framework)
+//   - DESIGN_SPECS/bitmap-flag-api.md (BITMAP_* primitives)
+//   - DOCS/TECH_DEBT.md TECH_DEBT-023 (cfg-flag-eligibility criteria)
+//
+// All entries pass cfg-flag-eligibility: boot-frozen, engine-wide, slow-path-tolerant.
+//======================================================================
+// [DERIVED]   (tool-refreshed — ROW_COUNT/CONSUMERS generators land with the drift-gate generalization; empty skeleton is correct, D-327)
+//======================================================================
+// [END_REGISTRY]_[FOREACH_RISK_CFG_FLAG]
+//======================================================================
 
 #endif // RISK_CFG_FLAG_REGISTRY_HPP
