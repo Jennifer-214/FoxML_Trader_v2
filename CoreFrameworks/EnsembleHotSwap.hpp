@@ -3,8 +3,34 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [v5.14.2 — ENSEMBLE HOT-SWAP HELPER]
-//
+// [FILE]_[CoreFrameworks/EnsembleHotSwap.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the atomic ensemble hot-swap helper — same-thread Free->Init->Load->PostLoadSetup; test-isolatable split]
+// [CONTAINS]
+//   - [FUNCTION]_[EngineSharded_HotSwapEnsemble]
+//======================================================================================================
+
+#pragma once
+
+#include "ControllerConfig.hpp"
+#include "../ML_Headers/NodeModelZoo.hpp"
+
+#include <stdio.h>
+
+namespace tt {
+
+//======================================================================
+// [FUNCTION]_[EngineSharded_HotSwapEnsemble]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH] [CRITICAL]]
+// [REFERENCE]_[PARITY]_[PARITY-009]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[atomic ensemble swap on the owning slow-path thread — cache horizons, Free, Init, LoadFromCfg, full PostLoadSetup]
+//======================================================================
+// [CODE]
+//======================================================================
 // Atomic ensemble model swap. Replaces the v5.10.0c REFUSE path that
 // rejected hot-swap when ensemble inference was active. Same-thread
 // (slow-path c is single-reader/writer for its own ezoo); brief
@@ -19,17 +45,7 @@
 // exercise the helper without dragging in the full sharded engine
 // (Binance, Notify, Depth recorder globals, etc.). Boundary-stable
 // refactor — caller side unchanged; only the storage location moved.
-//======================================================================================================
-
-#pragma once
-
-#include "ControllerConfig.hpp"
-#include "../ML_Headers/NodeModelZoo.hpp"
-
-#include <stdio.h>
-
-namespace tt {
-
+//
 // Caller responsibilities:
 //   - swap_ezoo must be non-null and own its handle storage
 //   - Open-position gate already passed (caller checks
@@ -128,5 +144,10 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
 
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_HotSwapEnsemble]
+//======================================================================
 
 }  // namespace tt
