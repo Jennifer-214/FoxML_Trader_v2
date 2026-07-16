@@ -3,32 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [EXCHANGE ADAPTER]
-//
-// Generic exchange interface used by the OMS. Concrete adapters wrap a
-// specific exchange API behind this interface so the OMS can stay
-// exchange-agnostic. Phase 02 ships BinanceAdapter; phase 08 adds a
-// MockAdapter for tests; future phases can add Coinbase, Kraken, etc.
-//
-// The interface is a struct of function pointers + an opaque ctx pointer.
-// This is the C-style polymorphism the codebase already uses everywhere
-// (no virtuals, no classes — see CLAUDE.md "Code Conventions").
-//
-// Async submission contract:
-//   submit_market_buy / submit_market_sell return IMMEDIATELY after
-//   enqueueing the request to the adapter's worker thread. They do NOT
-//   block on the network. The supplied callback fires (from the worker
-//   thread) once the order completes — success or failure. Callers must
-//   make the callback thread-safe; the OMS does this by pushing a
-//   CMD_FILL_RESULT into its single-consumer result queue.
-//
-// Sync calls (get_balances, query_order):
-//   These are slow-path queries called from controller-side code, NOT
-//   from any hot path. They block on the network. Used by reconciliation
-//   (phase 05) and startup balance sync, not on every tick.
-//
-// OrderResult is non-templated POD so it can flow through the OMS
-// command queue without depending on the FPN_Binary<F> width.
+// [FILE]_[CoreFrameworks/ExchangeAdapter.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the exchange-agnostic OMS seam — fn-pointer interface + the OrderResult POD adapters fill]
+// [CONTAINS]
+//   - [STRUCT]_[OrderResult]
+//   - [STRUCT]_[ExchangeAdapter]
 //======================================================================================================
 
 #pragma once
@@ -37,6 +19,16 @@
 
 namespace tt {
 
+//======================================================================
+// [STRUCT]_[OrderResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [FLOAT_DISPLAY_ONLY]]
+// [SYNC]_[SPSC]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one submission's venue outcome — a MESSAGE copied by value through the OMS command ring (never shared in place), non-templated at any Money width]
+//======================================================================
+// [CODE]
+//======================================================================
 // Result of a single order submission. Populated by the adapter worker
 // thread and passed to the OrderCallback. POD so it can be memcpy'd into
 // SPSCRing slots without ceremony.
@@ -56,6 +48,11 @@ struct OrderResult {
     double   commission;          // Binance "n" — commission paid this fill (in commission_asset units)
     char     commission_asset[8]; // "BNB", "USDT", "BTC" — Binance "N" field
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[OrderResult]
+//======================================================================
 
 // Callback signature: the adapter calls this when an order completes.
 // user_ctx is the opaque pointer the OMS passed when submitting (typically
@@ -66,6 +63,16 @@ typedef void (*OrderCallback)(void* user_ctx,
                                uint64_t client_id,
                                const OrderResult* result);
 
+//======================================================================
+// [STRUCT]_[ExchangeAdapter]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [ENTRY_POINT]]
+// [REFERENCE]_[INVARIANT]_[H2]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fn-pointer + opaque-ctx exchange interface — C-style polymorphism, no virtuals; adapters embed by value in the OMS]
+//======================================================================
+// [CODE]
+//======================================================================
 // Generic adapter interface. Each concrete adapter (BinanceAdapter,
 // MockAdapter, etc.) populates a value of this struct via its _Get function
 // and the OMS embeds it by value inside OrderManagerState. The ctx pointer
@@ -101,5 +108,37 @@ struct ExchangeAdapter {
     // Opaque adapter state. Set once at construction, read by every method.
     void* ctx;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[the interface contract]
+//----------------------------------------------------------------------
+// Generic exchange interface used by the OMS. Concrete adapters wrap a
+// specific exchange API behind this interface so the OMS can stay
+// exchange-agnostic. Phase 02 ships BinanceAdapter; phase 08 adds a
+// MockAdapter for tests; future phases can add Coinbase, Kraken, etc.
+//
+// The interface is a struct of function pointers + an opaque ctx pointer.
+// This is the C-style polymorphism the codebase already uses everywhere
+// (no virtuals, no classes — see CLAUDE.md "Code Conventions").
+//
+// Async submission contract:
+//   submit_market_buy / submit_market_sell return IMMEDIATELY after
+//   enqueueing the request to the adapter's worker thread. They do NOT
+//   block on the network. The supplied callback fires (from the worker
+//   thread) once the order completes — success or failure. Callers must
+//   make the callback thread-safe; the OMS does this by pushing a
+//   CMD_FILL_RESULT into its single-consumer result queue.
+//
+// Sync calls (get_balances, query_order):
+//   These are slow-path queries called from controller-side code, NOT
+//   from any hot path. They block on the network. Used by reconciliation
+//   (phase 05) and startup balance sync, not on every tick.
+//
+// OrderResult is non-templated POD so it can flow through the OMS
+// command queue without depending on the FPN_Binary<F> width.
+//======================================================================
+// [END_STRUCT]_[ExchangeAdapter]
+//======================================================================
 
 }  // namespace tt
