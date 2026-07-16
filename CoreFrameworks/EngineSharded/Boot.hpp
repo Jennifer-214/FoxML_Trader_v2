@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [EngineSharded/Boot.hpp — boot-time globals + signal handler]
+// [FILE]_[CoreFrameworks/EngineSharded/Boot.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[boot-time shared globals + the SIGINT/SIGTERM handler — C++17 inline single-storage discipline]
+// [REFERENCE]_[DESIGN_SPEC]_[cpp17-inline-variable-for-header-shared-state]
+// [CONTAINS]
+//   - [FUNCTION]_[EngineSharded_SignalHandler]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
@@ -31,18 +38,18 @@
 
 namespace tt {
 
-//======================================================================================================
-// [Shutdown flag — set by SIGINT handler; polled by all engine threads]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[shutdown flag — set by SIGINT handler; polled by all engine threads]
+//------------------------------------------------------------------------------------------------------
 // File-shared shutdown flag the SIGINT handler flips. The handler is installed
 // only while EngineSharded_Run is active, so this flag is only set when the
 // sharded engine is the one that wants to know about it.
 //======================================================================================================
 inline volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
 
-//======================================================================================================
-// [GUI quit pointer — signal-lockstep with SDL GUI thread]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[GUI quit pointer — signal-lockstep with SDL GUI thread]
+//------------------------------------------------------------------------------------------------------
 // Pointer to the GUI's quit_requested flag, set by EngineSharded_Run after
 // g_shared is constructed. The signal handler writes through it so SDL's GUI
 // thread (which loops on quit_requested) exits in lockstep with the engine
@@ -53,9 +60,15 @@ inline volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
 //======================================================================================================
 inline volatile sig_atomic_t* g_engine_sharded_gui_quit_ptr = nullptr;
 
-//======================================================================================================
-// [Signal handler — SIGINT/SIGTERM → set both flags]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_SignalHandler]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[SIGINT/SIGTERM -> set both flags — engine threads + the SDL GUI exit in lockstep off one signal]
+//======================================================================
+// [CODE]
+//======================================================================
 extern "C" inline void EngineSharded_SignalHandler(int sig) {
     (void)sig;
     g_engine_sharded_shutdown = 1;
@@ -63,5 +76,10 @@ extern "C" inline void EngineSharded_SignalHandler(int sig) {
         *g_engine_sharded_gui_quit_ptr = 1;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_SignalHandler]
+//======================================================================
 
 } // namespace tt
