@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0
-//
-// CoreFrameworks/EngineCommon.hpp
-//
+
+//======================================================================================================
+// [FILE]_[CoreFrameworks/EngineCommon.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BOOT_TIME] [ML_INFERENCE]]
+// [REFERENCE]_[DESIGN_SPEC]_[shared-helper-extract-for-train-serve-mirror-close]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[shared train-serve helpers — LIVE + BACKTEST both delegate per-node boot and slow-path-cycle here; closes the execution-layer Class-18 mirror (PARITY-026..032) by construction]
+// [CONTAINS]
+//   - [FUNCTION]_[EngineCommon_ApplyBnbDiscount]
+//   - [FUNCTION]_[EngineCommon_BootGlobal]
+//   - [FUNCTION]_[EngineCommon_BootPerCore]
+//   - [FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
+//   - [FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
+//======================================================================================================
 // Shared train-serve helpers for the per-core lifecycle.
 // First canonical of the shared-helper-extract-for-train-serve-mirror-close pattern
 // (DESIGN_SPECS/refactor-patterns/shared-helper-extract-for-train-serve-mirror-close.md).
@@ -69,7 +81,8 @@
 // (not [MAX_EXECUTION_NODES]).
 //
 // Live engine doesn't have this constraint: live inference accesses
-// state.nodes[c].regime_state per-core directly (canonical site EngineSharded:3194).
+// state.nodes[c].regime_state per-core directly (canonical site: the exit-submit
+// block in EngineCommon_SlowPathCycleOneCore below).
 //
 // Rationale for core 0 specifically: preserves sample_regimes=0 semantic that
 // fc_ctx.regime_state held pre-.B.4. Future-readable: grep BACKTEST_REGIME_SAMPLE_CORE
@@ -80,7 +93,7 @@
 
 #include <cstdint>      // uint64_t (used in slow-path-cycle helper signatures for ts_us)
 #include <cstdio>       // fprintf (used in ApplyBnbDiscount stderr message)
-#include <x86intrin.h>  // __rdtsc (slow-path latency sampling — sister to EngineSharded.hpp:82)
+#include <x86intrin.h>  // __rdtsc (slow-path latency sampling — sister to the run loop's rdtsc bracketing in EngineSharded/Run.hpp)
 
 // Phase B includes (added as helper bodies land; sister-convention relative paths):
 //   B.0 ApplyBnbDiscount → ControllerConfig.hpp (cfg.nodes[c].fee_rate_*) + FixedPointN.hpp (FPN_Binary<F> arithmetic)
@@ -150,6 +163,15 @@ constexpr int BACKTEST_REGIME_SAMPLE_CORE = 0;
 //    Body extracted from EngineSharded.hpp:690-699 (verified at HEAD 64e7101).
 //    Loop uses MAX_EXECUTION_NODES (compile-time max), not cfg.num_execution_nodes —
 //    preserves exact pre-extract semantic for any future-activated cores.
+//======================================================================
+// [FUNCTION]_[EngineCommon_ApplyBnbDiscount]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CFG_FLOW]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE one non-const-cfg helper — one-shot BNB 0.75x fee discount onto every per-node fee_rate_*; PARITY-030 closure]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
     if (cfg.pay_fees_in_bnb) {
@@ -163,6 +185,11 @@ inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
             " (verify Binance UI 'pay fees in BNB' is also on)\n");
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_ApplyBnbDiscount]
+//======================================================================
 
 // 2. EngineCommon_BootGlobal
 //    const cfg ONE-SHOT global boot work (post-BNB-mutation):
@@ -179,6 +206,15 @@ inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
 //    Body extracted from EngineSharded.hpp:742 + :749-753 + :760-762 (verified at HEAD 64e7101 +
 //    Phase A Step A.4 enumeration). Closes PARITY-026 (kill_switch) + per-core regime init parity
 //    sister-discipline (backtest already does the same at BacktestSharded.hpp:198 + :210-212).
+//======================================================================
+// [FUNCTION]_[EngineCommon_BootGlobal]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one-shot global boot — EventLoopState_Init + kill-switch configure (PARITY-026) + per-node Regime_Init; statics stay in the caller (Decision G)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
                                      EventLoopState<F>& state,
@@ -199,6 +235,11 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
         Regime_Init(&state.nodes[i].regime_state, (int)cfg.nodes[i].regime_hysteresis);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_BootGlobal]
+//======================================================================
 
 // 3. EngineCommon_BootPerCore
 //    const cfg per-core boot:
@@ -231,6 +272,16 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //
 //    Signature (8 args per v1.7 O1 — drops unused oms; adds caller-owned
 //    statics + nullable ML zoos + caller-precomputed node_balance):
+//======================================================================
+// [FUNCTION]_[EngineCommon_BootPerCore]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [ML_INFERENCE]]
+// [REFERENCE]_[INVARIANT]_[H22]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-node boot — ring/core init, register, strategy wire, full ML branch (zoo load + validate + confidence + turnover), Strategy_InitPerCore, permission=0; PARITY-027/028/029 closure]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                                       int c,
@@ -438,6 +489,11 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
     //   during first ticks; now matches LIVE warmup discipline.
     ExecutionCore_SetPermission(&core, 0);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_BootPerCore]
+//======================================================================
 
 // 4. EngineCommon_SlowPathCycleOneCore
 //    const cfg per-core slow-path-cycle body (atomic per-core unit):
@@ -484,6 +540,16 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 //   MASK_GATE_CFG_DEPTH_ENABLED) — when disabled, helper substitutes FPN_Zero values
 //   regardless of what's in the passed BookSnapshot. Matches current LIVE :3052-3058
 //   pattern verbatim per bytewise-identical math discipline.
+//======================================================================
+// [FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [REFERENCE]_[INVARIANT]_[[H8] [H22]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE per-node slow-path body (LIVE per-thread; BACKTEST via the fan wrapper) — rolling update, rebuild, seqlock push, ML exit submit, time-exit/trail/breakeven, warmup permission; PARITY-031/032 closure]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                                                int c,
@@ -504,8 +570,9 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     uint64_t _sec_t_other_start = _sp_t0;
 
     // v1.7.1 M2.B + v1.7.3 N-2 + D1-B: refresh engine-wide gate cache at body
-    // entry BEFORE BITMAP_IS_SET reads downstream. Sister consumer pattern at
-    // ControllerEventLoop.hpp:2335 + :3555. Macro signature `(state.global_gate_state,
+    // entry BEFORE BITMAP_IS_SET reads downstream. Sister consumer pattern:
+    // ControllerEventLoop.hpp's two SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE
+    // call sites. Macro signature `(state.global_gate_state,
     // cfg)` per v1.7.3 N-2 correction — was incorrectly `(state, cfg)` which
     // would COMPILE FAIL since EventLoopState<F> has no `.flags` member.
     SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state.global_gate_state, cfg);
@@ -737,10 +804,11 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // MASK_BREAKEVEN_ON_PROFIT bit = 0 → branchless BITMAP_IS_SET returns 0
     // → no call (bytewise-identical to pre-`.B.4` per_node_slow behavior).
     // Cohorts with cfg flag SET → cached bit = 1 → fires (5+ year correctness
-    // gap closed for per_node_slow arch). Sister consumers at
-    // ControllerEventLoop.hpp:2344 (MASK_LAZY_REBUILD_ACTIVE) + :3558
-    // (MASK_WS_FLATTEN_ACTIVE). D1-B is legitimately NEW slow-path-gate
-    // application — wrapper at :3799 reads cfg directly, NOT via cache.
+    // gap closed for per_node_slow arch). Sister consumers in
+    // ControllerEventLoop.hpp: the MASK_LAZY_REBUILD_ACTIVE and
+    // MASK_WS_FLATTEN_ACTIVE cached-gate reads. D1-B is legitimately NEW
+    // slow-path-gate application — the RebuildAllParameters wrapper reads
+    // cfg directly, NOT via cache.
     if (BITMAP_IS_SET(state.global_gate_state.flags, MASK_BREAKEVEN_ON_PROFIT)
         && price_d > 0.01) {
         EventLoop_BreakevenOnProfitOneCore(&state, cfg, price_d, c);
@@ -804,6 +872,11 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // + producer threads respectively. They submit via
     // OMS_PushSubmit (Phase B) — thread-safe.
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
+//======================================================================
 
 // 5. EngineCommon_SlowPathCycleAllCores
 //    const cfg fan wrapper (~10 LOC for-loop calling SlowPathCycleOneCore N times).
@@ -814,6 +887,15 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
 //    Live does NOT call this (each per_node_slow thread calls OneCore directly).
 //
 //    Signature (v1.7.3 N-6 consequential: 8 args; pass-through to OneCore expanded args):
+//======================================================================
+// [FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[BACKTEST fan wrapper — loops SlowPathCycleOneCore over registered nodes once per tick; LIVE never calls it (per-node threads call OneCore directly)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                                 EventLoopState<F>& state,
@@ -838,5 +920,10 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                            price, volume, ts_us, now_tick, depth);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
+//======================================================================
 
 }  // namespace tt
