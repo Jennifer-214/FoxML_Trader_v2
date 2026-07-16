@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [MOMENTUM / TREND-FOLLOWING STRATEGY]
+// [FILE]_[Strategies/Momentum.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[trend-following — buys breakouts ABOVE avg + stddev*mult (gate_direction=1); tighter SL / wider TP; P&L regression adapts the breakout threshold]
+// [CONTAINS]
+//   - [STRUCT]_[MomentumState]
+//   - [FUNCTION]_[Momentum_Adapt]        (Init shares the file head)
+//   - [FUNCTION]_[Momentum_BuySignal]
+//   - [FUNCTION]_[Momentum_ExitAdjust]   (+ ExitAdjustSharded ratchet twin)
 //======================================================================================================
 // the complement to mean reversion — buys breakouts instead of dips
 // activates when regime detector identifies a strong directional trend
@@ -36,9 +45,15 @@
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 
-//======================================================================================================
-// [STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[MomentumState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P&L + price regression feeders, adaptive breakout/volume multipliers, initial-conds anchor for the max_shift clamp]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct MomentumState {
     RegressionFeederX<F> feeder;       // P&L regression for adaptive filters
     RORRegressor<F> ror;               // slope-of-slopes
@@ -49,10 +64,21 @@ template <unsigned F> struct MomentumState {
     int has_regression;
     RegressionFeederX<F> price_feeder; // for trailing R² computation
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[704B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[11]
+// [STRADDLE]_[last_regression@496]
+//======================================================================
+// [END_STRUCT]_[MomentumState]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// INIT
+//------------------------------------------------------------------------------
 // called at warmup completion. computes initial breakout buy conditions from rolling stats.
 // buy_price = avg + (stddev * breakout_mult) — price must rise ABOVE this to trigger BuyGate
 //======================================================================================================
@@ -79,9 +105,16 @@ inline void Momentum_Init(MomentumState<F> *state,
     state->has_regression = 0;
 }
 
-//======================================================================================================
-// [ADAPT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Momentum_Adapt]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[idle squeeze (branchless mask) + P&L regression -> breakout_mult; positive slope lowers the threshold (enter earlier), negative raises it]
+//======================================================================
+// [CODE]
+//======================================================================
 // same feedback loop as MR but tuning breakout_mult instead of offset:
 //   1. idle squeeze: lower breakout threshold when no positions and price is running
 //   2. P&L regression: adjust breakout_mult based on profitability
@@ -160,10 +193,22 @@ inline void Momentum_Adapt(MomentumState<F> *state,
 
     (void)current_price;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Momentum_Adapt]
+//======================================================================
 
-//======================================================================================================
-// [BUY SIGNAL]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Momentum_BuySignal]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[breakout gate = base_avg + stddev*mult (buy ABOVE); regression shift (max_shift-clamped, branchless confidence mask) + long-trend and R2-floor vetoes]
+//======================================================================
+// [CODE]
+//======================================================================
 // computes breakout buy conditions: buy_price = avg + (stddev * breakout_mult)
 // gate_direction = 1 means BuyGate checks price >= buy_price (buy above)
 //======================================================================================================
@@ -237,10 +282,21 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
 
     return conds;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Momentum_BuySignal]
+//======================================================================
 
-//======================================================================================================
-// [EXIT ADJUST]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Momentum_ExitAdjust]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[hold_score = SNR*R2 gates the trail — tighter SL (momentum_sl_mult) + wider TP + 2:1 floor; ExitAdjustSharded (ratchet_sl twin, fee-floor capped) shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // momentum trailing: tighter SL trail (failures reverse fast), wider TP trail (let runs extend)
 // uses the same hold_score = SNR * R² pattern as MR but with different multipliers
 // the key difference: momentum uses cfg->momentum_sl_mult (tighter) instead of cfg->sl_trail_mult
@@ -301,9 +357,9 @@ inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, Money current_price,
     }
 }
 
-//======================================================================================================
-// [EXIT ADJUST — sharded, ratchet_sl path]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// EXIT ADJUST — sharded, ratchet_sl path
+//------------------------------------------------------------------------------
 // v5.4.0 Phase 2.3: sharded equivalent of Momentum_ExitAdjust above.
 // Same shape as MeanReversion_ExitAdjustSharded but uses momentum_sl_mult
 // (the tighter momentum-specific SL trail) instead of sl_trail_mult.
@@ -376,5 +432,10 @@ inline void Momentum_ExitAdjustSharded(
     }
 }
 } // namespace tt
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Momentum_ExitAdjust]
+//======================================================================
 
 #endif // MOMENTUM_HPP
