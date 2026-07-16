@@ -3,38 +3,19 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CORE LATENCY STATS]
-//
-// Per-execution-core latency tracking. One NodeLatencyStats instance lives on
-// each ExecutionCore. The execution core (single writer) samples its own tick
-// cost when the enabled flag is set; the controller (single reader) snapshots
-// the stats on its slow path for display in the TUI/GUI.
-//
-// Why per-core (not global):
-//   - Each core has its own L1 cache, so the stats live next to the execution
-//     state — zero false sharing across cores
-//   - Single-writer means no atomics needed inside the struct except for the
-//     enabled flag
-//   - The controller can compare per-core histograms and spot the slow core,
-//     not just see one aggregate "engine is slow" number
-//
-// Hot path overhead:
-//   - Disabled (default): 1 atomic load + 1 branch (predicted not-taken). ~1ns.
-//   - Enabled: 2 rdtsc + 1 branch + 1 store + 1 ring write. ~25-30ns.
-//   - On a 60ns hot path, enabled mode is a 50% overhead. Use it for
-//     diagnostics, not always-on production monitoring (or accept the cost).
-//
-// Storage:
-//   - Running scalars: count, sum, min, max
-//   - Ring buffer of recent 256 samples for percentile estimation
-//   - Last-sample timestamp for "stale" detection in the TUI
-//
-// Percentile accuracy:
-//   - The ring buffer holds the most recent 256 samples (or all samples if
-//     fewer have been collected). p50/p95/p99 are computed by sorting the
-//     ring on demand. This is a sliding window, so the percentiles reflect
-//     RECENT behavior, not lifetime behavior.
-//   - Lifetime min/max/avg are tracked separately and don't decay.
+// [FILE]_[CoreFrameworks/NodeLatencyStats.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCOPE]_[CORE]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-core hot-path latency tracking — single-writer sampling + controller-side percentile snapshot]
+// [CONTAINS]
+//   - [STRUCT]_[NodeLatencyStats]
+//   - [STRUCT]_[NodeLatencySnapshot]
+//   - [FUNCTION]_[NodeLatencyStats_Init]
+//   - [FUNCTION]_[NodeLatencyStats_Reset]
+//   - [FUNCTION]_[NodeLatencyStats_Sample]
+//   - [FUNCTION]_[NodeLatencyStats_Snapshot]
 //======================================================================================================
 
 #pragma once
@@ -45,13 +26,19 @@
 
 namespace tt {
 
-//======================================================================================================
-// [STRUCT]
-//======================================================================================================
-// 64-byte aligned to keep its cache line clean. The struct is single-writer
-// (the execution core itself) so the only atomic is the enabled flag, which
-// the controller flips from outside.
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[NodeLatencyStats]
+//----------------------------------------------------------------------
+// [TAG]_[[MONITORING_PLANE] [DATA_ORIENTED_DESIGN]]
+// [SCOPE]_[CORE]
+// [THREAD]_[[HOT_WRITER] [SLOW_READER]]
+// [SYNC]_[ATOMIC]
+// [REFERENCE]_[INVARIANT]_[H6]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-core latency accumulator — running scalars + 256-sample ring + lifetime log-bucket histogram]
+//======================================================================
+// [CODE]
+//======================================================================
 struct alignas(64) NodeLatencyStats {
     static constexpr int RING_SIZE = 256;  // power of 2 for cheap masking
     static_assert((RING_SIZE & (RING_SIZE - 1)) == 0, "RING_SIZE must be power of 2");
@@ -84,14 +71,67 @@ struct alignas(64) NodeLatencyStats {
     // p50/p95/p99 across all samples (not just the last 256).
     uint64_t lifetime_buckets[HIST_BUCKETS];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[role + why per-core]
+//----------------------------------------------------------------------
+// Per-execution-core latency tracking. One NodeLatencyStats instance lives on
+// each ExecutionCore. The execution core (single writer) samples its own tick
+// cost when the enabled flag is set; the controller (single reader) snapshots
+// the stats on its slow path for display in the TUI/GUI.
+//
+// 64-byte aligned to keep its cache line clean. The struct is single-writer
+// (the execution core itself) so the only atomic is the enabled flag, which
+// the controller flips from outside.
+//
+// Why per-core (not global):
+//   - Each core has its own L1 cache, so the stats live next to the execution
+//     state — zero false sharing across cores
+//   - Single-writer means no atomics needed inside the struct except for the
+//     enabled flag
+//   - The controller can compare per-core histograms and spot the slow core,
+//     not just see one aggregate "engine is slow" number
+//======================================================================
+// [COMMENT]_[hot-path overhead + storage + percentile accuracy]
+//----------------------------------------------------------------------
+// Hot path overhead:
+//   - Disabled (default): 1 atomic load + 1 branch (predicted not-taken). ~1ns.
+//   - Enabled: 2 rdtsc + 1 branch + 1 store + 1 ring write. ~25-30ns.
+//   - On a 60ns hot path, enabled mode is a 50% overhead. Use it for
+//     diagnostics, not always-on production monitoring (or accept the cost).
+//
+// Storage:
+//   - Running scalars: count, sum, min, max
+//   - Ring buffer of recent 256 samples for percentile estimation
+//   - Last-sample timestamp for "stale" detection in the TUI
+//
+// Percentile accuracy:
+//   - The ring buffer holds the most recent 256 samples (or all samples if
+//     fewer have been collected). p50/p95/p99 are computed by sorting the
+//     ring on demand. This is a sliding window, so the percentiles reflect
+//     RECENT behavior, not lifetime behavior.
+//   - Lifetime min/max/avg are tracked separately and don't decay.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[1600B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[25]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[NodeLatencyStats]
+//======================================================================
 
-//======================================================================================================
-// [SNAPSHOT STRUCT]
-//======================================================================================================
-// Read-only view returned by NodeLatencyStats_Snapshot. Computed values are
-// converted to nanoseconds at the call site (the snapshot function takes the
-// TSC frequency in GHz so it can do the conversion in one place).
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[NodeLatencySnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[MONITORING_PLANE] [FLOAT_DISPLAY_ONLY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[read-only percentile view returned by Snapshot — ns conversions for TUI/GUI display]
+//======================================================================
+// [CODE]
+//======================================================================
 struct NodeLatencySnapshot {
     int      enabled;            // 1 if stats are currently being collected
     uint64_t total_count;        // lifetime sample count
@@ -117,14 +157,27 @@ struct NodeLatencySnapshot {
     double   lifetime_p95_ns;
     double   lifetime_p99_ns;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Read-only view returned by NodeLatencyStats_Snapshot. Computed values are
+// converted to nanoseconds at the call site (the snapshot function takes the
+// TSC frequency in GHz so it can do the conversion in one place).
+//======================================================================
+// [END_STRUCT]_[NodeLatencySnapshot]
+//======================================================================
 
-//======================================================================================================
-// [INIT / RESET]
-//======================================================================================================
-// Init zeros everything and leaves stats DISABLED. Reset clears the running
-// scalars + ring but does NOT change the enabled state — the caller can reset
-// stats mid-run without disabling them.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeLatencyStats_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero everything, stats DISABLED]
+//======================================================================
+// [CODE]
+//======================================================================
 inline void NodeLatencyStats_Init(NodeLatencyStats* s) {
     s->enabled.store(0, std::memory_order_relaxed);
     s->total_count = 0;
@@ -136,7 +189,27 @@ inline void NodeLatencyStats_Init(NodeLatencyStats* s) {
     for (int i = 0; i < NodeLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
     for (int i = 0; i < NodeLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[init + reset semantics — shared with Reset below]
+//----------------------------------------------------------------------
+// Init zeros everything and leaves stats DISABLED. Reset clears the running
+// scalars + ring but does NOT change the enabled state — the caller can reset
+// stats mid-run without disabling them.
+//======================================================================
+// [END_FUNCTION]_[NodeLatencyStats_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[NodeLatencyStats_Reset]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[clear scalars + ring, PRESERVE the enabled state — mid-run reset without disabling]
+//======================================================================
+// [CODE]
+//======================================================================
 inline void NodeLatencyStats_Reset(NodeLatencyStats* s) {
     s->total_count = 0;
     s->total_cycles = 0;
@@ -147,6 +220,11 @@ inline void NodeLatencyStats_Reset(NodeLatencyStats* s) {
     for (int i = 0; i < NodeLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
     for (int i = 0; i < NodeLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NodeLatencyStats_Reset]
+//======================================================================
 
 inline void NodeLatencyStats_Enable(NodeLatencyStats* s) {
     s->enabled.store(1, std::memory_order_release);
@@ -156,16 +234,15 @@ inline void NodeLatencyStats_Disable(NodeLatencyStats* s) {
     s->enabled.store(0, std::memory_order_release);
 }
 
-//======================================================================================================
-// [SAMPLE — HOT PATH, single writer]
-//======================================================================================================
-// Called from inside ExecutionCore_Tick when enabled. Single writer = no
-// atomics. The controller never writes to these fields, only reads them
-// during snapshot computation, so the relaxed reads are safe.
-//
-// `cycles` is the rdtsc delta of the work being measured. `now_tsc` is the
-// rdtsc reading at sample time, used for "last seen" tracking in the TUI.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeLatencyStats_Sample]
+//----------------------------------------------------------------------
+// [TAG]_[[HOT_PATH] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[hot-path sample record — scalars + ring write + log-bucket increment; single writer, no atomics]
+//======================================================================
+// [CODE]
+//======================================================================
 __attribute__((always_inline))
 static inline void NodeLatencyStats_Sample(NodeLatencyStats* s, uint64_t cycles, uint64_t now_tsc) {
     s->total_count++;
@@ -184,17 +261,31 @@ static inline void NodeLatencyStats_Sample(NodeLatencyStats* s, uint64_t cycles,
     if (bucket >= NodeLatencyStats::HIST_BUCKETS) bucket = NodeLatencyStats::HIST_BUCKETS - 1;
     s->lifetime_buckets[bucket]++;
 }
-
-//======================================================================================================
-// [SNAPSHOT — slow path, controller side]
-//======================================================================================================
-// Copies the ring into a local array, sorts it, and computes percentiles.
-// O(N log N) where N=256, so ~2µs per call on a typical CPU. Cheap enough to
-// run on the controller's slow path every snapshot rebuild.
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Called from inside ExecutionCore_Tick when enabled. Single writer = no
+// atomics. The controller never writes to these fields, only reads them
+// during snapshot computation, so the relaxed reads are safe.
 //
-// tsc_ghz is the calibrated TSC frequency for cycle→ns conversion. Pass 0 to
-// skip the conversion (cycle counts only).
-//======================================================================================================
+// `cycles` is the rdtsc delta of the work being measured. `now_tsc` is the
+// rdtsc reading at sample time, used for "last seen" tracking in the TUI.
+//======================================================================
+// [END_FUNCTION]_[NodeLatencyStats_Sample]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[NodeLatencyStats_Snapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[SLOW_PATH] [MONITORING_PLANE] [FLOAT_DISPLAY_ONLY]]
+// [COMPLEXITY]_[O(N log N), N=256 — ~2us per call; slow-path budget]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[controller-side percentile snapshot — sort the recent ring + walk the lifetime histogram]
+//======================================================================
+// [CODE]
+//======================================================================
 inline NodeLatencySnapshot NodeLatencyStats_Snapshot(const NodeLatencyStats* s, double tsc_ghz) {
     NodeLatencySnapshot out{};
     out.enabled = s->enabled.load(std::memory_order_acquire);
@@ -256,5 +347,19 @@ inline NodeLatencySnapshot NodeLatencyStats_Snapshot(const NodeLatencyStats* s, 
     out.lifetime_p99_ns = lifetime_pct(0.99);
     return out;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Copies the ring into a local array, sorts it, and computes percentiles.
+// O(N log N) where N=256, so ~2µs per call on a typical CPU. Cheap enough to
+// run on the controller's slow path every snapshot rebuild.
+//
+// tsc_ghz is the calibrated TSC frequency for cycle→ns conversion. Pass 0 to
+// skip the conversion (cycle counts only).
+//======================================================================
+// [END_FUNCTION]_[NodeLatencyStats_Snapshot]
+//======================================================================
 
 }  // namespace tt
