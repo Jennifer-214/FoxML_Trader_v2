@@ -3,17 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [OPS_CFG_FLAG REGISTRY — v5.14.9.F.3]
-//======================================================================================================
-// Fifth domain registry. Operational-mechanic boolean cfg flags. uint8_t bitmap.
-//
-// Pattern: heterogeneous-registry-pattern.md DOMAIN SPLIT form (Form 2).
-// Cross-ref:
-//   - DESIGN_SPECS/heterogeneous-registry-pattern.md (decision framework)
-//   - DESIGN_SPECS/bitmap-flag-api.md (BITMAP_* primitives)
-//   - DOCS/TECH_DEBT.md TECH_DEBT-023 (cfg-flag-eligibility criteria)
-//
-// Both entries pass cfg-flag-eligibility: boot-frozen, engine-wide, boot-only-read.
+// [FILE]_[CoreFrameworks/OpsCfgFlagRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[operational-domain boolean cfg flags — uint8_t bitmap registry + generated enum/masks]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_OPS_CFG_FLAG]
 //======================================================================================================
 #ifndef OPS_CFG_FLAG_REGISTRY_HPP
 #define OPS_CFG_FLAG_REGISTRY_HPP
@@ -21,8 +17,23 @@
 #include <cstdint>
 #include "../MemHeaders/BitmapMacros.hpp"
 
-// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
-//
+//======================================================================
+// [REGISTRY]_[FOREACH_OPS_CFG_FLAG]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
+// [REFERENCE]_[DESIGN_SPEC]_[heterogeneous-registry-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-023]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[operational-mechanic boolean cfg flags — one row = enum bit + mask + parser route + GUI render]
+// [COLUMN]_[NAME]_[flag identifier -> OPS_CFG_<NAME> enum bit + MASK_OPS_CFG_<NAME>]   (5-col tuple, v5.14.9.F.5+)
+// [COLUMN]_[legacy_field]_[cfg-file key the parser walker matches]
+// [COLUMN]_[display_label]_[GUI display string]
+// [COLUMN]_[section]_[GUI bucket]
+// [COLUMN]_[doc]_[operator-facing description]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.15.5.A.7 — Cohort-migrated 2 orphan ack flags from direct int cfg fields:
 //   - acknowledge_inference_cfg_drift  (was ControllerConfig.hpp:861 int field; v5.9.5i)
 //   - acknowledge_cross_binary_version_drift (was :853 int field; v5.9.4)
@@ -71,5 +82,24 @@ FOREACH_OPS_CFG_FLAG(X_GEN_OPS_CFG_MASK)
 // ControllerConfig.hpp:1428 — migrated to direct `cfg.ops_cfg_flags = 0`.
 //
 // #define OPS_CFG_FLAG_AUTOPOPULATE_FROM_PAIR(target_flags, _session_filter, _notify) /* RETIRED v5.15.5.A.7 */
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Fifth domain registry. Operational-mechanic boolean cfg flags. uint8_t bitmap.
+//
+// Pattern: heterogeneous-registry-pattern.md DOMAIN SPLIT form (Form 2).
+// Cross-ref:
+//   - DESIGN_SPECS/heterogeneous-registry-pattern.md (decision framework)
+//   - DESIGN_SPECS/bitmap-flag-api.md (BITMAP_* primitives)
+//   - DOCS/TECH_DEBT.md TECH_DEBT-023 (cfg-flag-eligibility criteria)
+//
+// All entries pass cfg-flag-eligibility: boot-frozen, engine-wide, boot-only-read.
+//======================================================================
+// [DERIVED]   (tool-refreshed — ROW_COUNT/CONSUMERS generators land with the drift-gate generalization; empty skeleton is correct, D-327)
+//======================================================================
+// [END_REGISTRY]_[FOREACH_OPS_CFG_FLAG]
+//======================================================================
 
 #endif // OPS_CFG_FLAG_REGISTRY_HPP
