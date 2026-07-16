@@ -3,13 +3,12 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ORDER MANAGER]
-//
-// Single-owner OMS for the per-core sharded engine. Owns the in-flight
-// order table and routes submissions through an ExchangeAdapter.
-//
-// Phase 02 architecture (this file):
-//
+// [FILE]_[CoreFrameworks/OrderManager.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-owner OMS — the drainer-thread order table + async adapter routing + fill handling + the money books]
+// [DIAGRAM]
 //   drainer thread                          adapter worker thread(s)
 //   ──────────────                          ────────────────────────
 //   OrderManager_Submit                     pop from adapter queue
@@ -27,6 +26,30 @@
 //          ├─> look up order by id
 //          ├─> mark FILLED or REJECTED
 //          └─> free slot
+// [CONTAINS]
+//   - [ENUM]_[CommandType]
+//   - [STRUCT]_[SubmitCommand]
+//   - [STRUCT]_[OrderManagerState]
+//   - [FUNCTION]_[OrderManager_FillResultCallback]
+//   - [FUNCTION]_[OrderManager_Init]
+//   - [FUNCTION]_[OrderManager_Submit]
+//   - [FUNCTION]_[OMS_PushSubmit]
+//   - [FUNCTION]_[OMS_DrainSubmit]
+//   - [FUNCTION]_[OrderManager_AccountMakerTakerFee]
+//   - [FUNCTION]_[OMS_GuardTakerBoundFeeBasis]
+//   - [FUNCTION]_[handle_buy_fill]
+//   - [FUNCTION]_[handle_sell_fill]
+//   - [FUNCTION]_[OrderManager_HandleFill]
+//   - [FUNCTION]_[OrderManager_ProcessFillCommand]
+//   - [FUNCTION]_[OMS_OpenPositionCost]
+//   - [FUNCTION]_[OMS_ExpectedFreeCash]
+//   - [FUNCTION]_[OrderManager_ProcessReconcile]
+//   - [FUNCTION]_[OrderManager_Tick]
+//   - [FUNCTION]_[OrderManager_Shutdown]
+//   - [FUNCTION]_[OrderManager_OpenCalibrationLog]
+//======================================================================================================
+// Single-owner OMS for the per-core sharded engine. Owns the in-flight
+// order table and routes submissions through an ExchangeAdapter.
 //
 // The drainer never blocks on the network. The worker thread (or thread
 // pool) handles all REST traffic. Drainer cycle drops from worst case
@@ -79,20 +102,33 @@
 
 namespace tt {
 
-//======================================================================================================
-// [COMMAND QUEUE]
-//======================================================================================================
-// External threads push state updates as Commands; OrderManager_Tick
-// drains them on the drainer thread. Phase 02 only uses CMD_FILL_RESULT
-// (from the adapter worker thread). Phase 03 will add CMD_RECONCILE
-// (from the reconciliation poller). Phase 04 may add CMD_USER_FILL
-// (from the user-data websocket).
-//======================================================================================================
+//======================================================================
+// [ENUM]_[CommandType]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[command-queue discriminator — external threads push Commands; OrderManager_Tick drains on the drainer]
+//======================================================================
+// [CODE]
+//======================================================================
 enum CommandType : uint8_t {
     CMD_FILL_RESULT = 0,   // from adapter worker (REST ACK or full fill)
     CMD_WS_FILL     = 1,   // from user data websocket (real-time fill)
     CMD_RECONCILE   = 2,   // from reconciliation poller (phase 05)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// External threads push state updates as Commands; OrderManager_Tick
+// drains them on the drainer thread. Phase 02 only uses CMD_FILL_RESULT
+// (from the adapter worker thread). Phase 03 will add CMD_RECONCILE
+// (from the reconciliation poller). Phase 04 may add CMD_USER_FILL
+// (from the user-data websocket).
+//======================================================================
+// [END_ENUM]_[CommandType]
+//======================================================================
 
 // Non-templated POD so the SPSCRing slots stay self-contained regardless
 // of Money width.
@@ -105,6 +141,48 @@ struct Command {
 
 constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 
+//======================================================================
+// [STRUCT]_[SubmitCommand]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
+// [THREAD]_[[SLOW_WRITER] [DRAINER_READER]]
+// [SYNC]_[SPSC]
+// [REFERENCE]_[DESIGN_SPEC]_[orchestration-helper-with-pod-args-pattern]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE submit shape — API arg struct AND SPSC ring element; producers construct, drainer pops, Submit consumes]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+struct SubmitCommand {
+    // ─── REQUIRED (semantic; ctor-signaled) ───
+    int16_t                 node_id      = 0;
+    uint8_t                 order_type   = 0;
+    Money                  qty          = Money_Zero();
+    uint8_t                 leg          = 0;
+    const ::PerNodeCfg<F>*  node_cfg     = nullptr;
+
+    // ─── OPTIONAL (default-init; caller overrides as needed) ───
+    uint8_t                 strategy_id  = 0xFF;
+    uint8_t                 _pad[2]      = {0, 0};
+    Money                  intended_tp  = Money_Zero();
+    Money                  intended_sl  = Money_Zero();
+    Money                  event_price  = Money_Zero();
+    Money                  tp_pct       = Money_Zero();  // A25 (D-205): leg-effective per-fill TP fraction, resolved at submit; 0 → handle_buy_fill keeps the legacy intended_tp path (bytewise-identical)
+
+    // Default ctor — needed for SPSC ring slot init + OMS state value-init compat.
+    SubmitCommand() = default;
+
+    // Required-field ctor — recommended form for production + test callers; signals
+    // which fields a valid submit needs.
+    SubmitCommand(int16_t cid, OrderType t, Money q, uint8_t lg, const ::PerNodeCfg<F>* cfg)
+        : node_id(cid), order_type((uint8_t)t), qty(q), leg(lg), node_cfg(cfg) {}
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v4.7.37: SubmitCommand — payload for the per-core submit_queues. Producer
 // threads (today: producer slow-path; future: per-core slow-path threads)
 // push commands here instead of calling OrderManager_Submit directly. The
@@ -138,86 +216,38 @@ constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 //
 // Per orchestration-helper-with-pod-args-pattern.md (2nd canonical application after
 // Stamp_AssembleAndEmit) — POD args pattern promoted to CLAUDE.md item at ship close.
-template <unsigned F>
-struct SubmitCommand {
-    // ─── REQUIRED (semantic; ctor-signaled) ───
-    int16_t                 node_id      = 0;
-    uint8_t                 order_type   = 0;
-    Money                  qty          = Money_Zero();
-    uint8_t                 leg          = 0;
-    const ::PerNodeCfg<F>*  node_cfg     = nullptr;
-
-    // ─── OPTIONAL (default-init; caller overrides as needed) ───
-    uint8_t                 strategy_id  = 0xFF;
-    uint8_t                 _pad[2]      = {0, 0};
-    Money                  intended_tp  = Money_Zero();
-    Money                  intended_sl  = Money_Zero();
-    Money                  event_price  = Money_Zero();
-    Money                  tp_pct       = Money_Zero();  // A25 (D-205): leg-effective per-fill TP fraction, resolved at submit; 0 → handle_buy_fill keeps the legacy intended_tp path (bytewise-identical)
-
-    // Default ctor — needed for SPSC ring slot init + OMS state value-init compat.
-    SubmitCommand() = default;
-
-    // Required-field ctor — recommended form for production + test callers; signals
-    // which fields a valid submit needs.
-    SubmitCommand(int16_t cid, OrderType t, Money q, uint8_t lg, const ::PerNodeCfg<F>* cfg)
-        : node_id(cid), order_type((uint8_t)t), qty(q), leg(lg), node_cfg(cfg) {}
-};
+//======================================================================
+// [END_STRUCT]_[SubmitCommand]
+//======================================================================
 
 constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 
-//======================================================================================================
-// [ORDER MANAGER STATE]
-//======================================================================================================
-// Phase 03 (option D — facade): the OMS now owns all the financial state
-// that used to live in EventLoopState. EventLoopState becomes a thin
-// dispatcher with a pointer back to here.
-//
-// Field groups:
-//   - order table (orders[], order_bitmap, next_order_id)
-//   - exchange wiring (adapter, live_trading, result_queue)
-//   - bank state (portfolio, balance, realized_pnl, fee_rate) — phase 03
-//   - kill switch (ks_*, kill_switch_tripped, ks_trips_total) — phase 03
-//   - trade log pointer (not owned, points at the engine's CSV writer) — phase 03
-//   - observability counters (total_submitted/filled/rejected)
-//
-// The bank state and kill switch fields used to live in EventLoopState.
-// Moved here in phase 03 chunk 1 so the OMS is the single source of truth
-// for everything money-related. EventLoopState_Balance and friends are
-// the forwarding accessors that let existing call sites keep working.
-//======================================================================================================
-// v5.15.5.C.1 — OrderManagerState HOT/WARM/COLD tier reorganization
-// (cache-layout-discipline-for-hot-side-structs.md Rule 4) + cross-thread
-// atomic cluster isolation via alignas(64) (cross-thread-snapshot-publish-
-// cluster-isolation.md / ND1) + embedded-SPSCRing cluster discipline
-// (spsc-ring-embedded-in-hot-struct-cluster-discipline.md / NC2) + RAII
-// destructor preservation through tier reorg (raii-destructor-with-cluster-
-// reorg-interaction.md / NC1).
-//
-// Pre-.C.1 the struct interleaved HOT (orders, rings) with COLD (adapter,
-// live_trading) with WARM-on-fill (portfolio, fee state) with CROSS-THREAD
-// (total_*, flatten_pending) — drainer per-cycle access pulled scattered
-// cache lines across the entire ~150 KB struct. Post-.C.1 clusters are
-// explicit + compile-time-locked via static_asserts.
-//
-// FIELD NAMES UNCHANGED — only field positions move. All ~46 consumer
-// access sites (`oms->total_submitted` etc.) work without modification.
-// Compiler resolves names at compile time; reorg changes resolved offsets
-// only. RAII destructor (`~OrderManagerState()`) refs fields by name; reorg
-// is bytewise-safe per NC1.
-//
-// Persistence: OMS state is NOT byte-persisted. OrderEventLog writes
-// individual OrderEvent records (NOT struct bytes); Portfolio_FromEventLog
-// replays on restart. Snapshot publisher reads individual fields. Reorg
-// preserves all wire-format semantics.
-//
-// Bench-gate context: TECH_DEBT-012 flags this as PERFORMANCE-CRITICAL
-// (drainer reads OMS every cycle). Tier reorg is pure data-layout change
-// with compile-time-enforced sizeof/offsetof asserts — bytewise-safe + the
-// 3027-test regression + parity_harness byte-equivalence checks act as the
-// gate. The HIGH-RISK changes per TECH_DEBT-012 (FOREACH_OMS_INIT registry
-// conversion) land in .C.3 where rdtsc-bracket bench instrumentation is
-// added with a runtime cfg toggle.
+//======================================================================
+// [STRUCT]_[OrderManagerState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [DATA_ORIENTED_DESIGN]]
+// [THREAD]_[[DRAINER_WRITER] [WORKER_PRODUCER] [GUI_READER] [SLOW_WRITER]]
+// [SYNC]_[SPSC]
+// [SYNC]_[ATOMIC]
+// [REFERENCE]_[INVARIANT]_[[H3] [H6]]
+// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the OMS facade — order table + rings + the money books, HOT/WARM/COLD tier-clustered, assert-anchored]
+// [REGION]_[HOT cluster — drainer per-cycle]_[orders..event_log]
+// [THREAD]_[[DRAINER_WRITER] [WORKER_PRODUCER]]
+// [SYNC]_[SPSC]
+// [REGION]_[WARM cluster — fill-burst bank state]_[portfolio..last_exit_predicted_meta]
+// [THREAD]_[[DRAINER_WRITER]]
+// [REGION]_[COLD cluster — boot-set + reconcile-only]_[adapter..last_seen_trade_id]
+// [REGION]_[observability atomics]_[total_submitted..total_rejected]
+// [THREAD]_[[DRAINER_WRITER] [GUI_READER]]
+// [SYNC]_[ATOMIC]
+// [REGION]_[safety CAS cluster]_[flatten_pending..recovery_until_us]
+// [THREAD]_[[SLOW_WRITER] [SLOW_READER]]
+// [SYNC]_[ATOMIC]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer forward declarations.
 // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md. Noop fn provides
 // the always-call default; real fns wired at boot when respective subsystems enable.
@@ -227,11 +257,11 @@ inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money
 
 template <unsigned F>
 struct OrderManagerState {
-    // ════════════════════════════════════════════════════════════════════
-    // HOT CLUSTER — drainer reads every cycle
+    //------------------------------------------------------------------
+    // [SECTION]_[HOT CLUSTER — drainer reads every cycle]
+    //------------------------------------------------------------------
     // (orders, rings, event_log). v5.15.5.C.3 (Finding A') — event_log_mode
     // removed from HOT cluster; now a 2-bit slot in oms_state_flags (COLD).
-    // ════════════════════════════════════════════════════════════════════
     Order<F> orders[MAX_INFLIGHT_ORDERS];
     uint16_t order_bitmap;       // 1 = slot in use, 0 = free. uint16_t caps at 16 slots.
     static_assert(MAX_INFLIGHT_ORDERS <= 16,
@@ -298,10 +328,10 @@ struct OrderManagerState {
     // isolated by OrderEventLog's internal alignas discipline.
     OrderEventLog<F> event_log;
 
-    // ════════════════════════════════════════════════════════════════════
-    // WARM CLUSTER — read on fill burst (HandleFill + DrainPostFill)
+    //------------------------------------------------------------------
+    // [SECTION]_[WARM CLUSTER — read on fill burst (HandleFill + DrainPostFill)]
+    //------------------------------------------------------------------
     // === BANK STATE (moved from EventLoopState in phase 03 chunk 1) ===
-    // ════════════════════════════════════════════════════════════════════
     // Canonical portfolio + balance. After phase 03 mode 1 ships, these
     // are derived from the order event log. In mode 0 (legacy) and during
     // chunk 1 itself, EventLoop_OnEvent still mutates them directly.
@@ -458,9 +488,9 @@ struct OrderManagerState {
     uint8_t last_exit_predicted_meta[MAX_PORTFOLIO_POSITIONS];
     // MAX_PORTFOLIO_POSITIONS=16 → 16 bytes; 16 % 8 == 0, so no padding required.
 
-    // ════════════════════════════════════════════════════════════════════
-    // COLD CLUSTER — boot-set + reconcile-only (drainer hot path doesn't read)
-    // ════════════════════════════════════════════════════════════════════
+    //------------------------------------------------------------------
+    // [SECTION]_[COLD CLUSTER — boot-set + reconcile-only (drainer hot path doesn't read)]
+    //------------------------------------------------------------------
 
     // Exchange adapter (by value). In paper mode all function pointers
     // are null and the OMS short-circuits before touching them. In live
@@ -539,13 +569,13 @@ struct OrderManagerState {
     // Boot today = once at startup; not a per-cycle path.
     uint64_t last_seen_trade_id;
 
-    // ════════════════════════════════════════════════════════════════════
-    // CROSS-THREAD OBSERVABILITY COUNTERS — alignas(64) cluster (NC1 ND1)
+    //------------------------------------------------------------------
+    // [SECTION]_[CROSS-THREAD OBSERVABILITY COUNTERS — alignas(64) cluster (NC1 ND1)]
+    //------------------------------------------------------------------
     // Writer = drainer thread (atomic_fetch_add per fill).
     // Reader = snapshot publisher (GUI thread) at 60 Hz via .load(RELAXED).
     // Isolation prevents publisher reads from invalidating cache lines of
     // drainer's other write targets (warm fee_state / last_fill etc.).
-    // ════════════════════════════════════════════════════════════════════
     // Observability counters. Atomic so the TUI render loop on a different
     // core can read them without locks. Relaxed ordering throughout —
     // these are display-only.
@@ -553,13 +583,13 @@ struct OrderManagerState {
     std::atomic<uint64_t> total_filled;
     std::atomic<uint64_t> total_rejected;
 
-    // ════════════════════════════════════════════════════════════════════
-    // CROSS-THREAD SAFETY CAS CLUSTER — alignas(64) cluster (NC1 ND1)
+    //------------------------------------------------------------------
+    // [SECTION]_[CROSS-THREAD SAFETY CAS CLUSTER — alignas(64) cluster (NC1 ND1)]
+    //------------------------------------------------------------------
     // Writer = N slow-path threads via CAS (compare_exchange_strong).
     // Reader = slow-path predicate in RebuildOneCore.
     // Isolation prevents N-thread CAS contention from invalidating
     // neighbor warm fields (kill_switch_tripped, ks_*, etc.).
-    // ════════════════════════════════════════════════════════════════════
     // v5.12.1.A.2 — WS-staleness emergency-flatten flag. CAS-set by
     // EventLoop_CheckWsStaleness when the producer's last-tick gap exceeds
     // cfg.ws_dead_time_flatten_threshold_secs. Multiple slow-paths may
@@ -576,9 +606,9 @@ struct OrderManagerState {
     // (auto-recovery; no manual reset required).
     std::atomic<uint64_t> recovery_until_us;  // 0 = no recovery window active
 
-    // ════════════════════════════════════════════════════════════════════
-    // RAII destructor (v5.11.26)
-    // ════════════════════════════════════════════════════════════════════
+    //------------------------------------------------------------------
+    // [SECTION]_[RAII destructor (v5.11.26)]
+    //------------------------------------------------------------------
     // Stops the OrderEventLog async writer thread (v5.11.3.B feature) +
     // closes the disk file + frees the mmap'd entry buffer when this
     // struct goes out of scope. Idempotent on default-init / never-Init'd
@@ -632,6 +662,72 @@ struct OrderManagerState {
         OrderManager_Shutdown(this);
     }
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[the facade — what lives here + why]
+//----------------------------------------------------------------------
+// Phase 03 (option D — facade): the OMS now owns all the financial state
+// that used to live in EventLoopState. EventLoopState becomes a thin
+// dispatcher with a pointer back to here.
+//
+// Field groups:
+//   - order table (orders[], order_bitmap, next_order_id)
+//   - exchange wiring (adapter, live_trading, result_queue)
+//   - bank state (portfolio, balance, realized_pnl, fee_rate) — phase 03
+//   - kill switch (ks_*, kill_switch_tripped, ks_trips_total) — phase 03
+//   - trade log pointer (not owned, points at the engine's CSV writer) — phase 03
+//   - observability counters (total_submitted/filled/rejected)
+//
+// The bank state and kill switch fields used to live in EventLoopState.
+// Moved here in phase 03 chunk 1 so the OMS is the single source of truth
+// for everything money-related. EventLoopState_Balance and friends are
+// the forwarding accessors that let existing call sites keep working.
+//======================================================================
+// [COMMENT]_[C.1 tier reorganization]
+//----------------------------------------------------------------------
+// v5.15.5.C.1 — OrderManagerState HOT/WARM/COLD tier reorganization
+// (cache-layout-discipline-for-hot-side-structs.md Rule 4) + cross-thread
+// atomic cluster isolation via alignas(64) (cross-thread-snapshot-publish-
+// cluster-isolation.md / ND1) + embedded-SPSCRing cluster discipline
+// (spsc-ring-embedded-in-hot-struct-cluster-discipline.md / NC2) + RAII
+// destructor preservation through tier reorg (raii-destructor-with-cluster-
+// reorg-interaction.md / NC1).
+//
+// Pre-.C.1 the struct interleaved HOT (orders, rings) with COLD (adapter,
+// live_trading) with WARM-on-fill (portfolio, fee state) with CROSS-THREAD
+// (total_*, flatten_pending) — drainer per-cycle access pulled scattered
+// cache lines across the entire ~150 KB struct. Post-.C.1 clusters are
+// explicit + compile-time-locked via static_asserts.
+//
+// FIELD NAMES UNCHANGED — only field positions move. All ~46 consumer
+// access sites (`oms->total_submitted` etc.) work without modification.
+// Compiler resolves names at compile time; reorg changes resolved offsets
+// only. RAII destructor (`~OrderManagerState()`) refs fields by name; reorg
+// is bytewise-safe per NC1.
+//
+// Persistence: OMS state is NOT byte-persisted. OrderEventLog writes
+// individual OrderEvent records (NOT struct bytes); Portfolio_FromEventLog
+// replays on restart. Snapshot publisher reads individual fields. Reorg
+// preserves all wire-format semantics.
+//
+// Bench-gate context: TECH_DEBT-012 flags this as PERFORMANCE-CRITICAL
+// (drainer reads OMS every cycle). Tier reorg is pure data-layout change
+// with compile-time-enforced sizeof/offsetof asserts — bytewise-safe + the
+// 3027-test regression + parity_harness byte-equivalence checks act as the
+// gate. The HIGH-RISK changes per TECH_DEBT-012 (FOREACH_OMS_INIT registry
+// conversion) land in .C.3 where rdtsc-bracket bench instrumentation is
+// added with a runtime cfg toggle.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[260928B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[4077]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[OrderManagerState]
+//======================================================================
 
 // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 noop fn definition.
 // Single noop shared across all 3 fn-pointer fields (same sig). Used as the "always-call"
@@ -768,9 +864,15 @@ static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
               "the COLD cluster gained a non-8-aligned field between oms_state_flags "
               "and ks_min_balance. Re-check _pad_osf[7] explicit pad.");
 
-//======================================================================================================
-// [FILL RESULT CALLBACK — invoked by the adapter worker thread]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_FillResultCallback]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CONCURRENCY] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the adapter-worker's ONLY write path into the OMS — push a Command into the SPSC result_queue and return]
+//======================================================================
+// [CODE]
+//======================================================================
 // Templated on F so it matches the OrderManagerState<F>* user_ctx. Each F
 // instantiation produces a distinct function pointer, which the adapter
 // stores type-erased as `OrderCallback`. The callback is the only path
@@ -781,7 +883,6 @@ static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
 // Pushing into the SPSC ring is wait-free. If the queue is full (should
 // never happen with size 256 unless something is very wrong), the result
 // is dropped with a log message.
-//======================================================================================================
 template <unsigned F>
 static void OrderManager_FillResultCallback(void* user_ctx,
                                              uint64_t client_id,
@@ -797,10 +898,22 @@ static void OrderManager_FillResultCallback(void* user_ctx,
                      (unsigned long long)client_id);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_FillResultCallback]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [REFERENCE]_[INVARIANT]_[H17]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one-call OMS init — registry-driven OMS_INIT_AUTOPOPULATE; a new OMS field is ONE registry row]
+//======================================================================
+// [CODE]
+//======================================================================
 // Zero the order table, clear the bitmap, install the adapter and the
 // live_trading flag. The adapter is copied by value — the caller still
 // owns whatever the adapter.ctx points at, but the function pointers
@@ -833,7 +946,7 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 //   external SET site). Post-Finding A: passed as OrderManager_Init parameter;
 //   the registry walk inside OMS_INIT_AUTOPOPULATE sets the bit via the
 //   BIT-kind row for `partial_exit_enabled`.
-//======================================================================================================
+//
 // v5.9.5e — `event_log_path` lets callers separate the in-memory event log
 // infrastructure (single-writer mode=1 used by both live + backtest for
 // fill+drain pipeline parity since v4.7.15) from the on-disk persistence
@@ -853,7 +966,7 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // SPSC rings, OrderEventLog conditional + StartAsyncWriter) live in the
 // AUTOPOPULATE macro body. Adding a new OMS-level field is now ONE row in
 // the canonical registry; INIT/RESET/PERSIST views auto-flow.
-//======================================================================================================
+//
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` param DELETED. Per-Order fee_rate lives on
 // Order::pre_resolved (set at submit via Order_BindPreResolved with cfg.nodes[c]). OMS no
 // longer holds a global fee_rate. Callers drop the arg.
@@ -868,10 +981,22 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     OMS_INIT_AUTOPOPULATE(oms, adapter, live_trading, partial_exit_enabled,
                           starting_balance, event_log_mode, event_log_path);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_Init]
+//======================================================================
 
-//======================================================================================================
-// [SUBMIT — async via adapter, returns immediately]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_Submit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[allocate slot + bind pre-resolved cfg + async adapter submit (or paper synth fill) — returns immediately]
+//======================================================================
+// [CODE]
+//======================================================================
 // Paper mode:
 //   Mode 0 (legacy): Bump total_submitted and total_filled, return the next
 //   id. No slot allocation, no adapter call, no result queue traffic.
@@ -900,7 +1025,6 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 //   strategy_id: STRATEGY_* constant for trade log CSV.
 //   event_price: market price at submit time; used as the fill price in
 //     paper mode (no adapter callback to supply one).
-//======================================================================================================
 template <unsigned F>
 inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitCommand<F>& cmd) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
@@ -1063,10 +1187,21 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     }
     return id;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_Submit]
+//======================================================================
 
-//======================================================================================================
-// [PUSH SUBMIT — funnel external Submit requests through SPSC queue]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OMS_PushSubmit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[producer-side submit funnel — push the SubmitCommand into the node's SPSC queue; drainer pops serially]
+//======================================================================
+// [CODE]
+//======================================================================
 // v4.7.37 (Phase B reordered): producer threads call OMS_PushSubmit instead
 // of OrderManager_Submit. Drainer thread pops from submit_queues and calls
 // OrderManager_Submit serially, preserving the documented "drainer is sole
@@ -1101,10 +1236,21 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     }
     return pushed;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_PushSubmit]
+//======================================================================
 
-//======================================================================================================
-// [DRAIN SUBMIT — drainer thread pops queues and calls Submit serially]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OMS_DrainSubmit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[drainer-side pop of all per-node submit queues — calls OrderManager_Submit serially; returns count drained]
+//======================================================================
+// [CODE]
+//======================================================================
 // v4.7.37 (Phase B reordered): called from the drainer thread's loop, before
 // OrderManager_Tick. Drains all per-core submit queues and calls
 // OrderManager_Submit for each command. Single-threaded — preserves OMS
@@ -1126,10 +1272,23 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
     }
     return drained;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_DrainSubmit]
+//======================================================================
 
-//======================================================================================================
-// [FEE ACCOUNTING — maker/taker counters + totals]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_AccountMakerTakerFee]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[CLASS]_[18]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE fee-bookkeeping body — branchless maker/taker counters + fee buckets; Class-18 mirror close]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.15.5.C.2 (S5): single-source-of-truth for the 8-line fee bookkeeping
 // duplicated byte-identical at both entry-fill and exit-fill sites in
 // HandleFill (only differing in entry_fee vs exit_fee). Class 18 mirror
@@ -1153,7 +1312,22 @@ inline void OrderManager_AccountMakerTakerFee(
     oms->total_maker_fees    = maker ? Money_Add(oms->total_maker_fees, fee) : oms->total_maker_fees;
     oms->total_taker_fees    = maker ? oms->total_taker_fees : Money_Add(oms->total_taker_fees, fee);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_AccountMakerTakerFee]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[OMS_GuardTakerBoundFeeBasis]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [SUPPORTIVE]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-154]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[dormant fee-desync tripwire — a maker fill on a TAKER-bound fee_rate fails LOUD, never silently]
+//======================================================================
+// [CODE]
+//======================================================================
 // GUARD — maker/taker fee-desync (DORMANT; the reactivatable-assumption shape, Class-40 sibling).
 // pre_resolved.fee_rate is bound at SUBMIT as TAKER (the engine is MARKET-only — OrderManager_Submit refuses
 // non-MARKET, and MARKET fills are always taker). So a maker fill CANNOT occur today: this is a NEVER-TAKEN
@@ -1169,10 +1343,15 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
                         "were enabled without re-resolving fee_rate from is_maker at fill (TECH_DEBT-154).\n");
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_GuardTakerBoundFeeBasis]
+//======================================================================
 
-//======================================================================================================
-// [PATTERN 1 1D TYPE DISPATCH HANDLERS — v5.15.5.F.4c.3 WIP2d-1.B.1]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[Pattern 1 1D type dispatch handlers — v5.15.5.F.4c.3 WIP2d-1.B.1]
+//------------------------------------------------------------------------------------------------------
 // BUY/SELL dispatch via fn pointer table indexed by Order_GetType(o). Per branchless-dispatch-
 // discipline.md Pattern 1 + H20 invariant. Class 28 first canonical. Inner bodies use Pattern 3
 // mask-selects for all data-dependent dispatch (TP/SL/INSIDE reason, peak balance via FPN_Max,
@@ -1181,6 +1360,16 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
 // cheaply mask-gated; Phase 2 Portfolio/TradeLog mask-param refactor handles the remaining cases).
 //======================================================================================================
 
+//======================================================================
+// [FUNCTION]_[handle_buy_fill]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [REFERENCE]_[DECISION]_[D-173]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[entry fill — open portfolio slot at the ACTUAL fill (per-fill TP anchor) + fee bookkeeping + entry emit]
+//======================================================================
+// [CODE]
+//======================================================================
 // BUY handler — entry fill: open portfolio slot + record entry fee + bump counters + trade log.
 template <unsigned F>
 inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty,
@@ -1208,7 +1397,22 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
     // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md.
     oms->on_entry_fill_emit(oms, o, fill_price, fill_qty, entry_fee);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[handle_buy_fill]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[handle_sell_fill]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CRITICAL]]
+// [REFERENCE]_[DECISION]_[[D-173] [D-190]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[exit fill — close slot, book net P&L into balance/realized, exit-side scratch arrays, calib + exit emits]
+//======================================================================
+// [CODE]
+//======================================================================
 // SELL handler — exit fill: close portfolio slot, compute P&L, update balance, write trade log.
 template <unsigned F>
 inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty,
@@ -1294,6 +1498,11 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
     // Default = noop_fill_emit; set to real_on_exit_fill_emit at boot when trade_log Init succeeds.
     oms->on_exit_fill_emit(oms, o, fill_price, net, total_fee);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[handle_sell_fill]
+//======================================================================
 
 // Fn pointer table — indexed by OrderType (0=MARKET_BUY, 1=MARKET_SELL, 2=LIMIT_BUY, 3=LIMIT_SELL).
 // 4 × 8B = 32B = 1 cache line; L1-hot on pinned drainer.
@@ -1308,13 +1517,20 @@ inline constexpr FillHandler<F> g_fill_dispatch[4] = {
     &handle_sell_fill<F>,   // ORDER_LIMIT_SELL  = 3 (future)
 };
 
-//======================================================================================================
-// [FILL HANDLER — Pattern 1 dispatch entrypoint]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_HandleFill]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CRITICAL]]
+// [REFERENCE]_[DECISION]_[D-173]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fill entrypoint — fee booking rule SSoT (venue-USDT authoritative, computed fallback) + audit append + Pattern-1 dispatch]
+//======================================================================
+// [CODE]
+//======================================================================
 // Slim entrypoint: bounds guard (H20 exception #4) + pre-resolve discipline warn + audit log append
 // + branchless dispatch via fn pointer table. All BUY/SELL-specific logic lives in handle_buy_fill /
 // handle_sell_fill above. Future LIMIT_BUY/LIMIT_SELL types extend mechanically — 2 rows in g_fill_dispatch.
-//======================================================================================================
 template <unsigned F>
 inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
                                      Money fill_price, Money fill_qty,
@@ -1363,18 +1579,26 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     // of BUY/SELL access pattern. Closes Class 28 first canonical.
     g_fill_dispatch<F>[(uint8_t)Order_GetType(o)](oms, o, fill_price, fill_qty, booked_fee);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_HandleFill]
+//======================================================================
 
-
-
-//======================================================================================================
-// [PROCESS ONE FILL COMMAND — unified handler for REST and WS fills]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_ProcessFillCommand]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[unified REST/WS fill handler — O(1) encoded-slot lookup, dedup, state transition, mode-1 dispatch, slot free]
+//======================================================================
+// [CODE]
+//======================================================================
 // Looks up the order by id, applies the fill or rejection, runs the mode 1
 // fill handler if applicable, frees the slot. Called from the unified drain
 // loop in OrderManager_Tick for both CMD_FILL_RESULT and CMD_WS_FILL.
 //
 // Returns 1 if the command was processed, 0 if skipped (dedup, not found, etc.)
-//======================================================================================================
 template <unsigned F>
 inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Command& cmd) {
     // WS surprise fill (order_id == 0): log and skip.
@@ -1474,10 +1698,22 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
     oms->order_bitmap &= (uint16_t)~(1u << slot);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_ProcessFillCommand]
+//======================================================================
 
-//======================================================================================================
-// [OPEN-POSITION COMMITTED-CASH COST — SSoT for the reconciler + .E.1 venue-net]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OMS_OpenPositionCost]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL]]
+// [REFERENCE]_[DECISION]_[D-216]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[committed-cash SSoT — sum over open slots of entry notional + entry fee; shared by reconciler + .E.1 venue-net]
+//======================================================================
+// [CODE]
+//======================================================================
 // Sum over open slots of (entry_price*qty + entry_fee) = the cash that left the account
 // to OPEN the held positions. oms->balance is FLAT-ACCOUNT value (start + sum realized; a
 // BUY never debits it -- Portfolio_OpenSlot only), so to predict the venue's FREE cash you
@@ -1496,10 +1732,24 @@ inline Money OMS_OpenPositionCost(const OrderManagerState<F>* oms) {
     }
     return cost;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_OpenPositionCost]
+//======================================================================
 
-//======================================================================================================
-// [EXPECTED FREE CASH — the cash-leg reconcile formula (pure, REST-free, unit-testable)]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OMS_ExpectedFreeCash]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL]]
+// [REFERENCE]_[DECISION]_[D-216]
+// [REFERENCE]_[CLASS]_[38]
+// [REFERENCE]_[INVARIANT]_[H4]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[cash-leg reconcile formula — ledger minus committed cost minus inflight-BUY reserve; pure + unit-testable]
+//======================================================================
+// [CODE]
+//======================================================================
 // expected_free_cash = balance - OMS_OpenPositionCost - Sum_inflight((requested-filled)*price + est_fee).
 // Asset-agnostic STRUCTURE (cash = ledger - committed-cost - inflight-reserved); long-only cost-sign +
 // single-currency settlement are crypto-spot-specific -- .E.6 equities extend with signed-qty + a margin
@@ -1525,10 +1775,22 @@ inline Money OMS_ExpectedFreeCash(const OrderManagerState<F>* oms) {
     }
     return expected;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_ExpectedFreeCash]
+//======================================================================
 
-//======================================================================================================
-// [PROCESS ONE RECONCILE COMMAND]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_ProcessReconcile]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [LIVE_TRADING]]
+// [REFERENCE]_[DECISION]_[D-216]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reconcile command handler — DETECT-ONLY advisory alert + audit-trail append; NEVER mutates the ledger]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Command& cmd) {
     double drift = cmd.result.avg_fill_price;           // repurposed field
@@ -1561,15 +1823,25 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
         OrderEventLog_Append(&oms->event_log, recon_event);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_ProcessReconcile]
+//======================================================================
 
-//======================================================================================================
-// [TICK — drain all command queues]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_Tick]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CRITICAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-drain-pass command pump — drains REST/WS/reconcile SPSC rings through the unified dispatcher]
+//======================================================================
+// [CODE]
+//======================================================================
 // Drainer thread calls this on every drain pass. Drains three SPSC rings
 // sequentially (REST fills, WS fills, reconcile corrections) and dispatches
 // each command to the appropriate handler. Adding a new command source is
 // one new SPSCRing field + one drain call here + one handler function.
-//======================================================================================================
 template <unsigned F>
 inline void OrderManager_Tick(OrderManagerState<F>* oms) {
     // Drain all three command queues through the unified dispatcher.
@@ -1595,15 +1867,21 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
             OrderManager_ProcessReconcile(oms, cmd);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_Tick]
+//======================================================================
 
-//======================================================================================================
-// [SHUTDOWN]
-//======================================================================================================
-// The OMS itself owns no threads or sockets — adapter lifetime is managed
-// externally (the caller calls adapter.shutdown after joining the drainer).
-// This function is a no-op kept for symmetry with Init and so a future
-// phase can hook in additional cleanup without breaking the API.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_Shutdown]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[free the event log (stops its async writer thread) + close the calibration log; the RAII destructor's body]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
     OrderEventLog_Free(&oms->event_log);
@@ -1614,10 +1892,21 @@ inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
         oms->calibration_log_file = nullptr;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_Shutdown]
+//======================================================================
 
-//======================================================================================================
-// [v5.13.0.B — calibration log open]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_OpenCalibrationLog]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[open the calibration CSV (v5.13.0.B) + wire the Pattern-5 calib sink to real; non-fatal on failure]
+//======================================================================
+// [CODE]
+//======================================================================
 // Opens cfg.calibration_log_path in append mode. Writes a header row if
 // the file is new (size == 0). Engine boot calls this AFTER OrderManager_Init
 // when the cfg field is non-empty. Single-thread (boot); after this returns
@@ -1625,7 +1914,6 @@ inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
 //
 // Returns 0 on success / -1 on failure (failure is non-fatal: log goes to
 // stderr; engine continues without calibration logging this session).
-//======================================================================================================
 template <unsigned F>
 inline int OrderManager_OpenCalibrationLog(OrderManagerState<F>* oms,
                                              const char* path) {
@@ -1652,10 +1940,15 @@ inline int OrderManager_OpenCalibrationLog(OrderManagerState<F>* oms,
     }
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_OpenCalibrationLog]
+//======================================================================
 
-//======================================================================================================
-// [INTROSPECTION HELPERS — for tests and TUI]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[introspection helpers — for tests and TUI]
+//----------------------------------------------------------------------
 template <unsigned F>
 inline uint64_t OrderManager_TotalSubmitted(const OrderManagerState<F>* oms) {
     return oms->total_submitted.load(std::memory_order_relaxed);
