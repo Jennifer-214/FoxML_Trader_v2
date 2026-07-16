@@ -3,8 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SHARDED SNAPSHOT COPY]
-//
+// [FILE]_[CoreFrameworks/ShardedSnapshot.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [FLOAT_DISPLAY_ONLY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the sharded TUISnapshot populator — EventLoopState + OMS -> the same fields the GUI panels already read]
+// [CONTAINS]
+//   - [FUNCTION]_[TUI_CopySnapshotSharded]
+//======================================================================================================
 // Populates TUISnapshot from the sharded engine's EventLoopState + OMS.
 // Called from the producer thread's slow-path cadence in EngineSharded.hpp.
 // Maps the same TUISnapshot fields the GUI panels read, just from different
@@ -38,6 +44,16 @@
 // are all in the global namespace. EventLoopState, EventLoopAggregates,
 // Portfolio are in namespace tt.
 
+//======================================================================
+// [FUNCTION]_[TUI_CopySnapshotSharded]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [SLOW_PATH] [FLOAT_DISPLAY_ONLY]]
+// [REFERENCE]_[CLASS]_[26]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one EventLoopState walk per publish (producer slow-path cadence) -> full TUISnapshot; unified per-core loop (.B.8) consolidates 4 node walks into 1]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 static inline void TUI_CopySnapshotSharded(
     TUISnapshot *snap,
@@ -137,8 +153,8 @@ static inline void TUI_CopySnapshotSharded(
     snap->max_drawdown = agg.max_drawdown;
     snap->max_drawdown_pct = agg.max_drawdown_pct * 100.0;
     // KEEP-AS-GLOBAL: engine-wide headline display shows GLOBAL fee_rate default;
-    // per-core deviations are surfaced via per_node_count panel + per-position
-    // net_pnl computation at line 249 (per-core fee_taker). Operator-facing summary.
+    // per-core deviations are surfaced via per_node_count panel + the per-position
+    // net_pnl computation in the position loop below (per-core fee_taker). Operator-facing summary.
     snap->fee_rate_pct = Money_ToDouble(cfg->fee_rate) * 100.0;
 
     // v4.0.4: warmup progress display. min_warmup_samples is what the
@@ -335,7 +351,7 @@ static inline void TUI_CopySnapshotSharded(
     int      any_model_loaded    = 0;
 
     // config display — KEEP-AS-GLOBAL: Settings panel shows GLOBAL cfg defaults;
-    // per-core deviations surfaced via per_node_count panel at line 339.
+    // per-core deviations surfaced via the per_node_count panel section below.
     // Operator-facing summary semantic; per-core values are visible in the
     // dedicated per-core view rather than headline Settings.
     snap->cfg_tp  = Money_ToDouble(cfg->take_profit_pct) * 100.0;
@@ -896,3 +912,8 @@ static inline void TUI_CopySnapshotSharded(
     }
     (void)any_ml_active;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TUI_CopySnapshotSharded]
+//======================================================================
