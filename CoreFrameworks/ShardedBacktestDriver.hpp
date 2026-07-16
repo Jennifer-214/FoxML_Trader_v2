@@ -3,8 +3,17 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SHARDED BACKTEST DRIVER]
-//
+// [FILE]_[CoreFrameworks/ShardedBacktestDriver.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-threaded backtest driver — same execution-core code path as live, collapsed onto one thread for bit-for-bit determinism]
+// [CONTAINS]
+//   - [STRUCT]_[ShardedBacktestDriver]
+//   - [FUNCTION]_[ShardedBacktestDriver_Init]
+//   - [FUNCTION]_[ShardedBacktest_RunTick]
+//   - [FUNCTION]_[ShardedBacktest_Run]
+//======================================================================================================
 // Phase 11 of the per-core sharded engine. Single-threaded driver that runs an
 // EventLoopState + N execution cores against a recorded tick stream. Used by
 // the backtest suite (and by phase 11 functional tests) to validate the
@@ -62,9 +71,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// [DRIVER STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[ShardedBacktestDriver]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[caller-owned pointer bag the driver orchestrates — optional slow-path/OMS/train-serve/depth state, NULL = legacy behavior per field]
+//======================================================================
+// [CODE]
+//======================================================================
 // Bag of pointers to everything the driver needs to step a single tick. The
 // caller owns all the underlying objects and is responsible for their
 // lifetime; the driver just orchestrates them. Keeping it as a struct of
@@ -86,7 +101,8 @@ struct ShardedBacktestDriver {
     uint64_t slow_path_runs;                // observability counter
 
     // Track E.1 — train-serve parity state. Optional. When set, driver pushes
-    // these on slow-path firings (mirroring EngineSharded_Run lines 794-818)
+    // these on slow-path firings (mirroring EngineSharded_Run's producer
+    // slow-path pushes in EngineSharded/Run.hpp)
     // and threads them into EventLoop_RebuildAllParameters so ML strategies
     // see the same RegimeSignals features the live path produces. NULL fields
     // are skipped — driver works the same as before for legacy callers.
@@ -131,10 +147,21 @@ struct ShardedBacktestDriver {
                          int tick_index);
     void* hook_ctx;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[ShardedBacktestDriver]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedBacktestDriver_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[wire the driver to caller-owned deps; NULL rolling/config skips strategy rebuild; optional Track-E.1 state assigned post-Init]
+//======================================================================
+// [CODE]
+//======================================================================
 // Wire the driver to its dependencies. The state must already be initialized
 // and have its execution cores registered + strategies assigned. Set rolling
 // and config to nullptr to skip the slow-path strategy rebuild step (the
@@ -176,10 +203,22 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
     drv->on_slow_path       = nullptr;
     drv->hook_ctx           = nullptr;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedBacktestDriver_Init]
+//======================================================================
 
-//======================================================================================================
-// [RUN ONE TICK]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedBacktest_RunTick]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [REFERENCE]_[INVARIANT]_[H22]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one tick end-to-end — fixed-order core fan-out, drain, OMS tick + post-fill, slow-path cadence via EngineCommon_SlowPathCycleAllCores (M5 parity); ordering is load-bearing (P11.6)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Step the entire engine through a single tick. tick_index is 0-based and is
 // used to determine slow-path cadence (firing every slow_path_interval ticks).
 //
@@ -187,7 +226,6 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
 // slow-path rebuild sees fresh stats, then fan-out to cores, then drain
 // events, then slow-path on cadence. Pitfall P11.6 covers this ordering
 // requirement.
-//======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                                      const Tick<F>& tick,
@@ -229,10 +267,11 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //     wins/losses, SL cooldown) is populated by OrderManager_Tick
     //     into FillRecords + masks but NOT applied to the NodeContexts
     //     until DrainPostFill consumes them. Live engine calls this on
-    //     the drainer thread after each OrderManager_Tick (EngineSharded
-    //     line 1594). Mirror the same call here so backtest NodeContexts
-    //     match live for identical inputs. Safe to call when masks are
-    //     zero (no fills this tick) — the function early-exits per slot.
+    //     the drainer thread after each OrderManager_Tick (the drainer
+    //     loop in EngineSharded/Run.hpp). Mirror the same call here so
+    //     backtest NodeContexts match live for identical inputs. Safe to
+    //     call when masks are zero (no fills this tick) — the function
+    //     early-exits per slot.
     if (drv->oms &&
         BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
         drv->config) {
@@ -246,7 +285,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //
     // CRITICAL: RollingStats is pushed HERE inside the slow path, NOT once
     // per tick. The legacy PortfolioController_Tick also samples this way
-    // (line 1383-1384 of PortfolioController.hpp), so 128 samples covers
+    // (its slow-path RollingStats_Push block), so 128 samples covers
     // ~128*poll_interval ticks of history, not just 128 ticks. Sampling
     // every tick narrows the window 64x and produces tighter dip thresholds
     // that miss the trades the legacy path takes.
@@ -260,9 +299,9 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         if (drv->rolling_long) {
             RollingStats_Push(drv->rolling_long, price_b, volume_b);
         }
-        // Track E.1 — push v4.3 state at the same cadence EngineSharded_Run
-        // does (lines 804-818). Each guarded so callers that don't supply
-        // the state get prior behavior.
+        // Track E.1 — push v4.3 state at the same cadence EngineSharded_Run's
+        // producer slow-path block does. Each guarded so callers that don't
+        // supply the state get prior behavior.
         if (drv->rolling_medium) {
             RollingStats_Push(drv->rolling_medium, price_b, volume_b);
         }
@@ -277,8 +316,9 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             TickRate_Push(drv->tick_rate_state, tick.timestamp);
         }
         if (drv->regime_ror && drv->rolling) {
-            // Slope-of-slopes feed (mirrors EngineSharded line 813-818 +
-            // legacy PortfolioController.hpp:1552). RORRegressor takes a
+            // Slope-of-slopes feed (mirrors EngineSharded_Run's producer
+            // RORRegressor_Push + the legacy PortfolioController sister).
+            // RORRegressor takes a
             // LinearRegression3XResult; intercept is irrelevant for ROR.
             LinearRegression3XResult<F> slope_sample;
             slope_sample.model.slope     = drv->rolling->price_slope;
@@ -352,8 +392,8 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         }
         if (drv->config && drv->oms && drv->rolling) {
             // Caller-precompute per v1.6 O2 bytewise-identical math discipline.
-            // BookSnapshot per v1.7.3 N-6 9-arg signature (sister-canonical reuse from
-            // DataStream/BinanceDepth.hpp:29-41 per feedback_audit_canonical_sister_before_new_infra).
+            // BookSnapshot per v1.7.3 N-6 9-arg signature (sister-canonical reuse of
+            // BookSnapshot<F> from DataStream/BinanceDepth.hpp per feedback_audit_canonical_sister_before_new_infra).
             // Field-mapping verified at v1.7.4: drv->book_imbalance / drv->current_spread /
             // drv->current_mid_price are POINTER types (const FPN_Binary<F>*) requiring deref before
             // assign (v1.7.4 NEW-4 closure); null-check each before deref.
@@ -381,14 +421,24 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedBacktest_RunTick]
+//======================================================================
 
-//======================================================================================================
-// [RUN STREAM]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedBacktest_Run]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[whole-stream convenience wrapper — RunTick loop + final drain/OMS-tick/post-fill flush mirroring live's shutdown flush]
+//======================================================================
+// [CODE]
+//======================================================================
 // Convenience wrapper that runs a whole tick stream end-to-end and does the
 // final event drain. For tests that just want to feed an array and check the
 // outcome.
-//======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
                                  const Tick<F>* ticks,
@@ -413,8 +463,8 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     }
     if (drv->oms) OrderManager_Tick(drv->oms);
     // v4.7.15: drain post-fill in mode 1 to match live's final-flush loop
-    // (EngineSharded line 1597-1604). Without this, the last tick's
-    // FillRecords sit in the OMS buffers and never apply to NodeContexts.
+    // (the shutdown flush in EngineSharded/Run.hpp). Without this, the last
+    // tick's FillRecords sit in the OMS buffers and never apply to NodeContexts.
     if (drv->oms &&
         BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
         drv->config) {
@@ -423,5 +473,10 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
                                  drv->config->ensemble_trade_reward_mult);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedBacktest_Run]
+//======================================================================
 
 }  // namespace tt
