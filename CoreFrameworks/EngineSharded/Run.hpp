@@ -3,7 +3,17 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [EngineSharded/Run.hpp — orchestrator + utility helpers + DumpLatency + ANSI TUI]
+// [FILE]_[CoreFrameworks/EngineSharded/Run.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ENTRY_POINT] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE sharded orchestrator — EngineSharded_Run boot->threads->run-loop->shutdown, plus TSC/pinning/latency-dump utilities and the ANSI TUI; ~30 function-scope statics live here]
+// [CONTAINS]
+//   - [FUNCTION]_[EngineSharded_CalibrateTscGhz]
+//   - [FUNCTION]_[EngineSharded_PinThread]   (+ NodeHotCpu / DrainerCpu / NodeSlowCpuBase topology trio)
+//   - [FUNCTION]_[EngineSharded_SmartSlowPathPins] (+ GetSiblingCPU)
+//   - [FUNCTION]_[EngineSharded_DumpLatency]
+//   - [FUNCTION]_[EngineSharded_Run]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
@@ -131,9 +141,9 @@
 
 namespace tt {
 
-//======================================================================================================
-// [ORDER LATENCY STATS — file-static instance]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[order latency stats — the g_sharded_order_lat singleton instance]
+//------------------------------------------------------------------------------
 // the type and helper functions live in CoreFrameworks/ShardedOrderLatency.hpp
 // (extracted during the OMS phase 01 refactor so OrderManager.hpp can call
 // Sample without circular includes). this file just owns the singleton instance
@@ -148,12 +158,17 @@ namespace tt {
 //======================================================================================================
 inline ShardedOrderLatency g_sharded_order_lat;
 
-//======================================================================================================
-// [TSC CALIBRATION]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_CalibrateTscGhz]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[~50ms rdtsc-vs-wall busy calibration so the latency dump can print ns beside raw cycles]
+//======================================================================
+// [CODE]
+//======================================================================
 // Quick TSC frequency calibration so the latency dump can show ns alongside
 // raw cycles. ~50ms of busy work, plenty accurate for diagnostic display.
-//======================================================================================================
 static inline double EngineSharded_CalibrateTscGhz() {
     auto wall0 = std::chrono::high_resolution_clock::now();
     uint32_t hi0, lo0;
@@ -173,14 +188,24 @@ static inline double EngineSharded_CalibrateTscGhz() {
     double cycles = (double)(t1 - t0);
     return cycles / wall_ns;  // GHz
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_CalibrateTscGhz]
+//======================================================================
 
-//======================================================================================================
-// [PIN THREAD TO CORE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_PinThread]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[best-effort pthread_setaffinity pin (failure = warn, never fatal); the NodeHotCpu/DrainerCpu/NodeSlowCpuBase topology trio shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // Best-effort core pinning. Returns 1 on success, 0 on failure (logged but
 // not fatal — if pinning fails the engine still runs, just with potentially
 // worse tail latency due to scheduler migration).
-//======================================================================================================
 static inline int EngineSharded_PinThread(int cpu_id) {
 #ifdef __linux__
     cpu_set_t cpuset;
@@ -198,9 +223,9 @@ static inline int EngineSharded_PinThread(int cpu_id) {
 #endif
 }
 
-//======================================================================================================
-// [PER-NODE CPU TOPOLOGY] — a NODE owns 2 CPUs (1 hot + 1 slow); node_id ≠ cpu_id.
-//======================================================================================================
+//------------------------------------------------------------------------------
+// PER-NODE CPU TOPOLOGY — a NODE owns 2 CPUs (1 hot + 1 slow); node_id ≠ cpu_id.
+//------------------------------------------------------------------------------
 // Boot CPU layout for N nodes (= num_execution_nodes):
 //   CPU 0      = producer
 //   CPU 1..N   = node hot threads   (node i → EngineSharded_NodeHotCpu(i))
@@ -213,10 +238,21 @@ static inline int EngineSharded_PinThread(int cpu_id) {
 static inline int EngineSharded_NodeHotCpu(int node_id)        { return node_id + 1;   }  // CPU 1..N (CPU 0 = producer)
 static inline int EngineSharded_DrainerCpu(int num_nodes)      { return num_nodes + 1; }  // CPU N+1
 static inline int EngineSharded_NodeSlowCpuBase(int num_nodes) { return num_nodes + 2; }  // CPU N+2.. (fallback base)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_PinThread]
+//======================================================================
 
-//======================================================================================================
-// [SMART SLOW-PATH CPU PIN ASSIGNMENT — v5.1.5]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_SmartSlowPathPins]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v5.1.5 slow-path pin assignment that avoids SMT siblings of producer/hot/drainer (3-pass: idle -> tainted -> wraparound); GetSiblingCPU (sysfs read) shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // Read /sys/devices/system/cpu/cpuN/topology/thread_siblings_list to learn
 // which CPUs share a physical core (SMT siblings). Choose slow-path pins
 // that AVOID landing on SMT siblings of the producer/hot-path/drainer
@@ -314,13 +350,23 @@ static inline int EngineSharded_SmartSlowPathPins(int producer_cpu,
     for (int i = 0; i < num_slow; ++i) out_pins[i] = chosen[i];
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_SmartSlowPathPins]
+//======================================================================
 
-//======================================================================================================
-// [LATENCY DUMP]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_DumpLatency]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[shutdown per-node latency table (min/p50/p95/p99/max/avg in ns via the calibrated TSC); notes the ~25-30ns rdtsc floor]
+//======================================================================
+// [CODE]
+//======================================================================
 // Dumps per-core latency stats in a compact table after the run finishes.
 // One row per core, all converted to ns via the calibrated TSC frequency.
-//======================================================================================================
 template <unsigned F>
 static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
                                               int num_nodes, double tsc_ghz) {
@@ -347,10 +393,22 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
     fprintf(stderr, "isolcpus on a real production box for cleaner tails).\n");
     fprintf(stderr, "================================================================\n");
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_DumpLatency]
+//======================================================================
 
-//======================================================================================================
-// [RUN]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_Run]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ENTRY_POINT] [LIVE_TRADING] [CONCURRENCY] [CAPITAL_BEARING]]
+// [REFERENCE]_[INVARIANT]_[[H3] [H8] [H22]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the sharded main — TSC calibrate, boot (BNB discount -> BootGlobal -> per-node BootPerCore), spawn producer/drainer/per-node hot+slow threads, run to shutdown, join + latency dump]
+//======================================================================
+// [CODE]
+//======================================================================
 // The sharded engine main entry point. Called from main.cpp when
 // engine_mode == ENGINE_MODE_SHARDED.
 //
@@ -384,9 +442,9 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
 // once at the top of this file (above namespace tt opening); the call
 // site is in EngineSharded_Run below.
 
-//======================================================================================================
-// [Phase 7.B — drainer-cycle bench gate histogram]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// Phase 7.B — drainer-cycle bench gate histogram
+//------------------------------------------------------------------------------
 // `g_engine_drainer_cycle_hist` is now declared in EngineSharded/Async.hpp (v5.15.5.F.4d.1.B.6
 // Phase B Step B.2; co-located with drain_with_submit hoist that originated the per-cycle
 // rdtsc bracket). Inline (C++17); same single-shared-storage semantics. References from this
@@ -709,7 +767,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // v5.15.5.F.4d.1.B.4 Step C.1 — extracted to EngineCommon_ApplyBnbDiscount
     // (closes PARITY-030 by-construction; sister BACKTEST caller invokes same helper
     // at Step C.2). Body preserved verbatim from prior inline at LIVE :690-699 →
-    // CoreFrameworks/EngineCommon.hpp:152-164. Non-const cfg mutation; ONE-SHOT
+    // EngineCommon_ApplyBnbDiscount in CoreFrameworks/EngineCommon.hpp. Non-const cfg mutation; ONE-SHOT
     // pre-loop; THE ONLY non-const-cfg helper in EngineCommon.
     EngineCommon_ApplyBnbDiscount(cfg);
     // v4.2.1 paper-mode slippage simulation — also per-core via cfg.nodes[c].slippage_pct,
@@ -758,7 +816,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // (closes PARITY-026 hotfix sister-discipline as part of TECH_DEBT-119
     // structural fold; BACKTEST sister at Step C.2 uses same helper). Body
     // preserved verbatim from prior inline at LIVE :742 + :749-753 + :760-762 →
-    // CoreFrameworks/EngineCommon.hpp:181-200 (Init + ConfigureKillSwitch +
+    // EngineCommon_BootGlobal in CoreFrameworks/EngineCommon.hpp (Init + ConfigureKillSwitch +
     // Regime_Init loop with cfg-driven hysteresis per cfg.nodes[i].regime_hysteresis).
     //
     // M5 LIVE-only persistence sinks (DepthRecorder + Notify + trade_log + TickRecorder
@@ -915,7 +973,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // aligned_alloc with null-check (LIVE-specific; BACKTEST uses Free+Init static
         // array) + post-helper LIVE-only wires (oms.ezoo_refs + NodeLatencyStats_Enable).
         // Helper body preserved verbatim from prior inline at LIVE :908-1177 →
-        // CoreFrameworks/EngineCommon.hpp:233-427.
+        // EngineCommon_BootPerCore in CoreFrameworks/EngineCommon.hpp.
 
         // Per-core risk: use core-specific override if set, else shared/even split
         // (preserved verbatim per v1.6 O2 bytewise-identical math discipline).
@@ -999,7 +1057,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         mkdir("data", 0755);
         if (!live_trading) {
             // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed
-            // oms_state_flags (S3a); set at line 665 from cfg; drainer-path
+            // oms_state_flags (S3a); set at OrderManager_Init from cfg; drainer-path
             // single source of truth (S4).
             int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path,
                                                   BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED),
@@ -1059,11 +1117,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // reconciliation. This dispatch lives in EngineSharded boot ONLY.
             // When TECH_DEBT-002 (centralized removal) ships, no migration
             // step needed here. If v5.X+ adds Phase 3 heartbeat reconcile
-            // (per Reconcile.hpp:19-24), verify the new dispatch is ALSO
+            // (per the Reconcile.hpp phase roadmap), verify the new dispatch is ALSO
             // sharded-only — DO NOT add to legacy path.
             //
             // FUTURE-THINKING: if mode dispatch goes per-cycle (e.g.,
-            // AUTO_SYNC_CONTINUOUS in v5.X+), apply CLAUDE.md item 18(a):
+            // AUTO_SYNC_CONTINUOUS in v5.X+), apply branchless-dispatch-discipline (default-off template-bool):
             // template <bool ENABLED> + if constexpr for compile-time
             // elision. Boot dispatch today is operator-initiated +
             // I/O-dominated; branchless irrelevant.
@@ -1113,7 +1171,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     //       exchange-position-no-local divergence), so the fills are historical.
                     //       So SEED the watermark to max(fetched) WITHOUT replaying. The warm-tail
                     //       replay (Reconcile_ApplyMissedFills, KEPT for that future path) is
-                    //       .E.1-gated behind the WS-fill watermark-bump (OrderManager.hpp:536) --
+                    //       .E.1-gated behind the WS-fill watermark-bump (the OMS last_seen_trade_id contract) --
                     //       until that lands, the boot watermark is always 0 and no non-zero-
                     //       watermark replay is reachable (H21: do not run an unreachable replay).
                     // .B.2: Reconcile_AutoCancelStale (real exchange cancels; UNAFFECTED -- a
@@ -1583,7 +1641,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // and execution continues unpinned.
     //
     // Reset Paper coordination: paper_reset_in_progress atomic declared
-    // earlier (~line 786) so fan_out lambda's reset handler can reference
+    // earlier (the InitArena boot block above) so fan_out lambda's reset handler can reference
     // it. Slow-paths park (yield) when set; producer's reset handler sets,
     // runs reset, clears.
     std::vector<std::thread> slow_paths;
@@ -1789,7 +1847,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         __ATOMIC_RELEASE);
                                 } else {
                                     // Cast model_handle back to the typed zoo
-                                    // pointer set at boot (line ~805). NULL
+                                    // pointer set at boot (the InitArena block above). NULL
                                     // means the core wasn't STRATEGY_ML at
                                     // boot, so no zoo storage was allocated;
                                     // hot-swap requires operator pre-config.
@@ -1949,7 +2007,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // via D1-B BREAKEVEN_ON_PROFIT cached-gate dispatch sister to
                     // TrailingSLRatchet; BACKTEST sister at Step C.4 invokes AllCores
                     // wrapper). Helper body preserved verbatim from prior inline at LIVE
-                    // :2834-3101 → CoreFrameworks/EngineCommon.hpp:470-770. Caller resolves
+                    // the per_node_slow lambda body → EngineCommon_SlowPathCycleOneCore in CoreFrameworks/EngineCommon.hpp. Caller resolves
                     // per-cycle scalars per v1.6 O2 bytewise-identical math (price =
                     // mtm_price per v1.7.3 HIGH-1) + v1.7.3 N-6 9-arg with BookSnapshot<F>
                     // sister-canonical reuse. Telemetry Path A INTERNAL (helper computes
@@ -2251,7 +2309,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Live AND paper modes both save (live: deployed weights inform
     // next session; paper: same thing for backtest-style sessions).
     // Reaches the ezoo via ctx.ensemble_handle (registered at
-    // line ~853) since the static array's name is scope-limited
+    // the boot per-node loop above) since the static array's name is scope-limited
     // to the init for-loop.
     for (int i = 0; i < num_nodes; ++i) {
         auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
@@ -2345,7 +2403,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     OrderManager_Shutdown(&oms);
 
     // v5.11.6.A — InitArena destroy MOVED to after per-struct frees
-    // (Strategy_FreePerCore loop below at line ~3274). Pre-fix ordering
+    // (the Strategy_FreePerCore loop below). Pre-fix ordering
     // had InitArena_Destroy here BEFORE the strategy free loop, which
     // would zero out InitArena_Global() while strategy frees were still
     // running — InitArena_Owns check in Strategy_FreePerCore would
@@ -2471,5 +2529,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     std::signal(SIGINT,  prev_int);
     std::signal(SIGTERM, prev_term);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_Run]
+//======================================================================
 
 }  // namespace tt
