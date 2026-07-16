@@ -3,49 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SHARDED TRADE LOG COLUMN REGISTRY — v5.14.10.F]
-//======================================================================================================
-// FOREACH_TRADE_LOG_COL(X) registry — adds a new ShardedTradeLog CSV column
-// in 1 row. Second application of the calibration-log-column-registry.md
-// pattern (closes /merge-scan N2 finding for ShardedTradeLog; MetricsLog
-// deferred — see TECH_DEBT-031).
-//
-// Tuple: X(col_name, printf_fmt, value_expr)
-//   col_name    — bare identifier; used for CSV header AND row writers
-//   printf_fmt  — per-column printf format string (e.g. "%lu", "%.8f", "%c")
-//   value_expr  — expression read at row-build time; MUST be valid in caller scope
-//
-// CALLER SCOPE CONTRACT (both RecordEntry + RecordExit):
-//   uint64_t timestamp_us, uint32_t node_id, uint32_t strategy_id,
-//   char event_type, double price_v, double entry_price_v, double exit_price_v,
-//   double pnl_v, double fees_v, double balance_after_v, double trade_size_v,
-//   int regime_v (v5.15.5.C.3 Phase 5.A; -1 = unknown for non-strategy-aware callers),
-//   const char* regime_name_v (v5.15.5.C.3 Phase 5.A; "UNKNOWN" for regime_v < 0)
-//
-// HEADER + ROW EMIT:
-//   - TradeLog_EmitHeader(f) — comma-separated col_name list + trailing \n
-//   - TRADE_LOG_EMIT_ROW(buf, bufsz, *out_n) — macro expanded inside caller;
-//     uses snprintf to build the row in a stack buffer (preserves the
-//     pre-refactor P8.3 truncation-guard pattern of fwrite-from-buffer).
-//     Returns row length via *out_n; caller validates against bufsz +
-//     truncation counter.
-//
-// BYTE-FORMAT PRESERVATION:
-//   Pre-refactor RecordEntry / RecordExit fprintf format strings:
-//     RecordEntry: "%lu,%u,%u,E,%.8f,%.8f,0,0,%.8f,%.8f,%.8f\n"
-//     RecordExit:  "%lu,%u,%u,X,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f\n"
-//   Both produce 11 columns; differ in event_type letter + zero-vs-populated
-//   exit_price/pnl. Registry merges both writers into ONE row shape with
-//   per-writer value population (event_type='E'/'X'; exit_price/pnl/fees
-//   set per writer via caller-scope variables BEFORE TRADE_LOG_EMIT_ROW).
-//
-// FUTURE COLUMNS (1 row each):
-//   - Maker/taker fee bifurcation (separate maker_fee + taker_fee columns)
-//   - Slippage attribution (notional vs effective_price columns)
-//   - Bandit attribution (which arm + which regime drove this trade — sister
-//     to v5.14.10.D cfg=2 calib log telemetry; same per-slot OMS state need)
-//
-// Pattern documented in DESIGN_SPECS/calibration-log-column-registry.md.
+// [FILE]_[CoreFrameworks/TradeLogColRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[trade-log CSV column registry — one row = header + entry/exit row writers; append-only column order]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_TRADE_LOG_COL]
 //======================================================================================================
 #ifndef TRADE_LOG_COL_REGISTRY_HPP
 #define TRADE_LOG_COL_REGISTRY_HPP
@@ -54,10 +18,20 @@
 
 namespace tt {
 
-//======================================================================================================
-// [REGISTRY TUPLE]
-//======================================================================================================
-// 11 columns matching pre-v5.14.10.F ShardedTradeLog format v3 header.
+//======================================================================
+// [REGISTRY]_[FOREACH_TRADE_LOG_COL]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[DESIGN_SPEC]_[calibration-log-column-registry]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ShardedTradeLog CSV columns — position-read by operator parsers; DO NOT reorder, APPEND only]
+// [COLUMN]_[col_name]_[bare identifier; used for CSV header AND row writers]
+// [COLUMN]_[printf_fmt]_[per-column printf format string (e.g. "%lu", "%.8f", "%c")]
+// [COLUMN]_[value_expr]_[expression read at row-build time; MUST be valid in caller scope]
+//======================================================================
+// [CODE]
+//======================================================================
 // ORDER MATTERS — operator parsers (TradeReader / TUI history panel /
 // offline analysis tools) read columns by position.
 // DO NOT reorder existing columns; APPEND new columns at the end.
@@ -82,18 +56,20 @@ namespace tt {
     X(regime,          "%d",   regime_v)                                                       \
     X(regime_name,     "%s",   regime_name_v)
 
-//======================================================================================================
-// [AUTO-GENERATED COUNT]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[auto-generated count]
+//------------------------------------------------------------------------------
 #define X_GEN_TRADE_LOG_COUNT_ONE(name, fmt, expr) +1
 #define FOREACH_TRADE_LOG_COL_COUNT (0 FOREACH_TRADE_LOG_COL(X_GEN_TRADE_LOG_COUNT_ONE))
 
-//======================================================================================================
-// [HEADER EMITTER]
-//======================================================================================================
-// Single function emits the canonical 11-column CSV header. Walks registry;
+//------------------------------------------------------------------------------
+// [SECTION]_[header emitter]
+//------------------------------------------------------------------------------
+// Single function emits the canonical CSV header (column count = the
+// registry's row count; was 11 pre-Phase-5.A). Walks registry;
 // first column has no leading comma; trailing \n at end. Byte-identical to
-// the pre-v5.14.10.F hand-coded header literal at ShardedTradeLog.hpp:118-119.
+// the pre-v5.14.10.F hand-coded header literal at ShardedTradeLog.hpp:118-119
+// for the original 11 columns.
 inline void TradeLog_EmitHeader(FILE* f) {
     if (!f) return;
     int first = 1;
@@ -107,9 +83,9 @@ inline void TradeLog_EmitHeader(FILE* f) {
     std::fprintf(f, "\n");
 }
 
-//======================================================================================================
-// [ROW EMITTER — snprintf to caller-supplied buffer]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[row emitter — snprintf to caller-supplied buffer]
+//------------------------------------------------------------------------------
 // Used inside RecordEntry / RecordExit. Writes the row to `buf` (size bufsz);
 // returns total bytes written via *out_n_ptr. Caller checks truncation
 // (n < 0 || n >= bufsz) and bumps writes_truncated on failure (P8.3 pattern).
@@ -152,6 +128,52 @@ inline void TradeLog_EmitHeader(FILE* f) {
             _trade_first = 0;                                                                  \
         }                                                                                       \
     } while (0);
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[origin + caller contract + byte-format preservation]
+//----------------------------------------------------------------------
+// FOREACH_TRADE_LOG_COL(X) registry — adds a new ShardedTradeLog CSV column
+// in 1 row. Second application of the calibration-log-column-registry.md
+// pattern (closes /merge-scan N2 finding for ShardedTradeLog; MetricsLog
+// deferred — see TECH_DEBT-031).
+//
+// CALLER SCOPE CONTRACT (both RecordEntry + RecordExit):
+//   uint64_t timestamp_us, uint32_t node_id, uint32_t strategy_id,
+//   char event_type, double price_v, double entry_price_v, double exit_price_v,
+//   double pnl_v, double fees_v, double balance_after_v, double trade_size_v,
+//   int regime_v (v5.15.5.C.3 Phase 5.A; -1 = unknown for non-strategy-aware callers),
+//   const char* regime_name_v (v5.15.5.C.3 Phase 5.A; "UNKNOWN" for regime_v < 0)
+//
+// HEADER + ROW EMIT:
+//   - TradeLog_EmitHeader(f) — comma-separated col_name list + trailing \n
+//   - TRADE_LOG_EMIT_ROW(buf, bufsz, *out_n) — macro expanded inside caller;
+//     uses snprintf to build the row in a stack buffer (preserves the
+//     pre-refactor P8.3 truncation-guard pattern of fwrite-from-buffer).
+//     Returns row length via *out_n; caller validates against bufsz +
+//     truncation counter.
+//
+// BYTE-FORMAT PRESERVATION (historical — the pre-v5.14.10.F 11-column era):
+//   Pre-refactor RecordEntry / RecordExit fprintf format strings:
+//     RecordEntry: "%lu,%u,%u,E,%.8f,%.8f,0,0,%.8f,%.8f,%.8f\n"
+//     RecordExit:  "%lu,%u,%u,X,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f\n"
+//   Both produce 11 columns; differ in event_type letter + zero-vs-populated
+//   exit_price/pnl. Registry merges both writers into ONE row shape with
+//   per-writer value population (event_type='E'/'X'; exit_price/pnl/fees
+//   set per writer via caller-scope variables BEFORE TRADE_LOG_EMIT_ROW).
+//
+// FUTURE COLUMNS (1 row each):
+//   - Maker/taker fee bifurcation (separate maker_fee + taker_fee columns)
+//   - Slippage attribution (notional vs effective_price columns)
+//   - Bandit attribution (which arm + which regime drove this trade — sister
+//     to v5.14.10.D cfg=2 calib log telemetry; same per-slot OMS state need)
+//
+// Pattern documented in DESIGN_SPECS/calibration-log-column-registry.md.
+//======================================================================
+// [DERIVED]   (tool-refreshed — ROW_COUNT/CONSUMERS generators land with the drift-gate generalization; empty skeleton is correct, D-327)
+//======================================================================
+// [END_REGISTRY]_[FOREACH_TRADE_LOG_COL]
+//======================================================================
 
 }  // namespace tt
 
