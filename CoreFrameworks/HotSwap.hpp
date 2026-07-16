@@ -3,8 +3,17 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [v5.15.4 — HOT-SWAP SHADOW-LOAD HELPERS]
-//
+// [FILE]_[CoreFrameworks/HotSwap.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the shadow-load hot-swap helpers (v5.15.4) — build NEW state aside, atomic pointer swap, free OLD; pre-swap untouched on any failure]
+// [REFERENCE]_[DESIGN_SPEC]_[shadow-load-state-transition-pattern]
+// [REFERENCE]_[PARITY]_[PARITY-023]
+// [CONTAINS]
+//   - [FUNCTION]_[HotSwap_ShadowLoad_Ensemble]
+//   - [FUNCTION]_[HotSwap_ShadowLoad_SingleZoo]
+//======================================================================================================
 // Replaces v5.10.0c "log-and-leave" + v5.14.2 in-place Free+Init+Load
 // patterns with the SHADOW-LOAD discipline per
 // DESIGN_SPECS/shadow-load-state-transition-pattern.md.
@@ -46,9 +55,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// [HotSwap_ShadowLoad_Ensemble<F>]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[HotSwap_ShadowLoad_Ensemble]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH] [CRITICAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ensemble shadow swap — 7 steps: cache horizons, alloc NEW, load, post-load, validate, atomic swap, free OLD]
+//======================================================================
+// [CODE]
+//======================================================================
 // Shadow-loads a new EnsembleModelZoo<F> from new_path; on success
 // atomically swaps state.nodes[node_idx].ensemble_handle to the new
 // allocation + Free's the old. Pre-swap state untouched on any failure.
@@ -193,10 +208,21 @@ inline int HotSwap_ShadowLoad_Ensemble(
 
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[HotSwap_ShadowLoad_Ensemble]
+//======================================================================
 
-//======================================================================================================
-// [HotSwap_ShadowLoad_SingleZoo<F>]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[HotSwap_ShadowLoad_SingleZoo]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH] [CRITICAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-zoo shadow swap — the ensemble helper's parallel for NodeModelZoo; same alloc/load/swap/free discipline]
+//======================================================================
+// [CODE]
+//======================================================================
 // Parallel to HotSwap_ShadowLoad_Ensemble for single-zoo NodeModelZoo<F>.
 // Allocates new zoo on heap, loads from new_path, atomically swaps
 // state.nodes[node_idx].model_handle, Free's old. Pre-swap untouched on
@@ -287,5 +313,10 @@ inline int HotSwap_ShadowLoad_SingleZoo(
 
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[HotSwap_ShadowLoad_SingleZoo]
+//======================================================================
 
 }  // namespace tt
