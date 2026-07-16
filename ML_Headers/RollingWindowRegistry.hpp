@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ROLLING WINDOW REGISTRY — v5.15.5.B.6]
+// [FILE]_[ML_Headers/RollingWindowRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the rolling-window cohort registry (v5.15.5.B.6) — first TEMPLATE-PARAMETERIZED cohort (each row carries a W); field decl + init auto-flow, consumers stay semantic]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_ROLLING_WINDOW]
 //======================================================================================================
 // X-macro registry for the per-cadence RollingStats cohort on NodeSlowState.
 // Closes a small Class-18 mirror: the 4 windows (short/long/medium/baseline)
@@ -29,8 +35,7 @@
 // distinct types per row; the X-macro walks across template instantiations.
 //
 // Cross-references:
-//   CLAUDE.md item 13 (X-macro registry pattern)
-//   CLAUDE.md item 19 (structural fix preferred)
+//   the X-macro registry pattern + structural-fix-preferred gradient
 //   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
 //   ML_Headers/RollingStats.hpp (RollingStats<F, W> with alignas(64) head)
 //======================================================================================================
@@ -39,7 +44,18 @@
 
 namespace tt {
 
-//------------------------------------------------------------------------------
+//======================================================================
+// [REGISTRY]_[FOREACH_ROLLING_WINDOW]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[4 windows (short 128 / long 512 / medium 256 / baseline 1024) — row order IS struct layout order]
+// [COLUMN]_[name]_[lower_snake suffix -> rolling_<name> field on NodeSlowState]
+// [COLUMN]_[window_size]_[compile-time W -> RollingStats<F, W> instantiation]
+//======================================================================
+// [CODE]
+//======================================================================
 // Tuple: X(name, window_size)
 //   name        — lower_snake_case suffix; produces `rolling_<name>` field
 //                 name on NodeSlowState
@@ -61,6 +77,11 @@ namespace tt {
     X(long,     512)              \
     X(medium,   256)              \
     X(baseline, 1024)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_ROLLING_WINDOW]
+//======================================================================
 
 }  // namespace tt
 

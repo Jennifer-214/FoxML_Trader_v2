@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ROR REGRESSOR]
+// [FILE]_[ML_Headers/ROR_regressor.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[regression-on-regression — slope-of-slopes (the second derivative of price); the trend-acceleration signal feeding regime detection]
+// [CONTAINS]
+//   - [FUNCTION]_[RORRegressor_Compute]   (RORRegressor + Init/Push + the DATA FLOW diagram share the file)
 //======================================================================================================
 // regression on regression - takes the slope outputs from LinearRegression3X and runs a second
 // regression on them, so instead of y=price x=time, its y=slope x=time, which tells you if the
@@ -14,9 +20,15 @@
 #define ROR_REGRESSOR_H
 
 #include "LinearRegression3X.hpp"
-//======================================================================================================
-// [ROR REGRESSOR STRUCTURE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RORRegressor_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[linearize the slope ring oldest->newest, fit -> slope-of-slopes; RORRegressor struct + Init/Push share this section]
+//======================================================================
+// [CODE]
+//======================================================================
 // same ring buffer pattern as RegressionFeederX, but instead of storing raw prices it stores the
 // slope values that come out of the inner regression, each time you run _Compute on the inner
 // regression you push the resulting slope into this buffer, once it fills up you can run regression
@@ -29,9 +41,9 @@ struct RORRegressor {
     int head;
     int count;
 };
-//======================================================================================================
-// [INIT FUNCTION]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// INIT FUNCTION
+//------------------------------------------------------------------------------
 // zeroes everything out, call once at startup
 //======================================================================================================
 template<unsigned F>
@@ -48,9 +60,9 @@ inline RORRegressor<F> RORRegressor_Init() {
 
     return reg;
 }
-//======================================================================================================
-// [PUSH FUNCTION]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// PUSH FUNCTION
+//------------------------------------------------------------------------------
 // takes a LinearRegression3XResult from the inner regression and stores the slope into the ring
 // buffer, also stores the r_squared so you could filter out bad fits later if you wanted to,
 // like if the inner regression had an r^2 of 0.05 that slope is basically noise and maybe you
@@ -63,9 +75,9 @@ inline void RORRegressor_Push(RORRegressor<F> *reg, LinearRegression3XResult<F> 
     reg->head                         = (reg->head + 1) & (MAX_WINDOW - 1);
     reg->count += (reg->count < MAX_WINDOW);
 }
-//======================================================================================================
-// [COMPUTE FUNCTION]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// COMPUTE FUNCTION
+//------------------------------------------------------------------------------
 // linearizes the slope ring buffer oldest-to-newest and runs LinearRegression3X_Fit on it, same
 // approach as RegressionFeederX_Compute but the y values are slopes instead of prices, the output
 // slope tells you how fast the trend is changing - positive means the trend is getting steeper
@@ -84,9 +96,9 @@ inline LinearRegression3XResult<F> RORRegressor_Compute(RORRegressor<F> *reg) {
 
     return LinearRegression3X_Fit(time_index, linearized, reg->count);
 }
-//======================================================================================================
-// [DATA FLOW]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// DATA FLOW
+//------------------------------------------------------------------------------
 // [price ticks] -> [RegressionFeederX_Push] -> [RegressionFeederX_Compute] -> [slope/r^2]
 //                                                                                  |
 //                                                                           [RORRegressor_Push]
@@ -98,5 +110,10 @@ inline LinearRegression3XResult<F> RORRegressor_Compute(RORRegressor<F> *reg) {
 //                                                          positive = trend accelerating (momentum)
 //                                                          negative = trend decelerating (reversal?)
 //                                                          near zero = trend is steady
-//======================================================================================================
+//------------------------------------------------------------------------------
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RORRegressor_Compute]
+//======================================================================
 #endif // ROR_REGRESSOR_H

@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [LINEAR REGRESSION]
+// [FILE]_[ML_Headers/LinearRegressionSimple.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-feature fixed-point least-squares — the original learning implementation; Fit + Predict]
+// [CONTAINS]
+//   - [FUNCTION]_[LinearRegression_Fit]   (+ Predict shares the file)
 //======================================================================================================
 // oh yeah its gonna be fixed point boiiiiiii, this is just a simple implementation, with only a single feature, im learning, for the more advanced one it will probably use a struct to just pack all the features in idk yet, im learning and trying to imagine ways to use this, so w/e, if you see me IRL it would make my day if you told me you love me, and remember class, java is bad
 //======================================================================================================
@@ -11,16 +17,22 @@
 #define LINEAR_REGRESSION_H
 
 #include "../FixedPoint/FixedPointN.hpp"
-//======================================================================================================
-// [LINEAR REGRESSION STRUCTURES]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[LinearRegression_Fit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[least-squares slope/intercept over FPN arrays (branchless zero-denominator guard); LinearRegressionModel + Predict share the section]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct LinearRegressionModel {
     FPN_Binary<F> slope;
     FPN_Binary<F> intercept;
 };
-//======================================================================================================
-// [LINEAR REGRESSION FUNCTION PROTOTYPES]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// LINEAR REGRESSION FUNCTION PROTOTYPES
+//------------------------------------------------------------------------------
 template <unsigned F> inline LinearRegressionModel<F> LinearRegression_Fit(FPN_Binary<F> *x_values, FPN_Binary<F> *y_values, int count) {
     using FP = FPN_Binary<F>;
     LinearRegressionModel<F> model;
@@ -55,7 +67,9 @@ template <unsigned F> inline LinearRegressionModel<F> LinearRegression_Fit(FPN_B
 template <unsigned F> inline FPN_Binary<F> LinearRegression_Predict(LinearRegressionModel<F> model, FPN_Binary<F> x) {
     return FPN_Add(FPN_Mul(model.slope, x), model.intercept);
 }
-
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[LinearRegression_Fit]
+//======================================================================
 #endif

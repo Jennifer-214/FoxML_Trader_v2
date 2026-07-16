@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [WELFORD ONLINE STATS]
+// [FILE]_[ML_Headers/WelfordStats.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[O(1) Welford mean/variance for unbounded streams (fixed-window sibling: RollingStats) — P&L distribution, drift detection, z-scores]
+// [CONTAINS]
+//   - [FUNCTION]_[Welford_Push]   (WelfordTracker + Init/Variance/Stddev/ZScore/Reset share the file)
 //======================================================================================================
 // O(1) incremental mean/variance tracker — numerically stable for unbounded streams.
 // complementary to RollingStats (which uses a fixed-window ring buffer).
@@ -15,6 +21,15 @@
 #include <cstdint>  // v5.15.5.F.4d TECH_DEBT-083 close — explicit IWYU for uintN_t (was transitively pulled)
 #include "../FixedPoint/FixedPointN.hpp"
 
+//======================================================================
+// [FUNCTION]_[Welford_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the classic two-delta update (numerically stable) + min/max; Variance/Stddev/ZScore read-outs share the section]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct WelfordTracker {
     uint64_t count;
@@ -94,5 +109,10 @@ template <unsigned F>
 inline void Welford_Reset(WelfordTracker<F> *w) {
     *w = Welford_Init<F>();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Welford_Push]
+//======================================================================
 
 #endif // WELFORD_STATS_HPP

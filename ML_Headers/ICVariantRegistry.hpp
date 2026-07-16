@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [IC VARIANT REGISTRY — v5.14.1.F]
+// [FILE]_[ML_Headers/ICVariantRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[IC computation variant registry (v5.14.1.F) — Spearman today (RollingIC's real behavior despite the generic name); future variants = 1 row + dispatch auto-flows]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_IC_VARIANT]
 //======================================================================================================
 // X-macro registry for IC (Information Coefficient) computation variants
 // on ConfidenceScorer. Operator selects active variant via cfg.confidence_ic_variant.
@@ -27,16 +33,26 @@
 // add the registry; future variants build alongside without disturbing
 // existing wiring.
 //
-// CLAUDE.md item 13 alignment: this is a multi-site additions category
+// X-macro registry-pattern alignment: this is a multi-site additions category
 // (cfg field + struct field + dispatcher branch + test per variant).
 // Registry collapses that to 1 line per variant.
 //======================================================================================================
 #ifndef IC_VARIANT_REGISTRY_HPP
 #define IC_VARIANT_REGISTRY_HPP
 
-//======================================================================================================
-// [REGISTRY ENTRY SHAPE]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_IC_VARIANT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[variant roster + count helper + the switch dispatcher; variant_id append-only (operator cfg files carry the numerics)]
+// [COLUMN]_[variant_id]_[cfg.confidence_ic_variant value — STABLE, append-only]
+// [COLUMN]_[name_tag/label_str]_[C identifier + display name]
+// [COLUMN]_[compute_call]_[expression returning double IC; `cs` in scope at the dispatch site]
+//======================================================================
+// [CODE]
+//======================================================================
 // X(variant_id, name_tag, label_str, compute_call)
 //
 //   variant_id   — integer enum value used by cfg.confidence_ic_variant.
@@ -62,9 +78,9 @@
     /* X(1, pearson,  "pearson",  RollingICPearson_Compute(&cs->ic_pearson)) */            \
     /* X(2, kendall,  "kendall",  RollingICKendall_Compute(&cs->ic_kendall)) */
 
-//======================================================================================================
-// [VARIANT-COUNT HELPER]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// VARIANT-COUNT HELPER
+//------------------------------------------------------------------------------
 // Compile-time count of registered IC variants. Used by tests to assert
 // "all expected variants present" — catches accidental row deletion.
 //======================================================================================================
@@ -72,9 +88,9 @@
 #define IC_VARIANT_COUNT_ONE(id, name, label, compute) +1
 #define FOREACH_IC_VARIANT_COUNT  (0 FOREACH_IC_VARIANT(IC_VARIANT_COUNT_ONE))
 
-//======================================================================================================
-// [DISPATCHER MACRO]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// DISPATCHER MACRO
+//------------------------------------------------------------------------------
 // Computes IC for the variant selected by `variant` arg. Used by new
 // ConfidenceScorer_ComputeICVariant + drift detection / display sites
 // that want to honor cfg.confidence_ic_variant.
@@ -101,5 +117,10 @@
             default: return 0.0;  /* unknown variant → safe */                             \
         }                                                                                  \
     }())
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_IC_VARIANT]
+//======================================================================
 
 #endif // IC_VARIANT_REGISTRY_HPP

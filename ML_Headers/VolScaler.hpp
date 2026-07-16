@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [VOL SCALER — VOLATILITY-INVERSE POSITION SIZING]
+// [FILE]_[ML_Headers/VolScaler.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[volatility-inverse sizing (FoxML vol_scaling.py port) — weight = clip(alpha/vol, +-z_max) * (max_weight/z_max); shared by backtest + live]
+// [CONTAINS]
+//   - [FUNCTION]_[VolScaler_Size]   (+ SizeDefault / InverseAlpha / RawZ share the file)
 //======================================================================================================
 // port of FoxML/private LIVE_TRADING/sizing/vol_scaling.py.
 // converts an alpha signal (expected return) to a position weight by dividing
@@ -42,6 +48,15 @@
 //
 // returns: target weight in [-max_weight, +max_weight]
 //   positive = long, negative = short (we only go long in current engine)
+//======================================================================
+// [FUNCTION]_[VolScaler_Size]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Sharpe-like alpha->weight; zero/negative vol returns 0; the Default/InverseAlpha/RawZ helpers share this section]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline double VolScaler_Size(double alpha, double volatility,
                                      double z_max, double max_weight) {
     if (volatility <= 0.0) return 0.0;
@@ -77,5 +92,10 @@ static inline double VolScaler_RawZ(double alpha, double volatility) {
     if (volatility <= 0.0) return 0.0;
     return alpha / volatility;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[VolScaler_Size]
+//======================================================================
 
 #endif // VOL_SCALER_HPP

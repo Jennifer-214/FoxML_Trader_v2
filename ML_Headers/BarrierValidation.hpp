@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BARRIER VALIDATION — v5.15.5.E.0.10 A6 ingress (D-221)]
+// [FILE]_[ML_Headers/BarrierValidation.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the corrupt-barrier SSoT predicate (A6/D-221) — applied at BOTH seams (loader ingress refuse + trainer emit refuse); SANE caps shared with the cfg capital sweep]
+// [CONTAINS]
+//   - [FUNCTION]_[barrier_is_corrupt]
 //======================================================================================================
 // SSoT predicate for detecting a CORRUPT model barrier (label_tp_pct / label_sl_pct).
 // Applied at BOTH seams of the SAME correctness invariant (adjacency by structure+function,
@@ -28,6 +34,15 @@
 
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[barrier_is_corrupt]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[corrupt = non-finite OR negative OR beyond the SANE caps (SL 100% / TP 1000%); raw stamp doubles by design (validation-only, H4-exempt)]
+//======================================================================
+// [CODE]
+//======================================================================
 static constexpr double BARRIER_SANE_MAX_SL = 1.0;    // 100% — economically hard for a spot SL
 static constexpr double BARRIER_SANE_MAX_TP = 10.0;   // 1000% — generous; absurd garbage (1e6) still caught
 
@@ -39,6 +54,12 @@ inline bool barrier_is_corrupt(double tp_pct, double sl_pct) {
         || tp_pct < 0.0             || sl_pct < 0.0
         || tp_pct > BARRIER_SANE_MAX_TP || sl_pct > BARRIER_SANE_MAX_SL;
 }
+
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[barrier_is_corrupt]
+//======================================================================
 
 }  // namespace tt
 

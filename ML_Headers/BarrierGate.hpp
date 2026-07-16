@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BARRIER GATE]
+// [FILE]_[ML_Headers/BarrierGate.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[peak/valley classifier gate (FoxML barrier.py port) — soft gate = (1-p_peak)^gamma * (0.5+0.5*p_valley)^delta, hard block above 0.6]
+// [CONTAINS]
+//   - [FUNCTION]_[BarrierGate_Compute]
 //======================================================================================================
 // blocks entries before local price peaks using two binary classifiers:
 //   P(will_peak)   — probability price is about to hit a local high
@@ -20,6 +26,15 @@
 
 #include <math.h>
 
+//======================================================================
+// [FUNCTION]_[BarrierGate_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[hard block when p_peak > 0.6, else the soft gate formula floored at g_min; BarrierGateResult struct rides in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 // tuning constants (FoxML defaults)
 #define BARRIER_G_MIN              0.2    // minimum gate value (never fully block)
 #define BARRIER_GAMMA              1.0    // peak penalty exponent
@@ -54,5 +69,10 @@ static inline BarrierGateResult BarrierGate_Compute(double p_peak, double p_vall
     r.blocked = 0;
     return r;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BarrierGate_Compute]
+//======================================================================
 
 #endif // BARRIER_GATE_HPP

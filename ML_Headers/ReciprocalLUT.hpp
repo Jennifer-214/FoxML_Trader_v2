@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [RECIPROCAL LUT — branchless 1/n for slow-path averaging]
+// [FILE]_[ML_Headers/ReciprocalLUT.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[boot-precomputed 1/n table — FPN_Mul(sum, recip[n]) replaces per-Push division (~10ns vs ~50-100ns); <=1 LSB ULP drift documented, exact for power-of-2 n]
+// [CONTAINS]
+//   - [FUNCTION]_[GetReciprocalLUT]
 //======================================================================================================
 // v5.11.2.A — Replaces FPN_DivNoAssert(sum, n_fp) with FPN_Mul(sum, recip[n])
 // where recip[n] = 1/n precomputed at engine boot.
@@ -23,7 +30,7 @@
 //   ~1e-15 in derived values — well below all downstream consumer precision
 //   (XGBoost float32 = ~1e-7, cfg-tuned thresholds = ~1e-4).
 //
-//   Replay-determinism (tests/controller_test.cpp:10258) uses memcmp on FPN_Binary
+//   Replay-determinism (the memcmp replay test in tests/controller_test.cpp) uses memcmp on FPN_Binary
 //   bytes — the LUT changes the output bytewise. Baseline is regenerated as
 //   part of v5.11.2.A; documented in DOCS/PARITY_LIFECYCLE.md.
 //
@@ -39,6 +46,15 @@
 
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[GetReciprocalLUT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Meyer's-singleton const LUT (thread-safe C++11 init); values[0] is the never-used sentinel]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W>
 struct ReciprocalLUT {
     FPN_Binary<F> values[W + 1];  // values[n] = 1.0 / n; values[0] = sentinel zero
@@ -60,5 +76,10 @@ inline const ReciprocalLUT<F, W>& GetReciprocalLUT() {
     }();
     return lut;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GetReciprocalLUT]
+//======================================================================
 
 } // namespace tt

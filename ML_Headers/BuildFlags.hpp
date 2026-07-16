@@ -1,7 +1,15 @@
 #pragma once
 //======================================================================================================
-// Build flags fingerprint (v5.9.5h Phase 10 / v5.10 Idea #10)
+// [FILE]_[ML_Headers/BuildFlags.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[compile-time build-flags fingerprint — stamp-emitted hash catches cross-build deploy drift (-O2 vs -O3 / USE_NATIVE_128); WARN-only at load]
+// [CONTAINS]
+//   - [FUNCTION]_[BUILD_FLAGS_HASH]
 //======================================================================================================
+// Build flags fingerprint (v5.9.5h Phase 10 / v5.10 Idea #10)
+//------------------------------------------------------------------------------
 // Detects cross-build deploy mistakes: train on dev box compiled with -O2,
 // deploy to prod compiled with -O3 + -DUSE_NATIVE_128 → silent feature
 // distribution drift (IEEE-754 reordering across optimization levels +
@@ -23,6 +31,16 @@
 
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[BUILD_FLAGS_HASH]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[constexpr FNV-1a over the ORDER-LOCKED canonical flag string — appending preserves existing semantics, reordering flips everyone (append-only discipline)]
+//======================================================================
+// [CODE]
+//======================================================================
 // FNV-1a constexpr — matches the helper in FeatureRegistry.hpp pattern.
 // Local copy so this header is self-contained (no include dependency on
 // FeatureRegistry.hpp from NodeModelZoo / EngineSharded which load early).
@@ -69,5 +87,10 @@ constexpr const char* BUILD_FLAGS_CANONICAL =
 inline constexpr uint64_t BUILD_FLAGS_HASH() {
     return bf_fnv1a(BUILD_FLAGS_CANONICAL);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BUILD_FLAGS_HASH]
+//======================================================================
 
 }  // namespace tt

@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [COST MODEL]
+// [FILE]_[ML_Headers/CostModel.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[trading-cost estimate (FoxML cost_model.py port) — spread + vol-timing + impact terms; gates unprofitable entries in backtest AND live]
+// [CONTAINS]
+//   - [FUNCTION]_[CostModel_Estimate]   (+ EstimateDefault / Breakeven / ShouldTrade + TradingCosts share the file)
 //======================================================================================================
 // port of FoxML/private LIVE_TRADING/arbitration/cost_model.py.
 // estimates trading costs: spread + volatility timing + market impact.
@@ -35,6 +41,15 @@
 #define COST_K2_DEFAULT  0.15   // volatility timing
 #define COST_K3_DEFAULT  1.0    // market impact
 
+//======================================================================
+// [FUNCTION]_[CostModel_Estimate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[cost = k1*spread + k2*vol*10000*sqrt(h/5) + k3*10*sqrt(participation/0.01); Breakeven/ShouldTrade gates share the section]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TradingCosts {
     double spread_cost;     // spread component (bps)
     double timing_cost;     // volatility timing component (bps)
@@ -98,5 +113,10 @@ static inline double CostModel_Breakeven(double total_cost_bps) {
 static inline int CostModel_ShouldTrade(double alpha_decimal, double total_cost_bps) {
     return (alpha_decimal > CostModel_Breakeven(total_cost_bps)) ? 1 : 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CostModel_Estimate]
+//======================================================================
 
 #endif // COST_MODEL_HPP

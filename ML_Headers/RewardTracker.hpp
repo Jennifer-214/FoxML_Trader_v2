@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [REWARD TRACKER]
+// [FILE]_[ML_Headers/RewardTracker.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-trade reward ring attributed to strategy arms — DrainCSV appends logging/reward_attribution.csv for offline bandit analysis]
+// [CONTAINS]
+//   - [STRUCT]_[RewardTracker]         (RewardRecord element shares the block)
+//   - [FUNCTION]_[RewardTracker_Push]  (+ Init / DrainCSV share the file)
 //======================================================================================================
 // ring buffer of per-trade reward records attributed to strategy arms.
 // DrainCSV appends to logging/reward_attribution.csv for offline analysis.
@@ -16,6 +23,15 @@
 #include <stdio.h>
 #include <time.h>
 
+//======================================================================
+// [STRUCT]_[RewardTracker]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[256-slot reward ring + the RewardRecord element (timestamp/strategy/bps/prices/hold/reason)]
+//======================================================================
+// [CODE]
+//======================================================================
 #define REWARD_TRACKER_MAX 256
 
 struct RewardRecord {
@@ -34,6 +50,23 @@ struct RewardTracker {
     int count;
 };
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[RewardTracker]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[RewardTracker_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ring push + the Init/DrainCSV (append + reset) siblings share this section]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void RewardTracker_Init(RewardTracker *rt) {
     rt->head = 0;
     rt->count = 0;
@@ -81,5 +114,10 @@ static inline void RewardTracker_DrainCSV(RewardTracker *rt, const char *path) {
     rt->count = 0;
     rt->head = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RewardTracker_Push]
+//======================================================================
 
 #endif // REWARD_TRACKER_HPP
