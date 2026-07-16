@@ -1,7 +1,22 @@
 // Copyright (c) 2026 Jennifer Lewis. All rights reserved.
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 //======================================================================================================
-// [UNIVERSAL CFG FIELD REGISTRY — TWO-REGISTRY ARCHITECTURE]
+// [FILE]_[CoreFrameworks/CfgFieldRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE] [DETERMINISM]]
+// [REFERENCE]_[INVARIANT]_[[H13] [H16] [H17]]
+// [REFERENCE]_[DESIGN_SPEC]_[[universal-cfg-field-registry-pattern] [registry-tuple-as-single-source-of-truth] [per-instance-registry-pattern]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE master cfg registry — two-registry architecture (GLOBAL ~47 rows / PER_NODE ~79 rows, DISJOINT scope); descriptor schema LOCKED at .F.4b; parser/GUI/defaults/stamp/drift all auto-flow from rows]
+// [CONTAINS]
+//   - [STRUCT]_[CfgFieldDescriptor]
+//   - [REGISTRY]_[FOREACH_GLOBAL_CFG_FIELD]
+//   - [REGISTRY]_[FOREACH_PER_NODE_CFG_FIELD]   (+ EMIT payload macros)
+//   - [REGISTRY]_[FOREACH_MANUAL_PER_NODE_FIELD]
+//   - [REGISTRY]_[FOREACH_PER_NODE_DOMAIN_BITMAP]
+//   - [REGISTRY]_[FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC]
+//   - [REGISTRY]_[FOREACH_PER_NODE_ARRAY_OVERRIDE]
+//   - [SECTION]_[descriptor arrays + FIELD_IDX enums + bitmap dispatcher framework + CI guards]
 //======================================================================================================
 // v5.15.5.F.4c.3 — global vs per-core registry split. Single FOREACH_CFG_FIELD
 // retired in favor of two registries with DISJOINT scope:
@@ -28,7 +43,7 @@
 //   DESIGN_SPECS/per-instance-registry-pattern.md (per-core; future axes:
 //   per-symbol, per-strategy, per-horizon, per-regime — each becomes a sister
 //   FOREACH_<AXIS>_CFG_FIELD using the same template).
-// Type-trait dispatch via tt:: namespace per CLAUDE.md item 23 +
+// Type-trait dispatch via tt:: namespace per H13 +
 //   DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.
 // Categorical applicability columns per
 //   DESIGN_SPECS/categorical-tag-applicability-pattern.md.
@@ -87,9 +102,16 @@
 enum RegimeCategoryDefault : uint16_t { REGIME_CAT_ALL = 0xFFFFu };
 enum RiskCategoryDefault   : uint16_t { RISK_CAT_ALL   = 0xFFFFu };
 
-//======================================================================================================
-// [CFG FIELD DESCRIPTOR]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[CfgFieldDescriptor]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[[H13] [H14] [H16]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the row descriptor — Kind is GUI-metadata ONLY (never drives storage, H13/H14 consolidated); MetadataFlag bits gate derived filters (H16); schema LOCKED at .F.4b]
+//======================================================================
+// [CODE]
+//======================================================================
 struct CfgFieldDescriptor {
     //---- Kind enum (uint8_t) — METADATA-ONLY ----
     // Drives GUI presentation (slider vs textbox, format string, % suffix, clamp coercion).
@@ -184,7 +206,7 @@ struct CfgFieldDescriptor {
     Kind          kind;             // 1 byte
     uint8_t       lives_in_struct;  // 1 byte (LivesInStruct enum value)
     uint16_t      metadata_flags;   // 2 bytes
-    uint16_t      _reserved = 0;    // 2 bytes — future use; default-init 0 per CLAUDE.md item 27
+    uint16_t      _reserved = 0;    // 2 bytes — future use; default-init 0 per H12 explicit-padding discipline
     uint16_t      field_idx;        // 2 bytes (FIELD_IDX_<name>; for sidecar-table lookup)
 
     //---- String pointers (32 bytes) ----
@@ -232,10 +254,15 @@ inline constexpr uint32_t CFG_FAULT_CAPITAL_MALFORMED    = 1u << 0;  // parse-po
 inline constexpr uint32_t CFG_FAULT_CAPITAL_OUT_OF_RANGE = 1u << 1;  // post-resolve sweep: a CAPITAL_BOUND value exceeded the no-margin cap (loss>100% / gain>1000%)
 inline constexpr uint32_t CFG_FAULT_UNKNOWN_KEY          = 1u << 2;  // loop-tail: an unrecognized SHARDED key (core_*/node_*) — a retired-prefix or typo'd/out-of-range per-node key (③ clean-break, D-223/D-255)
 inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-point: a non-capital FEATURE field (FPN/float regime/ema/rolling/ML threshold) was MALFORMED — determinism-bearing, refuse-don't-coerce (C1/C2; DISTINCT from CAPITAL_MALFORMED to keep the severities separable — no Class-49 merge)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[CfgFieldDescriptor]
+//======================================================================
 
-//======================================================================================================
-// [FOREACH_*_CFG_FIELD — 13-col tuple (per-core + global uniform at v5.15.5.F.4d.1.B.3+)]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[the 13-col tuple contract — shared by BOTH registries below]
+//------------------------------------------------------------------------------
 // Tuple (13 args; STORAGE_T leading column added to GLOBAL at .B.3 Step 0.5b.A per
 // Decision A (a) Path α cascade closing global↔per-core column asymmetry):
 //   X(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip,
@@ -277,11 +304,23 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // have author-supplied tooltips. HIGH-6 tooltip-preservation discipline per
 // plan + DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
 
-//======================================================================================================
-// [FOREACH_GLOBAL_CFG_FIELD — system / training / recording / engine-wide mode / ack / notify / logging]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_GLOBAL_CFG_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[H17]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[~47 engine-wide rows (system/training/recording/mode/ack/notify/logging) — set once, never per-node; struct decl + parser + GUI + defaults auto-flow]
+// [COLUMN]_[STORAGE_T]_[C++ destination type on ControllerConfig<F> (H13/H14: Kind never drives storage)]
+// [COLUMN]_[KIND_TOKEN]_[GUI metadata only (slider/textbox/format/clamp coercion)]
+// [COLUMN]_[name/label/section]_[cfg key + GUI label + Settings section]
+// [COLUMN]_[meta]_[MetadataFlag bits — derived-filter cohorts (H16)]
+// [COLUMN]_[payload]_[DBL/INT/BOOL/INT_ENUM (default, clamps)]
+// [COLUMN]_[tooltip + 4 applicability cats + lives_in_struct]_[GUI tooltip; categorical applicability; storage routing]
+//======================================================================
+// [CODE]
+//======================================================================
 // 47 rows. Operator sets once for the whole engine; not per-core.
-//======================================================================================================
 #define FOREACH_GLOBAL_CFG_FIELD(X)                                                                                                                                                                                  \
     /* === System / Operational (5) === */                                                                                                                                                                            \
     X(uint16_t,             KIND_INT,        num_execution_nodes,         "Execution Nodes",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
@@ -493,13 +532,25 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
         "Per-tick price-delta threshold below which slow-path cycle is 'no material change' (skips RebuildOneCore). Default 0.05% (stored fraction 0.0005). Payload re-authored PERCENT-space at Ship-B P0.3 — value-identical through cfg_assign_field's PCT scaling (this row was the one fraction-authored outlier).",                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
-//======================================================================================================
-// [FOREACH_PER_NODE_CFG_FIELD — trading / strategy / entry / exit / ML / risk-gate / regime-detection]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_GLOBAL_CFG_FIELD]
+//======================================================================
+
+//======================================================================
+// [REGISTRY]_[FOREACH_PER_NODE_CFG_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[[H17] [H22]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[~79 per-node rows at cfg.nodes[c].<field> — registry membership IS the scope assertion (PER_NODE_OK bit removed); same 13-col tuple as GLOBAL; EMIT payload macros follow inside this section]
+//======================================================================
+// [CODE]
+//======================================================================
 // 79 rows. Each per-core row lives at `cfg.nodes[c].<field>` (one instance per
 // execution core; up to MAX_EXECUTION_NODES = 16). PER_NODE_OK metadata bit
 // is REMOVED — registry membership IS the scope assertion.
-//======================================================================================================
 #define FOREACH_PER_NODE_CFG_FIELD(X)                                                                                                                                                                                \
     /* === Trading (6) === */                                                                                                                                                                                         \
     X(Money, KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         CfgFieldDescriptor::CAPITAL_BOUND_GAIN,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -719,9 +770,9 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
         "Per-node strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `node_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; nodes[c].strategy auto-syncs from node_strategies[c] via FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
-//======================================================================================================
-// [EMIT_PER_NODE_CFG_STRUCT_FIELD — payload macro for X-macro struct generation (WIP2d-0.B)]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// EMIT_PER_NODE_CFG_STRUCT_FIELD — payload macro for X-macro struct generation (WIP2d-0.B)
+//------------------------------------------------------------------------------
 // Consumed by PerNodeCfg<F> in ControllerConfig.hpp via:
 //   FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
 //
@@ -743,9 +794,9 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
                                          applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     STORAGE_T name;
 
-//======================================================================================================
-// [EMIT_GLOBAL_CFG_STRUCT_FIELD — payload macro for global cfg field struct generation (v5.15.5.F.4d.1.B.3+)]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// EMIT_GLOBAL_CFG_STRUCT_FIELD — payload macro for global cfg field struct generation (v5.15.5.F.4d.1.B.3+)
+//------------------------------------------------------------------------------
 // Sister to EMIT_PER_NODE_CFG_STRUCT_FIELD; landed at .B.3 Step 0.5b.A Path α cascade closing the
 // global↔per-core column asymmetry. ControllerConfig<F>'s 48 manual global cfg field decls become
 // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_STRUCT_FIELD) at .B.3 Step 0.5b.B (this ship's follow-up
@@ -764,9 +815,9 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
                                        applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     STORAGE_T name;
 
-//======================================================================================================
-// [EMIT_GLOBAL_CFG_DEFAULT — payload macro for auto-defaults in ControllerConfig_Default (v5.15.5.F.4d.1.B.3+)]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// EMIT_GLOBAL_CFG_DEFAULT — payload macro for auto-defaults in ControllerConfig_Default (v5.15.5.F.4d.1.B.3+)
+//------------------------------------------------------------------------------
 // Sister to EMIT_GLOBAL_CFG_STRUCT_FIELD; landed at .B.3 Step 1.6.1 (TECH_DEBT-093 full closure) +
 // future-headache reducer for all 48 global default-init lines.
 //
@@ -782,9 +833,9 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
                                   applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     tt::cfg_assign_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name]);
 
-//======================================================================================================
-// [EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR — payload macro for per-core registry rows' global manual struct field defaults (v5.15.5.F.4d.1.B.4 Phase Cx-E.1)]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR — payload macro for per-core registry rows' global manual struct field defaults (v5.15.5.F.4d.1.B.4 Phase Cx-E.1)
+//------------------------------------------------------------------------------
 // Sister to EMIT_GLOBAL_CFG_DEFAULT; lands the "future work" noted at :739 comment above.
 // Per-core registry rows (FOREACH_PER_NODE_CFG_FIELD) have global manual struct field declarations
 // on ControllerConfig<F> (load-bearing for EMIT_PER_NODE_COPY walker propagation at
@@ -809,10 +860,24 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     if constexpr (!((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
         tt::cfg_assign_field(cfg.name, g_per_node_cfg_field_descriptors[FIELD_IDX_PER_NODE_##name]); \
     }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_PER_NODE_CFG_FIELD]
+//======================================================================
 
-//======================================================================================================
-// [FOREACH_MANUAL_PER_NODE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_MANUAL_PER_NODE_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[DESIGN_SPEC]_[manual-fields-inventory-pattern]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the documented exemptions — parallel arrays awaiting .F.4e KINDs or TRANSITIONAL until WIP2f/g; every row cross-checked against MANUAL_FIELDS_INVENTORY.md by CI]
+// [COLUMN]_[type/name/suffix]_[array element type + field + optional [N] suffix]
+// [COLUMN]_[rationale]_[must match the MANUAL_FIELDS_INVENTORY.md row]
+//======================================================================
+// [CODE]
+//======================================================================
 // PURPOSE: documented exemptions for per-core fields that can't fit
 // FOREACH_PER_NODE_CFG_FIELD yet (awaiting KIND_STRING / KIND_FILE_PATH /
 // KIND_HEX64 at .F.4e) OR are TRANSITIONAL during shadow-window migration.
@@ -850,10 +915,26 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // Used by ControllerConfig<F> for parallel array declarations.
 #define EMIT_MANUAL_PER_NODE_DECL(type, name, suffix, rationale) \
     type name[MAX_EXECUTION_NODES] suffix;
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_MANUAL_PER_NODE_FIELD]
+//======================================================================
 
-//======================================================================================================
-// [FOREACH_PER_NODE_DOMAIN_BITMAP — meta-registry for cfg-domain bitmap fields (WIP2d-0.B)]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_PER_NODE_DOMAIN_BITMAP]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[H15]
+// [REFERENCE]_[DESIGN_SPEC]_[[meta-registry-pattern-for-codebase-registry-discipline] [bitmap-overflow-protection-discipline]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[meta-registry binding each FOREACH_<DOMAIN>_CFG_FLAG child to its per-node bitmap storage — struct decl + overflow asserts + the WIP2e rebuild walker all auto-flow]
+// [COLUMN]_[align_n]_[8 = alignas(8) cluster boundary; 0 = natural]
+// [COLUMN]_[DOMAIN/field/storage]_[pastes to <DOMAIN>_CFG_COUNT; the bitmap field + width]
+// [COLUMN]_[child_registry_token]_[the FOREACH_<DOMAIN>_CFG_FLAG the rebuild walker iterates]
+//======================================================================
+// [CODE]
+//======================================================================
 // PURPOSE: meta-registry binding each FOREACH_<DOMAIN>_CFG_FLAG child registry to its
 // per-core bitmap storage field. SINGLE source of truth for the 5 bitmap fields on
 // PerNodeCfg<F>; adding a new domain registry = 1 row here + 1 row in MANUAL_FIELDS_INVENTORY.md.
@@ -911,10 +992,24 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // registry headers are included at the top of this file, so <DOMAIN>_CFG_COUNT constants are
 // in scope here independent of any other file's include order.
 FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_PER_NODE_DOMAIN_BITMAP]
+//======================================================================
 
-//======================================================================================================
-// [FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC — AUTOPOPULATE manual sync sources (WIP2d-1.B.0)]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW]]
+// [REFERENCE]_[DESIGN_SPEC]_[autopopulate-pattern-for-production-caller-class]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sync sources for NO_FLAT_FIELD rows (no flat scalar exists) — legacy array -> nodes[c]; N=1 today (strategy <- node_strategies), applied per the future-easy multiplier]
+// [COLUMN]_[target_field]_[the NO_FLAT_FIELD-tagged row in FOREACH_PER_NODE_CFG_FIELD]
+// [COLUMN]_[source_array_field]_[the TRANSITIONAL parallel array on ControllerConfig]
+//======================================================================
+// [CODE]
+//======================================================================
 // PURPOSE: auxiliary registry for FOREACH_PER_NODE_CFG_FIELD rows tagged NO_FLAT_FIELD.
 // These rows lack a ControllerConfig flat scalar; the auto-flow copy walker skips them via
 // the NO_FLAT_FIELD bit. THIS registry provides the manual sync source mapping (legacy
@@ -944,10 +1039,23 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // `cfg` + `c` in scope from caller's per-core loop).
 #define EMIT_NO_FLAT_FIELD_SYNC(target, source) \
     cfg->nodes[c].target = cfg->source[c];
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC]
+//======================================================================
 
-//======================================================================================================
-// [FOREACH_PER_NODE_ARRAY_OVERRIDE — legacy capital parallel-array → nodes[c] merge (E.1.1 ③ item-4 / B)]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_PER_NODE_ARRAY_OVERRIDE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[TRANSITIONAL capital-array -> nodes[c] LAST-WINS merge (D-273/B) — RAW copy preserves the 0=inherit sentinel; MUST run AFTER the copy walker; retires with the arrays at WIP2g/E.1.2]
+// [COLUMN]_[target_field]_[on PerNodeCfg<F>]
+// [COLUMN]_[source_array_field]_[the standalone capital array on ControllerConfig<F>]
+//======================================================================
+// [CODE]
+//======================================================================
 // PURPOSE: the two TRANSITIONAL capital arrays (node_risk_pct / node_max_drawdown_pct) carry the LIVE
 // per-node override value, but ControllerConfig_ResolveForCore does NOT merge them — they are standalone
 // FOREACH_MANUAL_PER_NODE_FIELD arrays, NOT PER_NODE_OVERRIDE_FIELDS — so nodes[c].<field> was a dead
@@ -982,10 +1090,19 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // (last-wins; `cfg` + `c` in scope from caller's per-core loop).
 #define EMIT_PER_NODE_ARRAY_OVERRIDE(target, source) \
     cfg->nodes[c].target = cfg->source[c];
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_PER_NODE_ARRAY_OVERRIDE]
+//======================================================================
 
-//======================================================================================================
-// [PerNodeCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[descriptor arrays + FIELD_IDX enums + bitmap dispatcher framework + CI guards]
+//------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+// PerNodeCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)
+//------------------------------------------------------------------------------
 // PURPOSE: closes Shortsighted #3 (CI regex heuristic) to ~99.9% structural strength via
 // COMPILE-TIME static_assert. The X-macro KNOWS the expected struct payload (sum of STORAGE_T
 // sizes from FOREACH_PER_NODE_CFG_FIELD + FOREACH_PER_NODE_DOMAIN_BITMAP). If anyone adds a
@@ -1040,9 +1157,9 @@ inline constexpr size_t kPerCoreCfgFieldCount             = calc_per_node_cfg_fi
 // Plus alignas(64) tail-pad up to 63 bytes.
 inline constexpr size_t kPerCoreCfgMaxPaddingBytes        = kPerCoreCfgFieldCount * 7 + 63;
 
-//======================================================================================================
-// [FIELD_IDX enums — per-registry auto-generated]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// FIELD_IDX enums — per-registry auto-generated
+//------------------------------------------------------------------------------
 // Drives g_*_cfg_field_descriptors[FIELD_IDX_*_<name>] direct access at compile time.
 #define X_GEN_GLOBAL_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     FIELD_IDX_GLOBAL_##name,
@@ -1062,9 +1179,9 @@ enum CfgPerCoreFieldIdx : uint16_t {
 #undef X_GEN_GLOBAL_FIELD_IDX
 #undef X_GEN_PER_NODE_FIELD_IDX
 
-//======================================================================================================
-// [g_*_cfg_field_descriptors — auto-generated arrays]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// g_*_cfg_field_descriptors — auto-generated arrays
+//------------------------------------------------------------------------------
 // Single source of truth for descriptor data; consumers index via FIELD_IDX_GLOBAL_<name>
 // or FIELD_IDX_PER_NODE_<name>.
 #define X_GEN_DESCRIPTOR_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
@@ -1164,9 +1281,9 @@ static_assert(cfg_field_names_unique(g_per_node_cfg_field_descriptors),
 // fields but writes to inf.inference_cfg_* for stamp emit (different consumer).
 // The two are orthogonal by design. Verified at .F.4d via reverse-drift CI script.
 
-//======================================================================================================
-// [BITMAP DISPATCHER FRAMEWORK — TEMPLATED FOR PER-REGISTRY APPLICATION]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// BITMAP DISPATCHER FRAMEWORK — TEMPLATED FOR PER-REGISTRY APPLICATION
+//------------------------------------------------------------------------------
 // .F.4c.3 — template-parameterized on (N_FIELDS, descriptor array). Each
 // registry instantiates its own mask arrays + composed views. Same template
 // body composes against either FOREACH_GLOBAL_CFG_FIELD or
@@ -1267,7 +1384,7 @@ FOREACH_METADATA_BIT(X_GEN_PER_NODE_MASK)
 #undef X_GEN_PER_NODE_MASK
 
 //------------------------------------------------------------------------------
-// [CI CHECK 9 — STAMP_BOUND_CFG_DERIVED COHORT COVERAGE REGRESSION GUARD]
+// CI CHECK 9 — STAMP_BOUND_CFG_DERIVED COHORT COVERAGE REGRESSION GUARD
 //------------------------------------------------------------------------------
 // v5.15.5.F.4d.1.B.3 Step 4 (2026-05-24). Compile-time coverage assertion ensures
 // the STAMP_BOUND_CFG_DERIVED cohort doesn't shrink unintentionally. At ship time:
@@ -1309,7 +1426,7 @@ static_assert(
 );
 
 //------------------------------------------------------------------------------
-// [H16 COMPILE-TIME ENFORCEMENT — Path γ correction (v5.15.5.F.4d.1.A)]
+// H16 COMPILE-TIME ENFORCEMENT — Path γ correction (v5.15.5.F.4d.1.A)
 //------------------------------------------------------------------------------
 // Per DESIGN_SPECS/metadata-bit-driven-derived-filter-framework.md v1.2 Path γ
 // correction (2026-05-17). Every metadata bit MUST be either enrolled in
@@ -1363,7 +1480,7 @@ static_assert(
 );
 
 //------------------------------------------------------------------------------
-// [CFG_COMPOSE_AUDIT_DECISIONS — composition audit checklist (Gap 1 mitigation)]
+// CFG_COMPOSE_AUDIT_DECISIONS — composition audit checklist (Gap 1 mitigation)
 //------------------------------------------------------------------------------
 // Per DESIGN_SPECS/composed-filter-mask-pattern.md Stage 2 DRAFT § "Step 3
 // composition audit checklist". Adding a new metadata bit to FOREACH_METADATA_BIT
@@ -1454,7 +1571,7 @@ static_assert(
 );
 
 //------------------------------------------------------------------------------
-// [PER-LivesInStruct-VALUE BITMAP MASKS — per-registry application]
+// PER-LivesInStruct-VALUE BITMAP MASKS — per-registry application
 //------------------------------------------------------------------------------
 // Forward-compat for `.F.4i` BACKTEST cohort + future training/secrets cohorts.
 // Pattern is the metadata-bit-mask analogue but for an enum VALUE (equality
@@ -1499,7 +1616,7 @@ FOREACH_LIVES_IN_STRUCT(X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK)
 #undef X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK
 
 //------------------------------------------------------------------------------
-// [CFG_FIELD_FOR_EACH_SET_BIT — iteration macro]
+// CFG_FIELD_FOR_EACH_SET_BIT — iteration macro
 //------------------------------------------------------------------------------
 // Invokes `body` per set bit in `mask`. `idx_var` is bound to FIELD_IDX_*
 // value of each set bit. Branchless inner loop via __builtin_ctzll (single
@@ -1524,7 +1641,7 @@ FOREACH_LIVES_IN_STRUCT(X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK)
     }
 
 //------------------------------------------------------------------------------
-// [Per-registry composed-filter masks]
+// Per-registry composed-filter masks
 //------------------------------------------------------------------------------
 
 // Global registry — composed views

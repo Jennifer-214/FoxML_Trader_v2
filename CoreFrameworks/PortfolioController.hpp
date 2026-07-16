@@ -3,7 +3,20 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [PORTFOLIO CONTROLLER]
+// [FILE]_[CoreFrameworks/PortfolioController.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[LEGACY centralized controller — single_core mode + controller_test ONLY (sharded production uses the OMS path); tick loop + strategy dispatch + kill switch + v14 snapshot]
+// [CONTAINS]
+//   - [STRUCT]_[PortfolioController]
+//   - [FUNCTION]_[PortfolioController_Init]
+//   - [FUNCTION]_[KillSwitch_Activate]        (+ Reset / Buying_Halt / RecordExit mutation family)
+//   - [FUNCTION]_[PortfolioController_DrainExits]
+//   - [FUNCTION]_[PortfolioController_StrategyBuySignal] (+ StrategyDispatch)
+//   - [FUNCTION]_[PortfolioController_Tick]
+//   - [FUNCTION]_[PortfolioController_Unpause] (+ CycleRegime / HotReload shared-TUI family)
+//   - [FUNCTION]_[PortfolioController_SaveSnapshot] (+ LoadSnapshot)
 //======================================================================================================
 // this just tracks the portfolio delta and tracks performance over time, uses
 // linear regression and the GCN to edit and update the gate conditions for
@@ -20,9 +33,9 @@
 // engine_mode=single_core OR in unit tests. For sharded-also wiring, port
 // to the OMS path. See CLAUDE.md "Cross-Mode Init Placement" invariant.
 // ============================================================
-//======================================================================================================
-// [INCLUDE]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// INCLUDE
+//------------------------------------------------------------------------------
 #ifndef PORTFOLIO_CONTROLLER_HPP
 #define PORTFOLIO_CONTROLLER_HPP
 
@@ -61,9 +74,9 @@ static inline void log_ts(char *buf, size_t len) {
     struct tm *utc = gmtime(&t);
     snprintf(buf, len, "%02d:%02d:%02d", utc->tm_hour, utc->tm_min, utc->tm_sec);
 }
-//======================================================================================================
-// [CONTROLLER STRUCT]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[controller state codes + gate/reject reason tables]
+//------------------------------------------------------------------------------
 #define CONTROLLER_WARMUP 0
 #define CONTROLLER_ACTIVE 1
 
@@ -126,7 +139,16 @@ static const GateReasonDef GATE_REASON_TABLE[NUM_GATE_REASONS] = {
     {"barrier",    "barrier gate — peak probability too high",           0},
 };
 
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[PortfolioController]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DATA_ORIENTED_DESIGN]]
+// [REFERENCE]_[INVARIANT]_[H6]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the legacy controller root — HOT CORE packed into the first ~256B (was 167 cache lines deep pre-reorg); everything the single_core loop owns]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct PortfolioController {
   //================================================================================================
   // HOT CORE — touched every tick, packed into first ~256 bytes for L1 cache
@@ -279,9 +301,23 @@ template <unsigned F> struct PortfolioController {
 static_assert(!std::is_polymorphic<PortfolioController<64>>::value,
               "PortfolioController must remain non-polymorphic — Part 3 invariant");
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this legacy template block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PortfolioController]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[PortfolioController_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[legacy boot — portfolio/balance/stats zero, strategy + regime init from cfg (core-0 per-node values via the walker propagation)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void PortfolioController_Init(PortfolioController<F> *ctrl,
                                      ControllerConfig<F> config) {
@@ -355,7 +391,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
       Model_Load(&ctrl->valley_model, config.valley_model_path, config.ml_backend ? config.ml_backend : 1);
   }
   // regime detector — legacy single_core uses core 0's per-core value
-  // (sister to EngineCommon.hpp:199 SHARDED per-core convention;
+  // (sister to EngineCommon_BootGlobal's SHARDED per-core Regime_Init convention;
   // value-equivalent via EMIT_PER_NODE_COPY walker propagating global → cores)
   Regime_Init(&ctrl->regime, config.nodes[0].regime_hysteresis);
   ctrl->regime_ror = RORRegressor_Init<F>();
@@ -525,12 +561,23 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
     }
   }
 }
-//======================================================================================================
-// [CENTRALIZED STATE MUTATIONS]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PortfolioController_Init]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[KillSwitch_Activate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-site state mutations — every kill/halt/exit path routes here (no scattered field assignments); KillSwitch_Reset / Buying_Halt / RecordExit share the family]
+//======================================================================
+// [CODE]
+//======================================================================
 // single-site functions for state transitions that have mandatory side effects.
 // every kill/halt/exit path goes through these — no scattered field assignments.
-//======================================================================================================
 
 // KillSwitch_Activate: halt all buying immediately, zero gate state
 // called from: hot-path equity crash, slow-path daily loss, slow-path drawdown
@@ -741,12 +788,23 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
         }
     }
 }
-//======================================================================================================
-// [EXIT BUFFER DRAIN]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[KillSwitch_Activate]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[PortfolioController_DrainExits]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[TP/SL exit booking — slippage, P&L, balance, trade log, SL cooldown; runs in warmup too (loaded positions can exit)]
+//======================================================================
+// [CODE]
+//======================================================================
 // processes TP/SL exits: books P&L, updates balance, logs trades, triggers cooldown
 // called from both warmup (loaded positions can exit) and slow path
-//======================================================================================================
 template <unsigned F>
 inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
   for (uint32_t i = 0; i < ctrl->exit_buf.count; i++) {
@@ -764,14 +822,25 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
   ExitBuffer_Clear(&ctrl->exit_buf);
 }
 //======================================================================================================
-//======================================================================================================
-// [STRATEGY DISPATCH]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PortfolioController_DrainExits]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[PortfolioController_StrategyBuySignal]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[legacy strategy dispatch pair — BuySignal (signal-only: unpause/warmup) + StrategyDispatch (full slow-path cycle); a new strategy adds one case to EACH]
+//======================================================================
+// [CODE]
+//======================================================================
 // two entry points:
 //   _StrategyDispatch: full slow-path cycle (adapt regression + compute buy signal)
 //   _StrategyBuySignal: signal-only (unpause, warmup init — no regression feed)
 // adding a new strategy: add one case to EACH function.
-//======================================================================================================
 
 // signal-only: compute buy gate without feeding regression (for unpause/init)
 template <unsigned F>
@@ -905,12 +974,23 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
   PortfolioController_StrategyBuySignal(ctrl);
 }
 
-//======================================================================================================
-// [TICK - MAIN CONTROLLER FUNCTION]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PortfolioController_StrategyBuySignal]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[PortfolioController_Tick]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the legacy main loop — per-tick fill consumption (zero unprotected exposure) + poll_interval slow-path regression/adjust; single_core + tests only]
+//======================================================================
+// [CODE]
+//======================================================================
 // called every tick. fill consumption runs every tick (zero unprotected
 // exposure). regression/adjustment runs every poll_interval ticks (slow path).
-//======================================================================================================
 template <unsigned F>
 inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                                      OrderPool<F> *pool, Money current_price,
@@ -1909,12 +1989,23 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     }
   }
 }
-//======================================================================================================
-// [SHARED FUNCTIONS — used by both multicore and single-threaded TUI paths]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PortfolioController_Tick]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[PortfolioController_Unpause]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[shared TUI-path helpers (main.cpp + EngineTUI dedup) — Unpause / CycleRegime / HotReload share the family]
+//======================================================================
+// [CODE]
+//======================================================================
 // these eliminate duplication between main.cpp and EngineTUI.hpp so adding a new
 // strategy only requires updating these functions, not both TUI paths.
-//======================================================================================================
 
 // unpause: dispatch to active strategy's BuySignal
 template <unsigned F>
@@ -2001,9 +2092,22 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     }
 }
 
-//======================================================================================================
-// [SNAPSHOT SAVE/LOAD - v5]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PortfolioController_Unpause]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[PortfolioController_SaveSnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [CAPITAL_BEARING]]
+// [REFERENCE]_[INVARIANT]_[[H21] [H9]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[legacy v14 snapshot (APPEND-ONLY version; v13 tombstoned) — LoadSnapshot (graceful multi-version load + legacy confidence shadow-load) shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // persists full controller state for crash recovery and session resume
 // v7 adds: session stats (buys, wins, losses, gross_wins/losses, hold_ticks, fees)
 // v6 adds: entry_time (wall clock) for hold duration across restarts
@@ -2258,7 +2362,9 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
   fprintf(stderr, "[SNAPSHOT] loaded %d positions from %s (v%u)\n", count, filepath, version);
   return 1;
 }
-//======================================================================================================
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PortfolioController_SaveSnapshot]
+//======================================================================
 #endif // PORTFOLIO_CONTROLLER_HPP
