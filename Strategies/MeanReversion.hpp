@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [MEAN REVERSION STRATEGY]
+// [FILE]_[Strategies/MeanReversion.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[dip buyer — buy below avg (percentage or stddev offset mode, branchless select); P&L regression adapts the filters; idle squeeze catches runaway markets]
+// [CONTAINS]
+//   - [STRUCT]_[MeanReversionState]
+//   - [FUNCTION]_[MeanReversion_Adapt]      (Init unblocked)
+//   - [FUNCTION]_[MeanReversion_BuySignal]
+//   - [FUNCTION]_[MeanReversion_ExitAdjust] (+ ExitAdjustSharded ratchet twin)
 //======================================================================================================
 // buys dips below the rolling average, sells at fixed TP/SL per position
 // adaptive filters (entry offset and volume multiplier) are adjusted by P&L
@@ -41,9 +50,15 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "StrategyInterface.hpp"
 
-//======================================================================================================
-// [STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[MeanReversionState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P&L + price regression feeders, the three adaptive live_* filters, initial-conds anchor]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct MeanReversionState {
   RegressionFeederX<F> feeder; // P&L regression ring buffer
   RORRegressor<F> ror;         // slope-of-slopes (second derivative of P&L)
@@ -61,9 +76,20 @@ template <unsigned F> struct MeanReversionState {
   RegressionFeederX<F>
       price_feeder; // price regression for trailing TP R² computation
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[720B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[12]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[MeanReversionState]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
+//------------------------------------------------------------------------------
+// INIT
 //======================================================================================================
 // called once at warmup completion. computes initial buy conditions from
 // rolling stats and resets the regression feeder for P&L tracking in the active
@@ -98,9 +124,16 @@ inline void MeanReversion_Init(MeanReversionState<F> *state,
   state->has_regression = 0;
 }
 
-//======================================================================================================
-// [ADAPT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[MeanReversion_Adapt]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[idle squeeze + P&L regression -> the active offset mode's filter only (inactive mode frozen); branchless mask conditioning]
+//======================================================================
+// [CODE]
+//======================================================================
 // called every slow-path tick. three responsibilities:
 //   1. idle squeeze - loosen filters when portfolio is empty and price is
 //   running away
@@ -260,9 +293,22 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
   }
 }
 
-//======================================================================================================
-// [BUY SIGNAL]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MeanReversion_Adapt]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[MeanReversion_BuySignal]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[dip gate from adaptive filters + regression shift (max_shift clamped) + multi-timeframe long-trend veto]
+//======================================================================
+// [CODE]
+//======================================================================
 // called every slow-path tick after Adapt. computes buy gate conditions from
 // rolling stats using the current adaptive filter values, then applies
 // regression-based gate shift if available. optionally gates on long-window
@@ -392,9 +438,21 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
   return conds;
 }
 
-//======================================================================================================
-// [EXIT ADJUST]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MeanReversion_BuySignal]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[MeanReversion_ExitAdjust]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[hold_score = SNR x R2 (needs BOTH magnitude and consistency) gates the TP/SL trail; ExitAdjustSharded (ratchet_sl twin — the F4 dead-write fix) shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // called every slow-path tick after Adapt. adjusts TP/SL for positions that are
 // "running" (price above original TP) based on trend strength and consistency.
 //
@@ -487,9 +545,9 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
   }
 }
 
-//======================================================================================================
-// [EXIT ADJUST — sharded, ratchet_sl path]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// EXIT ADJUST — sharded, ratchet_sl path
+//------------------------------------------------------------------------------
 // v5.4.0 Phase 2.2: sharded equivalent of MeanReversion_ExitAdjust above.
 // The legacy version writes pos->stop_loss_price + pos->take_profit_price,
 // neither of which the sharded hot path reads (postmortem F4 — dead writes,
@@ -568,5 +626,10 @@ inline void MeanReversion_ExitAdjustSharded(
     }
 }
 } // namespace tt
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MeanReversion_ExitAdjust]
+//======================================================================
 
 #endif // MEAN_REVERSION_HPP

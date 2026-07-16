@@ -3,7 +3,20 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [STRATEGY PARAMETERS — pure functions that build GateParameters packs]
+// [FILE]_[Strategies/StrategyParameters.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the _BuildParameters family — PURE functions (state -> GateParameters pack) per strategy + the strategy_id dispatcher; the seam between slow-path state and the hot-path seqlock]
+// [CONTAINS]
+//   - [STRUCT]_[MLBuildContext]
+//   - [FUNCTION]_[Strategy_SpacingOk]        (+ TpFloor / GateEgress helpers section)
+//   - [FUNCTION]_[SimpleDip_BuildParameters] (+ ResolvePerFillTpPct/SlPct)
+//   - [FUNCTION]_[MeanReversion_BuildParameters]
+//   - [FUNCTION]_[Momentum_BuildParameters]
+//   - [FUNCTION]_[EmaCross_BuildParameters]
+//   - [FUNCTION]_[ML_BuildParameters]
+//   - [FUNCTION]_[Strategy_BuildParameters]  (the dispatcher)
 //======================================================================================================
 //
 // Phase 06 of the per-core sharding port. Each strategy provides a pure
@@ -80,9 +93,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// [ML BUILD CONTEXT — Phase 6prep sharded c13/c15]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[MLBuildContext]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ML rebuild parameter bag (Phase 6prep c13/c15) — model/ensemble handles, feature state pointers, confidence + gate-cache wiring, out_* result fields]
+//======================================================================
+// [CODE]
+//======================================================================
 // Bundle of ML-only extras that the dispatcher passes through to ML_BuildParameters
 // as a single void*. Keeps the dispatcher signature stable when more ML inputs
 // are added (cost model, vol scaler) — just add a field here.
@@ -220,9 +239,21 @@ struct MLBuildContext {
     void*               gate_state;  // SlowPathGateState* — cast at use site
 };
 
-//======================================================================================================
-// [SPACING + FEE-FLOOR HELPERS — v4.0.3]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[MLBuildContext]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Strategy_SpacingOk]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v4.0.3 shared gates — entry spacing + Strategy_TpFloor (fee-floor TP ratchet) + GateEgress_MaxPct/FinalizeEmit (the A6 egress chokepoint) share the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // Shared logic across all strategies' _BuildParameters. Pre-v4.0.3 these
 // were silently ignored by sharded strategies — now applied uniformly.
 //
@@ -294,9 +325,21 @@ inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strateg
     }
 }
 
-//======================================================================================================
-// [SIMPLEDIP — full port]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Strategy_SpacingOk]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[SimpleDip_BuildParameters]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the full-port reference implementation — dip gate + TP/SL/qty pack; ResolvePerFillTpPct/SlPct (the per-strategy per-fill dispatch SSoT) share the section]
+//======================================================================
+// [CODE]
+//======================================================================
 //
 // SimpleDip buys when price drops `entry_offset_pct` below the recent high
 // in the rolling window. TP and SL are fixed percentage offsets from the
@@ -433,9 +476,21 @@ inline void SimpleDip_BuildParameters(
     for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
 }
 
-//======================================================================================================
-// [MEAN REVERSION — STUB, full port deferred]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SimpleDip_BuildParameters]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[MeanReversion_BuildParameters]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sharded MR pack build (labeled STUB-era; carries the adaptive-state port status in its banner)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Real MeanReversion uses a regression feedback loop to adapt entry_offset_pct
 // and volume_multiplier based on recent P&L. The state lives in
 // `MeanReversionState<F>` and is mutated by `MeanReversion_Adapt`. Porting it
@@ -510,9 +565,21 @@ inline void MeanReversion_BuildParameters(
     for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
 }
 
-//======================================================================================================
-// [MOMENTUM — STUB, full port deferred]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MeanReversion_BuildParameters]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Momentum_BuildParameters]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sharded Momentum pack build — breakout gate + momentum-specific vetoes (tp-margin/flow/r2/last-win SHALTs)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Real Momentum uses ROR (rate-of-rate, slope-of-slope) and R² gates from
 // the rolling regression. It buys ABOVE the price (gate_direction = 1) when
 // momentum is rising. Like MeanReversion, the adaptive feedback loop needs
@@ -596,7 +663,7 @@ inline void Momentum_BuildParameters(
     // ABOVE entry_price, the bug is in BuildParameters. If it's correctly
     // BELOW entry but the live position shows SL above entry, the bug is
     // downstream (Momentum_ExitAdjust trailing ratchet, or Portfolio_OpenSlot
-    // path, or the regime-change ratchet at ControllerEventLoop.hpp:1535).
+    // path, or the regime-change ratchet in ControllerEventLoop.hpp).
     {
         static int sl_dbg = -1;
         if (sl_dbg == -1) {
@@ -626,9 +693,21 @@ inline void Momentum_BuildParameters(
     for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
 }
 
-//======================================================================================================
-// [EMA CROSS — STUB, full port deferred]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Momentum_BuildParameters]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EmaCross_BuildParameters]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sharded EmaCross pack build (guarded by the private/ include; absent build = registry row omitted)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Real EMA Cross uses an EMA computed by the controller on the slow path,
 // then buys dips when fast EMA is above slow EMA. The EMA state lives in
 // the controller, not the strategy. Once the controller exposes a clean
@@ -725,9 +804,22 @@ inline void EmaCross_BuildParameters(
     for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
 }
 
-//======================================================================================================
-// [ML — model-driven buy signals via NodeModelZoo]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EmaCross_BuildParameters]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ML_BuildParameters]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [CAPITAL_BEARING]]
+// [REFERENCE]_[INVARIANT]_[[H5] [H20]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ML rebuild body — features -> scaler -> (ensemble|single) inference -> threshold/confidence/ladder gates -> barrier TP/SL -> pack; the biggest _BuildParameters by far]
+//======================================================================
+// [CODE]
+//======================================================================
 // Packs features from rolling stats, runs inference on whichever role models
 // are loaded in the per-core NodeModelZoo, computes BarrierGate modulation,
 // and produces gate parameters.
@@ -1082,7 +1174,7 @@ inline void ML_BuildParameters(
                 // Cholesky ~2µs at N=8). Default off pays ~5ns flag check.
                 // v5.14.9.B.0 — read ridge_within_horizon gate from cached
                 // per-core state when wired; fall back to inline cfg-flag.
-                // v5.14.11.C — branchless multi-flag mask check (CLAUDE.md item
+                // v5.14.11.C — branchless multi-flag mask check (bitmap-flag-api item
                 // 18). "Ridge ON AND Thompson OFF" collapses to a single
                 // mask-AND-compare when gate_state is present (1 cycle vs
                 // 2-branch scalar). Fallback keeps scalar form for backtest
@@ -1103,7 +1195,7 @@ inline void ML_BuildParameters(
                     // v5.14.11.A — OnlineCycleStep helper consolidates ring-walk
                     // + BuildCorr at this site + the exit-side mirror (below at
                     // ~:1195). C1 helper extraction eliminates the Class 18
-                    // mirror per CLAUDE.md item 19.
+                    // mirror per the structural-fix-preferred gradient.
                     // v5.14.11.C — use_online wired from cfg.ridge_online_corr
                     // (default 0 = full recompute; bytewise-identical). Pattern:
                     // DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
@@ -1171,7 +1263,7 @@ inline void ML_BuildParameters(
                 // trace-deps RED finding). Computes BOTH blend (Σ wᵢ · barrierᵢ)
                 // AND dominant (argmax weights) so the mode-dispatch site below
                 // at the cfg-fallback can pick either via branchless MODE_FLAGS[]
-                // mask. Constant-iter inner loop (CLAUDE.md item 26); active mask
+                // mask. Constant-iter inner loop (H11); active mask
                 // (i < primary_count) zeroed via multiply for branchless.
                 // Gated by arms_with_barriers_mask: only arms with stamp barriers
                 // contribute; missing arms zero out via the mask AND.
@@ -1299,7 +1391,7 @@ inline void ML_BuildParameters(
         if (n_loaded > 0) {
             // v5.14.1.E — push per-handle predictions into exit_reward_ring
             // BEFORE blending (mirrors buy-side reward_ring populate at
-            // NodeModelZoo.hpp:1002+). Used by Ridge solver to compute
+            // NodeModelZoo.hpp's ridge-input capture). Used by Ridge solver to compute
             // correlation matrix from prediction history. Cheap: ~50 bytes
             // memcpy per cycle into a 256-slot ring.
             int slot = ezoo_ex->exit_reward_ring_head %
@@ -1318,7 +1410,7 @@ inline void ML_BuildParameters(
             // → uniform average (pre-v5.14.1.E behavior, bytewise unchanged).
             // When =1: Ridge override using exit_ridge_state + exit_reward_ring
             // history. Mirrors v5.14.0 buy-side ridge_within_horizon block at
-            // StrategyParameters.hpp:891-947.
+            // the ladder block earlier in ML_BuildParameters.
             double weights[ENSEMBLE_HORIZON_MAX];
             for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
                 weights[i] = 1.0 / (double)n_loaded;  // uniform default
@@ -1450,7 +1542,7 @@ inline void ML_BuildParameters(
     }
     // v5.15.5.A.6 — observability writes for the per-horizon barrier
     // dispatch. Mirrors exit-side pattern. Surfaces to MLStatusPanel via
-    // PerNodeSnap (ShardedSnapshot.hpp:597-602 area).
+    // PerNodeSnap (the ML observability block in ShardedSnapshot.hpp).
     if (mctx) {
         if (mctx->out_buy_dominant_horizon)
             *mctx->out_buy_dominant_horizon = blend_dispatch_ready ? blend_dominant_h : -1;
@@ -1614,7 +1706,7 @@ inline void ML_BuildParameters(
     // zeroing + SHALT path as the v5.9.1 hard-floor block above so the entry
     // log + ML Status panel attribute the block correctly. Returns early
     // (preserves the explicit SHALT pattern; readability beats marginal
-    // branchless gain at a single slow-path site per CLAUDE.md item 18(b)).
+    // branchless gain at a single slow-path site per branchless-dispatch-discipline).
     if (factor == 0.0 && gate_state && BITMAP_IS_SET(gate_state->flags, MASK_LADDER_ACTIVE)) {
         out->bg_price_threshold   = Money_Zero();
         out->bg_volume_threshold  = Money_Zero();
@@ -1647,9 +1739,21 @@ inline void ML_BuildParameters(
     for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
 }
 
-//======================================================================================================
-// [STRATEGY DISPATCHER]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ML_BuildParameters]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Strategy_BuildParameters]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the strategy_id dispatcher — X-macro case dispatch to each _BuildParameters; ML's wider signature gets its case-block per the registry drift note]
+//======================================================================
+// [CODE]
+//======================================================================
 // the slow path calls this once per registered execution core. dispatches to
 // the strategy's _BuildParameters by strategy_id. STRATEGY_NONE produces a
 // zero-init pack so the core has safe defaults but won't trade (combined
@@ -1962,5 +2066,10 @@ inline void Strategy_BuildParameters(
         *strategy_halt_reason = SHALT_NO_SIGNAL;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Strategy_BuildParameters]
+//======================================================================
 
 }  // namespace tt
