@@ -1,5 +1,12 @@
-// CoreFrameworks/StampBoundDerivedFilter.hpp
-//
+//======================================================================================================
+// [FILE]_[CoreFrameworks/StampBoundDerivedFilter.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the Path-γ metadata-bit derived-filter consumer — locale-pinned canonical stamp-body emit over the STAMP_BOUND cohort]
+// [CONTAINS]
+//   - [FUNCTION]_[STAMP_BOUND_CFG_emit_canonical_body]
+//======================================================================================================
 // First canonical consumer of FOREACH_METADATA_BIT auto-generated mask
 // infrastructure for wire-format derived filters per
 // DESIGN_SPECS/metadata-bit-driven-derived-filter-framework.md v1.2 Path γ
@@ -10,6 +17,8 @@
 // CfgFieldRegistry.hpp:1075) via CFG_FIELD_FOR_EACH_SET_BIT (branchless TZCNT).
 // Iteration order: per-core first, then global (canonical body order).
 //
+// The .A-era sequencing plan (as-written at v5.15.5.F.4d.1.A; the cohort has
+// since been FLAGGED — the T1 tests exercise a populated 19-row body):
 // At .A landing: zero rows have STAMP_BOUND_CFG_DERIVED bit; emit produces
 // empty body; wire_format_invariants helper verifies vacuously. .B flags 24
 // rows; same code produces populated body; same invariants verify shape.
@@ -22,6 +31,7 @@
 // tt::cfg_emit_synthetic_field<T>(d, idx, buf+pos, cap-pos) real per-type emit.
 //
 // v5.15.5.F.4d.1.A — NEW (Path γ first canonical consumer).
+//======================================================================================================
 
 #pragma once
 
@@ -31,6 +41,18 @@
 #include "../FixedPoint/FixedPointN.hpp"     // FPN_Binary<F> — required before CfgFieldRegistry.hpp
 #include "CfgFieldRegistry.hpp"
 
+//======================================================================
+// [FUNCTION]_[STAMP_BOUND_CFG_emit_canonical_body]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [DETERMINISM] [FROZEN]]
+// [REFERENCE]_[INVARIANT]_[H9]
+// [REFERENCE]_[DESIGN_SPEC]_[metadata-bit-driven-derived-filter-framework]
+// [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the cohort stamp-body emit — TZCNT bit-walk (per-core then global), Layer-2 locale-pinned; stub format until the real per-type emit lands]
+//======================================================================
+// [CODE]
+//======================================================================
 // Canonical body emit — locale-pinned per Layer 2.
 // Walks per-core descriptors first, then global (canonical wire order).
 // Returns body length (bytes written, excluding NUL terminator).
@@ -74,3 +96,8 @@ inline size_t STAMP_BOUND_CFG_emit_canonical_body(char* buf, size_t cap) {
     }
     return pos;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[STAMP_BOUND_CFG_emit_canonical_body]
+//======================================================================
