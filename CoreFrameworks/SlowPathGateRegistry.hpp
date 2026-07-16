@@ -3,43 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SLOW-PATH GATE REGISTRY — FOREACH_SLOW_PATH_GATE + AUTOPOPULATE]
-//======================================================================================================
-// Single source of truth for cfg-toggleable slow-path-adjacent gates. Each
-// gate is a cfg-driven boolean predicate. Scope column dispatches to the
-// appropriate state struct + AUTOPOPULATE walk:
-//
-//   PER_NODE     — checked in per-core ML rebuild body; uses RESOLVED cfg
-//                  (already merged with per-core overrides). Cached on
-//                  NodeContext<F>.gate_state (SlowPathGateState).
-//   ENGINE_WIDE  — checked in engine-wide outer / function-entry; uses
-//                  GLOBAL cfg (no per-core override). Cached on
-//                  EventLoopState.global_gate_state (GlobalGateState).
-//
-// Pattern documented in workspace DESIGN_SPECS/slow-path-gate-registry-pattern.md.
-// Composes 3 existing patterns: x-macro-registry-with-presence-dispatch
-// (scope column), bitmap-flag-api (bit-pack via uint16_t),
-// autopopulate-pattern (production-caller class extinction).
-//
-// Adding a new gate (1 row):
-//   1. Append X(scope, NAME, predicate, "doc") to FOREACH_SLOW_PATH_GATE
-//   2. Auto-generated:
-//      - GATE_<NAME> bit position (sequential across all scopes)
-//      - MASK_<NAME> uint16_t mask constant
-//      - State bit on appropriate struct (SlowPathGateState or GlobalGateState)
-//      - AUTOPOPULATE walks the new entry in matching scope variant
-//      - Other-scope variant SKIPs the entry
-//   3. Add use site reading via BITMAP_IS_SET(state.flags, MASK_<NAME>)
-//
-// Adding a new SCOPE: 1 dispatch macro variant (~5 lines) + 1 AUTOPOPULATE
-// variant (~10 lines). Existing registry entries untouched.
-//
-// Concurrency: per-core slow-path thread is the single writer + reader for
-// SlowPathGateState; engine-wide slow-path thread for GlobalGateState. No
-// atomics needed (matches v5.14.8.B FailureModeRegistry's failure_flags).
-// GUI display reads PerNodeSnap, not gate_state directly.
-//
-// Established: v5.14.9.B.0 (2026-05-10)
+// [FILE]_[CoreFrameworks/SlowPathGateRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the cfg-flag eligibility canon — scope-dispatched slow-path gate registry + branchless AUTOPOPULATE caches]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_SLOW_PATH_GATE]
 //======================================================================================================
 
 #ifndef SLOW_PATH_GATE_REGISTRY_HPP
@@ -51,21 +21,23 @@
 
 namespace tt {
 
-//======================================================================================================
-// [REGISTRY DEFINITION]
-//======================================================================================================
-// Tuple: X(scope, name, predicate_expr, doc_string)
-//   scope          — PER_NODE | ENGINE_WIDE; selects target state struct + cfg source
-//   name           — UPPERCASE token; produces GATE_<name> bit + MASK_<name> constant
-//   predicate_expr — bool expression; uses bare `cfg` reference bound by AUTOPOPULATE
-//                    caller. PER_NODE gets resolved_cfg; ENGINE_WIDE gets global cfg
-//   doc_string     — human-readable description for audits + cfg.example
-//
-// Adding a new gate to an existing scope: 1 row. Adding a new scope:
-// add a new SCOPE_<NAME>_DISPATCH macro pair + a new AUTOPOPULATE variant
-// (see "ADDING A SCOPE" section at file bottom).
-//======================================================================================================
-
+//======================================================================
+// [REGISTRY]_[FOREACH_SLOW_PATH_GATE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CFG_FLOW] [BITMAP_PACKED]]
+// [REFERENCE]_[DESIGN_SPEC]_[slow-path-gate-registry-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[cfg-toggleable slow-path gates — scope column dispatches PER_NODE (resolved cfg) vs ENGINE_WIDE (global cfg)]
+// [COLUMN]_[scope]_[PER_NODE | ENGINE_WIDE; selects target state struct + cfg source]
+// [COLUMN]_[name]_[UPPERCASE token; produces GATE_<name> bit + MASK_<name> constant]
+// [COLUMN]_[predicate_expr]_[bool expression over the AUTOPOPULATE-bound _gate_cfg; PER_NODE gets resolved_cfg, ENGINE_WIDE gets global cfg]
+// [COLUMN]_[doc_string]_[human-readable description for audits + cfg.example]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_SLOW_PATH_GATE(X)                                                                   \
     /* === PER_NODE — checked in ML_BuildParameters body; uses resolved_cfg === */                  \
     /* v5.14.9.A — soft risk degradation ladder. Composite must be on */                            \
@@ -127,9 +99,9 @@ namespace tt {
       BITMAP_IS_SET((_gate_cfg).lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT),        \
       "breakeven-on-profit lifecycle event (ratchet SL to fee-floored breakeven when in profit)")
 
-//======================================================================================================
-// [SCOPE-DISPATCH HELPER MACROS — same shape as STAMP_HANDLE_GEN_INCLUDE/SKIP]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[scope-dispatch helper macros — same shape as STAMP_HANDLE_GEN_INCLUDE/SKIP]
+//------------------------------------------------------------------------------
 // Each AUTOPOPULATE variant uses a dispatch chain:
 //   X_AUTOPOP_<VARIANT>_DISPATCH_<SCOPE>(name, predicate, doc) →
 //     either INCLUDE (emit OR-mask code) or SKIP (emit nothing)
@@ -195,9 +167,9 @@ static_assert(GATE_SLOW_PATH_TOTAL_COUNT <= 16,
     X_GEN_ENGINE_WIDE_COUNT_DISPATCH_##scope(name, predicate, doc)
 #define FOREACH_SLOW_PATH_GATE_ENGINE_WIDE_COUNT (0 FOREACH_SLOW_PATH_GATE(X_GEN_ENGINE_WIDE_COUNT))
 
-//======================================================================================================
-// [PER-SCOPE STATE STRUCTS]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[per-scope state structs]
+//------------------------------------------------------------------------------
 // Two structs keep the cache surfaces explicit. Use sites pick the right
 // one + read via BITMAP_IS_SET(state.flags, MASK_<NAME>).
 //
@@ -217,9 +189,9 @@ struct GlobalGateState {
     uint16_t flags;
 };
 
-//======================================================================================================
-// [AUTOPOPULATE COMPANION MACROS]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[autopopulate companion macros]
+//------------------------------------------------------------------------------
 // SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE(state, _resolved_cfg)
 //   Walks PER_NODE entries; sets each bit via mask OR-reduction.
 //   Caller invokes ControllerConfig_ResolveForCore upstream so the cfg
@@ -252,12 +224,49 @@ struct GlobalGateState {
         (state).flags = _new_flags;                                                                  \
         (void)_gate_cfg;                                                                             \
     } while (0)
-
-}  // namespace tt
-
-//======================================================================================================
-// [ADDING A NEW SCOPE — instructions for future contributors]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[SSoT story + add-a-gate recipe + concurrency]
+//----------------------------------------------------------------------
+// Single source of truth for cfg-toggleable slow-path-adjacent gates. Each
+// gate is a cfg-driven boolean predicate. Scope column dispatches to the
+// appropriate state struct + AUTOPOPULATE walk:
+//
+//   PER_NODE     — checked in per-core ML rebuild body; uses RESOLVED cfg
+//                  (already merged with per-core overrides). Cached on
+//                  NodeContext<F>.gate_state (SlowPathGateState).
+//   ENGINE_WIDE  — checked in engine-wide outer / function-entry; uses
+//                  GLOBAL cfg (no per-core override). Cached on
+//                  EventLoopState.global_gate_state (GlobalGateState).
+//
+// Pattern documented in workspace DESIGN_SPECS/slow-path-gate-registry-pattern.md.
+// Composes 3 existing patterns: x-macro-registry-with-presence-dispatch
+// (scope column), bitmap-flag-api (bit-pack via uint16_t),
+// autopopulate-pattern (production-caller class extinction).
+//
+// Adding a new gate (1 row):
+//   1. Append X(scope, NAME, predicate, "doc") to FOREACH_SLOW_PATH_GATE
+//   2. Auto-generated:
+//      - GATE_<NAME> bit position (sequential across all scopes)
+//      - MASK_<NAME> uint16_t mask constant
+//      - State bit on appropriate struct (SlowPathGateState or GlobalGateState)
+//      - AUTOPOPULATE walks the new entry in matching scope variant
+//      - Other-scope variant SKIPs the entry
+//   3. Add use site reading via BITMAP_IS_SET(state.flags, MASK_<NAME>)
+//
+// Adding a new SCOPE: 1 dispatch macro variant (~5 lines) + 1 AUTOPOPULATE
+// variant (~10 lines). Existing registry entries untouched.
+//
+// Concurrency: per-core slow-path thread is the single writer + reader for
+// SlowPathGateState; engine-wide slow-path thread for GlobalGateState. No
+// atomics needed (matches v5.14.8.B FailureModeRegistry's failure_flags).
+// GUI display reads PerNodeSnap, not gate_state directly.
+//
+// Established: v5.14.9.B.0 (2026-05-10)
+//======================================================================
+// [COMMENT]_[adding a new scope — instructions for future contributors]
+//----------------------------------------------------------------------
 // Steps to add a new scope (e.g., HOT_PATH or BOOT) to FOREACH_SLOW_PATH_GATE:
 //
 // 1. Add scope-dispatch macros for EXISTING variants (PER_NODE, ENGINE_WIDE):
@@ -284,6 +293,12 @@ struct GlobalGateState {
 //
 // EXISTING entries do not change. Existing AUTOPOPULATE variants do not
 // change (they SKIP the new scope automatically via dispatch).
-//======================================================================================================
+//======================================================================
+// [DERIVED]   (tool-refreshed — ROW_COUNT/CONSUMERS generators land with the drift-gate generalization; empty skeleton is correct, D-327)
+//======================================================================
+// [END_REGISTRY]_[FOREACH_SLOW_PATH_GATE]
+//======================================================================
+
+}  // namespace tt
 
 #endif  // SLOW_PATH_GATE_REGISTRY_HPP
