@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [v5.14.2.E.1 — POST-LOAD MODEL VALIDATION]
+// [FILE]_[CoreFrameworks/ModelValidation.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the post-load cross-zoo drift validator — registry-driven stamp<->cfg/build/runtime checks over every handle]
+// [CONTAINS]
+//   - [FUNCTION]_[NodeModelZoo_ValidateAgainstCfg]
 //======================================================================================================
 // Cross-zoo validator. Walks every loaded handle (single zoo + ensemble) and
 // detects stamp ↔ cfg / build / runtime drift via registry-driven dispatch.
@@ -63,9 +69,9 @@
 
 namespace tt {
 
-//======================================================================================================
-// [v5.15.5.A.7 — Log injection support: StderrLog functor + log_drift_pair helper]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[log injection support (v5.15.5.A.7) — StderrLog functor + log_drift_pair helper]
+//------------------------------------------------------------------------------------------------------
 // Default LogFn for production callers — preserves pre-refactor `fprintf(stderr, ...)` semantics
 // exactly. Tests inject a capturing functor (e.g., recording lambda) for log-content assertions.
 //
@@ -109,12 +115,21 @@ inline void log_drift_pair(LogFn& log_fn, const char* name, const T1& stamp_v, c
     }
 }
 
-//======================================================================================================
-// [v5.10.2.A — POST-LOAD VALIDATOR — REFACTORED v5.15.5.A.7]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeModelZoo_ValidateAgainstCfg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [SLOW_PATH] [CRITICAL]]
+// [REFERENCE]_[DESIGN_SPEC]_[template-deferred-dependency-injection]
+// [REFERENCE]_[DESIGN_SPEC]_[stamp-vs-runtime-drift-detection-registry]
+// [REFERENCE]_[PARITY]_[PARITY-012]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the cross-zoo drift walk — FOREACH_CFG_DRIFT_CHECK over every handle; tier counters + strict REFUSE]
+//======================================================================
+// [CODE]
+//======================================================================
 // Cross-zoo validator extracted from EngineSharded_Run boot loop body. Subsumes
 // drift detection across single zoo + ensemble parallel-array handles via
-// FOREACH_CFG_DRIFT_CHECK X-macro walker (14 entries: 8 cross-binary WARN +
+// FOREACH_CFG_DRIFT_CHECK X-macro walker (18 entries: 8 cross-binary WARN +
 // 6 inference_cfg Tier 1/2 + 4 v5.15.5.A.7 per-horizon barrier cohort = 18).
 //
 // Writes cfg_drift_tier1/tier2_count + strict_refused into ctx. Returns 0 on
@@ -263,5 +278,10 @@ static inline int NodeModelZoo_ValidateAgainstCfg(
     }
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NodeModelZoo_ValidateAgainstCfg]
+//======================================================================
 
 }  // namespace tt
