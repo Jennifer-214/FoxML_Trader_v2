@@ -3,8 +3,22 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SHARDED TRADE LOG]
-//
+// [FILE]_[CoreFrameworks/ShardedTradeLog.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the trade-history CSV writer — one row per drained TradeEvent; aggregate file + per-node mirrors; single-writer on the controller core]
+// [CONTAINS]
+//   - [STRUCT]_[ShardedTradeLog]
+//   - [FUNCTION]_[ShardedTradeLog_FormatPerCoreFilename]
+//   - [FUNCTION]_[ShardedTradeLog_WriteRow]
+//   - [FUNCTION]_[ShardedTradeLog_Init]
+//   - [FUNCTION]_[ShardedTradeLog_Flush]
+//   - [FUNCTION]_[ShardedTradeLog_Rotate]
+//   - [FUNCTION]_[ShardedTradeLog_Close]
+//   - [FUNCTION]_[ShardedTradeLog_RecordEntry]
+//   - [FUNCTION]_[ShardedTradeLog_RecordExit]
+//======================================================================================================
 // Phase 08 of the per-core sharded engine. CSV writer that records one row per
 // TradeEvent drained from a per-core event ring. Lives entirely on the
 // controller core — single-writer by construction (pitfall P8.2).
@@ -48,13 +62,18 @@
 
 namespace tt {
 
-//======================================================================================================
-// [STRUCT]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[ShardedTradeLog]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[session-owned FILE handles (aggregate + per-node mirrors) + observability counters; single-writer (P8.2)]
+//======================================================================
+// [CODE]
+//======================================================================
 // File handle is owned for the entire session. trade_count and writes_truncated
 // are observability counters surfaced via the TUI / tests; they don't affect
 // behavior.
-//======================================================================================================
 struct ShardedTradeLog {
     FILE*    file;                                       // aggregate: logging/SYMBOL_order_history.csv (GUI/TradeReader reads this)
     uint64_t row_count;          // total rows written this session
@@ -81,10 +100,28 @@ struct ShardedTradeLog {
     // follow-up if/when TradeReader needs to surface per-core tabs.
     FILE*    per_node_files[MAX_EXECUTION_NODES];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[184B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ShardedTradeLog]
+//======================================================================
 
-//======================================================================================================
-// [PER-CORE FILENAME HELPER]  (v5.15.5.C.3 Phase 5.B — structural fix)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_FormatPerCoreFilename]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [REFERENCE]_[CLASS]_[18]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[SSoT for the per-node mirror filename pattern (Class-18 mirror close — was 3 drifting format-string sites)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Single source of truth for the per-core mirror filename pattern. Used by
 // _Init (open), _Rotate (rename source), and EngineSharded_Run paper-reset
 // archive copy. Returns 1 on success, 0 on snprintf truncation.
@@ -93,17 +130,28 @@ struct ShardedTradeLog {
 //   "logging/%s_node_%d_order_history.csv"
 // appeared at 3 sites — changing the pattern required updating all 3, or
 // the next consumer would silently drift. Helper makes drift impossible.
-//======================================================================================================
 inline int ShardedTradeLog_FormatPerCoreFilename(char* buf, size_t bufsz,
                                                   const char* symbol, int node_id) {
     int n = snprintf(buf, bufsz,
                      "logging/%s_node_%d_order_history.csv", symbol, node_id);
     return (n >= 0 && (size_t)n < bufsz) ? 1 : 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_FormatPerCoreFilename]
+//======================================================================
 
-//======================================================================================================
-// [WRITE ROW]  (v5.15.5.C.3 Phase 5.B — structural fix)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_WriteRow]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [OMS_DRAINER]]
+// [REFERENCE]_[CLASS]_[18]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single dual-write chokepoint — aggregate row + per-node mirror + row_count bump; branchless unsigned bounds idiom]
+//======================================================================
+// [CODE]
+//======================================================================
 // Single chokepoint for "write one already-formatted row to aggregate file
 // + mirror to per-core file + bump row_count". Called by RecordEntry,
 // RecordExit, and any future RecordX added later — eliminates the
@@ -130,10 +178,21 @@ inline void ShardedTradeLog_WriteRow(ShardedTradeLog* log, int node_id,
     }
     log->row_count++;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_WriteRow]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[append-mode open (aggregate + per-node mirrors), header only when empty, line-buffered; 0 = logging disabled, never fatal]
+//======================================================================
+// [CODE]
+//======================================================================
 // Open logging/SYMBOL_sharded_order_history.csv in append mode. Writes the v3
 // header row only if the file is empty (so re-running the engine doesn't
 // duplicate the header).
@@ -222,14 +281,24 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_Init]
+//======================================================================
 
-//======================================================================================================
-// [FLUSH / CLOSE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_Flush]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[periodic slow-path flush of aggregate + per-node files so the CSV stays current between rows]
+//======================================================================
+// [CODE]
+//======================================================================
 // Flush is meant to be called from the slow path every K iterations so the CSV
 // stays current without paying an fflush() syscall on every row. Close is
 // called once at engine shutdown.
-//======================================================================================================
 inline void ShardedTradeLog_Flush(ShardedTradeLog* log) {
     if (log->file) fflush(log->file);
     // v5.15.5.C.3 Phase 5.B — flush per-core mirror files too.
@@ -237,10 +306,21 @@ inline void ShardedTradeLog_Flush(ShardedTradeLog* log) {
         if (log->per_node_files[c]) fflush(log->per_node_files[c]);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_Flush]
+//======================================================================
 
-//======================================================================================================
-// [ROTATE] (v4.7.18 — Reset Paper integration)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_Rotate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Reset-Paper rotation — close, rename aggregate + per-node files to timestamped backups, reopen fresh via _Init; no-op on failure]
+//======================================================================
+// [CODE]
+//======================================================================
 // Close the current trade log, rename it to a timestamped backup, and reopen
 // fresh. Used by the GUI's "Reset Paper" button so the user gets a clean
 // trade-history view without losing the prior session's data.
@@ -310,7 +390,21 @@ inline int ShardedTradeLog_Rotate(ShardedTradeLog* log) {
     // _Init also reopens the per-core mirror files.
     return ShardedTradeLog_Init(log, log->symbol);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_Rotate]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_Close]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[shutdown flush + close of aggregate + per-node files]
+//======================================================================
+// [CODE]
+//======================================================================
 inline void ShardedTradeLog_Close(ShardedTradeLog* log) {
     if (log->file) {
         fflush(log->file);
@@ -326,10 +420,21 @@ inline void ShardedTradeLog_Close(ShardedTradeLog* log) {
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_Close]
+//======================================================================
 
-//======================================================================================================
-// [RECORD ENTRY]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_RecordEntry]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [OMS_DRAINER] [FLOAT_DISPLAY_ONLY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one 'E' row via the FOREACH_TRADE_LOG_COL registry walk -> dual-write chokepoint; exit-only columns 0; truncation counted (P8.3)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Emit one 'E' row. Exit-only fields (exit_price, pnl, fees) are written as 0
 // — consumers should ignore them on entry rows by checking event_type == 'E'.
 //
@@ -383,10 +488,21 @@ inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
     // Class-18 mirror close rationale.
     ShardedTradeLog_WriteRow(log, (int)node_id, row, (size_t)n);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_RecordEntry]
+//======================================================================
 
-//======================================================================================================
-// [RECORD EXIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedTradeLog_RecordExit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [OMS_DRAINER] [FLOAT_DISPLAY_ONLY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one 'X' row, all columns populated — caller pre-computes net_pnl + total_fees (P8.7); registry walk -> dual-write chokepoint]
+//======================================================================
+// [CODE]
+//======================================================================
 // Emit one 'X' row. All columns populated. net_pnl is post-fee P&L (gross
 // minus entry_fee minus exit_fee), total_fees is entry_fee + exit_fee.
 //
@@ -433,5 +549,10 @@ inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
     // Class-18 mirror close rationale.
     ShardedTradeLog_WriteRow(log, (int)node_id, row, (size_t)n);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedTradeLog_RecordExit]
+//======================================================================
 
 }  // namespace tt
