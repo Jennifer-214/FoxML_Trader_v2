@@ -3,8 +3,84 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [RECONCILIATION LOOP]
-//
+// [FILE]_[CoreFrameworks/ReconciliationLoop.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the advisory venue-reconcile safety net — own thread + own REST instance; detect-only alerts via CMD_RECONCILE]
+// [CONTAINS]
+//   - [STRUCT]_[ReconciliationLoopState]
+//   - [FUNCTION]_[ReconciliationLoop_Pass]
+//   - [FUNCTION]_[reconcile_thread_body]
+//   - [FUNCTION]_[ReconciliationLoop_Init]
+//   - [FUNCTION]_[ReconciliationLoop_Shutdown]
+//======================================================================================================
+
+#pragma once
+
+#include "../DataStream/BinanceOrderAPI.hpp"
+#include "OrderManager.hpp"
+#include "SPSCRing.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <thread>
+
+namespace tt {
+
+constexpr size_t RECONCILE_QUEUE_SIZE = 64;
+
+//======================================================================
+// [STRUCT]_[ReconciliationLoopState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [THREAD]_[[RECONCILER_WRITER] [GUI_READER]]
+// [SYNC]_[ATOMIC]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reconciler thread state — own REST instance + read-only OMS view + observability atomics the TUI reads]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+struct ReconciliationLoopState {
+    // Own BinanceOrderAPI instance — never shared with adapter workers.
+    BinanceOrderAPI rest_api;
+
+    // Pointer to the OMS. Read-only from the reconciler's perspective —
+    // it reads oms->balance, oms->portfolio, oms->order_bitmap to compute
+    // expected state. The drainer is the only writer. The race between
+    // drainer writes and reconciler reads is tolerable: worst case is a
+    // single-cycle false drift that the next pass corrects.
+    OrderManagerState<F>* oms;
+
+    // DEAD (Phase 0.3 fix — see ReconciliationLoop_Pass): the Pass pushes to
+    // oms->reconcile_queue, NOT this ring; nothing reads this one. Kept
+    // initialized (callers may reference it); cleanup is the follow-on the
+    // Pass comment tracks (TECH_DEBT-192 dead-code cluster).
+    SPSCRing<Command, RECONCILE_QUEUE_SIZE> reconcile_queue;
+
+    // Config
+    int    interval_secs;       // default 30
+    double balance_tolerance;   // default 0.01 (1 cent USDT)
+    double qty_tolerance;       // default 1e-6 BTC
+
+    // Thread
+    std::thread thread;
+    std::atomic<int> shutdown_requested;
+    std::atomic<int> trigger_now;  // set externally (e.g. WS reconnect)
+
+    // Observability (atomic for TUI reads)
+    std::atomic<uint64_t> total_polls;
+    std::atomic<uint64_t> drift_corrections;
+    std::atomic<double>   last_drift_usdt;
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[architecture + threading]
+//----------------------------------------------------------------------
 // Phase 05 of the OMS plan. Periodic self-healing safety net that verifies
 // local OMS state against the exchange's actual balances. Runs on its own
 // thread with its own BinanceOrderAPI instance (per-thread, not shared).
@@ -27,66 +103,25 @@
 // The reconciler's REST instance connects to the same host with the same
 // credentials as the adapter workers, but on its own socket/SSL session.
 // No contention with the adapter worker thread.
-//======================================================================================================
+//======================================================================
+// [END_STRUCT]_[ReconciliationLoopState]
+//======================================================================
 
-#pragma once
-
-#include "../DataStream/BinanceOrderAPI.hpp"
-#include "OrderManager.hpp"
-#include "SPSCRing.hpp"
-
-#include <atomic>
-#include <chrono>
-#include <cstdint>
-#include <cstdio>
-#include <thread>
-
-namespace tt {
-
-constexpr size_t RECONCILE_QUEUE_SIZE = 64;
-
-//======================================================================================================
-// [STATE]
-//======================================================================================================
-template <unsigned F>
-struct ReconciliationLoopState {
-    // Own BinanceOrderAPI instance — never shared with adapter workers.
-    BinanceOrderAPI rest_api;
-
-    // Pointer to the OMS. Read-only from the reconciler's perspective —
-    // it reads oms->balance, oms->portfolio, oms->order_bitmap to compute
-    // expected state. The drainer is the only writer. The race between
-    // drainer writes and reconciler reads is tolerable: worst case is a
-    // single-cycle false drift that the next pass corrects.
-    OrderManagerState<F>* oms;
-
-    // Output: SPSC ring for CMD_RECONCILE → drainer
-    SPSCRing<Command, RECONCILE_QUEUE_SIZE> reconcile_queue;
-
-    // Config
-    int    interval_secs;       // default 30
-    double balance_tolerance;   // default 0.01 (1 cent USDT)
-    double qty_tolerance;       // default 1e-6 BTC
-
-    // Thread
-    std::thread thread;
-    std::atomic<int> shutdown_requested;
-    std::atomic<int> trigger_now;  // set externally (e.g. WS reconnect)
-
-    // Observability (atomic for TUI reads)
-    std::atomic<uint64_t> total_polls;
-    std::atomic<uint64_t> drift_corrections;
-    std::atomic<double>   last_drift_usdt;
-};
-
-//======================================================================================================
-// [RECONCILE PASS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ReconciliationLoop_Pass]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [LIVE_TRADING]]
+// [REFERENCE]_[DECISION]_[D-216]
+// [REFERENCE]_[INVARIANT]_[H4]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one reconcile cycle — venue free-USDT vs OMS_ExpectedFreeCash (Money, H4); drift pushes a detect-only alert]
+//======================================================================
+// [CODE]
+//======================================================================
 // One reconciliation cycle. Queries exchange balances, computes expected
 // balances from OMS state, reports drift.
 //
 // Returns 1 if drift was detected and a CMD_RECONCILE was pushed, 0 if clean.
-//======================================================================================================
 template <unsigned F>
 static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
     s->total_polls.fetch_add(1, std::memory_order_relaxed);
@@ -152,10 +187,21 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
     s->drift_corrections.fetch_add(1, std::memory_order_relaxed);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ReconciliationLoop_Pass]
+//======================================================================
 
-//======================================================================================================
-// [THREAD BODY]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[reconcile_thread_body]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the reconciler thread loop — interval sleep in 100ms shutdown/trigger-aware slices, then Pass]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline void reconcile_thread_body(ReconciliationLoopState<F>* s) {
     while (s->shutdown_requested.load(std::memory_order_acquire) == 0) {
@@ -174,10 +220,21 @@ static inline void reconcile_thread_body(ReconciliationLoopState<F>* s) {
         ReconciliationLoop_Pass(s);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[reconcile_thread_body]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ReconciliationLoop_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[wire the reconciler — cfg + counters + its own REST instance; thread NOT started until Start]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline int ReconciliationLoop_Init(ReconciliationLoopState<F>* s,
                                            const char* host,
@@ -204,10 +261,15 @@ static inline int ReconciliationLoop_Init(ReconciliationLoopState<F>* s,
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ReconciliationLoop_Init]
+//======================================================================
 
-//======================================================================================================
-// [START]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[start / trigger-now — thread launch + external immediate-pass hook]
+//----------------------------------------------------------------------
 template <unsigned F>
 static inline void ReconciliationLoop_Start(ReconciliationLoopState<F>* s) {
     s->thread = std::thread(reconcile_thread_body<F>, s);
@@ -215,17 +277,21 @@ static inline void ReconciliationLoop_Start(ReconciliationLoopState<F>* s) {
             s->interval_secs, s->balance_tolerance);
 }
 
-//======================================================================================================
-// [TRIGGER NOW — external callers can force an immediate pass]
-//======================================================================================================
+// External callers (e.g. WS reconnect) can force an immediate pass.
 template <unsigned F>
 static inline void ReconciliationLoop_TriggerNow(ReconciliationLoopState<F>* s) {
     s->trigger_now.store(1, std::memory_order_relaxed);
 }
 
-//======================================================================================================
-// [SHUTDOWN]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ReconciliationLoop_Shutdown]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[signal + join the reconciler thread + tear down its REST instance; logs the poll/correction totals]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline void ReconciliationLoop_Shutdown(ReconciliationLoopState<F>* s) {
     s->shutdown_requested.store(1, std::memory_order_release);
@@ -235,5 +301,10 @@ static inline void ReconciliationLoop_Shutdown(ReconciliationLoopState<F>* s) {
             (unsigned long long)s->total_polls.load(),
             (unsigned long long)s->drift_corrections.load());
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ReconciliationLoop_Shutdown]
+//======================================================================
 
 }  // namespace tt
