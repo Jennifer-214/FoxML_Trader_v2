@@ -3,8 +3,24 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BINANCE ADAPTER]
-//
+// [FILE]_[CoreFrameworks/BinanceAdapter.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[concrete ExchangeAdapter over BinanceOrderAPI — SPSC drainer->worker submission queue; PER-THREAD API instances, never a shared one with a mutex]
+// [CONTAINS]
+//   - [STRUCT]_[PendingSubmission]
+//   - [STRUCT]_[BinanceAdapterState]
+//   - [FUNCTION]_[BinanceAdapter_WorkerLoop]
+//   - [FUNCTION]_[BinanceAdapter_Init]
+//   - [FUNCTION]_[BinanceAdapter_ShutdownState]
+//   - [FUNCTION]_[BinanceAdapter_SubmitMarketBuy]
+//   - [FUNCTION]_[BinanceAdapter_SubmitMarketSell]
+//   - [FUNCTION]_[BinanceAdapter_GetBalancesImpl]
+//   - [FUNCTION]_[BinanceAdapter_QueryOrderImpl]
+//   - [FUNCTION]_[BinanceAdapter_ShutdownImpl]
+//   - [FUNCTION]_[BinanceAdapter_Get]
+//======================================================================================================
 // Concrete ExchangeAdapter implementation that wraps the existing
 // DataStream/BinanceOrderAPI.hpp behind an async submission queue.
 // Phase 02 of the OMS plan — see plans/oms/02_async_submission/plan.md.
@@ -12,8 +28,8 @@
 // THREAD-SAFETY MODEL (read this before changing anything):
 //
 //   BinanceOrderAPI is NOT thread-safe. Each instance has mutable
-//   per-call state (sockfd, ssl, connected) at
-//   DataStream/BinanceOrderAPI.hpp:67-80 that races under concurrent
+//   per-call state (sockfd, ssl, connected — see the BinanceOrderAPI
+//   struct in DataStream/BinanceOrderAPI.hpp) that races under concurrent
 //   calls. Two threads in BinanceOrderAPI_MarketBuy on the same instance
 //   would corrupt sockfd/ssl. The 2026-04-08 OMS survey caught this and
 //   the master plan now states it explicitly.
@@ -73,6 +89,16 @@
 
 namespace tt {
 
+//======================================================================
+// [STRUCT]_[PendingSubmission]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SYNC]_[SPSC]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one queued order — trivially-copyable SPSC ring MESSAGE (copied by value drainer->worker, never shared in place)]
+//======================================================================
+// [CODE]
+//======================================================================
 // One pending order awaiting submission to Binance. Fits in the SPSC
 // ring; trivially copyable as required by SPSCRing's static_assert.
 struct PendingSubmission {
@@ -83,7 +109,27 @@ struct PendingSubmission {
     OrderCallback cb;
     void*         user_ctx;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[40B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[PendingSubmission]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[BinanceAdapterState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-thread BinanceOrderAPI slots (workers_api[i] owned by worker i — no locks, no sharing) + SPSC submission queue + shutdown/ws_active atomics]
+//======================================================================
+// [CODE]
+//======================================================================
 constexpr size_t BINANCE_ADAPTER_QUEUE_SIZE = 256;
 
 struct BinanceAdapterState {
@@ -106,8 +152,9 @@ struct BinanceAdapterState {
     // each REST round trip with steady_clock and samples the elapsed
     // microseconds. Phase 01 lived inside OMS_Tick; phase 02 moves it
     // here because the REST call now happens on the worker thread, not
-    // the drainer thread. The instance still lives in EngineSharded.hpp
-    // as a file-static so the existing TUI line keeps working unchanged.
+    // the drainer thread. The instance still lives with the run loop
+    // (g_sharded_order_lat in EngineSharded/Run.hpp) so the existing
+    // TUI line keeps working unchanged.
     ShardedOrderLatency* latency;
 
     // Stats: dropped submissions when the queue was full. Bumped from
@@ -124,10 +171,27 @@ struct BinanceAdapterState {
     // preserved — full fill data in the callback.
     std::atomic<int> ws_active;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[12416B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[194]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[BinanceAdapterState]
+//======================================================================
 
-//======================================================================================================
-// [WORKER THREAD LOOP]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_WorkerLoop]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[worker loop — adaptive spin-then-sleep pop, REST call on THIS worker's own API instance, latency bracket, ACK-vs-full-fill callback]
+//======================================================================
+// [CODE]
+//======================================================================
 // Pop pending submissions from the SPSC queue, call the appropriate
 // BinanceOrderAPI function on this worker's own instance, build an
 // OrderResult, and invoke the callback. Sleep briefly when idle to avoid
@@ -136,7 +200,6 @@ struct BinanceAdapterState {
 // Each worker is launched with its own worker_index so it knows which
 // workers_api[] slot to use. Lifetime: from BinanceAdapter_Init until
 // shutdown_requested flips.
-//======================================================================================================
 static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int worker_index) {
     BinanceOrderAPI* api = &state->workers_api[worker_index];
 
@@ -235,10 +298,21 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_WorkerLoop]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init each worker's own BinanceOrderAPI (rollback on any failure), then start the worker threads; count clamps to [1, MAX_BINANCE_WORKERS]]
+//======================================================================
+// [CODE]
+//======================================================================
 // Set up the adapter: zero state, initialize each worker's BinanceOrderAPI
 // against the given host + credentials, start the worker threads. Returns
 // 1 on success, 0 on failure (any worker's BinanceOrderAPI_Init failure
@@ -298,14 +372,24 @@ static inline int BinanceAdapter_Init(BinanceAdapterState* state,
                  worker_count, host, symbol);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_Init]
+//======================================================================
 
-//======================================================================================================
-// [SHUTDOWN]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_ShutdownState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[signal + join workers, cleanup each API instance; idempotent]
+//======================================================================
+// [CODE]
+//======================================================================
 // Signal workers to exit, join each one, then cleanup each
 // BinanceOrderAPI instance. Idempotent — safe to call twice or to call
 // without a successful Init (shutdown_requested is already 0 by default).
-//======================================================================================================
 static inline void BinanceAdapter_ShutdownState(BinanceAdapterState* state) {
     state->shutdown_requested.store(1, std::memory_order_release);
     for (int i = 0; i < state->worker_count; ++i) {
@@ -318,17 +402,27 @@ static inline void BinanceAdapter_ShutdownState(BinanceAdapterState* state) {
     }
     state->worker_count = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_ShutdownState]
+//======================================================================
 
-//======================================================================================================
-// [SUBMIT — async, called by drainer thread via the function pointer]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_SubmitMarketBuy]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[async BUY submit — SPSC push from the drainer (sole producer); queue-full drops with log + counter, REST happens later on a worker]
+//======================================================================
+// [CODE]
+//======================================================================
 // Push a PendingSubmission onto the queue. Returns 1 on success, 0 on
 // queue-full failure (drops the submission with a log + counter bump).
 // The actual REST call happens later on a worker thread.
 //
 // The drainer is the only caller, so the SPSC producer-side contract
 // holds with worker_count == 1.
-//======================================================================================================
 static inline int BinanceAdapter_SubmitMarketBuy(void* ctx, uint64_t client_id,
                                                   double qty,
                                                   OrderCallback cb, void* user) {
@@ -348,7 +442,21 @@ static inline int BinanceAdapter_SubmitMarketBuy(void* ctx, uint64_t client_id,
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_SubmitMarketBuy]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_SubmitMarketSell]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[SELL twin of BinanceAdapter_SubmitMarketBuy — same SPSC contract + queue-full handling]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int BinanceAdapter_SubmitMarketSell(void* ctx, uint64_t client_id,
                                                    double qty,
                                                    OrderCallback cb, void* user) {
@@ -368,10 +476,21 @@ static inline int BinanceAdapter_SubmitMarketSell(void* ctx, uint64_t client_id,
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_SubmitMarketSell]
+//======================================================================
 
-//======================================================================================================
-// [SYNC QUERIES — slow path only]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_GetBalancesImpl]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[blocking balance query through worker 0's instance — reconciliation-only; caller serializes against in-flight workers]
+//======================================================================
+// [CODE]
+//======================================================================
 // get_balances and query_order block on the network. They are NOT called
 // from the drainer or any hot path. Phase 05 reconciliation uses them.
 // Phase 02 just provides workable stubs that go through worker 0's
@@ -390,7 +509,21 @@ static inline int BinanceAdapter_GetBalancesImpl(void* ctx, double* base_out, do
     // worker thread isn't actively making a call right now.
     return BinanceOrderAPI_GetBalances(&state->workers_api[0], quote_out, base_out);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_GetBalancesImpl]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_QueryOrderImpl]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[blocking order-status query through worker 0's instance -> OrderResult; reconciliation-only, same serialization contract]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int BinanceAdapter_QueryOrderImpl(void* ctx, const char* exchange_id,
                                                  OrderResult* out) {
     BinanceAdapterState* state = (BinanceAdapterState*)ctx;
@@ -407,19 +540,43 @@ static inline int BinanceAdapter_QueryOrderImpl(void* ctx, const char* exchange_
     out->error_code = status;
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_QueryOrderImpl]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_ShutdownImpl]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[void*-ctx trampoline onto BinanceAdapter_ShutdownState (the vtable shutdown slot)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void BinanceAdapter_ShutdownImpl(void* ctx) {
     BinanceAdapter_ShutdownState((BinanceAdapterState*)ctx);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_ShutdownImpl]
+//======================================================================
 
-//======================================================================================================
-// [GET — return the ExchangeAdapter<F> struct wired to this concrete state]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BinanceAdapter_Get]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[build the ExchangeAdapter<F> function-pointer vtable wired to this state; F unused here (double at the API boundary) but matches the OMS field type]
+//======================================================================
+// [CODE]
+//======================================================================
 // Build the function-pointer vtable that the OMS uses to call into this
 // adapter. F is the FPN_Binary width — the concrete adapter doesn't use F
 // (everything goes through `double` at the BinanceOrderAPI boundary) but
 // the template parameter matches the OMS's ExchangeAdapter<F> field type.
-//======================================================================================================
 template <unsigned F>
 static inline ExchangeAdapter<F> BinanceAdapter_Get(BinanceAdapterState* state) {
     ExchangeAdapter<F> adapter;
@@ -431,5 +588,10 @@ static inline ExchangeAdapter<F> BinanceAdapter_Get(BinanceAdapterState* state) 
     adapter.ctx                = state;
     return adapter;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceAdapter_Get]
+//======================================================================
 
 }  // namespace tt
