@@ -3,8 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [EVENT LOOP AGGREGATES]
-//
+// [FILE]_[CoreFrameworks/EventLoopAggregates.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [FLOAT_DISPLAY_ONLY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the TUI money-view adapter — flat aggregate doubles built once from EventLoopState per snapshot rebuild]
+// [CONTAINS]
+//   - [STRUCT]_[EventLoopAggregates]
+//   - [FUNCTION]_[EventLoop_GetAggregates]
+//======================================================================================================
 // Phase 10 of the per-core sharded engine. Adapter struct + builder that pulls
 // the "money view" out of an EventLoopState so the existing TUI/GUI snapshot
 // fields can be populated without rewriting any panels.
@@ -53,13 +60,18 @@
 
 namespace tt {
 
-//======================================================================================================
-// [STRUCT]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[EventLoopAggregates]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [FLOAT_DISPLAY_ONLY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the flat money view — doubles for the TUI; one Money->double crossing here instead of scattered per panel]
+//======================================================================
+// [CODE]
+//======================================================================
 // All fields are doubles because the TUI consumes doubles. The conversion from
 // FPN_Binary happens once here, in the adapter, instead of being scattered across
 // every panel. realized + unrealized = total_pnl. balance + unrealized = equity.
-//======================================================================================================
 struct EventLoopAggregates {
     // realized side — reflects executed trades
     double balance;              // global wallet (starting + sum of realized net P&L)
@@ -81,10 +93,57 @@ struct EventLoopAggregates {
     double max_drawdown;         // max(0, peak_balance - equity)
     double max_drawdown_pct;     // max_drawdown / peak_balance (0 when peak == 0)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why an adapter exists + the mark-price contract]
+//----------------------------------------------------------------------
+// Why an adapter exists at all:
+//   Per-core sharding moves position state from a single PortfolioController
+//   into N execution cores plus a controller-side EventLoopState. The TUI was
+//   built for the single-controller world where balance and equity are direct
+//   fields on the controller. After sharding, those numbers are computed from
+//   per-core state — balance is still a global wallet but equity has to walk
+//   the active positions and add unrealized P&L from the latest mark price.
+//
+//   Rather than redesign the TUISnapshot struct (which has 100+ fields and
+//   touches every panel), we expose a small adapter that produces flat aggregate
+//   doubles. Phase 13 migration writes a 30-line shim that maps these into the
+//   existing TUISnapshot fields:
+//
+//     snap->balance      = agg.balance
+//     snap->equity       = agg.equity
+//     snap->realized     = agg.realized_pnl
+//     snap->unrealized   = agg.unrealized_pnl
+//     snap->total_pnl    = agg.realized_pnl + agg.unrealized_pnl
+//     snap->active_count = agg.active_position_count
+//     snap->max_drawdown = agg.max_drawdown
+//     snap->max_drawdown_pct      = agg.max_drawdown_pct
+//     snap->kill_switch_active    = agg.kill_switch_tripped
+//
+//   Existing panels keep working unchanged. Per-core debug views are out of
+//   scope for this phase — can be added later as a new optional panel.
+//
+// Mark price:
+//   Equity needs a mark price for unrealized P&L. The execution cores see ticks
+//   directly but the controller core does not — it processes events. The engine
+//   main publishes the latest tick price into the controller via a separate
+//   path (a "current price" memory cell or a 1-Hz price update event), and
+//   passes it as the mark_price argument to GetAggregates. Pass FPN_Zero to
+//   skip unrealized computation entirely (unrealized stays 0).
+//======================================================================
+// [END_STRUCT]_[EventLoopAggregates]
+//======================================================================
 
-//======================================================================================================
-// [BUILD]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EventLoop_GetAggregates]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one EventLoopState walk -> the aggregate money view; unrealized marks active slots at mark_price (skip on zero)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Walk the EventLoopState once and emit the aggregate struct. O(MAX_PORTFOLIO_POSITIONS)
 // per call but only the bits set in active_bitmap are read for unrealized P&L.
 // Cheap enough to call on every snapshot rebuild (slow path, ~1Hz).
@@ -98,7 +157,6 @@ struct EventLoopAggregates {
 // no concurrency hazard. The execution cores never write to EventLoopState's
 // portfolio — only the controller's _OnEvent does. Snapshot reads from one
 // core, writes from one core, no atomics required.
-//======================================================================================================
 template <unsigned F>
 inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* state,
                                                     Money mark_price) {
@@ -149,5 +207,10 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
 
     return agg;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EventLoop_GetAggregates]
+//======================================================================
 
 }  // namespace tt
