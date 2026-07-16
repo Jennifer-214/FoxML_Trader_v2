@@ -3,8 +3,29 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ORDER EVENT LOG]
-//
+// [FILE]_[CoreFrameworks/OrderEventLog.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [CAPITAL_BEARING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the append-only order audit log — the canonical source of truth; portfolio = a derived fold of it]
+// [CONTAINS]
+//   - [ENUM]_[OrderEventType]
+//   - [STRUCT]_[OrderEvent]
+//   - [STRUCT]_[OrderEventLogFileHeader]
+//   - [STRUCT]_[OrderEventLog]
+//   - [FUNCTION]_[OrderEventLog_Init]
+//   - [FUNCTION]_[OrderEventLog_Free]
+//   - [FUNCTION]_[OrderEventLog_ApplyEvent]
+//   - [FUNCTION]_[OrderEventLog_Append]
+//   - [FUNCTION]_[OrderEventLog_AsyncWriterRoutine]
+//   - [FUNCTION]_[OrderEventLog_StartAsyncWriter]
+//   - [FUNCTION]_[OrderEventLog_StopAsyncWriter]
+//   - [FUNCTION]_[OrderEventLog_InitWithFile]
+//   - [FUNCTION]_[OrderEventLog_Reset]
+//   - [FUNCTION]_[OrderEventLog_LoadFromDisk]
+//   - [FUNCTION]_[OrderEvent_MakeFill]
+//   - [FUNCTION]_[Portfolio_FromEventLog]
+//======================================================================================================
 // Append-only in-memory log of order lifecycle events. Every state
 // transition in the OMS (submit, ack, fill, reject, cancel, reconcile)
 // gets appended here. The portfolio can be reconstructed from the log
@@ -51,9 +72,16 @@
 
 namespace tt {
 
-//======================================================================================================
-// [EVENT TYPES]
-//======================================================================================================
+//======================================================================
+// [ENUM]_[OrderEventType]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[order lifecycle event codes — disk-persisted in every OrderEvent record; append-only, never reuse]
+//======================================================================
+// [CODE]
+//======================================================================
 enum OrderEventType : uint8_t {
     OEVT_SUBMITTED     = 0,   // order entered the OMS table
     OEVT_ACKNOWLEDGED  = 1,   // exchange confirmed receipt (future, phase 04+)
@@ -63,10 +91,22 @@ enum OrderEventType : uint8_t {
     OEVT_CANCELED      = 5,   // canceled by us or by exchange
     OEVT_RECONCILED    = 6,   // reconciler override (phase 05+)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_ENUM]_[OrderEventType]
+//======================================================================
 
-//======================================================================================================
-// [ORDER EVENT]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[OrderEvent]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [CAPITAL_BEARING] [DECIMAL]]
+// [REFERENCE]_[INVARIANT]_[[H9] [H12] [H21]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one self-contained lifecycle event — fwritten RAW to the OMSEL02 disk log; the fold replays these alone]
+//======================================================================
+// [CODE]
+//======================================================================
 // One lifecycle event for one order. Self-contained — the fold function
 // can reconstruct the portfolio from a stream of these without consulting
 // any external state (no NodeContext lookup needed, no Order table needed).
@@ -75,7 +115,6 @@ enum OrderEventType : uint8_t {
 // and stop-loss at fill time. For sells and non-fill events they're zero.
 // This makes the event log self-contained for replay — the fold doesn't
 // need to know what the controller's intended TP/SL was at the time.
-//======================================================================================================
 template <unsigned F>
 struct OrderEvent {
     uint64_t       event_id;       // monotonic across the log
@@ -93,6 +132,18 @@ struct OrderEvent {
                                    // fill-lifecycle rework — zero until then; wire slot settles NOW)
     char           reason[32];     // short description for REJECTED/RECONCILED
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[144B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[OrderEvent]
+//======================================================================
 
 // Ship-B P2 epoch guard (S-4/D-175a): the header's magic/fpn_width/entry_size ALL stay unchanged
 // at a 16B->16B decimal re-encoding — old logs would replay binary-scaled ints as decimals.
@@ -103,12 +154,15 @@ struct OrderEvent {
 // Format version 2 = the decimal-money epoch (OMSEL02). Version 1 = the 16B-binary
 // OMSEL01 era — H21 TOMBSTONE: never reuse the OMSEL01 magic or version 1.
 #define ORDER_EVENT_LOG_FORMAT_VERSION 2u
+// [ASSERT]_[EPOCH_TRIPWIRE]_[is_fp_decimal_v<OrderEvent money> => ORDER_EVENT_LOG_FORMAT_VERSION >= 2]
+// [WHY]_[a 16B-to-16B encoding flip leaves magic/width/entry_size unchanged — the trait-keyed guard forces the OMSEL02 version bump in the same commit]
 static_assert(!is_fp_decimal_v<decltype(OrderEvent<64>::price)> || ORDER_EVENT_LOG_FORMAT_VERSION >= 2u,
               "Ship-B epoch: decimal OrderEvent money requires format version >= 2 (OMSEL02).");
 
-//======================================================================================================
-// [EVENT LOG STRUCT]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[capacity constants + file header]
+//------------------------------------------------------------------------------------------------------
+// Phase-03 design (the growable era — SUPERSEDED by the v5.11.5.C fixed mmap below):
 // Growable array (malloc + realloc). Capacity is the allocated size,
 // count is the number of valid entries. Grows 2x when full, matching the
 // BacktestResults growth pattern in the codebase (see Backtest dynamic
@@ -117,8 +171,7 @@ static_assert(!is_fp_decimal_v<decltype(OrderEvent<64>::price)> || ORDER_EVENT_L
 // Phase 03: sized for ~1 day of trading. SimpleDip fires ~50-100 entries
 // per day at current BTC rates. 16384 initial capacity is ~160 days of
 // headroom. Growth handles longer runs or faster strategies.
-//======================================================================================================
-constexpr size_t ORDER_EVENT_LOG_INIT_CAPACITY = 16384;
+constexpr size_t ORDER_EVENT_LOG_INIT_CAPACITY = 16384;   // growable-era constant; no live consumers (TECH_DEBT-192 cluster)
 
 // v5.11.5.C — fixed mmap-allocated capacity. Replaces malloc + realloc
 // growth pattern with a single mmap(MAP_POPULATE) at boot. Trade-off:
@@ -136,6 +189,16 @@ constexpr size_t ORDER_EVENT_LOG_INIT_CAPACITY = 16384;
 // keeping the mmap'd buffer comfortably small (5.6 MB << page cache).
 constexpr size_t ORDER_EVENT_LOG_MAX_CAPACITY = 32768;
 
+//======================================================================
+// [STRUCT]_[OrderEventLogFileHeader]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the OMSEL02 on-disk header — magic + width + entry size gate every load; OMSEL01 is tombstoned]
+//======================================================================
+// [CODE]
+//======================================================================
 // Phase 07 file header — written at the start of the event log file.
 // Carries the FPN_Binary width and entry size for forward compatibility.
 struct OrderEventLogFileHeader {
@@ -145,6 +208,11 @@ struct OrderEventLogFileHeader {
     uint64_t format_version; // ORDER_EVENT_LOG_FORMAT_VERSION (claimed from reserved[0] at the epoch)
     uint64_t reserved;       // future: checksum
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[OrderEventLogFileHeader]
+//======================================================================
 
 // v5.11.3.C — async writer SPSC ring size. 256 events × ~176B/event = ~45 KB.
 // Default-strategy burst is far below this (SimpleDip ~50-100 events/day total
@@ -152,6 +220,18 @@ struct OrderEventLogFileHeader {
 // processing many fills at once) without blocking the drainer on fwrite.
 constexpr size_t ORDER_EVENT_LOG_ASYNC_RING_SIZE = 256;
 
+//======================================================================
+// [STRUCT]_[OrderEventLog]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [CONCURRENCY] [CAPITAL_BEARING]]
+// [THREAD]_[[DRAINER_WRITER] [WORKER_CONSUMER]]
+// [SYNC]_[SPSC]
+// [SYNC]_[ATOMIC]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the log state — mmap'd entries + disk write-through + the drainer->writer async SPSC seam]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct OrderEventLog {
     OrderEvent<F>* entries;
@@ -196,15 +276,26 @@ struct OrderEventLog {
     std::atomic<uint64_t> writer_realloc_failed_count;  // writer realloc failures (legacy — should stay 0 post-v5.11.5.C)
     std::atomic<uint64_t> log_full_drops;   // v5.11.5.C — events dropped because mmap'd capacity is exhausted
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[OrderEventLog]
+//======================================================================
 
 // Forward-decl so OrderEventLog_Init (below) can quiesce a running writer before
 // re-initializing. StopAsyncWriter is DEFINED further down; the forward-decl keeps
 // the dependent call well-formed under two-phase lookup. (.E.0.10 TD-202/RBP Class 50.)
 template <unsigned F> inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log);
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderEventLog_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[quiesce-first init — stop any live writer, then mmap(MAP_POPULATE) the fixed-capacity entries buffer]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void OrderEventLog_Init(OrderEventLog<F>* log) {
     // .E.0.10 (TD-202 / RBP Class 50 — re-init-defeats-join lifecycle): QUIESCE-FIRST.
@@ -256,10 +347,21 @@ inline void OrderEventLog_Init(OrderEventLog<F>* log) {
                      "failed, event logging disabled\n");
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_Init]
+//======================================================================
 
-//======================================================================================================
-// [FREE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderEventLog_Free]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[teardown — stop the writer first, flush + close disk, munmap (or free) the entries buffer]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void OrderEventLog_Free(OrderEventLog<F>* log) {
     // v5.11.3.C — stop the async writer thread first so it stops touching
@@ -286,18 +388,23 @@ inline void OrderEventLog_Free(OrderEventLog<F>* log) {
     log->count         = 0;
     log->next_event_id.store(0, std::memory_order_relaxed);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_Free]
+//======================================================================
 
-//======================================================================================================
-// [APPEND]
-//======================================================================================================
-// Append one event. Grows the buffer 2x if full. Returns 1 on success,
-// 0 on allocation failure (the event is lost — logged to stderr).
-//
-// The caller fills in all fields except event_id, which is assigned by
-// this function from next_event_id.
-//======================================================================================================
-// Apply one event to the in-memory log + disk. The realloc + memcpy +
-// fwrite pieces of the original Append. Caller is responsible for any
+//======================================================================
+// [FUNCTION]_[OrderEventLog_ApplyEvent]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[apply one event to memory + disk — fixed capacity: overflow drops + bumps the GUI-surfaced counter]
+//======================================================================
+// [CODE]
+//======================================================================
+// Apply one event to the in-memory log + disk. The memcpy + fwrite pieces
+// of the original Append. Caller is responsible for any
 // thread-safety: this body assumes single-threaded access to log->entries
 // and log->disk_file.
 //
@@ -326,7 +433,23 @@ inline int OrderEventLog_ApplyEvent(OrderEventLog<F>* log, const OrderEvent<F>& 
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_ApplyEvent]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[OrderEventLog_Append]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[drainer-side append — assign event_id, push to the async ring (writer applies) or sync-apply pre-Start]
+//======================================================================
+// [CODE]
+//======================================================================
+// The caller fills in all fields except event_id, which is assigned by
+// this function from next_event_id.
 template <unsigned F>
 inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
     if (log->entries == nullptr) return 0;  // logging disabled (malloc failed)
@@ -358,10 +481,21 @@ inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
     // Sync path (writer thread not active — test mode or pre-Start init).
     return OrderEventLog_ApplyEvent(log, event);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_Append]
+//======================================================================
 
-//======================================================================================================
-// [ASYNC WRITER THREAD (v5.11.3.C)]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderEventLog_AsyncWriterRoutine]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CONCURRENCY] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the writer thread body (v5.11.3.C) — drain ring, apply, drain-before-stop so shutdown flushes everything]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void* OrderEventLog_AsyncWriterRoutine(void* arg) {
     OrderEventLog<F>* log = (OrderEventLog<F>*)arg;
@@ -395,7 +529,21 @@ inline void* OrderEventLog_AsyncWriterRoutine(void* arg) {
         if (drained == 0) usleep(1000);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_AsyncWriterRoutine]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[OrderEventLog_StartAsyncWriter]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[spawn the writer pthread — idempotent; failure degrades to sync Append, never fatal]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int OrderEventLog_StartAsyncWriter(OrderEventLog<F>* log) {
     if (log->writer_thread_active.load(std::memory_order_acquire)) return 0;
@@ -410,7 +558,21 @@ inline int OrderEventLog_StartAsyncWriter(OrderEventLog<F>* log) {
     log->writer_thread_active.store(1, std::memory_order_release);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_StartAsyncWriter]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[OrderEventLog_StopAsyncWriter]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[signal + join the writer — no-op when not running; the lifecycle pair of StartAsyncWriter]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log) {
     if (!log->writer_thread_active.load(std::memory_order_acquire)) return;
@@ -418,10 +580,22 @@ inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log) {
     pthread_join(log->writer_thread, nullptr);
     log->writer_thread_active.store(0, std::memory_order_release);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_StopAsyncWriter]
+//======================================================================
 
-//======================================================================================================
-// [INIT WITH FILE — phase 07 disk persistence]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderEventLog_InitWithFile]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [BOOT_TIME]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[open disk write-through — D-175a ROTATE-not-append on any stale-format file; header written on fresh files]
+//======================================================================
+// [CODE]
+//======================================================================
 // Like Init, but also opens a binary file for write-through. Events are
 // appended to disk on every OrderEventLog_Append call. The file carries a
 // small header for forward compatibility (magic + FPN_Binary width + entry size).
@@ -429,7 +603,6 @@ inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log) {
 // If the file already exists, LoadFromDisk should be called BEFORE this to
 // replay the events into memory. This function opens the file in append
 // mode so existing data is preserved.
-//======================================================================================================
 template <unsigned F>
 inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) {
     // only init the buffer if not already allocated (LoadFromDisk may have
@@ -494,17 +667,27 @@ inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) 
     std::fprintf(stderr, "[OrderEventLog] disk persistence: %s (%s)\n",
                  path, file_exists ? "appending" : "new file");
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_InitWithFile]
+//======================================================================
 
-//======================================================================================================
-// [RESET — v4.7.18 Reset Paper integration]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderEventLog_Reset]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[paper-reset truncate — zero memory state + recreate the disk file header-only (v4.7.18)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Truncate the disk event log to header-only (or remove + recreate) and zero
 // the in-memory state. Called from the engine's paper-reset handler so a
 // fresh boot doesn't replay 40 zombie events from a prior session.
 //
 // Keeps the same file handle open in append mode after the truncation so
 // subsequent appends keep working without reinitializing.
-//======================================================================================================
 template <unsigned F>
 inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
     // In-memory: clear count + reset id sequence. Buffer stays allocated.
@@ -536,17 +719,28 @@ inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
     std::fprintf(stderr, "[OrderEventLog] reset: %s truncated + re-headered\n",
                  log->disk_path);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_Reset]
+//======================================================================
 
-//======================================================================================================
-// [LOAD FROM DISK — phase 07 replay on startup]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderEventLog_LoadFromDisk]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [BOOT_TIME]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[startup replay load — header-gated (OMSEL01 refused loudly, H21); populates the buffer up to capacity]
+//======================================================================
+// [CODE]
+//======================================================================
 // Reads events from a previously-written event log file and populates the
 // in-memory buffer. Validates the file header for magic + FPN_Binary width match.
 // Returns the number of events loaded, or -1 on error.
 //
 // Call this BEFORE InitWithFile if the file already exists. The loaded
 // events are available for Portfolio_FromEventLog replay.
-//======================================================================================================
 template <unsigned F>
 inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
     FILE* f = std::fopen(path, "rb");
@@ -599,8 +793,8 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
     // operator history). In that case we load only the most recent
     // capacity-many events would be ideal — for now we load oldest-first
     // up to capacity and warn if the file is bigger. Acceptable since
-    // ORDER_EVENT_LOG_MAX_CAPACITY=16384 covers ~160 days of typical
-    // strategy rates.
+    // ORDER_EVENT_LOG_MAX_CAPACITY covers months of typical
+    // strategy rates (see the constant's v5.11.5.D sizing note).
     int loaded = 0;
     int truncated = 0;
     OrderEvent<F> event;
@@ -629,14 +823,24 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
     std::fprintf(stderr, "[OrderEventLog] loaded %d events from %s\n", loaded, path);
     return loaded;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEventLog_LoadFromDisk]
+//======================================================================
 
-//======================================================================================================
-// [HELPER — build a fill event]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderEvent_MakeFill]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [HELPER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fill-event builder — zero-inits + fills every field incl. the S-3 booked fee; event_id assigned at Append]
+//======================================================================
+// [CODE]
+//======================================================================
 // Convenience builder for the common case: a full fill from the OMS
 // callback. Fills all the fields so the caller doesn't have to zero-init
 // and set each one individually.
-//======================================================================================================
 template <unsigned F>
 inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
                                           uint64_t timestamp_us,
@@ -663,6 +867,11 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
     e.reason[0]    = '\0';
     return e;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderEvent_MakeFill]
+//======================================================================
 
 template <unsigned F>
 inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
@@ -685,9 +894,24 @@ inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
     return e;
 }
 
-//======================================================================================================
-// [PORTFOLIO FOLD — deterministic reconstruction from the event log]
-//======================================================================================================
+template <unsigned F>
+struct FoldResult {
+    Money balance;
+    Money realized_pnl;
+    Portfolio<F> portfolio;
+    int    fills_processed;
+};
+
+//======================================================================
+// [FUNCTION]_[Portfolio_FromEventLog]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DETERMINISM] [BOOT_TIME]]
+// [REFERENCE]_[CLASS]_[18]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the deterministic portfolio fold — same events in, same state out; the replay foundation]
+//======================================================================
+// [CODE]
+//======================================================================
 // Walk the event log in order, replay every FULL_FILL, and produce the
 // resulting Portfolio + balance + realized P&L. The output is
 // deterministic: same events in, same state out, every time. This is the
@@ -702,15 +926,6 @@ inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
 // Matches the OnEvent computation at ControllerEventLoop.hpp.
 //
 // Returns the number of fill events processed (for verification).
-//======================================================================================================
-template <unsigned F>
-struct FoldResult {
-    Money balance;
-    Money realized_pnl;
-    Portfolio<F> portfolio;
-    int    fills_processed;
-};
-
 template <unsigned F>
 inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
                                             Money starting_balance,
@@ -765,5 +980,10 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
 
     return result;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Portfolio_FromEventLog]
+//======================================================================
 
 }  // namespace tt
