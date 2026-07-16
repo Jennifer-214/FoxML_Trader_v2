@@ -1,13 +1,28 @@
 // Copyright (c) 2026 Jennifer Lewis. All rights reserved.
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 //======================================================================================================
-// [TT:: TYPE-TRAIT DISPATCH FOR CFG FIELD I/O]
+// [FILE]_[CoreFrameworks/CfgFieldDispatch.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [DETERMINISM] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[[H13] [H9] [H4]]
+// [REFERENCE]_[DESIGN_SPEC]_[type-trait-dispatch-via-tt-namespace]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the tt:: cfg dispatch octet — 3-barrier Class-23 antidote (typed-by-reference, X-macro chokepoint, type-family static_assert); locale-pinned save/emit]
+// [CONTAINS]
+//   - [FUNCTION]_[cfg_parse_field]
+//   - [FUNCTION]_[cfg_save_field]
+//   - [FUNCTION]_[cfg_assign_field]
+//   - [FUNCTION]_[cfg_diff_field]
+//   - [FUNCTION]_[cfg_emit_field]
+//   - [FUNCTION]_[cfg_populate_inf_field]
+//   - [FUNCTION]_[cfg_drift_compare]
+//   - [FUNCTION]_[cfg_drift_format_reason]
 //======================================================================================================
 // v5.15.5.F.4b — 3-barrier structural fix for Class 23 (DOCS/RECURRING_BUG_PATTERNS.md).
 // Companion to CoreFrameworks/CfgFieldRegistry.hpp.
 //
 // Pattern: DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md (canonical antidote).
-// Mirror: ML_Headers/StampBoundModelConstRegistry.hpp:101-124 tt::stamp_parse_field<T>
+// Mirror: tt::stamp_parse_field<T> in ML_Headers/StampBoundModelConstRegistry.hpp
 //   (canonical reference implementation; this file extends the pattern to cfg I/O).
 //
 // THE 3 BARRIERS:
@@ -20,8 +35,8 @@
 //               std::is_array_v / std::is_integral_v). Adding a cfg field of an
 //               unrecognized type FAILS THE BUILD with actionable error message.
 //
-// CLAUDE.md item 23 (type-trait dispatch via templated helpers) — public statement.
-// CLAUDE.md item 19 (structural fix preferred) — meta-pattern motivation.
+// H13 (type-trait dispatch via templated helpers) — public statement.
+// Structural-fix-preferred gradient — meta-pattern motivation.
 //======================================================================================================
 #pragma once
 #include "CfgFieldRegistry.hpp"
@@ -39,9 +54,9 @@ namespace tt {
 
     // Forward-declared parse_double_fast (definition lives in
     // ML_Headers/ModelInference.hpp's namespace tt; same precedent as
-    // StampBoundModelConstRegistry.hpp:97-99 forward-decl-to-avoid-include-cycle).
+    // StampBoundModelConstRegistry.hpp's forward-decl-to-avoid-include-cycle).
     inline double parse_double_fast(const char* s);
-    // ③ C1/C2 (D-261) — checked variant for FEATURE-field malformed-capture (definition in ParseFast.hpp:59).
+    // ③ C1/C2 (D-261) — checked variant for FEATURE-field malformed-capture (definition in CoreFrameworks/ParseFast.hpp).
     inline double parse_double_fast_checked(const char* s, bool* malformed_out);
 
     // Dependent-false for exhaustive if-constexpr chains (Ship-B P0, S-5/V5).
@@ -52,9 +67,16 @@ namespace tt {
     template <typename...>
     inline constexpr bool always_false_v = false;
 
-    //==================================================================================================
-    // [PARSE: text → typed cfg field]
-    //==================================================================================================
+    //======================================================================
+    // [FUNCTION]_[cfg_parse_field]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW] [DETERMINISM]]
+    // [REFERENCE]_[INVARIANT]_[H13]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[text -> typed cfg field; exact decimal Money parse (never via double), PCT scaling cfg-file-only (wire_context flag), malformed-money/feature fault capture, INT_ENUM label lookup]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // Caller passes destination BY REFERENCE; T deduced. NEVER takes void*+offset.
     //
     // v5.15.5.F.4d.1.B.3 Phase F — `wire_context` param added. KIND_DOUBLE_PCT scaling (operator-facing
@@ -223,10 +245,22 @@ namespace tt {
             dst = static_cast<T>(v);
         }
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_parse_field]
+    //======================================================================
 
-    //==================================================================================================
-    // [SAVE: typed cfg field → text buffer (operator-friendly format)]
-    //==================================================================================================
+    //======================================================================
+    // [FUNCTION]_[cfg_save_field]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW]]
+    // [REFERENCE]_[INVARIANT]_[[H13] [H9]]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[typed -> operator-readable cfg-file text — exact decimal Money (never %.Nf), PCT x100 form, LC_NUMERIC=C pinned]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // Returns chars written (snprintf semantics). Caller routes the buffer
     // through GUI/SettingsPanel.hpp:cfg_write_field(path, key, buf) for
     // comment-preserving save UX.
@@ -235,7 +269,7 @@ namespace tt {
     // Status-quo pre-.F.4b SettingsPanel save used raw snprintf which honored
     // LC_NUMERIC; a stamp emitted under de_DE produces "0,55" not "0.55" → HMAC chain
     // breaks. tt:: dispatch pins per-thread to LC_NUMERIC=C; restores before return.
-    // Precedent: MemHeaders/RunHistory.hpp:87-89.
+    // Precedent: MemHeaders/RunHistory.hpp's locale-pin block.
     template <typename T>
     inline int cfg_save_field(const T& src, const CfgFieldDescriptor& desc, char* buf, size_t cap) {
         static_assert(is_fp_binary_v<T>
@@ -301,10 +335,22 @@ namespace tt {
         }
         return n;
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_save_field]
+    //======================================================================
 
-    //==================================================================================================
-    // [ASSIGN: descriptor default → typed cfg field]
-    //==================================================================================================
+    //======================================================================
+    // [FUNCTION]_[cfg_assign_field]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW]]
+    // [REFERENCE]_[INVARIANT]_[H13]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[descriptor default -> typed cfg field (reset-to-defaults + boot default-fill); PCT payload is PERCENT-space, scaled exactly like the file parser]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // v5.15.5.F.4c — third sister of cfg_parse_field / cfg_save_field. Sets cfg.name
     // to its declared default value from the descriptor payload. Used by reset-to-
     // defaults GUI button + boot default-fill consumers. Same 3-barrier discipline.
@@ -359,10 +405,22 @@ namespace tt {
             dst = static_cast<T>(v);
         }
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_assign_field]
+    //======================================================================
 
-    //==================================================================================================
-    // [DIFF: typed cfg field vs descriptor default]
-    //==================================================================================================
+    //======================================================================
+    // [FUNCTION]_[cfg_diff_field]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW]]
+    // [REFERENCE]_[INVARIANT]_[H13]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[current vs descriptor default -> bool (GUI modified badge + --changed-only); exact .v compare for Money, PERCENT-space scaled like assign]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // v5.15.5.F.4c — fourth sister. Returns true if current value differs from declared
     // default. Used by GUI "modified" badge + CLI --list-cfg --changed-only consumer.
     template <typename T>
@@ -411,10 +469,22 @@ namespace tt {
         }
         return false;
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_diff_field]
+    //======================================================================
 
-    //==================================================================================================
-    // [EMIT: typed cfg field → HMAC wire-format kv text]
-    //==================================================================================================
+    //======================================================================
+    // [FUNCTION]_[cfg_emit_field]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW] [PERSISTENCE] [DETERMINISM]]
+    // [REFERENCE]_[INVARIANT]_[[H13] [H9]]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[typed -> HMAC wire-format "name=value\n" — exact decimal Money string on the wire, %.17g lossless binary, LC_NUMERIC=C pinned]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // v5.15.5.F.4d.1.B.1 — fifth in-file sister of the tt:: cfg dispatch family.
     //
     // Writes "<name>=<value>\n" to buf. Used by derived-filter consumer macros
@@ -486,10 +556,22 @@ namespace tt {
         }
         return (n < 0) ? 0u : static_cast<size_t>(n);
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_emit_field]
+    //======================================================================
 
-    //==================================================================================================
-    // [POPULATE_INF: typed cfg value → inf.<field> + inf.has_<field>]
-    //==================================================================================================
+    //======================================================================
+    // [FUNCTION]_[cfg_populate_inf_field]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE]]
+    // [REFERENCE]_[INVARIANT]_[[H13] [H20]]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[runtime cfg -> inf.field + inf.has_field, gate-aware (always-emit Q3.G: gate-off writes T{}+0); branchless cmov for scalars; SrcT/DstT/HasT independent]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // v5.15.5.F.4d.1.B.1 — sixth in-file sister. Used by INFERENCE_CFG_POPULATE_FROM_DERIVED
     // consumer macro to populate stamp inference cfg inputs from runtime cfg, gate-aware.
     //
@@ -507,9 +589,10 @@ namespace tt {
     //
     // v5.15.5.F.4d.1.B.2 — extended SrcT/DstT/HasT independent templates per coding-time
     // discovery at Step 1 build verify. Cohort cfg fields are FPN_Binary<F> in master registry but
-    // inf struct fields are double (per FOREACH_STAMP_BOUND_CFG legacy struct-gen at
-    // ModelInference.hpp:1199 `type name;` where type=double for FPN_Binary cohort rows + has_ field
-    // is uint8_t for StampInferenceCfgInputs OR int for ModelStampResult at :1643). Framework
+    // inf struct fields are double (per the FOREACH_STAMP_BOUND_CFG legacy struct-gen
+    // `type name;` emission in ML_Headers/ModelInference.hpp, where type=double for FPN_Binary
+    // cohort rows + has_ field is uint8_t for StampInferenceCfgInputs OR int for
+    // ModelStampResult). Framework
     // walker needs to convert SrcT→DstT (FPN_ToDouble for FPN_Binary→double) + accept any integral
     // HasT. Sister precedent: cfg_emit_field already handles FPN_Binary→double via FPN_ToDouble inline.
     template <typename SrcT, typename DstT, typename HasT>
@@ -537,7 +620,7 @@ namespace tt {
             }
         } else if constexpr (is_fp_binary_v<SrcT> && std::is_floating_point_v<DstT>) {
             // FPN_Binary<F> → double via FPN_ToDouble (cohort field common case; sister to
-            // cfg_emit_field FPN_Binary→double conversion at line 339).
+            // cfg_emit_field's FPN_Binary→double %.17g branch above).
             inf_dst = gate ? FPN_ToDouble(cfg_src) : DstT{};
             inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
         } else if constexpr (is_fp_binary_v<SrcT> && is_fp_binary_v<DstT>) {
@@ -560,10 +643,22 @@ namespace tt {
             inf_has_dst = gate ? static_cast<HasT>(1) : static_cast<HasT>(0);
         }
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_populate_inf_field]
+    //======================================================================
 
-    //==================================================================================================
-    // [DRIFT_COMPARE: stamp.<field> vs cfg.<field> → bool]
-    //==================================================================================================
+    //======================================================================
+    // [FUNCTION]_[cfg_drift_compare]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE] [DETERMINISM]]
+    // [REFERENCE]_[INVARIANT]_[[H13] [H4]]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[train-time stamp value vs serve-time cfg -> drift bool; exact .v / byte compares (never float math on money); exhaustive-else kills silent no-drift fall-through]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // v5.15.5.F.4d.1.B.1 — seventh in-file sister. Used by DRIFT_CHECK_FROM_DERIVED to detect
     // cfg drift between train-time stamp value and serve-time runtime cfg value.
     //
@@ -576,8 +671,9 @@ namespace tt {
     //
     // v5.15.5.F.4d.1.B.2 — extended StampT/CfgT independent templates per coding-time
     // discovery at Step 1 build verify. Stamp's recorded value is at the inf struct's type
-    // (double for FPN_Binary cohort rows per ModelInference.hpp:1643 `int has_##name; type name;`
-    // where type=double); cfg runtime value is FPN_Binary<F>. Compare in DstT space (the stamp's
+    // (double for FPN_Binary cohort rows per ModelInference.hpp's ModelStampResult struct-gen
+    // `int has_##name; type name;` where type=double); cfg runtime value is FPN_Binary<F>.
+    // Compare in DstT space (the stamp's
     // recorded type — what was actually wire-emitted at training time).
     template <typename StampT, typename CfgT>
     inline bool cfg_drift_compare(const StampT& stamp_val, const CfgT& cfg_val) {
@@ -637,7 +733,23 @@ namespace tt {
                           "add an explicit branch (silent fall-through = disabled drift protection).");
         }
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_drift_compare]
+    //======================================================================
 
+    //======================================================================
+    // [FUNCTION]_[cfg_drift_format_reason]
+    //----------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE]]
+    // [REFERENCE]_[INVARIANT]_[H13]
+    // [REFERENCE]_[DESIGN_SPEC]_[failure-attribution-buffer-pattern]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[first-drift attribution — "<field> drift: stamp=X cfg=Y" into a caller-allocated first-failure-wins buffer; boot/load-time only]
+    //======================================================================
+    // [CODE]
+    //======================================================================
     // v5.15.5.F.4d.1.B.3 Step 0.5a — first-drift attribution helper for framework drift walker.
     // Sister to cfg_drift_compare (which detects drift but loses field-attribution info).
     // Used by cfg_derived::drift_check_from_derived to write first-drift attribution into
@@ -706,6 +818,11 @@ namespace tt {
                           "add an explicit branch (sister to cfg_drift_compare).");
         }
     }
+    //======================================================================
+    // [END_CODE]
+    //======================================================================
+    // [END_FUNCTION]_[cfg_drift_format_reason]
+    //======================================================================
 
     // Note: cfg_render_field<T> is implemented inline in GUI/SettingsPanel.hpp (Step 0.5
     // landed at .F.4c), since rendering depends on ImGui which isn't included by this header
