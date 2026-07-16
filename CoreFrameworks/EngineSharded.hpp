@@ -3,8 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ENGINE — SHARDED MODE]
+// [FILE]_[CoreFrameworks/EngineSharded.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ENTRY_POINT]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the sharded-engine INDEX shim — pulls Boot/SlowPath/Async/Run sub-files in canonical order; no units of its own]
 //======================================================================================================
+// PHASE-13 ORIGIN (historical — the framing below is SUPERSEDED: sharded has been the
+// PRODUCTION engine since v5.0 with all strategies + live Binance wired; legacy single_core
+// LIVE is deprecated/warned at boot, and the engine_mode framing is the TECH_DEBT-140
+// vestige. Preserved verbatim as the file's origin story.)
 //
 // Phase 13 of the per-core sharding migration. The "experimental sharded
 // engine" entry point that main.cpp dispatches to when engine_mode = sharded.
@@ -37,7 +45,7 @@
 //   exit within ~10ms of the flag being raised.
 //
 //======================================================================================================
-// [FILE SUITE — Subfolder split (v5.15.5.F.4d.1.B.6)]
+// FILE SUITE — Subfolder split (v5.15.5.F.4d.1.B.6)
 //======================================================================================================
 //
 // At v5.15.5.F.4d.1.B.6 this file was split per file-size-split-discipline.md
