@@ -3,25 +3,17 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [GATE PARAMETERS]
-//
-// Pure parameter pack that the controller computes on its slow path and pushes
-// to each execution core. Contains EVERYTHING the buy gate and sell gate need
-// to evaluate. No global state, no Portfolio reads, no RollingStats access.
-//
-// The execution core reads this pack via the parameter slot (phase 05) and the
-// hot path BG_Evaluate / SG_Evaluate functions take it as their only context.
-// This is what makes the per-core architecture possible — the execution core
-// can do its job without consulting any cross-core state.
-//
-// To add a new gate input:
-//   1. Add the field here
-//   2. Update Strategy_BuildParameters in the strategy that uses it
-//   3. Update BG_Evaluate or SG_Evaluate to read it
-//   4. Bump SNAPSHOT_VERSION (params are persisted in v11+)
-//
-// Flags field encodes which gate behaviors are active. Each bit is a named
-// constant — never use numeric literals when checking flags.
+// [FILE]_[CoreFrameworks/GateParameters.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [HOT_PATH] [CAPITAL_BEARING]]
+// [SCOPE]_[CORE]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-core gate parameter pack + the pure branchless BG/SG evaluators it feeds]
+// [CONTAINS]
+//   - [STRUCT]_[GateParameters]
+//   - [FUNCTION]_[BG_Evaluate]
+//   - [FUNCTION]_[SG_Evaluate]
+//   - [FUNCTION]_[GateParameters_Init]
 //======================================================================================================
 
 #pragma once
@@ -34,6 +26,9 @@
 
 namespace tt {
 
+//----------------------------------------------------------------------
+// [SECTION]_[gate behavior flags — one bit each in GateParameters<F>::flags]
+//----------------------------------------------------------------------
 // Gate behavior flags. Each is one bit in GateParameters<F>::flags.
 constexpr uint8_t GATE_FLAG_TP_ENABLED       = 0x01;
 constexpr uint8_t GATE_FLAG_SL_ENABLED       = 0x02;
@@ -82,6 +77,19 @@ constexpr uint8_t GATE_FLAG_STALENESS_ENABLED = 0x80;
 // truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
 // "this core has no assigned strategy, do not trade".
 
+//======================================================================
+// [STRUCT]_[GateParameters]
+//----------------------------------------------------------------------
+// [TAG]_[[HOT_PATH] [CAPITAL_BEARING] [DATA_ORIENTED_DESIGN] [DECIMAL]]
+// [SCOPE]_[CORE]
+// [THREAD]_[[SLOW_WRITER] [HOT_READER]]
+// [SYNC]_[SEQ_LOCK]
+// [REFERENCE]_[INVARIANT]_[[H4] [H6] [H22]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[pure per-core gate parameter pack — everything BG/SG evaluation needs, zero cross-core state]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct alignas(64) GateParameters {
     // --- Buy gate inputs ---
@@ -147,21 +155,58 @@ struct alignas(64) GateParameters {
     // cfg.param_max_age_ticks. Branchless mask compute on hot path; ~3-5ns.
     uint64_t param_max_age_ticks;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[role — the per-core purity contract]
+//----------------------------------------------------------------------
+// Pure parameter pack that the controller computes on its slow path and pushes
+// to each execution core. Contains EVERYTHING the buy gate and sell gate need
+// to evaluate. No global state, no Portfolio reads, no RollingStats access.
+//
+// The execution core reads this pack via the parameter slot (phase 05) and the
+// hot path BG_Evaluate / SG_Evaluate functions take it as their only context.
+// This is what makes the per-core architecture possible — the execution core
+// can do its job without consulting any cross-core state.
+//
+// Flags field encodes which gate behaviors are active. Each bit is a named
+// constant — never use numeric literals when checking flags.
+//======================================================================
+// [COMMENT]_[extending — add a new gate input]
+//----------------------------------------------------------------------
+// To add a new gate input:
+//   1. Add the field here
+//   2. Update Strategy_BuildParameters in the strategy that uses it
+//   3. Update BG_Evaluate or SG_Evaluate to read it
+//   4. Bump SNAPSHOT_VERSION (params are persisted in v11+)
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[192B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[GateParameters]
+//======================================================================
 
+// [ASSERT]_[LAYOUT_LOCK]_[is_trivially_copyable<GateParameters<64>>]
+// [WHY]_[the pack rides the seqlock ParameterSlot memcpy + the sharded snapshot — raw-copy semantics required]
 static_assert(std::is_trivially_copyable<GateParameters<64>>::value, "GateParameters<64> must be trivially copyable");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(GateParameters<64>) >= 64]
+// [WHY]_[cache-line aligned so the hot path's cached copy sits cleanly on line boundaries (H6)]
 static_assert(alignof(GateParameters<64>) >= 64, "GateParameters<64> must be cache-line aligned");
 
-//======================================================================================================
-// Stub gate evaluators for phase 02. The real implementations come from phase 06
-// (strategy parameter refactor) which extracts pure gate functions from the existing
-// OrderGates.hpp. For phase 02 we just need the signatures + a working stub so
-// ExecutionCore_Tick compiles and tests can verify branchlessness.
-//
-// These stubs are correct but minimal: BG fires when price < threshold, SG fires
-// when price >= TP_price OR price <= SL_price. Real strategies will produce more
-// sophisticated parameter packs but the same gate evaluators.
-//======================================================================================================
-
+//======================================================================
+// [FUNCTION]_[BG_Evaluate]
+//----------------------------------------------------------------------
+// [TAG]_[[HOT_PATH] [CAPITAL_BEARING]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H7]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[branchless buy gate — buy-below/buy-above mask select + volume check + slow-path veto]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 __attribute__((always_inline))
 static inline bool BG_Evaluate(const Tick<F>& tick, const GateParameters<F>* params) {
@@ -183,7 +228,33 @@ static inline bool BG_Evaluate(const Tick<F>& tick, const GateParameters<F>* par
     uint64_t blocked_mask = -blocked;  // 0 or ALL_ONES
     return ((price_ok & volume_check) & ~blocked_mask) != 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[phase 02 origin — shared with SG_Evaluate below]
+//----------------------------------------------------------------------
+// Stub gate evaluators for phase 02. The real implementations come from phase 06
+// (strategy parameter refactor) which extracts pure gate functions from the existing
+// OrderGates.hpp. For phase 02 we just need the signatures + a working stub so
+// ExecutionCore_Tick compiles and tests can verify branchlessness.
+//
+// These stubs are correct but minimal: BG fires when price < threshold, SG fires
+// when price >= TP_price OR price <= SL_price. Real strategies will produce more
+// sophisticated parameter packs but the same gate evaluators.
+//======================================================================
+// [END_FUNCTION]_[BG_Evaluate]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[SG_Evaluate]
+//----------------------------------------------------------------------
+// [TAG]_[[HOT_PATH] [CAPITAL_BEARING]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H7]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[branchless sell gate — TP/SL hit vs ratchet-raised effective levels, each gated by its enable flag]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 __attribute__((always_inline))
 static inline bool SG_Evaluate(const Money& current_price, const Money& entry_price, const GateParameters<F>* params) {
@@ -199,7 +270,21 @@ static inline bool SG_Evaluate(const Money& current_price, const Money& entry_pr
     uint64_t sl_hit = (uint64_t)Money_Le(current_price, effective_sl);
     return ((tp_enabled & tp_hit) | (sl_enabled & sl_hit)) != 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SG_Evaluate]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GateParameters_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[safe defaults — zero thresholds + STRATEGY_NONE; with permission=0 the core will not trade]
+//======================================================================
+// [CODE]
+//======================================================================
 // Initialize a GateParameters pack to safe defaults. Permission=0 semantics: with
 // these params + permission=0 the execution core will not trade.
 template <unsigned F>
@@ -217,6 +302,11 @@ static inline void GateParameters_Init(GateParameters<F>* params) {
     params->strategy_id = STRATEGY_NONE;
     params->flags = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GateParameters_Init]
+//======================================================================
 
 }  // namespace tt
 
