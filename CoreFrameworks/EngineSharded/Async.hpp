@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [EngineSharded/Async.hpp — producer fan-out + drainer drain-with-submit hoisted helpers]
+// [FILE]_[CoreFrameworks/EngineSharded/Async.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PRODUCER] [OMS_DRAINER] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the producer fan-out + drainer drain-with-submit hoisted helpers — the two async thread bodies' cores]
+// [CONTAINS]
+//   - [FUNCTION]_[EngineSharded_Async_FanOut]
+//   - [FUNCTION]_[EngineSharded_Async_DrainWithSubmit]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
@@ -86,9 +93,9 @@ struct CandleAccumulator;
 
 namespace tt {
 
-//======================================================================================================
-// [DRAINER-CYCLE BENCH HISTOGRAM — file-shared inline global]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[drainer-cycle bench histogram — file-shared inline global]
+//------------------------------------------------------------------------------------------------------
 // Bench-gate histogram for per-drainer-cycle latency. Inline (C++17) so all TUs that
 // include this header see the same instance — the drainer thread body in
 // EngineSharded.hpp accumulates into it under `if constexpr (BENCH)`, and the engine
@@ -105,9 +112,15 @@ namespace tt {
 //======================================================================================================
 inline LatencyHistogram g_engine_drainer_cycle_hist{};
 
-//======================================================================================================
-// EngineSharded_Async_FanOut — hoist of producer-thread fan_out lambda
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_Async_FanOut]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PRODUCER] [DATA_PLANE] [CRITICAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the producer per-tick body — fan a tick to every core's ring + telemetry + EMA + the slow-cadence services]
+//======================================================================
+// [CODE]
+//======================================================================
 // Pushes a single tick out to every core's tick ring, updates global state (ticks_produced
 // counter, last_price/_volume atomics, ema_price replication), records the tick to CSV
 // when enabled, feeds the GUI candle accumulator, and at slow-path cadence (every
@@ -174,6 +187,9 @@ inline bool EngineSharded_Async_FanOut(
     // incomplete-type is legal in a parameter-list because no dereference happens.
     CandleAccumulator* candle_acc_ptr
 ) {
+    //------------------------------------------------------------
+    // [SECTION]_[tick fan-out + WS telemetry]
+    //------------------------------------------------------------
     Tick<F> t;
     memset(&t, 0, sizeof(t));
     t.price = Money{ money_from_double_payload(price_d) };   // replay/TUI-side ingress bridge
@@ -229,6 +245,9 @@ inline bool EngineSharded_Async_FanOut(
         state.ws_telemetry.ticks_per_5s.store(total, std::memory_order_relaxed);
     }
 
+    //------------------------------------------------------------
+    // [SECTION]_[per-tick GUI drag-TP/SL pickup]
+    //------------------------------------------------------------
     // v5.1.4: GUI drag-TP/SL pickup runs per-tick, NOT at slow-path
     // cadence. Pre-v5.1.4 this lived in the cadence block and gave
     // 5-33s of perceived latency. Cost: one atomic_load + branch on
@@ -252,6 +271,9 @@ inline bool EngineSharded_Async_FanOut(
     }
 #endif
 
+    //------------------------------------------------------------
+    // [SECTION]_[EMA replication + tick recording + candles]
+    //------------------------------------------------------------
     // v4.0 train-serve parity: update EMA price on every tick (matches
     // legacy PortfolioController_Tick behavior). Used by ML feature
     // pack — without this, sig->ema_sma_spread + sig->ema_above_sma
@@ -290,6 +312,9 @@ inline bool EngineSharded_Async_FanOut(
     }
 #endif
 
+    //------------------------------------------------------------
+    // [SECTION]_[slow-path cadence block — hot-reload / kill resets / depth / snapshot / TUI publish / paper reset]
+    //------------------------------------------------------------
     // Slow path: feed rolling stats and rebuild gate parameters
     // every poll_interval ticks. Matches the legacy controller's
     // sampling cadence so the per-core threshold computation gets
@@ -767,10 +792,21 @@ inline bool EngineSharded_Async_FanOut(
     }
     return true;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_Async_FanOut]
+//======================================================================
 
-//======================================================================================================
-// EngineSharded_Async_DrainWithSubmit — hoist of drainer-thread drain_with_submit lambda
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_Async_DrainWithSubmit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CRITICAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the drainer event pump — TradeEvent rings -> OnEvent bookkeeping -> leg-split qty -> SubmitCommand -> OMS]
+//======================================================================
+// [CODE]
+//======================================================================
 // Drains each core's TradeEvent ring (up to MAX_EVENTS_PER_DRAIN_PER_NODE per ring per
 // cycle), calls EventLoop_OnEvent for bookkeeping, computes order qty (with partial-
 // exit-leg split), builds SubmitCommand, and pushes to OMS via OMS_PushSubmit (so the
@@ -780,7 +816,6 @@ inline bool EngineSharded_Async_FanOut(
 // Originally a lambda inside EngineSharded_Run drainer thread; hoisted to a named
 // function at v5.15.5.F.4d.1.B.6 per Decision B (Option a). Body unchanged from lambda
 // body modulo capture → arg translation (4 by-ref captures → explicit args).
-//======================================================================================================
 template<unsigned F>
 inline int EngineSharded_Async_DrainWithSubmit(
     EventLoopState<F>& state,
@@ -955,5 +990,10 @@ inline int EngineSharded_Async_DrainWithSubmit(
     }
     return total_drained;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_Async_DrainWithSubmit]
+//======================================================================
 
 } // namespace tt
