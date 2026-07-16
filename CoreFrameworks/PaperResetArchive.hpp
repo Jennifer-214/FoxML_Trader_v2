@@ -3,7 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [PAPER-RESET ARCHIVE — v5.15.5.C.3 Phase 6]
+// [FILE]_[CoreFrameworks/PaperResetArchive.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[paper-reset session archiving — timestamped dir + snapshot + trades copy + summary.json before the OMS wipe]
+// [CONTAINS]
+//   - [FUNCTION]_[PaperResetArchive_FormatDirname]
+//   - [FUNCTION]_[PaperResetArchive_CreateDirectories]
+//   - [FUNCTION]_[Summary_WriteJson]
 //======================================================================================================
 // Operator-initiated paper-reset captures the prior session's state into a
 // timestamped archive directory BEFORE wiping the OMS for the next session.
@@ -84,12 +92,12 @@ namespace tt {
 
 template <unsigned F> struct EventLoopState;
 
-//======================================================================================================
-// [PaperResetArchive_FormatTimestamp — wall-clock us → ISO 8601-flavored string]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[timestamp + dirname formatters]
+//------------------------------------------------------------------------------------------------------
+// PaperResetArchive_FormatTimestamp — wall-clock us → ISO 8601-flavored string.
 // Format: "YYYY-MM-DD-HHMMSS" (filesystem-friendly; no colons; no T separator).
 // Uses localtime_r for thread safety. out_size should be >= 20.
-//======================================================================================================
 inline void PaperResetArchive_FormatTimestamp(uint64_t us, char* out, size_t out_size) {
     if (!out || out_size < 20) return;
     time_t t = (time_t)(us / 1000000ULL);
@@ -98,12 +106,9 @@ inline void PaperResetArchive_FormatTimestamp(uint64_t us, char* out, size_t out
     strftime(out, out_size, "%Y-%m-%d-%H%M%S", &tm_buf);
 }
 
-//======================================================================================================
-// [PaperResetArchive_FormatDirname — compose archive directory path]
-//======================================================================================================
+// PaperResetArchive_FormatDirname — compose archive directory path.
 // Output: "data/paper_resets/{start_iso}_to_{end_iso}.paper"
 // out_size should be >= 128 (typical ISO string + path overhead ~80 chars).
-//======================================================================================================
 inline void PaperResetArchive_FormatDirname(uint64_t start_us, uint64_t end_us,
                                              char* out, size_t out_size) {
     if (!out || out_size < 64) return;
@@ -113,16 +118,15 @@ inline void PaperResetArchive_FormatDirname(uint64_t start_us, uint64_t end_us,
     std::snprintf(out, out_size, "data/paper_resets/%s_to_%s.paper", start_iso, end_iso);
 }
 
-//======================================================================================================
-// [PaperResetArchive_CreateDirectories — mkdir -p semantics in C]
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[directory creation — mkdir -p semantics in C]
+//------------------------------------------------------------------------------------------------------
 // Creates each path component if it doesn't exist. Returns 1 on success
 // (or "exists already"), 0 on hard failure (permission denied, no parent
 // dir, etc.).
 //
 // Path must be <= 512 chars. Recurses by null-terminating at each '/' and
 // calling mkdir() incrementally.
-//======================================================================================================
 inline int PaperResetArchive_CreateDirectories(const char* path) {
     if (!path || !path[0]) return 0;
     char buf[512];
@@ -150,9 +154,15 @@ inline int PaperResetArchive_CreateDirectories(const char* path) {
     return 1;
 }
 
-//======================================================================================================
-// [Summary_WriteJson — top-level summary.json emission]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Summary_WriteJson]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[session summary.json — session + global + per_node + per_strategy blocks; per_regime placeholder pending the trade-log aggregator]
+//======================================================================
+// [CODE]
+//======================================================================
 // Composes the full summary.json structure:
 //
 //   {
@@ -250,6 +260,11 @@ inline int Summary_WriteJson(const char* output_path,
     std::fclose(f);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Summary_WriteJson]
+//======================================================================
 
 }  // namespace tt
 
