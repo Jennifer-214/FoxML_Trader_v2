@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [v5.14.3.B — FEATURE OVERLAY POST-LOAD VERIFICATION]
+// [FILE]_[ML_Headers/FeatureRegistryOverlay.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[3-layer overlay fingerprint verification (v5.14.3.B) — sidecar layer-2 hash vs stamp; the canonical post-load entry point for all 6 mirror sites]
+// [CONTAINS]
+//   - [FUNCTION]_[FeatureOverlay_PostLoadVerify]   (+ the sidecar parser shares the file)
 //======================================================================================================
 // 3-layer registry fingerprinting (overlay-aware lineage):
 //   layer-1 = base FEATURE_REGISTRY_HASH (existing C++ FNV-1a; v5.8.6)
@@ -50,7 +56,15 @@
 namespace tt {
 
 //======================================================================================================
-// [SIDECAR PARSER — extract computed_layer2_hash field]
+// [FUNCTION]_[FeatureOverlay_PostLoadVerify]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[read <model>.overlay.json, extract layer-2 hash, compare against the stamp; WARN/refuse per strict mode; the sidecar parser rides in this section]
+//======================================================================
+// [CODE]
+//======================================================================
+// SIDECAR PARSER — extract computed_layer2_hash field
 //======================================================================================================
 // Parses `<model>.overlay.json` and extracts the value of
 // `computed_layer2_hash` (64-char hex SHA256). Returns 1 on success,
@@ -125,7 +139,7 @@ inline int FeatureOverlay_ParseLayer2HashFromSidecar(
 }
 
 //======================================================================================================
-// [POST-LOAD VERIFY HELPER — canonical entry point for all 6 mirror sites]
+// POST-LOAD VERIFY HELPER — canonical entry point for all 6 mirror sites
 //======================================================================================================
 // Iterates every loaded ModelHandle in the zoo (single-zoo: 4 roles;
 // ensemble: 4 roles × N horizons). For each handle with stamp body
@@ -225,4 +239,9 @@ inline int FeatureOverlay_PostLoadVerify(
     return 0;
 }
 
-}  // namespace tt
+}  // namespace tt//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FeatureOverlay_PostLoadVerify]
+//======================================================================
+

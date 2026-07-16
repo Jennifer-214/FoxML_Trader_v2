@@ -3,13 +3,19 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [PER-ARM FLAG REGISTRY — v5.15.5.A]
+// [FILE]_[ML_Headers/PerArmFlagRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-arm boolean registry (v5.15.5.A) — one uint8_t per flag kind, bit N = arm N; field decl + init + ToString auto-flow onto EnsembleModelZoo]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_PER_ARM_FLAG]
 //======================================================================================================
 // FOREACH_PER_ARM_FLAG(X) registry — adding a new per-arm boolean state is 1 row:
 //   1. Append X(NAME, field_name, "doc") below
 //   2. The field auto-flows into EnsembleModelZoo struct as a uint8_t bitmap
-//      where bit N = "this flag is set for arm N" (per CLAUDE.md item 20
-//      BITMAP_* API conventions); accessors via BITMAP_IS_SET / BITMAP_SET
+//      where bit N = "this flag is set for arm N" (per bitmap-flag-api
+//      BITMAP_* conventions); accessors via BITMAP_IS_SET / BITMAP_SET
 //      / BITMAP_ANY using BITMAP_BIT_U8(arm_idx).
 //
 // STORAGE MODEL: per-flag uint8_t field (one byte per flag kind),
@@ -64,7 +70,16 @@
 // for rationale (matches NodeModelZoo.hpp consumer convention).
 
 //======================================================================================================
-// [REGISTRY TUPLE]
+// [REGISTRY]_[FOREACH_PER_ARM_FLAG]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BITMAP_PACKED]]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[X(NAME, field_name, doc) rows -> enum + field-decl macro + init + ToString + overflow asserts]
+// [COLUMN]_[NAME/field_name]_[uppercase token + the uint8_t bitmap field on EnsembleModelZoo]
+// [COLUMN]_[doc]_[audit string]
+//======================================================================
+// [CODE]
 //======================================================================================================
 // Tuple: X(name, field_name, doc_string)
 //   name        — UPPERCASE token; used for PER_ARM_FLAG_<name> enum
@@ -89,7 +104,7 @@
     X(CORRUPT,         corrupt_arms_mask,        "Per-arm barrier (label_tp/sl_pct) failed ingress validation: neg/NaN/+Inf/out-of-range — arm FULLY disabled (also sets disabled_horizon_mask, withholds arms_with_barriers_mask) + counted toward majority-SHALT (v5.15.5.E.0.10 A6)")
 
 //======================================================================================================
-// [AUTO-GENERATED ENUM]
+// AUTO-GENERATED ENUM
 //======================================================================================================
 // PER_ARM_FLAG_DISABLED=0, LOADED_BARRIERS=1, ...
 // PER_ARM_FLAG_COUNT = N (trailing sentinel)
@@ -103,7 +118,7 @@ enum {
 };
 
 //======================================================================================================
-// [FIELD DECLARATION MACRO]
+// FIELD DECLARATION MACRO
 //======================================================================================================
 // Use inside EnsembleModelZoo struct body to auto-generate the
 // uint8_t bitmap fields. Each invocation expands to one
@@ -125,7 +140,7 @@ enum {
     uint8_t field;  /* doc */
 
 //======================================================================================================
-// [INIT — zero all per-arm flag fields]
+// INIT — zero all per-arm flag fields
 //======================================================================================================
 // Standard C preprocessor doesn't propagate outer-macro parameters into
 // inner FOREACH expansions cleanly, so init uses explicit per-field
@@ -141,7 +156,7 @@ enum {
 // 5+ per-arm flag entries make explicit-init unwieldy.
 
 //======================================================================================================
-// [TOSTRING — for telemetry / debug]
+// TOSTRING — for telemetry / debug
 //======================================================================================================
 // Maps PER_ARM_FLAG_<name> enum value to its string token (e.g.,
 // "DISABLED", "LOADED_BARRIERS"). Useful in CRITICAL log lines + GUI
@@ -156,7 +171,7 @@ static inline const char* PerArmFlag_ToString(int flag_enum) {
 }
 
 //======================================================================================================
-// [COMPILE-TIME SANITY CHECKS]
+// COMPILE-TIME SANITY CHECKS
 //======================================================================================================
 // Per CLAUDE.md item 13 X-macro discipline + cfg-flag-eligibility-criteria
 // "Cohort audit when new field has siblings" rule (2026-05-11): existing
@@ -167,4 +182,9 @@ static_assert(PER_ARM_FLAG_DISABLED == 0,
 static_assert(PER_ARM_FLAG_COUNT >= 2,
               "Must have at least DISABLED + LOADED_BARRIERS entries for v5.15.5");
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_PER_ARM_FLAG]
+//======================================================================
 #endif // PER_ARM_FLAG_REGISTRY_HPP

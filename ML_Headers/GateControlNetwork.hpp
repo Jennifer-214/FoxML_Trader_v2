@@ -3,22 +3,34 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [GATE CONTROL NETWORK]
+// [FILE]_[ML_Headers/GateControlNetwork.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the original GCN sketch — a tiny fixed-point MLP (forward + backward pass) for gate control; exploratory-era module]
+// [CONTAINS]
+//   - [FUNCTION]_[GCN_forward]   (GCN_input/GCN_network structs + GCN_backward share the file)
 //======================================================================================================
 // This is going to just control the gate conditions, basically the watcher module i referenced earlier, im not sure how to actually implement this yet or everything it needs but i figure going ahead and sketching i tout will work,
 //
-//======================================================================================================
-// [INCLUDE]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// INCLUDE
+//------------------------------------------------------------------------------
 #ifndef GATE_CONTROL_NETWORK_HPP
 #define GATE_CONTROL_NETWORK_HPP
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "LinearRegression3X.hpp"
 #include "ROR_regressor.hpp"
-//======================================================================================================
-// [STRUCTS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[GCN_forward]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fixed-point MLP forward + backward over template-sized layers; the GCN_input/GCN_network structs ride in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct GCN_input {
     FPN_Binary<F> volume;
     FPN_Binary<F> price;
@@ -40,11 +52,9 @@ template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS> struct
     FPN_Binary<F> output[OUTPUTS];
 };
 
-//======================================================================================================
-// [FUNCTION]
-//======================================================================================================
-// [FORWARD PASS]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// FORWARD PASS
+//------------------------------------------------------------------------------
 //im gonna go back through these and make them branchless this is just boilerplate lol
 //
 //this is basically doing a standard forward pass where or each hidden nueron, it starts with the bias, then loops through every input and multiplies it be the weight connecting it to the hidden nuerion, and accumulates the result, then it applies ReLU, and does the same thing from hidden layer to output layer
@@ -74,9 +84,9 @@ void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &inp
     }
 }
 
-//======================================================================================================
-// [BACKWARD PASS]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// BACKWARD PASS
+//------------------------------------------------------------------------------
 //this apparently is just the if you know what the output was, and you know what you wanted it to be, you have the error difference, and then you push that back through it to figure out how much each weight contrinbuted to the error, and then you can nudge them in the opposite direction, by the learning rate
 //======================================================================================================
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS>
@@ -113,4 +123,9 @@ void GCN_backward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &in
 //======================================================================================================
 //======================================================================================================
 //======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GCN_forward]
+//======================================================================
 #endif

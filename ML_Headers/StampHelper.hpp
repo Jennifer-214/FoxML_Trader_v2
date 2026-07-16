@@ -3,7 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [STAMP_ASSEMBLE_AND_EMIT — v5.15.3.A canonical helper]
+// [FILE]_[ML_Headers/StampHelper.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM] [PERSISTENCE]]
+// [REFERENCE]_[INVARIANT]_[H9]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE canonical stamp assembly+emit (v5.15.3.A, PARITY-020 close) — both trainers route here; single wire-emit path = parity by construction]
+// [CONTAINS]
+//   - [STRUCT]_[StampArgs]
+//   - [FUNCTION]_[Stamp_AssembleAndEmit]
 //======================================================================================================
 // Single canonical orchestration helper for assembling StampInferenceCfgInputs
 // + emitting the stamp body. Used by both production callers:
@@ -30,12 +38,12 @@
 // default member init lets caller specify only what differs per call.
 //
 // CROSS-REFERENCES:
-//   - CLAUDE.md item 13 (X-macro registry — internal STAMP_CFG_AUTOPOPULATE walk)
-//   - CLAUDE.md item 15 (parity-tested-by-construction — single assembly path)
-//   - CLAUDE.md item 16 (reuse-audit — 2-3 callers share)
-//   - CLAUDE.md item 19 (structural fix preferred — closes Class 18 mirror)
-//   - CLAUDE.md item 21 (AUTOPOPULATE companion macro — internal call)
-//   - CLAUDE.md item 27 (POD padding determinism — default member init)
+//   - X-macro registry discipline (internal STAMP_CFG_AUTOPOPULATE walk)
+//   - parity-tested-by-construction (single assembly path)
+//   - reuse-audit (2-3 callers share)
+//   - structural-fix-preferred (closes Class 18 mirror)
+//   - AUTOPOPULATE companion macro (internal call)
+//   - H12 POD padding determinism (default member init)
 //   - DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md (sister pattern)
 //   - DESIGN_SPECS/structural-fix-preferred-decision-framework.md
 //======================================================================================================
@@ -61,7 +69,16 @@
 namespace tt {
 
 //======================================================================================================
-// [StampArgs<F> — POD struct for per-call inputs]
+// [STRUCT]_[StampArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [REFERENCE]_[INVARIANT]_[H12]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[POD per-call input bag — default member init keeps padding deterministic]
+//======================================================================
+// [CODE]
+//======================================================================
+// StampArgs<F> — POD struct for per-call inputs
 //======================================================================================================
 // Default member init for all fields → callers fill only what differs.
 // Single-horizon callers (train_model_worker_fn) leave horizon_* +
@@ -128,7 +145,22 @@ struct StampArgs {
 };
 
 //======================================================================================================
-// [Stamp_AssembleAndEmit — canonical helper]
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[StampArgs]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Stamp_AssembleAndEmit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM] [PERSISTENCE]]
+// [REFERENCE]_[INVARIANT]_[H9]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[assemble StampInferenceCfgInputs via the registry walk -> corrupt-barrier refuse -> emit the HMAC body; the single wire path]
+//======================================================================
+// [CODE]
+//======================================================================
+// Stamp_AssembleAndEmit — canonical helper
 //======================================================================================================
 // Walks STAMP_CFG_AUTOPOPULATE for cfg-bound fields (closes PARITY-020 for
 // callers that previously missed this call). Manually populates per-call
@@ -360,6 +392,12 @@ inline StampWriteResult Stamp_AssembleAndEmit(
         /*inf=*/&inf,
         /*cfg_ptr=*/&cfg);
 }
+
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Stamp_AssembleAndEmit]
+//======================================================================
 
 }  // namespace tt
 

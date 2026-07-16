@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BAYESIAN THOMPSON SAMPLING BANDIT — v5.14.10.A]
+// [FILE]_[ML_Headers/ThompsonBandit.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Gaussian-posterior Thompson sampling (v5.14.10.A) — deterministic splitmix64 PRNG + Box-Muller; runs beside Exp3-IX for A/B in dual-mode]
+// [CONTAINS]
+//   - [STRUCT]_[ThompsonBanditState]
+//   - [FUNCTION]_[Thompson_Sample]   (Init/Update/sink-wrappers/GetProbabilities/GetSoftmaxWeights share the file)
 //======================================================================================================
 // Per-arm Gaussian conjugate posterior (known observation variance). Selection
 // via posterior sampling (one draw per arm; argmax wins). Update via closed-form
@@ -17,7 +24,7 @@
 //     0 = Exp3 (default; bytewise-identical to pre-v5.14.10)
 //     1 = Thompson
 //     2 = Both (Exp3 drives action; Thompson logs choice for offline A/B)
-//   Per-arm reward observability (see NodeModelZoo.hpp:881-882 — every
+//   Per-arm reward observability (see NodeModelZoo.hpp's per-arm reward capture — every
 //   ensemble arm's prediction is independently graded against actual price)
 //   makes cfg=2 parallel-training MATHEMATICALLY VALID — both bandits learn
 //   from the same per-arm signal stream regardless of which one's CHOICE
@@ -35,7 +42,7 @@
 //   - SHA-256-locked sample-trace snapshot test in tests/controller_test.cpp
 //     enforces cross-binary cross-version reproducibility.
 //
-// SLOW-PATH ONLY. Hot path UNTOUCHED (CLAUDE.md item 17 + HOT_PATH_CHANGELOG).
+// SLOW-PATH ONLY. Hot path UNTOUCHED (hot-path-changelog discipline).
 // Cost per Thompson_Sample: ~80ns (8 splitmix64 draws → 4 Box-Muller pairs
 // → 8 normals → argmax). Slow-path budget 100µs → 0.08% utilization.
 //
@@ -51,7 +58,7 @@
 #include "BanditLearning.hpp"  // BANDIT_MAX_ARMS (shared; Thompson and Exp3 use same arm cap)
 
 //======================================================================================================
-// [DEFAULTS]
+// DEFAULTS
 //======================================================================================================
 // Operator-tunable via cfg fields (added in v5.14.10.B). Defaults preserve
 // "uninformative prior" semantics: posterior mean starts at 0, posterior
@@ -62,7 +69,15 @@
 #define THOMPSON_RNG_SEED_DEFAULT          42ULL    // operator-tunable; 0 = use this default
 
 //======================================================================================================
-// [STATE]
+// [STRUCT]_[ThompsonBanditState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-arm mu/precision posteriors + pull counts + the deterministic PRNG state]
+//======================================================================
+// [CODE]
+//======================================================================
+// STATE
 //======================================================================================================
 // Per-arm Gaussian conjugate posterior. POD struct (memset-friendly).
 // Layout: doubles aligned, then ints, then small fields. ~112 bytes per state
@@ -85,7 +100,21 @@ struct ThompsonBanditState {
 };
 
 //======================================================================================================
-// [PRNG: splitmix64]
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[ThompsonBanditState]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Thompson_Sample]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[splitmix64 -> Box-Muller -> one posterior draw per arm -> argmax; Init/Update (closed-form Bayes) + Pattern-5 sink wrappers + probability/softmax read-outs share the section]
+//======================================================================
+// [CODE]
+//======================================================================
+// PRNG: splitmix64
 //======================================================================================================
 // Reference: Sebastiano Vigna, "Further scramblings of Marsaglia's xorshift
 // generators" (2014). Public domain. State = single uint64_t. Period = 2^64.
@@ -106,7 +135,7 @@ static inline uint64_t Thompson_Splitmix64_Next(uint64_t* state) {
 }
 
 //======================================================================================================
-// [UNIFORM CONVERSION: raw uint64 → [0, 1)]
+// UNIFORM CONVERSION: raw uint64 → [0, 1)
 //======================================================================================================
 // 53-bit precision (max double mantissa). Matches std::generate_canonical
 // behavior bit-for-bit. Avoids the "exactly 1.0" edge case (would break Box-
@@ -116,7 +145,7 @@ static inline double Thompson_RawToUniform(uint64_t raw) {
 }
 
 //======================================================================================================
-// [BOX-MULLER: 2 uniforms → 2 standard normal samples]
+// BOX-MULLER: 2 uniforms → 2 standard normal samples
 //======================================================================================================
 // Standard polar form. Two independent N(0,1) samples per pair of uniforms;
 // caller is expected to use both (we don't cache z1 to keep state simple).
@@ -133,7 +162,7 @@ static inline void Thompson_BoxMuller_Pair(double u1, double u2,
 }
 
 //======================================================================================================
-// [INIT]
+// INIT
 //======================================================================================================
 // Zero-init state + apply prior to all arms + seed PRNG. After this, every
 // arm has identical posterior (mu_post = mu_prior, precision_post = precision_prior).
@@ -169,7 +198,7 @@ static inline void Thompson_InitDefault(ThompsonBanditState* tb, int n_arms) {
 }
 
 //======================================================================================================
-// [UPDATE — Bayesian posterior shift on observed reward]
+// UPDATE — Bayesian posterior shift on observed reward
 //======================================================================================================
 // Closed-form Gaussian conjugate update (known observation variance):
 //   precision_new = precision_old + precision_obs
@@ -193,7 +222,7 @@ static inline void Thompson_Update(ThompsonBanditState* tb, int arm, double rewa
 }
 
 //======================================================================================================
-// [PATTERN 5 SINK-FN-POINTER WRAPPERS — Thompson_Update branchless dispatch] (v5.15.5.F.4d)
+// PATTERN 5 SINK-FN-POINTER WRAPPERS — Thompson_Update branchless dispatch (v5.15.5.F.4d)
 //======================================================================================================
 // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md (Pattern 5 of
 // branchless-dispatch-discipline.md).
@@ -248,7 +277,7 @@ inline void real_thompson_update(ThompsonBanditState* tb, int arm, double reward
 using ThompsonUpdateFn = void (*)(ThompsonBanditState*, int /*arm*/, double /*reward*/);
 
 //======================================================================================================
-// [SAMPLE — draw one posterior sample per arm; return argmax]
+// SAMPLE — draw one posterior sample per arm; return argmax
 //======================================================================================================
 // For each arm: sample = mu_post + z / sqrt(precision_post), where z ~ N(0,1).
 // Returns the arm with the largest sample.
@@ -294,7 +323,7 @@ static inline int Thompson_Sample(ThompsonBanditState* tb) {
 }
 
 //======================================================================================================
-// [GET PROBABILITIES — Monte Carlo posterior probability estimation]
+// GET PROBABILITIES — Monte Carlo posterior probability estimation
 //======================================================================================================
 // Estimates P(arm i has highest posterior mean) via N=128 internal draws.
 // Used for TELEMETRY only (calibration log, ML Status panel display); production
@@ -326,7 +355,7 @@ static inline void Thompson_GetProbabilities(const ThompsonBanditState* tb, doub
 }
 
 //======================================================================================================
-// [GET SOFTMAX WEIGHTS — posterior-derived weight vector for BLENDED dispatch]
+// GET SOFTMAX WEIGHTS — posterior-derived weight vector for BLENDED dispatch
 //======================================================================================================
 // Maps each arm's posterior mean mu_post[i] to a normalized softmax weight:
 //   weights[i] = exp(mu_post[i] - max(mu_post)) / Σ_j exp(mu_post[j] - max(mu_post))
@@ -385,4 +414,9 @@ static inline void Thompson_GetSoftmaxWeights(const ThompsonBanditState* tb, dou
     }
 }
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Thompson_Sample]
+//======================================================================
 #endif // THOMPSON_BANDIT_HPP

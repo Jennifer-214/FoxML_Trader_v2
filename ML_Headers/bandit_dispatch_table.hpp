@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BANDIT DISPATCH TABLE — v5.15.5.F.4d]
+// [FILE]_[ML_Headers/bandit_dispatch_table.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reward-attribution fn-pointer tables (v5.15.5.F.4d) — auto-derived from FOREACH_BANDIT_ALGORITHM metadata; buy/exit symmetry via the FOREACH_BANDIT_SIDE meta-X-macro]
+// [CONTAINS]
+//   - [FUNCTION]_[g_buy_reward_dispatch]   (side tag + leaf fns + both tables share the file)
 //======================================================================================================
 // Pattern 1 fn-pointer dispatch tables for REWARD ATTRIBUTION (separate from
 // decision-time arm-selection in BanditAlgorithmRegistry.hpp). Auto-derived
@@ -49,7 +56,16 @@
 #include "../CoreFrameworks/Order.hpp"       // MASK_ORDER_BANDIT_3BIT (referenced by bit-cap static_asserts below)
 
 //======================================================================================================
-// [FOREACH_BANDIT_SIDE — meta-X-macro for buy/exit symmetry]
+// [FUNCTION]_[g_buy_reward_dispatch]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[DESIGN_SPEC]_[multi-state-dispatch-with-per-state-update-metadata]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the buy + exit reward dispatch tables — FOREACH_BANDIT_SIDE meta-macro mirrors both; leaf fns templated on Side; bit-width invariants pin Order::flags_packed bits 17-25]
+//======================================================================
+// [CODE]
+//======================================================================
+// FOREACH_BANDIT_SIDE — meta-X-macro for buy/exit symmetry
 //======================================================================================================
 // Per § G.1 of v5.15.5.F.4d merged plan body. Closes Class 18 (mirror-incomplete)
 // at the buy-side/exit-side bandit boundary structurally.
@@ -75,7 +91,7 @@
 #define FOREACH_BANDIT_SIDE_COUNT (0 FOREACH_BANDIT_SIDE(_BANDIT_SIDE_COUNT_ONE))
 
 //======================================================================================================
-// [BIT-WIDTH INVARIANTS — Order::flags_packed bandit context bits 17-25]
+// BIT-WIDTH INVARIANTS — Order::flags_packed bandit context bits 17-25
 //======================================================================================================
 // Per § N.1 of v5.15.5.F.4d merged plan body. SHIFT_ORDER_BANDIT_* / MASK_ORDER_BANDIT_3BIT
 // constants are in CoreFrameworks/Order.hpp (see comment block there pointing here for the
@@ -104,7 +120,7 @@ static_assert((unsigned)ENSEMBLE_HORIZON_MAX <= ((unsigned)::tt::MASK_ORDER_BAND
               "ENSEMBLE_HORIZON_MAX must stay ≤ MASK_ORDER_BANDIT_3BIT+1 or widen the slot.");
 
 //======================================================================================================
-// [Pattern 1 REWARD DISPATCH TABLES — auto-derived from FOREACH_BANDIT_ALGORITHM metadata]
+// Pattern 1 REWARD DISPATCH TABLES — auto-derived from FOREACH_BANDIT_ALGORITHM metadata
 //======================================================================================================
 // Per § A.1 of v5.15.5.F.4d merged plan body. Pattern 1 fn-pointer dispatch tables for REWARD
 // ATTRIBUTION (separate from decision-time arm-selection in BanditAlgorithmRegistry.hpp).
@@ -132,7 +148,7 @@ static_assert((unsigned)ENSEMBLE_HORIZON_MAX <= ((unsigned)::tt::MASK_ORDER_BAND
 //======================================================================================================
 
 //------------------------------------------------------------------------------------------------------
-// [SIDE TAG + DISPATCH CONTRACT TYPE]
+// SIDE TAG + DISPATCH CONTRACT TYPE
 //------------------------------------------------------------------------------------------------------
 enum class BanditSide { Buy, Exit };
 
@@ -140,7 +156,7 @@ template <unsigned F>
 using BanditRewardFn = void(*)(EnsembleModelZoo<F>* ezoo, int regime, int arm, double reward_bps);
 
 //------------------------------------------------------------------------------------------------------
-// [LEAF REWARD FNS — templated on Side via if-constexpr field selection]
+// LEAF REWARD FNS — templated on Side via if-constexpr field selection
 //------------------------------------------------------------------------------------------------------
 // Three leaf reward fns (one per algorithm-metadata combination). Each is templated on
 // `BanditSide` for compile-time field selection — no runtime branch on side.
@@ -188,7 +204,7 @@ inline void both_reward(EnsembleModelZoo<F>* ezoo, int regime, int arm, double r
 }
 
 //------------------------------------------------------------------------------------------------------
-// [BUY-SIDE REWARD DISPATCH TABLE — auto-derived from FOREACH_BANDIT_ALGORITHM (exp3_up, thompson_up)]
+// BUY-SIDE REWARD DISPATCH TABLE — auto-derived from FOREACH_BANDIT_ALGORITHM (exp3_up, thompson_up)
 //------------------------------------------------------------------------------------------------------
 // `?:` chain auto-selects one of 3 leaf fns per row. Adding a 6th algorithm row with metadata bits
 // (e.g., `(1, 1)` → both_reward) extends this table by 1 entry — zero callsite changes.
@@ -209,7 +225,7 @@ constexpr BanditRewardFn<F> g_buy_reward_dispatch[FOREACH_BANDIT_ALGORITHM_COUNT
 #undef _BUY_REWARD_DISPATCH_ENTRY
 
 //------------------------------------------------------------------------------------------------------
-// [EXIT-SIDE REWARD DISPATCH TABLE — same shape; FOREACH_BANDIT_SIDE auto-mirror]
+// EXIT-SIDE REWARD DISPATCH TABLE — same shape; FOREACH_BANDIT_SIDE auto-mirror
 //------------------------------------------------------------------------------------------------------
 // Per FOREACH_BANDIT_SIDE meta-X-macro. Adding a 3rd side (e.g., per-symbol Thompson) would extend
 // to 3 dispatch tables via copy-paste of this block with new `BanditSide::PerSymbol` tag — until
@@ -228,4 +244,9 @@ constexpr BanditRewardFn<F> g_exit_reward_dispatch[FOREACH_BANDIT_ALGORITHM_COUN
 };
 #undef _EXIT_REWARD_DISPATCH_ENTRY
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[g_buy_reward_dispatch]
+//======================================================================
 #endif // BANDIT_DISPATCH_TABLE_HPP

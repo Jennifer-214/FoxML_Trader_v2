@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CFG DRIFT CHECK REGISTRY — v5.15.5.A.7]
+// [FILE]_[ML_Headers/CfgDriftCheckRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stamp<->cfg drift-check registry (v5.15.5.A.7) — 18 rows replace 14 manual if-blocks; 3-axis Y3 dispatch (severity/category/compare_kind)]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_CFG_DRIFT_CHECK]
 //======================================================================================================
 // X-macro registry for stamp↔cfg drift detection at model load + hot-swap +
 // backtest validate chokepoints. Sister registry to FOREACH_ARCH_FIELD_DRIFT
@@ -64,7 +70,18 @@
 #include "StampBoundModelConstRegistry.hpp"       // STAMP_HAS macro (BITMAP_IS_SET on h->has_flags)
 
 //======================================================================================================
-// [REGISTRY ENTRY SHAPE — 10-col tuple]
+// [REGISTRY]_[FOREACH_CFG_DRIFT_CHECK]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [REFERENCE]_[DESIGN_SPEC]_[dual-axis-y3-dispatch-pattern]
+// [REFERENCE]_[CLASS]_[18]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[10-col tuple; Y3 axes: SEVERITY (WARN/TIER1/TIER2) x CATEGORY x COMPARE_KIND; 18 entries + count helper + test instrumentation]
+// [COLUMN]_[10-col tuple]_[see the entry-shape doc directly below]
+//======================================================================
+// [CODE]
+//======================================================================
+// REGISTRY ENTRY SHAPE — 10-col tuple
 //======================================================================================================
 // X(NAME, type, severity, category, compare_kind,
 //   get_stamp_expr, get_cfg_expr, gate_when, fail_mask, doc)
@@ -128,7 +145,7 @@
 //======================================================================================================
 
 //======================================================================================================
-// [Y3 DISPATCH AXIS 1 — SEVERITY]
+// Y3 DISPATCH AXIS 1 — SEVERITY
 //======================================================================================================
 // Drives tier counter mutation + REFUSE-in-strict return path. Two values today;
 // future could add FORENSIC_ONLY (no counter, log-only).
@@ -140,7 +157,7 @@
     do { ++(t1); if (strict) ++(t1r); (void)(t2); } while (0)
 
 //======================================================================================================
-// [Y3 DISPATCH AXIS 2 — CATEGORY]
+// Y3 DISPATCH AXIS 2 — CATEGORY
 //======================================================================================================
 // Drives ack-flag dispatch + per-category drift bit selection. Two values today;
 // future could add SCALER_CFG (when scaler cfg fields grow beyond binding hash).
@@ -163,7 +180,7 @@
 #define HANDLE_DRIFT_CATEGORY_CROSS_BINARY_FAIL_MASK   FAILURE_MASK_cfg_cross_binary_drift
 
 //======================================================================================================
-// [Y3 DISPATCH AXIS 3 — COMPARE_KIND]
+// Y3 DISPATCH AXIS 3 — COMPARE_KIND
 //======================================================================================================
 // Drives comparison shape per-entry. Three values today (EXACT for int/uint
 // non-noisy; EPS_DEFAULT for double with 1e-6 absolute epsilon; STRING for
@@ -178,7 +195,7 @@
 #define HANDLE_DRIFT_CMP_STRING(stamp, cfg)       (strcmp((stamp), (cfg)) != 0)
 
 //======================================================================================================
-// [FOREACH_CFG_DRIFT_CHECK — 18 entries]
+// FOREACH_CFG_DRIFT_CHECK — 18 entries
 //======================================================================================================
 // Walker composes the 3 Y3 axes per entry. See CoreFrameworks/ModelValidation.hpp
 // `NodeModelZoo_ValidateAgainstCfg<F, LogFn>` for the chokepoint consumer.
@@ -313,7 +330,7 @@
       "Tier 1 per_horizon_barrier_blend master gate drift (REFUSE in strict — model calibrated under different feature regime)")
 
 //======================================================================================================
-// [TEST INSTRUMENTATION]
+// TEST INSTRUMENTATION
 //======================================================================================================
 // Compile-time field count for tests + audit. Counts entries via macro counting.
 // Used by tests to assert "all N expected fields are present" — catches accidental
@@ -322,4 +339,9 @@
 #define CFG_DRIFT_CHECK_COUNT_ONE(name, type, severity, category, compare_kind, get_stamp, get_cfg, gate_when, fail_mask, doc) +1
 #define FOREACH_CFG_DRIFT_CHECK_COUNT  (0 FOREACH_CFG_DRIFT_CHECK(CFG_DRIFT_CHECK_COUNT_ONE))
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_CFG_DRIFT_CHECK]
+//======================================================================
 #endif // CFG_DRIFT_CHECK_REGISTRY_HPP

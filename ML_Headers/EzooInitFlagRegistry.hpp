@@ -3,14 +3,20 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [EZOO INIT FLAG REGISTRY — v5.15.5.A.2.bcd]
+// [FILE]_[ML_Headers/EzooInitFlagRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ensemble-init flag bitmap registry (v5.15.5.A.2.bcd) — 4 int fields collapsed to one uint8_t; enum + masks + ToString auto-flow]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_EZOO_INIT_FLAG]
 //======================================================================================================
 // FOREACH_EZOO_INIT_FLAG(X) registry — adding a new ensemble-init flag is 1 row:
 //   1. Append X(NAME, "doc") below
 //   2. Auto-generates MASK_EZOO_<NAME> = BITMAP_BIT_U8(idx) constant
 //   3. Auto-flows into single uint8_t ezoo->init_flags bitmap field
 //   4. Consumers read via BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_<NAME>)
-//      and write via BITMAP_SET / BITMAP_CLR per CLAUDE.md item 20
+//      and write via BITMAP_SET / BITMAP_CLR per bitmap-flag-api
 //
 // STORAGE: single uint8_t bitmap on EnsembleModelZoo. 4 bits used today
 // (ACTIVE, BANDITS_READY, EXIT_BANDITS_READY, THOMPSON_READY); 4 bits
@@ -61,7 +67,16 @@
 // etc.) use `namespace tt` because their consumers do too.
 
 //======================================================================================================
-// [REGISTRY TUPLE]
+// [REGISTRY]_[FOREACH_EZOO_INIT_FLAG]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BITMAP_PACKED]]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[X(NAME, doc) rows -> enum + MASK_EZOO_* + ToString + overflow assert; 4/8 bits used]
+// [COLUMN]_[NAME]_[uppercase token -> MASK_EZOO_<NAME>]
+// [COLUMN]_[doc]_[audit string]
+//======================================================================
+// [CODE]
 //======================================================================================================
 // Tuple: X(name, doc_string)
 //   name        — UPPERCASE token; bit position determined by registry order;
@@ -86,7 +101,7 @@
     X(EXIT_THOMPSON_READY,     "Exit-side Thompson posterior bandits wired (post-LoadFromCfg + _InitExitThompsonBandits)")
 
 //======================================================================================================
-// [AUTO-GENERATED ENUM]
+// AUTO-GENERATED ENUM
 //======================================================================================================
 // EZOO_INIT_FLAG_ACTIVE=0, BANDITS_READY=1, EXIT_BANDITS_READY=2, THOMPSON_READY=3
 // EZOO_INIT_FLAG_COUNT = N (trailing sentinel)
@@ -100,7 +115,7 @@ enum {
 };
 
 //======================================================================================================
-// [AUTO-GENERATED MASK CONSTANTS]
+// AUTO-GENERATED MASK CONSTANTS
 //======================================================================================================
 // MASK_EZOO_ACTIVE              = BITMAP_BIT_U8(0) = 0x01
 // MASK_EZOO_BANDITS_READY       = BITMAP_BIT_U8(1) = 0x02
@@ -113,7 +128,7 @@ FOREACH_EZOO_INIT_FLAG(X)
 #undef X
 
 //======================================================================================================
-// [TOSTRING — for telemetry / debug]
+// TOSTRING — for telemetry / debug
 //======================================================================================================
 // Maps EZOO_INIT_FLAG_<name> enum value to its string token. Useful in
 // CRITICAL log lines + diagnostic panels.
@@ -127,7 +142,7 @@ static inline const char* EzooInitFlag_ToString(int flag_enum) {
 }
 
 //======================================================================================================
-// [COMPILE-TIME SANITY CHECKS]
+// COMPILE-TIME SANITY CHECKS
 //======================================================================================================
 // Asserts the registry stays within uint8_t storage (8 bits max).
 // At 4 entries today + future growth, will fit comfortably; if a 9th
@@ -142,4 +157,9 @@ static_assert(EZOO_INIT_FLAG_COUNT <= 8,
 static_assert(EZOO_INIT_FLAG_ACTIVE == 0,
               "ACTIVE must remain the first per-ezoo init flag (bit 0)");
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_EZOO_INIT_FLAG]
+//======================================================================
 #endif // EZOO_INIT_FLAG_REGISTRY_HPP

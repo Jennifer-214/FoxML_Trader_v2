@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BARRIER BLEND MODE REGISTRY — v5.15.5.A]
+// [FILE]_[ML_Headers/BarrierBlendModeRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BITMAP_PACKED] [CFG_FLOW]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[barrier blend mode roster (v5.15.5.A) — MODE_F_* bit-packed dispatch semantics; consumers mask-AND, never nested if/else on the enum]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_BARRIER_BLEND_MODE]
 //======================================================================================================
 // FOREACH_BARRIER_BLEND_MODE(X) registry — adding a new barrier blend mode is 1 row:
 //   1. Append X(NAME, flags_expr, "doc") below
@@ -58,7 +64,19 @@
 // need to be accessible from template functions without namespace qualification.
 
 //======================================================================================================
-// [MODE_F_* BIT-PACKED FLAGS]
+// [REGISTRY]_[FOREACH_BARRIER_BLEND_MODE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BITMAP_PACKED]]
+// [REFERENCE]_[INVARIANT]_[[H20] [H21]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[MODE_F_* flags + rows -> enum + MODE_FLAGS[] LUT + branchless predicate accessors + To/FromString; enum values append-only (operator cfgs carry numerics)]
+// [COLUMN]_[NAME]_[mode token -> MODE_BARRIER_BLEND_<NAME>]
+// [COLUMN]_[flags_expr]_[MODE_F_* bit-or encoding the dispatch semantics]
+// [COLUMN]_[doc]_[audit string]
+//======================================================================
+// [CODE]
+//======================================================================
+// MODE_F_* BIT-PACKED FLAGS
 //======================================================================================================
 // Behavior flags that describe each blend mode's semantics. Multiple flags
 // can be combined per mode (e.g., BOTH_*_DRIVES = primary flag | SHADOW_ACTIVE).
@@ -69,7 +87,7 @@ constexpr uint8_t MODE_F_SHADOW_ACTIVE   = BITMAP_BIT_U8(2);  // 0x04 — record
 constexpr uint8_t MODE_F_LEGACY          = BITMAP_BIT_U8(3);  // 0x08 — fall back to cfg.ml_tp_pct / cfg.ml_sl_pct
 
 //======================================================================================================
-// [REGISTRY TUPLE]
+// REGISTRY TUPLE
 //======================================================================================================
 // Tuple: X(name, mode_flags, doc_string)
 //   name        — UPPERCASE token; used for MODE_BARRIER_BLEND_<name> enum
@@ -87,7 +105,7 @@ constexpr uint8_t MODE_F_LEGACY          = BITMAP_BIT_U8(3);  // 0x08 — fall b
     X(BOTH_DOMINANT_DRIVES, MODE_F_DOMINANT_DRIVES | MODE_F_SHADOW_ACTIVE,  "Dominant drives trade; blend logged for shadow-mode A/B compare")
 
 //======================================================================================================
-// [AUTO-GENERATED ENUM]
+// AUTO-GENERATED ENUM
 //======================================================================================================
 // MODE_BARRIER_BLEND_LEGACY=0, BLEND=1, DOMINANT=2, BOTH_BLEND_DRIVES=3, BOTH_DOMINANT_DRIVES=4
 // MODE_BARRIER_BLEND_COUNT = 5 (trailing sentinel)
@@ -99,7 +117,7 @@ enum {
 };
 
 //======================================================================================================
-// [AUTO-GENERATED MODE_FLAGS[] LOOKUP TABLE]
+// AUTO-GENERATED MODE_FLAGS[] LOOKUP TABLE
 //======================================================================================================
 // Indexed by MODE_BARRIER_BLEND_* enum; each entry holds the bit-packed flags
 // from the FOREACH tuple's 2nd column. Slow-path dispatch reads this table
@@ -112,7 +130,7 @@ constexpr uint8_t MODE_FLAGS[MODE_BARRIER_BLEND_COUNT] = {
 };
 
 //======================================================================================================
-// [BRANCHLESS DISPATCH PREDICATE ACCESSORS]
+// BRANCHLESS DISPATCH PREDICATE ACCESSORS
 //======================================================================================================
 // Single-cycle mask-AND from the bit-packed flag table. Pattern is reused at
 // the ML_BuildParameters dispatch site + at the shadow-ring write site.
@@ -136,7 +154,7 @@ static inline bool BarrierBlendMode_IsLegacy(int mode) {
 }
 
 //======================================================================================================
-// [TOSTRING / FROMSTRING]
+// TOSTRING / FROMSTRING
 //======================================================================================================
 // Operator-facing serialization for cfg-file parse, engine.cfg.example
 // auto-doc, GUI dropdown labels (via the SettingsPanel mode selector),
@@ -171,7 +189,7 @@ static inline const char* BarrierBlendMode_Doc(int mode) {
 }
 
 //======================================================================================================
-// [COMPILE-TIME SANITY CHECKS]
+// COMPILE-TIME SANITY CHECKS
 //======================================================================================================
 // Asserts the registry hasn't been silently corrupted (entries removed without
 // updating MODE_BARRIER_BLEND_COUNT, or flags expression dropped).
@@ -191,4 +209,9 @@ static_assert((MODE_FLAGS[MODE_BARRIER_BLEND_BOTH_DOMINANT_DRIVES]
                 & MODE_F_SHADOW_ACTIVE) != 0,
               "BOTH_DOMINANT_DRIVES must have shadow active for telemetry");
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_BARRIER_BLEND_MODE]
+//======================================================================
 #endif // BARRIER_BLEND_MODE_REGISTRY_HPP

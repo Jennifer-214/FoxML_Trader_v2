@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [PORTFOLIO TURNOVER — v5.14.1.G]
+// [FILE]_[ML_Headers/RollingTurnover.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[top-K arm-pick stability (v5.14.1.G) — symmetric-difference ratio between consecutive masks; observability only, never a trading input]
+// [CONTAINS]
+//   - [FUNCTION]_[RollingTurnover_Push]   (struct + Init/topk_mask/Compute share the file)
 //======================================================================================================
 // Tracks how stable the ensemble's top-K arm picks are over time.
 // Symmetric-difference between consecutive top-K bit-masks → ratio in
@@ -14,8 +20,8 @@
 // Per-core diagnostic surfaced via PerNodeSnap.ml_portfolio_turnover.
 // Operator visibility metric — does NOT influence trading decisions.
 // State lives on EventLoopState.nodes[].turnover (per-core, ephemeral).
-// NOT on ConfidenceScorer (would break PortfolioController.hpp:2094+2210
-// snapshot save/load per Class 4 — snapshot save/load asymmetry).
+// NOT on ConfidenceScorer (would break the legacy PortfolioController
+// snapshot save/load pair per Class 4 — snapshot save/load asymmetry).
 //
 // 8-arm ensemble fits in uint8_t bit-mask; popcount is 1 cycle on x86.
 //======================================================================================================
@@ -28,6 +34,15 @@
 #define ROLLING_TURNOVER_MAX_WINDOW 256
 #define ROLLING_TURNOVER_MAX_TOPK   8   // matches ENSEMBLE_HORIZON_MAX
 
+//======================================================================
+// [FUNCTION]_[RollingTurnover_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[popcount(prev XOR cur) / popcount-union ratio into the ring; the struct + Init/topk_mask/Compute ride in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RollingTurnover {
     uint8_t topk_mask_ring[ROLLING_TURNOVER_MAX_WINDOW];
     int     head;             // next write slot (modulo window)
@@ -38,7 +53,7 @@ struct RollingTurnover {
 };
 
 //======================================================================================================
-// [INIT]
+// INIT
 //======================================================================================================
 // Validates window + topk; clamps to safe range. Zero-init buffers.
 //======================================================================================================
@@ -55,7 +70,7 @@ static inline void RollingTurnover_Init(RollingTurnover *rt,
 }
 
 //======================================================================================================
-// [TOP-K MASK FROM WEIGHTS]
+// TOP-K MASK FROM WEIGHTS
 //======================================================================================================
 // Compute top-K bit-mask from weights array (descending sort by weight,
 // take top K indices, set bit i for each top-K member).
@@ -98,7 +113,7 @@ static inline uint8_t topk_mask_from_weights(const double* weights, int n,
 }
 
 //======================================================================================================
-// [PUSH]
+// PUSH
 //======================================================================================================
 // Append a new top-K mask to the ring; compute symmetric difference
 // against previous mask in same call. Returns the just-computed
@@ -128,7 +143,7 @@ static inline double RollingTurnover_Push(RollingTurnover *rt, uint8_t mask) {
 }
 
 //======================================================================================================
-// [COMPUTE]
+// COMPUTE
 //======================================================================================================
 // Average symmetric-difference ratio across the window (count - 1
 // pair-wise diffs from the ring's chronological order). Cold-start
@@ -155,4 +170,9 @@ static inline double RollingTurnover_Compute(const RollingTurnover *rt) {
     return sum / (double)(n - 1);
 }
 
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingTurnover_Push]
+//======================================================================
 #endif // ROLLING_TURNOVER_HPP
