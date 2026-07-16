@@ -2,7 +2,23 @@
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
 //======================================================================================================
-// [LIVE EXCHANGE RECONCILIATION — v5.2.1 Phase 1]
+// [FILE]_[CoreFrameworks/Reconcile.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[boot-time exchange reconciliation — LOGIC only (network lives in BinanceOrderAPI): parse venue truth, decide, replay/cancel/refuse; dry_run-first safety]
+// [CONTAINS]
+//   - [STRUCT]_[ReconcileOpenOrder]
+//   - [STRUCT]_[ReconcileTrade]
+//   - [REGISTRY]_[FOREACH_RECONCILE_MODE]
+//   - [FUNCTION]_[Reconcile_ApplyMissedFills]
+//   - [FUNCTION]_[Reconcile_SeedWatermark]
+//   - [FUNCTION]_[Reconcile_AutoCancelStale]
+//   - [STRUCT]_[ReconcileResult]
+//   - [FUNCTION]_[Reconcile_ParseOpenOrders]
+//   - [FUNCTION]_[Reconcile_ParseMyTrades]
+//   - [FUNCTION]_[Reconcile_Decide]
+//   - [FUNCTION]_[Reconcile_LogReport]
 //======================================================================================================
 // On boot in live mode (engine_mode=live), call OrderManager_Reconcile to
 // sync local view with exchange truth. Catches:
@@ -40,10 +56,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// [PARSED RECONCILE STRUCTS]
-//======================================================================================================
-
+//======================================================================
+// [STRUCT]_[ReconcileOpenOrder]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one parsed /api/v3/openOrders row; is_ours = engine's "tt-" client-id prefix]
+//======================================================================
+// [CODE]
+//======================================================================
 struct ReconcileOpenOrder {
     int64_t order_id;
     char    symbol[16];
@@ -54,7 +75,27 @@ struct ReconcileOpenOrder {
     char    client_order_id[40]; // engine sets these as "tt-..." prefix
     int     is_ours;             // 1 if client_order_id starts with "tt-"
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[112B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ReconcileOpenOrder]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[ReconcileTrade]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one parsed /api/v3/myTrades row — the replay unit for missed-fill recovery]
+//======================================================================
+// [CODE]
+//======================================================================
 struct ReconcileTrade {
     int64_t trade_id;
     int64_t order_id;
@@ -65,14 +106,36 @@ struct ReconcileTrade {
     int     is_buyer;     // 1 = BUY fill
     int     is_maker;     // 1 = maker fill
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[56B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ReconcileTrade]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.4.A — RECONCILE MODE X-MACRO REGISTRY]
-//======================================================================================================
-// 3-mode enum (STRICT/WARN/AUTO_SYNC) for boot reconcile dispatch.
+//======================================================================
+// [REGISTRY]_[FOREACH_RECONCILE_MODE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CFG_FLOW]]
+// [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[boot reconcile mode registry (STRICT/WARN/AUTO_SYNC) — enum + count + to/from-string auto-flow; values stable for cfg numeric back-compat]
+// [COLUMN]_[name]_[uppercase token -> RECONCILE_<name> enum value]
+// [COLUMN]_[value]_[uint8_t numeric; STABLE (legacy operator cfgs carry numerics)]
+// [COLUMN]_[cfg_string]_[operator-friendly parser token ("strict"/"warn"/"auto_sync")]
+//======================================================================
+// [CODE]
+//======================================================================
+// v5.14.4.A — 3-mode enum (STRICT/WARN/AUTO_SYNC) for boot reconcile dispatch.
 // Operator chose X-macro registry over manual enum at 3-mode count
-// per CLAUDE.md item 19 (structural fix preferred when bug class can
-// recur). Adding 4th mode = ONE line in this registry; enum + cfg
+// per the structural-fix-preferred gradient (structural fix preferred when
+// a bug class can recur). Adding 4th mode = ONE line in this registry; enum + cfg
 // parser + dispatch + count macro auto-extend.
 //
 // PROVEN PATTERN: same shape as STAMP_CFG_AUTOPOPULATE (v5.14.1.E.E.B)
@@ -94,17 +157,17 @@ struct ReconcileTrade {
 //
 // FUTURE-THINKING: if v5.X+ adds a per-cycle reconcile mode (e.g.,
 // AUTO_SYNC_CONTINUOUS that re-runs reconcile every N cycles), the
-// dispatch becomes per-cycle. At that point apply CLAUDE.md item 18(a):
+// dispatch becomes per-cycle. At that point apply branchless-dispatch-discipline:
 //   - DEFAULT-OFF safety gate via `template <bool ENABLED>` + `if constexpr`
 //     for compile-time elision when mode != continuous
 //   - OR runtime cache: hoist mode to slow-path top + pass resolved
-//     predicate (item 18(d))
+//     predicate
 // Boot dispatch today is operator-initiated + I/O-dominated; branchless
 // is irrelevant. The trigger is documented here so future-Claude
 // catches it when adding a per-cycle mode.
 //
 // SHARDED-ONLY (deep audit 2026-05-09 / TECH_DEBT-002 alignment):
-// Centralized engine `main.cpp:362` does balance check only, NOT
+// Centralized engine main.cpp does balance check only, NOT
 // reconciliation. Reconcile dispatch lives in EngineSharded boot ONLY.
 // When TECH_DEBT-002 (centralized removal) ships, no migration step
 // needed at the dispatch site (verified by deep audit).
@@ -157,17 +220,29 @@ inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
 #undef RECONCILE_MODE_FROM_STRING_CASE
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_RECONCILE_MODE]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.4.B.1 — APPLYMISSEDFILLS HELPER]
-//======================================================================================================
-// Replays trades that arrived during a disconnect window: for each
+//======================================================================
+// [FUNCTION]_[Reconcile_ApplyMissedFills]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[replay trades newer than the watermark through the canonical HandleFill path — idempotent, branchless origin-node bitmap search, per-node fee pre-resolution]
+//======================================================================
+// [CODE]
+//======================================================================
+// v5.14.4.B.1 — replays trades that arrived during a disconnect window: for each
 // ReconcileTrade with trade_id > oms->last_seen_trade_id, synthesizes
 // an Order + calls OrderManager_HandleFill (existing path) to update
 // portfolio + balance to match exchange-side reality.
 //
 // CALLER (sharded boot only; per deep audit 2026-05-09 / TECH_DEBT-002):
-//   - EngineSharded.hpp boot reconcile dispatch (RECONCILE_AUTO_SYNC mode)
+//   - the boot reconcile dispatch in EngineSharded/Run.hpp (RECONCILE_AUTO_SYNC mode)
 //
 // SAFETY:
 //   - Idempotent re-run: trade_id <= last_seen_trade_id → skipped
@@ -278,19 +353,33 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
 
     return replayed;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Reconcile_ApplyMissedFills]
+//======================================================================
 
-//======================================================================================================
-// [A20 (.E.0.10) — SEED THE TRADE-ID WATERMARK WITHOUT REPLAYING]
-//======================================================================================================
-// Cold-boot seed: the live boot balance was already seeded from the exchange (post-
-// OrphanRecovery, Run.hpp:653), which ALREADY reflects every settled trade in the
+//======================================================================
+// [FUNCTION]_[Reconcile_SeedWatermark]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[A20 cold-boot seed — set last_seen_trade_id = max(fetched) WITHOUT replaying (exchange-seeded balance already reflects them; replay would double-book)]
+//======================================================================
+// [CODE]
+//======================================================================
+// A20 (.E.0.10) — cold-boot seed: the live boot balance was already seeded from the
+// exchange (post-OrphanRecovery, in EngineSharded/Run.hpp), which ALREADY reflects every
+// settled trade in the
 // GetMyTrades(since=0) window (Binance's most-recent 100). Replaying them via
 // Reconcile_ApplyMissedFills would DOUBLE-BOOK balance + open phantom positions (A20).
 // So set last_seen_trade_id = max(fetched trade_id) WITHOUT replaying. max() over the
 // most-recent set is the newest settled trade -> a correct floor for the FUTURE WS-fill
-// watermark-bump (OrderManager.hpp:536, .E.1). Order-independent (a max), so the venue
-// response ordering does not matter. The book is FLAT at live boot (no snapshot load,
-// Run.hpp:982; orphan-sell flattens BTC; Reconcile_Decide refuses on real exchange-position
+// watermark-bump (the OMS last_seen_trade_id contract, .E.1). Order-independent (a max),
+// so the venue
+// response ordering does not matter. The book is FLAT at live boot (no snapshot load on
+// the live path in Run.hpp; orphan-sell flattens BTC; Reconcile_Decide refuses on real
+// exchange-position
 // -no-local divergence), so the fetched trades are historical, NOT open positions.
 template <unsigned F>
 inline uint64_t Reconcile_SeedWatermark(OrderManagerState<F>* oms,
@@ -304,11 +393,22 @@ inline uint64_t Reconcile_SeedWatermark(OrderManagerState<F>* oms,
     oms->last_seen_trade_id = max_trade_id;
     return max_trade_id;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Reconcile_SeedWatermark]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.4.B.2 — AUTOCANCELSTALE HELPER]
-//======================================================================================================
-// Cancels engine-orphaned exchange orders ("zombies"): for each
+//======================================================================
+// [FUNCTION]_[Reconcile_AutoCancelStale]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[cancel engine-orphaned "tt-" zombies via injected CancelFn (logic-only, test-friendly); best-effort — non-engine orders never touched]
+//======================================================================
+// [CODE]
+//======================================================================
+// v5.14.4.B.2 — cancels engine-orphaned exchange orders ("zombies"): for each
 // ReconcileOpenOrder where is_ours=1 (client_order_id has "tt-" prefix
 // = engine-placed), invokes BinanceOrderAPI_CancelOrder via the REST
 // API. Engine boot has no in-flight orders by construction (fresh OMS
@@ -320,7 +420,7 @@ inline uint64_t Reconcile_SeedWatermark(OrderManagerState<F>* oms,
 // must not touch those.
 //
 // CALLER (sharded boot only; per deep audit / TECH_DEBT-002):
-//   - EngineSharded.hpp boot reconcile dispatch (RECONCILE_AUTO_SYNC mode)
+//   - the boot reconcile dispatch in EngineSharded/Run.hpp (RECONCILE_AUTO_SYNC mode)
 //
 // SAFETY:
 //   - Network failure per cancel → logged + counted as failure, but
@@ -401,7 +501,21 @@ inline int Reconcile_AutoCancelStale(CancelFn&& cancel,
 
     return cancelled;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Reconcile_AutoCancelStale]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[ReconcileResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Reconcile_Decide's output — echoed inputs, planned actions (cancel/replay), refusal verdict + reason, divergence flags]
+//======================================================================
+// [CODE]
+//======================================================================
 struct ReconcileResult {
     // Inputs (echoed for logging)
     double exchange_usdt;
@@ -417,15 +531,27 @@ struct ReconcileResult {
     int    has_local_position_no_exchange; // local says open, exchange says flat
     int    has_exchange_position_no_local; // exchange says BTC > dust, local says 0 positions
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[304B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[5]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ReconcileResult]
+//======================================================================
 
-//======================================================================================================
-// [JSON PARSING — minimal, no allocator, no malloc]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// [SECTION]_[json field extraction — minimal, no allocator, no malloc]
+//------------------------------------------------------------------------------
 // We parse Binance's REST responses with strstr-based field extraction.
 // Same approach BinanceOrderAPI.hpp uses for account balance parsing.
 // Robust enough for real responses, simple enough to unit-test with
-// mocked strings.
-//======================================================================================================
+// mocked strings. (Boot-time REST-response parsing — not a tick-path
+// parser; the H5 simdjson/fast_float rule targets parser inner loops.)
+//------------------------------------------------------------------------------
 
 // Find next '{' after `cursor`. Returns pointer to it, or nullptr.
 static inline const char* reconcile_next_object(const char* cursor) {
@@ -515,12 +641,17 @@ static inline int reconcile_get_bool(const char* obj_start, const char* obj_end,
     return (strncmp(p, "true", 4) == 0) ? 1 : 0;
 }
 
-//======================================================================================================
-// [PARSE OPEN ORDERS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Reconcile_ParseOpenOrders]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[/api/v3/openOrders JSON array -> ReconcileOpenOrder[]; tags is_ours by the "tt-" client-id prefix]
+//======================================================================
+// [CODE]
+//======================================================================
 // Input: raw JSON array from /api/v3/openOrders.
 // Output: fills `out` array up to `out_cap`. Returns count parsed.
-//======================================================================================================
 inline int Reconcile_ParseOpenOrders(const char* json, ReconcileOpenOrder* out, int out_cap) {
     if (!json || !out || out_cap <= 0) return 0;
     int count = 0;
@@ -547,13 +678,23 @@ inline int Reconcile_ParseOpenOrders(const char* json, ReconcileOpenOrder* out, 
     }
     return count;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Reconcile_ParseOpenOrders]
+//======================================================================
 
-//======================================================================================================
-// [PARSE MY TRADES]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Reconcile_ParseMyTrades]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[/api/v3/myTrades JSON array -> ReconcileTrade[] (the replay input)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Input: raw JSON array from /api/v3/myTrades.
 // Output: fills `out` array up to `out_cap`. Returns count parsed.
-//======================================================================================================
 inline int Reconcile_ParseMyTrades(const char* json, ReconcileTrade* out, int out_cap) {
     if (!json || !out || out_cap <= 0) return 0;
     int count = 0;
@@ -578,10 +719,21 @@ inline int Reconcile_ParseMyTrades(const char* json, ReconcileTrade* out, int ou
     }
     return count;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Reconcile_ParseMyTrades]
+//======================================================================
 
-//======================================================================================================
-// [DECIDE — pure function, fully testable with mocked inputs]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Reconcile_Decide]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[pure decision function — exchange truth + local summary -> planned actions; REFUSES BOOT on exchange-position-no-local divergence]
+//======================================================================
+// [CODE]
+//======================================================================
 // Given parsed exchange truth + local view summary, compute reconcile
 // decisions. Does NOT execute (caller does, gated on dry_run flag).
 //
@@ -643,10 +795,21 @@ inline ReconcileResult Reconcile_Decide(
 
     return r;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Reconcile_Decide]
+//======================================================================
 
-//======================================================================================================
-// [APPLY — caller-driven, gated on dry_run]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Reconcile_LogReport]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[log every decision (DRY_RUN vs APPLY labeled); the real apply lives at the boot caller, gated on dry_run]
+//======================================================================
+// [CODE]
+//======================================================================
 // Logging-only stub. Real apply happens in EngineSharded boot when this
 // header is wired into main.cpp. The key actions:
 //   1. Log all decisions (always)
@@ -657,7 +820,6 @@ inline ReconcileResult Reconcile_Decide(
 //      c. Force-close local slots that are no longer on exchange
 //      d. Update oms->last_processed_trade_id to highest in trades[]
 //   3. If refused_boot: caller exits / refuses to advance
-//======================================================================================================
 inline void Reconcile_LogReport(const ReconcileResult& r, int dry_run) {
     fprintf(stderr,
         "[reconcile] exchange: USDT=%.2f BTC=%.6f | %d open orders, %d new trades\n",
@@ -683,6 +845,11 @@ inline void Reconcile_LogReport(const ReconcileResult& r, int dry_run) {
             "[reconcile] CRITICAL — refusing boot: %s\n", r.refusal_reason);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Reconcile_LogReport]
+//======================================================================
 
 }  // namespace tt
 
