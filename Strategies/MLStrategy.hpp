@@ -2,7 +2,15 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 //======================================================================================================
-// [ML STRATEGY]
+// [FILE]_[Strategies/MLStrategy.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[model-driven entries — feature pack + scaler + XGBoost inference (single-zoo or ensemble dispatch); NaN/Inf triple-guard; no model loaded = zero-cost no-op]
+// [CONTAINS]
+//   - [STRUCT]_[MLStrategyState]
+//   - [FUNCTION]_[MLStrategy_BuySignal]   (Init / Adapt + canonical adapter unblocked)
+//   - [FUNCTION]_[MLStrategy_ExitAdjust]  (+ ExitAdjustSharded ratchet twin)
 //======================================================================================================
 // model-driven buy signals using XGBoost or LightGBM inference.
 // follows the same 4-function pattern as MR/Momentum/SimpleDip.
@@ -26,9 +34,15 @@
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — MASK_OMS_STATE_*
 #include <cmath>  // v5.9.0: std::isnan/isinf for prediction validation
 
-//======================================================================================================
-// [STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[MLStrategyState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[buy model handle + feature scratch + last prediction; optional ensemble_zoo pointer (nullptr = single-model path)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct MLStrategyState {
     ModelHandle<F> buy_model;           // buy signal model (loaded from config path)
     float feature_buf[MODEL_MAX_FEATURES]; // scratch space for feature packing
@@ -44,10 +58,21 @@ template <unsigned F> struct MLStrategyState {
     EnsembleModelZoo<F>* ensemble_zoo;
     int ensemble_last_selected_idx;     // for display: which horizon won
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[7104B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[111]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[MLStrategyState]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// INIT
+//------------------------------------------------------------------------------
 // called once after warmup completes. model should already be loaded by the controller.
 // sets initial buy conditions from rolling stats (same pattern as other strategies).
 //======================================================================================================
@@ -77,12 +102,12 @@ inline void MLStrategy_Init(MLStrategyState<F> *state, const RollingStats<F> *ro
                         "(ensemble may attach below)\n");
 }
 
-//======================================================================================================
-// [ADAPT]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// ADAPT
+//------------------------------------------------------------------------------
 // no-op for now — model is static (trained offline).
 // future: online learning, feature drift detection, model hot-swap.
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void MLStrategy_Adapt(MLStrategyState<F> *state, FPN_Binary<F> current_price,
                               FPN_Binary<F> portfolio_delta, uint16_t active_bitmap,
@@ -111,9 +136,16 @@ inline void MLStrategy_Adapt_Canonical(
                       buy_conds, (const void*)cfg);
 }
 
-//======================================================================================================
-// [BUY SIGNAL]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[MLStrategy_BuySignal]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [REFERENCE]_[INVARIANT]_[H5]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[pack -> scale -> predict (ensemble dispatch when wired) -> threshold gate; NaN/Inf guarded at pack, post-scaler, and prediction; model decides WHEN, gate decides WHERE]
+//======================================================================
+// [CODE]
+//======================================================================
 // packs features from rolling stats + regime signals, runs model inference.
 // if prediction > threshold, returns buy conditions; otherwise returns zero-gate.
 // gate_direction = 0 (buy below avg, like MR) — model decides WHEN, not WHERE.
@@ -204,10 +236,21 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 
     return conds;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MLStrategy_BuySignal]
+//======================================================================
 
-//======================================================================================================
-// [EXIT ADJUST]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[MLStrategy_ExitAdjust]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[R2-gated trailing TP/SL (rolling R2 > 0.5) + 2:1 floor; ExitAdjustSharded (ratchet_sl twin, fee-floor capped) shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // uses fixed TP/SL from config (ml_tp_pct / ml_sl_pct).
 // no trailing — keep it simple until we have exit models.
 // TP/SL are set at fill time by the controller, not here.
@@ -256,9 +299,9 @@ inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, Money current_price,
     }
 }
 
-//======================================================================================================
-// [EXIT ADJUST — sharded, ratchet_sl path]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// EXIT ADJUST — sharded, ratchet_sl path
+//------------------------------------------------------------------------------
 // v5.4.0 Phase 2.5: sharded equivalent of MLStrategy_ExitAdjust above.
 // Uses rolling->price_r_squared > 0.5 as the trail gate (same as legacy
 // MLStrategy_ExitAdjust). Routes through Strategy_WriteRatchetSL so the
@@ -315,5 +358,10 @@ inline void MLStrategy_ExitAdjustSharded(
     }
 }
 } // namespace tt
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MLStrategy_ExitAdjust]
+//======================================================================
 
 #endif // ML_STRATEGY_HPP

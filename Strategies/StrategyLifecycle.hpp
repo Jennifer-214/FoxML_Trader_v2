@@ -3,7 +3,17 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [STRATEGY LIFECYCLE DISPATCHERS — v5.4.0 Phase 1.2]
+// [FILE]_[Strategies/StrategyLifecycle.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the lifecycle dispatchers (v5.4.0) — Init/Adapt/ExitAdjust/Free by strategy_id via the FOREACH_STRATEGY registry; plus the shared ratchet write helpers (SL fee-floor capped)]
+// [CONTAINS]
+//   - [FUNCTION]_[Strategy_InitPerCore]      (+ SeedFromCfg overloads)
+//   - [FUNCTION]_[Strategy_AdaptPerCore]
+//   - [FUNCTION]_[Strategy_WriteRatchetSL]   (+ WriteRatchetTP twin)
+//   - [FUNCTION]_[Strategy_ExitAdjustPerCore]
+//   - [FUNCTION]_[Strategy_FreePerCore]
 //======================================================================================================
 // Dispatches Strategy_<Action> calls by strategy_id. Wraps the per-strategy
 // `_Init`, `_Adapt`, `_ExitAdjust`, etc. so the engine's slow-path
@@ -50,9 +60,9 @@
 
 namespace tt {
 
-//======================================================================================================
-// [SEED FROM CFG — overload-resolution per state type]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// SEED FROM CFG — overload-resolution per state type
+//------------------------------------------------------------------------------
 // The X-macro Init dispatcher allocates state generically + calls _Init
 // uniformly. Strategies that need cfg-derived seeding (MR, Momentum)
 // override this template via overload. Default = no-op.
@@ -92,9 +102,15 @@ inline void Strategy_SeedFromCfg(MeanReversionState<F>* s, const ControllerConfi
     s->live_stddev_mult = cfg->offset_stddev_mult;  // 0 = pct mode, >0 = stddev mode
 }
 
-//======================================================================================================
-// [INIT — allocate per-strategy state]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Strategy_InitPerCore]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[allocate + seed per-node strategy state by strategy_id (X-macro dispatch); sets strategy_state_kind — the ONLY site that does (with FreePerCore)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Allocates the right state struct on the heap, calls the strategy's
 // `_Init` to populate initial values from rolling stats + cfg.
 // Idempotent: if state already exists, free it first (used during
@@ -160,9 +176,21 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
     ctx.strategy_state_kind = strategy_id;
 }
 
-//======================================================================================================
-// [ADAPT — per-cadence dispatch]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Strategy_InitPerCore]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Strategy_AdaptPerCore]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-cadence Adapt dispatch by effective strategy_id (X-macro); restores the F7-F10 orphaned lifecycle on the sharded path]
+//======================================================================
+// [CODE]
+//======================================================================
 // Called from EventLoop_RebuildOneCore each slow-path cadence, BEFORE
 // Strategy_BuildParameters. Updates per-strategy adaptive state from the
 // latest market observations. Pure no-op when state is null (e.g. AUTO
@@ -240,9 +268,21 @@ inline void Strategy_AdaptPerCore(
 #endif
 }
 
-//======================================================================================================
-// [WRITE RATCHET SL — shared helper, fee-floor capped]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Strategy_AdaptPerCore]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Strategy_WriteRatchetSL]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE ratchet-SL chokepoint — fee-floor cap (entry x (1 - 3x per-node fee_taker)) uniform across all 5 callers; max-only + DIRTY on advance; WriteRatchetTP (no floor needed) shares the section]
+//======================================================================
+// [CODE]
+//======================================================================
 // Strategies that ratchet SL upward (MR, Momentum, EmaCross trailing logic)
 // route writes through this helper so the fee-floor cap is uniform: the
 // ratchet can never push effective_sl above entry × (1 - 3 × fee_rate_taker).
@@ -268,7 +308,7 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
     if (Money_IsZero(entry_price)) return false;
 
     // Cap proposal at entry × (1 - 3 × fee_rate_taker). Same formula as the
-    // generic ratcheter (ControllerEventLoop.hpp:2244 v5.1.7 commentary).
+    // generic ratcheter (EventLoop_TrailingSLRatchetOneCore's v5.1.7 fee-floor).
     // v5.15.5.F.4d.1.B.8 — Class 26 sub-shape B fix: per-core fee_rate_taker
     // (UNINDEXED-GLOBAL closure). 5 callers (MeanReversion + MLStrategy +
     // EmaCross + Momentum + ControllerEventLoop) all pass per-core slot.
@@ -289,9 +329,9 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
     return false;
 }
 
-//======================================================================================================
-// [WRITE RATCHET TP — shared helper, no fee-floor]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// WRITE RATCHET TP — shared helper, no fee-floor
+//------------------------------------------------------------------------------
 // Companion to Strategy_WriteRatchetSL, parallel channel for trailing TP.
 // LONG geometry: TP ratchets UP (FPN_Max wins) → locks in higher exit
 // targets. No fee-floor cap is needed: a higher TP can never produce a
@@ -315,9 +355,21 @@ inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
     return false;
 }
 
-//======================================================================================================
-// [EXIT ADJUST — per-cadence dispatch]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Strategy_WriteRatchetSL]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Strategy_ExitAdjustPerCore]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-cadence ExitAdjust dispatch (only for nodes with open slots) — strategy-specific ratchets route through WriteRatchetSL; higher value wins vs the generic ratcheter]
+//======================================================================
+// [CODE]
+//======================================================================
 // Called from EventLoop_RebuildOneCore each slow-path cadence, AFTER
 // Strategy_BuildParameters, ONLY for cores with at least one open slot.
 // Dispatches to per-strategy logic that writes ratchet_sl via the shared
@@ -364,9 +416,21 @@ inline void Strategy_ExitAdjustPerCore(
     }
 }
 
-//======================================================================================================
-// [FREE — destroy per-strategy state]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Strategy_ExitAdjustPerCore]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Strategy_FreePerCore]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[kind-dispatched delete + kind=0xFF reset — the teardown half of the strategy_state_kind invariant]
+//======================================================================
+// [CODE]
+//======================================================================
 // Idempotent: safe to call on slots where strategy_state == nullptr.
 // Dispatches by strategy_state_kind to call the right `delete` (void*
 // can't be deleted directly).
@@ -432,6 +496,11 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
     ctx.strategy_state = nullptr;
     ctx.strategy_state_kind = 0xFF;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Strategy_FreePerCore]
+//======================================================================
 
 } // namespace tt
 

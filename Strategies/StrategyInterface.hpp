@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [STRATEGY INTERFACE]
+// [FILE]_[Strategies/StrategyInterface.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the strategy contract + roster — 4-lifecycle signatures, FOREACH_STRATEGY/REGIME/SHALT/HALT_REASON registries (enum + names + dispatch auto-flow); IDs append-only]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_STRATEGY]       (pilot-converted block)
+//   - [REGISTRY]_[FOREACH_REGIME]
+//   - [REGISTRY]_[FOREACH_SHALT]
+//   - [REGISTRY]_[FOREACH_HALT_REASON]
 //======================================================================================================
 // contract for strategy modules. each strategy implements these four functions with its own
 // prefix (e.g. MeanReversion_Init, Momentum_Init). the engine dispatches to the active
@@ -57,9 +66,9 @@
 #include <cstdint>
 #include <cstddef>
 
-//======================================================================================================
-// [STRATEGY REGISTRY — v5.8.0 X-macro]
-//======================================================================================================
+//------------------------------------------------------------------------------
+// STRATEGY REGISTRY — v5.8.0 X-macro
+//------------------------------------------------------------------------------
 // Single source of truth for all public strategies. Adding a strategy:
 //   1. cp DOCS/STRATEGY_TEMPLATE.hpp Strategies/<Name>.hpp; implement
 //      4 lifecycle fns (_Init / _BuildParameters / _Adapt /
@@ -187,10 +196,19 @@ static_assert(sizeof(STRATEGY_SHORT_NAMES) / sizeof(*STRATEGY_SHORT_NAMES) == NU
 static_assert(sizeof(STRATEGY_FULL_NAMES) / sizeof(*STRATEGY_FULL_NAMES) == NUM_STRATEGIES,
               "STRATEGY_FULL_NAMES out of sync with NUM_STRATEGIES");
 
-//======================================================================================================
-// [REGIME CONSTANTS — v5.8.4 X-macro registry]
-//======================================================================================================
-// Adding a regime is a 1-line change to FOREACH_REGIME(X) below — auto-
+//======================================================================
+// [REGISTRY]_[FOREACH_REGIME]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[regime roster — REGIME_<id> constants + REGIME_INFO names + regime->strategy table; IDs APPEND-ONLY (persisted in snapshots + trade logs)]
+// [COLUMN]_[id/short_name/full_name]_[regime identity + display names]
+// [COLUMN]_[default_strategy_id]_[the strategy AUTO mode dispatches for this regime]
+//======================================================================
+// [CODE]
+//======================================================================
+// v5.8.4 — adding a regime is a 1-line change to FOREACH_REGIME(X) below — auto-
 // generates REGIME_<id> constants, REGIME_INFO[] short/full name lookup,
 // and REGIME_STRATEGY_TABLE[] regime→strategy mapping. The regime
 // classifier (Strategies/RegimeDetector.hpp) still needs to be updated
@@ -248,14 +266,27 @@ static_assert(sizeof(REGIME_INFO) / sizeof(*REGIME_INFO) == NUM_REGIMES,
               "REGIME_INFO out of sync with NUM_REGIMES");
 static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == NUM_REGIMES,
               "REGIME_STRATEGY_TABLE out of sync with NUM_REGIMES");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_REGIME]
+//======================================================================
 
-//======================================================================================================
-// [STRATEGY HALT REASON CODES — v5.6.2]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_SHALT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [MONITORING_PLANE]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[strategy-INTERNAL veto codes (v5.6.2) — set by _BuildParameters before zero-gate/BUY_BLOCKED; IDs append-only (trade logs persist the numerics)]
+// [COLUMN]_[id/short_name/description]_[SHALT_<id> constant + GUI name + audit doc]
+//======================================================================
+// [CODE]
+//======================================================================
 // Distinct from NodeContext::halt_reason (controller-level halts:
 // spacing, vwap, long-slope, vol-delta, min-stddev, sl-cooldown,
 // warmup, core-budget, core-kill, imbalance — set in
-// ControllerEventLoop.hpp:1812-1814).
+// ControllerEventLoop.hpp's gate rebuild loop).
 //
 // strategy_halt_reason captures STRATEGY-INTERNAL vetoes — the
 // reasons a strategy zero-gates or sets BUY_BLOCKED before the
@@ -321,10 +352,23 @@ static const char* SHALT_SHORT_NAMES[] = {
 
 static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHALT_CODES,
               "SHALT_SHORT_NAMES out of sync with NUM_SHALT_CODES");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_SHALT]
+//======================================================================
 
-//======================================================================================================
-// [HALT REASONS — controller-level halt codes — v5.8.3 X-macro registry]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_HALT_REASON]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [MONITORING_PLANE]]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[controller-level halt codes (v5.8.3) — the cross-cutting-filter zero-gate reasons; IDs append-only (HALT_WARMUP=7 tombstone-reserved)]
+// [COLUMN]_[id/short_name/description]_[HALT_<id> constant + GUI name + audit doc]
+//======================================================================
+// [CODE]
+//======================================================================
 // These are set by the slow-path gate rebuild loop (ControllerEventLoop)
 // when a cross-cutting filter (spacing, vwap, vol-delta, book-imbalance,
 // etc.) zero-gates a core. SHALT_* (above) is the strategy-internal
@@ -377,5 +421,10 @@ static const char* HALT_NAMES[] = {
 
 static_assert(sizeof(HALT_NAMES) / sizeof(*HALT_NAMES) == NUM_HALT_REASONS,
               "HALT_NAMES out of sync with NUM_HALT_REASONS");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_HALT_REASON]
+//======================================================================
 
 #endif // STRATEGY_INTERFACE_HPP
