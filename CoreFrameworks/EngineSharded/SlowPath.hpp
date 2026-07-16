@@ -3,15 +3,17 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [EngineSharded/SlowPath.hpp — drainer slow-path hoisted helpers]
+// [FILE]_[CoreFrameworks/EngineSharded/SlowPath.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[drainer slow-path hoisted helpers — post-fill bookkeeping + GUI manual-close funnel]
+// [CONTAINS]
+//   - [FUNCTION]_[EngineSharded_SlowPath_DrainPostFill]
+//   - [FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
-//
-// Contains:
-//   - EngineSharded_SlowPath_DrainPostFill — hoisted from drain_post_fill lambda
-//   - EngineSharded_SlowPath_DrainManualCloses — MERGED hoist of drain_manual_closes
-//     LIVE + NO-OP variants per Decision H (single function with #ifdef inside body)
 //
 // **Decision B clarification:** Hoisted helpers use `template<unsigned F>` (NOT
 // `template<F, BENCH>`). All Live/Backtest dispatch is cfg-flag-driven, NOT
@@ -50,9 +52,16 @@ struct TUISharedState;
 
 namespace tt {
 
-//======================================================================================================
-// EngineSharded_SlowPath_DrainPostFill — hoist of drain_post_fill lambda
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_SlowPath_DrainPostFill]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[drainer per-fill bookkeeping funnel — thin arg-binder into EventLoop_DrainPostFill]
+//======================================================================
+// [CODE]
+//======================================================================
 // Per-fill bookkeeping that runs on the drainer thread after order fills come
 // back from the exchange (Binance user-data WS → drainer reads → calls this).
 //
@@ -66,7 +75,6 @@ namespace tt {
 // OneCore reads per-core fee from o->pre_resolved.fee_rate (Order carries pre-resolved
 // value via Order_BindPreResolved at submit time). See decision-time-data-binding-
 // pattern.md + RECURRING_BUG_PATTERNS Class 27.
-//======================================================================================================
 template<unsigned F>
 inline void EngineSharded_SlowPath_DrainPostFill(
     EventLoopState<F>& state,
@@ -81,10 +89,21 @@ inline void EngineSharded_SlowPath_DrainPostFill(
                              // v5.13.4 — sell-side bandit attribution
                              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED));
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_SlowPath_DrainPostFill]
+//======================================================================
 
-//======================================================================================================
-// EngineSharded_SlowPath_DrainManualCloses — MERGED hoist of drain_manual_closes (Decision H)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [GUI] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[GUI manual force-close funnel — synthetic SELL via OMS_PushExitForSlot; race-tolerant with hot-path SG]
+//======================================================================
+// [CODE]
+//======================================================================
 // v4.7.8: manual force-close requests from the GUI. User clicks a button on the
 // Positions panel → GUI sets manual_close_requested[slot]=1 → drainer reads +
 // emits a synthetic SELL via OrderManager_Submit bypassing the hot-path SG.
@@ -102,7 +121,6 @@ inline void EngineSharded_SlowPath_DrainPostFill(
 //
 // shared_ptr is nullable: pass `&g_shared` under USE_IMGUI_GUI; nullptr otherwise.
 // Body's #ifdef gate guarantees shared_ptr is only dereferenced when valid.
-//======================================================================================================
 template<unsigned F>
 inline void EngineSharded_SlowPath_DrainManualCloses(
     EventLoopState<F>& state,
@@ -184,5 +202,10 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
     (void)shared_ptr;
 #endif
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]
+//======================================================================
 
 } // namespace tt
