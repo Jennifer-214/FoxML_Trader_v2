@@ -1,6 +1,14 @@
 #pragma once
 //======================================================================================================
-// SHARDED SNAPSHOT PERSISTENCE
+// [FILE]_[CoreFrameworks/ShardedSnapshotPersist.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sharded snapshot save/load — atomic-rename writes, refuse-don't-migrate loads, H21 append-only version]
+// [CONTAINS]
+//   - [MACRO]_[SHARDED_SNAPSHOT_VERSION]
+//   - [FUNCTION]_[ShardedSnapshot_Save]
+//   - [FUNCTION]_[ShardedSnapshot_Load]
 //======================================================================================================
 // Phase 4 of the sharded completion plan. Sharded engine had no persistent
 // state — every restart lost: per-core regime hysteresis, pnl_feeder,
@@ -44,6 +52,13 @@
 
 namespace tt {
 
+//----------------------------------------------------------------------
+// [MACRO]_[SHARDED_SNAPSHOT_VERSION]
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [REFERENCE]_[INVARIANT]_[[H21] [H9]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[wire magic + APPEND-ONLY snapshot version (v1->v10 history inline) + Ship-B money-epoch compile guard]
+//----------------------------------------------------------------------
 // 0x53484430 = "SHD0" little-endian. Distinct from PORTFOLIO_SNAPSHOT_MAGIC
 // (0x4B434954 "TICK") so a legacy v11 file produces a clean refuse-load
 // rather than parsing as garbage.
@@ -100,13 +115,21 @@ static_assert(MONEY_ENCODING_EPOCH == 0u || SHARDED_SNAPSHOT_VERSION >= 9u + MON
               "Ship-B epoch: the engine money type flipped to decimal — bump "
               "SHARDED_SNAPSHOT_VERSION to 10u (H21 tombstone 9u) in THIS commit.");
 
-//======================================================================================================
-// [SAVE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedSnapshot_Save]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [SLOW_PATH]]
+// [REFERENCE]_[INVARIANT]_[[H21] [H9]]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[atomic-rename snapshot write (.tmp + fsync + rename) — header, registry-driven OMS block, 16 positions, per-node blocks]
+//======================================================================
+// [CODE]
+//======================================================================
 // Returns 1 on success, 0 on any I/O failure. On failure the previous good
 // file (if any) is unchanged — atomic rename never moves the .tmp into
 // place if writes failed.
-//======================================================================================================
+//
 // `partial_exit_enabled` is the engine's current cfg.partial_exit_enabled
 // (1 if partials are on, 0 otherwise). Persisted in the header so the
 // loader can refuse a snapshot taken under a different toggle state —
@@ -285,10 +308,22 @@ fail:
     unlink(tmppath);  // remove partial file
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedSnapshot_Save]
+//======================================================================
 
-//======================================================================================================
-// [LOAD]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ShardedSnapshot_Load]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [BOOT_TIME]]
+// [REFERENCE]_[INVARIANT]_[[H21] [H22]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[refuse-don't-migrate load — magic/version/node-count/partials-geometry gates, staged reads, all-or-nothing commit, ExecutionCore re-activation]
+//======================================================================
+// [CODE]
+//======================================================================
 // Returns 1 on successful load (state populated from file), 0 on any
 // validation failure (bad magic, version, core count). On failure the
 // state is left untouched — caller continues with fresh init.
@@ -296,7 +331,7 @@ fail:
 // Safety: explicit checks on magic + version + core count BEFORE any
 // state mutation. The first per-core read failure aborts the whole load
 // and rolls back to the in-memory snapshot taken at function entry.
-//======================================================================================================
+//
 // `partial_exit_enabled` is the engine's CURRENT cfg.partial_exit_enabled
 // (1 if partials are on, 0 otherwise). Loader refuses files written under
 // a different toggle state — slot indices have different meaning between
@@ -667,5 +702,10 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
             filepath, file_num_nodes, (unsigned long long)timestamp_us);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ShardedSnapshot_Load]
+//======================================================================
 
 }  // namespace tt
