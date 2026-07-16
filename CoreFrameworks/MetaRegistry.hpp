@@ -1,35 +1,32 @@
 // Copyright (c) 2026 Jennifer Lewis. All rights reserved.
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 //======================================================================================================
-// [FOREACH_REGISTRY — codebase-wide meta-registry of X-macro registries (WIP2d-1.B.0b)]
-//======================================================================================================
-// PURPOSE: codebase-wide Level-0 meta-registry per `meta-registry-pattern-for-codebase-registry-
-// discipline.md`. Every X-macro registry in the codebase MUST have a row here. CI cross-check
-// (tools/check_meta_registry.py) enforces — adding a new registry without registering it FAILS
-// the build via warning escalation.
-//
-// Pulls forward `.F.4d` H15 codification one ship early: pre-WIP2d-1.B.0b the discipline was
-// "documentation cross-references only"; post-WIP2d-1.B.0b the discipline is "codebase-wide CI
-// enforcement." Closes Shortsighted #2 (meta-registry applied one ship early; drift was
-// documentation-only until .F.4d).
-//
-// Row shape: X(registry_name, LEVEL, PARENT_NAME, description)
-//   - registry_name:  the FOREACH_<X> macro identifier
-//   - LEVEL:          0 = ROOT (codebase-wide; this registry itself); 1 = direct registry;
-//                     2 = child of a Level-1 meta-registry; etc.
-//   - PARENT_NAME:    for LEVEL > 0, the meta-registry that manages this registry's discipline.
-//                     ROOT_NONE for LEVEL = 0 (the codebase-wide root itself).
-//   - description:    one-line operator-facing description of the registry's purpose
-//
-// FUTURE ADD: at .F.4d, FOREACH_REGISTRY itself gets reorganized when more registries land
-// (.F.4d FOREACH_DERIVED_FILTER + sidecar override + further meta-registries). This file is the
-// codebase-wide enforcement seed; each addition is 1 row.
-//
-// SEE: DESIGN_SPECS/meta-registry-pattern-for-codebase-registry-discipline.md
+// [FILE]_[CoreFrameworks/MetaRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the codebase-wide Level-0 meta-registry — every X-macro registry has a row here (H15), CI-enforced]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_REGISTRY]
 //======================================================================================================
 #ifndef META_REGISTRY_HPP
 #define META_REGISTRY_HPP
 
+//======================================================================
+// [REGISTRY]_[FOREACH_REGISTRY]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[[H15] [H19]]
+// [REFERENCE]_[DESIGN_SPEC]_[meta-registry-pattern-for-codebase-registry-discipline]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ROOT registry of registries — enrollment (H15) + LEVEL/PARENT topology (H19), CI cross-checked]
+// [COLUMN]_[registry_name]_[the FOREACH_<X> macro identifier]
+// [COLUMN]_[LEVEL]_[0 = ROOT (this registry itself); 1 = direct registry; 2 = child of a Level-1 meta-registry]
+// [COLUMN]_[PARENT_NAME]_[for LEVEL > 0, the meta-registry managing this registry's discipline; ROOT_NONE at LEVEL 0]
+// [COLUMN]_[description]_[one-line operator-facing description of the registry's purpose]
+//======================================================================
+// [CODE]
+//======================================================================
 #define ROOT_NONE 0  // sentinel: this registry is the ROOT (no parent)
 
 #define FOREACH_REGISTRY(X)                                                                                                                              \
@@ -113,5 +110,30 @@
     X(FOREACH_ROLLING_WINDOW                    , 1,      FOREACH_REGISTRY                 , "Rolling window template variant registry.")
 
 #undef ROOT_NONE
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[purpose + enforcement history]
+//----------------------------------------------------------------------
+// PURPOSE: codebase-wide Level-0 meta-registry per `meta-registry-pattern-for-codebase-registry-
+// discipline.md`. Every X-macro registry in the codebase MUST have a row here. CI cross-check
+// (tools/check_meta_registry.py) enforces — adding a new registry without registering it FAILS
+// the build via warning escalation.
+//
+// Pulls forward `.F.4d` H15 codification one ship early: pre-WIP2d-1.B.0b the discipline was
+// "documentation cross-references only"; post-WIP2d-1.B.0b the discipline is "codebase-wide CI
+// enforcement." Closes Shortsighted #2 (meta-registry applied one ship early; drift was
+// documentation-only until .F.4d).
+//
+// FUTURE ADD: at .F.4d, FOREACH_REGISTRY itself gets reorganized when more registries land
+// (.F.4d FOREACH_DERIVED_FILTER + sidecar override + further meta-registries). This file is the
+// codebase-wide enforcement seed; each addition is 1 row.
+//
+// SEE: DESIGN_SPECS/meta-registry-pattern-for-codebase-registry-discipline.md
+//======================================================================
+// [DERIVED]   (tool-refreshed — ROW_COUNT/CONSUMERS generators land with the drift-gate generalization; empty skeleton is correct, D-327)
+//======================================================================
+// [END_REGISTRY]_[FOREACH_REGISTRY]
+//======================================================================
 
 #endif // META_REGISTRY_HPP
