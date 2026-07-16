@@ -3,7 +3,25 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [NOTIFY — operational alerting primitive (Phase 8b)]
+// [FILE]_[CoreFrameworks/Notify.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[operational alerting primitive — non-blocking queue + dedicated worker thread + pluggable backend; deliberately mutex/condvar (off every trading path)]
+// [CONTAINS]
+//   - [ENUM]_[NotifyKind]   (NotifyLevel shares the section)
+//   - [STRUCT]_[NotifyEvent]
+//   - [STRUCT]_[NotifyState]
+//   - [FUNCTION]_[Notify_NowMonotonicUs]
+//   - [FUNCTION]_[notify_worker_fn]
+//   - [FUNCTION]_[NotifyState_Init]
+//   - [FUNCTION]_[Notify_Send]
+//   - [FUNCTION]_[NotifyState_Shutdown]
+//   - [FUNCTION]_[NotifyBackend_Stderr]
+//   - [STRUCT]_[NotifyCommandState]
+//   - [FUNCTION]_[Notify_ShellEscape]
+//   - [FUNCTION]_[Notify_BuildCommand]
+//   - [FUNCTION]_[NotifyBackend_Command]
 //======================================================================================================
 // Routes alertable events (kill switch trips, disconnects, orphan recovery,
 // order rejections, etc.) through a queue + dedicated worker thread to a
@@ -40,9 +58,15 @@
 #include <time.h>
 #include <pthread.h>
 
-//======================================================================================================
-// [LEVELS + KINDS]
-//======================================================================================================
+//======================================================================
+// [ENUM]_[NotifyKind]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[alert severity (NotifyLevel, shares this section) + per-kind cooldown keys — append-only, never renumber; NOTIFY_KINDS_MAX bounds the cooldown array]
+//======================================================================
+// [CODE]
+//======================================================================
 enum NotifyLevel {
     NOTIFY_INFO     = 0, // status updates, session start/end, info-level
     NOTIFY_WARN     = 1, // recoverable issues (reconnect, transient errors)
@@ -69,10 +93,21 @@ enum NotifyKind {
     // append new kinds here; do NOT reorder
 };
 #define NOTIFY_KINDS_MAX 16
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_ENUM]_[NotifyKind]
+//======================================================================
 
-//======================================================================================================
-// [EVENT + STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[NotifyEvent]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[heap-free POD alert — level + cooldown kind + monotonic timestamp + fixed subject/body buffers; queued by value]
+//======================================================================
+// [CODE]
+//======================================================================
 // Heap-free per event — queue holds POD by value.
 struct NotifyEvent {
     int level;             // NotifyLevel
@@ -81,7 +116,27 @@ struct NotifyEvent {
     char subject[128];
     char body[512];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[656B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[11]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[NotifyEvent]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[NotifyState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[mutex+condvar MPSC ring (any thread enqueues, one worker drains) + per-kind cooldown + backend hook; g_notify inline global — null in backtest/tests]
+//======================================================================
+// [CODE]
+//======================================================================
 // Backend interface: takes one event + opaque state, returns 0 on success.
 typedef int (*NotifyBackendFn)(const NotifyEvent *evt, void *backend_state);
 
@@ -115,19 +170,47 @@ struct NotifyState {
 // cfg.notify_enabled=1. Backtest, controller_test, foxml_suite all leave it
 // null → callers must guard `if (g_notify) Notify_Send(...)`.
 inline NotifyState *g_notify = nullptr;
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[42256B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[661]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[NotifyState]
+//======================================================================
 
-//======================================================================================================
-// [INTERNAL HELPERS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Notify_NowMonotonicUs]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[CLOCK_MONOTONIC microseconds — cooldown clock (never CLOCK_REALTIME; wall clock can NTP-jump backward)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline uint64_t Notify_NowMonotonicUs() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Notify_NowMonotonicUs]
+//======================================================================
 
-//======================================================================================================
-// [WORKER THREAD]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[notify_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[worker loop — cond_wait, dequeue, backend WITHOUT the lock held; drains the residue on shutdown]
+//======================================================================
+// [CODE]
+//======================================================================
 // Drains the queue and invokes the backend. Backend is called WITHOUT the
 // state lock held (so a slow backend doesn't block enqueue). On shutdown,
 // drains remaining events before exiting (per test sidecar Group 5).
@@ -162,10 +245,21 @@ static inline void *notify_worker_fn(void *arg) {
     pthread_mutex_unlock(&ns->lock);
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[notify_worker_fn]
+//======================================================================
 
-//======================================================================================================
-// [API]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NotifyState_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero state, init mutex/cond, bind backend + cooldown, spawn worker; create-failure disables alerts, never fatal]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void NotifyState_Init(NotifyState *ns,
                                      NotifyBackendFn backend, void *backend_state,
                                      uint64_t cooldown_us) {
@@ -182,7 +276,21 @@ static inline void NotifyState_Init(NotifyState *ns,
         ns->worker_started = 0;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NotifyState_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Notify_Send]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[non-blocking enqueue — per-kind monotonic cooldown gate, drop+warn on full queue; caller never waits on backend I/O]
+//======================================================================
+// [CODE]
+//======================================================================
 // Non-blocking enqueue. Drops events on full queue (rate-limit failsafe).
 // Cooldown gate uses CLOCK_MONOTONIC (NTP-jump-safe).
 static inline void Notify_Send(NotifyState *ns, int level, int kind,
@@ -233,7 +341,21 @@ static inline void Notify_Send(NotifyState *ns, int level, int kind,
     pthread_cond_signal(&ns->cond);
     pthread_mutex_unlock(&ns->lock);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Notify_Send]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[NotifyState_Shutdown]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[signal shutdown, join worker (drains residue first), destroy pthread resources]
+//======================================================================
+// [CODE]
+//======================================================================
 // Drain remaining events + join worker thread + free pthread resources.
 static inline void NotifyState_Shutdown(NotifyState *ns) {
     if (!ns->worker_started) return;
@@ -246,10 +368,21 @@ static inline void NotifyState_Shutdown(NotifyState *ns) {
     pthread_cond_destroy(&ns->cond);
     ns->worker_started = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NotifyState_Shutdown]
+//======================================================================
 
-//======================================================================================================
-// [STDERR BACKEND] — default, always available, ships in Phase 8b
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NotifyBackend_Stderr]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[default backend — level-prefixed stderr line, flushed immediately for tail -f visibility (ships in Phase 8b)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int NotifyBackend_Stderr(const NotifyEvent *evt, void *state) {
     (void)state;
     static const char *level_str[] = {"INFO", "WARN", "ALERT", "CRITICAL"};
@@ -259,10 +392,21 @@ static inline int NotifyBackend_Stderr(const NotifyEvent *evt, void *state) {
     fflush(stderr); // make alerts visible immediately under tail -f
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NotifyBackend_Stderr]
+//======================================================================
 
-//======================================================================================================
-// [COMMAND BACKEND] — generic shell-out via popen
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[NotifyCommandState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[command-backend state — the cfg-supplied shell template (dunst/Discord/Slack/Telegram/ntfy/email examples in the section prose)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Runs a configurable shell command for each event. Decouples the engine
 // from any specific notification service. Templates MUST wrap %s in single
 // quotes — Notify_ShellEscape replaces internal ' with '\'' but does NOT
@@ -296,7 +440,27 @@ static inline int NotifyBackend_Stderr(const NotifyEvent *evt, void *state) {
 struct NotifyCommandState {
     char template_str[512]; // copied from cfg at Init; not modified
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [SIZE]_[512B]
+// [ALIGN]_[1]
+// [CACHE_LINES]_[8]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[NotifyCommandState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Notify_ShellEscape]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-quote shell escaping (' -> '\'' close-escape-reopen) — caller's template supplies the enclosing quotes]
+//======================================================================
+// [CODE]
+//======================================================================
 // Shell-quote `in` into `out`. Replaces internal ' with '\'' (close-escape-
 // reopen). Does NOT add enclosing quotes — the USER TEMPLATE provides them
 // (e.g., `notify-send 'Engine: %s' '%s'`). Worst case ~4x input + 1.
@@ -330,7 +494,21 @@ static inline void Notify_ShellEscape(char *out, size_t out_cap, const char *in)
     }
     out[pos] = '\0';
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Notify_ShellEscape]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Notify_BuildCommand]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[manual two-%s template substitution (subject, body) — never printf, so a cfg template with stray %d/%n can't inject]
+//======================================================================
+// [CODE]
+//======================================================================
 // Manual %s substitution — NOT printf-based. Prevents format-string injection
 // from user-supplied templates (template comes from cfg, may have stray %d/%n).
 // Substitutes up to two %s with subject + body in order. Other characters
@@ -362,7 +540,21 @@ static inline int Notify_BuildCommand(char *out, size_t out_cap,
     out[pos] = '\0';
     return *p == '\0';
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Notify_BuildCommand]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[NotifyBackend_Command]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[escape subject/body, build the command, popen + drain + pclose; fire-and-forget on the dedicated worker]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int NotifyBackend_Command(const NotifyEvent *evt, void *state) {
     NotifyCommandState *cs = (NotifyCommandState *)state;
     if (!cs || cs->template_str[0] == '\0') return -1;
@@ -389,5 +581,10 @@ static inline int NotifyBackend_Command(const NotifyEvent *evt, void *state) {
     pclose(f); // reap child to avoid zombies
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NotifyBackend_Command]
+//======================================================================
 
 #endif // NOTIFY_HPP
