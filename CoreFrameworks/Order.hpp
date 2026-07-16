@@ -215,7 +215,7 @@ static_assert(sizeof(OrderPreResolved<64>) == 48,
 // logging — drainer + Submit hot paths never read it. Stays in COLD tail.
 template <unsigned F>
 struct Order {
-    // ────────── HOT cluster — exactly 3 cache lines (192 B; Ship-A 16B FPN_Binary, was 4 lines / 256 B) ──────────
+    // ────────── HOT cluster (sizeof assert-locked at file end; A25 grew pre_resolved → no longer cache-line-exact) ──────────
     uint64_t              id;             // 8 B  @ 0    local monotonic id, assigned by OMS
     uint64_t              client_id;      // 8 B  @ 8    idempotency key (== id for first attempt; phase 06 may decouple)
     // Bit-packed flags: type[2] + state[4] + is_maker[1] + leg[1] + retry_count[8] + pre_resolved_bound[1] @bit16.
@@ -244,13 +244,13 @@ struct Order {
     // Decision-time-bound values, pre-resolved at Order submit via Order_BindPreResolved().
     // HandleFill reads o->pre_resolved.fee_rate directly — zero OMS cache lookup.
     // Per DESIGN_SPECS/decision-time-data-binding-pattern.md § Sub-struct refinement.
-    OrderPreResolved<F>   pre_resolved;             // 32 B @ 160 — sub-struct, future extension point (Ship-A 16B: 48→32)
-    // HOT subtotal: 192 B (exactly 3 cache lines; incl. the 8 B FPN_Binary-align pad inside _pad_hot1 @ 23)
+    OrderPreResolved<F>   pre_resolved;             // @ 160 — sub-struct, future extension point; size = the OrderPreResolved assert above
+    // HOT subtotal ends here (incl. the 8 B FPN_Binary-align pad inside _pad_hot1 @ 23); total sizeof assert-locked below
 
     // ────────── COLD cluster — exactly 1 cache line (64 B) ──────────
     // exchange_id is only set on adapter-side ACK (terminal-or-near-terminal) and read on
     // REJECTED logging / reconcile audit. Per-fill drainer hot path never touches this.
-    char                  exchange_id[64];          // 64 B @ 192 (Ship-A 16B FPN_Binary, was @ 256)
+    char                  exchange_id[64];          // 64 B — COLD tail (offset moved with pre_resolved growth; was @ 256 pre-Ship-A)
 };
 //======================================================================
 // [END_CODE]
