@@ -1,4 +1,11 @@
 #pragma once
+//======================================================================
+// [FILE]_[Limits.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[centralized compile-time bounds SSoT — portfolio/candle/trade-history/data-file/log-buffer sizes, per-core sharding caps (execution nodes + per-node drain budget), OMS in-flight-order + Binance-worker caps; changed here only]
+//======================================================================
 // centralized compile-time constants
 // change HERE only — all files include this for consistent bounds
 

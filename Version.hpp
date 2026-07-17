@@ -1,4 +1,11 @@
 #pragma once
+//======================================================================
+// [FILE]_[Version.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the version SSoT — ENGINE_VERSION (granular internal sprint cadence, WIRE-BOUND into model stamps/fingerprints/HMAC per H9) + RELEASE_VERSION (public display-only label, never wire-written); followed by the reverse-chronological sprint changelog. update here only]
+//======================================================================
 // single source of truth for version string
 // update HERE only — all renderers include this
 
