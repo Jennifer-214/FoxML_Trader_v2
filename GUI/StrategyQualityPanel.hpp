@@ -1,21 +1,11 @@
 #pragma once
-//==============================================================================
-// [STRATEGY QUALITY PANEL] — v5.7.6
-//==============================================================================
-// Reads health.jsonl on-demand (Refresh button) and renders per-strategy
-// quality aggregates from cat="entry" / cat="exit" lines emitted by v5.7.1.
-//
-// Design choices:
-//   - Refresh-button (not 5s background thread) — simpler, cheaper, no
-//     thread/file handle lifecycle to manage. Operator hits Refresh when
-//     they want updated numbers.
-//   - Tail-read last N=2000 lines (caps panel cost regardless of file size)
-//   - In-place line parsing — no JSON library; the v5.7.1 log lines have a
-//     known format with key=value pairs in the msg field
-//   - LC_NUMERIC=C pinned around strtod calls to match the writer side
-//   - No persistence — aggregates computed per Refresh, panel state is
-//     ephemeral within the GUI session
-//==============================================================================
+//======================================================================
+// [FILE]_[GUI/StrategyQualityPanel.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-strategy quality aggregates read on-demand from health.jsonl — entry/exit quality from cat=entry/exit lines; Refresh-button (no background thread), tail-read last N lines, in-place kv parse, LC_NUMERIC=C pinned]
+//======================================================================
 
 #include <cstdio>
 #include <cstring>
@@ -30,6 +20,16 @@
 
 namespace tt {
 
+//======================================================================
+// [STRUCT]_[StrategyQualityAggregate]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-strategy aggregate — entry/exit counts + quality sums accumulated from health.jsonl]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct StrategyQualityAggregate {
     uint32_t entries = 0;
     uint32_t exits   = 0;
@@ -42,7 +42,24 @@ struct StrategyQualityAggregate {
     uint32_t entries_by_regime[5] = {0,0,0,0,0};
     double   net_by_regime[5]     = {0,0,0,0,0};
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[StrategyQualityAggregate]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[StrategyQualityState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the Strategy Quality panel state — the per-strategy aggregates, recomputed each Refresh]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct StrategyQualityState {
     bool   loaded = false;
     char   last_error[128] = {0};
@@ -51,18 +68,50 @@ struct StrategyQualityState {
     int    exits_parsed = 0;
     StrategyQualityAggregate agg[NUM_STRATEGIES];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[StrategyQualityState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[StrategyQuality_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the Strategy Quality state]
+//======================================================================
 // v5.8.4b: uniform `void X_Init(StateT*, const char*)` signature for the
 // FOREACH_PANEL(X) registry. StrategyQuality state has default member
 // initializers and loads on-demand at the Refresh button — Init is
 // effectively a no-op zero-ensure. Path param is ignored (the actual
 // log path is passed at render time via GUI_Panel_StrategyQuality).
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void StrategyQuality_Init(StrategyQualityState *s, const char* /*path_unused*/) {
     *s = StrategyQualityState{};
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[StrategyQuality_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[sq_parse_kv]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[extract a key=value field from a health.jsonl line (no JSON lib)]
+//======================================================================
 // Parse "key=val" out of a log line msg. Returns 1 if key found and val
 // written into out (caller-supplied buffer). val is whitespace-terminated.
+//======================================================================
+// [CODE]
+//======================================================================
 inline int sq_parse_kv(const char* line, const char* key,
                         char* out, size_t cap) {
     size_t klen = strlen(key);
@@ -88,10 +137,25 @@ inline int sq_parse_kv(const char* line, const char* key,
     }
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[sq_parse_kv]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[sq_tail_read]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[tail-read the last N lines of a file into a buffer, capping panel cost regardless of file size]
+//======================================================================
 // Tail-read last `max_lines` from path. Returns number of lines read into
 // `lines` (caller-supplied buffer of size max_lines × line_cap). Each
 // line is null-terminated.
+//======================================================================
+// [CODE]
+//======================================================================
 inline int sq_tail_read(const char* path, int max_lines, int line_cap,
                          char* lines_buf, char* error_out, size_t error_cap) {
     FILE* f = fopen(path, "rb");
@@ -156,7 +220,22 @@ inline int sq_tail_read(const char* path, int max_lines, int line_cap,
     }
     return count;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[sq_tail_read]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[StrategyQuality_Refresh]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reparse health.jsonl on demand — accumulate per-strategy entry/exit quality, LC_NUMERIC=C pinned around strtod to match the writer]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 inline void StrategyQuality_Refresh(StrategyQualityState* state,
                                      const char* health_log_path) {
     state->loaded = false;
@@ -233,7 +312,22 @@ inline void StrategyQuality_Refresh(StrategyQualityState* state,
     free(lines);
     state->loaded = (n > 0);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[StrategyQuality_Refresh]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GUI_Panel_StrategyQuality]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Strategy Quality panel — the per-strategy aggregate table + a Refresh button]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 inline void GUI_Panel_StrategyQuality(StrategyQualityState* state,
                                        const char* health_log_path) {
     ImGui::Begin("Strategy Quality");
@@ -324,5 +418,10 @@ inline void GUI_Panel_StrategyQuality(StrategyQualityState* state,
     }
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_StrategyQuality]
+//======================================================================
 
 }  // namespace tt

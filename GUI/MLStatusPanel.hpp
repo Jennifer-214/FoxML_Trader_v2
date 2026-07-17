@@ -2,25 +2,13 @@
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 // See LICENSE file in the project root for full license text.
 
-//======================================================================================================
-// [ML STATUS PANEL — v5.9.0b]
-//======================================================================================================
-// Per-core ML observability surface. Shows for each STRATEGY_ML core:
-//   - Model load state: loaded / failed / no-model-configured (tri-state,
-//     distinct semantics per V5_9_AUDIT-#2)
-//   - Last prediction + threshold + effective threshold (post-confidence-
-//     damping) + confidence (V5_9_AUDIT-#3)
-//   - NaN/Inf event counters (feature pack + prediction)
-//   - ConfidenceScorer IC + RMSE for diagnostic
-//
-// Stateless render — direct call from main loop, NOT in FOREACH_PANEL(X)
-// registry. All data flows through TUISnapshot.per_node[i]. Mirrors the
-// v5.8.6b engine header pattern.
-//
-// Closes silent-failure visibility gap from v5.8 paper testing: operator
-// can no longer paper-soak for hours without knowing ML failed to load,
-// fed garbage features, or fell through to SimpleDip.
-//======================================================================================================
+//======================================================================
+// [FILE]_[GUI/MLStatusPanel.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-core ML observability panel — model load tri-state, last prediction/threshold/effective-threshold/confidence, NaN/Inf counters, ConfidenceScorer IC+RMSE; stateless, all data from TUISnapshot.per_node[], the display half of the ML silent-failure visibility close]
+//======================================================================
 #pragma once
 
 #include "imgui.h"
@@ -32,9 +20,19 @@
 
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[MLStatus_Render]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the per-core ML status panel — for each STRATEGY_ML core: load state, prediction/threshold/confidence, NaN/Inf events, ConfidenceScorer diagnostics; direct call, not in the FOREACH_PANEL registry]
+//======================================================================
 // v5.10.0c — optional `shared` parameter exposes the pending hot-swap
 // state so the panel can show "swap pending" hints. Callers can pass
 // nullptr; the row is rendered only when a swap is actually pending.
+//======================================================================
+// [CODE]
+//======================================================================
 inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* shared = nullptr) {
     if (!snap) return;
     if (ImGui::Begin("ML Status")) {
@@ -687,5 +685,10 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
     }
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MLStatus_Render]
+//======================================================================
 
 }  // namespace tt

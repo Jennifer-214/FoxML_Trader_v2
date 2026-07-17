@@ -1,4 +1,12 @@
 #pragma once
+
+//======================================================================
+// [FILE]_[GUI/TradeHistoryPanel.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sortable Trade History table read from the engine CSV — entry/exit/qty/P&L/fee/reason/strategy + hold time per trade, partial-exit aware; refreshes on file-size change]
+//======================================================================
 // TradeHistoryPanel — sortable table of all trades from CSV
 // shows entry, exit, P&L, reason, hold time per trade
 
@@ -7,7 +15,17 @@
 #include "TradeReader.hpp"
 #include "../Strategies/StrategyInterface.hpp"  // STRATEGY_SHORT_NAMES, NUM_STRATEGIES
 
+//======================================================================
+// [STRUCT]_[TradeHistoryEntry]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one parsed trade row for the history table — entry/exit prices, qty/P&L/fee, reason + strategy tags, node/leg (partials), and hold time]
+//======================================================================
 // extended trade info parsed from CSV for the history table
+//======================================================================
+// [CODE]
+//======================================================================
 struct TradeHistoryEntry {
     double entry_price, exit_price;
     double qty, pnl, fee;
@@ -22,21 +40,70 @@ struct TradeHistoryEntry {
     // rotated, etc.).
     double hold_secs;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TradeHistoryEntry]
+//======================================================================
 
 static constexpr int MAX_HISTORY = 256;
 
+//======================================================================
+// [STRUCT]_[TradeHistory]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the loaded trade-history rows + CSV path + the file-size cache for change detection]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct TradeHistory {
     TradeHistoryEntry entries[MAX_HISTORY];
     int count;
     char csv_path[256];
     long last_size;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TradeHistory]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[TradeHistory_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init a TradeHistory for a CSV path]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TradeHistory_Init(TradeHistory *th, const char *path) {
     memset(th, 0, sizeof(*th));
     strncpy(th->csv_path, path, 255);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TradeHistory_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[TradeHistory_Refresh]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reload the trade CSV if it grew — pair entry(E)/exit(X) rows into entries with hold time via a per-slot state machine]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TradeHistory_Refresh(TradeHistory *th) {
     struct stat st;
     if (stat(th->csv_path, &st) != 0) return;
@@ -168,7 +235,22 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
     }
     fclose(f);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TradeHistory_Refresh]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GUI_Panel_TradeHistory]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the sortable Trade History table — entry/exit/P&L/reason/hold per trade]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_enabled = 0) {
     ImGui::Begin("Trade History");
 
@@ -294,3 +376,8 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_TradeHistory]
+//======================================================================
