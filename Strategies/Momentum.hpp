@@ -77,11 +77,11 @@ template <unsigned F> struct MomentumState {
 //======================================================================
 
 //------------------------------------------------------------------------------
-// INIT
+// [SECTION]_[INIT]
 //------------------------------------------------------------------------------
 // called at warmup completion. computes initial breakout buy conditions from rolling stats.
 // buy_price = avg + (stddev * breakout_mult) — price must rise ABOVE this to trigger BuyGate
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void Momentum_Init(MomentumState<F> *state,
                            const RollingStats<F> *rolling,
@@ -358,7 +358,7 @@ inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, Money current_price,
 }
 
 //------------------------------------------------------------------------------
-// EXIT ADJUST — sharded, ratchet_sl path
+// [SECTION]_[EXIT ADJUST — sharded, ratchet_sl path]
 //------------------------------------------------------------------------------
 // v5.4.0 Phase 2.3: sharded equivalent of Momentum_ExitAdjust above.
 // Same shape as MeanReversion_ExitAdjustSharded but uses momentum_sl_mult

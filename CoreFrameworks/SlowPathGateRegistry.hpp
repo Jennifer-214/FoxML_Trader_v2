@@ -108,7 +108,7 @@ namespace tt {
 //
 // Pattern: when the variant matches the entry's scope, dispatch INCLUDE.
 // Otherwise SKIP. Token-paste resolves at preprocessor expansion.
-//======================================================================================================
+//------------------------------------------------------------------------------
 
 // PER_NODE variant — INCLUDEs PER_NODE entries; SKIPs ENGINE_WIDE
 #define X_AUTOPOP_PER_NODE_INCLUDE(name, predicate, doc)                                             \

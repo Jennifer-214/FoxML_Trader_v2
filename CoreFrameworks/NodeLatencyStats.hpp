@@ -166,6 +166,13 @@ struct NodeLatencySnapshot {
 // converted to nanoseconds at the call site (the snapshot function takes the
 // TSC frequency in GHz so it can do the conversion in one place).
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[144B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[NodeLatencySnapshot]
 //======================================================================
 

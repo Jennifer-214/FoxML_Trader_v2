@@ -54,6 +54,13 @@ struct OrderResult {
 // thread and passed to the OrderCallback. POD so it can be memcpy'd into
 // SPSCRing slots without ceremony.
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[240B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4]
+// [STRADDLE]_[exchange_id@4]
+//======================================================================
 // [END_STRUCT]_[OrderResult]
 //======================================================================
 
@@ -143,6 +150,13 @@ struct ExchangeAdapter {
 //
 // OrderResult is non-templated POD so it can flow through the OMS
 // command queue without depending on the FPN_Binary<F> width.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[48B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ExchangeAdapter]
 //======================================================================

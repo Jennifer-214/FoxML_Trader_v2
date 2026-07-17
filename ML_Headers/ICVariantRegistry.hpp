@@ -61,17 +61,17 @@
     /* X(2, kendall,  "kendall",  RollingICKendall_Compute(&cs->ic_kendall)) */
 
 //------------------------------------------------------------------------------
-// VARIANT-COUNT HELPER
+// [SECTION]_[VARIANT-COUNT HELPER]
 //------------------------------------------------------------------------------
 // Compile-time count of registered IC variants. Used by tests to assert
 // "all expected variants present" — catches accidental row deletion.
-//======================================================================================================
+//------------------------------------------------------------------------------
 
 #define IC_VARIANT_COUNT_ONE(id, name, label, compute) +1
 #define FOREACH_IC_VARIANT_COUNT  (0 FOREACH_IC_VARIANT(IC_VARIANT_COUNT_ONE))
 
 //------------------------------------------------------------------------------
-// DISPATCHER MACRO
+// [SECTION]_[DISPATCHER MACRO]
 //------------------------------------------------------------------------------
 // Computes IC for the variant selected by `variant` arg. Used by new
 // ConfidenceScorer_ComputeICVariant + drift detection / display sites

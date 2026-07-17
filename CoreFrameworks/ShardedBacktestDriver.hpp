@@ -152,6 +152,8 @@ struct ShardedBacktestDriver {
 // rebuild). Useful for tests that want pure event drain validation without
 // the full strategy pipeline.
 //======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
 // [END_STRUCT]_[ShardedBacktestDriver]
 //======================================================================
 

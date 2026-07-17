@@ -31,7 +31,7 @@ template <unsigned F> struct LinearRegressionModel {
     FPN_Binary<F> intercept;
 };
 //------------------------------------------------------------------------------
-// LINEAR REGRESSION FUNCTION PROTOTYPES
+// [SECTION]_[LINEAR REGRESSION FUNCTION PROTOTYPES]
 //------------------------------------------------------------------------------
 template <unsigned F> inline LinearRegressionModel<F> LinearRegression_Fit(FPN_Binary<F> *x_values, FPN_Binary<F> *y_values, int count) {
     using FP = FPN_Binary<F>;

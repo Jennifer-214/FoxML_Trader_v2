@@ -111,6 +111,7 @@ namespace tt {
 // Ship-B P2 epoch guard (S-4): this file raw-fwrites per-core money (allocated_balance /
 // node_realized / fees / notional / pnl_feeder / 16x Position). Encoding-keyed (the 16B->16B
 // decimal flip is layout-invisible): red-builds until the version rides the SAME commit.
+// [ASSERT]_[EPOCH_TRIPWIRE]_[SHARDED_SNAPSHOT_VERSION >= 9 + MONEY_ENCODING_EPOCH — encoding flip forces a version bump]
 static_assert(MONEY_ENCODING_EPOCH == 0u || SHARDED_SNAPSHOT_VERSION >= 9u + MONEY_ENCODING_EPOCH,
               "Ship-B epoch: the engine money type flipped to decimal — bump "
               "SHARDED_SNAPSHOT_VERSION to 10u (H21 tombstone 9u) in THIS commit.");

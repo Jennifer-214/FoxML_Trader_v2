@@ -44,7 +44,7 @@ namespace tt {
 // File-shared shutdown flag the SIGINT handler flips. The handler is installed
 // only while EngineSharded_Run is active, so this flag is only set when the
 // sharded engine is the one that wants to know about it.
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 inline volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
 
 //------------------------------------------------------------------------------------------------------
@@ -57,7 +57,7 @@ inline volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
 // flips g_engine_sharded_shutdown but the GUI thread keeps running until the
 // main thread reaches its post-join cleanup — which can hang if SDL's event
 // dispatch holds resources the joiner is waiting on. Two flags, one signal.
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 inline volatile sig_atomic_t* g_engine_sharded_gui_quit_ptr = nullptr;
 
 //======================================================================

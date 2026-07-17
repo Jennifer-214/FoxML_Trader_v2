@@ -67,7 +67,7 @@
 #include <cstddef>
 
 //------------------------------------------------------------------------------
-// STRATEGY REGISTRY — v5.8.0 X-macro
+// [SECTION]_[STRATEGY REGISTRY — v5.8.0 X-macro]
 //------------------------------------------------------------------------------
 // Single source of truth for all public strategies. Adding a strategy:
 //   1. cp DOCS/STRATEGY_TEMPLATE.hpp Strategies/<Name>.hpp; implement
@@ -117,8 +117,12 @@
 // [REGISTRY]_[FOREACH_STRATEGY]
 //----------------------------------------------------------------------
 // [TAG]_[[FRAMEWORK_DISCIPLINE]]
-// [SCHEMA]_[v1]
+// [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the strategy roster — add a strategy = 1 row; drives StrategyId enum + name table + dispatch]
+// [COLUMN]_[NAME]_[UPPERCASE token -> STRATEGY_<NAME> enum value]
+// [COLUMN]_[short/full]_[display names -> STRATEGY_SHORT_NAMES / STRATEGY_FULL_NAMES tables]
+// [COLUMN]_[StateT]_[per-node strategy state struct — allocated by Strategy_InitPerCore]
+// [COLUMN]_[Init/BuildParameters/Adapt/ExitAdjustSharded]_[the 4 lifecycle fns wired into X-macro dispatch]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -191,8 +195,10 @@ static const char *STRATEGY_FULL_NAMES[] = {
 };
 #undef X
 
+// [ASSERT]_[REGISTRY_COVERAGE]_[STRATEGY_SHORT_NAMES count == NUM_STRATEGIES]
 static_assert(sizeof(STRATEGY_SHORT_NAMES) / sizeof(*STRATEGY_SHORT_NAMES) == NUM_STRATEGIES,
               "STRATEGY_SHORT_NAMES out of sync with NUM_STRATEGIES");
+// [ASSERT]_[REGISTRY_COVERAGE]_[STRATEGY_FULL_NAMES count == NUM_STRATEGIES]
 static_assert(sizeof(STRATEGY_FULL_NAMES) / sizeof(*STRATEGY_FULL_NAMES) == NUM_STRATEGIES,
               "STRATEGY_FULL_NAMES out of sync with NUM_STRATEGIES");
 

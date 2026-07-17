@@ -110,7 +110,7 @@ enum OrderState : uint8_t {
 // Access via Order_GetType / Order_SetType / etc. accessor inline fns; never via direct
 // flags_packed bit-twiddling at consumer sites. Per multi-bit-state-encoding-pattern.md
 // (multi-field extension — flags packed are independent fields sharing a register-sized word).
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 static constexpr uint32_t MASK_ORDER_TYPE          = 0x00000003u;  // bits 0-1
 static constexpr uint32_t SHIFT_ORDER_TYPE         = 0;
 static constexpr uint32_t MASK_ORDER_STATE         = 0x0000003Cu;  // bits 2-5
@@ -186,6 +186,13 @@ struct OrderPreResolved {
 //
 // Future per-resolved fields extend HERE (single-line addition) + Order_BindPreResolved
 // extends concurrently. Consumer sites unchanged. Placed at end of Order<F> HOT cluster.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[48B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OrderPreResolved]
 //======================================================================
@@ -290,7 +297,7 @@ struct Order {
 // Branchless mask-select accessors over Order<F>::flags_packed. Compiler inlines; zero
 // runtime overhead vs direct field access. ALL consumer sites use these accessors —
 // direct `o->flags_packed` bit-twiddling FORBIDDEN outside Order.hpp.
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 template <unsigned F>
 inline OrderType Order_GetType(const Order<F>* o) {
     return (OrderType)((o->flags_packed & MASK_ORDER_TYPE) >> SHIFT_ORDER_TYPE);
@@ -363,7 +370,7 @@ inline void Order_MarkPreResolvedBound(Order<F>* o) {
 // + reward attribution sites). Per § N.1 of the .F.4d merged plan body.
 //
 // Branchless — pure shift + mask + bitwise-OR/AND; no data-dependent dispatch. H20 compliant.
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 template <unsigned F>
 inline int MBS_OrderBanditActiveState(const Order<F>& o) {
     return (int)((o.flags_packed >> SHIFT_ORDER_BANDIT_ACTIVE_STATE) & MASK_ORDER_BANDIT_3BIT);

@@ -37,7 +37,7 @@ namespace tt {
     X(TRAIL_SL,  "EventLoop_TrailingSLRatchetOneCore (~100-300ns)")
 
 //------------------------------------------------------------------------------
-// Auto-generated enum values + count sentinel.
+// [SECTION]_[Auto-generated enum values + count sentinel.]
 //------------------------------------------------------------------------------
 enum SpSection {
 #define X(NAME, DOC) SP_SECTION_##NAME,
@@ -47,7 +47,7 @@ enum SpSection {
 };
 
 //------------------------------------------------------------------------------
-// Auto-generated documentation strings (for tooltips, log headers, etc.).
+// [SECTION]_[Auto-generated documentation strings (for tooltips, log headers, etc.).]
 //------------------------------------------------------------------------------
 inline const char* SP_SECTION_NAME(int idx) {
     switch (idx) {

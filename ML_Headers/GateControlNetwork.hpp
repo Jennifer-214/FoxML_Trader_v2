@@ -14,7 +14,7 @@
 // This is going to just control the gate conditions, basically the watcher module i referenced earlier, im not sure how to actually implement this yet or everything it needs but i figure going ahead and sketching i tout will work,
 //
 //------------------------------------------------------------------------------
-// INCLUDE
+// [SECTION]_[INCLUDE]
 //------------------------------------------------------------------------------
 #ifndef GATE_CONTROL_NETWORK_HPP
 #define GATE_CONTROL_NETWORK_HPP
@@ -53,7 +53,7 @@ template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS> struct
 };
 
 //------------------------------------------------------------------------------
-// FORWARD PASS
+// [SECTION]_[FORWARD PASS]
 //------------------------------------------------------------------------------
 //im gonna go back through these and make them branchless this is just boilerplate lol
 //
@@ -85,7 +85,7 @@ void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &inp
 }
 
 //------------------------------------------------------------------------------
-// BACKWARD PASS
+// [SECTION]_[BACKWARD PASS]
 //------------------------------------------------------------------------------
 //this apparently is just the if you know what the output was, and you know what you wanted it to be, you have the error difference, and then you push that back through it to figure out how much each weight contrinbuted to the error, and then you can nudge them in the opposite direction, by the learning rate
 //------------------------------------------------------------------------------

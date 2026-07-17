@@ -74,7 +74,7 @@
     X(PER_HORIZON_BARRIER_BLEND,    per_horizon_barrier_blend,    "Per-Horizon Barriers",  "FoxML",       CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "Enable per-horizon TP/SL serving via blend/dominant modes (vs cfg-direct LEGACY fallback); paired with cfg.barrier_blend_mode enum [v5.15.5.A.5]. .B.3 Step 1.6.2 cohort bit-add (TECH_DEBT-100 closure; STAMP_BOUND_CFG_DERIVED activates framework walker now that Step 1.6.3 Decision C Approach A struct-gen provides unprefixed inf.per_horizon_barrier_blend field).")
 
 //------------------------------------------------------------------------------------------------------
-// AUTO-GENERATED ENUM + COUNT
+// [SECTION]_[AUTO-GENERATED ENUM + COUNT]
 //------------------------------------------------------------------------------------------------------
 enum MlCfgFlag {
 #define X_GEN_ML_CFG_BIT(name, legacy_field, display_label, section, metadata_flags, doc) ML_CFG_##name,
@@ -87,7 +87,7 @@ static_assert(ML_CFG_COUNT <= 16,
               "FOREACH_ML_CFG_FLAG exhausted uint16_t storage; expand cfg.ml_cfg_flags to uint32_t");
 
 //------------------------------------------------------------------------------------------------------
-// AUTO-GENERATED MASK_ML_CFG_<NAME> CONSTANTS
+// [SECTION]_[AUTO-GENERATED MASK_ML_CFG_<NAME> CONSTANTS]
 //------------------------------------------------------------------------------------------------------
 #define X_GEN_ML_CFG_MASK(name, legacy_field, display_label, section, metadata_flags, doc) \
     static constexpr uint16_t MASK_ML_CFG_##name = (uint16_t)(1u << ML_CFG_##name);
@@ -95,7 +95,7 @@ FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 #undef X_GEN_ML_CFG_MASK
 
 //------------------------------------------------------------------------------------------------------
-// COHORT GATE MACROS — v5.15.5.F.4d.1.B.2 Step 5.0
+// [SECTION]_[COHORT GATE MACROS — v5.15.5.F.4d.1.B.2 Step 5.0]
 //------------------------------------------------------------------------------------------------------
 // Shared cohort gate predicates across 3 registries:
 //   - FOREACH_STAMP_BOUND_CFG col 5 (emit_when) at ML_Headers/StampBoundCfgRegistry.hpp
@@ -134,7 +134,7 @@ FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 #define COHORT_GATE_COST_GATE_ENABLED     BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)
 
 //------------------------------------------------------------------------------------------------------
-// AUTOPOPULATE COMPANION
+// [SECTION]_[AUTOPOPULATE COMPANION]
 //------------------------------------------------------------------------------------------------------
 // Branchless OR-reduction; compiler emits cmov per row.
 

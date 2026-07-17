@@ -71,11 +71,11 @@ template <unsigned F> struct MLStrategyState {
 //======================================================================
 
 //------------------------------------------------------------------------------
-// INIT
+// [SECTION]_[INIT]
 //------------------------------------------------------------------------------
 // called once after warmup completes. model should already be loaded by the controller.
 // sets initial buy conditions from rolling stats (same pattern as other strategies).
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void MLStrategy_Init(MLStrategyState<F> *state, const RollingStats<F> *rolling,
                              BuySideGateConditions<F> *buy_conds) {
@@ -103,7 +103,7 @@ inline void MLStrategy_Init(MLStrategyState<F> *state, const RollingStats<F> *ro
 }
 
 //------------------------------------------------------------------------------
-// ADAPT
+// [SECTION]_[ADAPT]
 //------------------------------------------------------------------------------
 // no-op for now — model is static (trained offline).
 // future: online learning, feature drift detection, model hot-swap.
@@ -295,7 +295,7 @@ inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, Money current_price,
 }
 
 //------------------------------------------------------------------------------
-// EXIT ADJUST — sharded, ratchet_sl path
+// [SECTION]_[EXIT ADJUST — sharded, ratchet_sl path]
 //------------------------------------------------------------------------------
 // v5.4.0 Phase 2.5: sharded equivalent of MLStrategy_ExitAdjust above.
 // Uses rolling->price_r_squared > 0.5 as the trail gate (same as legacy

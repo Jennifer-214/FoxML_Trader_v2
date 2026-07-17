@@ -224,7 +224,7 @@ static inline int EngineSharded_PinThread(int cpu_id) {
 }
 
 //------------------------------------------------------------------------------
-// PER-NODE CPU TOPOLOGY — a NODE owns 2 CPUs (1 hot + 1 slow); node_id ≠ cpu_id.
+// [SECTION]_[PER-NODE CPU TOPOLOGY — a NODE owns 2 CPUs (1 hot + 1 slow); node_id ≠ cpu_id.]
 //------------------------------------------------------------------------------
 // Boot CPU layout for N nodes (= num_execution_nodes):
 //   CPU 0      = producer
@@ -452,7 +452,7 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
 // site is in EngineSharded_Run below.
 
 //------------------------------------------------------------------------------
-// Phase 7.B — drainer-cycle bench gate histogram
+// [SECTION]_[Phase 7.B — drainer-cycle bench gate histogram]
 //------------------------------------------------------------------------------
 template <unsigned F, bool BENCH = false>
 static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
@@ -1215,7 +1215,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     std::atomic<double> last_volume{0.0};
 
     //----------------------------------------------------------------------
-    // v5.15.4 — Mode-specific cfg normalize
+    // [SECTION]_[v5.15.4 — Mode-specific cfg normalize]
     //----------------------------------------------------------------------
     // When trading_mode=LIVE, auto-tighten safety defaults the operator
     // hasn't explicitly set: model_verify_strict 0→1 (STRICT);
@@ -1226,7 +1226,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     ControllerConfig_NormalizeForMode<F>(cfg);
 
     //----------------------------------------------------------------------
-    // v5.15.2 — Live-readiness boot gate
+    // [SECTION]_[v5.15.2 — Live-readiness boot gate]
     //----------------------------------------------------------------------
     // Pre-flight checklist via FOREACH_LIVE_READINESS_CHECK. When
     // trading_mode=LIVE, REFUSES boot if any LR_SEV_REFUSE-severity check
@@ -1251,7 +1251,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     }
 
     //----------------------------------------------------------------------
-    // GUI thread (ImGui build only)
+    // [SECTION]_[GUI thread (ImGui build only)]
     //----------------------------------------------------------------------
     // Same double-buffered TUISharedState pattern as the legacy engine in
     // main.cpp. The producer thread's slow-path populates TUISnapshot via
@@ -1348,7 +1348,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     if (topo_nproc < 1) topo_nproc = 1;
 
     //----------------------------------------------------------------------
-    // Producer thread — generates synthetic ticks and fans out to all cores
+    // [SECTION]_[Producer thread — generates synthetic ticks and fans out to all cores]
     //----------------------------------------------------------------------
     std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume,
                           &cfg, &state, &oms, num_nodes, use_synthetic, tsc_ghz,
@@ -1463,7 +1463,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     });
 
     //----------------------------------------------------------------------
-    // Executor threads — one per execution core
+    // [SECTION]_[Executor threads — one per execution core]
     //----------------------------------------------------------------------
     // Lambdas can't capture static arrays directly, so we pass the index
     // in by value and let the lambda body reference the file-scope statics.
@@ -1489,7 +1489,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     }
 
     //----------------------------------------------------------------------
-    // Drainer thread — controller side
+    // [SECTION]_[Drainer thread — controller side]
     //----------------------------------------------------------------------
     // open-coded drain so we can hook order submission AFTER each event.
     // identical structure to EventLoop_DrainEvents but with an OrderManager_Submit

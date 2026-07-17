@@ -42,7 +42,7 @@ struct RORRegressor {
     int count;
 };
 //------------------------------------------------------------------------------
-// INIT FUNCTION
+// [SECTION]_[INIT FUNCTION]
 //------------------------------------------------------------------------------
 // zeroes everything out, call once at startup
 //------------------------------------------------------------------------------
@@ -61,7 +61,7 @@ inline RORRegressor<F> RORRegressor_Init() {
     return reg;
 }
 //------------------------------------------------------------------------------
-// PUSH FUNCTION
+// [SECTION]_[PUSH FUNCTION]
 //------------------------------------------------------------------------------
 // takes a LinearRegression3XResult from the inner regression and stores the slope into the ring
 // buffer, also stores the r_squared so you could filter out bad fits later if you wanted to,
@@ -76,7 +76,7 @@ inline void RORRegressor_Push(RORRegressor<F> *reg, LinearRegression3XResult<F> 
     reg->count += (reg->count < MAX_WINDOW);
 }
 //------------------------------------------------------------------------------
-// COMPUTE FUNCTION
+// [SECTION]_[COMPUTE FUNCTION]
 //------------------------------------------------------------------------------
 // linearizes the slope ring buffer oldest-to-newest and runs LinearRegression3X_Fit on it, same
 // approach as RegressionFeederX_Compute but the y values are slopes instead of prices, the output
@@ -97,7 +97,7 @@ inline LinearRegression3XResult<F> RORRegressor_Compute(RORRegressor<F> *reg) {
     return LinearRegression3X_Fit(time_index, linearized, reg->count);
 }
 //------------------------------------------------------------------------------
-// DATA FLOW
+// [SECTION]_[DATA FLOW]
 //------------------------------------------------------------------------------
 // [price ticks] -> [RegressionFeederX_Push] -> [RegressionFeederX_Compute] -> [slope/r^2]
 //                                                                                  |

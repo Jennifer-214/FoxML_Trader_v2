@@ -27,7 +27,7 @@
 //------------------------------------------------------------------------------------------------------
 // FPN_Binary throughout - no float-to-int conversion boundaries, no precision surprises
 // Packed gate trick is dropped - FPN_Binary comparisons are already branchless so packing buys nothing
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 // [EDIT]_[[16-03-26 12:08pm]]
 // i need to make a feature store thats branchless probably unless the relationships between price and volume can be extrapolated to the actual raw data, otherwise the features pribably need to be branchless as well, to reduce inference time, those would stack up fast having mispredcitons for every single tick
 //======================================================================================================
@@ -83,7 +83,7 @@ template <unsigned F> struct SellSideGateConditions {
 //------------------------------------------------------------------------------------------------------
 // branchless gate: zeros buy conditions when gate fails (pass=0)
 // replaces the 5-line mask pattern used across all strategy buy signals
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 // Gate_Zero: zeros price condition when gate fails (pass=0)
 // volume is left intact — the BuyGate checks price first, so zeroed price blocks fills.
 // keeping volume lets the TUI display the actual volume threshold for diagnostics.

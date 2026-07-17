@@ -44,7 +44,7 @@ namespace tt {
     X(OVERNIGHT, overnight, 20, 24, 1.3, "20:00-23:59 UTC; declining volume, wider gates")
 
 //------------------------------------------------------------------------------
-// Auto-generated enum values.
+// [SECTION]_[Auto-generated enum values.]
 //------------------------------------------------------------------------------
 enum SessionPhase {
 #define X(NAME_U, name_l, START, END, MULT, DOC) SESSION_PHASE_##NAME_U,

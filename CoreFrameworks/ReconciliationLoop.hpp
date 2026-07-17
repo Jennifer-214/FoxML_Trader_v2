@@ -104,6 +104,13 @@ struct ReconciliationLoopState {
 // credentials as the adapter workers, but on its own socket/SSL session.
 // No contention with the adapter worker thread.
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[17088B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[267]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[ReconciliationLoopState]
 //======================================================================
 

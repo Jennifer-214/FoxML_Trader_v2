@@ -65,8 +65,28 @@
 //======================================================================
 // [CODE]
 //======================================================================
-// FOREACH_BANDIT_SIDE — meta-X-macro for buy/exit symmetry
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_BANDIT_SIDE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[meta-X-macro for buy/exit symmetry — 2 rows mirror every side-split consumer surface; adding a side = 1 row]
+// [COLUMN]_[side]_[lowercase token (buy | exit) — stamped into every mirrored identifier]
+//======================================================================
+// [CODE]
+//======================================================================
+#define FOREACH_BANDIT_SIDE(X) \
+    X(buy) \
+    X(exit)
+
+// Compile-time count for tests / static_asserts.
+#define _BANDIT_SIDE_COUNT_ONE(side) +1
+#define FOREACH_BANDIT_SIDE_COUNT (0 FOREACH_BANDIT_SIDE(_BANDIT_SIDE_COUNT_ONE))
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Per § G.1 of v5.15.5.F.4d merged plan body. Closes Class 18 (mirror-incomplete)
 // at the buy-side/exit-side bandit boundary structurally.
 //
@@ -81,14 +101,9 @@
 //
 // At v5.15.5.F.4d ship close: this is the FIRST CANONICAL of FOREACH_BANDIT_SIDE.
 // Future extension (per-symbol axis post-.F.4e KIND_STRING infrastructure) = 1-row add.
-//======================================================================================================
-#define FOREACH_BANDIT_SIDE(X) \
-    X(buy) \
-    X(exit)
-
-// Compile-time count for tests / static_asserts.
-#define _BANDIT_SIDE_COUNT_ONE(side) +1
-#define FOREACH_BANDIT_SIDE_COUNT (0 FOREACH_BANDIT_SIDE(_BANDIT_SIDE_COUNT_ONE))
+//======================================================================
+// [END_REGISTRY]_[FOREACH_BANDIT_SIDE]
+//======================================================================
 
 //======================================================================================================
 // BIT-WIDTH INVARIANTS — Order::flags_packed bandit context bits 17-25
@@ -148,7 +163,7 @@ static_assert((unsigned)ENSEMBLE_HORIZON_MAX <= ((unsigned)::tt::MASK_ORDER_BAND
 //======================================================================================================
 
 //------------------------------------------------------------------------------------------------------
-// SIDE TAG + DISPATCH CONTRACT TYPE
+// [SECTION]_[SIDE TAG + DISPATCH CONTRACT TYPE]
 //------------------------------------------------------------------------------------------------------
 enum class BanditSide { Buy, Exit };
 
@@ -156,7 +171,7 @@ template <unsigned F>
 using BanditRewardFn = void(*)(EnsembleModelZoo<F>* ezoo, int regime, int arm, double reward_bps);
 
 //------------------------------------------------------------------------------------------------------
-// LEAF REWARD FNS — templated on Side via if-constexpr field selection
+// [SECTION]_[LEAF REWARD FNS — templated on Side via if-constexpr field selection]
 //------------------------------------------------------------------------------------------------------
 // Three leaf reward fns (one per algorithm-metadata combination). Each is templated on
 // `BanditSide` for compile-time field selection — no runtime branch on side.
@@ -204,7 +219,7 @@ inline void both_reward(EnsembleModelZoo<F>* ezoo, int regime, int arm, double r
 }
 
 //------------------------------------------------------------------------------------------------------
-// BUY-SIDE REWARD DISPATCH TABLE — auto-derived from FOREACH_BANDIT_ALGORITHM (exp3_up, thompson_up)
+// [SECTION]_[BUY-SIDE REWARD DISPATCH TABLE — auto-derived from FOREACH_BANDIT_ALGORITHM (exp3_up, thompson_up)]
 //------------------------------------------------------------------------------------------------------
 // `?:` chain auto-selects one of 3 leaf fns per row. Adding a 6th algorithm row with metadata bits
 // (e.g., `(1, 1)` → both_reward) extends this table by 1 entry — zero callsite changes.
@@ -225,7 +240,7 @@ constexpr BanditRewardFn<F> g_buy_reward_dispatch[FOREACH_BANDIT_ALGORITHM_COUNT
 #undef _BUY_REWARD_DISPATCH_ENTRY
 
 //------------------------------------------------------------------------------------------------------
-// EXIT-SIDE REWARD DISPATCH TABLE — same shape; FOREACH_BANDIT_SIDE auto-mirror
+// [SECTION]_[EXIT-SIDE REWARD DISPATCH TABLE — same shape; FOREACH_BANDIT_SIDE auto-mirror]
 //------------------------------------------------------------------------------------------------------
 // Per FOREACH_BANDIT_SIDE meta-X-macro. Adding a 3rd side (e.g., per-symbol Thompson) would extend
 // to 3 dispatch tables via copy-paste of this block with new `BanditSide::PerSymbol` tag — until

@@ -217,6 +217,13 @@ struct SubmitCommand {
 // Per orchestration-helper-with-pod-args-pattern.md (2nd canonical application after
 // Stamp_AssembleAndEmit) — POD args pattern promoted to CLAUDE.md item at ship close.
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[128B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[SubmitCommand]
 //======================================================================
 
@@ -830,27 +837,33 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
 // `spsc-ring-embedded-in-hot-struct-cluster-discipline.md` (NC2).
 // Catches future field-insertion that silently breaks alignment.
 // ════════════════════════════════════════════════════════════════════════
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(OrderManagerState<64>) >= 64]
 static_assert(alignof(OrderManagerState<64>) >= 64,
               "OrderManagerState MUST be 64-byte aligned (cluster anchors + alignas(64) on result_queue).");
 // HOT cluster — first SPSCRing anchor (preceding fields = orders[] + scalars).
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(result_queue) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, result_queue) % 64 == 0,
               "result_queue (HOT cluster ring 1) MUST start at a cache-line boundary. "
               "See spsc-ring-embedded-in-hot-struct-cluster-discipline.md.");
 // WARM cluster — Portfolio anchor (per-fill bookkeeping cluster start).
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(portfolio) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, portfolio) % 64 == 0,
               "Portfolio (WARM cluster anchor) MUST start at a cache-line boundary "
               "(separates HOT event_log from WARM per-fill state).");
 // COLD cluster — adapter anchor (boot-set fields cluster start).
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(adapter) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, adapter) % 64 == 0,
               "ExchangeAdapter (COLD cluster anchor) MUST start at a cache-line boundary "
               "(separates WARM per-fill state from COLD boot-set state).");
 // Cross-thread observability cluster — total_submitted anchor.
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(total_submitted) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, total_submitted) % 64 == 0,
               "Observability atomics cluster (total_submitted/filled/rejected) MUST be "
               "alignas(64)-isolated. Snapshot publisher reads at 60 Hz; isolation "
               "prevents reads from invalidating drainer-written neighbor warm fields. "
               "See cross-thread-snapshot-publish-cluster-isolation.md (ND1).");
 // Cross-thread safety CAS cluster — flatten_pending anchor.
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(flatten_pending) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, flatten_pending) % 64 == 0,
               "Safety CAS atomics cluster (flatten_pending/recovery_until_us) MUST be "
               "alignas(64)-isolated. N slow-path threads CAS-contend; isolation prevents "
@@ -862,6 +875,7 @@ static_assert(offsetof(OrderManagerState<64>, flatten_pending) % 64 == 0,
 // _pad_osf[7] field is the explicit pad; this assert confirms the offset
 // remains 8-byte-aligned after future field additions to the COLD cluster.
 // Compile-time check; zero runtime cost (offsetof + % 8 fold to constant).
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(ks_min_balance) % 8 == 0]
 static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
               "ks_min_balance (Money) MUST be 8-byte aligned. If this trips, "
               "the COLD cluster gained a non-8-aligned field between oms_state_flags "
@@ -1380,7 +1394,7 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
 // last_realized_return write mask-gated, last_is_maker / last_was_win bitmaps mask-select).
 // FILE* null guards tagged __builtin_expect per H20 exception #4 (fprintf side effects can't be
 // cheaply mask-gated; Phase 2 Portfolio/TradeLog mask-param refactor handles the remaining cases).
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 
 //======================================================================
 // [FUNCTION]_[handle_buy_fill]

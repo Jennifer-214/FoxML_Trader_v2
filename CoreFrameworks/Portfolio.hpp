@@ -153,14 +153,23 @@ static_assert(sizeof(Position<64>) == 128,
 // [WHY]_[each Position[N] starts on a cache-line boundary — single-line-per-slot hot access]
 static_assert(alignof(Position<64>) == 64,
               "Position<64> must have 64B alignment for hot-path single-cache-line-per-slot access");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(take_profit_price) == 0]
 static_assert(offsetof(Position<64>, take_profit_price)  == 0,   "Position layout: take_profit_price offset (HOT)");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(stop_loss_price) == 16]
 static_assert(offsetof(Position<64>, stop_loss_price)    == 16,  "Position layout: stop_loss_price offset (HOT)");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(quantity) == 32]
 static_assert(offsetof(Position<64>, quantity)           == 32,  "Position layout: quantity offset");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(entry_price) == 48]
 static_assert(offsetof(Position<64>, entry_price)        == 48,  "Position layout: entry_price offset");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(entry_fee) == 64]
 static_assert(offsetof(Position<64>, entry_fee)          == 64,  "Position layout: entry_fee offset");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(original_tp) == 80]
 static_assert(offsetof(Position<64>, original_tp)        == 80,  "Position layout: original_tp offset");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(original_sl) == 96]
 static_assert(offsetof(Position<64>, original_sl)        == 96,  "Position layout: original_sl offset");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(entry_timestamp_us) == 112]
 static_assert(offsetof(Position<64>, entry_timestamp_us) == 112, "Position layout: entry_timestamp_us offset");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(pair_index) == 120]
 static_assert(offsetof(Position<64>, pair_index)         == 120, "Position layout: pair_index offset");
 
 // PERSIST byte count — first 128 bytes of Position go to wire format (Ship A 16B FPN_Binary; was 184B).
@@ -172,8 +181,10 @@ constexpr size_t POSITION_PERSIST_BYTES() {
     // 9 PERSIST value fields (112B FPN_Binary + 8B uint64 + 1B int8) + 7B _pad_pos = 128B (Ship A 16B FPN_Binary)
     return offsetof(Position<F>, _pad_pos) + 7;
 }
+// [ASSERT]_[LAYOUT_LOCK]_[POSITION_PERSIST_BYTES<64>() == 128 — the v6 wire prefix]
 static_assert(POSITION_PERSIST_BYTES<64>() == 128,
               "Position PERSIST byte count must equal 128 — wire format (PORTFOLIO_SNAPSHOT_VERSION=6, Ship A 16B) byte-identical");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(Position<64>) == POSITION_PERSIST_BYTES — no trailing non-wire bytes]
 static_assert(sizeof(Position<64>) - POSITION_PERSIST_BYTES<64>() == 0,
               "16B FPN_Binary: PERSIST fills 128B = 2 cache lines exact, NO trailing alignas pad (was 8B at 24B FPN_Binary)");
 //======================================================================
@@ -240,6 +251,8 @@ template <unsigned F> struct ExitRecord {
 //----------------------------------------------------------------------
 // ExitRecord snapshots all position data at exit time — slot may be reused by a
 // new fill before DrainExits runs, so nothing downstream should read from the slot
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
 //======================================================================
 // [END_STRUCT]_[ExitRecord]
 //======================================================================
@@ -483,6 +496,13 @@ struct PositionEntryArgs {
 //     Non-negative → paired leg index for partial-exit semantics (.F.1.B
 //     audit candidate when partial-exit replay needs leg-A/leg-B pairing
 //     preservation).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[96B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PositionEntryArgs]
 //======================================================================
@@ -737,7 +757,7 @@ inline void PositionExitGate(Portfolio<F> *portfolio, Money current_price, ExitB
 // binary snapshot of portfolio state - written on slow path, read once at startup
 // includes a magic number and version so we dont load garbage or stale formats
 // also saves realized P&L and adaptive filter state alongside the portfolio
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 #define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian
 #define PORTFOLIO_SNAPSHOT_VERSION 7   // Ship-B DECIMAL epoch: money re-encoded 2^64->10^8 at identical 16B layout; v6 (16B binary, H21 tombstone) + earlier version-rejected. Was: // Ship-A 16B FPN_Binary: Position PERSIST 184->128 B; v5 snapshots version-rejected (H21/D-144)
 

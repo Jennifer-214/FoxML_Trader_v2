@@ -34,7 +34,7 @@
 // to the OMS path. See CLAUDE.md "Cross-Mode Init Placement" invariant.
 // ============================================================
 //------------------------------------------------------------------------------
-// INCLUDE
+// [SECTION]_[INCLUDE]
 //------------------------------------------------------------------------------
 #ifndef PORTFOLIO_CONTROLLER_HPP
 #define PORTFOLIO_CONTROLLER_HPP

@@ -257,6 +257,13 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[104B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[CfgFieldDescriptor]
 //======================================================================
 
@@ -547,6 +554,12 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // [REFERENCE]_[INVARIANT]_[[H17] [H22]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[~79 per-node rows at cfg.nodes[c].<field> — registry membership IS the scope assertion (PER_NODE_OK bit removed); same 13-col tuple as GLOBAL; EMIT payload macros follow inside this section]
+// [COLUMN]_[STORAGE_T]_[C++ destination type on PerNodeCfg<F> (H13/H14: Kind never drives storage)]
+// [COLUMN]_[KIND_TOKEN]_[GUI metadata only (slider/textbox/format/clamp coercion)]
+// [COLUMN]_[name/label/section]_[cfg key + GUI label + Settings section]
+// [COLUMN]_[meta]_[MetadataFlag bits — derived-filter cohorts (H16)]
+// [COLUMN]_[payload]_[DBL/INT/BOOL/INT_ENUM (default, clamps)]
+// [COLUMN]_[tooltip + 4 applicability cats + lives_in_struct]_[GUI tooltip; categorical applicability; storage routing]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -770,7 +783,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //------------------------------------------------------------------------------
-// EMIT_PER_NODE_CFG_STRUCT_FIELD — payload macro for X-macro struct generation (WIP2d-0.B)
+// [SECTION]_[EMIT_PER_NODE_CFG_STRUCT_FIELD — payload macro for X-macro struct generation (WIP2d-0.B)]
 //------------------------------------------------------------------------------
 // Consumed by PerNodeCfg<F> in ControllerConfig.hpp via:
 //   FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
@@ -794,7 +807,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     STORAGE_T name;
 
 //------------------------------------------------------------------------------
-// EMIT_GLOBAL_CFG_STRUCT_FIELD — payload macro for global cfg field struct generation (v5.15.5.F.4d.1.B.3+)
+// [SECTION]_[EMIT_GLOBAL_CFG_STRUCT_FIELD — payload macro for global cfg field struct generation (v5.15.5.F.4d.1.B.3+)]
 //------------------------------------------------------------------------------
 // Sister to EMIT_PER_NODE_CFG_STRUCT_FIELD; landed at .B.3 Step 0.5b.A Path α cascade closing the
 // global↔per-core column asymmetry. ControllerConfig<F>'s 48 manual global cfg field decls become
@@ -815,7 +828,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     STORAGE_T name;
 
 //------------------------------------------------------------------------------
-// EMIT_GLOBAL_CFG_DEFAULT — payload macro for auto-defaults in ControllerConfig_Default (v5.15.5.F.4d.1.B.3+)
+// [SECTION]_[EMIT_GLOBAL_CFG_DEFAULT — payload macro for auto-defaults in ControllerConfig_Default (v5.15.5.F.4d.1.B.3+)]
 //------------------------------------------------------------------------------
 // Sister to EMIT_GLOBAL_CFG_STRUCT_FIELD; landed at .B.3 Step 1.6.1 (TECH_DEBT-093 full closure) +
 // future-headache reducer for all 48 global default-init lines.
@@ -833,7 +846,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     tt::cfg_assign_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name]);
 
 //------------------------------------------------------------------------------
-// EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR — payload macro for per-core registry rows' global manual struct field defaults (v5.15.5.F.4d.1.B.4 Phase Cx-E.1)
+// [SECTION]_[EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR — payload macro for per-core registry rows' global manual struct field defaults (v5.15.5.F.4d.1.B.4 Phase Cx-E.1)]
 //------------------------------------------------------------------------------
 // Sister to EMIT_GLOBAL_CFG_DEFAULT; lands the "future work" noted at :739 comment above.
 // Per-core registry rows (FOREACH_PER_NODE_CFG_FIELD) have global manual struct field declarations
@@ -1114,7 +1127,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 //------------------------------------------------------------------------------
 
 //------------------------------------------------------------------------------
-// PerNodeCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)
+// [SECTION]_[PerNodeCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)]
 //------------------------------------------------------------------------------
 // PURPOSE: closes Shortsighted #3 (CI regex heuristic) to ~99.9% structural strength via
 // COMPILE-TIME static_assert. The X-macro KNOWS the expected struct payload (sum of STORAGE_T
@@ -1171,7 +1184,7 @@ inline constexpr size_t kPerCoreCfgFieldCount             = calc_per_node_cfg_fi
 inline constexpr size_t kPerCoreCfgMaxPaddingBytes        = kPerCoreCfgFieldCount * 7 + 63;
 
 //------------------------------------------------------------------------------
-// FIELD_IDX enums — per-registry auto-generated
+// [SECTION]_[FIELD_IDX enums — per-registry auto-generated]
 //------------------------------------------------------------------------------
 // Drives g_*_cfg_field_descriptors[FIELD_IDX_*_<name>] direct access at compile time.
 #define X_GEN_GLOBAL_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
@@ -1193,7 +1206,7 @@ enum CfgPerCoreFieldIdx : uint16_t {
 #undef X_GEN_PER_NODE_FIELD_IDX
 
 //------------------------------------------------------------------------------
-// g_*_cfg_field_descriptors — auto-generated arrays
+// [SECTION]_[g_*_cfg_field_descriptors — auto-generated arrays]
 //------------------------------------------------------------------------------
 // Single source of truth for descriptor data; consumers index via FIELD_IDX_GLOBAL_<name>
 // or FIELD_IDX_PER_NODE_<name>.
@@ -1250,8 +1263,10 @@ inline constexpr CfgFieldDescriptor g_per_node_cfg_field_descriptors[] = {
 #undef X_GEN_DESCRIPTOR_PER_NODE
 
 // Verify array sizes match sentinels.
+// [ASSERT]_[REGISTRY_COVERAGE]_[global descriptor array count == FIELD_IDX count]
 static_assert(sizeof(g_global_cfg_field_descriptors) / sizeof(g_global_cfg_field_descriptors[0]) == FIELD_IDX_GLOBAL_END,
               "g_global_cfg_field_descriptors size must equal FIELD_IDX_GLOBAL_END");
+// [ASSERT]_[REGISTRY_COVERAGE]_[per-node descriptor array count == FIELD_IDX count]
 static_assert(sizeof(g_per_node_cfg_field_descriptors) / sizeof(g_per_node_cfg_field_descriptors[0]) == FIELD_IDX_PER_NODE_END,
               "g_per_node_cfg_field_descriptors size must equal FIELD_IDX_PER_NODE_END");
 
@@ -1280,10 +1295,12 @@ constexpr bool cfg_field_names_unique(const CfgFieldDescriptor (&a)[N]) {
                 return false;
     return true;
 }
+// [ASSERT]_[OVERLAP_EXCLUSION]_[global cfg field names unique]
 static_assert(cfg_field_names_unique(g_global_cfg_field_descriptors),
               "FOREACH_GLOBAL_CFG_FIELD has duplicate cfg_field_name — violates "
               "row-uniqueness contract + breaks .F.4c.1 ImGui PushID collision "
               "avoidance. Find + rename the duplicate.");
+// [ASSERT]_[OVERLAP_EXCLUSION]_[per-node cfg field names unique]
 static_assert(cfg_field_names_unique(g_per_node_cfg_field_descriptors),
               "FOREACH_PER_NODE_CFG_FIELD has duplicate cfg_field_name — violates "
               "row-uniqueness contract + breaks .F.4c.1 ImGui PushID collision "
@@ -1295,7 +1312,7 @@ static_assert(cfg_field_names_unique(g_per_node_cfg_field_descriptors),
 // The two are orthogonal by design. Verified at .F.4d via reverse-drift CI script.
 
 //------------------------------------------------------------------------------
-// BITMAP DISPATCHER FRAMEWORK — TEMPLATED FOR PER-REGISTRY APPLICATION
+// [SECTION]_[BITMAP DISPATCHER FRAMEWORK — TEMPLATED FOR PER-REGISTRY APPLICATION]
 //------------------------------------------------------------------------------
 // .F.4c.3 — template-parameterized on (N_FIELDS, descriptor array). Each
 // registry instantiates its own mask arrays + composed views. Same template
@@ -1363,9 +1380,18 @@ constexpr size_t cfg_mask_overlap_count(const CfgMaskArray<N_WORDS>& a,
     return n;
 }
 
-// FOREACH_METADATA_BIT(X) — tuple: X(lowercase_name, UPPERCASE_BIT_NAME).
-// .F.4c.3 — PER_NODE_OK removed (redundant under per-core authoritative registry).
-// Each remaining row adds a per-bit precomputed mask array per registry.
+//======================================================================
+// [REGISTRY]_[FOREACH_METADATA_BIT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[H16]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the MetadataFlag bit roster — one row per derived-filter cohort bit; drives per-bit precomputed mask arrays per registry]
+// [COLUMN]_[lowercase_name]_[mask-array identifier stem -> g_<registry>_cfg_<name>_mask]
+// [COLUMN]_[UPPERCASE_BIT_NAME]_[CfgFieldDescriptor::MetadataFlag bit]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_METADATA_BIT(X)                                            \
     X(restart_required,         RESTART_REQUIRED)                          \
     X(safety_critical,          SAFETY_CRITICAL)                           \
@@ -1381,6 +1407,16 @@ constexpr size_t cfg_mask_overlap_count(const CfgMaskArray<N_WORDS>& a,
     X(stamp_bound_cfg_derived,  STAMP_BOUND_CFG_DERIVED)  /* v5.15.5.F.4d.1.A — Path γ first canonical consumer */ \
     X(capital_bound_loss,       CAPITAL_BOUND_LOSS)        /* ③ D-254 — loss-side no-margin cap (≤ BARRIER_SANE_MAX_SL) */ \
     X(capital_bound_gain,       CAPITAL_BOUND_GAIN)        /* ③ D-254 — gain-side cap (≤ BARRIER_SANE_MAX_TP) */
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// .F.4c.3 — PER_NODE_OK removed (redundant under per-core authoritative registry).
+// Each remaining row adds a per-bit precomputed mask array per registry.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_METADATA_BIT]
+//======================================================================
 
 // Per-registry per-bit precomputed mask arrays — X-macro generated.
 // Each lands in .rodata as a compile-time constant.
@@ -1397,7 +1433,7 @@ FOREACH_METADATA_BIT(X_GEN_PER_NODE_MASK)
 #undef X_GEN_PER_NODE_MASK
 
 //------------------------------------------------------------------------------
-// CI CHECK 9 — STAMP_BOUND_CFG_DERIVED COHORT COVERAGE REGRESSION GUARD
+// [SECTION]_[CI CHECK 9 — STAMP_BOUND_CFG_DERIVED COHORT COVERAGE REGRESSION GUARD]
 //------------------------------------------------------------------------------
 // v5.15.5.F.4d.1.B.3 Step 4 (2026-05-24). Compile-time coverage assertion ensures
 // the STAMP_BOUND_CFG_DERIVED cohort doesn't shrink unintentionally. At ship time:
@@ -1415,6 +1451,7 @@ FOREACH_METADATA_BIT(X_GEN_PER_NODE_MASK)
 // infrastructure). ML_CFG_FLAG + GATE_CFG_FLAG cohort coverage verified separately
 // at their respective registries.
 //------------------------------------------------------------------------------
+// [ASSERT]_[REGISTRY_COVERAGE]_[STAMP_BOUND_CFG_DERIVED cohort coverage >= 20 fields]
 static_assert(
     cfg_field_count(g_per_node_cfg_stamp_bound_cfg_derived_mask)
     + cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask) >= 20,
@@ -1429,6 +1466,7 @@ static_assert(
 // Closes the uniform-bound-over-heterogeneous-cohort anti-pattern structurally (a both-tagged
 // field would get whichever cap the post-resolve sweep checks first = a silent wrong cap on a
 // capital field). Masks auto-generated above by FOREACH_METADATA_BIT.
+// [ASSERT]_[OVERLAP_EXCLUSION]_[capital-bound loss/gain masks disjoint, per-node + global]
 static_assert(
     cfg_mask_overlap_count(g_per_node_cfg_capital_bound_loss_mask,
                            g_per_node_cfg_capital_bound_gain_mask) == 0
@@ -1439,7 +1477,7 @@ static_assert(
 );
 
 //------------------------------------------------------------------------------
-// H16 COMPILE-TIME ENFORCEMENT — Path γ correction (v5.15.5.F.4d.1.A)
+// [SECTION]_[H16 COMPILE-TIME ENFORCEMENT — Path γ correction (v5.15.5.F.4d.1.A)]
 //------------------------------------------------------------------------------
 // Per DESIGN_SPECS/metadata-bit-driven-derived-filter-framework.md v1.2 Path γ
 // correction (2026-05-17). Every metadata bit MUST be either enrolled in
@@ -1484,6 +1522,7 @@ inline constexpr uint16_t ALL_METADATA_BITS_IN_USE =
     | CfgFieldDescriptor::CAPITAL_BOUND_LOSS        // bit 14 (③ D-254)
     | CfgFieldDescriptor::CAPITAL_BOUND_GAIN;       // bit 15 (③ D-254)
 
+// [ASSERT]_[REGISTRY_COVERAGE]_[every MetadataFlag bit enrolled in FOREACH_METADATA_BIT or exempt — H16]
 static_assert(
     (ALL_METADATA_BITS_IN_USE & ~(ENROLLED_METADATA_BITS | EXEMPT_FROM_FOREACH_METADATA_BIT)) == 0u,
     "H16 violated: a CfgFieldDescriptor::MetadataFlag bit is in use but not "
@@ -1493,7 +1532,7 @@ static_assert(
 );
 
 //------------------------------------------------------------------------------
-// CFG_COMPOSE_AUDIT_DECISIONS — composition audit checklist (Gap 1 mitigation)
+// [SECTION]_[CFG_COMPOSE_AUDIT_DECISIONS — composition audit checklist (Gap 1 mitigation)]
 //------------------------------------------------------------------------------
 // Per DESIGN_SPECS/composed-filter-mask-pattern.md Stage 2 DRAFT § "Step 3
 // composition audit checklist". Adding a new metadata bit to FOREACH_METADATA_BIT
@@ -1573,6 +1612,7 @@ inline constexpr size_t CFG_COMPOSE_AUDIT_DECISIONS_COUNT =
 
 inline constexpr size_t COMPOSED_MASK_COUNT_AT_F4D1A = 3;  // render + save + cli_explain
 
+// [ASSERT]_[REGISTRY_COVERAGE]_[one CFG_COMPOSE_AUDIT_DECISIONS row per metadata bit x composed mask]
 static_assert(
     CFG_COMPOSE_AUDIT_DECISIONS_COUNT == FOREACH_METADATA_BIT_COUNT * COMPOSED_MASK_COUNT_AT_F4D1A,
     "CFG_COMPOSE_AUDIT_DECISIONS row count mismatch. Each metadata bit MUST "
@@ -1584,21 +1624,40 @@ static_assert(
 );
 
 //------------------------------------------------------------------------------
-// PER-LivesInStruct-VALUE BITMAP MASKS — per-registry application
+// [SECTION]_[PER-LivesInStruct-VALUE BITMAP MASKS — per-registry application]
 //------------------------------------------------------------------------------
 // Forward-compat for `.F.4i` BACKTEST cohort + future training/secrets cohorts.
 // Pattern is the metadata-bit-mask analogue but for an enum VALUE (equality
 // check) rather than a bit (bitwise AND).
 //------------------------------------------------------------------------------
 
-// FOREACH_LIVES_IN_STRUCT(X) — tuple: X(lowercase_name, UPPERCASE_VALUE_NAME).
-// Mirrors the LivesInStruct enum.
+//======================================================================
+// [REGISTRY]_[FOREACH_LIVES_IN_STRUCT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-LivesInStruct-value mask roster — the enum-VALUE analogue of the metadata-bit masks (equality, not bitwise AND)]
+// [COLUMN]_[lowercase_name]_[mask-array identifier stem]
+// [COLUMN]_[UPPERCASE_VALUE_NAME]_[LivesInStruct enum value]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_LIVES_IN_STRUCT(X)                                          \
     X(struct_cfg,            STRUCT_CFG)                                    \
     X(struct_backtest_cfg,   STRUCT_BACKTEST_CFG)                           \
     X(struct_controller_cfg, STRUCT_CONTROLLER_CFG)                         \
     X(struct_secrets_cfg,    STRUCT_SECRETS_CFG)                            \
     X(struct_training_cfg,   STRUCT_TRAINING_CFG)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Mirrors the LivesInStruct enum. Forward-compat for the .F.4i BACKTEST
+// cohort + future training/secrets cohorts (per the section note above).
+//======================================================================
+// [END_REGISTRY]_[FOREACH_LIVES_IN_STRUCT]
+//======================================================================
 
 // Compile-time per-LivesInStruct-value mask computation.
 // NOTE: dispatch via EQUALITY (lives_in_struct == Value) not bitwise AND;
@@ -1629,7 +1688,7 @@ FOREACH_LIVES_IN_STRUCT(X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK)
 #undef X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK
 
 //------------------------------------------------------------------------------
-// CFG_FIELD_FOR_EACH_SET_BIT — iteration macro
+// [SECTION]_[CFG_FIELD_FOR_EACH_SET_BIT — iteration macro]
 //------------------------------------------------------------------------------
 // Invokes `body` per set bit in `mask`. `idx_var` is bound to FIELD_IDX_*
 // value of each set bit. Branchless inner loop via __builtin_ctzll (single
@@ -1654,7 +1713,7 @@ FOREACH_LIVES_IN_STRUCT(X_GEN_PER_NODE_LIVES_IN_STRUCT_MASK)
     }
 
 //------------------------------------------------------------------------------
-// Per-registry composed-filter masks
+// [SECTION]_[Per-registry composed-filter masks]
 //------------------------------------------------------------------------------
 
 // Global registry — composed views

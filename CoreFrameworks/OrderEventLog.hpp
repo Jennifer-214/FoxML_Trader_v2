@@ -217,6 +217,13 @@ struct OrderEventLogFileHeader {
 // Phase 07 file header — written at the start of the event log file.
 // Carries the FPN_Binary width and entry size for forward compatibility.
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[32B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[OrderEventLogFileHeader]
 //======================================================================
 
@@ -284,6 +291,13 @@ struct OrderEventLog {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[37376B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[584]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OrderEventLog]
 //======================================================================

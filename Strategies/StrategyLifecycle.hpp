@@ -61,7 +61,7 @@
 namespace tt {
 
 //------------------------------------------------------------------------------
-// SEED FROM CFG — overload-resolution per state type
+// [SECTION]_[SEED FROM CFG — overload-resolution per state type]
 //------------------------------------------------------------------------------
 // The X-macro Init dispatcher allocates state generically + calls _Init
 // uniformly. Strategies that need cfg-derived seeding (MR, Momentum)
@@ -317,7 +317,7 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
 }
 
 //------------------------------------------------------------------------------
-// WRITE RATCHET TP — shared helper, no fee-floor
+// [SECTION]_[WRITE RATCHET TP — shared helper, no fee-floor]
 //------------------------------------------------------------------------------
 // Companion to Strategy_WriteRatchetSL, parallel channel for trailing TP.
 // LONG geometry: TP ratchets UP (FPN_Max wins) → locks in higher exit
@@ -326,7 +326,7 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
 // transitions and by future strategy-specific TP trailing.
 //
 // Returns true iff the write actually advanced ratchet_tp.
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
                                      Money proposed_tp) {

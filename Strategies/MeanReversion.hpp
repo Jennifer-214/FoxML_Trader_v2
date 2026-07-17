@@ -89,7 +89,7 @@ template <unsigned F> struct MeanReversionState {
 //======================================================================
 
 //------------------------------------------------------------------------------
-// INIT
+// [SECTION]_[INIT]
 //------------------------------------------------------------------------------
 // called once at warmup completion. computes initial buy conditions from
 // rolling stats and resets the regression feeder for P&L tracking in the active
@@ -536,7 +536,7 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
 }
 
 //------------------------------------------------------------------------------
-// EXIT ADJUST — sharded, ratchet_sl path
+// [SECTION]_[EXIT ADJUST — sharded, ratchet_sl path]
 //------------------------------------------------------------------------------
 // v5.4.0 Phase 2.2: sharded equivalent of MeanReversion_ExitAdjust above.
 // The legacy version writes pos->stop_loss_price + pos->take_profit_price,

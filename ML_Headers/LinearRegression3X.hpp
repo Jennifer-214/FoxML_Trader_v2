@@ -63,16 +63,20 @@ template <unsigned F> struct RegressionFeederX {
     int count;
 };
 
-//======================================================================================================
-// FEEDER PERSISTENCE DELEGATE  (v5.15.5.F.4d.1.E.1.2 — Step 2, D-305)
-//======================================================================================================
-// Field-by-field snapshot persistence for RegressionFeederX<F>, mirroring the ConfidenceScorer /
-// RegimeState delegates. Wire byte sequence IDENTICAL to the pre-registry hand-loop
-// (ShardedSnapshotPersist.hpp save block). price_samples is persisted with sizeof(FPN_Binary<F>)
-// (type-honest; the pre-registry loop wrote it as sizeof(Money) — byte-identical because both are
-// 16B __int128, but the field IS FPN_Binary<F> feature data, not Money — R1). All 3 fields persist.
-// H15: enrolled in CoreFrameworks/MetaRegistry.hpp. NEVER fwrite(&fx, sizeof(RegressionFeederX)) —
-// the blob carries 8B trailing pad (144B struct vs 136B wire): field-by-field only.
+//======================================================================
+// [REGISTRY]_[FOREACH_FEEDER_PERSIST_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[INVARIANT]_[[H9] [H15] [H21]]
+// [REFERENCE]_[DECISION]_[D-305]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[RegressionFeederX<F> snapshot persistence delegate — 3 field rows drive fwrite/fread/commit AUTOPOPULATE + the count-lock]
+// [COLUMN]_[name]_[RegressionFeederX<F> field persisted]
+// [COLUMN]_[type]_[element type for sizeof in fwrite/fread]
+// [COLUMN]_[n]_[element count — MAX_WINDOW for the ring, 1 for scalars]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_FEEDER_PERSIST_FIELD(X)         \
     X(price_samples, FPN_Binary<F>, MAX_WINDOW) \
     X(head,          int,           1)          \
@@ -115,6 +119,21 @@ constexpr int FOREACH_FEEDER_PERSIST_FIELD_COUNT = 0 FOREACH_FEEDER_PERSIST_FIEL
 static_assert(FOREACH_FEEDER_PERSIST_FIELD_COUNT == 3,
     "RegressionFeederX wire format = EXACTLY 3 persisted fields (price_samples[MAX_WINDOW] + "
     "head + count); a change requires a SHARDED_SNAPSHOT_VERSION bump + loader migration (H21).");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Field-by-field snapshot persistence for RegressionFeederX<F>, mirroring the ConfidenceScorer /
+// RegimeState delegates. Wire byte sequence IDENTICAL to the pre-registry hand-loop
+// (ShardedSnapshotPersist.hpp save block). price_samples is persisted with sizeof(FPN_Binary<F>)
+// (type-honest; the pre-registry loop wrote it as sizeof(Money) — byte-identical because both are
+// 16B __int128, but the field IS FPN_Binary<F> feature data, not Money — R1). All 3 fields persist.
+// H15: enrolled in CoreFrameworks/MetaRegistry.hpp. NEVER fwrite(&fx, sizeof(RegressionFeederX)) —
+// the blob carries 8B trailing pad (144B struct vs 136B wire): field-by-field only.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_FEEDER_PERSIST_FIELD]
+//======================================================================
 //======================================================================================================
 // RESULT STRUCT
 //======================================================================================================

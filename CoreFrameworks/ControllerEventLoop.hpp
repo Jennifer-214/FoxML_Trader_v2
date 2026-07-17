@@ -282,6 +282,13 @@ static_assert(sizeof(SlowPathTelemetry) == 64,
 // ~25 B used in 64 B cache line — generous padding kept intentional for
 // future flag additions + crosstalk prevention.
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[64B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[SlowPathTelemetry]
 //======================================================================
 
@@ -836,6 +843,13 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 // helpers + alignas(64) discipline; shoehorning them into a uniform
 // registry shape would lose the type safety.
 //======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[9856B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[154]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[NodeContextDisplayMeta]
 //======================================================================
 
@@ -1126,12 +1140,12 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
 }
 
 //------------------------------------------------------------------------------
-// INIT LEGACY — convenience for tests
+// [SECTION]_[INIT LEGACY — convenience for tests]
 //------------------------------------------------------------------------------
 // test helper that creates an OMS + wires it into the EventLoopState in one
 // call. the caller provides the OMS on the stack alongside the state. uses a
 // default-constructed (zeroed) ExchangeAdapter and live_trading=0 (paper mode).
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
                                        OrderManagerState<F>* oms,
@@ -1145,7 +1159,7 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
 }
 
 //------------------------------------------------------------------------------
-// FREE — v5.1.0
+// [SECTION]_[FREE — v5.1.0]
 //------------------------------------------------------------------------------
 // Free heap-allocated NodeSlowState pointers. Idempotent: safe to call
 // twice (NULLs the pointer). Tests + engine that init via
@@ -1438,7 +1452,7 @@ inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
 //------------------------------------------------------------------------------
 
 //------------------------------------------------------------------------------
-// ATTACH TRADE LOG — phase 08
+// [SECTION]_[ATTACH TRADE LOG — phase 08]
 //------------------------------------------------------------------------------
 // install an optional CSV trade log. pass nullptr to disable. ownership stays
 // with the caller (the engine main usually); EventLoop never opens or closes
@@ -1447,7 +1461,7 @@ inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
 // pitfall P8.2: only the controller core writes to this log. don't share the
 // pointer with GUI or other threads. if the GUI wants to display trades it
 // must read the CSV file from disk, never call the recorder directly.
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void EventLoopState_AttachTradeLog(EventLoopState<F>* state,
                                           ShardedTradeLog* log) {
@@ -1458,13 +1472,13 @@ inline void EventLoopState_AttachTradeLog(EventLoopState<F>* state,
 }
 
 //------------------------------------------------------------------------------
-// ATTACH OMS — phase 03 chunk 1B
+// [SECTION]_[ATTACH OMS — phase 03 chunk 1B]
 //------------------------------------------------------------------------------
 // Replace the OMS pointer. Mainly useful for re-wiring after Init if the
 // OMS was constructed separately (e.g. EngineSharded.hpp pre-1B callers).
 // EventLoopState_Init already wires the OMS pointer, so most call sites
 // don't need this anymore.
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void EventLoopState_AttachOms(EventLoopState<F>* state,
                                       OrderManagerState<F>* oms) {
@@ -1472,7 +1486,7 @@ inline void EventLoopState_AttachOms(EventLoopState<F>* state,
 }
 
 //------------------------------------------------------------------------------
-// BANK ACCESSORS — phase 03 chunk 1B
+// [SECTION]_[BANK ACCESSORS — phase 03 chunk 1B]
 //------------------------------------------------------------------------------
 // Forwarding accessors for the financial fields. All forward to state->oms->
 // since the bank state now lives in OrderManagerState.
@@ -1541,7 +1555,7 @@ inline ShardedTradeLog* EventLoopState_TradeLog(const EventLoopState<F>* state) 
 }
 
 //------------------------------------------------------------------------------
-// SET INTENDED PARAMS
+// [SECTION]_[SET INTENDED PARAMS]
 //------------------------------------------------------------------------------
 // for phase 04, the controller updates the intended TP/SL/qty for a core
 // directly through this helper. phase 05 replaces it with an atomic
@@ -1549,7 +1563,7 @@ inline ShardedTradeLog* EventLoopState_TradeLog(const EventLoopState<F>* state) 
 // it's just a write to the controller-side struct, no synchronization needed
 // because the execution core never reads from NodeContext (only from its own
 // gate_params, which we DO NOT touch from this function — see P4.7).
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
                                               FPN_Binary<F> tp, FPN_Binary<F> sl, Money qty) {
@@ -3583,7 +3597,7 @@ inline void EventLoop_KillSwitchTrip(EventLoopState<F>* state) {
 }
 
 //------------------------------------------------------------------------------
-// KILL SWITCH EVALUATE
+// [SECTION]_[KILL SWITCH EVALUATE]
 //------------------------------------------------------------------------------
 // returns 1 if the switch newly tripped on this call, 0 otherwise. always safe
 // to call. evaluates two conditions:
@@ -3916,7 +3930,7 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
 }
 
 //------------------------------------------------------------------------------
-// POST-FLATTEN RECOVERY EXPIRY (v5.12.1.A.3)
+// [SECTION]_[POST-FLATTEN RECOVERY EXPIRY (v5.12.1.A.3)]
 //------------------------------------------------------------------------------
 // CheckWsStaleness sets oms->recovery_until_us when it fires a flatten.
 // Once the deadline elapses, this helper auto-clears flatten_pending +
@@ -4183,14 +4197,14 @@ inline int EventLoop_Unpause(EventLoopState<F>* state) {
 }
 
 //------------------------------------------------------------------------------
-// SLOW PATH HOOK
+// [SECTION]_[SLOW PATH HOOK]
 //------------------------------------------------------------------------------
 // phase 04 doesn't run the existing PortfolioController_SlowPath. that wires
 // in via phase 13's migration flag, where the per-core mode bypasses the
 // existing slow path entirely (events ARE the slow path now) and the
 // legacy mode keeps the old behavior. for now this hook is a no-op and the
 // run-loop is purely event-driven.
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline int EventLoop_SlowPath(EventLoopState<F>* state) {
     (void)state;
@@ -4198,7 +4212,7 @@ inline int EventLoop_SlowPath(EventLoopState<F>* state) {
 }
 
 //------------------------------------------------------------------------------
-// RUN CONTROLLER
+// [SECTION]_[RUN CONTROLLER]
 //------------------------------------------------------------------------------
 // the controller core thread main loop. spins draining events with a small
 // adaptive backoff: after several empty polls, sleep briefly to avoid burning
