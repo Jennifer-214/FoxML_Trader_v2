@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FLOW FEATURES — Wave 1 of Track D, post-Track-E]
+// [FILE]_[ML_Headers/FlowFeatures.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[order-flow feature state (Track D) — book-imbalance history, signed-volume EWMAs, large-trade + spread z-score windows; all pushed at slow-path cadence, feeding the regime feature pack]
+// [CONTAINS]
+//   - [STRUCT]_[BookImbalanceHistory]   (+ [FUNCTION]_[BookImbHistory_Push] family: Init/MeanLong/MeanShortFast/Last/MeanShort)
+//   - [STRUCT]_[FlowState]              (+ [FUNCTION]_[FlowState_Push] family: Init)
+//   - [STRUCT]_[LargeTradeState]        (+ [FUNCTION]_[LargeTradeState_Push] family: Init/ZScore/Last)
+//   - [STRUCT]_[SpreadState]            (+ [FUNCTION]_[SpreadState_Push] family: Init/ZScore/Last)
 //======================================================================================================
 // Three new state structs feeding the v4.5 feature pack expansion:
 //
@@ -45,33 +54,23 @@
 #include <cstdint>
 #include <cstring>
 
-//======================================================================================================
-// [BOOK IMBALANCE HISTORY — D.1]
-//======================================================================================================
-// Fixed-size ring buffer of recent book_imbalance samples. Window W
-// chosen at instantiation (default 1024 = ~17 minutes at slow_path_-
-// interval=100, ~1 sample/sec under a busy market).
-//
-// Maintains a running sum so MeanLong is O(1). MeanShort iterates the
-// last K samples (K << W) — O(K) per call, called once per slow path.
-//======================================================================================================
-// v5.15.5.D.A/B — alignas(64) + HOT-first reorg per cache-layout-discipline-
-// for-hot-side-structs.md Rule 4. HOT cluster (sum + short_sum + count + head)
-// at offset 0..55 = 1 cache line minus 8 B; COLD samples[W] at offset 56. The
-// 8 B trailing pad from alignas(64) is structural minimum (24,632 natural;
-// mod 64 = 24; next multiple = 24,640).
-//
-// v5.15.5.D.B — `short_sum` maintains a running sum over the SHORT_K most
-// recent samples. The pre-.D.B BookImbHistory_MeanShort(k=64) did an O(K)
-// sequential walk every slow-path cycle (~24 cache lines / read in
-// RegimeDetector). With short_sum, MeanShortFast reads it in O(1). Pattern:
-// DESIGN_SPECS/sliding-window-online-statistics-pattern.md Approach 3
-// (sliding-window incremental) Multi-window variant; 2nd canonical
-// application after v5.14.11.A RidgeBlender correlation matrix.
+//======================================================================
+// [STRUCT]_[BookImbalanceHistory]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DATA_ORIENTED_DESIGN]]
+// [SCOPE]_[NODE]
+// [INSTANTIATION]_[[1024]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ring of book-imbalance samples (D.1) — running long + SHORT_K sums make MeanLong + MeanShortFast O(1); HOT scalars lead, COLD ring follows]
+// [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern]
+// [REFERENCE]_[INVARIANT]_[[H4] [H6]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 1024>
 struct alignas(64) BookImbalanceHistory {
     // v5.15.5.D.B — Compile-time-fixed short-window size. Production caller
-    // is RegimeDetector @ Strategies/RegimeDetector.hpp:392 (uses MeanShortFast
+    // is RegimeDetector @ Strategies/RegimeDetector.hpp (uses MeanShortFast
     // = short_sum / effective_k, equivalent to MeanShort(64) bytewise).
     // Tests still call MeanShort(s, k) with k=2 — that path keeps the O(K)
     // walk for non-canonical k.
@@ -82,33 +81,80 @@ struct alignas(64) BookImbalanceHistory {
     FPN_Binary<F> short_sum;    // v5.15.5.D.B — running sum over last SHORT_K samples
     int    count;        // number of valid samples in [0, W]
     int    head;         // next write position
-    // COLD cluster (offset 56; samples[head] touched 1× per Push;
+    // COLD cluster (samples[head] touched 1× per Push;
     // samples[head - SHORT_K] touched 1× per Push for short-window eviction
     // — typically L1-warm since K=64 cycles ago was visited recently)
     FPN_Binary<F> samples[W];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Fixed-size ring buffer of recent book_imbalance samples. Window W
+// chosen at instantiation (default 1024 = ~17 minutes at slow_path_-
+// interval=100, ~1 sample/sec under a busy market).
+//
+// Maintains a running sum so MeanLong is O(1). MeanShort iterates the
+// last K samples (K << W) — O(K) per call, called once per slow path.
+//======================================================================
+// [COMMENT]_[layout — v5.15.5.D.A/B]
+//----------------------------------------------------------------------
+// v5.15.5.D.A/B — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. HOT cluster (sum + short_sum + count + head)
+// leads the struct; COLD samples[W] follows (exact offsets + sizeof pinned by
+// the layout-lock asserts below — the mechanical SSoT).
+//
+// v5.15.5.D.B — `short_sum` maintains a running sum over the SHORT_K most
+// recent samples. The pre-.D.B BookImbHistory_MeanShort(k=64) did an O(K)
+// sequential walk every slow-path cycle (~24 cache lines / read in
+// RegimeDetector). With short_sum, MeanShortFast reads it in O(1). Pattern:
+// DESIGN_SPECS/sliding-window-online-statistics-pattern.md Approach 3
+// (sliding-window incremental) Multi-window variant; 2nd canonical
+// application after v5.14.11.A RidgeBlender correlation matrix.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16448B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[257]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[BookImbalanceHistory]
+//======================================================================
 
-// v5.15.5.D.A/B — Layout lock for the canonical production instantiation.
-// 56 B HOT scalars + 24,576 B COLD samples + 8 B alignas(64) trailing pad
-// = 24,640 B = 385 cache lines exact. The 8 B trailing pad is structural
-// minimum given alignas(64) requirement; rigorously verified — see plan
-// 2026-05-13-v5.15.5.D-flowfeatures-cache-layout-sweep.md padding analysis.
+// v5.15.5.D.A/B — Layout lock for the canonical production instantiation;
+// padding analysis rigorously verified — see plan
+// 2026-05-13-v5.15.5.D-flowfeatures-cache-layout-sweep.md.
 // Typedef wraps the template instantiation so the comma in <64, 1024> isn't
 // parsed as a macro-arg separator inside offsetof().
 using BookImbHistDefaultT = BookImbalanceHistory<64, 1024>;
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(BookImbalanceHistory<64,1024>) == 16448]
 static_assert(sizeof(BookImbHistDefaultT) == 16448,
     "BookImbalanceHistory<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN_Binary, was 24,640).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(sum) == 0 — HOT cluster leads]
 static_assert(offsetof(BookImbHistDefaultT, sum) == 0,
     "BookImbalanceHistory HOT scalar `sum` MUST sit at offset 0.");
 static_assert(offsetof(BookImbHistDefaultT, short_sum) == 16,
     "BookImbalanceHistory HOT scalar `short_sum` MUST sit at offset 16 "
     "(immediately after sum in HOT cluster; Ship-A 16B FPN_Binary, was 24). Pattern: sliding-window-online-"
     "statistics-pattern.md Multi-window variant.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(samples) == 48 — COLD ring after the HOT cluster]
 static_assert(offsetof(BookImbHistDefaultT, samples) == 48,
     "BookImbalanceHistory COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN_Binary, was 56).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(BookImbalanceHistory) == 64]
 static_assert(alignof(BookImbHistDefaultT) == 64,
     "BookImbalanceHistory MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[BookImbHistory_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[dual-window ring push — evicts long (W) + short (SHORT_K) sums before overwrite; Init/MeanLong/MeanShortFast/Last/MeanShort ride in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 1024>
 static inline void BookImbHistory_Init(BookImbalanceHistory<F, W> *s) {
     memset(s, 0, sizeof(*s));
@@ -197,10 +243,39 @@ static inline FPN_Binary<F> BookImbHistory_MeanShort(const BookImbalanceHistory<
     }
     return FPN_DivNoAssert(acc, FPN_FromDouble<F>((double)k));
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BookImbHistory_Push]
+//======================================================================
 
-//======================================================================================================
-// [FLOW STATE — D.2]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[FlowState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [DATA_ORIENTED_DESIGN] [DETERMINISM]]
+// [SCOPE]_[NODE]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[signed-volume EWMAs at 10s / 1m / 5m half-lives (D.2) — continuous-time decay, cadence-independent; whole struct is one HOT cache line]
+// [REFERENCE]_[INVARIANT]_[H6]
+//======================================================================
+// [CODE]
+//======================================================================
+// v5.15.5.D.A — alignas(64) ensures FlowState's 32 B never straddles two
+// cache lines. All 4 fields are HOT (Push and read both touch all 4 every
+// slow-path cycle); no HOT/WARM/COLD tier needed (whole struct fits in 1
+// cache line). Trailing 32 B pad is structural minimum given alignas(64)
+// requirement (32 B natural; pad to 64).
+struct alignas(64) FlowState {
+    double ewma_10s;     // signed-volume EWMA, half-life 10s
+    double ewma_1m;      // half-life 60s
+    double ewma_5m;      // half-life 300s
+    uint64_t last_us;    // timestamp of last push (0 = no prior)
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Three EWMAs of signed volume at half-lives 10s / 1min / 5min. Each
 // push:
 //   1. dt = (timestamp_us - last_us) / 1e6  (seconds since last push)
@@ -216,27 +291,37 @@ static inline FPN_Binary<F> BookImbHistory_MeanShort(const BookImbalanceHistory<
 // it's cadence-independent — pushing every slow-path firing (variable
 // inter-tick time) produces the same approximate continuous EWMA as
 // pushing every wall-clock second would.
-//======================================================================================================
-// v5.15.5.D.A — alignas(64) ensures FlowState's 32 B never straddles two
-// cache lines. All 4 fields are HOT (Push and read both touch all 4 every
-// slow-path cycle); no HOT/WARM/COLD tier needed (whole struct fits in 1
-// cache line). Trailing 32 B pad is structural minimum given alignas(64)
-// requirement (32 B natural; pad to 64).
-struct alignas(64) FlowState {
-    double ewma_10s;     // signed-volume EWMA, half-life 10s
-    double ewma_1m;      // half-life 60s
-    double ewma_5m;      // half-life 300s
-    uint64_t last_us;    // timestamp of last push (0 = no prior)
-};
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[64B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[FlowState]
+//======================================================================
 
 // v5.15.5.D.A — Layout lock for FlowState.
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(FlowState) == 64]
 static_assert(sizeof(FlowState) == 64,
     "FlowState sizeof MUST be 64 B (1 cache line).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(ewma_10s) == 0]
 static_assert(offsetof(FlowState, ewma_10s) == 0,
     "FlowState fields MUST sit at offset 0.");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(FlowState) == 64]
 static_assert(alignof(FlowState) == 64,
     "FlowState MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[FlowState_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[EWMA decay push — dt-scaled exp decay through FPN_Exp for bytewise determinism; first-push seeds, non-advancing timestamps accumulate; Init rides in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void FlowState_Init(FlowState *s) {
     s->ewma_10s = 0.0;
     s->ewma_1m  = 0.0;
@@ -286,23 +371,24 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
     s->ewma_5m  = s->ewma_5m  * decay_5m  + signed_volume;
     s->last_us = timestamp_us;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FlowState_Push]
+//======================================================================
 
-//======================================================================================================
-// [LARGE TRADE STATE — D.4]
-//======================================================================================================
-// Ring buffer of recent trade sizes. Maintains running sum + sum_sq for
-// O(1) mean + variance. Z-score of a current trade size: (size - mean) /
-// stddev. Output is double (matches RegimeSignals.large_trade_z's type
-// to mirror tick_rate_z's pattern).
-//
-// Window W default 1024 ≈ 17 minutes at slow_path=100 cadence under a
-// busy market. Same W as BookImbalanceHistory for symmetry.
-//======================================================================================================
-// v5.15.5.D.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
-// for-hot-side-structs.md Rule 4. HOT cluster (sum + sum_sq + count + head)
-// sits at offset 0..55 = 1 cache line minus 8 B; COLD sizes[W] follows at
-// offset 56. The 8 B trailing pad from alignas(64) is structural minimum
-// (24,632 natural; mod 64 = 24; next multiple = 24,640).
+//======================================================================
+// [STRUCT]_[LargeTradeState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DATA_ORIENTED_DESIGN]]
+// [SCOPE]_[NODE]
+// [INSTANTIATION]_[[1024]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ring of recent trade sizes (D.4) — running sum + sum_sq give O(1) mean/variance for the large-trade z-score; HOT scalars lead, COLD ring follows]
+// [REFERENCE]_[INVARIANT]_[[H4] [H6]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 1024>
 struct alignas(64) LargeTradeState {
     // HOT cluster (offset 0; touched every slow-path cycle by Push + read fns)
@@ -310,25 +396,65 @@ struct alignas(64) LargeTradeState {
     FPN_Binary<F> sum_sq;       // running sum of squares
     int    count;
     int    head;
-    // COLD cluster (offset 56; sizes[head] touched 1× per Push; ZScore is
+    // COLD cluster (sizes[head] touched 1× per Push; ZScore is
     // already O(1) using running sum + sum_sq, no walk)
     FPN_Binary<F> sizes[W];     // ring of recent sizes
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Ring buffer of recent trade sizes. Maintains running sum + sum_sq for
+// O(1) mean + variance. Z-score of a current trade size: (size - mean) /
+// stddev. Output is double (matches RegimeSignals.large_trade_z's type
+// to mirror tick_rate_z's pattern).
+//
+// Window W default 1024 ≈ 17 minutes at slow_path=100 cadence under a
+// busy market. Same W as BookImbalanceHistory for symmetry.
+//======================================================================
+// [COMMENT]_[layout — v5.15.5.D.A]
+//----------------------------------------------------------------------
+// v5.15.5.D.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. HOT cluster (sum + sum_sq + count + head)
+// leads the struct; COLD sizes[W] follows (exact offsets + sizeof pinned by
+// the layout-lock asserts below — the mechanical SSoT).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16448B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[257]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[LargeTradeState]
+//======================================================================
 
-// v5.15.5.D.A — Layout lock for LargeTradeState<64, 1024>.
-// 56 B HOT scalars + 24,576 B COLD sizes + 8 B alignas(64) trailing pad
-// = 24,640 B = 385 cache lines exact. Typedef wraps template instantiation
-// for offsetof macro-arg parsing.
+// v5.15.5.D.A — Layout lock for LargeTradeState<64, 1024>. Typedef wraps
+// template instantiation for offsetof macro-arg parsing.
 using LargeTradeStateDefaultT = LargeTradeState<64, 1024>;
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(LargeTradeState<64,1024>) == 16448]
 static_assert(sizeof(LargeTradeStateDefaultT) == 16448,
     "LargeTradeState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN_Binary, was 24,640).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(sum) == 0 — HOT cluster leads]
 static_assert(offsetof(LargeTradeStateDefaultT, sum) == 0,
     "LargeTradeState HOT scalar `sum` MUST sit at offset 0.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(sizes) == 48 — COLD ring after the HOT cluster]
 static_assert(offsetof(LargeTradeStateDefaultT, sizes) == 48,
     "LargeTradeState COLD `sizes` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN_Binary, was 56).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(LargeTradeState) == 64]
 static_assert(alignof(LargeTradeStateDefaultT) == 64,
     "LargeTradeState MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[LargeTradeState_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ring push maintaining sum + sum_sq (evict-before-overwrite); Init/ZScore/Last ride in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 1024>
 static inline void LargeTradeState_Init(LargeTradeState<F, W> *s) {
     memset(s, 0, sizeof(*s));
@@ -384,10 +510,39 @@ static inline FPN_Binary<F> LargeTradeState_Last(const LargeTradeState<F, W> *s)
     int idx = (s->head - 1 + (int)W) % (int)W;
     return s->sizes[idx];
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[LargeTradeState_Push]
+//======================================================================
 
-//======================================================================================================
-// [SPREAD STATE — D.3]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[SpreadState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DATA_ORIENTED_DESIGN]]
+// [SCOPE]_[NODE]
+// [INSTANTIATION]_[[1024]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ring of bid-ask spread samples (D.3) — same running-sum shape as LargeTradeState, kept separate for call-site clarity + future divergence; feeds FEAT_SPREAD_ZSCORE]
+// [REFERENCE]_[INVARIANT]_[[H4] [H6]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F, unsigned W = 1024>
+struct alignas(64) SpreadState {
+    // HOT cluster (offset 0; touched every slow-path cycle)
+    FPN_Binary<F> sum;
+    FPN_Binary<F> sum_sq;
+    int    count;
+    int    head;
+    // COLD cluster
+    FPN_Binary<F> samples[W];
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Rolling window of recent bid-ask spread samples. Same shape as
 // LargeTradeState (running sum + sum_sq for O(1) mean + variance), kept
 // as a separate struct for clarity at call sites and future divergence
@@ -399,33 +554,48 @@ static inline FPN_Binary<F> LargeTradeState_Last(const LargeTradeState<F, W> *s)
 // 10000 (computed inline at Regime_ComputeSignals time, no state needed).
 // FEAT_SPREAD_ZSCORE is the z-score of current spread vs this state's
 // distribution.
-//======================================================================================================
+//======================================================================
+// [COMMENT]_[layout — v5.15.5.D.A]
+//----------------------------------------------------------------------
 // v5.15.5.D.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
 // for-hot-side-structs.md Rule 4. Identical shape to LargeTradeState; HOT
-// cluster (sum + sum_sq + count + head) at offset 0..55; COLD samples[W]
-// at offset 56. The 8 B trailing pad is structural minimum.
-template <unsigned F, unsigned W = 1024>
-struct alignas(64) SpreadState {
-    // HOT cluster (offset 0; touched every slow-path cycle)
-    FPN_Binary<F> sum;
-    FPN_Binary<F> sum_sq;
-    int    count;
-    int    head;
-    // COLD cluster (offset 56)
-    FPN_Binary<F> samples[W];
-};
+// cluster (sum + sum_sq + count + head) leads, COLD samples[W] follows
+// (exact offsets + sizeof pinned by the layout-lock asserts below).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16448B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[257]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[SpreadState]
+//======================================================================
 
 // v5.15.5.D.A — Layout lock for SpreadState<64, 1024>.
 using SpreadStateDefaultT = SpreadState<64, 1024>;
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(SpreadState<64,1024>) == 16448]
 static_assert(sizeof(SpreadStateDefaultT) == 16448,
     "SpreadState<64,1024> sizeof MUST be 16,448 B (257 cache lines; Ship-A 16B FPN_Binary, was 24,640).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(sum) == 0 — HOT cluster leads]
 static_assert(offsetof(SpreadStateDefaultT, sum) == 0,
     "SpreadState HOT scalar `sum` MUST sit at offset 0.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(samples) == 48 — COLD ring after the HOT cluster]
 static_assert(offsetof(SpreadStateDefaultT, samples) == 48,
     "SpreadState COLD `samples` MUST sit at offset 48 (after HOT cluster; Ship-A 16B FPN_Binary, was 56).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(SpreadState) == 64]
 static_assert(alignof(SpreadStateDefaultT) == 64,
     "SpreadState MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[SpreadState_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ring push maintaining sum + sum_sq (evict-before-overwrite); Init/ZScore/Last ride in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 1024>
 static inline void SpreadState_Init(SpreadState<F, W> *s) {
     memset(s, 0, sizeof(*s));
@@ -475,5 +645,10 @@ static inline FPN_Binary<F> SpreadState_Last(const SpreadState<F, W> *s) {
     int idx = (s->head - 1 + (int)W) % (int)W;
     return s->samples[idx];
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SpreadState_Push]
+//======================================================================
 
 #endif // FLOW_FEATURES_HPP
