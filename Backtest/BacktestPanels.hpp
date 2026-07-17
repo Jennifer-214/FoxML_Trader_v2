@@ -2,15 +2,20 @@
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 // See LICENSE file in the project root for full license text.
 
-//======================================================================================================
-// [BACKTEST PANELS]
-//======================================================================================================
-// Phase 1 panels: Data Browser, Run Control, Results
-// follows existing panel pattern from DashboardPanels.hpp:
+//======================================================================
+// [FILE]_[Backtest/BacktestPanels.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the foxml_suite backtest GUI — Data Browser, Run Control, Results, Comparison, Past Runs, Optimizer, and the big Training panel (WF / held-out / multi-horizon train+stamp); each panel = a state struct + worker threads + an ImGui render fn, and the GUI only ever reads display structs, never calls engine fns directly]
+//======================================================================
+// follows the panel pattern from DashboardPanels.hpp:
 //   - each panel is a standalone ImGui window (dockable, rearrangeable)
 //   - state structs are separate from render functions
 //   - GUI never calls engine functions directly (reads display structs only)
-//======================================================================================================
+//   - long-running work (backtest / WF / training) runs on a pthread worker;
+//     the render fn reads a thread-safe snapshot when the worker finishes
+//======================================================================
 #ifndef BACKTEST_PANELS_HPP
 #define BACKTEST_PANELS_HPP
 
@@ -30,13 +35,20 @@
                           // internally) cause OpenMP team collisions in
                           // RowsWiseBuildHistKernel → segfault.
 
-//======================================================================================================
-// [DATA PANEL STATE]
-//======================================================================================================
 // scan cap for the Data panel — must be ≥ MAX_DATA_FILES so the GUI doesn't
 // silently truncate before the run_config buffer fills. paired with Limits.hpp.
 #define DATA_MAX_FILES 2048
 
+//======================================================================
+// [STRUCT]_[DataPanelState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[state for the Data Browser panel — the recursive CSV scan results + per-file selection]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct DataPanelState {
     char data_dir[256];
     // discovered files
@@ -48,12 +60,44 @@ struct DataPanelState {
     // scan state
     bool scanned;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[DataPanelState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[DataPanel_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the Data Browser state with the default data dir]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void DataPanel_Init(DataPanelState *state) {
     memset(state, 0, sizeof(*state));
     strncpy(state->data_dir, "data/", sizeof(state->data_dir) - 1);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[DataPanel_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[DataPanel_Scan]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[recursively scan data_dir for .csv files, filename-sorted (chronological for YYYY-MM-DD)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void DataPanel_Scan(DataPanelState *state) {
     state->file_count = 0;
     state->scanned = true;
@@ -101,10 +145,19 @@ static inline void DataPanel_Scan(DataPanelState *state) {
                 memcpy(state->files[j], tmp, 256);
             }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[DataPanel_Scan]
+//======================================================================
 
-//======================================================================================================
-// [SAMPLES SNAPSHOT — thread-safe display struct]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[SamplesSnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[thread-safe label-distribution display struct — the worker writes it once post-run, the GUI reads it when running==0 (kills the labels[] realloc-race)]
+//======================================================================
 // Worker thread writes to this ONCE at end of Backtest_Run (after the label
 // post-pass populates results->labels[]). GUI thread reads from this when
 // rendering — never iterates results->labels[] directly, eliminating the
@@ -117,6 +170,9 @@ static inline void DataPanel_Scan(DataPanelState *state) {
 // All three label-kind branches (binary/multiclass/regression) populate
 // the appropriate subset; the rest stay zero. label_kind tells the GUI
 // which subset to display.
+//======================================================================
+// [CODE]
+//======================================================================
 struct SamplesSnapshot {
     int sample_count;        // 0 = no completed run yet
     int label_type;          // LABEL_* id used during the run
@@ -137,10 +193,24 @@ struct SamplesSnapshot {
     float lmean;
     float lstddev;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[SamplesSnapshot]
+//======================================================================
 
-//======================================================================================================
-// [RUN CONTROL STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[RunControlState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[state for the Run Control panel — the worker thread, run config + results, snapshot, and candle feed]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct RunControlState {
     volatile int running;
     volatile int progress_pct;
@@ -154,18 +224,50 @@ struct RunControlState {
     SamplesSnapshot stats_snapshot; // distribution stats — see comment above struct
     char config_path[256];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[RunControlState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[RunControl_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init Run Control state + allocate the BacktestResults buffers]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void RunControl_Init(RunControlState *state) {
     memset(state, 0, sizeof(*state));
     strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
     BacktestResults_Init(&state->results);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RunControl_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[SamplesSnapshot_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[compute the kind-aware label distribution into a SamplesSnapshot — worker-thread only, after labels are populated and before running=0]
+//======================================================================
 // Compute distribution stats from results->labels[] into a SamplesSnapshot.
 // MUST only be called when no other thread is writing to results->labels —
 // i.e. by the worker thread AFTER Backtest_Run has populated labels in the
 // post-pass, BEFORE running=0 is set. The GUI thread reads the snapshot
 // only when running==0, giving a safe happens-before relationship.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
                                              const BacktestResults *r,
                                              int label_type) {
@@ -211,12 +313,27 @@ static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SamplesSnapshot_Compute]
+//======================================================================
 
 // worker thread function
 struct BacktestWorkerArgs {
     RunControlState *state;
 };
 
+//======================================================================
+// [FUNCTION]_[backtest_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: run a backtest, then compute the samples snapshot]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *backtest_worker_fn(void *arg) {
     BacktestWorkerArgs *args = (BacktestWorkerArgs *)arg;
     RunControlState *state = args->state;
@@ -236,6 +353,11 @@ static inline void *backtest_worker_fn(void *arg) {
     state->running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[backtest_worker_fn]
+//======================================================================
 
 // v5.11.24 — multi-horizon Collect Features. Mirrors Train Multi-Horizon's
 // pattern: snap horizons at click time, collect features ONCE, then loop
@@ -263,6 +385,16 @@ struct CollectMultiHorizonWorkerArgs {
     float snap_sl_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
 
+//======================================================================
+// [FUNCTION]_[collect_multi_horizon_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: collect features once for a multi-horizon training run]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *collect_multi_horizon_worker_fn(void *arg) {
     auto *args = (CollectMultiHorizonWorkerArgs *)arg;
     RunControlState *rc = args->run_control;
@@ -331,7 +463,22 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
     rc->running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[collect_multi_horizon_worker_fn]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[RunControl_Start]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[spawn the backtest worker thread for the selected files + config]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void RunControl_Start(RunControlState *state, DataPanelState *data) {
     if (state->running) return;
 
@@ -368,10 +515,22 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
     pthread_create(&state->worker_tid, NULL, backtest_worker_fn, args);
     pthread_detach(state->worker_tid);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RunControl_Start]
+//======================================================================
 
-//======================================================================================================
-// [PANEL: DATA BROWSER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_DataBrowser]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Data Browser panel — the discovered-file list + selection]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_DataBrowser(DataPanelState *state) {
     ImGui::Begin("Data");
 
@@ -467,10 +626,22 @@ static inline void GUI_Panel_DataBrowser(DataPanelState *state) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_DataBrowser]
+//======================================================================
 
-//======================================================================================================
-// [PANEL: RUN CONTROL]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_RunControl]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Run Control panel — start/cancel, progress, and the post-run snapshot stats]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *data) {
     ImGui::Begin("Run Control");
 
@@ -511,15 +682,42 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_RunControl]
+//======================================================================
 
-//======================================================================================================
-// [PANEL: RESULTS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ResultsPnlColor]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[pick a P&L cell color from the value sign]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline ImVec4 ResultsPnlColor(double v) {
     return v >= 0.0 ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)    // foxml green
                     : ImVec4(0.82f, 0.47f, 0.47f, 1.0f);    // foxml red
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ResultsPnlColor]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Results]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Results panel — the backtest stats table + equity curve]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Results(const BacktestResults *results) {
     ImGui::Begin("Results");
 
@@ -610,12 +808,24 @@ static inline void GUI_Panel_Results(const BacktestResults *results) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Results]
+//======================================================================
 
-//======================================================================================================
-// [COMPARISON STATE]
-//======================================================================================================
 #define COMPARISON_MAX_RUNS 8
 
+//======================================================================
+// [STRUCT]_[ComparisonState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[state for the Comparison panel — saved run slots for side-by-side compare]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct ComparisonState {
     BacktestStats stats[COMPARISON_MAX_RUNS];
     double *equity_curves[COMPARISON_MAX_RUNS];   // dynamic per-run snapshots
@@ -623,6 +833,13 @@ struct ComparisonState {
     char    labels[COMPARISON_MAX_RUNS][64];
     int run_count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[ComparisonState]
+//======================================================================
 
 //==========================================================================
 // PAST RUNS VIEWER (v4.3) — scan models/{run_name}/ subdirs, parse the
@@ -633,6 +850,16 @@ struct ComparisonState {
 //==========================================================================
 #define PAST_RUNS_MAX 64
 
+//======================================================================
+// [STRUCT]_[PastRun]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one loaded past-run record — kind-aware metrics + fingerprint + horizon metadata]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct PastRun {
     char dir_name[128];          // run directory name under models/
     // from summary.txt
@@ -704,7 +931,24 @@ struct PastRun {
     // gauge training data scale at a glance.
     int    n_train_samples;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PastRun]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[PastRunsState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[state for the Past Runs panel — the scanned run-directory list + selection]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct PastRunsState {
     PastRun runs[PAST_RUNS_MAX];
     int     count;
@@ -729,7 +973,24 @@ struct PastRunsState {
     // single modal renders at window scope after EndTabBar.
     int     pending_delete_idx;  // -1 = no delete pending
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PastRunsState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PastRuns_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the Past Runs state]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void PastRuns_Init(PastRunsState *s) {
     memset(s, 0, sizeof(*s));
     s->selected = -1;
@@ -741,9 +1002,24 @@ static inline void PastRuns_Init(PastRunsState *s) {
     s->compare_candidate_idx = -1;
     s->compare_modal_open = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRuns_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[parse_kv_line]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[parse one key=value line from a run's metadata file]
+//======================================================================
 // helper: parse a key=value line into a (key, value) pair via simple split.
 // returns 1 on success, 0 if line doesn't contain '='.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int parse_kv_line(const char *line, char *key, size_t key_size,
                                   char *val, size_t val_size) {
     const char *eq = strchr(line, ':');
@@ -768,8 +1044,23 @@ static inline int parse_kv_line(const char *line, char *key, size_t key_size,
                          val[vlen-1] == '%')) val[--vlen] = '\0';
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[parse_kv_line]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PastRuns_LoadOne]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[load one past-run record from its run directory]
+//======================================================================
 // scan one run directory's metadata files
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
     memset(r, 0, sizeof(*r));
     const char *base = strrchr(run_dir, '/');
@@ -857,12 +1148,27 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRuns_LoadOne]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[past_runs_unlink_cb]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[nftw unlink callback for recursive run-directory deletion]
+//======================================================================
 // v4.3 — scan one directory for run subdirs containing summary.txt. Used
 // recursively for the two-level models/{kind}/{run_name}/ layout AND for
 // backward compat with flat models/{run_name}/ runs from before v4.3.
 // v5.11.51 — recursive directory delete via nftw. Used by Past Runs
 // "Delete" button. Returns 0 on success, -1 on any error.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int past_runs_unlink_cb(const char *fpath, const struct stat *sb,
                                           int typeflag, struct FTW *ftwbuf) {
     (void)sb; (void)ftwbuf;
@@ -871,18 +1177,48 @@ static inline int past_runs_unlink_cb(const char *fpath, const struct stat *sb,
     }
     return unlink(fpath);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[past_runs_unlink_cb]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PastRuns_DeleteDir]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[recursively delete a run directory via nftw]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int PastRuns_DeleteDir(const char *path) {
     // FTW_DEPTH = post-order traversal so files deleted before parent dir
     // FTW_PHYS = don't follow symlinks (avoid accidentally walking into other
     //            dirs if operator has bizarre symlink configuration)
     return nftw(path, past_runs_unlink_cb, 16, FTW_DEPTH | FTW_PHYS);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRuns_DeleteDir]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PastRun_ParseHorizon]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[parse a horizon prefix + label out of a run-directory name]
+//======================================================================
 // v5.11.51 — parse "<prefix>_horizon_<N>" from dir_name. Returns 1 if it
 // matches the multi-horizon pattern (sets out_prefix + out_horizon_ticks).
 // Returns 0 if not a multi-horizon dir (out_prefix gets dir_name copy,
 // out_horizon_ticks = 0).
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int PastRun_ParseHorizon(const char *dir_name, char *out_prefix,
                                           size_t out_prefix_size, int *out_horizon_ticks) {
     *out_horizon_ticks = 0;
@@ -921,7 +1257,22 @@ static inline int PastRun_ParseHorizon(const char *dir_name, char *out_prefix,
     *out_horizon_ticks = (int)h;
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRun_ParseHorizon]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PastRuns_ScanOneDir]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[scan one directory for past-run records]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void PastRuns_ScanOneDir(PastRunsState *s, const char *path) {
     DIR *d = opendir(path);
     if (!d) return;
@@ -943,7 +1294,22 @@ static inline void PastRuns_ScanOneDir(PastRunsState *s, const char *path) {
     }
     closedir(d);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRuns_ScanOneDir]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PastRuns_Scan]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[scan the runs root for every past-run record]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void PastRuns_Scan(PastRunsState *s) {
     s->count = 0;
     s->status_msg[0] = '\0';
@@ -1012,18 +1378,48 @@ static inline void PastRuns_Scan(PastRunsState *s) {
              "scanned %d run(s) in models/{classification,regression,...} (newest first; multi-horizon grouped)",
              s->count);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRuns_Scan]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PastRun_MetricLabel]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the metric-label string for a run's label kind (accuracy vs correlation)]
+//======================================================================
 // label-type-aware metric label
+//======================================================================
+// [CODE]
+//======================================================================
 static inline const char* PastRun_MetricLabel(int expected_num_classes) {
     if (expected_num_classes == 1) return "Corr (r)";   // regression
     if (expected_num_classes >= 2) return "Acc (multi)";// multiclass
     return "Acc (bin)";                                  // binary (0)
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRun_MetricLabel]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GUI_Panel_PastRuns]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Past Runs panel — the run table + per-run detail + delete/compare actions]
+//======================================================================
 // v5.11.57 — `cfg_for_verify` exposes ControllerConfig (typically
 // &run_control->results.config_used) so Verify Stamp can use the
 // real cfg.auto_stamp_secret for HMAC-verification (not just devmode).
 // Pass NULL to keep pre-v5.11.57 behavior (devmode-only).
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_PastRuns(PastRunsState *s,
                                         const ControllerConfig<BACKTEST_FP> *cfg_for_verify = nullptr) {
     ImGui::Begin("Past Runs");
@@ -1896,18 +2292,63 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_PastRuns]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Comparison_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the Comparison state]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Comparison_Init(ComparisonState *state) {
     memset(state, 0, sizeof(*state));
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Comparison_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Comparison_Free]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[free the Comparison saved-run buffers]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Comparison_Free(ComparisonState *state) {
     for (int i = 0; i < COMPARISON_MAX_RUNS; i++) {
         free(state->equity_curves[i]);
         state->equity_curves[i] = NULL;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Comparison_Free]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Comparison_SaveRun]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[save the current results into a Comparison slot]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResults *results,
                                        const char *label) {
     if (state->run_count >= COMPARISON_MAX_RUNS) {
@@ -1945,10 +2386,22 @@ static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResu
     state->labels[idx][63] = '\0';
     state->run_count++;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Comparison_SaveRun]
+//======================================================================
 
-//======================================================================================================
-// [PANEL: COMPARISON]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Comparison]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Comparison panel — side-by-side saved runs]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestResults *current) {
     ImGui::Begin("Comparison");
 
@@ -2079,10 +2532,22 @@ static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestRe
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Comparison]
+//======================================================================
 
-//======================================================================================================
-// [OPTIMIZER PANEL STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[OptimizerPanelState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[state for the Optimizer panel — the two sweep ranges + the results grid + the worker]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct OptimizerPanelState {
     OptimizerRange ranges[OPT_MAX_PARAMS];
     int num_params;
@@ -2098,7 +2563,24 @@ struct OptimizerPanelState {
     BacktestRunConfig run_config;
     char config_path[256];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[OptimizerPanelState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[OptimizerPanel_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the Optimizer panel state with default sweep ranges]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void OptimizerPanel_Init(OptimizerPanelState *state) {
     memset(state, 0, sizeof(*state));
     state->num_params = 1;
@@ -2115,11 +2597,26 @@ static inline void OptimizerPanel_Init(OptimizerPanelState *state) {
     // closes separately at v5.15.6.A/B/C per TECH_DEBT-123.)
     strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OptimizerPanel_Init]
+//======================================================================
 
 struct OptWorkerArgs {
     OptimizerPanelState *state;
 };
 
+//======================================================================
+// [FUNCTION]_[optimizer_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: run a parameter sweep]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *optimizer_worker_fn(void *arg) {
     OptWorkerArgs *args = (OptWorkerArgs *)arg;
     OptimizerPanelState *state = args->state;
@@ -2133,10 +2630,22 @@ static inline void *optimizer_worker_fn(void *arg) {
     state->running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[optimizer_worker_fn]
+//======================================================================
 
-//======================================================================================================
-// [PANEL: OPTIMIZER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Optimizer]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Optimizer panel — sweep ranges, the results grid, and the best cell]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelState *data) {
     ImGui::Begin("Optimizer");
 
@@ -2147,7 +2656,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
     ImGui::SliderInt("Parameters", &state->num_params, 1, 2);
 
     // v5.10.0a — sweepable cfg key picker. Supports the cfg fields recognized
-    // by ConfigField_Set (BacktestEngine.hpp:1966+). Operator selects from
+    // by ConfigField_Set (BacktestEngine.hpp). Operator selects from
     // dropdown to fill state->ranges[p].key; InputText still editable for
     // operators who know which obscure key they want.
     static const char* sweep_keys[] = {
@@ -2350,10 +2859,22 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Optimizer]
+//======================================================================
 
-//======================================================================================================
-// [TRAINING PANEL STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[TrainingPanelState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[state for the Training panel — every training / validation / multi-horizon knob and worker handle]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct TrainingPanelState {
     // XGBoost hyperparameters
     int max_depth;
@@ -2546,7 +3067,24 @@ struct TrainingPanelState {
     int             ui_label_kind_per_horizon[8];   // parsed (broadcast or positional)
     int             ui_label_kind_per_horizon_count; // 0=empty; 1=broadcast; N=positional
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TrainingPanelState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[TrainingPanel_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the Training panel state — defaults for every training/validation knob]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
     memset(state, 0, sizeof(*state));
     state->max_depth = 4;
@@ -2666,6 +3204,11 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     for (int i = 0; i < 8; ++i) state->ui_horizon_list[i] = 0;
     state->ui_horizon_count = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_Init]
+//======================================================================
 
 // walk-forward worker thread
 struct WalkForwardWorkerArgs {
@@ -2673,6 +3216,16 @@ struct WalkForwardWorkerArgs {
     const BacktestResults *data;
 };
 
+//======================================================================
+// [FUNCTION]_[walkforward_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: run walk-forward CV]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *walkforward_worker_fn(void *arg) {
     WalkForwardWorkerArgs *args = (WalkForwardWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
@@ -2690,6 +3243,11 @@ static inline void *walkforward_worker_fn(void *arg) {
     state->wf_running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[walkforward_worker_fn]
+//======================================================================
 
 // v5.10.0a.E — Hyperparam Sweep worker thread. Mirrors walkforward_worker_fn
 // but calls Backtest_RunHyperparamTrainSweep — trains N XGBoosters per cell
@@ -2713,6 +3271,16 @@ struct HyperparamSweepWorkerArgs {
     int snap_wf_min_train;
 };
 
+//======================================================================
+// [FUNCTION]_[hp_sweep_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: run a hyperparam training sweep]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *hp_sweep_worker_fn(void *arg) {
     HyperparamSweepWorkerArgs *args = (HyperparamSweepWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
@@ -2750,6 +3318,11 @@ static inline void *hp_sweep_worker_fn(void *arg) {
     state->hp_running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[hp_sweep_worker_fn]
+//======================================================================
 
 // v5.8.7 — full-validation worker thread. Mirrors walkforward_worker_fn but
 // calls Backtest_RunFullValidation, which carries the v5.8.6 auto-stamp
@@ -2776,6 +3349,16 @@ struct FullValidationWorkerArgs {
     double  snap_label_sl_pct;
 };
 
+//======================================================================
+// [FUNCTION]_[fullvalidation_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: run full validation (WF + held-out gap)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *fullvalidation_worker_fn(void *arg) {
     FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
@@ -2918,6 +3501,11 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     state->fv_running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[fullvalidation_worker_fn]
+//======================================================================
 
 // v5.9.0d — Train Model worker thread (V5_9_AUDIT-#7).
 // Pre-v5.9.0d: Train Model ran SYNCHRONOUSLY on the UI thread, freezing
@@ -2942,6 +3530,16 @@ struct TrainModelWorkerArgs {
     const RunControlState *run_control;
 };
 
+//======================================================================
+// [FUNCTION]_[train_model_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: train + stamp one production model]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *train_model_worker_fn(void *arg) {
     TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
@@ -3235,7 +3833,7 @@ static inline void *train_model_worker_fn(void *arg) {
         // includes the winsor block in the v1 sidecar format. Uses
         // results->config_used (the ControllerConfig snapshot at
         // training time; same source as the existing xgb_train_nthread
-        // population at line ~2949).
+        // population in train_model_worker_fn).
         {
             double pct_low  = FPN_ToDouble(results->config_used.winsor_pct_low);
             double pct_high = FPN_ToDouble(results->config_used.winsor_pct_high);
@@ -3407,6 +4005,11 @@ static inline void *train_model_worker_fn(void *arg) {
     state->tm_running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[train_model_worker_fn]
+//======================================================================
 
 //======================================================================================================
 // [v5.10.0a.G.1 — MULTI-HORIZON TRAINING WORKER]
@@ -3478,6 +4081,13 @@ struct MultiHorizonWorkerArgs {
     int  snap_label_kind_per_horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
 
+//======================================================================
+// [FUNCTION]_[mh_run_one_horizon_fv]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[run full validation for one horizon of a multi-horizon grid + emit its stamp]
+//======================================================================
 // v5.11.41 — per-horizon FV helper. Extracted from train_multi_horizon_worker_fn
 // for both serial-mode (called from for-loop) AND parallel-mode (called from
 // per-horizon pthreads). Writes mh_horizon_fv[h] / mh_horizon_complete[h] /
@@ -3494,6 +4104,9 @@ struct MultiHorizonWorkerArgs {
 //                   to drive Backtest_ComputeLabelsFromSamples. In SERIAL,
 //                   this is &run_control->run_config (shared mutate). In
 //                   PARALLEL, each thread passes its own local copy.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void mh_run_one_horizon_fv(
     TrainingPanelState *state,
     BacktestResults *results,
@@ -3760,7 +4373,7 @@ static inline void mh_run_one_horizon_fv(
     FILE *sf = fopen(dst_summary, "w");
     if (sf) {
         // v5.11.50 — use CANONICAL summary.txt field names that past_runs
-        // reads (line 760-779). Pre-fix v5.11.41.A used made-up wf_*
+        // reads (in PastRuns_LoadOne). Pre-fix v5.11.41.A used made-up wf_*
         // names; past_runs ignored them, leaving Train Acc/Val Acc/Gap
         // columns blank. NOW uses the same names Save Run uses so
         // multi-horizon runs render the same as single-horizon Save Run
@@ -3817,6 +4430,11 @@ static inline void mh_run_one_horizon_fv(
         fclose(sf);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[mh_run_one_horizon_fv]
+//======================================================================
 
 // v5.11.41 — per-horizon parallel worker. Each thread runs ONE horizon's
 // full FV pipeline against its own isolated_results (shallow copy of shared
@@ -3848,6 +4466,16 @@ struct MultiHorizonParallelJob {
     int horizon_count;
 };
 
+//======================================================================
+// [FUNCTION]_[mh_per_horizon_parallel_worker]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[parallel per-horizon worker for the multi-horizon sweep (caps libgomp to 1 thread)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *mh_per_horizon_parallel_worker(void *arg) {
     MultiHorizonParallelJob *job = (MultiHorizonParallelJob *)arg;
     // v5.15.3.C — libgomp pthread-race landmine FIXED at process entry
@@ -3876,7 +4504,22 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
     free(job);
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[mh_per_horizon_parallel_worker]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[train_multi_horizon_worker_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[background thread: train a multi-horizon model grid, serial or parallel]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *train_multi_horizon_worker_fn(void *arg) {
     MultiHorizonWorkerArgs *args = (MultiHorizonWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
@@ -3923,8 +4566,8 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     float snap_held_out_fraction  = args->snap_held_out_fraction;
     // v5.13.5.B (parity-check audit gap-close 2026-05-08) — copy NEW
     // v5.13.5 snap fields to stack BEFORE free(args). Without this,
-    // subsequent reads at the parallel-job populate (line ~3938) +
-    // serial-mode call (line ~4005, 4014) would dereference freed
+    // subsequent reads at the parallel-job populate +
+    // the serial-mode call would dereference freed
     // memory → undefined label_kind in stamp + wrong/random training_side
     // path routing. Same pattern as horizons/tp_pcts/sl_pcts above.
     int snap_label_kind_per_horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
@@ -4115,7 +4758,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             // v5.13.1.B — per-horizon label_kind from snap (broadcast
             // already applied at click time when CSV had ≤1 entries).
             // v5.13.5.B (parity-check gap-close) — read stack-local snap
-            // (args is freed at line ~3814).
+            // (args is freed by the worker before these reads).
             int per_horizon_lk = snap_label_kind_per_horizon[h];
             mh_run_one_horizon_fv(
                 state, results, h,
@@ -4157,10 +4800,22 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     state->mh_running = 0;
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[train_multi_horizon_worker_fn]
+//======================================================================
 
-//======================================================================================================
-// [PANEL: TRAINING]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Training]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Training panel — collect features, WF, held-out, optimizer, multi-horizon, and model training/stamping]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Training(TrainingPanelState *state,
                                        RunControlState *run_control,
                                        DataPanelState *data) {
@@ -4345,7 +5000,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // Sync logic in click handlers: state->label_forward_ticks =
     //   state->ui_horizon_list[0] when ui_horizon_count >= 1.
 
-    // v5.11.43 — parse horizon CSV early (was at line ~4236+ post-Train Model).
+    // v5.11.43 — parse horizon CSV early (was later, post-Train-Model).
     // Collect Features + Train Model buttons need ui_horizon_count to decide
     // whether to render single-mode or multi-horizon-mode variant. Parsing
     // here makes ui_horizon_count fresh BEFORE any button conditional fires.
@@ -4870,7 +5525,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // v5.11.48 — Run Name prefix input rendered HERE (before Train buttons)
     // so operator sees + sets it BEFORE clicking train. The same field is
-    // also rendered post-train near Save Run (legacy location, line ~4691)
+    // also rendered post-train near Save Run (legacy location)
     // so operator can rename for Save Run if needed. Both edit the same
     // state->run_name buffer.
     ImGui::InputText("Run Name (prefix)", state->run_name, sizeof(state->run_name));
@@ -4931,8 +5586,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // v5.11.25 — real per-iteration progress bar. Pre-fix used a
         // pulsing indeterminate bar (`-1.0f * GetTime()`) as a "still
         // alive" signal because the XGBoost C-API had no progress
-        // callback hook — but the per-iteration loop at
-        // BacktestPanels.hpp:2580+ already uses XGBoosterUpdateOneIter
+        // callback hook — but this file's per-iteration training loop
+        // already uses XGBoosterUpdateOneIter
         // (added for cancel support, v5.9.0d), so the worker can
         // publish current_iter to a volatile field cheaply. Operator
         // sees actual % done + iter count.
@@ -6372,5 +7027,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Training]
+//======================================================================
 
 #endif // BACKTEST_PANELS_HPP
