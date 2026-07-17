@@ -1,4 +1,12 @@
 #pragma once
+
+//======================================================================
+// [FILE]_[GUI/ChartPanel.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[TradingView-style charts as separate dockable ImGui/ImPlot windows — Price, Volume, Live P&L, Equity Curve; all share per-frame ChartState prepared from the candle snapshot, the price chart supports drag-to-edit TP/SL and an ML overlay]
+//======================================================================
 // ChartPanel — TradingView-style charts as separate dockable windows
 // Price Chart, Volume, Equity Curve — each independently arrangeable
 //
@@ -12,7 +20,17 @@
 #include "../Strategies/StrategyInterface.hpp"
 #include "../MemHeaders/PerNodeStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
 
+//======================================================================
+// [STRUCT]_[ChartSettings]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[chart display settings — visible candle count + interval, overlay toggles, Y auto-fit control, show-all-levels, per-core marker filter]
+//======================================================================
 // chart display settings (mutable — controlled by GUI dropdowns)
+//======================================================================
+// [CODE]
+//======================================================================
 struct ChartSettings {
     int visible_candles = 60;
     int candle_interval = 60;  // seconds
@@ -44,10 +62,24 @@ struct ChartSettings {
     // are global to the symbol and always rendered regardless.
     int node_filter = -1;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[ChartSettings]
+//======================================================================
 
-//==========================================================================
-// SHARED CHART STATE — prepared once per frame, read by all 3 windows
-//==========================================================================
+//======================================================================
+// [STRUCT]_[ChartState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-frame prepared chart data shared by all chart windows — visible OHLCV arrays + SMA + VWAP + X range + candle half-width]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct ChartState {
     // visible candle data
     double xs[CANDLE_MAX + 1], opens[CANDLE_MAX + 1], highs[CANDLE_MAX + 1];
@@ -63,7 +95,24 @@ struct ChartState {
     float candle_hw;  // half-width in pixels
     bool ready;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[ChartState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[ChartState_Prepare]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[prepare the shared ChartState once per frame from the candle snapshot + settings — extract visible candles, compute SMA/VWAP, set the X range]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void ChartState_Prepare(ChartState *cs, const CandleSnapshot *csnap,
                                        const ChartSettings *settings) {
     int n = csnap->count;
@@ -130,17 +179,46 @@ static inline void ChartState_Prepare(ChartState *cs, const CandleSnapshot *csna
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ChartState_Prepare]
+//======================================================================
 
-//==========================================================================
-// PRICE CHART — candlesticks + overlays
-//==========================================================================
+//======================================================================
+// [STRUCT]_[DragState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the TP/SL line-drag state — which position slot/leg is being dragged and to what price]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct DragState {
     int active;       // currently dragging
     int slot;         // position bitmap slot
     int is_tp;        // 1=TP, 0=SL
     double price;     // current drag price
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[DragState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GUI_PriceChart]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Price Chart window — candlesticks + VWAP/SMA/session overlays + per-core entry/TP/SL markers with drag-to-edit, ML prediction overlay, crosshair]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                                    TradeData *trades, ChartSettings *settings,
                                    CandleAccumulator *candle_acc,
@@ -1159,10 +1237,22 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     ImPlot::PopStyleColor(2);  // PlotBg + AxisGrid
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_PriceChart]
+//======================================================================
 
-//==========================================================================
-// VOLUME CHART — separate dockable window
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_VolumeChart]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Volume chart window — per-candle buy/sell volume bars]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap,
                                     const ChartSettings *settings) {
     ImGui::Begin("Volume");
@@ -1277,10 +1367,22 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
     ImPlot::PopStyleColor(2);  // PlotBg + AxisGrid
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_VolumeChart]
+//======================================================================
 
-//==========================================================================
-// LIVE P&L — streaming chart from pnl_history ring buffer
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_LivePnLChart]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Live P&L chart — streaming from the snapshot's pnl_history ring buffer]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_LivePnLChart(const TUISnapshot *s) {
     ImGui::Begin("Live P&L");
     if (s->graph_count < 2) {
@@ -1337,10 +1439,22 @@ static inline void GUI_LivePnLChart(const TUISnapshot *s) {
     ImPlot::PopStyleColor();
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_LivePnLChart]
+//======================================================================
 
-//==========================================================================
-// EQUITY CURVE — separate dockable window (only renders with trade data)
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_EquityChart]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Equity Curve chart from the trade-data cumulative P&L]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_EquityChart(TradeData *trades) {
     ImGui::Begin("Equity Curve");
     if (trades->equity_count < 1) {
@@ -1432,3 +1546,8 @@ static inline void GUI_EquityChart(TradeData *trades) {
     ImPlot::PopStyleColor();
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_EquityChart]
+//======================================================================
