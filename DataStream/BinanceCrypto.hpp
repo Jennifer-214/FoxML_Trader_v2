@@ -3,7 +3,21 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BINANCE WEBSOCKET DATA-STREAM FOR CRYPTO]
+// [FILE]_[DataStream/BinanceCrypto.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the @trade market-data stream — full TCP -> TLS -> WebSocket -> JSON -> FPN stack producing DataStream<F>; SSL_pending-first poll; 24h session lifecycle; public endpoint (no key)]
+// [CONTAINS]
+//   - [STRUCT]_[BinanceConfig]   (POLL_* flags ride)
+//   - [STRUCT]_[BinanceStream]
+//   - [FUNCTION]_[binance_ws_read_frame]   (+ base64 / tcp_connect / tls_setup / handshake / pong / close-frame layer family)
+//   - [FUNCTION]_[binance_parse_trade]
+//   - [FUNCTION]_[BinanceStream_Init]   (+ Close / Reconnect + the g_binance_shutdown_flag hook)
+//   - [FUNCTION]_[BinanceStream_Poll]
+//   - [FUNCTION]_[BinanceStream_ReadTick]
+//   - [FUNCTION]_[BinanceStream_InWindDown]   (+ ShouldReconnect / HasPending session family)
+//   - [FUNCTION]_[BinanceConfig_Load]   (+ cfg selector / fault flag / config_ok ride)
 //======================================================================================================
 // connects to Binance trade websocket (wss://stream.binance.com:9443/ws/<symbol>@trade)
 // and produces DataStream<F> structs - same interface the pipeline already consumes
@@ -50,16 +64,22 @@
 
 using namespace std;
 
-//======================================================================================================
-// [POLL FLAGS]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[BinanceConfig]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CFG_FLOW]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[venue selection + poll/reconnect/wind-down knobs + the N1 malformed-venue fault flag (POLL_* result flags ride); binance_config_ok() gates boot]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[POLL FLAGS]
+//------------------------------------------------------------------
 #define POLL_NONE   0
 #define POLL_SOCKET 1
 #define POLL_STDIN  2
 
-//======================================================================================================
-// [CONFIG]
-//======================================================================================================
 struct BinanceConfig {
     char symbol[32];            // e.g. "btcusdt" (lowercase)
     int use_testnet;            // 1 = testnet, 0 = production
@@ -72,12 +92,23 @@ struct BinanceConfig {
     uint32_t cfg_load_fault_flags = 0;  // N1 (③ reuse) — set on a MALFORMED venue selector; binance_config_ok() => boot REFUSED
 };
 
-//======================================================================================================
-// [STREAM STATE]
-//======================================================================================================
-// read_buf accumulates partial SSL reads - websocket frames can arrive in fragments
-// connect_time tracks the 24-hour session lifecycle for proactive reconnect
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BinanceConfig]
+//======================================================================
+
+//======================================================================
+// [STRUCT]_[BinanceStream]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[connection + 8K frame-accumulation buffer + tick counter + connect_time (24h lifecycle) + socket/stdin pollfds]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BinanceStream {
     int sockfd;
     SSL_CTX *ssl_ctx;
@@ -90,10 +121,31 @@ struct BinanceStream {
     int connected;
     struct pollfd pfds[2];      // [0] = socket, [1] = stdin
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// read_buf accumulates partial SSL reads - websocket frames can arrive in fragments
+// connect_time tracks the 24-hour session lifecycle for proactive reconnect
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BinanceStream]
+//======================================================================
 
-//======================================================================================================
-// [BASE64 ENCODER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[binance_ws_read_frame]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the WS layer family (base64 / L1 tcp_connect / L2 tls_setup / L3 handshake / L4 frame reader / pong / close-frame ride) — fragment-accumulating reader null-terminates every frame]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[BASE64 ENCODER]
+//------------------------------------------------------------------
 // fixed-size base64 for the 16-byte websocket key - no general purpose encoder needed
 // input: 16 bytes, output: 24 chars + null terminator
 // we need this for the Sec-WebSocket-Key header in the HTTP upgrade request
@@ -425,26 +477,21 @@ static inline int binance_ws_send_close(BinanceStream *bs) {
     return (written == 6) ? 1 : 0;
 }
 
-//======================================================================================================
-// [LAYER 5: JSON PARSER]
-//======================================================================================================
-// fixed-format parser - not general purpose. binance trade messages always have
-// "p":"<price>" and "q":"<quantity>" fields. we scan for the key, extract the value
-// between quotes, null-terminate it
-//
-// no allocations, no recursion, no tree building - just two string scans
-// returns 1 if both fields found, 0 otherwise
-//
-// v5.11.16 (2026-05-07) — DataStream parsing audit. The strstr/strchr calls
-// below are safe to use without explicit length bounds because the caller
-// (binance_ws_read_frame at line 365) writes `buf[pay_len] = '\0'` after
-// every frame read AND clamps pay_len <= buf_size-1, so the null terminator
-// is guaranteed to land within the buffer. v5.11.4.A locale-immune parsing
-// covered the actual number-extraction (FPN_FromString is digit-by-digit;
-// out->price_d / out->volume_d use tt::parse_double_fast). Audit verdict:
-// no behavior change needed; using the `len` parameter (previously unused)
-// as a min-size sanity guard catches truncated frames without scanning.
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[binance_ws_read_frame]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[binance_parse_trade]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fixed-format trade extract ("p"/"q" quoted strings + "m" bare bool) — two bounded scans, no alloc/recursion; v5.11.16-audited (rationale in the comment block)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int binance_parse_trade(const char *json, int len, char *price_str, char *qty_str, int *is_buyer_maker) {
     // v5.11.16 — sanity floor. A real Binance trade message is >= ~120 bytes
     // (event type + symbol + ids + price + qty + timestamps). Anything under
@@ -491,16 +538,40 @@ static inline int binance_parse_trade(const char *json, int len, char *price_str
 
     return 1;
 }
-
-//======================================================================================================
-// [INIT]
-//======================================================================================================
-// full connection setup: TCP -> TLS -> WebSocket handshake
-// after this returns 1, the stream is ready to receive trade data
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// fixed-format parser - not general purpose. binance trade messages always have
+// "p":"<price>" and "q":"<quantity>" fields. we scan for the key, extract the value
+// between quotes, null-terminate it
 //
-// OpenSSL is initialized once with OPENSSL_init_ssl - safe to call multiple times
-// (internally tracks whether its already been called)
-//======================================================================================================
+// no allocations, no recursion, no tree building - just two string scans
+// returns 1 if both fields found, 0 otherwise
+//
+// v5.11.16 (2026-05-07) — DataStream parsing audit. The strstr/strchr calls
+// are safe to use without explicit length bounds because the caller
+// (binance_ws_read_frame) writes `buf[pay_len] = '\0'` after
+// every frame read AND clamps pay_len <= buf_size-1, so the null terminator
+// is guaranteed to land within the buffer. v5.11.4.A locale-immune parsing
+// covered the actual number-extraction (FPN_FromString is digit-by-digit;
+// out->price_d / out->volume_d use tt::parse_double_fast). Audit verdict:
+// no behavior change needed; using the `len` parameter (previously unused)
+// as a min-size sanity guard catches truncated frames without scanning.
+//======================================================================
+// [END_FUNCTION]_[binance_parse_trade]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BinanceStream_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the connection lifecycle family (Close / Reconnect + the g_binance_shutdown_flag hook ride) — TCP -> TLS -> WS handshake; interruptible reconnect delay]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int BinanceStream_Init(BinanceStream *bs, const BinanceConfig *config) {
     memset(bs, 0, sizeof(BinanceStream));
     bs->sockfd    = -1;
@@ -570,11 +641,10 @@ static inline int BinanceStream_Init(BinanceStream *bs, const BinanceConfig *con
     return 1;
 }
 
-//======================================================================================================
-// [CLOSE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[CLOSE]
+//------------------------------------------------------------------
 // clean shutdown: send close frame, SSL shutdown, close socket, free resources
-//======================================================================================================
 static inline void BinanceStream_Close(BinanceStream *bs) {
     if (!bs->connected) return;
 
@@ -599,12 +669,11 @@ static inline void BinanceStream_Close(BinanceStream *bs) {
     fprintf(stderr, "[BINANCE] connection closed\n");
 }
 
-//======================================================================================================
-// [RECONNECT]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[RECONNECT]
+//------------------------------------------------------------------
 // close the existing connection and re-establish from scratch
 // waits reconnect_delay seconds before attempting (avoids hammering binance)
-//======================================================================================================
 // Engine sets this at startup so reconnect can break out of its delay
 // sleep when the user closes the GUI / hits Ctrl+C. NULL (default) =
 // no shutdown signal wired; degrades to a normal blocking sleep.
@@ -644,19 +713,21 @@ static inline int BinanceStream_Reconnect(BinanceStream *bs, const BinanceConfig
     return BinanceStream_Init(bs, config);
 }
 
-//======================================================================================================
-// [POLL]
-//======================================================================================================
-// checks for available data on the socket and stdin
-//
-// CRITICAL: checks SSL_pending() FIRST. OpenSSL buffers decrypted data internally -
-// poll() only sees the raw socket, so it can report "no data ready" while SSL has a
-// complete frame sitting in its internal buffer. by checking SSL_pending first, we
-// avoid this mismatch entirely - if SSL has buffered data, we return POLL_SOCKET
-// immediately without ever calling poll()
-//
-// returns OR'd combination of POLL_NONE, POLL_SOCKET, POLL_STDIN
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceStream_Init]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BinanceStream_Poll]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[socket + stdin readiness -> OR'd POLL_* flags — SSL_pending checked FIRST (OpenSSL internal buffer vs poll() mismatch); rationale in the comment block]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int BinanceStream_Poll(BinanceStream *bs, uint32_t timeout_ms) {
     if (!bs->connected) return POLL_NONE;
 
@@ -693,17 +764,33 @@ static inline int BinanceStream_Poll(BinanceStream *bs, uint32_t timeout_ms) {
     return result;
 }
 
-//======================================================================================================
-// [READ TICK]
-//======================================================================================================
-// reads one websocket frame, handles ping/pong transparently, parses JSON trade data
-// into the DataStream output struct
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// checks for available data on the socket and stdin
 //
-// ping handling: if we get a ping (opcode 0x9), we immediately pong and loop to read
-// the next frame. this is invisible to the caller - they just get trade data or an error
+// CRITICAL: checks SSL_pending() FIRST. OpenSSL buffers decrypted data internally -
+// poll() only sees the raw socket, so it can report "no data ready" while SSL has a
+// complete frame sitting in its internal buffer. by checking SSL_pending first, we
+// avoid this mismatch entirely - if SSL has buffered data, we return POLL_SOCKET
+// immediately without ever calling poll()
 //
-// returns 1 on success (out filled with price + volume), 0 on error/disconnect
-//======================================================================================================
+// returns OR'd combination of POLL_NONE, POLL_SOCKET, POLL_STDIN
+//======================================================================
+// [END_FUNCTION]_[BinanceStream_Poll]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BinanceStream_ReadTick]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[consume one frame -> DataStream<F> — transparent ping/pong; 1 on success, 0 on error/disconnect]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) {
     if (!bs->connected) return 0;
@@ -781,17 +868,31 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
     }
 }
 
-//======================================================================================================
-// [SESSION LIFECYCLE]
-//======================================================================================================
-// binance auto-disconnects after 24 hours. we proactively reconnect before that:
-// - wind down starts at connect_time + 23h25m (disable buy gate)
-// - reconnect triggers at connect_time + 23h30m (close all positions, reconnect)
-// - 30 min buffer before the hard 24h cutoff
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// reads one websocket frame, handles ping/pong transparently, parses JSON trade data
+// into the DataStream output struct
 //
-// BinanceStream_InWindDown: returns 1 if we're in the wind-down period
-// BinanceStream_ShouldReconnect: returns 1 if it's time to close and reconnect
-//======================================================================================================
+// ping handling: if we get a ping (opcode 0x9), we immediately pong and loop to read
+// the next frame. this is invisible to the caller - they just get trade data or an error
+//
+// returns 1 on success (out filled with price + volume), 0 on error/disconnect
+//======================================================================
+// [END_FUNCTION]_[BinanceStream_ReadTick]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BinanceStream_InWindDown]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 24h session family (ShouldReconnect / HasPending ride) — wind-down at 23h25m, reconnect at 23h30m (30-min buffer before Binance's hard cutoff)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int BinanceStream_InWindDown(BinanceStream *bs, uint32_t wind_down_minutes) {
     if (!bs->connected) return 0;
 
@@ -815,23 +916,40 @@ static inline int BinanceStream_ShouldReconnect(BinanceStream *bs) {
     return (elapsed >= 84600) ? 1 : 0;
 }
 
-//======================================================================================================
-// [HAS PENDING DATA]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[HAS PENDING DATA]
+//------------------------------------------------------------------
 // exposes SSL_pending check for the main loop's burst drain logic
 // returns 1 if SSL has buffered data that can be read without blocking
-//======================================================================================================
 static inline int BinanceStream_HasPending(BinanceStream *bs) {
     if (!bs->connected || !bs->ssl) return 0;
     return (SSL_pending(bs->ssl) > 0) ? 1 : 0;
 }
 
-//======================================================================================================
-// [CONFIG LOADER]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// binance auto-disconnects after 24 hours. we proactively reconnect before that:
+// - wind down starts at connect_time + 23h25m (disable buy gate)
+// - reconnect triggers at connect_time + 23h30m (close all positions, reconnect)
+// - 30 min buffer before the hard 24h cutoff
+//======================================================================
+// [END_FUNCTION]_[BinanceStream_InWindDown]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BinanceConfig_Load]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CFG_FLOW] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[boot cfg parse (venue-selector fault flag + selector + config_ok ride) — refuse-don't-coerce on malformed venue selectors (N1; a typo must NOT flip testnet->PROD)]
+//======================================================================
+// [CODE]
+//======================================================================
 // parses binance-specific fields from the engine config file
 // same key=value format as ControllerConfig_Load, skips # comments and empty lines
-//======================================================================================================
 // N1 (③ config-compiler reuse) — BinanceConfig venue-selector malformed-capture. `atoi` swallows a
 // malformed value ->0, and 0 is the MORE-DANGEROUS value (use_testnet=0 = PRODUCTION venue) -> a typo
 // silently flips testnet->PROD (capital-conditional; the H22 cross-parser asymmetry the swallow-coerce
@@ -918,7 +1036,9 @@ static inline BinanceConfig BinanceConfig_Load(const char *filepath) {
     fclose(f);
     return config;
 }
-
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceConfig_Load]
+//======================================================================
 #endif // BINANCE_CRYPTO_HPP
