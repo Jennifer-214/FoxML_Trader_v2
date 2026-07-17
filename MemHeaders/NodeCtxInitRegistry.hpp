@@ -3,11 +3,21 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CORE CONTEXT INIT/RESET REGISTRY — v5.15.5.B.7]
+// [FILE]_[MemHeaders/NodeCtxInitRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the unified NodeContext init/reset SSoT — 40 rows with a RESET column (15 RST); init walks ALL, paper-reset walks RST-only; AUTOPOPULATE macros make call sites one-liners]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_NODE_CTX_FIELD]
+//   - [FUNCTION]_[_node_ctx_init_value_fields]   (+ reset walk + _alloc_and_init_slow_state + count sentinels ride)
+//   - [MACRO]_[NODE_CTX_*_AUTOPOPULATE]
+// [REFERENCE]_[DESIGN_SPEC]_[[autopopulate-pattern-for-production-caller-class] [x-macro-registry-with-presence-dispatch]]
+// [REFERENCE]_[CLASS]_[18]
 //======================================================================================================
 // X-macro registries + AUTOPOPULATE companion macros for per-core init
-// and paper-reset paths. Closes a Class-18 mirror class (CLAUDE.md item
-// 19): pre-.B.7, adding a new NodeContext field that needed boot-time
+// and paper-reset paths. Closes a Class-18 mirror class (structural-fix-
+// preferred): pre-.B.7, adding a new NodeContext field that needed boot-time
 // init required touching `EventLoopState_Init` (~50 line loop body);
 // adding a per-session counter also required touching the paper-reset
 // path in `EngineSharded.hpp:2237+`. Forgetting either → silently wrong
@@ -47,7 +57,7 @@
 //     the for-loop.
 //
 // Templated helper functions encapsulate the FOREACH walks per
-// CLAUDE.md item 23 (tt::stamp_parse_field<T> precedent). This avoids
+// the templated-helpers discipline (tt::stamp_parse_field<T> precedent). This avoids
 // re-expanding the registry at every AUTOPOPULATE call site + gives
 // cleaner error diagnostics + lets the helpers be called independently
 // from outside the macros if ever needed.
@@ -57,11 +67,8 @@
 // function declarations are visible (otherwise the inline helpers in
 // this header fail to compile).
 //
-// Cross-references:
-//   CLAUDE.md item 13 (X-macro registry pattern)
-//   CLAUDE.md item 19 (structural fix preferred when bug class can recur)
-//   CLAUDE.md item 21 (AUTOPOPULATE companion macro pattern)
-//   CLAUDE.md item 23 (templated helper for type-trait dispatch)
+// Cross-references (the X-macro-registry / structural-fix-preferred /
+// AUTOPOPULATE-companion / templated-helpers disciplines):
 //   DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md
 //   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
 //======================================================================================================
@@ -73,28 +80,19 @@
 
 namespace tt {
 
-//======================================================================================================
-// [BOOT-INIT FIELD REGISTRY]
-//======================================================================================================
-// Tuple: X(NAME, TYPE, INIT_VALUE)
-//   NAME       — field name on NodeContext (lowercase snake_case)
-//   TYPE       — C++ field type; cast applied at write site via (TYPE)(INIT_VALUE)
-//   INIT_VALUE — initial value at boot; FPN_Binary<F>=FPN_Zero<F>(), scalar=numeric, ptr=nullptr
-//
-// Order matches the historical EventLoopState_Init body to preserve
-// review-readability + match documentation. Field grouping reflects the
-// NodeContext HOT/WARM/COLD cluster layout from v5.15.5.B.1.
-//
-// Adding a new boot-init field: append ONE row here. AUTOPOPULATE picks
-// it up at next compile.
-//======================================================================================================
-// v5.15.5.F.4d.1.E.1.2 (D-297/D2) — UNIFIED into ONE registry (was FOREACH_NODE_CTX_INIT_FIELD
-// + FOREACH_NODE_CTX_RESET_FIELD, two parallel lists). Init + reset views now generate from
-// this single source (the persist view + wire metadata land in the E.1.2 serializer step —
-// Steps 2-4). `RESET` column: RST = also cleared on operator paper-reset (the strict subset —
-// per-session state); NORST = boot-init only (load-bearing across reset: handles, models,
-// intended trade values, IC/regime/feeder history). The RST set is byte-for-byte the former
-// FOREACH_NODE_CTX_RESET_FIELD (Phase 2.1 + Phase 3 + v4.7.21/26 + v5.4.3 anchored).
+//======================================================================
+// [REGISTRY]_[FOREACH_NODE_CTX_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[40 NodeContext scalar rows in HOT/WARM cluster order — init view walks ALL, paper-reset view walks the 15 RST-flagged; the two can never drift (D-297 unification)]
+// [COLUMN]_[NAME]_[field name on NodeContext (lowercase snake_case)]
+// [COLUMN]_[type]_[C++ field type; cast applied at write site via (TYPE)(INIT_VALUE)]
+// [COLUMN]_[INIT_VALUE]_[boot value; Money_Zero() / numeric / nullptr / sentinel]
+// [COLUMN]_[RESET]_[RST = also cleared on operator paper-reset; NORST = boot-init only (load-bearing across reset)]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_NODE_CTX_FIELD(X)                                                                    \
     /* HOT cluster — dispatch metadata + handles */                                                 \
     X(core,                       ExecutionCore<F>*,  nullptr,        NORST)                         \
@@ -143,14 +141,34 @@ namespace tt {
     X(node_peak_balance,          Money,              Money_Zero(),   RST)                           \
     X(node_dd_pct,                Money,              Money_Zero(),   RST)                           \
     X(node_ks_trips_total,        uint32_t,           0,              RST)
-
-//======================================================================================================
-// [PAPER-RESET VIEW — the RST-flagged subset of FOREACH_NODE_CTX_FIELD]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(NAME, TYPE, INIT_VALUE, RESET)
+//
+// v5.15.5.F.4d.1.E.1.2 (D-297/D2) — UNIFIED into ONE registry (was FOREACH_NODE_CTX_INIT_FIELD
+// + FOREACH_NODE_CTX_RESET_FIELD, two parallel lists). Init + reset views now generate from
+// this single source (the persist view + wire metadata land in the E.1.2 serializer step —
+// Steps 2-4). `RESET` column: RST = also cleared on operator paper-reset (the strict subset —
+// per-session state); NORST = boot-init only (load-bearing across reset: handles, models,
+// intended trade values, IC/regime/feeder history). The RST set is byte-for-byte the former
+// FOREACH_NODE_CTX_RESET_FIELD (Phase 2.1 + Phase 3 + v4.7.21/26 + v5.4.3 anchored).
+//
+// Order matches the historical EventLoopState_Init body to preserve
+// review-readability + match documentation. Field grouping reflects the
+// NodeContext HOT/WARM/COLD cluster layout from v5.15.5.B.1.
+//
+// Adding a new boot-init field: append ONE row here. AUTOPOPULATE picks
+// it up at next compile.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// [[v5.15.5.F.4d.1.E.1.2 D-297] [PAPER-RESET VIEW — the RST-flagged subset]]
+//----------------------------------------------------------------------
 // Reset is NO LONGER a separate registry (D-297/D2) — it is the `RST`-flagged
 // subset of the unified FOREACH_NODE_CTX_FIELD above, generated by presence
 // dispatch in `_node_ctx_reset_value_fields`. The RST membership is byte-for-byte
-// the former FOREACH_NODE_CTX_RESET_FIELD (a `== 15` static_assert below pins it),
+// the former FOREACH_NODE_CTX_RESET_FIELD (a `== 15` static_assert pins it),
 // anchored by:
 //   - Phase 2.1 (P&L + budget leak): node_realized/fees/wins/losses/open_notional
 //   - Phase 3 (kill switch leak): node_peak_balance/dd_pct/ks_trips_total
@@ -165,16 +183,19 @@ namespace tt {
 // regime-hysteresis state (sub-structs aren't in this scalar registry anyway; they're
 // helper-Init'd at AUTOPOPULATE Layer 2).
 // Adding/removing a reset field: flip a NORST↔RST on its row above. ONE edit, ONE list.
-//======================================================================================================
+//======================================================================
+// [END_REGISTRY]_[FOREACH_NODE_CTX_FIELD]
+//======================================================================
 
-//======================================================================================================
-// [TEMPLATED HELPERS — registry walk encapsulation]
-//======================================================================================================
-// Per CLAUDE.md item 23 — templated helper functions encapsulate the
-// FOREACH walks. Each is instantiated once per F (only F=64 today);
-// AUTOPOPULATE macros below delegate to these helpers.
-//======================================================================================================
-
+//======================================================================
+// [FUNCTION]_[_node_ctx_init_value_fields]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the registry-walk helper family (reset walk + _alloc_and_init_slow_state + count sentinels ride) — one instantiation per F; AUTOPOPULATE delegates here]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void _node_ctx_init_value_fields(NodeContext<F>& ctx) {
 #define X(NAME, TYPE, INIT_VAL, RESET) ctx.NAME = (TYPE)(INIT_VAL);
@@ -212,16 +233,16 @@ inline void _alloc_and_init_slow_state(NodeContext<F>& ctx) {
     NodeSlowState_Init(ctx.slow_state);
 }
 
-//======================================================================================================
-// [COMPILE-TIME COUNT SENTINELS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[COMPILE-TIME COUNT SENTINELS]
+//------------------------------------------------------------------
 // Public counts via `>=` style (per /readiness Check 21) — useful for
 // downstream consumers + sanity checks.
-//======================================================================================================
 #define _NODE_CTX_INIT_COUNT_ONE(NAME, TYPE, INIT_VAL, RESET) +1
 constexpr int NODE_CTX_INIT_FIELD_COUNT =
     0 FOREACH_NODE_CTX_FIELD(_NODE_CTX_INIT_COUNT_ONE);
 #undef _NODE_CTX_INIT_COUNT_ONE
+// [ASSERT]_[REGISTRY_COVERAGE]_[NODE_CTX_INIT_FIELD_COUNT >= 30]
 static_assert(NODE_CTX_INIT_FIELD_COUNT >= 30,
               "FOREACH_NODE_CTX_FIELD must keep at least the v5.15.5.B.7 "
               "set (30+ fields). Removing entries needs explicit justification.");
@@ -235,16 +256,25 @@ constexpr int NODE_CTX_RESET_FIELD_COUNT =
 #undef _NODE_CTX_RESET_COUNT_ONE
 #undef _NODE_CTX_RESET_COUNT_RST
 #undef _NODE_CTX_RESET_COUNT_NORST
+// [ASSERT]_[REGISTRY_COVERAGE]_[NODE_CTX_RESET_FIELD_COUNT == 15]
 static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
               "The RST-flagged subset of FOREACH_NODE_CTX_FIELD is EXACTLY the 15 former "
               "FOREACH_NODE_CTX_RESET_FIELD rows (Phase 2.1/3 + v4.7.21/26 + v5.4.3). A "
               "byte-identical-reset pin — flipping a NORST↔RST changes this count deliberately.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[_node_ctx_init_value_fields]
+//======================================================================
 
 }  // namespace tt
 
-//======================================================================================================
-// [AUTOPOPULATE COMPANION MACROS — multi-target dispatch]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[NODE_CTX_*_AUTOPOPULATE]
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the one-line per-slot call sites — INIT: 5 layers (registry walk / 6 helper-Inits / 4 atomic stores / arena slow_state / sibling display_meta); RESET: RST walk + 2 bitmap clears]
+//----------------------------------------------------------------------
 // NODE_CTX_INIT_AUTOPOPULATE(state_ptr, i)
 //   One-line per-slot boot init. Covers:
 //     1. ~40 value-init fields via templated helper _node_ctx_init_value_fields
@@ -261,10 +291,9 @@ static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
 //
 // Multi-target dispatch: same registry + helpers serve BOTH boot init
 // AND paper reset. Future "per-session counter" additions touch ONE row
-// (init registry) + ONE row (reset registry if appropriate) — no manual
-// touch of the AUTOPOPULATE macro body unless adding a new helper-Init
-// or atomic cluster.
-//======================================================================================================
+// (append it RST-flagged; the D-297 unified registry has no separate
+// reset list) — no manual touch of the AUTOPOPULATE macro body unless
+// adding a new helper-Init or atomic cluster.
 
 #define NODE_CTX_INIT_AUTOPOPULATE(_state_ptr, _i)                                                  \
     do {                                                                                            \

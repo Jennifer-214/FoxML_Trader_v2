@@ -3,7 +3,18 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CORE-CONTEXT SUMMARY FIELD REGISTRY — v5.15.5.C.3 Phase 4]
+// [FILE]_[MemHeaders/NodeCtxSummaryFieldRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[summary.json per_node field SSoT — 20 rows walk NodeContext via type-trait-dispatched JSON emit (Money %.8f / FPN %.6f / integer widths); + the per-strategy aggregator]
+// [CONTAINS]
+//   - [FUNCTION]_[json_emit_value]   (+ is_fpn trait + json_emit_pair ride)
+//   - [REGISTRY]_[FOREACH_NODE_CTX_SUMMARY_FIELD]   (+ count sentinel + floor assert)
+//   - [FUNCTION]_[Summary_EmitPerCoreEntry]
+//   - [FUNCTION]_[Summary_EmitPerStrategy]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth]
+// [REFERENCE]_[INVARIANT]_[H13]
 //======================================================================================================
 // FOREACH_NODE_CTX_SUMMARY_FIELD(X) — drives summary.json per_node array
 // emission for the paper-reset archive flow (Phase 6) + general operator-
@@ -12,7 +23,8 @@
 // Tuple: X(field_name, type, json_key)
 //   field_name — bare identifier on NodeContext<F>; referenced as ctx.field_name
 //   type       — C++ type; dispatched via json_emit_value<T> for per-type
-//                 JSON formatting (FPN_Binary<F> → "%.6f" via FPN_ToDouble, uint8/16/32/64 → "%llu",
+//                 JSON formatting (Money → "%.8f" via Money_ToDouble,
+//                 FPN_Binary<F> → "%.6f" via FPN_ToDouble, uint8/16/32/64 → "%llu",
 //                 signed → "%lld", float/double → "%.6f")
 //   json_key   — operator-facing JSON key string literal
 //
@@ -23,8 +35,8 @@
 // HYBRID PATTERN PRECEDENT (this is the first codebase application of
 // type-trait-dispatched JSON emission via templated helpers):
 //   - CalibLogColRegistry.hpp uses printf-fmt-string dispatch (CSV row).
-//   - This registry uses type-trait dispatch (JSON value; per CLAUDE.md
-//     item 23 templated helpers; cleaner because JSON has fewer types).
+//   - This registry uses type-trait dispatch (JSON value; per the
+//     templated-helpers discipline; cleaner because JSON has fewer types).
 //
 // AGGREGATION (per_strategy section of summary.json):
 //   Summary_EmitPerStrategy() hand-codes the aggregation for the 4 summable
@@ -32,18 +44,17 @@
 //   refactor: introduce FOREACH_NODE_CTX_SUMMABLE_FIELD sub-registry +
 //   aggregation kind column if more aggregation cohorts emerge.
 //
-// PER_REGIME AGGREGATION (deferred to Phase 5):
-//   Requires per-trade regime data (Phase 5 ShardedTradeLog refactor adds
-//   regime column to trade log CSV). Phase 4 emits summary.json with
-//   per_node + per_strategy sections only; per_regime added at Phase 6
-//   archive flow integration.
+// PER_REGIME AGGREGATION status: Phase 5 added the per-trade regime column
+//   to the trade log CSV; the Phase 6 archive flow emits summary.json with
+//   per_node + per_strategy populated and `per_regime: []` as an EMPTY
+//   PLACEHOLDER — real per-regime aggregation still pending the trade-log
+//   aggregator (see PaperResetArchive.hpp).
 //
-// Cross-references:
+// Cross-references (the X-macro-registry + templated-helpers/type-trait-
+// dispatch disciplines):
 //   DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md (3-col tuple shape)
 //   DESIGN_SPECS/calibration-log-column-registry.md (sister registry; CSV vs JSON dispatch)
 //   DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md (multi-target dispatch)
-//   CLAUDE.md item 13 (X-macro registry for multi-site additions)
-//   CLAUDE.md item 23 (templated helpers; type-trait dispatch over branches)
 //   v5.14.10.D FOREACH_CALIB_LOG_COL (precedent — CSV row emit registry)
 //   v5.15.5.B.7 FOREACH_NODE_CTX_FIELD (sister registry — per-core init/reset walk)
 //======================================================================================================
@@ -56,7 +67,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 
 // Forward declaration — NodeContext<F> is defined in
-// CoreFrameworks/ControllerEventLoop.hpp (line ~253). Callers of the per-core
+// CoreFrameworks/ControllerEventLoop.hpp. Callers of the per-core
 // emit function must include that header first.
 namespace tt {
     template <unsigned F> struct NodeContext;
@@ -64,36 +75,24 @@ namespace tt {
 
 namespace tt {
 
-//======================================================================================================
-// [TYPE TRAIT — is_fpn for FPN_Binary<F> detection in templated dispatch]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[json_emit_value]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[type-trait-dispatched JSON value emit (is_fpn trait + json_emit_pair ride) — Money %.8f / FPN %.6f / float %.6f / unsigned %llu / signed %lld; if-constexpr single-path codegen]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[is_fpn type trait]
+//------------------------------------------------------------------
 // FPN_Binary<F> is a template; std::is_same_v<T, FPN_Binary<F>> requires a specific F. To
 // detect any FPN_Binary<F> regardless of width, use this custom type trait.
-//======================================================================================================
 template <typename T> struct is_fpn : std::false_type {};
 template <unsigned F> struct is_fpn<FPN_Binary<F>> : std::true_type {};
 template <typename T> inline constexpr bool is_fpn_v = is_fpn<T>::value;
 
-//======================================================================================================
-// [JSON EMIT HELPERS — type-trait dispatch via templated functions]
-//======================================================================================================
-// Per CLAUDE.md item 23. Each instantiation discards unused branches via
-// if-constexpr; the compiler emits only the per-type code path that matches
-// T. Single source of truth for JSON value formatting; adding a new
-// supported type = 1 if-constexpr branch.
-//
-// Format choices:
-//   FPN_Binary<F>           → "%.6f" via FPN_ToDouble (6 decimal places; sufficient for
-//                       BTC USD prices, fee rates, and P&L)
-//   float / double   → "%.6f" (same precision)
-//   unsigned integer → "%llu" (works for uint8/16/32/64 via cast)
-//   signed integer   → "%lld" (works for int8/16/32/64 via cast)
-//   bool / int (logical) → "%d" (0 or 1)
-//
-// All formats are JSON-compatible (no trailing newlines, no escape sequences
-// needed for numeric output). String fields not currently supported — add a
-// branch with manual JSON escape if/when string keys emerge.
-//======================================================================================================
 template <typename T>
 inline void json_emit_value(std::FILE* f, const T& value) {
     if (!f) return;
@@ -123,18 +122,52 @@ inline void json_emit_pair(std::FILE* f, const char* key, const T& value, bool& 
     first_field = false;
     json_emit_value(f, value);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Type-trait dispatch via templated functions (the templated-helpers
+// discipline). Each instantiation discards unused branches via
+// if-constexpr; the compiler emits only the per-type code path that matches
+// T. Single source of truth for JSON value formatting; adding a new
+// supported type = 1 if-constexpr branch.
+//
+// Format choices:
+//   Money            → "%.8f" via Money_ToDouble (decimal money — exact
+//                       8dp display; Ship-B)
+//   FPN_Binary<F>    → "%.6f" via FPN_ToDouble (6 decimal places; sufficient for
+//                       BTC USD prices, fee rates, and P&L)
+//   float / double   → "%.6f" (same precision)
+//   unsigned integer → "%llu" (works for uint8/16/32/64 via cast)
+//   signed integer   → "%lld" (works for int8/16/32/64 via cast)
+//   bool / int (logical) → "%d" (0 or 1)
+//
+// All formats are JSON-compatible (no trailing newlines, no escape sequences
+// needed for numeric output). String fields not currently supported — add a
+// branch with manual JSON escape if/when string keys emerge.
+//
+// json_emit_pair: emits "key":value into a JSON object body. Caller manages
+// opening { / closing } braces + commas between pairs via the first_field
+// bool (false after first call).
+//======================================================================
+// [END_FUNCTION]_[json_emit_value]
+//======================================================================
 
 }  // namespace tt
 
-//======================================================================================================
-// [CANONICAL REGISTRY — per-core summary fields]
-//======================================================================================================
-// Fields ordered by semantic grouping (identity → counters → P&L → kill switch).
-// Order is operator-facing (appears in summary.json + future per-core reports).
-// Append new entries at the end to preserve operator-side parser stability if/when
-// downstream tooling indexes by position (currently keyed by json_key, but
-// keeping append-only discipline simplifies migrations).
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_NODE_CTX_SUMMARY_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[20 per-core summary rows (identity -> counters -> P&L -> kill switch -> ML) — semantic-grouped, append-only ordering; count-floor assert rides]
+// [COLUMN]_[field_name]_[bare identifier on NodeContext<F>; referenced as ctx.field_name]
+// [COLUMN]_[type]_[C++ type; dispatched via json_emit_value<T>]
+// [COLUMN]_[json_key]_[operator-facing JSON key string literal]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_NODE_CTX_SUMMARY_FIELD(X)                                                       \
     /* Identity + strategy */                                                                   \
     X(strategy_id,           uint8_t,  "strategy_id")                                           \
@@ -164,40 +197,44 @@ inline void json_emit_pair(std::FILE* f, const char* key, const T& value, bool& 
     /* ML observability */                                                                      \
     X(last_confidence,       double,   "last_confidence")
 
-//======================================================================================================
-// [COMPILE-TIME COUNT SENTINEL]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[COMPILE-TIME COUNT SENTINEL]
+//------------------------------------------------------------------
 #define _CCSUM_COUNT_ONE(name, type, key) +1
 constexpr int FOREACH_NODE_CTX_SUMMARY_FIELD_COUNT =
     0 FOREACH_NODE_CTX_SUMMARY_FIELD(_CCSUM_COUNT_ONE);
 #undef _CCSUM_COUNT_ONE
 
+// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_NODE_CTX_SUMMARY_FIELD_COUNT >= 18]
 static_assert(FOREACH_NODE_CTX_SUMMARY_FIELD_COUNT >= 18,
               "FOREACH_NODE_CTX_SUMMARY_FIELD must keep the v5.15.5.C.3 Phase 4 "
               "minimum set (~20 per-core trading-relevant stats). Removing "
               "entries requires explicit justification + operator tooling audit.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Fields ordered by semantic grouping (identity → counters → P&L → kill switch).
+// Order is operator-facing (appears in summary.json + future per-core reports).
+// Append new entries at the end to preserve operator-side parser stability if/when
+// downstream tooling indexes by position (currently keyed by json_key, but
+// keeping append-only discipline simplifies migrations).
+//======================================================================
+// [END_REGISTRY]_[FOREACH_NODE_CTX_SUMMARY_FIELD]
+//======================================================================
 
 namespace tt {
 
-//======================================================================================================
-// [Summary_EmitPerCoreEntry — emit one JSON object for a single NodeContext]
-//======================================================================================================
-// Emits a complete JSON object (with opening { / closing }) for one core's
-// summary fields. Caller manages the surrounding array brackets [...] +
-// inter-object commas.
-//
-// Usage from caller (per_node array writer):
-//   std::fprintf(f, "[");
-//   for (int c = 0; c < num_nodes; ++c) {
-//       if (c > 0) std::fprintf(f, ",");
-//       Summary_EmitPerCoreEntry(f, state.nodes[c], c);
-//   }
-//   std::fprintf(f, "]");
-//
-// JSON shape per core:
-//   {"node_id":0,"strategy_id":3,"resolved_strategy_id":3,"halt_reason":0,
-//    "strategy_halt_reason":0,"allocated_balance":1000.000000,"entries":42,...}
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Summary_EmitPerCoreEntry]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one complete JSON object per core (node_id + the 20 registry fields) — caller manages the surrounding array brackets + inter-object commas]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void Summary_EmitPerCoreEntry(std::FILE* f, const NodeContext<F>& ctx, int node_id) {
     if (!f) return;
@@ -210,29 +247,35 @@ inline void Summary_EmitPerCoreEntry(std::FILE* f, const NodeContext<F>& ctx, in
 #undef _CCSUM_JSON_EMIT_ONE
     std::fprintf(f, "}");
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Usage from caller (per_node array writer):
+//   std::fprintf(f, "[");
+//   for (int c = 0; c < num_nodes; ++c) {
+//       if (c > 0) std::fprintf(f, ",");
+//       Summary_EmitPerCoreEntry(f, state.nodes[c], c);
+//   }
+//   std::fprintf(f, "]");
+//
+// JSON shape per core:
+//   {"node_id":0,"strategy_id":3,"resolved_strategy_id":3,"halt_reason":0,
+//    "strategy_halt_reason":0,"allocated_balance":1000.000000,"entries":42,...}
+//======================================================================
+// [END_FUNCTION]_[Summary_EmitPerCoreEntry]
+//======================================================================
 
-//======================================================================================================
-// [Summary_EmitPerStrategy — aggregate cores by strategy_id, emit per_strategy array]
-//======================================================================================================
-// Groups cores by strategy_id; for each unique strategy present, sums the
-// SUMMABLE fields (entries, exits, realized, fees, wins, losses, gross_*,
-// open_notional) across cores. Emits JSON array of per-strategy objects.
-//
-// Iterates 256 possible strategy_id values (full uint8_t range); skips
-// strategies with no cores (present == 0). Today's strategies fit within
-// NUM_STRATEGIES (6: MR, MOM, DIP, ML, EMA, AUTO); the 256 capacity gives
-// headroom for future expansion without API change.
-//
-// STRATEGY_NONE (0xFF) is skipped — "no strategy" cores have no trades to aggregate.
-//
-// Hand-coded aggregation (not registry-driven) because:
-//   1. Aggregation arithmetic differs per type (FPN_Add vs += vs no-op).
-//   2. The summable subset is stable today (4-7 fields); a 4th tuple column
-//      for aggregation kind would add complexity for marginal benefit.
-//   3. Future refactor possible: FOREACH_NODE_CTX_SUMMABLE_FIELD sub-registry
-//      with FPN_AGG / INT_AGG / MAX_AGG dispatch when ≥3 aggregation
-//      patterns emerge.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Summary_EmitPerStrategy]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[group cores by strategy_id and sum the summable fields into a per_strategy JSON array — 256-slot uint8_t range, STRATEGY_NONE (0xFF) skipped; hand-coded aggregation]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void Summary_EmitPerStrategy(std::FILE* f, const NodeContext<F>* nodes, int num_nodes) {
     if (!f || !nodes) return;
@@ -287,6 +330,26 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const NodeContext<F>* nodes, i
     }
     std::fprintf(f, "]");
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Iterates 256 possible strategy_id values (full uint8_t range); skips
+// strategies with no cores (present == 0). Today's strategies fit within
+// NUM_STRATEGIES (6: MR, MOM, DIP, ML, EMA, AUTO); the 256 capacity gives
+// headroom for future expansion without API change.
+//
+// Hand-coded aggregation (not registry-driven) because:
+//   1. Aggregation arithmetic differs per type (Money_Add vs += vs no-op).
+//   2. The summable subset is stable today (4-7 fields); a 4th tuple column
+//      for aggregation kind would add complexity for marginal benefit.
+//   3. Future refactor possible: FOREACH_NODE_CTX_SUMMABLE_FIELD sub-registry
+//      with FPN_AGG / INT_AGG / MAX_AGG dispatch when ≥3 aggregation
+//      patterns emerge.
+//======================================================================
+// [END_FUNCTION]_[Summary_EmitPerStrategy]
+//======================================================================
 
 }  // namespace tt
 
