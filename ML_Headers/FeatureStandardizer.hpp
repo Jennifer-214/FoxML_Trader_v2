@@ -3,7 +3,20 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FEATURE STANDARDIZER — v5.9.3a]
+// [FILE]_[ML_Headers/FeatureStandardizer.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE] [DETERMINISM]]
+// [SEAM]_[train-serve scaler parity — trainer computes in double, engine applies the same doubles]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[mean-center + unit-variance (+ winsor clip) for ML features — SHA-sealed .scaler sidecar binds to the feature registry; identity when no scaler loaded]
+// [CONTAINS]
+//   - [STRUCT]_[FeatureStandardizer]
+//   - [FUNCTION]_[FeatureStandardizer_Init]
+//   - [FUNCTION]_[FeatureStandardizer_Apply]
+//   - [FUNCTION]_[FeatureStandardizer_Load]
+//   - [FUNCTION]_[FeatureStandardizer_VerifyAgainstBuild]
+//   - [FUNCTION]_[FeatureStandardizer_Compute]   (FitWinsor + Persist share the section)
+//   - [FUNCTION]_[FeatureStandardizer_Free]
 //======================================================================================================
 // Mean-centering + unit-variance scaling for ML features. Applied between
 // Features_PackAll and Model_Predict on the slow path.
@@ -17,25 +30,15 @@
 //   FPN_Binary/branchless rule that protects the hot path doesn't apply.
 //   See DOCS/CLAUDE_ML_INVARIANTS.md "Train-serve scaler parity" rule.
 //
-// Sidecar binary format (`.scaler` next to the model `.bin`):
-//   [u32 magic = 0xFE5C1AE2]
-//   [u32 num_features]                  // must equal NUM_REGISTERED_FEATURES at load
-//   [u64 feature_registry_hash]         // must equal FEATURE_REGISTRY_HASH() at load
-//   [u32 stddev_floor_q]                // Q32 fixed-point (1e-9 default)
-//   [double mean[N]]
-//   [double stddev[N]]
-//   [u8 sha256[32] of body up to here]
+// Sidecar binary format (`.scaler` next to the model `.bin`): the
+// [WIRE_FIELD] map on FeatureStandardizer_Load + the SCALER_BODY_BYTES
+// field list below are the format SSoT (winsor-aware v1, magic 0xFE5C1AE3).
 //
 // Two-layer registry binding:
 //   1. Stamp body has scaler_sha256 (sidecar's full-file SHA)
 //   2. Sidecar embeds feature_registry_hash + num_features
 //   Both must match build's FEATURE_REGISTRY_HASH() / NUM_REGISTERED_FEATURES
 //   at load. Drift is impossible to ship without explicit retrain.
-//
-// Status v5.9.3a: scaler infrastructure ships DISABLED. Compute/Persist
-// (training-side) + apply-site callers land in v5.9.3b. Load + verify
-// path is the v5.9.3a deliverable. v5.9.2 parity regression test
-// passes unchanged by construction (no caller invokes Apply).
 //
 // FUTURE HOOKS (post-v5.9.3):
 //   - per-feature feature flags (enable scaling per FeatureId)
@@ -57,9 +60,9 @@
 
 namespace tt {
 
-//======================================================================================================
-// [SIDECAR FORMAT CONSTANTS]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[sidecar format constants]
+//----------------------------------------------------------------------
 // Magic number identifies a v5.9.3+ scaler binary. Distinct value chosen so
 // random file headers don't accidentally validate as scaler files.
 // v5.14.1.D — magic bumped from 0xFE5C1AE2 (v0; pre-winsor) to 0xFE5C1AE3
@@ -88,8 +91,9 @@ static constexpr uint32_t SCALER_MAGIC    = 0xFE5C1AE3u;  // v5.14.1.D+ (winsor)
 //                                        div-by-zero on constant features
 //   mean[N]       [8N bytes, double*N] — per-feature mean
 //   stddev[N]     [8N bytes, double*N] — per-feature stddev
-//
-// Total = 20 + 16*NUM_REGISTERED_FEATURES bytes (default N=34 → 564 bytes).
+//   has_winsor_bounds [1 byte, uint8_t] — v5.14.1.D winsor block begins
+//   winsor_low[N]  [8N bytes, double*N] — per-feature winsor floor
+//   winsor_high[N] [8N bytes, double*N] — per-feature winsor ceiling
 //
 // Both Persist (write) and Load (verify-SHA) build the body from these
 // fields. SCALER_BODY_BYTES is used to size the in-memory staging buffer
@@ -131,16 +135,17 @@ static inline double scaler_q32_to_floor(uint32_t q) {
     return (double)q / 4294967296.0;
 }
 
-//======================================================================================================
-// [FEATURE STANDARDIZER STRUCT]
-//======================================================================================================
-// Inline struct (no malloc) per v5.9.3a audit decision. NUM_REGISTERED_FEATURES
-// is constexpr → struct size known at compile time. ~600 bytes per
-// instance for current 34 features. Lives inline on each ModelHandle.
-//
-// has_scaler: 0 by default (no scaler loaded). Set to 1 after successful
-// FeatureStandardizer_Load. Apply path early-returns when 0 (identity).
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[FeatureStandardizer]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCOPE]_[NODE]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-model scaler state — mean/stddev/winsor arrays sized by NUM_REGISTERED_FEATURES; inline on each ModelHandle, no heap]
+// [REFERENCE]_[INVARIANT]_[H1]
+//======================================================================
+// [CODE]
+//======================================================================
 struct FeatureStandardizer {
     int      has_scaler;           // 0 = identity (no scaler loaded), 1 = active
     uint64_t registry_hash;        // FEATURE_REGISTRY_HASH() at training time
@@ -162,13 +167,37 @@ struct FeatureStandardizer {
     double   winsor_low[NUM_REGISTERED_FEATURES];
     double   winsor_high[NUM_REGISTERED_FEATURES];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Inline struct (no malloc) per v5.9.3a audit decision. NUM_REGISTERED_FEATURES
+// is constexpr → struct size known at compile time. ~600 bytes per
+// instance for current 34 features. Lives inline on each ModelHandle.
+//
+// has_scaler: 0 by default (no scaler loaded). Set to 1 after successful
+// FeatureStandardizer_Load. Apply path early-returns when 0 (identity).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[1320B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[21]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[FeatureStandardizer]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
-// Zero-init the struct. has_scaler=0 means "identity applied" — caller
-// can safely use the struct without explicit init, but explicit init is
-// recommended for clarity.
+//======================================================================
+// [FUNCTION]_[FeatureStandardizer_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero-init to the identity scaler — mean 0, stddev 1, winsor bounds +-INFINITY (pass-through)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void FeatureStandardizer_Init(FeatureStandardizer* sc) {
     if (!sc) return;
     sc->has_scaler = 0;
@@ -190,26 +219,28 @@ static inline void FeatureStandardizer_Init(FeatureStandardizer* sc) {
         sc->winsor_high[i] = +INFINITY;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Zero-init the struct. has_scaler=0 means "identity applied" — caller
+// can safely use the struct without explicit init, but explicit init is
+// recommended for clarity.
+//======================================================================
+// [END_FUNCTION]_[FeatureStandardizer_Init]
+//======================================================================
 
-//======================================================================================================
-// [APPLY] — slow-path, between Features_PackAll and Model_Predict
-//======================================================================================================
-// Standardize features in-place. Reads from + writes to the same float[]
-// buffer. Math: out[i] = ((double)in[i] - mean[i]) / fmax(stddev[i], floor);
-// cast back to float at the boundary.
-//
-// When has_scaler=0: returns 0 immediately (identity, no work).
-// When has_scaler=1: applies standardization + post-apply finite check
-// (NaN/Inf in output sets sentinel=-1, caller skips the prediction
-// cycle, v5.9.0 NaN-guard pattern).
-//
-// Returns: 0 = OK / no-op, -1 = output produced NaN/Inf (caller skips
-// prediction). Pre-apply NaN check is Features_PackAll's job (v5.9.0).
-//
-// V5.9.3a STATUS: function defined, NO CALLERS YET. v5.9.3b adds the
-// 5 Model_Predict-adjacent call sites (StrategyParameters.hpp:723/751,
-// MLStrategy.hpp:129, PortfolioController.hpp:1639/1806).
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[FeatureStandardizer_Apply]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SEAM]_[train-serve scaler apply — double math matching the trainer, per the file-header type rationale]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[in-place standardize: winsor clip -> mean-center -> unit-var (floored stddev); identity when no scaler; -1 on non-finite output]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int FeatureStandardizer_Apply(const FeatureStandardizer* sc,
                                               float* features, int n) {
     if (!sc || !sc->has_scaler) return 0;     // identity (no work)
@@ -240,19 +271,48 @@ static inline int FeatureStandardizer_Apply(const FeatureStandardizer* sc,
     }
     return 0;
 }
-
-//======================================================================================================
-// [LOAD] — engine boot, called from NodeModelZoo_TryLoadRole
-//======================================================================================================
-// Read the .scaler sidecar binary. Validates magic, num_features, and
-// the body's embedded sha256. Caller (NodeModelZoo) compares the FULL
-// file's SHA against stamp's scaler_sha256 separately (using
-// sha256_file_hex_inproc). After Load returns 1, caller sets
-// has_scaler=1 if all upstream checks (registry_hash match) pass.
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Standardize features in-place. Reads from + writes to the same float[]
+// buffer. Math: out[i] = ((double)in[i] - mean[i]) / fmax(stddev[i], floor);
+// cast back to float at the boundary.
 //
-// Returns: 1 = success, 0 = file missing, -1 = corrupt / mismatched
-// magic / num_features / embedded SHA.
-//======================================================================================================
+// When has_scaler=0: returns 0 immediately (identity, no work).
+// When has_scaler=1: applies standardization + post-apply finite check
+// (NaN/Inf in output sets sentinel=-1, caller skips the prediction
+// cycle, v5.9.0 NaN-guard pattern).
+//
+// Returns: 0 = OK / no-op, -1 = output produced NaN/Inf (caller skips
+// prediction). Pre-apply NaN check is Features_PackAll's job (v5.9.0).
+//======================================================================
+// [END_FUNCTION]_[FeatureStandardizer_Apply]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[FeatureStandardizer_Load]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[read + verify the .scaler sidecar — magic / num_features / embedded body-SHA gates; 1 = loaded, 0 = missing, -1 = corrupt]
+// [WIRE_VERSION]_[[SCALER_MAGIC v1 0xFE5C1AE3 winsor-aware; v0 0xFE5C1AE2 refused with a regenerate hint]]
+// ---- the sidecar body field-map: tier-2 [WIRE_FIELD] members, ordinal-addressed (D-345) ----
+// [WIRE_FIELD]_[magic]_[u32 — SCALER_MAGIC, identifies file type]
+// [WIRE_FIELD]_[num_features]_[u32 — must equal NUM_REGISTERED_FEATURES at load]
+// [WIRE_FIELD]_[registry_hash]_[u64 — FOREACH_FEATURE compile-time hash; binds scaler to the feature registry]
+// [WIRE_FIELD]_[stddev_floor]_[u32 Q32 fixed-point — Apply uses fmax(stddev, floor)]
+// [WIRE_FIELD]_[mean]_[double x N — per-feature mean]
+// [WIRE_FIELD]_[stddev]_[double x N — per-feature stddev]
+// [WIRE_FIELD]_[has_winsor_bounds]_[u8 — v5.14.1.D winsor block begins here]
+// [WIRE_FIELD]_[winsor_low]_[double x N — per-feature winsor floor]
+// [WIRE_FIELD]_[winsor_high]_[double x N — per-feature winsor ceiling]
+// [WIRE_FIELD]_[sha256]_[32-byte trailer — SHA-256 of the body, recomputed + compared at Load]
+// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int FeatureStandardizer_Load(FeatureStandardizer* sc,
                                              const char* sidecar_path) {
     if (!sc || !sidecar_path) return -1;
@@ -346,33 +406,53 @@ static inline int FeatureStandardizer_Load(FeatureStandardizer* sc,
     sc->has_scaler = 1;
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Read the .scaler sidecar binary. Validates magic, num_features, and
+// the body's embedded sha256. Caller (NodeModelZoo) compares the FULL
+// file's SHA against stamp's scaler_sha256 separately (using
+// sha256_file_hex_inproc). After Load returns 1, caller sets
+// has_scaler=1 if all upstream checks (registry_hash match) pass.
+//======================================================================
+// [END_FUNCTION]_[FeatureStandardizer_Load]
+//======================================================================
 
-//======================================================================================================
-// [VERIFY] — caller checks the loaded scaler against current build's invariants
-//======================================================================================================
-// Returns 1 if scaler matches build's FEATURE_REGISTRY_HASH() and
-// num_features. Returns 0 on mismatch. Caller decides refusal vs warn
-// per held_out_gate_strict.
+//======================================================================
+// [FUNCTION]_[FeatureStandardizer_VerifyAgainstBuild]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[loaded scaler vs THIS build — registry hash + feature count must match; caller decides refuse vs warn per held_out_gate_strict]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int FeatureStandardizer_VerifyAgainstBuild(const FeatureStandardizer* sc) {
     if (!sc || !sc->has_scaler) return 0;
     if (sc->num_features != (uint32_t)NUM_REGISTERED_FEATURES) return 0;
     if (sc->registry_hash != FEATURE_REGISTRY_HASH()) return 0;
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FeatureStandardizer_VerifyAgainstBuild]
+//======================================================================
 
-//======================================================================================================
-// [COMPUTE + PERSIST] — training-side, v5.9.3b will call from Backtest_TrainModel
-//======================================================================================================
-// Compute mean + stddev across the training set. Welford-style accumulator
-// (numerically stable). Reads feature_matrix as float (per Features_PackAll
-// output type), accumulates in double.
-//
-// V5.9.3a STATUS: function defined, NO CALLERS YET. v5.9.3b will integrate
-// from Backtest_TrainModel.
-
-//======================================================================================================
-// [FIT_WINSOR_PERCENTILES — v5.14.1.D]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[FeatureStandardizer_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[training-side: fit mean + stddev over the training matrix (two-pass, double accum); FitWinsor + the atomic-write Persist ride in this section]
+//======================================================================
+// [CODE]
+//======================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FIT_WINSOR_PERCENTILES — v5.14.1.D]
+//----------------------------------------------------------------------
 // Compute per-feature winsor bounds from training data using cfg-tunable
 // percentiles. For each feature column: gather values, sort, take
 // floor(pct_low * N) and floor(pct_high * N) indices → winsor_low[i] /
@@ -392,7 +472,7 @@ static inline int FeatureStandardizer_VerifyAgainstBuild(const FeatureStandardiz
 //
 // Latency: O(N log N) per feature × NUM_REGISTERED_FEATURES; one-time
 // training-side cost. Slow-path slow.
-//======================================================================================================
+//----------------------------------------------------------------------
 static inline void FeatureStandardizer_FitWinsor(FeatureStandardizer* sc,
                                                    const float* feature_matrix,
                                                    int num_samples,
@@ -527,16 +607,36 @@ static inline int FeatureStandardizer_Persist(const FeatureStandardizer* sc,
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Compute mean + stddev across the training set. Reads feature_matrix as
+// float (per Features_PackAll output type), accumulates in double.
+// Persist writes the sidecar via atomic write (.tmp + rename).
+//======================================================================
+// [END_FUNCTION]_[FeatureStandardizer_Compute]
+//======================================================================
 
-//======================================================================================================
-// [FREE]
-//======================================================================================================
-// Inline struct — no heap allocation. Free is a logical no-op (just zeros
-// the struct so future use re-initializes).
+//======================================================================
+// [FUNCTION]_[FeatureStandardizer_Free]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[logical no-op — inline struct owns no heap; re-Inits so future use starts clean]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void FeatureStandardizer_Free(FeatureStandardizer* sc) {
     if (!sc) return;
     FeatureStandardizer_Init(sc);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FeatureStandardizer_Free]
+//======================================================================
 
 }  // namespace tt
 
