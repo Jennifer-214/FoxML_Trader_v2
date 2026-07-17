@@ -3,65 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BANDIT ALGORITHM REGISTRY — v5.14.10.A]
-//======================================================================================================
-// FOREACH_BANDIT_ALGORITHM(X) registry — adding a new bandit algorithm is 1 row:
-//   1. Append X(NAME, val, fn, "doc") below
-//   2. Implement BanditAlgo_<NAME>_Apply with the uniform 5-arg contract
-//   Auto-generated: enum BanditAlgorithm, dispatch table bandit_algorithm_fns[],
-//   FOREACH_BANDIT_ALGORITHM_COUNT, ToString/FromString, bounds-checked wrapper.
-//
-// Operator selects via cfg.bandit_algorithm enum (5-state post-v5.15.5.F.4d):
-//   0 = EXP3                     (default; bytewise-identical to pre-v5.14.10; Thompson frozen)
-//   1 = THOMPSON                 (Bayesian posterior sampling; non-stationary-friendly; Exp3 frozen)
-//   2 = EXP3_OP_THOMPSON_GHOST   (Exp3 drives decisions + Thompson shadow-learns; legacy "BOTH" semantic
-//                                  preserved + Class 24 fix — Thompson posterior NOW updates from rewards)
-//   3 = THOMPSON_OP_EXP3_GHOST   (NEW v5.15.5.F.4d — Thompson drives decisions + Exp3 shadow-learns)
-//   4 = BLENDED                  (NEW v5.15.5.F.4d EXPERIMENTAL — weighted blend Exp3 + Thompson via
-//                                  cfg.thompson_exp3_blend_alpha; weights = (1-α) × Exp3 + α × Thompson_softmax)
-//
-// State semantics + bit columns drive auto-derived dispatch tables (multi-state-dispatch-with-per-
-// state-update-metadata.md Stage 3 ACTIVE first canonical at .F.4d):
-//   - `exp3_up`     bit — does this state update Exp3 posterior on reward attribution?
-//   - `thompson_up` bit — does this state update Thompson posterior on reward attribution?
-//   - `drives`      token — which algo drives decisions (EXP3 / THOMPSON / BLENDED)
-//
-// DESIGN — UNIFORM 6-ARG DISPATCH CONTRACT (widened from 5-arg at .F.4d for BLENDED):
-//   void BanditAlgoFn(BanditState* exp3, ThompsonBanditState* thompson,
-//                     int n_arms, double blend_alpha,
-//                     double* weights_out, int* chosen_arm_out);
-//
-//   - exp3            : BanditState* (used by EXP3 + ghost-modes + BLENDED; nullable for THOMPSON)
-//   - thompson        : ThompsonBanditState* (used by THOMPSON + ghost-modes + BLENDED; nullable for EXP3)
-//   - n_arms          : active arm count (must match both states' n_arms)
-//   - blend_alpha     : Exp3↔Thompson blend ratio for BLENDED state ([0..1]; 0 = pure Exp3, 1 = pure Thompson).
-//                       Ignored by EXP3 / THOMPSON / ghost-modes (caller may pass any value).
-//                       Per § J of .F.4d merged plan body — fn-arg passing avoids Class 27 cfg-mirror cache
-//                       on BanditState (alpha is per-core resolved value bound at dispatch time, not cached).
-//   - weights_out     : OUT — caller-supplied buffer of BANDIT_MAX_ARMS doubles.
-//                       Each compute fn writes EXACTLY n_arms entries; rest unmodified.
-//   - chosen_arm_out  : OUT — single int (writeable; nullable to discard).
-//
-// Each compute fn writes BOTH outputs (uniform contract regardless of algo):
-//   - EXP3:                       weights = Bandit_GetProbabilities; chosen = argmax(weights)
-//   - THOMPSON:                   chosen = Thompson_Sample; weights = one-hot at chosen
-//   - EXP3_OP_THOMPSON_GHOST:     weights = Exp3 probs (drives blending); chosen = Exp3's argmax
-//                                  (chosen flipped from Thompson's pick at .F.4d to fix Class 24 sister
-//                                  attribution bug; Thompson Sample side-effected for telemetry —
-//                                  populates last_predicted_buy_thompson_arm via caller-side capture).
-//   - THOMPSON_OP_EXP3_GHOST:     chosen = Thompson_Sample; weights = one-hot at chosen.
-//                                  Exp3 GetProbabilities called for telemetry only (logged via calib).
-//   - BLENDED:                    weights = (1-α) × Exp3_probs + α × Thompson_softmax(mu_post);
-//                                  chosen = argmax(weights). Per § J — uses Thompson_GetSoftmaxWeights
-//                                  helper for branchless softmax (no PRNG advance on weights derivation).
-//
-// WHY 7-COL TUPLE (was 4-col pre-.F.4d): registry feeds dispatch table + enum + ToString/FromString
-// + bounds-checked wrapper + auto-derived per-state update masks (exp3_up + thompson_up reductions)
-// + dead-state assert. Adding a 6th algorithm becomes 1 row with metadata tuple → both dispatch
-// tables (buy + exit auto-mirror via FOREACH_BANDIT_SIDE) + masks + slow-path predicates extend.
-//
-// Pattern documented in DESIGN_SPECS/curve-registry-pattern.md + multi-state-dispatch-with-per-
-// state-update-metadata.md. Slow-path-only; hot path UNTOUCHED.
+// [FILE]_[ML_Headers/BanditAlgorithmRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[bandit-algorithm registry (v5.14.10.A + .F.4d 5-state expansion) — one X-macro row per algorithm auto-flows enum + dispatch table + update masks + To/FromString + bounds-checked wrapper]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_BANDIT_ALGORITHM]   (dispatch contract typedef + 5 compute fns + Apply wrapper share the block)
 //======================================================================================================
 #ifndef BANDIT_ALGORITHM_REGISTRY_HPP
 #define BANDIT_ALGORITHM_REGISTRY_HPP
@@ -71,9 +19,28 @@
 #include "BanditLearning.hpp"   // BanditState + Bandit_GetProbabilities
 #include "ThompsonBandit.hpp"   // ThompsonBanditState + Thompson_Sample
 
-//======================================================================================================
-// [DISPATCH CONTRACT TYPE — 6-arg (widened from 5-arg at v5.15.5.F.4d for BLENDED state-4)]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_BANDIT_ALGORITHM]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[5 bandit algorithm states (EXP3 / THOMPSON / 2 ghost modes / BLENDED) — 7-col rows auto-flow enum + fn-ptr dispatch + per-state update masks + dead-state assert]
+// [COLUMN]_[name]_[UPPERCASE token -> BANDIT_ALGO_<name> enum]
+// [COLUMN]_[enum_value]_[numeric, cfg-stored — NEVER renumber after release (Option C wire-byte preservation; cfg=0/1/2 unchanged across .F.4d, cfg=3/4 NEW)]
+// [COLUMN]_[compute_fn]_[free-function symbol matching the 6-arg BanditAlgoFn dispatch contract]
+// [COLUMN]_[exp3_up]_[0/1 — state updates Exp3 posterior on reward attribution; drives the BANDIT_EXP3_UPDATE_MASK reduction]
+// [COLUMN]_[thompson_up]_[0/1 — state updates Thompson posterior; drives BANDIT_THOMPSON_UPDATE_MASK + closes Class 24 (update wired only when set)]
+// [COLUMN]_[drives]_[EXP3 | THOMPSON | BLENDED — which algo drives decisions; auto-derives slow-path gate predicates]
+// [COLUMN]_[doc_string]_[operator-facing description for cfg.example + GUI tooltip]
+// [REFERENCE]_[DESIGN_SPEC]_[curve-registry-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[multi-state-dispatch-with-per-state-update-metadata]
+// [REFERENCE]_[INVARIANT]_[[H15] [H20] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[DISPATCH CONTRACT TYPE — 6-arg (widened from 5-arg at v5.15.5.F.4d for BLENDED state-4)]
+//----------------------------------------------------------------------
 typedef void (*BanditAlgoFn)(BanditState* exp3,
                               ThompsonBanditState* thompson,
                               int n_arms,
@@ -81,9 +48,9 @@ typedef void (*BanditAlgoFn)(BanditState* exp3,
                               double* weights_out,
                               int* chosen_arm_out);
 
-//======================================================================================================
-// [FORWARD-DECLARE COMPUTE FNS]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FORWARD-DECLARE COMPUTE FNS]
+//----------------------------------------------------------------------
 // Forward-declare so the dispatch table below can reference them.
 // Definitions follow at end of file.
 // 5 apply_fns post-v5.15.5.F.4d (was 3 pre-.F.4d; BanditAlgo_Both_Apply deleted as orphan after
@@ -104,23 +71,11 @@ inline void BanditAlgo_Blended_Apply(BanditState* exp3, ThompsonBanditState* tho
                                        int n_arms, double blend_alpha,
                                        double* weights_out, int* chosen_arm_out);
 
-//======================================================================================================
-// [REGISTRY TUPLE]
-//======================================================================================================
-// Tuple (7-col post-v5.15.5.F.4d; was 4-col):
-//   X(name, enum_value, compute_fn, exp3_up, thompson_up, drives, doc_string)
-//   name         — UPPERCASE token; used for BANDIT_ALGO_<name> enum
-//   enum_value   — numeric value (cfg-stored; NEVER renumber after release; OPTION C wire-byte
-//                   preservation — cfg=0/1/2 wire bytes unchanged across .F.4d; cfg=3/4 NEW)
-//   compute_fn   — free-function symbol matching the BanditAlgoFn dispatch contract (6-arg)
-//   exp3_up      — 0/1; does this state update Exp3 posterior on reward attribution?
-//                   Drives auto-derived BANDIT_EXP3_UPDATE_MASK reduction.
-//   thompson_up  — 0/1; does this state update Thompson posterior on reward attribution?
-//                   Drives auto-derived BANDIT_THOMPSON_UPDATE_MASK reduction + closes Class 24
-//                   (Thompson_Update wired only when this bit is set; replaces fragile callsite check).
-//   drives       — token (EXP3 / THOMPSON / BLENDED); which algo drives decisions.
-//                   Auto-derives slow-path gate predicates (e.g., "should we compute Exp3 probs?").
-//   doc_string   — operator-facing description for cfg.example + GUI tooltip
+//----------------------------------------------------------------------
+// [SECTION]_[REGISTRY TUPLE]
+//----------------------------------------------------------------------
+// (tuple column legend lives in the [COLUMN] lines of this registry's
+//  orient block; per-column rationale preserved there verbatim)
 //
 // IMPORTANT: enum values must be DENSE + CONTIGUOUS starting at 0 (fn-ptr table
 // is indexed by enum value). Static_assert below enforces this.
@@ -137,9 +92,9 @@ inline void BanditAlgo_Blended_Apply(BanditState* exp3, ThompsonBanditState* tho
     X(  THOMPSON_OP_EXP3_GHOST,    3,     BanditAlgo_Thompson_Drives_Exp3_Ghost_Apply,      1,       1,           THOMPSON, "NEW v5.15.5.F.4d — Thompson drives + Exp3 shadow-learns (explicit ghost mode for Thompson-led decisions with Exp3 telemetry)") \
     X(  BLENDED,                   4,     BanditAlgo_Blended_Apply,                         1,       1,           BLENDED,  "NEW v5.15.5.F.4d EXPERIMENTAL — Exp3+Thompson weighted blend via thompson_exp3_blend_alpha; weights = (1-α)×Exp3 + α×Thompson_softmax")
 
-//======================================================================================================
-// [AUTO-GENERATED ENUM + COUNT + DENSITY ASSERT]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[AUTO-GENERATED ENUM + COUNT + DENSITY ASSERT]
+//----------------------------------------------------------------------
 #define X_GEN_BANDIT_ALGO_ENUM(name, val, fn, exp3_up, thompson_up, drives, doc) BANDIT_ALGO_##name = val,
 enum BanditAlgorithm {
     FOREACH_BANDIT_ALGORITHM(X_GEN_BANDIT_ALGO_ENUM)
@@ -174,9 +129,9 @@ static_assert(FOREACH_BANDIT_ALGORITHM_COUNT == 5,
 FOREACH_BANDIT_ALGORITHM(_BANDIT_STATE_NONDEAD_ASSERT)
 #undef _BANDIT_STATE_NONDEAD_ASSERT
 
-//======================================================================================================
-// [AUTO-DERIVED PER-STATE UPDATE MASKS — v5.15.5.F.4d Step 2.B + § B.5]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[AUTO-DERIVED PER-STATE UPDATE MASKS — v5.15.5.F.4d Step 2.B + § B.5]
+//----------------------------------------------------------------------
 // Per § B.5 of v5.15.5.F.4d merged plan body. X-macro reduction over per-row `exp3_up` / `thompson_up`
 // metadata bits produces uint8_t bitmaps indexed by enum value. Bit N is set IFF algorithm N updates
 // the respective algorithm's posterior on reward attribution.
@@ -190,7 +145,6 @@ FOREACH_BANDIT_ALGORITHM(_BANDIT_STATE_NONDEAD_ASSERT)
 //   - Test fixtures verifying gate predicate semantics
 //
 // Adding a 6th algorithm row → masks auto-extend to bit 5+. Zero per-site update.
-//======================================================================================================
 #define _BANDIT_EXP3_MASK_BIT(name, val, fn, exp3_up, thompson_up, drives, doc) \
     | (((uint8_t)(exp3_up)) << (val))
 static constexpr uint8_t BANDIT_EXP3_UPDATE_MASK = (uint8_t)(0 FOREACH_BANDIT_ALGORITHM(_BANDIT_EXP3_MASK_BIT));
@@ -213,9 +167,9 @@ static_assert(BANDIT_THOMPSON_UPDATE_MASK == 0x1Eu, "THOMPSON update mask invari
 static_assert((BANDIT_EXP3_UPDATE_MASK & BANDIT_THOMPSON_UPDATE_MASK) == 0x1Cu,
               "SHADOW_LEARNING (both algos update) invariant: bits 2,3,4 set (the 3 ghost/blended states)");
 
-//======================================================================================================
-// [DISPATCH TABLE — function pointers indexed by enum value]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[DISPATCH TABLE — function pointers indexed by enum value]
+//----------------------------------------------------------------------
 // Slow-path: 1 indirect call (~1-2ns); branch predictor handles cfg-stable
 // algorithm choice (operator typically picks one mode and runs).
 #define X_GEN_BANDIT_ALGO_FN_PTR(name, val, fn, exp3_up, thompson_up, drives, doc) fn,
@@ -224,9 +178,9 @@ static const BanditAlgoFn bandit_algorithm_fns[] = {
 };
 #undef X_GEN_BANDIT_ALGO_FN_PTR
 
-//======================================================================================================
-// [TOSTRING / FROMSTRING — cfg parser + GUI display]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[TOSTRING / FROMSTRING — cfg parser + GUI display]
+//----------------------------------------------------------------------
 static inline const char* BanditAlgorithm_ToString(int algo) {
     switch (algo) {
         #define X_GEN_BANDIT_ALGO_TOSTRING(name, val, fn, exp3_up, thompson_up, drives, doc) case val: return #name;
@@ -258,9 +212,9 @@ static inline int BanditAlgorithm_FromString(const char* s) {
     return -1;
 }
 
-//======================================================================================================
-// [DISPATCH WRAPPER — bounds-checked]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[DISPATCH WRAPPER — bounds-checked]
+//----------------------------------------------------------------------
 // Caller passes any int algorithm value; out-of-range degrades to EXP3 (preserves
 // pre-v5.14.10 behavior). Out-of-range happens on corrupted cfg / stamp-bound
 // parse failure; the safe fallback is the bytewise-identical default path.
@@ -278,9 +232,9 @@ static inline void BanditAlgorithm_Apply(int algo,
     bandit_algorithm_fns[algo](exp3, thompson, n_arms, blend_alpha, weights_out, chosen_arm_out);
 }
 
-//======================================================================================================
-// [COMPUTE FNS — uniform 5-arg contract]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[COMPUTE FNS — uniform dispatch contract]
+//----------------------------------------------------------------------
 // Each fn writes BOTH outputs (weights + chosen_arm) regardless of which algo
 // "drives" the decision. Ensemble blending in ML_BuildParameters reads weights;
 // telemetry / cfg=2 calib log reads chosen_arm.
@@ -288,7 +242,6 @@ static inline void BanditAlgorithm_Apply(int algo,
 // Defensive on null state pointers — degenerates to uniform weights + arm 0.
 // In production this should NEVER happen (caller wires both states); defensive
 // check protects against partial-init or test-harness misuse.
-//======================================================================================================
 
 // EXP3 — wraps existing Bandit_GetProbabilities + argmax. Bytewise-identical to
 // pre-v5.14.10 behavior when called via this dispatch (cfg.bandit_algorithm=0
@@ -348,7 +301,7 @@ inline void BanditAlgo_Thompson_Apply(BanditState* exp3, ThompsonBanditState* th
 // now reflects Exp3's argmax (NOT Thompson's pick) so reward attribution lands on the arm
 // that ACTUALLY drove the decision. Thompson_Sample still called for telemetry side effect
 // (RNG advances; caller captures last_predicted_buy_thompson_arm separately per § A.0 plan body).
-// Per-arm reward observability (NodeModelZoo.hpp:881-882) — both bandits learn from same
+// Per-arm reward observability (NodeModelZoo.hpp) — both bandits learn from same
 // per-arm signal regardless of which one chose; Thompson posterior NOW updates from rewards
 // (Class 24 fix — pre-.F.4d Thompson never updated despite mode being settable).
 inline void BanditAlgo_Exp3_Drives_Thompson_Ghost_Apply(BanditState* exp3, ThompsonBanditState* thompson,
@@ -461,5 +414,71 @@ inline void BanditAlgo_Blended_Apply(BanditState* exp3, ThompsonBanditState* tho
         *chosen_arm_out = best;
     }
 }
-
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [ROW]_[EXP3_OP_THOMPSON_GHOST]_[cfg=2 wire slot reassigned from legacy BOTH at .F.4d — bytes preserved, Class 24 fix applied; FromString keeps the BOTH alias]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// FOREACH_BANDIT_ALGORITHM(X) registry — adding a new bandit algorithm is 1 row:
+//   1. Append X(NAME, val, fn, "doc") below
+//   2. Implement BanditAlgo_<NAME>_Apply with the uniform dispatch contract
+//   Auto-generated: enum BanditAlgorithm, dispatch table bandit_algorithm_fns[],
+//   FOREACH_BANDIT_ALGORITHM_COUNT, ToString/FromString, bounds-checked wrapper.
+//
+// Operator selects via cfg.bandit_algorithm enum (5-state post-v5.15.5.F.4d):
+//   0 = EXP3                     (default; bytewise-identical to pre-v5.14.10; Thompson frozen)
+//   1 = THOMPSON                 (Bayesian posterior sampling; non-stationary-friendly; Exp3 frozen)
+//   2 = EXP3_OP_THOMPSON_GHOST   (Exp3 drives decisions + Thompson shadow-learns; legacy "BOTH" semantic
+//                                  preserved + Class 24 fix — Thompson posterior NOW updates from rewards)
+//   3 = THOMPSON_OP_EXP3_GHOST   (NEW v5.15.5.F.4d — Thompson drives decisions + Exp3 shadow-learns)
+//   4 = BLENDED                  (NEW v5.15.5.F.4d EXPERIMENTAL — weighted blend Exp3 + Thompson via
+//                                  cfg.thompson_exp3_blend_alpha; weights = (1-α) × Exp3 + α × Thompson_softmax)
+//
+// State semantics + bit columns drive auto-derived dispatch tables (multi-state-dispatch-with-per-
+// state-update-metadata.md Stage 3 ACTIVE first canonical at .F.4d):
+//   - `exp3_up`     bit — does this state update Exp3 posterior on reward attribution?
+//   - `thompson_up` bit — does this state update Thompson posterior on reward attribution?
+//   - `drives`      token — which algo drives decisions (EXP3 / THOMPSON / BLENDED)
+//
+// DESIGN — UNIFORM 6-ARG DISPATCH CONTRACT (widened from 5-arg at .F.4d for BLENDED):
+//   void BanditAlgoFn(BanditState* exp3, ThompsonBanditState* thompson,
+//                     int n_arms, double blend_alpha,
+//                     double* weights_out, int* chosen_arm_out);
+//
+//   - exp3            : BanditState* (used by EXP3 + ghost-modes + BLENDED; nullable for THOMPSON)
+//   - thompson        : ThompsonBanditState* (used by THOMPSON + ghost-modes + BLENDED; nullable for EXP3)
+//   - n_arms          : active arm count (must match both states' n_arms)
+//   - blend_alpha     : Exp3↔Thompson blend ratio for BLENDED state ([0..1]; 0 = pure Exp3, 1 = pure Thompson).
+//                       Ignored by EXP3 / THOMPSON / ghost-modes (caller may pass any value).
+//                       Per § J of .F.4d merged plan body — fn-arg passing avoids Class 27 cfg-mirror cache
+//                       on BanditState (alpha is per-core resolved value bound at dispatch time, not cached).
+//   - weights_out     : OUT — caller-supplied buffer of BANDIT_MAX_ARMS doubles.
+//                       Each compute fn writes EXACTLY n_arms entries; rest unmodified.
+//   - chosen_arm_out  : OUT — single int (writeable; nullable to discard).
+//
+// Each compute fn writes BOTH outputs (uniform contract regardless of algo):
+//   - EXP3:                       weights = Bandit_GetProbabilities; chosen = argmax(weights)
+//   - THOMPSON:                   chosen = Thompson_Sample; weights = one-hot at chosen
+//   - EXP3_OP_THOMPSON_GHOST:     weights = Exp3 probs (drives blending); chosen = Exp3's argmax
+//                                  (chosen flipped from Thompson's pick at .F.4d to fix Class 24 sister
+//                                  attribution bug; Thompson Sample side-effected for telemetry —
+//                                  populates last_predicted_buy_thompson_arm via caller-side capture).
+//   - THOMPSON_OP_EXP3_GHOST:     chosen = Thompson_Sample; weights = one-hot at chosen.
+//                                  Exp3 GetProbabilities called for telemetry only (logged via calib).
+//   - BLENDED:                    weights = (1-α) × Exp3_probs + α × Thompson_softmax(mu_post);
+//                                  chosen = argmax(weights). Per § J — uses Thompson_GetSoftmaxWeights
+//                                  helper for branchless softmax (no PRNG advance on weights derivation).
+//
+// WHY 7-COL TUPLE (was 4-col pre-.F.4d): registry feeds dispatch table + enum + ToString/FromString
+// + bounds-checked wrapper + auto-derived per-state update masks (exp3_up + thompson_up reductions)
+// + dead-state assert. Adding a 6th algorithm becomes 1 row with metadata tuple → both dispatch
+// tables (buy + exit auto-mirror via FOREACH_BANDIT_SIDE) + masks + slow-path predicates extend.
+//
+// Pattern documented in DESIGN_SPECS/curve-registry-pattern.md + multi-state-dispatch-with-per-
+// state-update-metadata.md. Slow-path-only; hot path UNTOUCHED.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_BANDIT_ALGORITHM]
+//======================================================================
 #endif // BANDIT_ALGORITHM_REGISTRY_HPP
