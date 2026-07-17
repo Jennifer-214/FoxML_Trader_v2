@@ -1,4 +1,12 @@
 #pragma once
+
+//======================================================================
+// [FILE]_[GUI/FoxmlTheme.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the FoxML Classic ImGui + ImPlot palette (terminal-matched) + the theme applicator — sourced from the Kitty/Waybar theme; FoxmlColors holds the constexpr palette, Foxml_ApplyTheme wires it into the ImGui/ImPlot styles]
+//======================================================================
 // FoxML Classic palette — matches Kitty terminal + Waybar + TUI exactly
 // sourced from ~/THEME/FoxML/themes/FoxML_Classic/palette.sh
 // and ~/.config/kitty/kitty.conf + ~/.config/waybar/style.css
@@ -42,6 +50,16 @@ namespace FoxmlColors {
     constexpr ImVec4 selection  = {0.227f, 0.243f, 0.275f, 1.0f};  // #3a3e46 (slate selection)
 }
 
+//======================================================================
+// [FUNCTION]_[Foxml_ApplyTheme]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[apply the FoxML Classic palette to the ImGui + ImPlot styles — sharp corners, warm-gold chrome, no blue defaults]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Foxml_ApplyTheme() {
     using namespace FoxmlColors;
 
@@ -153,3 +171,8 @@ static inline void Foxml_ApplyTheme() {
     ps.Colors[ImPlotCol_AxisBgActive]   = {primary.x, primary.y, primary.z, 0.25f};
     ps.Colors[ImPlotCol_Crosshairs] = {wheat.x, wheat.y, wheat.z, 0.5f};
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Foxml_ApplyTheme]
+//======================================================================

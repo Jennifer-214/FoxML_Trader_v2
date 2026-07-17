@@ -1,4 +1,12 @@
 #pragma once
+
+//======================================================================
+// [FILE]_[GUI/TradeReader.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reads the engine CSV trade log into chart markers + an equity curve — a port of tools/chart.py TradeReader; refreshes on file-size change (no per-frame reopen), locale-immune CSV parse]
+//======================================================================
 // TradeReader — reads engine CSV trade log for chart markers + equity curve
 // port of tools/chart.py TradeReader
 // refreshes by checking file size (no inotify, same as Python)
@@ -22,6 +30,16 @@ struct EquityPoint {
     double cumulative_pnl;
 };
 
+//======================================================================
+// [STRUCT]_[TradeData]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the loaded trade markers + equity curve + the file-size cache for change detection]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct TradeData {
     TradeMarker markers[MAX_TRADES];
     int marker_count;
@@ -35,13 +53,45 @@ struct TradeData {
     char csv_path[256];
     long last_size;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TradeData]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[TradeData_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init a TradeData for a CSV path]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TradeData_Init(TradeData *td, const char *csv_path) {
     memset(td, 0, sizeof(*td));
     strncpy(td->csv_path, csv_path, 255);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TradeData_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[csv_field]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[extract the Nth comma-separated field from a CSV line]
+//======================================================================
 // simple CSV field parser: find Nth comma-separated field in line
+//======================================================================
+// [CODE]
+//======================================================================
 static inline const char *csv_field(const char *line, int field_idx, char *out, int out_len) {
     int current = 0;
     const char *p = line;
@@ -72,7 +122,22 @@ static inline const char *csv_field(const char *line, int field_idx, char *out, 
     out[0] = '\0';
     return out;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[csv_field]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[TradeData_Refresh]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reload the trade CSV if its size changed — pair BUY/SELL fees FIFO into net-P&L equity points, cap markers to the recent window]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TradeData_Refresh(TradeData *td) {
     struct stat st;
     if (stat(td->csv_path, &st) != 0) return;
@@ -168,3 +233,8 @@ static inline void TradeData_Refresh(TradeData *td) {
         td->marker_count = td->max_visible_markers;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TradeData_Refresh]
+//======================================================================

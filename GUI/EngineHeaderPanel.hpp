@@ -2,25 +2,13 @@
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 // See LICENSE file in the project root for full license text.
 
-//======================================================================================================
-// [ENGINE HEADER PANEL — v5.8.6b]
-//======================================================================================================
-// Single-line ImGui header showing the running engine's version + feature
-// registry hash + model format version. Same content rendered in both
-// engine_gui (live) and foxml_suite (training/backtest) — call
-// EngineHeader_Render() from each binary's render loop.
-//
-// All values pulled from compile-time constants:
-//   ENGINE_VERSION_STRING (Version.hpp)
-//   FEATURE_REGISTRY_HASH() (FeatureRegistry.hpp — FNV-1a fold)
-//   MODEL_FORMAT_VERSION (ModelInference.hpp)
-//
-// This panel is the operator-visible counterpart to the boot-log line
-// emitted by NodeModelZoo_TryLoadRole at model load. Shows what the
-// CURRENT BUILD speaks; per-loaded-model match state is in the boot log.
-// (Future ship can extend this panel with per-model match status if
-// the boot log proves insufficient — for now it's deliberately minimal.)
-//======================================================================================================
+//======================================================================
+// [FILE]_[GUI/EngineHeaderPanel.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-line engine header — release/engine/format/registry-hash from compile-time constants + the optional cfg-path and WS-heartbeat freshness from the snapshot; rendered identically in engine_gui + foxml_suite]
+//======================================================================
 #pragma once
 
 #include "imgui.h"
@@ -32,9 +20,19 @@
 
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[EngineHeader_Render]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the one-line Engine header — build-time version/format/registry fields, plus cfg source path + color-coded WS heartbeat freshness when a snapshot is passed]
+//======================================================================
 // v5.8.6b: original 3-arg version (engine + format + registry).
 // v5.9.0c: optional snap arg displays the loaded cfg path. When snap is
 // nullptr (legacy callers), only the 3 build-time fields render.
+//======================================================================
+// [CODE]
+//======================================================================
 inline void EngineHeader_Render(const struct TUISnapshot* snap = nullptr) {
     if (ImGui::Begin("Engine")) {
         ImGui::TextColored(FoxmlColors::sand, "release:");
@@ -107,5 +105,10 @@ inline void EngineHeader_Render(const struct TUISnapshot* snap = nullptr) {
     }
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineHeader_Render]
+//======================================================================
 
 }  // namespace tt

@@ -1,4 +1,12 @@
 #pragma once
+
+//======================================================================
+// [FILE]_[GUI/CandleAccumulator.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[aggregates raw trade ticks into OHLCV candles fed from the engine WS thread — thread-safe (engine writes under the mutex, GUI reads a copied snapshot); a port of tools/chart.py CandleAccumulator]
+//======================================================================
 // CandleAccumulator — aggregates raw trade ticks into OHLCV candles
 // fed from the engine's existing Binance websocket (no second connection)
 // thread-safe: engine thread writes, GUI thread reads via snapshot
@@ -13,12 +21,39 @@
 
 static constexpr int CANDLE_MAX = CANDLE_HISTORY_MAX;
 
+//======================================================================
+// [STRUCT]_[Candle]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one OHLCV candle — bucket start + open/high/low/close + volume split by side]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct Candle {
     double time_sec;  // bucket start (unix timestamp)
     double open, high, low, close;
     double volume, buy_vol, sell_vol;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[Candle]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[CandleAccumulator]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ring of completed candles + the in-progress candle + running VWAP, guarded by a mutex for the WS-writer / GUI-reader split]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct CandleAccumulator {
     int interval_sec;       // candle width (default 60)
     Candle candles[CANDLE_MAX];
@@ -30,14 +65,46 @@ struct CandleAccumulator {
     double vwap_vol;        // running volume sum
     pthread_mutex_t lock;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[CandleAccumulator]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[CandleAccumulator_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the accumulator + its mutex at a candle interval]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void CandleAccumulator_Init(CandleAccumulator *ca, int interval_sec = 60) {
     memset(ca, 0, sizeof(*ca));
     ca->interval_sec = interval_sec;
     pthread_mutex_init(&ca->lock, NULL);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[CandleAccumulator_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[engine-thread: fold one wall-clock tick into the current candle, flushing to the ring on a bucket boundary]
+//======================================================================
 // called from engine thread on every tick
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void CandleAccumulator_Push(CandleAccumulator *ca,
                                            double price, double volume, int is_seller) {
     double now = (double)time(NULL);
@@ -80,9 +147,24 @@ static inline void CandleAccumulator_Push(CandleAccumulator *ca,
 
     pthread_mutex_unlock(&ca->lock);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_Push]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[CandleAccumulator_PushWithTime]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[backtest-replay variant of Push — the caller supplies the tick timestamp instead of wall-clock]
+//======================================================================
 // variant for backtest replay: caller provides the tick timestamp
 // instead of using wall-clock time(NULL)
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void CandleAccumulator_PushWithTime(CandleAccumulator *ca,
                                                     double price, double volume,
                                                     int is_seller, double tick_time_sec) {
@@ -121,14 +203,46 @@ static inline void CandleAccumulator_PushWithTime(CandleAccumulator *ca,
 
     pthread_mutex_unlock(&ca->lock);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_PushWithTime]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[CandleSnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a GUI-thread copy of the candle ring + in-progress candle + VWAP]
+//======================================================================
 // snapshot for GUI thread — copies ring buffer + current candle
+//======================================================================
+// [CODE]
+//======================================================================
 struct CandleSnapshot {
     Candle candles[CANDLE_MAX + 1];  // +1 for the in-progress candle
     int count;                        // total candles in snapshot
     double vwap;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[CandleSnapshot]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[CandleAccumulator_Snapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[copy the ring + current candle into a CandleSnapshot in chronological order (under the mutex)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void CandleAccumulator_Snapshot(CandleAccumulator *ca, CandleSnapshot *out) {
     pthread_mutex_lock(&ca->lock);
 
@@ -152,8 +266,23 @@ static inline void CandleAccumulator_Snapshot(CandleAccumulator *ca, CandleSnaps
 
     pthread_mutex_unlock(&ca->lock);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_Snapshot]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[CandleAccumulator_SetInterval]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reset the accumulator to a new candle interval, clearing all data]
+//======================================================================
 // reset accumulator with new interval (clears all candle data)
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void CandleAccumulator_SetInterval(CandleAccumulator *ca, int interval_sec) {
     pthread_mutex_lock(&ca->lock);
     ca->interval_sec = interval_sec;
@@ -164,7 +293,27 @@ static inline void CandleAccumulator_SetInterval(CandleAccumulator *ca, int inte
     ca->vwap_vol = 0;
     pthread_mutex_unlock(&ca->lock);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_SetInterval]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[CandleAccumulator_Destroy]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[destroy the accumulator's mutex]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void CandleAccumulator_Destroy(CandleAccumulator *ca) {
     pthread_mutex_destroy(&ca->lock);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_Destroy]
+//======================================================================
