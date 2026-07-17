@@ -1,22 +1,36 @@
 #pragma once
 //======================================================================================================
+// [FILE]_[Backtest/XGBHyperparams.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[XGBoost hyperparameter SSoT — one struct + Defaults factory + Apply helper shared by every training flow; stamp-bound for reproducibility forensics]
+// [CONTAINS]
+//   - [STRUCT]_[XGBHyperparams]
+//   - [FUNCTION]_[XGBHyperparams_Apply]   (XGBHyperparams_Defaults rides)
+//======================================================================================================
 // XGBoost hyperparameter struct — single source of truth for training-side
-// parameters. Used by Train Model worker, WalkForward folds, and HeldOut
-// training (3 sites total). Pre-v5.9.5h these were hardcoded across the
-// 3 sites with subtle divergences (Train Model used operator-tunable
-// max_depth/lr/n_est while WF/HeldOut hardcoded 6/0.1/...; nthread varied).
-// v5.9.5h centralizes the values + extends with cfg-tunable fields for
-// the 5 previously-hardcoded params (subsample, colsample_bytree,
-// min_child_weight, seed, tree_method).
+// parameters. Used by the Train Model worker, WalkForward folds, HeldOut
+// training, and the multi-horizon full-validation eval (4 Apply sites at
+// HEAD; StampHelper reads Defaults for stamp emit). Pre-v5.9.5h these were
+// hardcoded across the then-3 sites with subtle divergences (Train Model
+// used operator-tunable max_depth/lr/n_est while WF/HeldOut hardcoded
+// 6/0.1/...; nthread varied). v5.9.5h centralizes the values + extends
+// with cfg-tunable fields for the 5 previously-hardcoded params (subsample,
+// colsample_bytree, min_child_weight, seed, tree_method).
 //
 // Stamp binding: v5.9.5h emits all 8 fields into stamp body via
-// StampInferenceCfgInputs.has_xgb_hyperparams group. Engine load-WARN
-// fires when cfg's hyperparams differ from stamp's (drift detection).
+// StampInferenceCfgInputs.has_xgb_hyperparams group (xgb_train_nthread
+// joined later — 9 xgb fields + the group flag at HEAD; SSoT =
+// StampBoundModelConstRegistry). Engine load-WARN fires when cfg's
+// hyperparams differ from stamp's (drift detection: CfgDriftCheckRegistry
+// rows -> cfg_cross_binary_drift, SEV_YELLOW Model Health flag).
 //
 // Train-serve parity: hyperparams don't affect inference; same model
 // bytes execute identically regardless of how they were trained.
 // Stamp binding is for forensics + reproducibility, not load-time
-// refusal (that's v5.9.5i for inference cfg fields).
+// refusal (that was v5.9.5i's scope for inference cfg fields — landed;
+// the derived-walker DRIFT_CHECK_FROM_DERIVED runs at model load).
 //
 // Defaults match the v5.9.5g hardcoded values exactly so non-tuning
 // operators get bytewise-identical training output post-v5.9.5h.
@@ -32,6 +46,15 @@
 
 namespace tt {
 
+//======================================================================
+// [STRUCT]_[XGBHyperparams]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 8 training hyperparams, defaults inline per field — stamp-bound as the has_xgb_hyperparams group]
+//======================================================================
+// [CODE]
+//======================================================================
 struct XGBHyperparams {
     // Tree shape + learning rate
     int    max_depth         = 6;        // tree depth (1-20 typical; >12 overfits)
@@ -45,7 +68,23 @@ struct XGBHyperparams {
     int    seed              = 42;       // RNG seed for reproducible runs
     char   tree_method[16]   = "hist";   // hist | exact | approx | auto
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[XGBHyperparams]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[XGBHyperparams_Apply]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[push every hyperparam onto a BoosterHandle in one call, XGBoost-build-gated; the XGBHyperparams_Defaults factory rides]
+//======================================================================
+// [CODE]
+//======================================================================
 // Factory: returns the v5.9.5g hardcoded defaults. Use this everywhere
 // hyperparams need to be initialized; subsequent operator-cfg overrides
 // modify the returned struct in-place.
@@ -55,10 +94,11 @@ inline XGBHyperparams XGBHyperparams_Defaults() {
 }
 
 #ifdef USE_XGBOOST
-// Apply all hyperparams to an XGBoost BoosterHandle. Replaces hand-written
-// XGBoosterSetParam blocks at 3 training sites. nthread is passed
-// separately because Train Model uses 4 (faster GUI iter) while WF/HeldOut
-// use 1 (deterministic per-fold output). Caller chooses.
+// Apply all hyperparams to an XGBoost BoosterHandle. Replaces the
+// hand-written XGBoosterSetParam blocks the training sites carried
+// pre-v5.9.5h. nthread is passed separately — each flow reads its own
+// cfg knob (xgb_train_nthread for Train Model, xgb_eval_nthread for
+// WF/HeldOut/full-validation; both default 4, boot-only). Caller chooses.
 inline void XGBHyperparams_Apply(BoosterHandle booster,
                                   const XGBHyperparams& hp,
                                   int nthread) {
@@ -92,5 +132,10 @@ inline void XGBHyperparams_Apply(BoosterHandle booster,
     // directly for the loop bound.
 }
 #endif
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[XGBHyperparams_Apply]
+//======================================================================
 
 }  // namespace tt

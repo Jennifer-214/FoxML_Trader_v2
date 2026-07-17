@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BACKTEST SNAPSHOT]
+// [FILE]_[Backtest/BacktestSnapshot.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[backtest TUISnapshot populate — thin wrapper over the shared TUI_CopySnapshot, one copy fn with no manual field sync; sole backtest override forces live_trading to paper]
+// [CONTAINS]
+//   - [FUNCTION]_[BacktestSnapshot_Copy]
 //======================================================================================================
 // thin wrapper around TUI_CopySnapshot — single implementation, no manual sync.
 // adding a field to TUISnapshot? update TUI_CopySnapshot ONLY. backtest gets it free.
@@ -16,6 +22,15 @@
 #include "../DataStream/EngineTUI.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
 
+//======================================================================
+// [FUNCTION]_[BacktestSnapshot_Copy]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[populate a TUISnapshot from engine state via the shared TUI_CopySnapshot, then force live_trading to 0]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
                                           const PortfolioController<F> *ctrl,
@@ -26,5 +41,10 @@ static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
     // backtest-specific overrides
     snap->live_trading = 0; // always paper in backtest
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestSnapshot_Copy]
+//======================================================================
 
 #endif // BACKTEST_SNAPSHOT_HPP

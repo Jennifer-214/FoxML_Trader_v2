@@ -3,7 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [HELD-OUT SPLIT — temporal train+val / test partitioning with lock-token discipline]
+// [FILE]_[Backtest/HeldOutSplit.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[temporal train+val vs held-out-test partition with lock-token discipline — accidental peeking impossible, intentional peeking auditable; friction-grade FNV token, not crypto]
+// [CONTAINS]
+//   - [STRUCT]_[HeldOutSplit]
+//   - [FUNCTION]_[HeldOutSplit_GenToken]   (HeldOutSplit_FNV1a64 rides)
+//   - [FUNCTION]_[HeldOutSplit_Make]   (TestAccessAllowed / Unlock / Relock ride)
 //======================================================================================================
 // purpose: separate a final-test held-out portion BEFORE any tuning so the
 // generalization-gap measurement is unbiased. ML training "discipline" — code
@@ -30,6 +38,15 @@
 #include <string.h>
 #include <time.h>
 
+//======================================================================
+// [STRUCT]_[HeldOutSplit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the split record — trainval/test index boundary + locked flag + the 32-hex unlock token; the clamped fraction bounds ride]
+//======================================================================
+// [CODE]
+//======================================================================
 // 5%–30% range for the held-out fraction. Below 5% = too small to estimate
 // generalization meaningfully; above 30% = too little data left for training
 // + walk-forward CV. Out-of-range inputs are clamped (not rejected) so the
@@ -44,8 +61,23 @@ struct HeldOutSplit {
     int locked;              // 1 = test set inaccessible, 0 = unlocked
     char lock_token[33];     // 32 hex chars + null terminator
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[HeldOutSplit]
+//======================================================================
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[HeldOutSplit_GenToken]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[deterministic 32-hex token from split shape + stable seed, double FNV-1a-64; HeldOutSplit_FNV1a64 rides]
+//======================================================================
+// [CODE]
+//======================================================================
 // Two FNV-1a-64 hashes with distinct seeds, concatenated as 16+16 hex chars.
 // Friction-grade: hard to guess (~128 bits entropy), trivial to forge with
 // source access. That's by design.
@@ -87,8 +119,21 @@ static inline void HeldOutSplit_GenToken(char out[33],
     snprintf(out, 33, "%016llx%016llx",
              (unsigned long long)h1, (unsigned long long)h2);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[HeldOutSplit_GenToken]
+//======================================================================
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[HeldOutSplit_Make]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[build a locked split from sample count + clamped fraction; the lifecycle helpers TestAccessAllowed / Unlock / Relock ride]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline HeldOutSplit HeldOutSplit_Make(int total_samples, double fraction) {
     HeldOutSplit s = {};
     s.total_samples = total_samples;
@@ -121,12 +166,13 @@ static inline HeldOutSplit HeldOutSplit_Make(int total_samples, double fraction)
     return s;
 }
 
-//======================================================================================================
+// Convenience predicate; no callers at HEAD — the consumers gate on
+// split->locked directly (the Backtest_RunFullValidation + HeldOutSplit_TrainEval
+// refuse-if-locked checks).
 static inline int HeldOutSplit_TestAccessAllowed(const HeldOutSplit *s) {
     return s && s->locked == 0;
 }
 
-//======================================================================================================
 // Returns 1 if unlock succeeded, 0 if token doesn't match (still locked).
 // Logs unlock event to stderr — caller can also Notify_Send for audit trail.
 static inline int HeldOutSplit_Unlock(HeldOutSplit *s, const char *token) {
@@ -141,14 +187,14 @@ static inline int HeldOutSplit_Unlock(HeldOutSplit *s, const char *token) {
     return 1;
 }
 
-//======================================================================================================
 // Convenience: re-lock for a fresh evaluation cycle (e.g., new model).
+// No callers at HEAD (convenience API; _Make is the production path).
 //
 // v5.9.2c semantics change: pre-v5.9.2c, Relock generated a NEW token
 // via stack-address entropy, so any code holding the old one couldn't
 // unlock again. Post-v5.9.2c, GenToken is deterministic — same inputs
-// produce same token. Relock now passes a non-zero seed (`s->locked`'s
-// flip count proxy via XOR with timestamp) to retain the "fresh token"
+// produce same token. Relock now passes a non-zero seed (current time
+// XOR total_samples — see below) to retain the "fresh token"
 // semantic. Callers that want pure shape-stable tokens use _Make,
 // not _Relock.
 static inline void HeldOutSplit_Relock(HeldOutSplit *s) {
@@ -162,5 +208,10 @@ static inline void HeldOutSplit_Relock(HeldOutSplit *s) {
     HeldOutSplit_GenToken(s->lock_token, s->total_samples,
                           s->trainval_end_idx, relock_seed);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[HeldOutSplit_Make]
+//======================================================================
 
 #endif // HELD_OUT_SPLIT_HPP

@@ -1,4 +1,15 @@
 #pragma once
+//======================================================================================================
+// [FILE]_[Backtest/PhaseTimers.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-phase backtest wall-clock instrumentation — one process-wide PhaseTimer singleton, 8 phases from CSV parse to stamp emit; summary printed at run end]
+// [CONTAINS]
+//   - [STRUCT]_[PhaseTimer]
+//   - [FUNCTION]_[PhaseTimer_Summary]   (PhaseTimer_Global / _NowNs / _Reset ride)
+//   - [STRUCT]_[PhaseTimerSnapshot]   (PhaseTimer_PopulateSnapshot rides; UNWIRED at HEAD — TECH_DEBT-240)
+//======================================================================================================
 // v5.10.0 Item A — per-phase backtest timers.
 //
 // Instrumentation only; no behavior change. Phases instrumented:
@@ -12,8 +23,8 @@
 //   stamp_emit      — stamp_write_for_model
 //
 // Backtest is single-threaded; one global PhaseTimer instance is fine.
-// Reset at run start via PhaseTimer_Reset; dump at run end via
-// PhaseTimer_Summary.
+// Reset at run start via PhaseTimer_Reset (in BacktestSharded_Run); dump
+// at run end via PhaseTimer_Summary (Backtest_Run + Backtest_RunFullValidation).
 //
 // Why a global rather than threading an arg through every site:
 // BacktestSharded_Run + Backtest_ComputeLabelsFromSamples + WF + HeldOut
@@ -21,6 +32,7 @@
 // PhaseTimer* through every signature would touch ~15 files for an
 // instrumentation-only change. Single-threaded backtest semantics
 // make the global safe.
+//======================================================================================================
 
 #include <stdint.h>
 #include <stdio.h>
@@ -28,6 +40,15 @@
 
 namespace tt {
 
+//======================================================================
+// [STRUCT]_[PhaseTimer]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 8 phase accumulators in ns + wall-clock total + populated flag — every field has a live writer in BacktestSharded_Run or BacktestEngine]
+//======================================================================
+// [CODE]
+//======================================================================
 struct PhaseTimer {
     uint64_t parse_ns;
     uint64_t fan_out_hot_ns;        // tick loop body (fan_out + hot path)
@@ -40,7 +61,23 @@ struct PhaseTimer {
     uint64_t total_ns;              // wall-clock total (backtest end - start)
     int      populated;             // 1 = at least one phase recorded; 0 = idle/never-run
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PhaseTimer]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[PhaseTimer_Summary]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[print the per-phase ms + percent table, skipping empty phases; PhaseTimer_Global / _NowNs / _Reset ride]
+//======================================================================
+// [CODE]
+//======================================================================
 // Process-wide instance via function-local static. Single-threaded
 // backtest path; suite reuses across runs (Reset at start of each
 // Backtest_Run / RunFullValidation). Function-local-static keeps the
@@ -97,10 +134,22 @@ static inline void PhaseTimer_Summary(const PhaseTimer* pt, FILE* fp) {
     #undef PHASE_ROW
     fprintf(fp, "  %-18s %8.1f ms\n", "total:", total_ms);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PhaseTimer_Summary]
+//======================================================================
 
-// Snapshot of a phase timer for GUI display. Renderer reads this; updater
-// writes to g_phase_timer + memcpy to the snapshot at run end so the GUI
-// gets a stable value (mid-run reads would catch a half-updated counter).
+//======================================================================
+// [STRUCT]_[PhaseTimerSnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stable copy of the timer for GUI display, PhaseTimer_PopulateSnapshot rides — UNWIRED at HEAD, zero consumers; the Panels phase render reads the live singleton directly]
+// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-240]
+//======================================================================
+// [CODE]
+//======================================================================
 struct PhaseTimerSnapshot {
     uint64_t parse_ns;
     uint64_t fan_out_hot_ns;
@@ -127,5 +176,25 @@ static inline void PhaseTimer_PopulateSnapshot(const PhaseTimer* pt,
     s->total_ns           = pt->total_ns;
     s->valid              = pt->populated;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// [[2026-07-17] [v5.10.0]]
+//----------------------------------------------------------------------
+// Snapshot of a phase timer for GUI display — design intent: populate at
+// run end via PhaseTimer_PopulateSnapshot so a renderer reads a stable
+// copy (a mid-run read of the live PhaseTimer_Global() singleton can
+// catch a half-updated counter). UNWIRED at HEAD (2026-07-17 rot-check):
+// zero consumers for the struct AND the populate fn — the GUI
+// phase-breakdown render reads PhaseTimer_Global() directly, the exact
+// mid-run read this pair was built to prevent. Wire the render to a
+// snapshot or delete the pair: TECH_DEBT-240.
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PhaseTimerSnapshot]
+//======================================================================
 
 }  // namespace tt
