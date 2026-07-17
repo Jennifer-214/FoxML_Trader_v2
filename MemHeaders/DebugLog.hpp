@@ -5,15 +5,22 @@
 #define DEBUG_LOG_HPP
 
 //======================================================================================================
-// [DEBUG LOG MACROS — v5.11.32]
-//
+// [FILE]_[MemHeaders/DebugLog.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[compile-time-gated engine debug logging — LOG_DEBUG_HOT/ENGINE evaporate to ((void)0) unless FOXML_DEBUG_LOGS; the latency-budget discipline for where each log style is legal]
+// [CONTAINS]
+//   - [MACRO]_[LOG_DEBUG_HOT]   (+ LOG_DEBUG_ENGINE alias — both variants of the #ifdef pair)
+// [REFERENCE]_[INVARIANT]_[H8]
+//======================================================================================================
 // Compile-time-gated diagnostic logging for engine hot-path / slow-path
 // code. The discipline:
 //
 //   1. Hot path (BG_Evaluate / SG_Evaluate / ExecutionCore_Tick) and
 //      engine slow path (EventLoop_RebuildOneCore + per-poll cadence)
 //      are LATENCY-BUDGETED. Hot path runs at 40-400ns p99; slow path
-//      at ~150µs p99. A 5-10µs Health_Log call is 3-7% of the slow-path
+//      at ≤100µs p99 (H8). A 5-10µs Health_Log call is 5-10% of the slow-path
 //      budget — unacceptable EVEN when operator opts in to logging.
 //
 //   2. Therefore: NEW diagnostic logging on engine paths goes through
@@ -64,6 +71,12 @@
 
 #include "HealthLog.hpp"   // Health_Log + HEALTH_* level constants
 
+//----------------------------------------------------------------------
+// [MACRO]_[LOG_DEBUG_HOT]
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the #ifdef pair (LOG_DEBUG_ENGINE alias rides) — Health_Log(HEALTH_DEBUG,...) under FOXML_DEBUG_LOGS, ((void)0) otherwise; args NOT evaluated when stripped]
+//----------------------------------------------------------------------
 #ifdef FOXML_DEBUG_LOGS
 
 #define LOG_DEBUG_HOT(cat, node_id, ...)    \
