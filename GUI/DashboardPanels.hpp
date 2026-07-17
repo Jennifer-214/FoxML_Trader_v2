@@ -1,4 +1,12 @@
 #pragma once
+
+//======================================================================
+// [FILE]_[GUI/DashboardPanels.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[all the engine dashboard panels — a 1:1 ImGui port of the ANSI TUIAnsi sections; each is a stateless dockable window reading only TUISnapshot, plus the shared draw helpers and the GUI_RenderDashboard orchestrator]
+//======================================================================
 // DashboardPanels — all engine dashboard panels for ImGui
 // 1:1 port of ANSI_Section_* from TUIAnsi.hpp
 // each panel is a dockable ImGui window reading from TUISnapshot
@@ -18,13 +26,38 @@
 #include <ctime>
 #include <chrono>  // v5.0.3: Engine Topology drift display
 
+//======================================================================
+// [FUNCTION]_[PnlColor]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[pick a P&L text color from the value sign]
+//======================================================================
 // ── helper: colored value text (green if positive, red if negative) ──
+//======================================================================
+// [CODE]
+//======================================================================
 static inline ImVec4 PnlColor(double val) {
     return (val >= 0) ? FoxmlColors::green_b : FoxmlColors::red;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PnlColor]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GUI_R2Bar]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[draw a small inline R-squared quality bar]
+//======================================================================
 // ── helper: R² progress bar ──
 // slope_dir: positive slope → green, negative → red, near zero → neutral
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_R2Bar(const char *label, double r2, float width = 80.0f,
                               double slope = 0.0) {
     ImGui::Text("%s", label);
@@ -46,14 +79,44 @@ static inline void GUI_R2Bar(const char *label, double r2, float width = 80.0f,
     ImGui::ProgressBar((float)r2, ImVec2(width, ImGui::GetTextLineHeight()), "");
     ImGui::PopStyleColor();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_R2Bar]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[SectionHeader]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[draw a colored section header row]
+//======================================================================
 // ── helper: section header with peach color ──
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void SectionHeader(const char *title) {
     ImGui::TextColored(FoxmlColors::primary, "%s", title);
     ImGui::Separator();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SectionHeader]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[LabeledValue]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[draw a label + printf-formatted value row]
+//======================================================================
 // ── helper: labeled value on same line ──
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void LabeledValue(const char *label, const char *fmt, ...) {
     ImGui::TextColored(FoxmlColors::sand, "%s", label);
     ImGui::SameLine();
@@ -64,10 +127,22 @@ static inline void LabeledValue(const char *label, const char *fmt, ...) {
     va_end(args);
     ImGui::TextUnformatted(buf);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[LabeledValue]
+//======================================================================
 
-//==========================================================================
-// PANEL: HEADER — fox kaomoji, version, state, uptime, session
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Header]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Header panel — fox kaomoji, version, engine state, uptime, session]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
     ImGui::Begin("Header", nullptr, ImGuiWindowFlags_NoTitleBar);
 
@@ -189,10 +264,22 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Header]
+//======================================================================
 
-//==========================================================================
-// PANEL: TOP BAR — key metrics at a glance
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_TopBar]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Top Bar — the key metrics at a glance]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_TopBar(const TUISnapshot *s) {
     ImGui::Begin("Top Bar", nullptr, ImGuiWindowFlags_NoTitleBar);
 
@@ -226,10 +313,22 @@ static inline void GUI_Panel_TopBar(const TUISnapshot *s) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_TopBar]
+//======================================================================
 
-//==========================================================================
-// PANEL: MARKET (merged Market Structure + Regime Signals)
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Market]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Market panel — market structure + regime signals]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Market(const TUISnapshot *s) {
     ImGui::Begin("Market");
     SectionHeader("MARKET");
@@ -300,7 +399,7 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
             ImGui::TextColored(FoxmlColors::comment, "?:%d", unresolved);
         }
     } else {
-        // legacy single-engine view — kept for engine_mode=single_core.
+        // legacy single-engine display fallback (vestigial — the single_core engine was deleted at E.1.1).
         const char *strat_name = (s->strategy_id == 4) ? "EMA CROSS" :
                                   (s->strategy_id == 2) ? "SIMPLE DIP" :
                                   (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
@@ -432,10 +531,22 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Market]
+//======================================================================
 
-//==========================================================================
-// PANEL: BUY GATE
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_BuyGate]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Buy Gate panel — the entry-gate diagnostics (the display half of the display<->execution invariant)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
     ImGui::Begin("Buy Gate");
     SectionHeader("BUY GATE");
@@ -467,8 +578,8 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         // (StrategyInterface.hpp's FOREACH_SHALT(X) registry). Local
         // mirror retired — single source of truth.
         constexpr int shalt_names_count = (int)NUM_SHALT_CODES;
-        constexpr uint8_t GUI_GATE_FLAG_BUY_BLOCKED = 0x20;  // mirrors
-            // GateParameters.hpp:61. Display-side mirror keeps the GUI
+        constexpr uint8_t GUI_GATE_FLAG_BUY_BLOCKED = 0x20;  // mirrors the
+            // GateParameters.hpp buy-blocked bit. Display-side mirror keeps the GUI
             // module from needing CoreFrameworks/ headers; checked by
             // EXECUTION_DISPLAY_INVARIANTS.md test for value parity.
         ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV |
@@ -884,10 +995,22 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_BuyGate]
+//======================================================================
 
-//==========================================================================
-// PANEL: ACCOUNT (merged Portfolio + P&L + Risk)
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Account]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Account panel — portfolio + P&L + risk]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *shared = NULL) {
     ImGui::Begin("Account");
     SectionHeader("ACCOUNT");
@@ -1123,10 +1246,22 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Account]
+//======================================================================
 
-//==========================================================================
-// PANEL: CONFIG
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Config]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Config panel — the active cfg snapshot]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Config(const TUISnapshot *s) {
     ImGui::Begin("Config");
     SectionHeader("CONFIG");
@@ -1171,10 +1306,22 @@ static inline void GUI_Panel_Config(const TUISnapshot *s) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Config]
+//======================================================================
 
-//==========================================================================
-// PANEL: POSITIONS — proper table with aligned columns
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Positions]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Positions table — per-slot entries, TP/SL, per-position P&L]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *shared = NULL) {
     ImGui::Begin("Positions");
 
@@ -1281,7 +1428,7 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
 
             // TP — v5.6.5 adds enabled-flag indicator + original-TP
             // tooltip on hover. ps->tp is already the effective TP
-            // (max of live + ratchet) per ShardedSnapshot.hpp:178.
+            // (max of live + ratchet) per ShardedSnapshot.hpp.
             // gate_flags from per_node: TP_ENABLED=0x01, SL_ENABLED=0x02.
             ImGui::TableNextColumn();
             {
@@ -1445,10 +1592,19 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Positions]
+//======================================================================
 
-//==========================================================================
-// PANEL: PER-CORE P&L HISTORY (v4.7.11)
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_PerNodePnL]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the per-core P&L history chart — each core's realized P&L over the session]
+//======================================================================
 // Overlays each core's realized P&L over the session as 4 lines on the
 // same chart. Useful for spotting which core is adding alpha vs which
 // is bleeding fees. Samples once per second (or on every snapshot tick
@@ -1457,7 +1613,9 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
 //
 // Static state — single-instance panel, OK to keep in function-static.
 // Pure GUI thread, doesn't touch engine state.
-//==========================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_PerNodePnL(const TUISnapshot *s) {
     static constexpr int PNL_HISTORY = 1800;
     static double pnl_history[PNL_HISTORY][16];  // [time_idx][core]
@@ -1550,10 +1708,22 @@ static inline void GUI_Panel_PerNodePnL(const TUISnapshot *s) {
     }
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_PerNodePnL]
+//======================================================================
 
-//==========================================================================
-// PANEL: STATS
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Stats]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Stats panel — session performance aggregates]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Stats(const TUISnapshot *s) {
     ImGui::Begin("Stats");
     SectionHeader("STATS");
@@ -1639,11 +1809,23 @@ static inline void GUI_Panel_Stats(const TUISnapshot *s) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Stats]
+//======================================================================
 
-//==========================================================================
-// PANEL: LATENCY (conditional on LATENCY_PROFILING)
-//==========================================================================
 #ifdef LATENCY_PROFILING
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Latency]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Latency panel (LATENCY_PROFILING builds only)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Latency(const TUISnapshot *s) {
     ImGui::Begin("Latency");
     SectionHeader("LATENCY");
@@ -1692,14 +1874,23 @@ static inline void GUI_Panel_Latency(const TUISnapshot *s) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Latency]
+//======================================================================
 #endif
 
-//==========================================================================
-// RENDER ALL DASHBOARD PANELS
-//==========================================================================
-//==========================================================================
-// PANEL: ML INTELLIGENCE — bandit arms, confidence, cost, model info
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_MLIntelligence]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the ML Intelligence panel — bandit arms, confidence, cost, model info]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
     int any_active = s->ml.cost_gate_enabled | s->ml.foxml_vol_scaling_enabled |
                      s->ml.confidence_enabled | s->ml.bandit_enabled |
@@ -1884,7 +2075,22 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_MLIntelligence]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[GUI_RenderDashboard]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render every dashboard panel — the orchestrator called once per frame from the render loop]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time,
                                         TUISharedState *shared = NULL) {
     GUI_Panel_Header(s, start_time);
@@ -2375,3 +2581,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         ImGui::End();
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_RenderDashboard]
+//======================================================================
