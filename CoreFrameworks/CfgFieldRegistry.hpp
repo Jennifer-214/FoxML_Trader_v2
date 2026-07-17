@@ -299,11 +299,6 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 #define INT_ENUM(default_val, labels_array, count) \
     { .as_int_enum = { (int)(default_val), (labels_array), (uint8_t)(count) } }
 
-// NOTE: tooltips for fields PRE-EXISTING in GUI/SettingsPanel.hpp:46-289 field_defs[]
-// preserved BYTE-IDENTICAL via raw strings. Fields NEW to GUI (no pre-existing entry)
-// have author-supplied tooltips. HIGH-6 tooltip-preservation discipline per
-// plan + DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
-
 //======================================================================
 // [REGISTRY]_[FOREACH_GLOBAL_CFG_FIELD]
 //----------------------------------------------------------------------
@@ -534,6 +529,13 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// NOTE: tooltips for fields PRE-EXISTING in GUI/SettingsPanel.hpp:46-289 field_defs[]
+// preserved BYTE-IDENTICAL via raw strings. Fields NEW to GUI (no pre-existing entry)
+// have author-supplied tooltips. HIGH-6 tooltip-preservation discipline per
+// plan + DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
 //======================================================================
 // [END_REGISTRY]_[FOREACH_GLOBAL_CFG_FIELD]
 //======================================================================

@@ -60,12 +60,6 @@
 
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_BIT_U8 + BITMAP_* accessors
 
-// NOTE: deliberately NOT wrapped in `namespace tt` — matches NodeModelZoo.hpp
-// convention (consumer file uses globally-namespaced enums/types). The MASK
-// constants need to be accessible from template functions in NodeModelZoo
-// without namespace qualification. Sister registries (FailureModeRegistry,
-// etc.) use `namespace tt` because their consumers do too.
-
 //======================================================================================================
 // [REGISTRY]_[FOREACH_EZOO_INIT_FLAG]
 //----------------------------------------------------------------------
@@ -159,6 +153,14 @@ static_assert(EZOO_INIT_FLAG_ACTIVE == 0,
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// NOTE: deliberately NOT wrapped in `namespace tt` — matches NodeModelZoo.hpp
+// convention (consumer file uses globally-namespaced enums/types). The MASK
+// constants need to be accessible from template functions in NodeModelZoo
+// without namespace qualification. Sister registries (FailureModeRegistry,
+// etc.) use `namespace tt` because their consumers do too.
 //======================================================================
 // [END_REGISTRY]_[FOREACH_EZOO_INIT_FLAG]
 //======================================================================

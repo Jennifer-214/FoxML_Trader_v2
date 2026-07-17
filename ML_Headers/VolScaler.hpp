@@ -38,16 +38,6 @@
 #define VOL_SCALER_Z_MAX_DEFAULT       3.0    // z-score clipping threshold
 #define VOL_SCALER_MAX_WEIGHT_DEFAULT  0.05   // 5% max position weight
 
-// scale alpha signal to position weight via volatility
-//
-// parameters:
-//   alpha:      expected return (decimal, e.g. 0.01 = 1% expected return)
-//   volatility: volatility estimate (decimal, e.g. 0.02 = 2%)
-//   z_max:      clipping threshold (default 3.0)
-//   max_weight: maximum position weight (default 0.05)
-//
-// returns: target weight in [-max_weight, +max_weight]
-//   positive = long, negative = short (we only go long in current engine)
 //======================================================================
 // [FUNCTION]_[VolScaler_Size]
 //----------------------------------------------------------------------
@@ -94,6 +84,19 @@ static inline double VolScaler_RawZ(double alpha, double volatility) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// scale alpha signal to position weight via volatility
+//
+// parameters:
+//   alpha:      expected return (decimal, e.g. 0.01 = 1% expected return)
+//   volatility: volatility estimate (decimal, e.g. 0.02 = 2%)
+//   z_max:      clipping threshold (default 3.0)
+//   max_weight: maximum position weight (default 0.05)
+//
+// returns: target weight in [-max_weight, +max_weight]
+//   positive = long, negative = short (we only go long in current engine)
 //======================================================================
 // [END_FUNCTION]_[VolScaler_Size]
 //======================================================================

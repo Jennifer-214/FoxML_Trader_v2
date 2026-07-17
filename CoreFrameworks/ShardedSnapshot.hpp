@@ -40,10 +40,6 @@
 
 #include <cmath>
 
-// TUISnapshot, TUIPositionSnap, RollingStats, ControllerConfig, Position
-// are all in the global namespace. EventLoopState, EventLoopAggregates,
-// Portfolio are in namespace tt.
-
 //======================================================================
 // [FUNCTION]_[TUI_CopySnapshotSharded]
 //----------------------------------------------------------------------
@@ -914,6 +910,12 @@ static inline void TUI_CopySnapshotSharded(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// TUISnapshot, TUIPositionSnap, RollingStats, ControllerConfig, Position
+// are all in the global namespace. EventLoopState, EventLoopAggregates,
+// Portfolio are in namespace tt.
 //======================================================================
 // [END_FUNCTION]_[TUI_CopySnapshotSharded]
 //======================================================================

@@ -66,9 +66,6 @@
 
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_BIT_U8 + BITMAP_* accessors
 
-// NOTE: deliberately NOT wrapped in `namespace tt` — see EzooInitFlagRegistry.hpp
-// for rationale (matches NodeModelZoo.hpp consumer convention).
-
 //======================================================================================================
 // [REGISTRY]_[FOREACH_PER_ARM_FLAG]
 //----------------------------------------------------------------------
@@ -184,6 +181,11 @@ static_assert(PER_ARM_FLAG_COUNT >= 2,
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// NOTE: deliberately NOT wrapped in `namespace tt` — see EzooInitFlagRegistry.hpp
+// for rationale (matches NodeModelZoo.hpp consumer convention).
 //======================================================================
 // [END_REGISTRY]_[FOREACH_PER_ARM_FLAG]
 //======================================================================

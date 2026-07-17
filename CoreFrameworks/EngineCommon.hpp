@@ -136,33 +136,19 @@
 
 namespace tt {
 
-// ==========================================================================
-// Constants
-// ==========================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[Constants]
+//------------------------------------------------------------------------------------------------------
 
 // Backtest regime sampling — see file-header doc block for rationale.
 // Future contributors changing sampling strategy: update this constant + the
 // comment block at file header (grep BACKTEST_REGIME_SAMPLE_CORE to find).
 constexpr int BACKTEST_REGIME_SAMPLE_CORE = 0;
 
-// ==========================================================================
-// Helper declarations (5 total)
-// ==========================================================================
+//------------------------------------------------------------------------------------------------------
+// [SECTION]_[Helper declarations (5 total)]
+//------------------------------------------------------------------------------------------------------
 
-// 1. EngineCommon_ApplyBnbDiscount
-//    NON-CONST cfg ONE-SHOT mutator: applies BNB fee discount (0.75x) to all
-//    per-core fee_rate_maker + fee_rate_taker when cfg.pay_fees_in_bnb is set.
-//    Called ONCE per boot, BEFORE EngineCommon_BootGlobal. Sister to existing
-//    Sharded_ValidatePartialExitCfg pre-loop cfg helper.
-//
-//    THE ONLY non-const-cfg helper in EngineCommon. All others take const ref.
-//
-//    Closes PARITY-030 by-construction: both EngineSharded + BacktestSharded
-//    call this once, so BNB discount applies symmetrically.
-//
-//    Body extracted from EngineSharded.hpp:690-699 (verified at HEAD 64e7101).
-//    Loop uses MAX_EXECUTION_NODES (compile-time max), not cfg.num_execution_nodes —
-//    preserves exact pre-extract semantic for any future-activated cores.
 //======================================================================
 // [FUNCTION]_[EngineCommon_ApplyBnbDiscount]
 //----------------------------------------------------------------------
@@ -188,24 +174,26 @@ inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 1. EngineCommon_ApplyBnbDiscount
+//    NON-CONST cfg ONE-SHOT mutator: applies BNB fee discount (0.75x) to all
+//    per-core fee_rate_maker + fee_rate_taker when cfg.pay_fees_in_bnb is set.
+//    Called ONCE per boot, BEFORE EngineCommon_BootGlobal. Sister to existing
+//    Sharded_ValidatePartialExitCfg pre-loop cfg helper.
+//
+//    THE ONLY non-const-cfg helper in EngineCommon. All others take const ref.
+//
+//    Closes PARITY-030 by-construction: both EngineSharded + BacktestSharded
+//    call this once, so BNB discount applies symmetrically.
+//
+//    Body extracted from EngineSharded.hpp:690-699 (verified at HEAD 64e7101).
+//    Loop uses MAX_EXECUTION_NODES (compile-time max), not cfg.num_execution_nodes —
+//    preserves exact pre-extract semantic for any future-activated cores.
+//======================================================================
 // [END_FUNCTION]_[EngineCommon_ApplyBnbDiscount]
 //======================================================================
 
-// 2. EngineCommon_BootGlobal
-//    const cfg ONE-SHOT global boot work (post-BNB-mutation):
-//      - EventLoopState_Init(&state, &oms)
-//      - EventLoopState_ConfigureKillSwitch (per PARITY-026 hotfix; gated on MASK_RISK_CFG_KILL_SWITCH_ENABLED)
-//      - Regime_Init per-core loop (cfg.nodes[i].regime_hysteresis → state.nodes[i].regime_state)
-//    EXCLUDES: function-scope statics (stay in caller per Decision G — trade_log + BinanceUserData
-//              + NotifyState + TickRecorder/DepthRecorder + Notify worker spawn are M5 LIVE-only
-//              persistence sinks / threading observability; stay in EngineSharded_Run caller scope)
-//    EXCLUDES: BNB cfg mutation (now in ApplyBnbDiscount)
-//
-//    Called ONCE per boot, AFTER EngineCommon_ApplyBnbDiscount.
-//
-//    Body extracted from EngineSharded.hpp:742 + :749-753 + :760-762 (verified at HEAD 64e7101 +
-//    Phase A Step A.4 enumeration). Closes PARITY-026 (kill_switch) + per-core regime init parity
-//    sister-discipline (backtest already does the same at BacktestSharded.hpp:198 + :210-212).
 //======================================================================
 // [FUNCTION]_[EngineCommon_BootGlobal]
 //----------------------------------------------------------------------
@@ -238,40 +226,27 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 2. EngineCommon_BootGlobal
+//    const cfg ONE-SHOT global boot work (post-BNB-mutation):
+//      - EventLoopState_Init(&state, &oms)
+//      - EventLoopState_ConfigureKillSwitch (per PARITY-026 hotfix; gated on MASK_RISK_CFG_KILL_SWITCH_ENABLED)
+//      - Regime_Init per-core loop (cfg.nodes[i].regime_hysteresis → state.nodes[i].regime_state)
+//    EXCLUDES: function-scope statics (stay in caller per Decision G — trade_log + BinanceUserData
+//              + NotifyState + TickRecorder/DepthRecorder + Notify worker spawn are M5 LIVE-only
+//              persistence sinks / threading observability; stay in EngineSharded_Run caller scope)
+//    EXCLUDES: BNB cfg mutation (now in ApplyBnbDiscount)
+//
+//    Called ONCE per boot, AFTER EngineCommon_ApplyBnbDiscount.
+//
+//    Body extracted from EngineSharded.hpp:742 + :749-753 + :760-762 (verified at HEAD 64e7101 +
+//    Phase A Step A.4 enumeration). Closes PARITY-026 (kill_switch) + per-core regime init parity
+//    sister-discipline (backtest already does the same at BacktestSharded.hpp:198 + :210-212).
+//======================================================================
 // [END_FUNCTION]_[EngineCommon_BootGlobal]
 //======================================================================
 
-// 3. EngineCommon_BootPerCore
-//    const cfg per-core boot:
-//      - SPSCRing_Init(&tick_ring) + ExecutionCore_Init(&core, c, &tick_ring)
-//      - EventLoopState_RegisterCore (per v1.5 D1 correction; NOT
-//        OrderManager_RegisterCore which doesn't exist in the codebase)
-//      - EventLoopState_SetCoreStrategy(&state, c, cfg.node_strategies[c], node_balance)
-//      - ML branch (when cfg.node_strategies[c] == STRATEGY_ML && zoo_ptr && ezoo_ptr):
-//          NodeModelZoo_Init + EnsembleModelZoo_Init + Load + PostLoadSetup +
-//          ValidateAgainstCfg + FeatureOverlay_PostLoadVerify +
-//          ConfidenceScorer_Init + ConfidenceScorer_BindCompositeCfg +
-//          RollingTurnover_Init
-//      - Strategy_InitPerCore (closes PARITY-029 — pre-v5.4 F7 bug; outside ML branch)
-//      - ExecutionCore_SetPermission(&core, 0)
-//
-//    Called N times per boot (per-core loop). External wrappers (e.g.,
-//    bandit_state_prior_path; oms.ezoo_refs LIVE-only wire; NodeLatencyStats_Enable
-//    LIVE-only) called AFTER this returns per Decision B + M5 false-positive surface.
-//
-//    Caller responsibilities per v1.7 O4:
-//      - Precompute node_balance per O2 bytewise-identical math (preserved from
-//        LIVE :898-906 + :915-920 + BACKTEST :234-238 + :258-263 verbatim)
-//      - Allocate zoo_ptr + ezoo_ptr per arch (LIVE: aligned_alloc(64) with
-//        null-check + NODE_STATE_FLAG_SET(MODEL_LOAD_FAILED) on alloc fail;
-//        BACKTEST: Free+Init static array element)
-//      - Pass nullptr for both zoo_ptr + ezoo_ptr when non-ML strategy
-//
-//    Closes PARITY-027 (exit-model bind) + PARITY-028 (BindCompositeCfg +
-//    RollingTurnover) + PARITY-029 (Strategy_InitPerCore) by-construction.
-//
-//    Signature (8 args per v1.7 O1 — drops unused oms; adds caller-owned
-//    statics + nullable ML zoos + caller-precomputed node_balance):
 //======================================================================
 // [FUNCTION]_[EngineCommon_BootPerCore]
 //----------------------------------------------------------------------
@@ -492,54 +467,43 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 3. EngineCommon_BootPerCore
+//    const cfg per-core boot:
+//      - SPSCRing_Init(&tick_ring) + ExecutionCore_Init(&core, c, &tick_ring)
+//      - EventLoopState_RegisterCore (per v1.5 D1 correction; NOT
+//        OrderManager_RegisterCore which doesn't exist in the codebase)
+//      - EventLoopState_SetCoreStrategy(&state, c, cfg.node_strategies[c], node_balance)
+//      - ML branch (when cfg.node_strategies[c] == STRATEGY_ML && zoo_ptr && ezoo_ptr):
+//          NodeModelZoo_Init + EnsembleModelZoo_Init + Load + PostLoadSetup +
+//          ValidateAgainstCfg + FeatureOverlay_PostLoadVerify +
+//          ConfidenceScorer_Init + ConfidenceScorer_BindCompositeCfg +
+//          RollingTurnover_Init
+//      - Strategy_InitPerCore (closes PARITY-029 — pre-v5.4 F7 bug; outside ML branch)
+//      - ExecutionCore_SetPermission(&core, 0)
+//
+//    Called N times per boot (per-core loop). External wrappers (e.g.,
+//    bandit_state_prior_path; oms.ezoo_refs LIVE-only wire; NodeLatencyStats_Enable
+//    LIVE-only) called AFTER this returns per Decision B + M5 false-positive surface.
+//
+//    Caller responsibilities per v1.7 O4:
+//      - Precompute node_balance per O2 bytewise-identical math (preserved from
+//        LIVE :898-906 + :915-920 + BACKTEST :234-238 + :258-263 verbatim)
+//      - Allocate zoo_ptr + ezoo_ptr per arch (LIVE: aligned_alloc(64) with
+//        null-check + NODE_STATE_FLAG_SET(MODEL_LOAD_FAILED) on alloc fail;
+//        BACKTEST: Free+Init static array element)
+//      - Pass nullptr for both zoo_ptr + ezoo_ptr when non-ML strategy
+//
+//    Closes PARITY-027 (exit-model bind) + PARITY-028 (BindCompositeCfg +
+//    RollingTurnover) + PARITY-029 (Strategy_InitPerCore) by-construction.
+//
+//    Signature (8 args per v1.7 O1 — drops unused oms; adds caller-owned
+//    statics + nullable ML zoos + caller-precomputed node_balance):
+//======================================================================
 // [END_FUNCTION]_[EngineCommon_BootPerCore]
 //======================================================================
 
-// 4. EngineCommon_SlowPathCycleOneCore
-//    const cfg per-core slow-path-cycle body (atomic per-core unit):
-//      - EventLoop_UpdateRollingStateOneCore
-//      - EventLoop_RebuildOneCore (regime classification + strategy rebuild)
-//      - EventLoop_TimeExitOneCore
-//      - EventLoop_TrailingSLRatchetOneCore
-//      - EventLoop_BreakevenOnProfitOneCore (PARITY-032 fold-in; was MISSING
-//        from per_node_slow lambda pre-.B.4)
-//      - ML exit-prediction submit (when MASK_ML_CFG_USE_EXIT_MODEL set)
-//      - per-core regime collection (state.nodes[c].regime_state populated)
-//
-//    Live: called per-core from per_node_slow thread (each thread invokes once
-//    per slow-path cycle).
-//    Backtest: called via SlowPathCycleAllCores wrapper (which loops N times
-//    per tick).
-//
-//    Closes PARITY-031 (per-core regime) + PARITY-032 (breakeven) +
-//    auxiliary by-construction.
-// Signature (v1.7.3 N-6: 9 args per /trace-deps + /dod-audit + /readiness + /bug-check
-// convergent finding — body needs volume + now_tick + depth in addition to v1.7.2 6 args;
-// BookSnapshot<F> sister-canonical reuse from DataStream/BinanceDepth.hpp:32-35 per
-// feedback_audit_canonical_sister_before_new_infra — REUSE existing canonical instead of
-// inventing new DepthBundle struct):
-//
-// Caller responsibilities (v1.7.3 HIGH-1 mtm_price + N-6 caller-wiring; v1.7.3 self-catch
-// removed fabricated `enabled` field — BookSnapshot per DataStream/BinanceDepth.hpp:29-41
-// has NO `enabled` field; helper checks MASK_GATE_CFG_DEPTH_ENABLED internally at read
-// time per current LIVE pattern :3052-3058):
-//   - LIVE per_node_slow lambda: resolve volume from last_volume.load();
-//     now_tick from ticks_produced.load(); depth = g_depth_shared.snapshots[
-//     __atomic_load_n(&g_depth_shared.active_idx, __ATOMIC_ACQUIRE)] (existing
-//     BookSnapshot<F> ref; no new struct construction needed).
-//     mtm_price precompute at caller-side per O2 bytewise-identical math discipline.
-//   - BACKTEST ShardedBacktest_RunTick: resolve volume from tick.volume; now_tick from
-//     (uint64_t)tick_index; depth via BookSnapshot<F> constructed from BACKTEST
-//     ShardedBacktestDriver<F> pointer fields (drv->book_imbalance per :102 — NO
-//     `current_` prefix; deref *drv->current_spread + *drv->current_mid_price per
-//     :119-120 POINTER types; null-check each pointer individually before deref per
-//     canonical idiom at :287/:307/:349-350; v1.7.4 NEW-1/2/3/4 path + prefix +
-//     pointer-deref corrections landed; spec points to
-//     CoreFrameworks/ShardedBacktestDriver.hpp for the source struct).
-//   Helper handles depth-disabled flag at read time (BITMAP_IS_SET on cfg.gate_cfg_flags
-//   MASK_GATE_CFG_DEPTH_ENABLED) — when disabled, helper substitutes FPN_Zero values
-//   regardless of what's in the passed BookSnapshot. Matches current LIVE :3052-3058
-//   pattern verbatim per bytewise-identical math discipline.
 //======================================================================
 // [FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
 //----------------------------------------------------------------------
@@ -875,18 +839,57 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 4. EngineCommon_SlowPathCycleOneCore
+//    const cfg per-core slow-path-cycle body (atomic per-core unit):
+//      - EventLoop_UpdateRollingStateOneCore
+//      - EventLoop_RebuildOneCore (regime classification + strategy rebuild)
+//      - EventLoop_TimeExitOneCore
+//      - EventLoop_TrailingSLRatchetOneCore
+//      - EventLoop_BreakevenOnProfitOneCore (PARITY-032 fold-in; was MISSING
+//        from per_node_slow lambda pre-.B.4)
+//      - ML exit-prediction submit (when MASK_ML_CFG_USE_EXIT_MODEL set)
+//      - per-core regime collection (state.nodes[c].regime_state populated)
+//
+//    Live: called per-core from per_node_slow thread (each thread invokes once
+//    per slow-path cycle).
+//    Backtest: called via SlowPathCycleAllCores wrapper (which loops N times
+//    per tick).
+//
+//    Closes PARITY-031 (per-core regime) + PARITY-032 (breakeven) +
+//    auxiliary by-construction.
+// Signature (v1.7.3 N-6: 9 args per /trace-deps + /dod-audit + /readiness + /bug-check
+// convergent finding — body needs volume + now_tick + depth in addition to v1.7.2 6 args;
+// BookSnapshot<F> sister-canonical reuse from DataStream/BinanceDepth.hpp:32-35 per
+// feedback_audit_canonical_sister_before_new_infra — REUSE existing canonical instead of
+// inventing new DepthBundle struct):
+//
+// Caller responsibilities (v1.7.3 HIGH-1 mtm_price + N-6 caller-wiring; v1.7.3 self-catch
+// removed fabricated `enabled` field — BookSnapshot per DataStream/BinanceDepth.hpp:29-41
+// has NO `enabled` field; helper checks MASK_GATE_CFG_DEPTH_ENABLED internally at read
+// time per current LIVE pattern :3052-3058):
+//   - LIVE per_node_slow lambda: resolve volume from last_volume.load();
+//     now_tick from ticks_produced.load(); depth = g_depth_shared.snapshots[
+//     __atomic_load_n(&g_depth_shared.active_idx, __ATOMIC_ACQUIRE)] (existing
+//     BookSnapshot<F> ref; no new struct construction needed).
+//     mtm_price precompute at caller-side per O2 bytewise-identical math discipline.
+//   - BACKTEST ShardedBacktest_RunTick: resolve volume from tick.volume; now_tick from
+//     (uint64_t)tick_index; depth via BookSnapshot<F> constructed from BACKTEST
+//     ShardedBacktestDriver<F> pointer fields (drv->book_imbalance per :102 — NO
+//     `current_` prefix; deref *drv->current_spread + *drv->current_mid_price per
+//     :119-120 POINTER types; null-check each pointer individually before deref per
+//     canonical idiom at :287/:307/:349-350; v1.7.4 NEW-1/2/3/4 path + prefix +
+//     pointer-deref corrections landed; spec points to
+//     CoreFrameworks/ShardedBacktestDriver.hpp for the source struct).
+//   Helper handles depth-disabled flag at read time (BITMAP_IS_SET on cfg.gate_cfg_flags
+//   MASK_GATE_CFG_DEPTH_ENABLED) — when disabled, helper substitutes FPN_Zero values
+//   regardless of what's in the passed BookSnapshot. Matches current LIVE :3052-3058
+//   pattern verbatim per bytewise-identical math discipline.
+//======================================================================
 // [END_FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
 //======================================================================
 
-// 5. EngineCommon_SlowPathCycleAllCores
-//    const cfg fan wrapper (~10 LOC for-loop calling SlowPathCycleOneCore N times).
-//    Per Option D future-orientation for v6.0 viewer decoupling boundary:
-//    viewer reuses this wrapper as the natural per-tick mmap-publish API.
-//
-//    Backtest calls this ONCE per tick (ShardedBacktest_RunTick).
-//    Live does NOT call this (each per_node_slow thread calls OneCore directly).
-//
-//    Signature (v1.7.3 N-6 consequential: 8 args; pass-through to OneCore expanded args):
 //======================================================================
 // [FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
 //----------------------------------------------------------------------
@@ -922,6 +925,18 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 5. EngineCommon_SlowPathCycleAllCores
+//    const cfg fan wrapper (~10 LOC for-loop calling SlowPathCycleOneCore N times).
+//    Per Option D future-orientation for v6.0 viewer decoupling boundary:
+//    viewer reuses this wrapper as the natural per-tick mmap-publish API.
+//
+//    Backtest calls this ONCE per tick (ShardedBacktest_RunTick).
+//    Live does NOT call this (each per_node_slow thread calls OneCore directly).
+//
+//    Signature (v1.7.3 N-6 consequential: 8 args; pass-through to OneCore expanded args):
 //======================================================================
 // [END_FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
 //======================================================================

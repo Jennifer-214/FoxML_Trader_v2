@@ -73,10 +73,6 @@ constexpr uint8_t GATE_FLAG_PAIR_ACTIVE      = 0x40;
 // cfg.param_staleness_gate_enabled in EventLoop_RebuildOneCore.
 constexpr uint8_t GATE_FLAG_STALENESS_ENABLED = 0x80;
 
-// Strategy IDs come from Strategies/StrategyInterface.hpp (single source of
-// truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
-// "this core has no assigned strategy, do not trade".
-
 //======================================================================
 // [STRUCT]_[GateParameters]
 //----------------------------------------------------------------------
@@ -179,6 +175,12 @@ struct alignas(64) GateParameters {
 //   2. Update Strategy_BuildParameters in the strategy that uses it
 //   3. Update BG_Evaluate or SG_Evaluate to read it
 //   4. Bump SNAPSHOT_VERSION (params are persisted in v11+)
+//======================================================================
+// [COMMENT]_[strategy IDs]
+//----------------------------------------------------------------------
+// Strategy IDs come from Strategies/StrategyInterface.hpp (single source of
+// truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
+// "this core has no assigned strategy, do not trade".
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 //----------------------------------------------------------------------

@@ -59,10 +59,6 @@
 
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_BIT_U8 for MODE_F_* constants (item 20)
 
-// NOTE: deliberately NOT wrapped in `namespace tt` — matches NodeModelZoo.hpp +
-// StrategyParameters.hpp consumer convention; MODE_FLAGS[] table + MASK constants
-// need to be accessible from template functions without namespace qualification.
-
 //======================================================================================================
 // [REGISTRY]_[FOREACH_BARRIER_BLEND_MODE]
 //----------------------------------------------------------------------
@@ -211,6 +207,12 @@ static_assert((MODE_FLAGS[MODE_BARRIER_BLEND_BOTH_DOMINANT_DRIVES]
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// NOTE: deliberately NOT wrapped in `namespace tt` — matches NodeModelZoo.hpp +
+// StrategyParameters.hpp consumer convention; MODE_FLAGS[] table + MASK constants
+// need to be accessible from template functions without namespace qualification.
 //======================================================================
 // [END_REGISTRY]_[FOREACH_BARRIER_BLEND_MODE]
 //======================================================================
