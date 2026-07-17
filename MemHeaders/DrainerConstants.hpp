@@ -3,9 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [DRAINER CONSTANTS]  (v5.15.5.C.4 Phase T1 — drainer-thread-stable cache)
+// [FILE]_[MemHeaders/DrainerConstants.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-cycle drainer-thread-stable predicate cache — one Init per drain cycle replaces 6 scattered BITMAP_IS_SET reads with consistency-within-cycle]
+// [CONTAINS]
+//   - [STRUCT]_[DrainerConstants]
+//   - [FUNCTION]_[DrainerConstants_Init]
+// [REFERENCE]_[DESIGN_SPEC]_[function-struct-alignment-for-single-mov-access]
 //======================================================================================================
-//
 // POD struct holding drainer-thread-stable cfg + state predicates.
 // Initialized once per drainer cycle at the top of the main loop body (and
 // inside each consumer lambda — drain_with_submit / drain_manual_closes /
@@ -41,7 +48,7 @@
 // to FOREACH_DRAINER_CONSTANT registry per
 // `DESIGN_SPECS/heterogeneous-registry-pattern.md` DOMAIN SPLIT form.
 //
-// LATENCY: per CLAUDE.md item 17. Init cost: ~5-10 cycles per call (4
+// LATENCY: Init cost: ~5-10 cycles per call (4
 // field assignments + 1 BITMAP_IS_SET + 1 multiply). Cheaper than 6×
 // scattered BITMAP_IS_SET reads (which the consumers replace). NET SAVINGS.
 //======================================================================================================
@@ -56,13 +63,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// POD struct holding drainer-thread-stable cfg + state predicates.
-//
-// Field order: size-descending (8B → 4B → 1B + trailing pad).
-// Per `function-struct-alignment-for-single-mov-access.md` — naturally
-// aligned; single-mov access for all fields when passed by const ref.
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[DrainerConstants]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[16B size-descending POD — registered_count + derived drain_count + partial_on, 7B trailing slack; drainer-thread-local (deliberately NO alignas(64))]
+//======================================================================
+// [CODE]
+//======================================================================
 struct DrainerConstants {
     // v5.15.5.F.4d.1.B.8 — fee_rate_taker_d field DELETED (Class 27 vestigial sub-instance closure;
     // UNREAD post-.F.4c.3 WIP2d-1.B.1 cache deletion; verified 0 production consumers via grep + /trace-deps).
@@ -72,15 +81,56 @@ struct DrainerConstants {
     bool    partial_on;         // 1B, offset 8  — BITMAP_IS_SET(oms_state_flags, PARTIAL_EXIT_ENABLED)
     uint8_t _pad[7];            // 7B, offset 9-15 — trailing slack for future fields
 };
-
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Field order: size-descending (8B → 4B → 1B + trailing pad).
+// Per `function-struct-alignment-for-single-mov-access.md` — naturally
+// aligned; single-mov access for all fields when passed by const ref.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[DrainerConstants]
+//======================================================================
 // Verify layout assumptions hold (catches silent struct-layout regressions).
 // v5.15.5.F.4d.1.B.8: size 24→16 + alignof 8→4 post fee_rate_taker_d deletion (Class 27 vestigial).
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(DrainerConstants) == 16]
 static_assert(sizeof(DrainerConstants) == 16, "DrainerConstants size changed; cache/single-mov analysis may be stale");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(DrainerConstants) == 4]
 static_assert(alignof(DrainerConstants) == 4, "DrainerConstants alignment changed");
 
-//======================================================================================================
-// Initialize DrainerConstants from current state + cfg + oms.
-//
+//======================================================================
+// [FUNCTION]_[DrainerConstants_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[build the per-cycle cache — call ONCE per drainer cycle at each consumer scope entry; ~5-10 cycles]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline DrainerConstants DrainerConstants_Init(
+    int registered_count,
+    const ControllerConfig<F>& /*cfg*/,
+    const OrderManagerState<F>& oms) {
+    DrainerConstants dc;
+    dc.registered_count = registered_count;
+    dc.partial_on       = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    dc.drain_count      = dc.partial_on ? (dc.registered_count * 2) : dc.registered_count;
+    return dc;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Call ONCE per drainer cycle at the entry of each consumer scope (main
 // loop body, drain_with_submit lambda, drain_post_fill lambda, etc.).
 // Cost: ~5-10 cycles (4 field assignments + 1 BITMAP_IS_SET + 1 multiply).
@@ -95,17 +145,8 @@ static_assert(alignof(DrainerConstants) == 4, "DrainerConstants alignment change
 //
 // v5.15.5.F.4d.1.B.8 — `cfg` parameter retained for future drainer-thread-stable
 // cfg fields; currently unused after fee_rate_taker_d deletion.
-//======================================================================================================
-template <unsigned F>
-inline DrainerConstants DrainerConstants_Init(
-    int registered_count,
-    const ControllerConfig<F>& /*cfg*/,
-    const OrderManagerState<F>& oms) {
-    DrainerConstants dc;
-    dc.registered_count = registered_count;
-    dc.partial_on       = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    dc.drain_count      = dc.partial_on ? (dc.registered_count * 2) : dc.registered_count;
-    return dc;
-}
+//======================================================================
+// [END_FUNCTION]_[DrainerConstants_Init]
+//======================================================================
 
 }  // namespace tt

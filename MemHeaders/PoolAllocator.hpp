@@ -4,7 +4,15 @@
 
 
 //======================================================================================================
-// [POOL ALLOCATOR]
+// [FILE]_[MemHeaders/PoolAllocator.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the bitmap order pool — 64-slot ctz-allocate/popcount-count over calloc or mmap(MAP_POPULATE) backing; OrderPool_DestroyBacking is the SOLE cleanup entry]
+// [CONTAINS]
+//   - [STRUCT]_[OrderPool]   (CurrentOrder slot type rides the block)
+//   - [FUNCTION]_[OrderPool_Allocate]   (+ init / DestroyBacking / Free / CountActive family)
+// [REFERENCE]_[INVARIANT]_[H14]
 //======================================================================================================
 #ifndef POOL_ALLOCATOR_H
 #define POOL_ALLOCATOR_H
@@ -16,37 +24,16 @@
 #include <sys/mman.h>   // v5.11.17 — mmap(MAP_POPULATE) backing under FOXML_POOL_USE_MMAP
 #include "../FixedPoint/FixedPointN.hpp"
 
-// v5.11.17 (2026-05-07) — backing-allocator switch.
-//
-// Pool backing was historically calloc(). 31 sites across tests +
-// production called `free(pool.slots)` directly to clean up. The
-// v5.11.6.B attempt to flip backing to mmap(MAP_POPULATE) regressed
-// because `free()` is UB on mmap'd pointers — that ship reverted.
-//
-// This re-attempt introduces `OrderPool_DestroyBacking` as the SOLE
-// cleanup entry point. All 31 prior `free(pool.slots)` callers are
-// migrated to it (boundary-stable refactor: callers see a stable API,
-// implementation can switch backing freely).
-//
-// Backing default stays `calloc` for v5.11.17 to keep behavior
-// bytewise-identical at the same tag. Define FOXML_POOL_USE_MMAP at
-// build time to flip to mmap(MAP_POPULATE | MAP_PRIVATE | MAP_ANONYMOUS).
-// v5.11.22 (MAP_HUGETLB) will lift this default once operator gates
-// hugepage availability via cfg.
-
-//======================================================================================================
-// [CURRENT ORDER STRUCTURE]
-//======================================================================================================
-// these are the current structs, theyll probably change but idk, just consider these more like intial jsut to lay ground work, these are almost definitly gonna change now that i think about it lol
-//======================================================================================================
-// [EDIT [14-03-26]]
-//======================================================================================================
-// price and quantity are now FP32 - deterministic fixed-point all the way through
-//======================================================================================================
-// [EDIT [14-03-26]]
-//======================================================================================================
-// templated on FP precision - engine code picks the width with e.g. CurrentOrder<64>
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[OrderPool]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 64-slot bitmap pool (CurrentOrder slot type rides) — slots pointer + uint64 occupancy bitmap + capacity]
+// [INSTANTIATION]_[[64]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct CurrentOrder {
     uint64_t order_id;
     Money price;
@@ -58,11 +45,36 @@ template <unsigned F> struct OrderPool {
     uint64_t bitmap;
     uint32_t capacity;
 };
-//======================================================================================================
-// [POOL ALLOCATOR FUNCTION PROTOTYPES]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// these are the current structs, theyll probably change but idk, just consider these more like intial jsut to lay ground work, these are almost definitly gonna change now that i think about it lol
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// [[2026-03-14] [EDIT]]
+//----------------------------------------------------------------------
+// price and quantity are now FP32 - deterministic fixed-point all the way through
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// [[2026-03-14] [EDIT]]
+//----------------------------------------------------------------------
+// templated on FP precision - engine code picks the width with e.g. CurrentOrder<64>
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[OrderPool]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OrderPool_Allocate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the pool API family (init / DestroyBacking / Free / CountActive ride) — ctz first-free allocate, branchless bitmap bookkeeping]
+//======================================================================
+// [CODE]
+//======================================================================
 // current working code, subject to chaaanggggeeeee
-//======================================================================================================
 template <unsigned F> inline void OrderPool_init(OrderPool<F> *pool, uint32_t capacity) {
 #ifdef FOXML_POOL_USE_MMAP
     // v5.11.17 — mmap(MAP_POPULATE) backing. MAP_POPULATE pre-faults the
@@ -122,5 +134,29 @@ template <unsigned F> inline uint32_t OrderPool_CountActive(const OrderPool<F> *
     uint32_t popcount = __builtin_popcountll(pool->bitmap);
     return popcount;
 }
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.11.17 (2026-05-07) — backing-allocator switch.
+//
+// Pool backing was historically calloc(). 31 sites across tests +
+// production called `free(pool.slots)` directly to clean up. The
+// v5.11.6.B attempt to flip backing to mmap(MAP_POPULATE) regressed
+// because `free()` is UB on mmap'd pointers — that ship reverted.
+//
+// This re-attempt introduces `OrderPool_DestroyBacking` as the SOLE
+// cleanup entry point. All 31 prior `free(pool.slots)` callers are
+// migrated to it (boundary-stable refactor: callers see a stable API,
+// implementation can switch backing freely).
+//
+// Backing default stays `calloc` for v5.11.17 to keep behavior
+// bytewise-identical at the same tag. Define FOXML_POOL_USE_MMAP at
+// build time to flip to mmap(MAP_POPULATE | MAP_PRIVATE | MAP_ANONYMOUS).
+// v5.11.22 (MAP_HUGETLB) will lift this default once operator gates
+// hugepage availability via cfg.
+//======================================================================
+// [END_FUNCTION]_[OrderPool_Allocate]
+//======================================================================
 #endif // POOL_ALLOCATOR_H
