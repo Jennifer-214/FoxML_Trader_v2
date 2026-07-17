@@ -90,11 +90,11 @@ template <unsigned F> struct MeanReversionState {
 
 //------------------------------------------------------------------------------
 // INIT
-//======================================================================================================
+//------------------------------------------------------------------------------
 // called once at warmup completion. computes initial buy conditions from
 // rolling stats and resets the regression feeder for P&L tracking in the active
 // phase. handles both percentage and stddev offset modes via branchless select.
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F>
 inline void MeanReversion_Init(MeanReversionState<F> *state,
                                const RollingStats<F> *rolling,
@@ -566,7 +566,7 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
 //
 // Forward declaration of Strategy_WriteRatchetSL — defined in
 // StrategyLifecycle.hpp which can't be included here (cycle).
-//======================================================================================================
+//------------------------------------------------------------------------------
 namespace tt {
 template <unsigned F> struct EventLoopState;
 template <unsigned F>

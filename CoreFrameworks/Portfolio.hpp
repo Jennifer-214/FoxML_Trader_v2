@@ -40,7 +40,7 @@
 // [SECTION]_[structs]
 //------------------------------------------------------------------------------------------------------
 // Im not sure how many positions i really want to track here but for now im just gonna leave it at like 16 i think, there will probably be more advanced logic added later to have a model that watches performace and dynamically updates or something like i attempted to do in FoxML core, but this is a deepr dive so i can actually learn and understand the logic behind stuff, and i just think its cool as shit, like why learn java when stuff lke this exists lmao, also i get to make my own library so im not functioning off blackbox implementations where the end of the documentation is lke "Trust me bro", and i hate reading documentation, so id rather build my own
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 
 //======================================================================
 // [STRUCT]_[Position]
@@ -290,7 +290,7 @@ inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
 // [SECTION]_[functions]
 //------------------------------------------------------------------------------------------------------
 // similar to the pool allocator, will need more work and im not sure if i want the rebalancing adn stuff here or in another header, probably another header for the actual managment, because these are just the basic functions to add and manipulate the actual opsitions, tnd are dependent on the buy/sell gates
-//======================================================================================================
+//------------------------------------------------------------------------------------------------------
 
 //======================================================================
 // [FUNCTION]_[Position_Reset]

@@ -45,7 +45,7 @@ struct RORRegressor {
 // INIT FUNCTION
 //------------------------------------------------------------------------------
 // zeroes everything out, call once at startup
-//======================================================================================================
+//------------------------------------------------------------------------------
 template<unsigned F>
 inline RORRegressor<F> RORRegressor_Init() {
     RORRegressor<F> reg;
@@ -67,7 +67,7 @@ inline RORRegressor<F> RORRegressor_Init() {
 // buffer, also stores the r_squared so you could filter out bad fits later if you wanted to,
 // like if the inner regression had an r^2 of 0.05 that slope is basically noise and maybe you
 // dont want it polluting the outer regression
-//======================================================================================================
+//------------------------------------------------------------------------------
 template<unsigned F>
 inline void RORRegressor_Push(RORRegressor<F> *reg, LinearRegression3XResult<F> inner_result) {
     reg->slope_samples[reg->head]     = inner_result.model.slope;
@@ -82,7 +82,7 @@ inline void RORRegressor_Push(RORRegressor<F> *reg, LinearRegression3XResult<F> 
 // approach as RegressionFeederX_Compute but the y values are slopes instead of prices, the output
 // slope tells you how fast the trend is changing - positive means the trend is getting steeper
 // (accelerating), negative means its flattening or reversing
-//======================================================================================================
+//------------------------------------------------------------------------------
 template<unsigned F>
 inline LinearRegression3XResult<F> RORRegressor_Compute(RORRegressor<F> *reg) {
     FPN_Binary<F> linearized[MAX_WINDOW];

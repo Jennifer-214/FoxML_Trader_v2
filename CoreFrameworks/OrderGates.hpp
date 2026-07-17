@@ -105,6 +105,7 @@ inline void Gate_ZeroAll(BuySideGateConditions<F> *conds, int pass) {
 // [SECTION]_[order gates]
 //------------------------------------------------------------------------------------------------------
 // no more packing/unpacking - compare FPN_Binary fields directly (already branchless)
+
 //======================================================================================================
 // [EDIT]_[[16-03-26 08:55am]]
 // im not sure if im gonna add the outputs to a portfolio management system here or not, we'll see, im not even sure if im actually gonna put out anything thats actually useable for like large scale or systemic trading, like sure, for individuals using it yeah, thats not ahuge concern, but something that someone could pick up and start a hedge fund from idk, well See,

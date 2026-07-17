@@ -9,7 +9,7 @@
 //   - [FUNCTION]_[BUILD_FLAGS_HASH]
 //======================================================================================================
 // Build flags fingerprint (v5.9.5h Phase 10 / v5.10 Idea #10)
-//------------------------------------------------------------------------------
+//======================================================================================================
 // Detects cross-build deploy mistakes: train on dev box compiled with -O2,
 // deploy to prod compiled with -O3 + -DUSE_NATIVE_128 → silent feature
 // distribution drift (IEEE-754 reordering across optimization levels +

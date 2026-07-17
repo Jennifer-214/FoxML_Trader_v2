@@ -60,7 +60,7 @@ template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS> struct
 //this is basically doing a standard forward pass where or each hidden nueron, it starts with the bias, then loops through every input and multiplies it be the weight connecting it to the hidden nuerion, and accumulates the result, then it applies ReLU, and does the same thing from hidden layer to output layer
 //
 //the weight indexing is how you layout a 2D grid in a 1D array, so you have inputs going to hidden nuerons, and its just a grid of inputs * hidden weights, i wish i actually understood this stuff like on a deeper leve than conceptual, its really interesting but idk, maybe im just stupid, i have ZERO clue why people are cloning my stuff, like if your doing it to make me feel better thanks i guess, it kind of works until it doesnt
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS>
 void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &input) {
     // Compute hidden layer
@@ -88,7 +88,7 @@ void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &inp
 // BACKWARD PASS
 //------------------------------------------------------------------------------
 //this apparently is just the if you know what the output was, and you know what you wanted it to be, you have the error difference, and then you push that back through it to figure out how much each weight contrinbuted to the error, and then you can nudge them in the opposite direction, by the learning rate
-//======================================================================================================
+//------------------------------------------------------------------------------
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS>
 void GCN_backward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &input, FPN_Binary<F> &target, FPN_Binary<F> learning_rate) {
     // Compute output layer error
