@@ -3,7 +3,13 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [STAMP-BOUND MODEL-CONST REGISTRY — v5.14.8.0]
+// [FILE]_[ML_Headers/StampBoundModelConstRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[architectural stamp-body field registry — one 9-col row auto-flows struct fields + parser + emitter + has_flags bit gating across the PRE_CFG/POST_CFG canonical wire order]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_STAMP_BOUND_MODEL_CONST]   (string-type aliases + stamp_parse_field + groups/standalones + bit allocation + STAMP_HAS accessors + dispatchers share the block)
 //======================================================================================================
 // X-macro registry for ARCHITECTURAL stamp body fields — fields that
 // describe the model itself (training timestamp, run name, scaler fit
@@ -19,25 +25,6 @@
 // (PARITY-002/003/004/005/008) recurred 4× before STAMP_CFG_AUTOPOPULATE
 // extinguished it for cfg-bound fields. This registry extinguishes the
 // same class for architectural model-const fields.
-//
-// SCOPE for v5.14.8.0: registry INFRASTRUCTURE (this file) — empty
-// FOREACH_STAMP_BOUND_MODEL_CONST defined; macros + companion AUTOPOPULATE
-// + documentation. v5.14.8.A migrates the existing 24 architectural
-// fields into entries here (boundary-stable: wire format preserved
-// via canonical-order-preserving entry order; field-access syntax
-// preserved via X-macro generating same field names).
-// v5.14.8.D adds 5 NEW v5.14.8 fields as registry entries
-// (training_timestamp_us, run_name, scaler_fit_data_hash,
-// removal_reasons_csv, environment_meta).
-//
-// BIT-PACKING (TECH_DEBT-013): v5.14.8.A also bit-packs the has_*
-// flags into a single uint64_t `has_flags` field per the BIT_FLAG
-// storage class pattern (CLAUDE.md item 1 — Portfolio uint16_t bitmap
-// precedent; FOREACH_FAILURE_MODE pseudo-registry pattern at
-// MemHeaders/FailureModeRegistry.hpp). For v5.14.8.0, this header
-// uses the same byte-per-has-flag pattern as StampBoundCfgRegistry to
-// keep the .0 sub-tag focused on infrastructure; bit-packing migration
-// + accessor-macro substitution happens in .A.
 //
 // FORWARD-COMPAT (Surface G): has_<name>=0 default for legacy stamps
 // means the parser leaves new fields untouched on a v5.14.7 stamp;
@@ -62,9 +49,31 @@
 #include <type_traits>  // v5.14.8.A.merged.4 — std::is_array_v / extent_v / is_floating_point_v / is_unsigned_v for tt::stamp_parse_field<T>
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_* primitives (v5.14.8.A.0.b.1) backing STAMP_HAS / SET / CLR aliases
 
-//======================================================================================================
-// [STRING-FIELD TYPE ALIASES]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_STAMP_BOUND_MODEL_CONST]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[~46 architectural stamp-body rows in PRE_CFG + POST_CFG halves (the split preserves canonical wire order around the sister cfg registry) — struct-gen + parser + emitter + has_flags bits all auto-flow]
+// [COLUMN]_[name]_[canonical stamp body key AND struct field name; written as <name>=<value> line]
+// [COLUMN]_[group]_[has_* gating: "_" = standalone own bit; else a FOREACH_..._GROUPS name — grouped fields share one bit]
+// [COLUMN]_[presence]_[INCLUDE = on all 3 structs | SKIP_HANDLE = parser+emit only (token-paste struct-gen dispatch)]
+// [COLUMN]_[type]_[int / uint32_t / uint64_t / double / tt::stamp_str_N char-array alias]
+// [COLUMN]_[fmt]_[printf format — ALSO the parse-base SSoT (hex detected from 'x'/'X' in fmt)]
+// [COLUMN]_[default_val]_[zero-init value set before parsing]
+// [COLUMN]_[get_value_expr]_[extraction expression evaluated in the EMIT CALLER's scope]
+// [COLUMN]_[emit_when]_[boolean gate at emit time — literal 1 = always; guard expr = optional field]
+// [COLUMN]_[doc_comment]_[purpose string for errors + doc tooling]
+// [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
+// [REFERENCE]_[PARITY]_[PARITY-022]
+// [REFERENCE]_[INVARIANT]_[[H9] [H15] [H21]]
+// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-036]
+//======================================================================
+// [CODE]
+//======================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[STRING-FIELD TYPE ALIASES]
+//----------------------------------------------------------------------
 // C++ array-typedef forms for char[N] fields. The X-macro tuple's `type`
 // column needs a single-token type name; `char[65]` doesn't tokenize
 // cleanly (the '[' splits parameters). Aliases give us a single token.
@@ -76,7 +85,7 @@
 //
 // Naming convention: `stamp_str_<N>` where N = total array size including
 // null terminator. Add new aliases as char[N] fields are introduced.
-//======================================================================================================
+//----------------------------------------------------------------------
 namespace tt {
     using stamp_str_16   = char[16];    // xgb_tree_method, environment_cuda_version, environment_libgomp_version
     using stamp_str_32   = char[32];    // v5.14.8.D — environment_tf_version, environment_pytorch_version
@@ -125,9 +134,9 @@ namespace tt {
     }
 }
 
-//======================================================================================================
-// [REGISTRY ENTRY SHAPE]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[REGISTRY ENTRY SHAPE]
+//----------------------------------------------------------------------
 // X(name, group, presence, type, fmt, default_val, get_value_expr, emit_when, doc_comment)
 //
 //   name           — canonical stamp body key (also struct field name).
@@ -197,7 +206,7 @@ namespace tt {
 // code. This eliminates the v5.9.5b production-caller field-population
 // gap class — adding a new architectural stamp field becomes ONE line
 // in this registry; populator is auto-generated.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 // ANTI-PATTERN: Do NOT add architectural stamp body fields as flat
 // struct field declarations directly in ModelStampResult /
@@ -215,9 +224,9 @@ namespace tt {
 //   2. Add per-field entries to FOREACH_STAMP_BOUND_MODEL_CONST with
 //      group=<group_name>; all fields share one has_<group_name> bit
 
-//======================================================================================================
-// [GROUP DECLARATIONS — v5.14.8.A]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[GROUP DECLARATIONS — v5.14.8.A]
+//----------------------------------------------------------------------
 // Groups are has_* flags that gate MULTIPLE typed fields populated
 // together. Each group declaration auto-allocates one bit position in
 // the bitmap. Standalone fields (group="_") auto-allocate their own bits.
@@ -235,9 +244,9 @@ namespace tt {
     X(grid_member,      "grid member metadata (2): grid_member_count, grid_member_idx — renamed from grid_member v5.14.8.A.merged for dispatcher cleanliness") \
     X(label_params,     "label params (3): lookahead_ticks, tp_pct, sl_pct")
 
-//======================================================================================================
-// [STANDALONE has_* DECLARATIONS]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[STANDALONE has_* DECLARATIONS]
+//----------------------------------------------------------------------
 // Lists standalone entries (group="_" in main FOREACH). Each gets its
 // own has_<name> declaration. Adding a new standalone field requires:
 //   1. Add line to this STANDALONE macro (declares has_<name>)
@@ -255,11 +264,11 @@ namespace tt {
     X(feature_mask,                 "feature mask set (1 field)")                                   \
     X(xgb_train_nthread,            "xgb training thread count set (1 field)")
 
-//======================================================================================================
-// [TYPED VALUE ENTRIES — v5.14.8.A; emit order = canonical body order]
-//======================================================================================================
-// Order matches stamp_write_for_model emit sequence (ModelInference.hpp
-// :2175-2378). Wire format byte-for-byte preserved for HMAC verification.
+//----------------------------------------------------------------------
+// [SECTION]_[TYPED VALUE ENTRIES — v5.14.8.A; emit order = canonical body order]
+//----------------------------------------------------------------------
+// Order matches the stamp_write_for_model emit sequence in
+// ModelInference.hpp. Wire format byte-for-byte preserved for HMAC verification.
 // has_* gating: standalone (group="_") gates a single field; group
 // (group=<name>) gates all entries with that group_name.
 //
@@ -484,24 +493,24 @@ namespace tt {
     FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X) \
     FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)
 
-//======================================================================================================
-// [PARSER DISPATCH MACROS]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[PARSER DISPATCH MACROS]
+//----------------------------------------------------------------------
 // Per-type parsers used in the parser X-macro expansion (verify_model_stamp).
 // Add a new type? Add a new STAMP_MODEL_CONST_PARSE_<type> macro below.
 //   STAMP_MODEL_CONST_PARSE(int, val)      → atoi(val)
 //   STAMP_MODEL_CONST_PARSE(uint64_t, val) → (uint64_t)strtoull(val, NULL, 10)
 //   STAMP_MODEL_CONST_PARSE(double, val)   → tt::parse_double_fast(val)
 //   STAMP_MODEL_CONST_PARSE(char_array, val, dest, max_len) → strncpy(dest, val, max_len-1)
-//======================================================================================================
+//----------------------------------------------------------------------
 
 #define STAMP_MODEL_CONST_PARSE_int(val)      atoi(val)
 #define STAMP_MODEL_CONST_PARSE_uint64_t(val) (uint64_t)strtoull(val, NULL, 10)
 #define STAMP_MODEL_CONST_PARSE_double(val)   tt::parse_double_fast(val)
 
-//======================================================================================================
-// [BIT ALLOCATION FOR has_flags — v5.14.8.A.merged]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[BIT ALLOCATION FOR has_flags — v5.14.8.A.merged]
+//----------------------------------------------------------------------
 // Each group + each standalone entry gets ONE bit position in the
 // uint64_t has_flags field that lives on ModelStampResult /
 // StampInferenceCfgInputs / ModelHandle (post-Option-1 unification).
@@ -521,7 +530,7 @@ namespace tt {
 // derivation; no STANDALONE list dispatch). Verbose for some entries
 // (has_inference_cfg_bandit_blend_ratio) but unambiguous + IDE auto-
 // completes. Eliminates 2-site STANDALONE dispatch maintenance.
-//======================================================================================================
+//----------------------------------------------------------------------
 namespace tt {
 enum StampHasFlagBit : uint64_t {
     // === Group bits (one per group; gates ALL fields in group) ===
@@ -593,9 +602,9 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define MASK_scaler_fit_data_hash                   (1ULL << tt::STAMP_BIT_scaler_fit_data_hash)
 #define MASK_removal_reasons_csv                    (1ULL << tt::STAMP_BIT_removal_reasons_csv)
 
-//======================================================================================================
-// [STAMP_HAS / SET / CLR accessor macros — alias to BITMAP_* API]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[STAMP_HAS / SET / CLR accessor macros — alias to BITMAP_* API]
+//----------------------------------------------------------------------
 // Ergonomic accessors for the has_flags uint64_t bitmap. Aliases to the
 // BITMAP_* primitives so callers don't touch raw bit operations.
 //
@@ -608,15 +617,15 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 // Atomic variants available via BITMAP_ATOMIC_* directly when cross-thread
 // visibility is needed (e.g., observability flags written by slow path,
 // read by display thread).
-//======================================================================================================
+//----------------------------------------------------------------------
 #define STAMP_HAS(s, name)  BITMAP_IS_SET((s).has_flags, MASK_##name)
 #define STAMP_SET(s, name)  BITMAP_SET((s).has_flags, MASK_##name)
 #define STAMP_CLR(s, name)  BITMAP_CLR((s).has_flags, MASK_##name)
 #define STAMP_ANY(s, mask_set) BITMAP_ANY((s).has_flags, (mask_set))
 
-//======================================================================================================
-// [AUTO-POPULATE MACRO — eliminates v5.9.5b production-caller class]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[AUTO-POPULATE MACRO — QUARANTINED (PARITY-022) + the live dispatchers]
+//----------------------------------------------------------------------
 // Single-call auto-populate for production stamp emit. Replaces manual
 // per-field populator blocks with one X-macro expansion that:
 //   - For each registry entry: evaluate emit_when at the call site
@@ -641,7 +650,7 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 // String-field handling: char[N] fields use strncpy with explicit
 // max_len from the registry; the macro form for char arrays is
 // auto-dispatched per-type at expansion time (see .A migration code).
-//======================================================================================================
+//----------------------------------------------------------------------
 
 // v5.15.3.A — STAMP_MODEL_CONST_AUTOPOPULATE QUARANTINED (PARITY-022).
 //
@@ -752,9 +761,9 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
         }                                                                             \
     }
 
-//======================================================================================================
-// [TEST INSTRUMENTATION]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[TEST INSTRUMENTATION]
+//----------------------------------------------------------------------
 // Compile-time field count for tests. Counts entries via macro counting.
 // Used by tests to assert "all N expected fields are present in the
 // registry" — catches accidental row deletion during refactors.
@@ -768,7 +777,7 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 //       } while (0);
 //   FOREACH_STAMP_BOUND_MODEL_CONST(X)
 //   #undef X
-//======================================================================================================
+//----------------------------------------------------------------------
 
 #define STAMP_MODEL_CONST_COUNT_ONE(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) +1
 #define FOREACH_STAMP_BOUND_MODEL_CONST_COUNT  (0 FOREACH_STAMP_BOUND_MODEL_CONST(STAMP_MODEL_CONST_COUNT_ONE))
@@ -778,9 +787,9 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define FOREACH_STAMP_BOUND_MODEL_CONST_GROUP_COUNT \
     (0 FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS(STAMP_MODEL_CONST_GROUP_COUNT_ONE))
 
-//======================================================================================================
-// [STRUCT-GENERATION DISPATCH (presence-aware) — v5.14.8.A.0.b]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[STRUCT-GENERATION DISPATCH (presence-aware) — v5.14.8.A.0.b]
+//----------------------------------------------------------------------
 // The token-paste pattern that lets ModelHandle struct generation skip
 // fields marked SKIP_HANDLE while ModelStampResult + StampInferenceCfgInputs
 // include all fields.
@@ -795,9 +804,14 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 // based on the presence column. Adding a new presence marker (e.g.,
 // PARSER_ONLY) means defining one new STAMP_HANDLE_GEN_<MARKER> macro;
 // no per-entry boilerplate.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 #define STAMP_HANDLE_GEN_INCLUDE(name, type)      type name;
 #define STAMP_HANDLE_GEN_SKIP_HANDLE(name, type)  /* skip — parser-only */
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_STAMP_BOUND_MODEL_CONST]
+//======================================================================
 
 #endif // STAMP_BOUND_MODEL_CONST_REGISTRY_HPP
