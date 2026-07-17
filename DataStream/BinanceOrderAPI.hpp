@@ -3,7 +3,18 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BINANCE REST ORDER API]
+// [FILE]_[DataStream/BinanceOrderAPI.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[HMAC-signed REST order placement/query — market buy/sell with venue-filter clamps, retry/backoff, clock sync; venue decimals ride the D-123 known-temporary double bridge (string-direct Money_FromString = .E.3); fee contract gaps tracked at TECH_DEBT-169]
+// [CONTAINS]
+//   - [STRUCT]_[SymbolFilters]   (order-status codes + BinanceErrorCode enum ride)
+//   - [STRUCT]_[BinanceOrderAPI]
+//   - [FUNCTION]_[binance_json_extract]   (+ current_ms / hmac wrapper / extract_str / extract_double / round_qty / step_decimals helper family)
+//   - [FUNCTION]_[binance_rest_request]   (+ tcp_connect / tls_setup / signed_request / retry_request transport family)
+//   - [FUNCTION]_[BinanceOrderAPI_MarketBuy]   (+ the public API family: Cleanup / MarketSell / CancelOrder / GetStatus / ServerTime / LoadFilters / GetBalance(s) / GetOpenOrders / GetMyTrades / SyncClock / Init)
+//   - [FUNCTION]_[LoadSecrets]
 //======================================================================================================
 // places and manages orders via Binance REST API (https://api.binance.com/api/v3/order)
 // uses HMAC-SHA256 signing for authentication
@@ -44,9 +55,18 @@
 #include "BinanceCrypto.hpp"  // for g_binance_shutdown_flag (interruptible REST sleeps)
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — shared HMAC primitive (used by binance_hmac_sha256 wrapper below)
 
-//======================================================================================================
-// [ORDER STATUS CODES]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[SymbolFilters]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[venue-DEFINED trading constants as exact DECIMAL Money (D-106 source-authority; exchangeInfo strings <=8dp) — lot step/min/max + min_notional + derived qty_decimals (order-status codes + BinanceErrorCode ride)]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[ORDER STATUS CODES]
+//------------------------------------------------------------------
 #define ORDER_STATUS_UNKNOWN         0
 #define ORDER_STATUS_NEW             1
 #define ORDER_STATUS_PARTIALLY_FILLED 2
@@ -55,9 +75,9 @@
 #define ORDER_STATUS_REJECTED        5
 #define ORDER_STATUS_EXPIRED         6
 
-//======================================================================================================
-// [SYMBOL FILTERS] — queried from /api/v3/exchangeInfo at init
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[SYMBOL FILTERS — queried from /api/v3/exchangeInfo at init]
+//------------------------------------------------------------------
 // Binance error codes (subset that affects order routing decisions).
 // Full list at https://binance-docs.github.io/apidocs/spot/en/#error-codes
 enum BinanceErrorCode {
@@ -84,10 +104,23 @@ struct SymbolFilters {
     int qty_decimals;        // decimal places for quantity formatting (derived from step_size)
     int loaded;              // 1 = filters fetched successfully
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[SymbolFilters]
+//======================================================================
 
-//======================================================================================================
-// [API STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[BinanceOrderAPI]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-thread REST instance — socket/SSL + credentials + clock offset + filters + reconnect rate-limit + staleness/error/rate-weight observability; NEVER shared across threads]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BinanceOrderAPI {
     int sockfd;
     SSL_CTX *ssl_ctx;
@@ -104,10 +137,23 @@ struct BinanceOrderAPI {
     int last_error_code;       // Binance error code from last failed request (0 = none)
     int rate_limit_weight;     // X-MBX-USED-WEIGHT-1m from last response
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BinanceOrderAPI]
+//======================================================================
 
-//======================================================================================================
-// [HELPERS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[binance_json_extract]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the helper family (current_ms / the shared-HMAC wrapper / extract_str / extract_double / round_qty / step_decimals ride) — flat-JSON extract; locale-immune parse_double_fast_n; exact-decimal quantize core in a double shell (.E.3)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int64_t binance_current_ms() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -194,9 +240,24 @@ static inline int binance_step_decimals(double step_size) {
     return d;
 }
 
-//======================================================================================================
-// [TCP + TLS] — same pattern as BinanceCrypto.hpp
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[binance_json_extract]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[binance_rest_request]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the transport family (rest_tcp_connect / rest_tls_setup / signed_request / retry_request ride) — keep-alive HTTP/1.1 over SSL with reconnect-and-resend; HMAC signing; 5xx/418/429 backoff retry]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[TCP + TLS — same pattern as BinanceCrypto.hpp]
+//------------------------------------------------------------------
 static inline int binance_rest_tcp_connect(const char *host, const char *port) {
     struct addrinfo hints, *res, *rp;
     memset(&hints, 0, sizeof(hints));
@@ -260,13 +321,12 @@ static inline int binance_rest_tls_setup(BinanceOrderAPI *api) {
     return 1;
 }
 
-//======================================================================================================
-// [HTTP REQUEST]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[HTTP REQUEST]
+//------------------------------------------------------------------
 // sends an HTTP/1.1 request over SSL and reads the response
 // returns HTTP status code (200, 400, etc.) or -1 on error
 // response body written to response_buf
-//======================================================================================================
 static inline int binance_rest_request(BinanceOrderAPI *api,
                                         const char *method,
                                         const char *path,
@@ -396,9 +456,9 @@ static inline int binance_rest_request(BinanceOrderAPI *api,
     return status;
 }
 
-//======================================================================================================
-// [SIGN + SEND HELPERS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[SIGN + SEND HELPERS]
+//------------------------------------------------------------------
 static inline int binance_signed_request(BinanceOrderAPI *api,
                                           const char *method, const char *path,
                                           const char *params,
@@ -493,10 +553,21 @@ static inline int binance_retry_request(BinanceOrderAPI *api,
     return -1;
 }
 
-//======================================================================================================
-// [PUBLIC API]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[binance_rest_request]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[BinanceOrderAPI_MarketBuy]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the public API family (Cleanup / MarketSell / CancelOrder / GetStatus / ServerTime / LoadFilters / GetBalance(s) / GetOpenOrders / GetMyTrades / SyncClock / Init ride) — market orders with step/min/max/notional clamps (D-175) + venue order_complete (A17); fills parse via the D-123 double bridge]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void BinanceOrderAPI_Cleanup(BinanceOrderAPI *api) {
     if (api->ssl) { SSL_shutdown(api->ssl); SSL_free(api->ssl); api->ssl = NULL; }
     if (api->ssl_ctx) { SSL_CTX_free(api->ssl_ctx); api->ssl_ctx = NULL; }
@@ -907,12 +978,21 @@ static inline int BinanceOrderAPI_Init(BinanceOrderAPI *api, const char *host,
     return 1;
 }
 
-//======================================================================================================
-// [SECRETS LOADER]
-//======================================================================================================
-// loads api_key and api_secret from a key=value file (same format as engine.cfg)
-// returns 1 if both found, 0 if file missing or keys empty
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BinanceOrderAPI_MarketBuy]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[LoadSecrets]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[api_key/api_secret from a key=value secrets file (engine.cfg format; inline #-comments stripped) — 1 only when BOTH present]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int LoadSecrets(const char *filepath, char *key_out, char *secret_out) {
     key_out[0] = '\0';
     secret_out[0] = '\0';
@@ -955,5 +1035,10 @@ static inline int LoadSecrets(const char *filepath, char *key_out, char *secret_
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[LoadSecrets]
+//======================================================================
 
 #endif // BINANCE_ORDER_API_HPP
