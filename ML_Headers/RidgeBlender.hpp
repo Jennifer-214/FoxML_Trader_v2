@@ -6,7 +6,23 @@
 #define RIDGE_BLENDER_HPP
 
 //======================================================================================================
-// [RIDGE RISK-PARITY BLENDING — v5.14.0]
+// [FILE]_[ML_Headers/RidgeBlender.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Ridge risk-parity blending (v5.14.0) — cost-aware Markowitz weights over correlated model predictions via constant-iter Cholesky; uniform fallback on singular sigma]
+// [DIAGRAM]_[formula]
+//   w  ∝  (Σ + λI)^{-1} μ,   μ[i] = max(IC_i - cost_penalty × cost_i, min_ic_floor)
+// [CONTAINS]
+//   - [STRUCT]_[RidgeWeights]
+//   - [FUNCTION]_[Cholesky_Solve]
+//   - [FUNCTION]_[RidgeBlender_Compute]
+//   - [FUNCTION]_[RidgeBlender_FinalizeCorrFromSums]
+//   - [FUNCTION]_[RidgeBlender_BuildCorr]
+//   - [FUNCTION]_[RidgeBlender_UpdateOnline]
+//   - [FUNCTION]_[RidgeBlender_BuildHistoryFromRing]
+//   - [FUNCTION]_[RidgeBlender_OnlineCycleStep]
+//   - [FUNCTION]_[RidgeWeights_Init]
 //======================================================================================================
 // Multi-model alpha combination via Markowitz-style cost-aware weighting.
 // Solves   w  ∝  (Σ + λI)^{-1} μ   via Cholesky decomposition, where:
@@ -48,7 +64,7 @@
 //                   + 8 sqrts; ~2µs.
 //   - Total:        ~3µs/cycle. Slow-path budget = 100µs p99; well within.
 //
-// Reference: FoxML_Core LIVE_TRADING/blending/ridge_weights.py:25-139
+// Reference: FoxML_Core LIVE_TRADING/blending/ridge_weights.py
 //======================================================================================================
 
 #include <cassert>
@@ -76,22 +92,18 @@ static constexpr int MAX_RIDGE_MODELS = 8;
 // this constant.
 static constexpr int RIDGE_HISTORY_DEPTH = 64;
 
-//======================================================================================================
-// [RIDGEWEIGHTS STRUCT]
-//======================================================================================================
-// Output (boundary-stable: FPN_Binary<F> for snapshot/serialization stability)
-// + internal scratch (double for Cholesky numerical stability).
-//
-// Allocated INSIDE EnsembleModelZoo (per-core; already heap-allocated).
-// No false sharing — slow-path single-writer + single-reader on its own
-// core's ezoo.
-//
-// Cache impact: ~5KB at MAX_RIDGE_MODELS=8 (8×8 doubles × 3 matrices +
-// scratch + output). Fits in L2; not in hot-path read set.
-//
-// SoA layout: matrices flattened as 2D arrays for compiler vectorization
-// (Cholesky inner loops can SIMD-fuse on -O2 + AVX2/AVX-512 builds).
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[RidgeWeights]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCOPE]_[NODE]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Ridge state — FPN_Binary output weights at the boundary, double Cholesky scratch inside, alignas(64) online sliding-window sums cluster]
+// [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern]
+// [REFERENCE]_[INVARIANT]_[H6]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct RidgeWeights {
     // === OUTPUT (boundary; FPN_Binary for snapshot stability) ===
@@ -130,22 +142,46 @@ struct RidgeWeights {
     double               online_sum_xx[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS];
     uint64_t             online_window_count;       // ≤ K; saturates at K
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Output (boundary-stable: FPN_Binary<F> for snapshot/serialization stability)
+// + internal scratch (double for Cholesky numerical stability).
+//
+// Allocated INSIDE EnsembleModelZoo (per-core; already heap-allocated).
+// No false sharing — slow-path single-writer + single-reader on its own
+// core's ezoo.
+//
+// Fits in L2; not in hot-path read set.
+//
+// SoA layout: matrices flattened as 2D arrays for compiler vectorization
+// (Cholesky inner loops can SIMD-fuse on -O2 + AVX2/AVX-512 builds).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[2048B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[32]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[RidgeWeights]
+//======================================================================
 
-//======================================================================================================
-// [CHOLESKY DECOMPOSITION — internal kernel]
-//======================================================================================================
-// Standard textbook algorithm. Computes lower-triangular L such that
-// L × L^T = (Σ + λI). Then forward-solves L y = μ + back-solves L^T w = y.
-//
-// Returns 0 on success, -1 on failure (any L[i][i] ≤ 0 → singular Σ).
-// On failure, caller's fallback_to_uniform path kicks in.
-//
-// Numerical stability: λI added to the diagonal (the "ridge") protects
-// against near-singular Σ. cfg.ridge_lambda = 0.15 is the FoxML_Core-
-// validated default. Lower values (e.g., 0.01) give sharper weights but
-// can fail Cholesky on highly-correlated arms; higher values (≥ 1.0)
-// dilute weights toward uniform.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Cholesky_Solve]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fully branchless CONSTANT-ITER Cholesky (decomp + forward + back solve, all inner reductions exactly 8 wide via zero-invariants); -1 on singular sigma]
+// [DIAGRAM]_[formula]
+//   L × L^T = (Σ + λI);   L y = μ;   L^T w = y
+// [REFERENCE]_[DESIGN_SPEC]_[branchless-math-kernel-pattern]
+// [REFERENCE]_[INVARIANT]_[H11]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int Cholesky_Solve(double L_out[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS],
                           double y_out[MAX_RIDGE_MODELS],
@@ -260,27 +296,35 @@ inline int Cholesky_Solve(double L_out[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS],
 
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Standard textbook algorithm. Computes lower-triangular L such that
+// L × L^T = (Σ + λI). Then forward-solves L y = μ + back-solves L^T w = y.
+//
+// Returns 0 on success, -1 on failure (any L[i][i] ≤ 0 → singular Σ).
+// On failure, caller's fallback_to_uniform path kicks in.
+//
+// Numerical stability: λI added to the diagonal (the "ridge") protects
+// against near-singular Σ. cfg.ridge_lambda = 0.15 is the FoxML_Core-
+// validated default. Lower values (e.g., 0.01) give sharper weights but
+// can fail Cholesky on highly-correlated arms; higher values (≥ 1.0)
+// dilute weights toward uniform.
+//======================================================================
+// [END_FUNCTION]_[Cholesky_Solve]
+//======================================================================
 
-//======================================================================================================
-// [RIDGE BLENDER — main entry]
-//======================================================================================================
-// Compute Ridge weights from per-model IC + cost. Builds μ[i] =
-// max(IC[i] - cost_penalty × cost[i], min_ic_floor); calls Cholesky_Solve;
-// clips negatives + renormalizes to sum=1; falls back to uniform on
-// singular Σ.
-//
-// Caller must have already populated `out->corr_matrix[][]` via
-// RidgeBlender_BuildCorr (or equivalent — e.g., from a snapshot of last
-// K predictions across models).
-//
-// Returns 0 on success, -1 on Cholesky failure (uniform weights returned
-// in `out->w[]` regardless; fallback_to_uniform set to 1).
-//
-// Cfg parameters (all FPN_Binary<F> on cfg, converted to double here):
-//   - ridge_lambda     (default 0.15; safe for typical N=2..8)
-//   - cost_penalty     (default 0.5; fee-cost weighting in net IC)
-//   - min_ic_floor     (default 0.001; prevents zero-weight starvation)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RidgeBlender_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the main entry — net-IC mu build -> Cholesky solve -> clip negatives + renormalize to sum 1; uniform fallback on singular sigma]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int RidgeBlender_Compute(RidgeWeights<F>* out,
                                   const double ic[],
@@ -342,10 +386,40 @@ inline int RidgeBlender_Compute(RidgeWeights<F>* out,
 
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Caller must have already populated `out->corr_matrix[][]` via
+// RidgeBlender_BuildCorr (or equivalent — e.g., from a snapshot of last
+// K predictions across models).
+//
+// Returns 0 on success, -1 on Cholesky failure (uniform weights returned
+// in `out->w[]` regardless; fallback_to_uniform set to 1).
+//
+// Cfg parameters (all FPN_Binary<F> on cfg, converted to double here):
+//   - ridge_lambda     (default 0.15; safe for typical N=2..8)
+//   - cost_penalty     (default 0.5; fee-cost weighting in net IC)
+//   - min_ic_floor     (default 0.001; prevents zero-weight starvation)
+//======================================================================
+// [END_FUNCTION]_[RidgeBlender_Compute]
+//======================================================================
 
-//======================================================================================================
-// [FINALIZE CORRELATION MATRIX FROM SUMS — shared math kernel]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RidgeBlender_FinalizeCorrFromSums]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the SHARED corr-from-sums math kernel — full-recompute AND online-incremental paths both finalize through here (single formula, no Class-18 mirror)]
+// [DIAGRAM]_[formula]
+//   mean[i]    = sum_x[i] / K
+//   var[i]     = max(sum_xx[i][i] / K - mean[i]^2, 0)
+//   corr[i][j] = (sum_xx[i][j] / K - mean[i] × mean[j]) / sqrt(var[i] × var[j])   clamped [-1, 1]
+// [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.14.11.A — converts running sums (sum_x[N], sum_xx[N][N], window_count)
 // into N×N correlation matrix. Sum-of-squares form per
 // DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
@@ -441,11 +515,23 @@ inline void RidgeBlender_FinalizeCorrFromSums(double corr_out[MAX_RIDGE_MODELS][
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RidgeBlender_FinalizeCorrFromSums]
+//======================================================================
 
-
-//======================================================================================================
-// [BUILD CORRELATION MATRIX — from prediction history; single-pass sum-of-squares]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RidgeBlender_BuildCorr]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[full-recompute correlation — single-pass sum-of-squares over K×N flat history, AVX-512 with byte-identical scalar baseline, shared finalize]
+// [REFERENCE]_[DESIGN_SPEC]_[avx512-byte-determinism-pattern]
+// [REFERENCE]_[INVARIANT]_[H10]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.14.11.A REFACTORED — single-pass sum-of-squares accumulation +
 // shared FinalizeCorrFromSums. Replaces the prior 3-pass mean/var/corr
 // recomputation; unified math kernel with online incremental path.
@@ -532,11 +618,23 @@ inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_M
     RidgeBlender_FinalizeCorrFromSums<F>(corr_out, sum_x, sum_xx,
                                            (uint64_t)n_history, n_models);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RidgeBlender_BuildCorr]
+//======================================================================
 
-
-//======================================================================================================
-// [UPDATE ONLINE — sliding-window incremental sum-of-squares]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RidgeBlender_UpdateOnline]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sliding-window incremental sums — add-only while filling, fused drop-oldest+add when full (explicit 4-op form defeats FMA fusion for cross-build byte determinism)]
+// [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern]
+// [REFERENCE]_[INVARIANT]_[H10]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.14.11.A — per-record incremental update for the sliding-window K=64
 // correlation matrix. Two modes (selected by predictions_oldest_or_null):
 //
@@ -670,15 +768,25 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
         // window_count stays at K (saturated)
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RidgeBlender_UpdateOnline]
+//======================================================================
 
-
-//======================================================================================================
-// [BUILD HISTORY FROM RING — single-source ring iteration helper]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RidgeBlender_BuildHistoryFromRing]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE ring-walk-backwards-from-head helper — most-recent-first into a K×N flat buffer; replaced the buy/exit mirror loops (Class-18 close)]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.14.11.A — C1 helper extraction per Caramel decision 2026-05-11.
 // Single source of truth for ring-walk-backwards-from-head pattern;
-// replaces TWO mirror loops at StrategyParameters.hpp:985-994 (buy) and
-// :1184-1193 (exit). Class 18 mirror prevention per CLAUDE.md item 19.
+// replaces TWO mirror loops at StrategyParameters.hpp (buy + exit).
+// Class 18 mirror prevention per the structural-fix-preferred gradient.
 //
 // Templated on PredictionRecordT to avoid circular include with
 // NodeModelZoo.hpp. Caller provides concrete EnsembleModelZoo<F>::PredictionRecord
@@ -718,15 +826,25 @@ inline int RidgeBlender_BuildHistoryFromRing(const PredictionRecordT* ring,
     }
     return avail;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RidgeBlender_BuildHistoryFromRing]
+//======================================================================
 
-
-//======================================================================================================
-// [ONLINE CYCLE STEP — full per-cycle dispatch (full-recompute OR incremental)]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RidgeBlender_OnlineCycleStep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-cycle dispatch both Ridge call sites reduce to — cfg=0 full-recompute vs cfg=1 online-incremental; -1 = not enough history, caller falls back to bandit weights]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.14.11.A — C1 helper wrapper per Caramel decision 2026-05-11.
 // Full per-Ridge-cycle dispatch; both Ridge call sites (buy + exit) reduce
 // to a single helper call. Eliminates the parallel ring-walk + BuildCorr
-// mirror at StrategyParameters.hpp:996 and :1195.
+// mirror at StrategyParameters.hpp.
 //
 // Dispatches between:
 //   - use_online_incremental=false: full-recompute via BuildHistoryFromRing
@@ -798,10 +916,21 @@ inline int RidgeBlender_OnlineCycleStep(RidgeWeights<F>* rw,
         return 0;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RidgeBlender_OnlineCycleStep]
+//======================================================================
 
-//======================================================================================================
-// [INIT — zero-init for embedding in EnsembleModelZoo]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RidgeWeights_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero-init + identity correlation matrix — Cholesky-safe no-info starting state for embedding in EnsembleModelZoo]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void RidgeWeights_Init(RidgeWeights<F>* rw) {
     if (!rw) return;
@@ -812,5 +941,10 @@ inline void RidgeWeights_Init(RidgeWeights<F>* rw) {
         rw->corr_matrix[i][i] = 1.0;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RidgeWeights_Init]
+//======================================================================
 
 #endif  // RIDGE_BLENDER_HPP
