@@ -1,7 +1,23 @@
 // Copyright (c) 2026 Jennifer Lewis. All rights reserved.
 // Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 //======================================================================================================
-// [CFG GATE REGISTRY — canonical sparse sidecar for cfg-derived consumer gate_when expressions]
+// [FILE]_[MemHeaders/CfgGateRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the cfg-derived consumer framework home — sparse gate_when sidecars (H18 first canonical) + the 4-registry STAMP_BOUND_DERIVED_COHORT meta-walker + 4 consumer template fns + struct-gen]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_CFG_GATE_PER_NODE]   (+ FOREACH_CFG_GATE_GLOBAL sister rides)
+//   - [FUNCTION]_[lookup_populate]   (+ lookup_drift; namespace cfg_gate)
+//   - [MACRO]_[FOREACH_STAMP_BOUND_DERIVED_COHORT]
+//   - [FUNCTION]_[populate_inference_cfg_from_derived]
+//   - [FUNCTION]_[populate_stamp_cfg_from_derived]
+//   - [FUNCTION]_[drift_check_from_derived]
+//   - [FUNCTION]_[parse_stamp_cfg_to_derived]
+//   - [MACRO]_[STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN]   (+ exclusion sidecar + _STAMP_RESULT_* helpers + PARSE wrapper)
+//   - [MACRO]_[*_FROM_DERIVED wrappers]
+// [REFERENCE]_[DESIGN_SPEC]_[[cfg-derived-consumer-framework] [sidecar-override-pattern-for-registry-auto-flows] [metadata-bit-driven-derived-filter-framework]]
+// [REFERENCE]_[INVARIANT]_[[H18] [H15] [H19]]
 //======================================================================================================
 // v5.15.5.F.4d.1.B.1 — Step 1 of framework consolidation.
 //
@@ -29,15 +45,20 @@
 //   For drift consumers (DRIFT_CHECK_FROM_DERIVED):
 //     DEFAULT gate = stamp_has_inference_cfg (drift check fires when stamp's inference_cfg present)
 //
-// Per-cohort gates that DIFFER from default (will populate at .B.2 when cohort fields flag the bit):
-//   Bandit/Thompson cohort → BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)
-//   Ridge cohort → BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS)
-//   Composite confidence cohort → BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)
-//   Soft-risk degradation cohort → cfg.risk_degradation_curve != 0
+// Per-cohort gates that DIFFER from default (POPULATED at .B.2 — the shared COHORT_GATE_*
+// macros are the SSoT, defined at ML_Headers/MlCfgFlagRegistry.hpp; the Bandit/Thompson gate
+// is `(cfg.bandit_algorithm != 0)` matching the legacy emit_when semantic — the BITMAP-bit
+// form was tried first and REJECTED for wire-byte parity, see the in-registry note):
+//   Bandit/Thompson cohort → COHORT_GATE_BANDIT_THOMPSON  (cfg.bandit_algorithm != 0)
+//   BLENDED state-4        → COHORT_GATE_BANDIT_BLEND_STATE_4  (== 4)
+//   Ridge cohort           → COHORT_GATE_RIDGE_ANY  (either ridge ml_cfg_flags bit)
+//   Composite confidence   → COHORT_GATE_COMPOSITE_CONFIDENCE  (the composite ml_cfg_flags bit)
+//   Soft-risk degradation  → COHORT_GATE_SOFTRISK_ENABLED  (cfg.risk_degradation_curve != 0)
 //
 //======================================================================================================
-// AT .B.1: BOTH SIDECAR REGISTRIES ARE EMPTY (no cohort fields flag STAMP_BOUND_CFG_DERIVED yet;
-// .B.2 cohort migration populates source rows + corresponding sidecar entries together).
+// HISTORY: at .B.1 both sidecar registries shipped EMPTY (framework-first). .B.2 cohort
+// migration populated FOREACH_CFG_GATE_PER_NODE with 16 cohort-gated entries; _GLOBAL
+// remains deliberately empty (its rows use the default always-emit gate — see its note).
 //======================================================================================================
 
 #pragma once
@@ -52,28 +73,17 @@
 #include <cstring>                                      // strcmp (parser dispatch)
 #include <cstdlib>                                      // atoi (parser dispatch)
 
-//======================================================================================================
-// [FOREACH_CFG_GATE — sparse sidecar registries]
-//======================================================================================================
-//
-// Sparse: only rows with NON-DEFAULT gate get an entry. Rows that use the default gate
-// (most rows at .B.2 cohort migration) have NO entry here.
-//
-// 2-tuple shape: X(name, gate_when_expr)
-//   name        — must match a FOREACH_PER_NODE_CFG_FIELD or FOREACH_GLOBAL_CFG_FIELD row name
-//                 with STAMP_BOUND_CFG_DERIVED metadata bit set
-//   gate_when_expr — C++ expression returning bool; references cfg (typed ControllerConfig<F>);
-//                    evaluated at consumer macro expansion time (slow-path / stamp-emit cadence)
-//
-// CI verification (Check 9 at .B.3): every entry's `name` references a real flagged source row.
-// Adding an entry without flagging the source row would fail CI.
-
-// v5.15.5.F.4d.1.B.2 Step 5 — populated with cohort-gated entries. Inline gate expressions
-// match legacy FOREACH_STAMP_BOUND_CFG emit_when col semantic (Decision 9 v1.2 reframe:
-// flat cfg access for SOFTRISK + BLENDED — engine-wide global cfg snapshot at stamp emit).
-// .B.3 may extract shared COHORT_GATE_* macros to dedupe across registries (Path γ #3
-// structural close); .B.2 keeps inline for minimum viable scope (replacing 3 registries'
-// inline predicates is .B.3 work alongside legacy registry deletion).
+//======================================================================
+// [REGISTRY]_[FOREACH_CFG_GATE_PER_NODE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the sparse gate_when sidecars (H18 first canonical; FOREACH_CFG_GATE_GLOBAL sister rides) — 16 per-node cohort-gated entries; no entry = default gate applies]
+// [COLUMN]_[name]_[must match a FOREACH_PER_NODE_CFG_FIELD / FOREACH_GLOBAL_CFG_FIELD row with the STAMP_BOUND_CFG_DERIVED bit set]
+// [COLUMN]_[gate_when_expr]_[C++ bool expression over cfg (typed ControllerConfig<F>); evaluated at consumer expansion (slow-path / stamp-emit cadence)]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_CFG_GATE_PER_NODE(X) \
     /* Bandit/Thompson cohort — MATCHES legacy FOREACH_STAMP_BOUND_CFG emit_when semantic \
      * (cfg.bandit_algorithm != 0) at lines 162-170. Coding-time discovery: my initial \
@@ -105,21 +115,38 @@
      * (matching legacy emit_when = 1 for these rows). gap_acceptable_threshold migration \
      * deferred to .B.3 per coding-time discovery (FOREACH_GLOBAL_CFG_FIELD doesn't auto-gen \
      * struct fields; manual cfg storage cleanup is .B.3 scope). */
-
-//======================================================================================================
-// [Sidecar lookup helpers — used by consumer macros at Step 2]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Sparse: only rows with NON-DEFAULT gate get an entry. Rows that use the default gate
+// (most rows at .B.2 cohort migration) have NO entry here.
 //
-// Each lookup helper switch-dispatches on FIELD_IDX. Empty registries at .B.1 → switch only has
-// `default` branch → always returns default. At .B.2 rows populate → switch gets case entries
-// → entries override default for flagged rows.
+// 2-tuple shape: X(name, gate_when_expr)
 //
-// Per H20: switch on size_t with sparse case set is acceptable at slow-path / stamp-emit cadence
-// (compiler emits jump table for dense cases; binary search or if-else chain for sparse).
-// Mask-bit walker (CFG_FIELD_FOR_EACH_SET_BIT) was rejected for these consumers per the
-// compile-time-name-access requirement (consumer macros need cfg.<name> + inf.<name> access;
-// runtime idx alone doesn't suffice). See `.B.1` plan body Step 1 design note.
+// v5.15.5.F.4d.1.B.2 Step 5 — populated with cohort-gated entries. Inline gate expressions
+// match legacy FOREACH_STAMP_BOUND_CFG emit_when col semantic (Decision 9 v1.2 reframe:
+// flat cfg access for SOFTRISK + BLENDED — engine-wide global cfg snapshot at stamp emit).
+// .B.3 may extract shared COHORT_GATE_* macros to dedupe across registries (Path γ #3
+// structural close); .B.2 keeps inline for minimum viable scope (replacing 3 registries'
+// inline predicates is .B.3 work alongside legacy registry deletion).
+//
+// CI verification (Check 9 at .B.3): every entry's `name` references a real flagged source row.
+// Adding an entry without flagging the source row would fail CI.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_CFG_GATE_PER_NODE]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[lookup_populate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the sidecar lookup pair (lookup_drift rides; namespace cfg_gate) — FIELD_IDX switch dispatch; no entry -> default (populate: true / drift: stamp_has_inference_cfg)]
+//======================================================================
+// [CODE]
+//======================================================================
 namespace cfg_gate {
 
     //==================================================================================================
@@ -180,10 +207,30 @@ namespace cfg_gate {
     }
 
 }  // namespace cfg_gate
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Each lookup helper switch-dispatches on FIELD_IDX. Empty registries at .B.1 → switch only has
+// `default` branch → always returns default. At .B.2 rows populate → switch gets case entries
+// → entries override default for flagged rows.
+//
+// Per H20: switch on size_t with sparse case set is acceptable at slow-path / stamp-emit cadence
+// (compiler emits jump table for dense cases; binary search or if-else chain for sparse).
+// Mask-bit walker (CFG_FIELD_FOR_EACH_SET_BIT) was rejected for these consumers per the
+// compile-time-name-access requirement (consumer macros need cfg.<name> + inf.<name> access;
+// runtime idx alone doesn't suffice). See `.B.1` plan body Step 1 design note.
+//======================================================================
+// [END_FUNCTION]_[lookup_populate]
+//======================================================================
 
-//======================================================================================================
-// [FOREACH_STAMP_BOUND_DERIVED_COHORT — action-parameterized meta-walker (v5.15.5.F.4d.1.B.3 Step 1.6.5b)]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[FOREACH_STAMP_BOUND_DERIVED_COHORT]
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[action-parameterized meta-walker — expands BASE_X##_<SCOPE> over ALL 4 cfg registries unconditionally; registry-coverage drift impossible by construction (Class 21 close)]
+//----------------------------------------------------------------------
 //
 // Single source of truth for cohort coverage. Dispatches to all 4 cfg-domain registries that participate
 // in the STAMP_BOUND_CFG_DERIVED cohort. Consumer passes BASE_X token; meta-walker expands to 4
@@ -230,9 +277,9 @@ namespace cfg_gate {
     FOREACH_ML_CFG_FLAG(BASE_X##_ML_CFG_FLAG)                                                       \
     FOREACH_GATE_CFG_FLAG(BASE_X##_GATE_CFG_FLAG)
 
-//======================================================================================================
-// [Consumer macros — Step 2 of .B.1 framework consolidation]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[Consumer macros — Step 2 of .B.1 framework consolidation]
+//------------------------------------------------------------------
 //
 // 3 derived-filter consumer macros (each Stage 3 first reference at .B.1 ship):
 //   INFERENCE_CFG_POPULATE_FROM_DERIVED — populates StampInferenceCfgInputs from runtime cfg
@@ -255,9 +302,9 @@ namespace cfg_gate {
 // (cfg.name direct vs cfg.per_node[N].name indexed) follows H17 cfg struct auto-gen convention
 // — verified at .B.2 first cohort migration when actual rows flag the bit.
 
-//==================================================================================================
-// [Consumer template fns — Step 2 of .B.1 framework consolidation]
-//==================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[Consumer template fns — Step 2 of .B.1 framework consolidation]
+//------------------------------------------------------------------
 //
 // Per C++ if-constexpr discard rules: false branches must be SYNTACTICALLY VALID at non-template
 // scope (name resolution happens for discarded branches). To make .B.1's 0-row walker compile
@@ -277,9 +324,15 @@ namespace cfg_gate {
 
 namespace cfg_derived {
 
-    //==============================================================================================
-    // [populate_inference_cfg_from_derived — sister to legacy INFERENCE_CFG_AUTOPOPULATE]
-    //==============================================================================================
+//======================================================================
+// [FUNCTION]_[populate_inference_cfg_from_derived]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[populate StampInferenceCfgInputs from runtime cfg via the 4-registry meta-walker — gate-looked-up scalars + bitmap-bit cohort walkers; sister to legacy INFERENCE_CFG_AUTOPOPULATE]
+//======================================================================
+// [CODE]
+//======================================================================
     // v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
     // meta-walker (single source of truth for cohort coverage). NEW walkers for ml_cfg_flag +
     // gate_cfg_flag cohort registries added (closes Class 21 instance + absorbs Step 0.5d.d
@@ -329,10 +382,22 @@ namespace cfg_derived {
         #undef X_INFERENCE_CFG_POPULATE_ML_CFG_FLAG
         #undef X_INFERENCE_CFG_POPULATE_GATE_CFG_FLAG
     }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[populate_inference_cfg_from_derived]
+//======================================================================
 
-    //==============================================================================================
-    // [populate_stamp_cfg_from_derived — emit canonical body bytes for HMAC chain]
-    //==============================================================================================
+//======================================================================
+// [FUNCTION]_[populate_stamp_cfg_from_derived]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[emit canonical key=value body bytes for the HMAC chain via the meta-walker — gate-filtered; H9 wire preservation (X-macro bodies verbatim from pre-refactor)]
+// [REFERENCE]_[INVARIANT]_[H9]
+//======================================================================
+// [CODE]
+//======================================================================
     // v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
     // meta-walker. X-macro BODIES VERBATIM from pre-refactor (wire-format byte preservation —
     // emit order preserved by FOREACH walker semantics + Layer 5b invariants tolerate the
@@ -404,10 +469,22 @@ namespace cfg_derived {
 
         return written;
     }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[populate_stamp_cfg_from_derived]
+//======================================================================
 
-    //==============================================================================================
-    // [drift_check_from_derived — branchless trigger via mask-select per H20]
-    //==============================================================================================
+//======================================================================
+// [FUNCTION]_[drift_check_from_derived]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stamp-vs-runtime drift check via the meta-walker — branchless mask-select trigger (H20) + first-failure-wins reason attribution; caller passes pre-extracted stamp_has + failure_mask]
+// [REFERENCE]_[INVARIANT]_[H20]
+//======================================================================
+// [CODE]
+//======================================================================
     // Caller passes pre-extracted bools (stamp_has_inference_cfg + failure_mask) to avoid
     // cross-include of ML_Headers from MemHeaders/CfgGateRegistry.hpp.
     //
@@ -504,10 +581,21 @@ namespace cfg_derived {
         #undef X_DRIFT_CHECK_ML_CFG_FLAG
         #undef X_DRIFT_CHECK_GATE_CFG_FLAG
     }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[drift_check_from_derived]
+//======================================================================
 
-    //==============================================================================================
-    // [parse_stamp_cfg_to_derived — 4-walker parser dispatch for stamp parse-side]
-    //==============================================================================================
+//======================================================================
+// [FUNCTION]_[parse_stamp_cfg_to_derived]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stamp parse-side: match one key=value against flagged rows across the 4 registries -> parse into struct field + set has_<name>; false = caller falls through to legacy handlers]
+//======================================================================
+// [CODE]
+//======================================================================
     // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A option (e) framework consolidation;
     // codified at v1.12 plan body) — sister to populate_stamp_cfg_from_derived + drift_check_from_derived
     // + populate_inference_cfg_from_derived (4-of-4 cfg-derived consumer family).
@@ -577,12 +665,21 @@ namespace cfg_derived {
 
         return false;
     }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[parse_stamp_cfg_to_derived]
+//======================================================================
 
 }  // namespace cfg_derived
 
-//==============================================================================================
-// [STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN — unconditional struct-field auto-gen for 4 registries]
-//==============================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN]
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[UNCONDITIONAL struct-field auto-gen over the 4 registries (_STAMP_RESULT_* helpers + PARSE wrapper ride) — closes Class 14/18/21 for the cfg-derived surface]
+// [REFERENCE]_[CLASS]_[18]
+//----------------------------------------------------------------------
 // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A option (e) framework consolidation;
 // codified at v1.12 plan body) — sister to STAMP_CFG_AUTOPOPULATE + INFERENCE_CFG_POPULATE_FROM_DERIVED
 // macros. Invoked at struct scope to declare ALL stamp-bound derived fields from 4 cfg registries
@@ -616,10 +713,27 @@ namespace cfg_derived {
 // CI tool `check_struct_field_uniqueness.py` (NEW at .B.3) enforces: any name in BOTH master cfg AND
 // FOREACH_STAMP_BOUND_MODEL_CONST MUST appear in this exclusion sidecar (else CI fail at build).
 // Future collisions = add 1 sidecar entry + 2 #define/#undef lines per struct site. Bounded scope.
+//----------------------------------------------------------------------
+
+//======================================================================
+// [REGISTRY]_[FOREACH_STAMP_RESULT_FIELD_EXCLUSION]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the H18 sparse exclusion sidecar — 3 names colliding between master cfg + MODEL_CONST; struct sites redirect them to dead fields (see the prose above)]
+// [COLUMN]_[name]_[cfg field name declared in FOREACH_STAMP_BOUND_MODEL_CONST that collides with a master cfg row]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_STAMP_RESULT_FIELD_EXCLUSION(X) \
     X(xgb_min_child_weight) \
     X(xgb_seed)             \
     X(xgb_train_nthread)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_STAMP_RESULT_FIELD_EXCLUSION]
+//======================================================================
 
 // X-macro field helpers (private framework internals; underscore prefix). Names follow
 // `_STAMP_RESULT_<SCOPE>` naming convention required by FOREACH_STAMP_BOUND_DERIVED_COHORT
@@ -650,9 +764,12 @@ namespace cfg_derived {
 #define PARSE_STAMP_CFG_TO_DERIVED(r, key, val) \
     cfg_derived::parse_stamp_cfg_to_derived<64>((r), (key), (val))
 
-//==================================================================================================
-// [Consumer macros — thin wrappers around template fns]
-//==================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[*_FROM_DERIVED wrappers]
+// [TAG]_[[ENGINE] [CFG_FLOW]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[thin caller-facing wrappers over the 4 consumer template fns — preserve the familiar call-site shape; DRIFT wrapper extracts STAMP_HAS + failure_mask at the ML_Headers caller]
+//----------------------------------------------------------------------
 // Macros preserve familiar call-site shape; template fn provides correct C++ if-constexpr semantics.
 
 #define INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg) \
@@ -682,9 +799,9 @@ namespace cfg_derived {
         (reason_buf), \
         (reason_cap))
 
-//======================================================================================================
-// [Cross-references]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[Cross-references]
+//------------------------------------------------------------------
 //
 // DESIGN_SPECS:
 //   - cfg-derived-consumer-framework.md (this file is Stage 3 first reference at .B.1 ship close)
@@ -698,13 +815,14 @@ namespace cfg_derived {
 //   - /readiness Check 29 (verified "Canonical sister registries considered" section)
 //   - /plan-draft (scaffolds future plans from template that produced this ship's plan body)
 //
-// CLAUDE.md:
-//   - H15: every FOREACH_X registry enrolled in FOREACH_REGISTRY meta-registry (4 enrollments
-//     pending at Step 4: FOREACH_CFG_GATE_PER_NODE + _GLOBAL + 3 consumer macros)
+// CLAUDE.md invariants (+ the framework-driven-extensibility / structural-fix-
+// preferred disciplines — this file IS the framework infrastructure and closes
+// Class 14/18/21 for the cfg-derived surface):
+//   - H15: every FOREACH_X registry enrolled in FOREACH_REGISTRY meta-registry
+//     (LANDED — FOREACH_CFG_GATE_PER_NODE + _GLOBAL + FOREACH_STAMP_BOUND_DERIVED_COHORT
+//     all have MetaRegistry.hpp rows)
 //   - H18: custom-semantics via sidecar override pattern (this file's structural shape)
 //   - H19: meta-registry topology — sidecar Level 1 with PARENT = FOREACH_METADATA_BIT
-//   - item 31: framework-driven extensibility (this file IS the framework infrastructure)
-//   - item 19: structural fix preferred (this file closes Class 14/18/21 for cfg-derived surface)
 //
 // Cohort migration entries: deferred to .B.2 per per-sub-ship cycle. .B.2 plan body skeleton:
 // subplans/2026-05-17-v5.15.5.F.4d.1.B.2-cohort-migration.md

@@ -3,7 +3,20 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ORDER MANAGER STATE — CANONICAL FIELD REGISTRY (v5.15.5.C.3 — Phase 3b 8-tuple)]
+// [FILE]_[MemHeaders/OmsFieldRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the canonical OMS field SSoT — 33 8-tuple rows driving INIT/RESET/PERSIST views via RESET_KIND x STORAGE_KIND x PERSIST_KIND token-paste; the 10-row PERSIST view IS the snapshot OMS wire block (count-pinned)]
+// [CONTAINS]
+//   - [STRUCT]_[OmsInitCtx]   (+ OmsResetCtx + _oms_now_us ride)
+//   - [REGISTRY]_[FOREACH_OMS_FIELD]
+//   - [REGISTRY]_[FOREACH_OMS_PER_SLOT_FIELD]   (both registries' count sentinels + 3 asserts ride this block)
+//   - [MACRO]_[OMS_PROJECT_*]   (INIT / RESET / PERSIST / PER_SLOT dispatch views)
+//   - [FUNCTION]_[_oms_init_value_fields]   (+ _oms_reset_value_fields)
+//   - [MACRO]_[OMS_*_AUTOPOPULATE]
+// [REFERENCE]_[DESIGN_SPEC]_[[registry-tuple-as-single-source-of-truth] [heterogeneous-registry-pattern] [wire-format-byte-preservation-discipline]]
+// [REFERENCE]_[INVARIANT]_[[H9] [H14]]
 //======================================================================================================
 // Single canonical X-macro registry covering OMS-level scalar fields with
 // rich per-field attributes that drive THREE derived views via FOUR
@@ -75,8 +88,8 @@
 //   Post: 2-bit slot at bits 3-4 of `oms_state_flags` (4 bytes saved per OMS;
 //         registry-driven via MULTI_BIT dispatch). 2nd codebase application
 //         of multi-bit-state-encoding-pattern.md (after `last_exit_predicted_meta[16]`).
-//         Hits "2+ applications" threshold for promotion to CLAUDE.md item
-//         (per CLAUDE.local.md "codify design principles" rule 2026-05-13).
+//         The "2+ applications" promotion threshold WAS hit — the MBS
+//         discipline is codified as H14.
 //
 // FINDING B skipped 2026-05-13 (packed OmsInitCtx boot_flags): stack-only
 // helper struct with brief lifetime (~1µs at boot); byte savings symbolic;
@@ -92,12 +105,9 @@
 //   DESIGN_SPECS/bitmap-flag-api.md (BIT-kind references mask constants)
 //   DESIGN_SPECS/multi-bit-state-encoding-pattern.md (MULTI_BIT slot dispatch)
 //   DESIGN_SPECS/wire-format-byte-preservation-discipline.md (PERSIST row ordering)
-//   CLAUDE.md item 13 (X-macro registry)
-//   CLAUDE.md item 15 (Parity-tested-by-construction — wire format)
-//   CLAUDE.md item 19 (structural fix preferred for recurring class)
-//   CLAUDE.md item 20 (BITMAP_* hybrid: single-bit + multi-bit cohabitation)
-//   CLAUDE.md item 21 (AUTOPOPULATE companion macro)
-//   CLAUDE.md item 23 (templated helpers for dispatch — per .B.7 precedent)
+//   (+ the X-macro-registry / parity-tested-by-construction / structural-fix-
+//    preferred / BITMAP_* hybrid / AUTOPOPULATE-companion / templated-helpers
+//    disciplines — per the .B.7 precedent)
 //   v5.15.5.B.7 FOREACH_NODE_CTX_FIELD (sister registry; unified init/reset tuple precedent)
 //   v5.15.5.C.2.1 FOREACH_OMS_META_SLOT (per-slot multi-bit; struct-level analog: this header's EVENT_LOG_MODE)
 //======================================================================================================
@@ -113,7 +123,7 @@
 #include "OmsStateFlagRegistry.hpp"       // MASK_OMS_STATE_* + SHIFT_OMS_STATE_* constants
 
 // Forward declarations — OmsFieldRegistry.hpp is included BEFORE
-// OrderManagerState<F> is defined in OrderManager.hpp (line 71 < line 186).
+// OrderManagerState<F> is defined in OrderManager.hpp.
 // Templated helpers below take `OrderManagerState<F>*` — pointer-to-incomplete
 // is OK at template declaration; full type required at instantiation (which
 // happens at OrderManager_Init's body where the struct is complete).
@@ -126,20 +136,28 @@ namespace tt {
 
 namespace tt {
 
-//======================================================================================================
-// [HELPER: NOW_US — wall-clock microseconds since epoch]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[OmsInitCtx]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[boot-init + paper-reset context structs (OmsResetCtx + the _oms_now_us helper ride) — plain unpacked fields (Finding B); field order MUST match the AUTOPOPULATE aggregate initializer]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[HELPER: NOW_US — wall-clock microseconds since epoch]
+//------------------------------------------------------------------
 // Used as INIT_VALUE / RESET_VALUE for `paper_session_start_us`. Evaluated
 // at the AUTOPOPULATE expansion site (each evaluation captures fresh time).
-//======================================================================================================
 inline uint64_t _oms_now_us() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-//======================================================================================================
-// [OmsInitCtx<F> + OmsResetCtx<F> — context structs for templated helpers]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[OmsInitCtx<F> + OmsResetCtx<F> — context structs for templated helpers]
+//------------------------------------------------------------------
 // OmsInitCtx<F>: boot-time init args. Constructed by OMS_INIT_AUTOPOPULATE
 // macro at the call site (currently OrderManager_Init only); passed by
 // const-ref to _oms_init_value_fields<F>. Stack-allocated, lives ~1µs at boot.
@@ -172,48 +190,31 @@ template <unsigned F>
 struct OmsResetCtx {
     Money starting_balance;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; template-ctx pair with reference member — quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[OmsInitCtx]
+//======================================================================
 
-//======================================================================================================
-// [CANONICAL REGISTRY — FOREACH_OMS_FIELD]
-//======================================================================================================
-// Row ordering convention:
-//   1. SUBSTRATE row (oms_state_flags) FIRST — BIT/MULTI_BIT rows below
-//      depend on this being initialized to 0 before they OR/AND their bits in.
-//   2. BIT + MULTI_BIT cfg-derived rows next (SKIP_PERSIST) — set/clear bits
-//      in oms_state_flags.
-//   3. HOT scalars (order_bitmap, next_order_id) — SKIP_PERSIST.
-//   4. WIRE-FORMAT-ORDERED PERSIST rows next (wire positions 1..10 of
-//      snapshot v8 stream). PERSIST view's FOREACH walk emits in this order
-//      to preserve byte-format compatibility (CLAUDE.md item 15).
-//   5. SKIP_PERSIST cfg-derived rows (fee rates, slippage, ks state) — any order.
-//   6. SKIP_PERSIST observability rows (exit-fill masks, atomics) — any order.
-//   7. SKIP_PERSIST COLD pointers + last_seen_trade_id — any order.
-//
-// Adding a new OMS-level field: ONE row in this registry. Pick:
-//   - RESET_KIND: DO_RESET if session-scoped accumulator; SKIP_RESET if boot-only/cfg-derived.
-//   - STORAGE_KIND: DIRECT for normal fields; BIT for single-bit flags in oms_state_flags;
-//     MULTI_BIT for K-state slots in oms_state_flags; ATOMIC for std::atomic<T>.
-//   - PERSIST_KIND: PERSIST if in snapshot wire format; SKIP_PERSIST otherwise.
-//   - STORAGE_MASK: bit/slot mask constant for BIT/MULTI_BIT; 0 for DIRECT/ATOMIC.
-//
-// SKIP_RESET reasoning per field group (audit trail anchored to incident class):
-//   - next_order_id: drainer has in-flight orders; reset risks ID collision with un-drained submits.
-//   - adapter:       boot-set struct copy; reset would zero function pointers in live mid-session.
-//   - oms_state_flags substrate: reset would wipe LIVE_TRADING + PARTIAL_EXIT_ENABLED bits which
-//                                are cfg-derived (not session-scoped); kill_switch_tripped bit reset
-//                                handled by its own DO_RESET BIT row.
-//   - fee_rate*, slippage_pct:    cfg-derived; same cfg = same rates post-reset.
-//   - last_seen_trade_id:         high-watermark must monotonically increase across paper-reset
-//                                  (Class 5 recurring-bug — replay safety across reset boundary).
-//   - calibration_log_file, trade_log: FILE* / owner pointers; rotation handled at archive capture (Phase 6).
-//   - flatten_pending, recovery_until_us: cross-thread CAS atomics; resetting via value-init would race
-//                                          with CheckWsStaleness; steady-state state, not session-scoped.
-//   - ks_min_balance, ks_max_drawdown_pct, ks_trips_total: cfg-derived limits + trip counter (across-session).
-//   - last_closed_mask, last_opened_mask, last_exit_predicted_bitmap: per-cycle state cleared inside the tick;
-//     no session-reset needed.
-//
-// DO_RESET fields = session-scoped accumulator state (Phase 2.1 / Phase 3 / v5.5.6 Class-5 recurring-bug class).
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_OMS_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[33 8-tuple rows in 9 semantic groups (substrate -> BIT/MBS cfg-derived -> HOT -> the 10 wire-ordered PERSIST rows -> cfg-derived -> masks -> adapter -> atomics -> COLD)]
+// [COLUMN]_[NAME]_[field name on OrderManagerState (or bit/slot name for BIT/MULTI_BIT)]
+// [COLUMN]_[type]_[C++ type; cast applied at write site]
+// [COLUMN]_[INIT]_[boot value; ctx.<arg> forms reference OmsInitCtx]
+// [COLUMN]_[RESET]_[paper-reset value; only evaluated for DO_RESET rows]
+// [COLUMN]_[RESET_KIND]_[DO_RESET | SKIP_RESET]
+// [COLUMN]_[STORAGE_KIND]_[DIRECT | BIT | MULTI_BIT | ATOMIC]
+// [COLUMN]_[PERSIST_KIND]_[PERSIST | SKIP_PERSIST]
+// [COLUMN]_[STORAGE_MASK]_[MASK_OMS_STATE_* for BIT/MULTI_BIT; 0 otherwise]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_OMS_FIELD(X)                                                                                                                            \
     /* ============================================================================================ */                                                  \
     /* [1] SUBSTRATE — oms_state_flags MUST be initialized to 0 before BIT/MULTI_BIT rows below       */                                                  \
@@ -298,26 +299,65 @@ struct OmsResetCtx {
     X(calibration_log_file,   FILE*,              nullptr,                      nullptr,                      SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     X(trade_log,              ShardedTradeLog*,   nullptr,                      nullptr,                      SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     X(last_seen_trade_id,     uint64_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Row ordering convention:
+//   1. SUBSTRATE row (oms_state_flags) FIRST — BIT/MULTI_BIT rows below
+//      depend on this being initialized to 0 before they OR/AND their bits in.
+//   2. BIT + MULTI_BIT cfg-derived rows next (SKIP_PERSIST) — set/clear bits
+//      in oms_state_flags.
+//   3. HOT scalars (order_bitmap, next_order_id) — SKIP_PERSIST.
+//   4. WIRE-FORMAT-ORDERED PERSIST rows next (wire positions 1..10 of
+//      snapshot v8 stream). PERSIST view's FOREACH walk emits in this order
+//      to preserve byte-format compatibility (H9 wire preservation).
+//   5. SKIP_PERSIST cfg-derived rows (fee rates, slippage, ks state) — any order.
+//   6. SKIP_PERSIST observability rows (exit-fill masks, atomics) — any order.
+//   7. SKIP_PERSIST COLD pointers + last_seen_trade_id — any order.
+//
+// Adding a new OMS-level field: ONE row in this registry. Pick:
+//   - RESET_KIND: DO_RESET if session-scoped accumulator; SKIP_RESET if boot-only/cfg-derived.
+//   - STORAGE_KIND: DIRECT for normal fields; BIT for single-bit flags in oms_state_flags;
+//     MULTI_BIT for K-state slots in oms_state_flags; ATOMIC for std::atomic<T>.
+//   - PERSIST_KIND: PERSIST if in snapshot wire format; SKIP_PERSIST otherwise.
+//   - STORAGE_MASK: bit/slot mask constant for BIT/MULTI_BIT; 0 for DIRECT/ATOMIC.
+//
+// SKIP_RESET reasoning per field group (audit trail anchored to incident class):
+//   - next_order_id: drainer has in-flight orders; reset risks ID collision with un-drained submits.
+//   - adapter:       boot-set struct copy; reset would zero function pointers in live mid-session.
+//   - oms_state_flags substrate: reset would wipe LIVE_TRADING + PARTIAL_EXIT_ENABLED bits which
+//                                are cfg-derived (not session-scoped); kill_switch_tripped bit reset
+//                                handled by its own DO_RESET BIT row.
+//   - fee_rate*, slippage_pct:    cfg-derived; same cfg = same rates post-reset.
+//   - last_seen_trade_id:         high-watermark must monotonically increase across paper-reset
+//                                  (Class 5 recurring-bug — replay safety across reset boundary).
+//   - calibration_log_file, trade_log: FILE* / owner pointers; rotation handled at archive capture (Phase 6).
+//   - flatten_pending, recovery_until_us: cross-thread CAS atomics; resetting via value-init would race
+//                                          with CheckWsStaleness; steady-state state, not session-scoped.
+//   - ks_min_balance, ks_max_drawdown_pct, ks_trips_total: cfg-derived limits + trip counter (across-session).
+//   - last_closed_mask, last_opened_mask, last_exit_predicted_bitmap: per-cycle state cleared inside the tick;
+//     no session-reset needed.
+//
+// DO_RESET fields = session-scoped accumulator state (Phase 2.1 / Phase 3 / v5.5.6 Class-5 recurring-bug class).
+//======================================================================
+// [END_REGISTRY]_[FOREACH_OMS_FIELD]
+//======================================================================
 
-//======================================================================================================
-// [PER-SLOT REGISTRY — FillRecord + adjacent per-slot arrays]
-//======================================================================================================
-// Separate from FOREACH_OMS_FIELD because per-slot fields use a looped
-// access pattern over MAX_PORTFOLIO_POSITIONS. Walked inside a
-// `for (int _i = 0; _i < MAX_PORTFOLIO_POSITIONS; ++_i)` loop in
-// AUTOPOPULATE Layer 2.
-//
-// Tuple: X(NAME_OR_ACCESSOR, TYPE, INIT, RESET)
-//   NAME_OR_ACCESSOR — either a top-level array name (last_realized_return[_i])
-//                       or a FillRecord field accessor (last_fill[_i].field).
-//   TYPE             — C++ type for the cast at write site.
-//   INIT             — per-slot boot init value.
-//   RESET            — per-slot value at DrainPostFill post-attribution clear.
-//
-// `last_exit_predicted_meta[i]` is cleared via OMS_META_CLEAR helper
-// (defined in OmsExitPredictorMetaRegistry.hpp) — handled separately in
-// the per-slot AUTOPOPULATE expansion below.
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_OMS_PER_SLOT_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[5 per-slot scalar rows walked inside the MAX_PORTFOLIO_POSITIONS loop (both registries' count sentinels + 3 asserts ride this block, incl. the ==10 PERSIST wire pin)]
+// [COLUMN]_[NAME_OR_ACCESSOR]_[top-level array name (last_realized_return[_i]) or field accessor]
+// [COLUMN]_[type]_[C++ type for the cast at write site]
+// [COLUMN]_[INIT]_[per-slot boot init value]
+// [COLUMN]_[RESET]_[per-slot value at DrainPostFill post-attribution clear]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_OMS_PER_SLOT_FIELD(X)                                                          \
     X(last_realized_return[_i],         double,    0.0,            0.0)                        \
     /* v5.15.5.C.4 Phase G — exit-side fields REMOVED (derived at DrainPostFill).             \
@@ -341,9 +381,9 @@ struct OmsResetCtx {
      * array carrier variant).                                                                */ \
     X(bandit_reward_bps[_i],            double,    0.0,            0.0)
 
-//======================================================================================================
-// [COMPILE-TIME COUNT SENTINELS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[COMPILE-TIME COUNT SENTINELS — both registries]
+//------------------------------------------------------------------
 #define _OMS_FIELD_COUNT_ONE(name, type, init, reset, rkind, skind, pkind, smask) +1
 constexpr int FOREACH_OMS_FIELD_COUNT =
     0 FOREACH_OMS_FIELD(_OMS_FIELD_COUNT_ONE);
@@ -354,6 +394,7 @@ constexpr int FOREACH_OMS_PER_SLOT_FIELD_COUNT =
     0 FOREACH_OMS_PER_SLOT_FIELD(_OMS_PER_SLOT_COUNT_ONE);
 #undef _OMS_PER_SLOT_COUNT_ONE
 
+// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_OMS_FIELD_COUNT >= 30]
 static_assert(FOREACH_OMS_FIELD_COUNT >= 30,
               "FOREACH_OMS_FIELD must keep at least the v5.15.5.C.3 set "
               "(30+ scalar entries: substrate + 3 BIT/MULTI_BIT + HOT + 10 PERSIST wire + "
@@ -377,6 +418,7 @@ constexpr int FOREACH_OMS_FIELD_PERSIST_COUNT =
 #undef _OMS_FIELD_PERSIST_COUNT_ONE
 #undef _OMS_PERSIST_COUNT_PERSIST
 #undef _OMS_PERSIST_COUNT_SKIP_PERSIST
+// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_OMS_FIELD_PERSIST_COUNT == 10 — the snapshot OMS wire pin]
 static_assert(FOREACH_OMS_FIELD_PERSIST_COUNT == 10,
               "Snapshot v8 wire format expects EXACTLY 10 PERSIST-kind fields. "
               "Adding/removing a PERSIST row in FOREACH_OMS_FIELD requires "
@@ -387,6 +429,7 @@ static_assert(FOREACH_OMS_FIELD_PERSIST_COUNT == 10,
 //   + last_exit_fee[16] (closes Class 30 latent drift from .F.4c.3 r-4 — field existed but
 //     wasn't enrolled in this registry; reset path was hand-maintained)
 //   + bandit_reward_bps[16] (NEW; per-slot bandit reward sibling for DrainPostFill consumer)
+// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5]
 static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
               "FOREACH_OMS_PER_SLOT_FIELD must keep the 5 per-slot scalar entries "
               "(last_realized_return + last_exit_predicted_p + last_exit_fill_price + "
@@ -394,17 +437,39 @@ static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
               "Class 30 latent drift; bandit_reward_bps NEW at .F.4d for bandit reward attribution. "
               "FillRecord struct DELETED in C.4 Phase K; SKIP_PERSIST Position fields "
               "reverted to OMS siblings in C.5 per slot-state-foreach decision tree.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Separate from FOREACH_OMS_FIELD because per-slot fields use a looped
+// access pattern over MAX_PORTFOLIO_POSITIONS. Walked inside a
+// `for (int _i = 0; _i < MAX_PORTFOLIO_POSITIONS; ++_i)` loop in
+// AUTOPOPULATE Layer 2.
+//
+// `last_exit_predicted_meta[i]` is cleared via OMS_META_CLEAR helper
+// (defined in OmsExitPredictorMetaRegistry.hpp) — handled separately in
+// the per-slot AUTOPOPULATE expansion below.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_OMS_PER_SLOT_FIELD]
+//======================================================================
 
 }  // namespace tt
 
-//======================================================================================================
-// [DISPATCH MACROS — INIT view (STORAGE_KIND token-paste)]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[OMS_PROJECT_*]
+// [TAG]_[[ENGINE] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the token-paste dispatch views — INIT (STORAGE_KIND), RESET (RESET_KIND x STORAGE_KIND), PERSIST (4-phase save/declare/read/commit; unimplemented combos static_assert(false)), PER_SLOT]
+//----------------------------------------------------------------------
+
+//------------------------------------------------------------------
+// [SECTION]_[DISPATCH MACROS — INIT view (STORAGE_KIND token-paste)]
+//------------------------------------------------------------------
 // INIT walk runs at boot from _oms_init_value_fields helper. Every row gets
 // initialized regardless of RESET_KIND; dispatch on STORAGE_KIND determines
 // HOW the init value is written (plain assign / bit set/clear / multi-bit
 // slot write / atomic store).
-//======================================================================================================
 
 #define OMS_PROJECT_INIT(name, type, init, reset, rkind, skind, pkind, smask) \
     OMS_PROJECT_INIT_##skind(name, type, init, smask)
@@ -433,13 +498,12 @@ static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
 #define OMS_PROJECT_INIT_ATOMIC(name, type, init, smask) \
     _oms->name.store((type)(init), std::memory_order_relaxed);
 
-//======================================================================================================
-// [DISPATCH MACROS — RESET view (RESET_KIND × STORAGE_KIND token-paste)]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[DISPATCH MACROS — RESET view (RESET_KIND × STORAGE_KIND token-paste)]
+//------------------------------------------------------------------
 // RESET walk runs at paper-reset from _oms_reset_value_fields helper.
 // Dispatch on RESET_KIND first (SKIP_RESET = no emission); for DO_RESET,
 // further dispatch on STORAGE_KIND to determine HOW the reset value is written.
-//======================================================================================================
 
 #define OMS_PROJECT_RESET(name, type, init, reset, rkind, skind, pkind, smask) \
     OMS_PROJECT_RESET_##rkind##_##skind(name, type, reset, smask)
@@ -471,9 +535,9 @@ static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
 #define OMS_PROJECT_RESET_DO_RESET_ATOMIC(name, type, reset, smask) \
     _oms->name.store((type)(reset), std::memory_order_relaxed);
 
-//======================================================================================================
-// [DISPATCH MACROS — PERSIST view (PERSIST_KIND × STORAGE_KIND token-paste)]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[DISPATCH MACROS — PERSIST view (PERSIST_KIND × STORAGE_KIND token-paste)]
+//------------------------------------------------------------------
 // Four phases for the snapshot save/load lifecycle:
 //   OMS_PROJECT_PERSIST_SAVE     — at save: emit fwrite of the wire value
 //   OMS_PROJECT_PERSIST_DECLARE  — at load: declare tmp_<name> local for each persist row
@@ -503,7 +567,6 @@ static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
 //   - `f`     — FILE* opened wb / rb
 //   - `fail:` label (save site only — goto fail on fwrite failure)
 //   - For load: caller's enclosing function returns 0 on fread failure
-//======================================================================================================
 
 // ---- SAVE ----
 #define OMS_PROJECT_PERSIST_SAVE(name, type, init, reset, rkind, skind, pkind, smask) \
@@ -597,26 +660,25 @@ static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
                   "PERSIST + ATOMIC commit not yet implemented. "                           \
                   "First user: state->oms->name.store(tmp_##name, <documented order>).");
 
-//======================================================================================================
-// [DISPATCH MACROS — PER_SLOT views]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[DISPATCH MACROS — PER_SLOT views]
+//------------------------------------------------------------------
 // Walked inside a for(_i=0..MAX_PORTFOLIO_POSITIONS) loop. Accessor includes
 // [_i] so expansion produces `_oms->last_fill[_i].field = ...` etc.
-//======================================================================================================
 #define OMS_PROJECT_PER_SLOT_INIT(accessor, type, init, reset) \
     _oms->accessor = (type)(init);
 #define OMS_PROJECT_PER_SLOT_RESET(accessor, type, init, reset) \
     _oms->accessor = (type)(reset);
 
-//======================================================================================================
-// [TEMPLATED HELPERS — registry walk encapsulation per CLAUDE.md item 23]
-//======================================================================================================
-// Per CLAUDE.md item 23 + v5.15.5.B.7 precedent (_node_ctx_init_value_fields).
-// Templated functions encapsulate the FOREACH walks; each is instantiated
-// once per F (only F=64 today). AUTOPOPULATE macros delegate Layer 1 walk
-// to these helpers; sub-struct inits (Portfolio_Init, per-slot loops, SPSC
-// rings, event log) stay inline in the macro body (NOT walking the registry).
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[_oms_init_value_fields]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the registry-walk helper pair (_oms_reset_value_fields rides) — one instantiation per F; AUTOPOPULATE delegates the Layer-1 walk here (templated-helpers discipline; .B.7 precedent)]
+//======================================================================
+// [CODE]
+//======================================================================
 namespace tt {
 
 template <unsigned F>
@@ -636,10 +698,25 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
 }
 
 }  // namespace tt
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Templated functions encapsulate the FOREACH walks; each is instantiated
+// once per F (only F=64 today). AUTOPOPULATE macros delegate Layer 1 walk
+// to these helpers; sub-struct inits (Portfolio_Init, per-slot loops, SPSC
+// rings, event log) stay inline in the macro body (NOT walking the registry).
+//======================================================================
+// [END_FUNCTION]_[_oms_init_value_fields]
+//======================================================================
 
-//======================================================================================================
-// [AUTOPOPULATE COMPANION MACROS — multi-target dispatch]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[OMS_*_AUTOPOPULATE]
+// [TAG]_[[ENGINE] [OMS_DRAINER] [BOOT_TIME] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the one-line OMS call sites — INIT: 5 layers (registry walk / sub-structs+per-slot / SPSC rings / event-log load+replay / async writer LAST); RESET: RST walk + Portfolio_Init]
+//----------------------------------------------------------------------
 // OMS_INIT_AUTOPOPULATE(_oms, _adapter, _live_trading, _partial_exit_enabled,
 //                        _starting_balance, _fee_rate, _event_log_mode, _event_log_path)
 //   Boot-time full init of an OrderManagerState. Five layers:
@@ -674,7 +751,6 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
 // into Layer 1 via STORAGE_KIND dispatch. Net: 8 → 5 layers, cleaner
 // AUTOPOPULATE body, no more "where does this field live?" decision per
 // future addition.
-//======================================================================================================
 
 // AUTOPOPULATE macro parameter naming convention:
 //   Parameter `_oms_target` distinguishes the caller's OMS pointer from the
