@@ -3,20 +3,26 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FEATURE REGISTRY — v5.8.1b — X-macro driven]
+// [FILE]_[ML_Headers/FeatureRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE] [DETERMINISM]]
+// [SEAM]_[train-serve feature-set identity — FEATURE_REGISTRY_HASH in every stamp; mismatch = load-time rejection]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ML feature SSoT — one FOREACH_FEATURE row per feature auto-flows enum + names/versions + enabled bitmap + staleness + registry hash + the Features_PackAll packers]
+// [CONTAINS]
+//   - [STRUCT]_[FeatureComputeCtx]
+//   - [REGISTRY]_[FOREACH_FEATURE]   (the 40 ML_Compute_* leaves + registry hash + both Features_PackAll overloads share the block)
 //======================================================================================================
 // Single source of truth for ML features. Adding a new feature:
 //   1. Implement `ML_Compute_<Name>(ctx)` returning FPN_Binary<F>
 //   2. Append one row to FOREACH_FEATURE(X)
 //   3. Recompile — FEATURE_REGISTRY_HASH flips, old stamps reject at load
 //
-// Status (v5.8.1b): all 34 features registered (FEAT_SHORT_SLOPE through
-// FEAT_SPREAD_ZSCORE). All 5 production callers (MLStrategy,
-// StrategyParameters dispatcher, BacktestSharded, PortfolioController
-// regime + barrier paths) use Features_PackAll. Legacy ModelFeatures_Pack
-// in ModelInference.hpp is a deprecated frozen reference — kept only so
-// the EXTENSIBILITY equivalence test can validate bytewise parity.
-// Scheduled for full removal in v5.9.
+// All 5 production callers (MLStrategy, StrategyParameters dispatcher,
+// BacktestSharded, PortfolioController regime + barrier paths) use
+// Features_PackAll. Legacy ModelFeatures_Pack in ModelInference.hpp is a
+// deprecated frozen reference — kept only so the EXTENSIBILITY equivalence
+// test can validate bytewise parity.
 //
 // Auto-generated from FOREACH_FEATURE(X):
 //   - enum FeatureId with stable IDs
@@ -42,9 +48,15 @@
 #include "RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // RegimeSignals<F>
 
-//======================================================================================================
-// [FEATURE COMPUTE CONTEXT]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[FeatureComputeCtx]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the input bundle every registered compute fn reads — precomputed RegimeSignals + short rolling + hysteresed regime + the staleness-gate scaffold]
+//======================================================================
+// [CODE]
+//======================================================================
 // The bundle of inputs the registered feature compute functions read.
 // Each compute fn reads what it needs and ignores the rest.
 //
@@ -63,7 +75,6 @@
 // applies — declared-but-unused fields confuse readers + audit
 // tools (the v5.8 audit's false-CRITICAL came from misreading
 // these fields as required).
-//======================================================================================================
 template <unsigned F>
 struct FeatureComputeCtx {
     // Pre-computed regime signal bundle. Feature indices 0-10, 15-33
@@ -104,13 +115,42 @@ struct FeatureComputeCtx {
     const uint64_t*                       feature_last_update_us;        // [NUM_REGISTERED_FEATURES]; nullptr = no check
     uint32_t*                             stale_feature_events_total;    // operator-readable counter; nullptr-safe
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[48B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[FeatureComputeCtx]
+//======================================================================
 
-//======================================================================================================
-// [FEATURE COMPUTE FUNCTIONS — v5.8.1a first 10 features]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_FEATURE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[40 feature rows — one row auto-flows FeatureId enum + NAMES/VERSIONS arrays + enabled bitmap + staleness table + FEATURE_REGISTRY_HASH + the Features_PackAll walkers]
+// [COLUMN]_[id]_[UPPERCASE token -> FEATURE_<id> enum; IDs contiguous from 0, order LOCKED to historical indices (trained models address by position)]
+// [COLUMN]_[name]_[string folded into FEATURE_REGISTRY_HASH + FEATURE_NAMES display table]
+// [COLUMN]_[version]_[bump on formula change — flips the hash, forces retrain; never bump for renames/comments]
+// [COLUMN]_[enabled]_[FEATURE_ENABLED | FEATURE_DISABLED compile-time gate — skipped by PackAll AND excluded from the hash]
+// [COLUMN]_[fn]_[ML_Compute_<Name> leaf matching the canonical ctx signature]
+// [COLUMN]_[note]_[human description]
+// [COLUMN]_[max_staleness_minutes]_[0 = no check; >0 = zero-substitute when older (v5.14.9.E scaffold; NOT hash-folded)]
+// [REFERENCE]_[INVARIANT]_[[H15] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FEATURE COMPUTE FUNCTIONS — v5.8.1a first 10 features]
+//----------------------------------------------------------------------
 // All read from ctx->signals (the pre-computed RegimeSignals bundle).
 // FPN_Zero return on null ctx or null signals — safe for cold-start.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 template <unsigned F>
 inline FPN_Binary<F> ML_Compute_ShortSlope(const FeatureComputeCtx<F>* ctx) {
@@ -162,9 +202,9 @@ inline FPN_Binary<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? ctx->signals->volume_delta : FPN_Zero<F>();
 }
 
-//======================================================================================================
-// [FEATURE COMPUTE FUNCTIONS — v5.8.1b features 10-33]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FEATURE COMPUTE FUNCTIONS — v5.8.1b features 10-33]
+//----------------------------------------------------------------------
 // Indices 10, 15-33 read from ctx->signals (precomputed RegimeSignals bundle).
 // Indices 11-14 are the only ones reading directly from ctx->short_rolling
 // (vwap_deviation, price_stddev, price_avg, volume_avg).
@@ -174,7 +214,7 @@ inline FPN_Binary<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
 // float. With F=64 fractional bits the round-trip is lossless to within
 // 1/2^64, far below float precision, so Features_PackAll produces the same
 // float bits as the legacy direct (float)double cast in ModelFeatures_Pack.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 template <unsigned F>
 inline FPN_Binary<F> ML_Compute_EmaSmaSpread(const FeatureComputeCtx<F>* ctx) {
@@ -298,9 +338,9 @@ inline FPN_Binary<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
     return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->spread_zscore) : FPN_Zero<F>();
 }
 
-//======================================================================================================
-// [v5.14.5.B — REGIME-CONDITIONAL FEATURES]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.14.5.B — REGIME-CONDITIONAL FEATURES]
+//----------------------------------------------------------------------
 // 3 features that expose regime context to ML models. Differs from
 // existing SHORT_SLOPE / VOL_RATIO in normalization characteristics
 // (saturating vs unbounded; sign-carrying z-score vs ratio).
@@ -318,7 +358,7 @@ inline FPN_Binary<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
 // slow-path callers from EventLoopCoreState.regime_state.current_regime;
 // universalized in v5.14.5.B.0). Genuinely new info; not derivable
 // from existing RegimeSignals fields.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 // regime_trend_strength: saturating clamp of short_slope to [-1, 1].
 // Bounded; sign-preserving. Differs from SHORT_SLOPE (unbounded slope/avg
@@ -367,9 +407,9 @@ inline FPN_Binary<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ct
     return FPN_FromInt<F>(ctx->current_regime);
 }
 
-//======================================================================================================
-// [v5.14.5.C — FRACTIONAL DIFFERENTIATION FEATURES]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.14.5.C — FRACTIONAL DIFFERENTIATION FEATURES]
+//----------------------------------------------------------------------
 // Marcos Lopez de Prado fractional differentiation. Removes the long-
 // memory component of price series while preserving stationarity in
 // the residual. Three integration orders d ∈ {0.4, 0.5, 0.6} bracket
@@ -393,7 +433,7 @@ inline FPN_Binary<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ct
 // FUTURE OPPORTUNITY (v5.16+): same pattern works for volume_buf[]; add
 // ML_Compute_FracDiffVolume_d05 etc. as additional features if model
 // finds price-frac-diff useful and we want volume-frac-diff isolation.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 constexpr int FRAC_DIFF_K = 50;
 
@@ -447,11 +487,11 @@ inline FPN_Binary<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ct
     return FracDiffPriceCompute<F>(ctx, kFracDiff_d06_Coeffs);
 }
 
-//======================================================================================================
-// [FEATURE REGISTRY — X-macro]
-//======================================================================================================
-// Row format:
-//   X(<ID>, <name>, <version>, <ENABLED|DISABLED>, <compute_fn>, <note>)
+//----------------------------------------------------------------------
+// [SECTION]_[FEATURE REGISTRY — the X-macro]
+//----------------------------------------------------------------------
+// (tuple column legend lives in the [COLUMN] lines of this registry's
+//  orient block; per-column rationale preserved there)
 //
 // ENABLED/DISABLED is a compile-time gate — DISABLED features are skipped
 // by Features_PackAll AND don't contribute to FEATURE_REGISTRY_HASH (so
@@ -464,7 +504,7 @@ inline FPN_Binary<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ct
 // trained models continue to find each feature at the expected position.
 // EXTENSIBILITY tests pin specific FEATURE_<NAME> == <legacy index> values
 // to catch reorderings.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 #define FEATURE_ENABLED  1
 #define FEATURE_DISABLED 0
@@ -474,8 +514,6 @@ inline FPN_Binary<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ct
 // zero-substituted in Features_PackAll + bumps stale_feature_events_total).
 // Initial values all 0 (preserves pre-v5.14.9.E behavior bytewise). Operator
 // opts in per-feature by editing the registry. Per TECH_DEBT-015 close.
-//
-// Tuple: X(id, name, version, enabled, fn, note, max_staleness_minutes)
 #define FOREACH_FEATURE(X) \
     X(SHORT_SLOPE,        "short_slope",        1, FEATURE_ENABLED, ML_Compute_ShortSlope,        "regression slope, 128-tick window", 0) \
     X(SHORT_R2,           "short_r2",           1, FEATURE_ENABLED, ML_Compute_ShortR2,           "R² of short-window regression", 0) \
@@ -585,16 +623,16 @@ static_assert(sizeof(FEATURE_MAX_STALENESS_MINUTES) / sizeof(*FEATURE_MAX_STALEN
               == NUM_REGISTERED_FEATURES,
               "FEATURE_MAX_STALENESS_MINUTES out of sync with NUM_REGISTERED_FEATURES");
 
-//======================================================================================================
-// [FEATURE REGISTRY HASH — FNV-1a over enabled feature names+versions]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FEATURE REGISTRY HASH — FNV-1a over enabled feature names+versions]
+//----------------------------------------------------------------------
 // Compile-time hash that contributes to the model fingerprint. Stamp body
 // embeds this value at training time; verifier rejects load when it
 // differs from the build-time value (= train-serve feature-set mismatch).
 //
 // DISABLED features don't contribute, so flipping ENABLED → DISABLED also
 // flips the hash, forcing retrain.
-//======================================================================================================
+//----------------------------------------------------------------------
 
 namespace tt {
 constexpr uint64_t FNV_OFFSET_64 = 0xcbf29ce484222325ULL;
@@ -632,9 +670,9 @@ inline uint64_t FEATURE_REGISTRY_HASH() {
     return h;
 }
 
-//======================================================================================================
-// [FEATURES_PACK_ALL — the new packer]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FEATURES_PACK_ALL — the packer]
+//----------------------------------------------------------------------
 // Replaced ModelFeatures_Pack at v5.8.1b. Loops the X-macro registry,
 // invokes each enabled compute fn, writes float result into out[i].
 //
@@ -674,7 +712,7 @@ inline uint64_t FEATURE_REGISTRY_HASH() {
 // (zero `out`, log, skip Model_Predict).
 //
 // See DOCS/CLAUDE_ML_INVARIANTS.md "Features_PackAll validates output".
-//======================================================================================================
+//----------------------------------------------------------------------
 template <unsigned F>
 inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
     int n = 0;
@@ -714,9 +752,9 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
     return n;
 }
 
-//======================================================================================================
-// [Features_PackAll mask-aware variant — v5.11.18 main]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[Features_PackAll mask-aware variant — v5.11.18 main]
+//----------------------------------------------------------------------
 // Per /parity-check 2026-05-07 (CRITICAL gap on scaler binding + HIGH gap
 // on Features_PackAll index contract). Operator-controlled per-core
 // feature subsetting via the cfg field core_<N>_feature_mask
@@ -784,3 +822,8 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out,
 #undef X
     return n;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_FEATURE]
+//======================================================================
