@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [VALIDATION SPLIT — PURGED TEMPORAL CV]
+// [FILE]_[Backtest/ValidationSplit.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[purged temporal walk-forward CV — expanding-window folds with a lookback-aware purge gap so no train sample's features overlap any test label window; leakage post-check invalidates violating folds]
+// [REFERENCE]_[SOURCE]_[FoxML/private purged_time_series_split.py + feature_time_meta.py]
+// [CONTAINS]
+//   - [FUNCTION]_[PurgeGap_Compute]   (PurgeGap_ComputeExplicit rides)
+//   - [STRUCT]_[PurgedSplit]
+//   - [FUNCTION]_[ValidationSplit_Generate]   (GenerateExplicit + Verify + Print ride)
 //======================================================================================================
 // port of FoxML/private purged_time_series_split.py + feature_time_meta.py.
 // prevents temporal leakage by enforcing a purge gap between train and test sets
@@ -39,9 +48,15 @@
 #include "../ML_Headers/ModelInference.hpp"
 #include <stdio.h>
 
-//======================================================================================================
-// [PURGE GAP COMPUTATION]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[PurgeGap_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[purge = max of horizon and max feature lookback, plus buffer — the minimum train/test gap that prevents temporal leakage; ComputeExplicit overload rides]
+//======================================================================
+// [CODE]
+//======================================================================
 // from FoxML purge.py: purge = max(horizon, max_feature_lookback) + buffer
 // with safety.yaml: purge_include_feature_lookback = true
 //
@@ -49,10 +64,12 @@
 // any data that overlaps with the test set's label window. without this,
 // a 512-tick feature lookback near the train/test boundary contaminates
 // the test set even if the label horizon is only 100 ticks.
-//======================================================================================================
 
-// default purge buffer (ticks). from safety.yaml: lookback_buffer_minutes = 5.0
-// at ~10 ticks/second this is ~3000 ticks. conservative default, configurable.
+// default purge buffer (ticks). the FoxML source value was
+// lookback_buffer_minutes = 5.0 (~3000 ticks at ~10 ticks/second); the
+// engine ships 512 ticks as its fallback default — used when the caller
+// passes buffer_ticks <= 0 (Backtest_RunWalkForward) and as the GUI's
+// wf_buffer_ticks initial value. Configurable per run.
 #define PURGE_BUFFER_DEFAULT 512
 
 // compute purge gap accounting for both label horizon and feature lookback.
@@ -74,19 +91,25 @@ static inline int PurgeGap_ComputeExplicit(int horizon_ticks, int max_lookback, 
     int base = (horizon_ticks > max_lookback) ? horizon_ticks : max_lookback;
     return base + buffer_ticks;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PurgeGap_Compute]
+//======================================================================
 
-//======================================================================================================
-// [PURGED SPLIT RESULT]
-//======================================================================================================
-// each fold is a (train, test) pair with the purge gap enforced between them.
-// train window grows with each fold (expanding window, not sliding).
-//
-// layout for fold k of n_splits:
+//======================================================================
+// [STRUCT]_[PurgedSplit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one fold — train and test index ranges with the purge gap enforced between them; valid flag marks folds skipped when train is too small after purge]
+// [DIAGRAM]
 //   train: [0 .. test_start - purge_gap)
-//   purge: [test_start - purge_gap .. test_start)    ← discarded, prevents leakage
+//   purge: [test_start - purge_gap .. test_start)    <- discarded, prevents leakage
 //   test:  [test_start .. test_end)
-//======================================================================================================
-
+//======================================================================
+// [CODE]
+//======================================================================
 #define VALIDATION_MAX_FOLDS 20
 
 struct PurgedSplit {
@@ -99,30 +122,28 @@ struct PurgedSplit {
     int test_count;     // test_end - test_start (convenience)
     int valid;          // 1 = usable fold, 0 = skipped (train too small after purge)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// each fold is a (train, test) pair with the purge gap enforced between them.
+// train window grows with each fold (expanding window, not sliding).
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PurgedSplit]
+//======================================================================
 
-//======================================================================================================
-// [GENERATE FOLDS]
-//======================================================================================================
-// generates walk-forward folds with lookback-aware purge gap.
-// mirrors FoxML PurgedTimeSeriesSplit.split() adapted for tick indices.
-//
-// key behavior from FoxML:
-//   - test folds are equal-sized slices of the data (last fold may be smaller)
-//   - train window grows with each fold: fold 1 trains on [0..N/5],
-//     fold 2 on [0..2N/5], etc. (expanding window)
-//   - purge gap enforced: train_end = test_start - purge_gap
-//   - fold skipped if train set would be empty after purge
-//
-// parameters:
-//   folds:          output array (caller allocates, max VALIDATION_MAX_FOLDS)
-//   total_samples:  total number of samples in the dataset
-//   n_splits:       number of folds (default 5, from FoxML)
-//   horizon_ticks:  label forward window (e.g. 1000 ticks)
-//   buffer_ticks:   extra safety margin (default PURGE_BUFFER_DEFAULT)
-//   min_train:      minimum training samples required (skip fold if fewer)
-//
-// returns: number of valid folds generated (may be < n_splits if early folds skipped)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ValidationSplit_Generate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[expanding-window fold generation with the purge gap enforced plus a post-generation leakage invariant check; GenerateExplicit + Verify + Print ride. The WF caller computes its gap in non-neutral sample space and calls GenerateExplicit — this raw-space variant and Verify have no callers at HEAD]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int ValidationSplit_Generate(PurgedSplit *folds, int total_samples,
                                             int n_splits, int horizon_ticks,
                                             int buffer_ticks, int min_train) {
@@ -287,12 +308,10 @@ static inline int ValidationSplit_GenerateExplicit(PurgedSplit *folds, int total
     return valid_count;
 }
 
-//======================================================================================================
-// [VALIDATION HELPERS]
-//======================================================================================================
-
 // verify no overlap between train and test (debug assertion)
 // returns 1 if all folds are clean, 0 if leakage detected
+// (no callers at HEAD — the in-Generate post-check above carries the
+// production leakage guard; this standalone form is available for tests)
 static inline int ValidationSplit_Verify(const PurgedSplit *folds, int n_splits) {
     for (int i = 0; i < n_splits; i++) {
         if (!folds[i].valid) continue;
@@ -329,5 +348,32 @@ static inline void ValidationSplit_Print(const PurgedSplit *folds, int n_splits)
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// generates walk-forward folds with lookback-aware purge gap.
+// mirrors FoxML PurgedTimeSeriesSplit.split() adapted for tick indices.
+//
+// key behavior from FoxML:
+//   - test folds are equal-sized slices of the data (last fold may be smaller)
+//   - train window grows with each fold: fold 1 trains on [0..N/5],
+//     fold 2 on [0..2N/5], etc. (expanding window)
+//   - purge gap enforced: train_end = test_start - purge_gap
+//   - fold skipped if train set would be empty after purge
+//
+// parameters:
+//   folds:          output array (caller allocates, max VALIDATION_MAX_FOLDS)
+//   total_samples:  total number of samples in the dataset
+//   n_splits:       number of folds (default 5, from FoxML)
+//   horizon_ticks:  label forward window (e.g. 1000 ticks)
+//   buffer_ticks:   extra safety margin (default PURGE_BUFFER_DEFAULT)
+//   min_train:      minimum training samples required (skip fold if fewer)
+//
+// returns: number of valid folds generated (may be < n_splits if early folds skipped)
+//======================================================================
+// [END_FUNCTION]_[ValidationSplit_Generate]
+//======================================================================
 
 #endif // VALIDATION_SPLIT_HPP

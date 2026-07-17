@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FINGERPRINT — SHA256 REPRODUCIBILITY]
+// [FILE]_[Backtest/Fingerprint.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[run-reproducibility fingerprint — SHA-256 over cfg bytes + format version + lookbacks + data files; embedded zero-dep kernel, sister to the openssl-EVP digest kernel in MemHeaders/HmacSha256.hpp]
+// [REFERENCE]_[SOURCE]_[FoxML/private fingerprinting.py + config_hashing.py — concept ports]
+// [CONTAINS]
+//   - [FUNCTION]_[SHA256_Update]   (SHA256_State + transform + primitives + Init / Final / ToHex ride)
+//   - [FUNCTION]_[Fingerprint_HashFile]
+//   - [FUNCTION]_[Fingerprint_Compute]   (Fingerprint_Short rides)
 //======================================================================================================
 // port of FoxML/private fingerprinting.py concept (not the 1309-line infrastructure).
 // SHA256 hash of config + data for reproducibility tracking.
@@ -22,11 +31,17 @@
 #include <stdint.h>
 #include <string.h>
 
-//======================================================================================================
-// [EMBEDDED SHA256]
+//======================================================================
+// [FUNCTION]_[SHA256_Update]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[embedded streaming SHA-256 family — SHA256_State + transform + the bitwise primitives + Init / Final / ToHex ride; FIPS 180-4, public domain, zero deps]
+//======================================================================
+// [CODE]
+//======================================================================
 // public domain implementation. processes data in 64-byte blocks.
 // based on the FIPS 180-4 specification.
-//======================================================================================================
 
 struct SHA256_State {
     uint32_t h[8];
@@ -130,11 +145,21 @@ static inline void SHA256_ToHex(const uint8_t hash[32], char hex[65]) {
     }
     hex[64] = '\0';
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SHA256_Update]
+//======================================================================
 
-//======================================================================================================
-// [FILE HASHING]
-// streams file through SHA256 in 64KB chunks — handles multi-GB files.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Fingerprint_HashFile]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stream a file through SHA-256 in 64KB chunks — handles multi-GB files]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FINGERPRINT_CHUNK_SIZE 65536
 
 static inline int Fingerprint_HashFile(const char *path, uint8_t hash[32]) {
@@ -153,17 +178,28 @@ static inline int Fingerprint_HashFile(const char *path, uint8_t hash[32]) {
     SHA256_Final(&s, hash);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Fingerprint_HashFile]
+//======================================================================
 
-//======================================================================================================
-// [CONFIG FINGERPRINT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Fingerprint_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[combined run fingerprint — cfg raw bytes then MODEL_FORMAT_VERSION then FEATURE_LOOKBACKS then each data file hash; Fingerprint_Short rides for display truncation]
+// [REFERENCE]_[INVARIANT]_[H12]
+//======================================================================
+// [CODE]
+//======================================================================
 // canonical serialization: hash config fields as sorted key=value pairs.
 // same config → same hash, regardless of field order in struct.
 // includes MODEL_FORMAT_VERSION to catch feature set changes.
 //
 // from FoxML config_hashing.py: canonical_json with sorted keys + normalized floats.
 // we use a simpler approach: snprintf key=value pairs in sorted order.
-//======================================================================================================
 #include "../ML_Headers/ModelInference.hpp"
 
 // compute fingerprint of config + data files.
@@ -205,5 +241,10 @@ static inline void Fingerprint_Short(const char *full_hex, char *short_out, int 
     memcpy(short_out, full_hex, len);
     short_out[len] = '\0';
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Fingerprint_Compute]
+//======================================================================
 
 #endif // FINGERPRINT_HPP

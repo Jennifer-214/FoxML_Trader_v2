@@ -3495,8 +3495,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   // explain so the user understands what happened and what to use instead.
   // (Took us multiple hours of debugging Friday night before we figured this
   // out — the field name implied "ticks" but actually means "rolling window
-  // samples." See CLAUDE.md "Label-type-aware metric invariant" for the
-  // sibling rule about consulting source-of-truth helpers.)
+  // samples." See the LabelType_* kind helpers in Backtest/LabelFunctions.hpp
+  // for the sibling rule about consulting source-of-truth helpers.)
   const uint32_t ROLLING_WINDOW_SHORT = 128; // matches RollingStats<F> default W
   if (cfg.min_warmup_samples > ROLLING_WINDOW_SHORT) {
     fprintf(stderr,

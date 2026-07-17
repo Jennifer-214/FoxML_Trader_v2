@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [OVERFIT DETECTION]
+// [FILE]_[Backtest/OverfitDetection.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sequential threshold gates catching a model that memorized instead of generalized — accuracy-space checks for classification plus a correlation-space analog for regression labels]
+// [REFERENCE]_[SOURCE]_[FoxML/private overfitting_detection.py + safety.yaml thresholds]
+// [CONTAINS]
+//   - [STRUCT]_[OverfitReport]   (the threshold defines ride)
+//   - [FUNCTION]_[OverfitDetection_Check]   (CheckDefaults rides)
+//   - [FUNCTION]_[OverfitDetection_CheckRegression]   (CheckRegressionDefaults + CountOverfit + Print ride)
 //======================================================================================================
 // port of FoxML/private overfitting_detection.py.
 // 4 sequential threshold checks to detect when a model has memorized training
@@ -26,20 +35,28 @@
 #include <stdio.h>
 #include <string.h>
 
-//======================================================================================================
-// [THRESHOLDS — from FoxML safety.yaml]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[OverfitReport]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-fold verdict record — accuracies or correlations, gaps, which check tripped, human-readable reason; the FoxML threshold defines ride]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------
+// [SECTION]_[thresholds from FoxML safety.yaml]
+//------------------------------------------------------------
 // these were tuned over 6 months of experiments across 20+ model families.
 // 0.99 accuracy is the point where even good financial models start memorizing.
 // 0.20 gap is the point where generalization has clearly failed.
-//======================================================================================================
 #define OVERFIT_TRAIN_ACC_THRESHOLD 0.99f // train acc >= this = memorization
 #define OVERFIT_TRAIN_VAL_GAP 0.20f       // train - val >= this = overfitting
 #define OVERFIT_FEATURE_COUNT_CAP 250 // optional: skip if n_features >= this
 
-//======================================================================================================
-// [REPORT]
-//======================================================================================================
+//------------------------------------------------------------
+// [SECTION]_[report record]
+//------------------------------------------------------------
 struct OverfitReport {
   float train_accuracy;
   float cv_accuracy;   // cross-validation accuracy (from walk-forward folds, -1
@@ -52,22 +69,23 @@ struct OverfitReport {
   int check_failed;    // which check triggered (1-4), 0 if none
   char reason[128];    // human-readable reason
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[OverfitReport]
+//======================================================================
 
-//======================================================================================================
-// [CHECK]
-//======================================================================================================
-// runs the 4 sequential overfit checks from FoxML.
-// returns an OverfitReport with the result.
-//
-// parameters:
-//   train_acc:    training set accuracy (0.0 - 1.0)
-//   cv_acc:       cross-validation mean accuracy (-1.0 if not available)
-//   val_acc:      held-out validation accuracy (-1.0 if not available)
-//   n_features:   number of features (0 to skip feature count check)
-//   acc_thresh:   memorization threshold (default 0.99)
-//   gap_thresh:   gap threshold (default 0.20)
-//   feat_cap:     feature count cap (0 to disable)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OverfitDetection_Check]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 4 sequential accuracy-space gates — memorization, train/CV gap, train/val gap, feature cap; CheckDefaults rides with the FoxML thresholds]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline OverfitReport
 OverfitDetection_Check(float train_acc, float cv_acc, float val_acc,
                        int n_features, float acc_thresh, float gap_thresh,
@@ -141,10 +159,35 @@ static inline OverfitReport OverfitDetection_CheckDefaults(float train_acc,
       train_acc, cv_acc, val_acc, n_features, OVERFIT_TRAIN_ACC_THRESHOLD,
       OVERFIT_TRAIN_VAL_GAP, OVERFIT_FEATURE_COUNT_CAP);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// runs the 4 sequential overfit checks from FoxML.
+// returns an OverfitReport with the result.
+//
+// parameters:
+//   train_acc:    training set accuracy (0.0 - 1.0)
+//   cv_acc:       cross-validation mean accuracy (-1.0 if not available)
+//   val_acc:      held-out validation accuracy (-1.0 if not available)
+//   n_features:   number of features (0 to skip feature count check)
+//   acc_thresh:   memorization threshold (default 0.99)
+//   gap_thresh:   gap threshold (default 0.20)
+//   feat_cap:     feature count cap (0 to disable)
+//======================================================================
+// [END_FUNCTION]_[OverfitDetection_Check]
+//======================================================================
 
-//======================================================================================================
-// [REGRESSION-AWARE OVERFIT CHECK]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OverfitDetection_CheckRegression]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[correlation-space analog for regression labels — memorization, train/val corr gap, feature cap; CheckRegressionDefaults + CountOverfit + Print ride]
+//======================================================================
+// [CODE]
+//======================================================================
 // For regression labels, accuracy-threshold checks don't apply. We use Pearson
 // correlation between predictions and labels as the analog metric:
 //   - |train_corr| close to 1 → memorization (model has near-perfect fit)
@@ -249,5 +292,10 @@ static inline void OverfitDetection_Print(const OverfitReport *r,
     fprintf(stderr, ")\n");
   }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OverfitDetection_CheckRegression]
+//======================================================================
 
 #endif // OVERFIT_DETECTION_HPP

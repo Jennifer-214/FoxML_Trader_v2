@@ -3,7 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [LABEL FUNCTIONS]
+// [FILE]_[Backtest/LabelFunctions.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SEAM]_[train-serve label-set identity — LABEL_REGISTRY_HASH in every stamp; mismatch = load-time rejection]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[table-driven ML target-label SSoT — one FOREACH_TARGET row auto-flows the LABEL enum + the label table + the registry hash; the forward-scan compute leaves + kind helpers share the registry block]
+// [CONTAINS]
+//   - [STRUCT]_[HistoricalTick]
+//   - [REGISTRY]_[FOREACH_TARGET]   (the LABEL enum + 11 Label_* leaves + label_table + LABEL_REGISTRY_HASH + LabelType_* helpers share the block)
 //======================================================================================================
 // table-driven target label system for ML training data.
 // adding a new label type = 1 function + 1 table entry.
@@ -20,30 +28,50 @@
 
 #include <stdint.h>
 
-// HistoricalTick lives here (single definition point).
-// BacktestEngine.hpp includes this file.
+//======================================================================
+// [STRUCT]_[HistoricalTick]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one historical aggTrade record — the single definition point; the tick array the forward-scan labels read]
+//======================================================================
+// [CODE]
+//======================================================================
 struct HistoricalTick {
     double price;
     double qty;
     int64_t timestamp_us; // Binance aggTrades: microseconds since epoch (NOT milliseconds)
     int is_buyer_maker;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// HistoricalTick lives here (single definition point).
+// BacktestEngine.hpp includes this file.
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[HistoricalTick]
+//======================================================================
 
-// v5.10.0d — FOREACH_TARGET X-macro registry (audit Idea #2). Mirrors
-// FOREACH_FEATURE / FOREACH_STRATEGY pattern from v5.8.x. Adding,
-// removing, or reordering labels flips LABEL_REGISTRY_HASH() →
-// load-time stamp refusal, preventing silent label-set drift between
-// trainer and serve.
-//
-// Row schema:
-//   X(id_suffix, "key_name", "Display", "Description", Compute_Fn, num_classes)
-//   - id_suffix: appended to LABEL_<id_suffix> auto-generated constant
-//   - key_name: cfg parser key + stamp body identifier (load-bearing)
-//   - num_classes: 0 = binary, 1 = regression, ≥2 = multiclass
-//
-// APPEND-ONLY discipline. Reordering or removing a row flips the hash
-// → all stamps signed under the prior order refuse to load. Append at
-// the end.
+//======================================================================
+// [REGISTRY]_[FOREACH_TARGET]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the target-label registry — one row auto-flows the LABEL enum, the label table, and the FNV registry hash; APPEND-ONLY, reorder/remove flips the hash and refuses old stamps]
+// [COLUMN]_[id_suffix]_[UPPERCASE token -> LABEL_<id_suffix> enum; order LOCKED + append-only, stamps hash the order]
+// [COLUMN]_[name]_[cfg parser key + stamp body identifier; folded into LABEL_REGISTRY_HASH]
+// [COLUMN]_[display]_[GUI dropdown string]
+// [COLUMN]_[desc]_[human description]
+// [COLUMN]_[fn]_[Label_<Name> compute leaf matching the LabelFn signature]
+// [COLUMN]_[num_classes]_[0 binary, 1 regression, 2-or-more multiclass; ":nc"+value folded into the hash]
+// [REFERENCE]_[INVARIANT]_[[H15] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_TARGET(X) \
     X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0) \
     X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0) \
@@ -69,13 +97,14 @@ enum {
     LABEL_COUNT_AUTO
 };
 
-//======================================================================================================
-// [WIN/LOSS]
+//----------------------------------------------------------------------
+// [SECTION]_[WIN/LOSS]
+//----------------------------------------------------------------------
 // looks forward to the next completed trade — was it profitable?
 // simplest label: 1 = win, 0 = loss. uses the existing engine's exit logic.
 // note: labels trades, not ticks. many ticks will have label=0 because
 // no trade was entered at that point.
-//======================================================================================================
+//----------------------------------------------------------------------
 static inline float Label_WinLoss(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                                    double sample_price, double tp_pct, double sl_pct,
                                    int /* forward_ticks */) {
@@ -91,12 +120,13 @@ static inline float Label_WinLoss(const HistoricalTick *ticks, int tick_idx, int
     return 0.0f; // ran out of data = no exit = loss (conservative)
 }
 
-//======================================================================================================
-// [BARRIER]
+//----------------------------------------------------------------------
+// [SECTION]_[BARRIER]
+//----------------------------------------------------------------------
 // first-passage label from FoxML/private: will price hit +X% before -Y%?
 // tp_pct and sl_pct are the barrier sizes (e.g. 1.5 = 1.5%).
 // same as win/loss but with configurable asymmetric barriers.
-//======================================================================================================
+//----------------------------------------------------------------------
 static inline float Label_Barrier(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                                    double sample_price, double tp_pct, double sl_pct,
                                    int /* forward_ticks */) {
@@ -110,11 +140,12 @@ static inline float Label_Barrier(const HistoricalTick *ticks, int tick_idx, int
     return 0.5f; // neither hit = neutral (useful for 3-class later)
 }
 
-//======================================================================================================
-// [FORWARD P&L]
+//----------------------------------------------------------------------
+// [SECTION]_[FORWARD P&L]
+//----------------------------------------------------------------------
 // continuous label: return over the next N ticks.
 // useful for regression (predict magnitude, not just direction).
-//======================================================================================================
+//----------------------------------------------------------------------
 static inline float Label_ForwardPnl(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                                       double sample_price, double /* tp_pct */, double /* sl_pct */,
                                       int forward_ticks) {
@@ -126,12 +157,16 @@ static inline float Label_ForwardPnl(const HistoricalTick *ticks, int tick_idx, 
     return (float)((future_price - sample_price) / sample_price * 100.0); // % return
 }
 
-//======================================================================================================
-// [REGIME]
+//----------------------------------------------------------------------
+// [SECTION]_[REGIME]
+//----------------------------------------------------------------------
 // which regime was the engine in at this sample point?
-// 0 = ranging, 1 = trending, 2 = volatile
-// useful for training a regime classifier model.
-//======================================================================================================
+// values follow the FOREACH_REGIME SSoT (Strategies/StrategyInterface.hpp):
+// 0=RANGING, 1=TRENDING, 2=VOLATILE, 3=TRENDING_DOWN, 4=MILD_TREND.
+// useful for training a regime classifier model. NOTE: the FOREACH_TARGET
+// regime row declares num_classes=4 but the SSoT has 5 values — a sampled
+// MILD_TREND (4) exceeds num_class=4; tracked as TECH_DEBT-241.
+//----------------------------------------------------------------------
 static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick_idx */,
                                   int /* total_ticks */, double /* sample_price */,
                                   double /* tp_pct */, double /* sl_pct */,
@@ -139,8 +174,9 @@ static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick
     return (float)regime_at_sample;
 }
 
-//======================================================================================================
-// [VOL-SCALED BARRIER]
+//----------------------------------------------------------------------
+// [SECTION]_[VOL-SCALED BARRIER]
+//----------------------------------------------------------------------
 // port of FoxML/private barrier.py compute_barrier_targets().
 // barriers scale with rolling volatility instead of fixed percentage.
 // adapts to market conditions: wider barriers in high-vol, tighter in low-vol.
@@ -154,7 +190,7 @@ static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick
 //
 // FoxML constants: barrier_size = 0.5 (k*sigma), vol_window = 20, min_periods = 5
 // source: ~/FoxML/private/DATA_PROCESSING/targets/barrier.py
-//======================================================================================================
+//----------------------------------------------------------------------
 static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                                       double sample_price, double barrier_k, double /* sl_pct */,
                                       int vol_window) {
@@ -212,13 +248,14 @@ static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, 
     return 0.5f; // neither hit = neutral
 }
 
-//======================================================================================================
-// [WILL_PEAK / WILL_VALLEY]
+//----------------------------------------------------------------------
+// [SECTION]_[WILL_PEAK / WILL_VALLEY]
+//----------------------------------------------------------------------
 // binary labels for barrier gate model training.
 // WILL_PEAK: 1 if price reaches a local max within N ticks (extra_param = lookahead)
 // WILL_VALLEY: 1 if price reaches a local min within N ticks
 // "local max/min" = price is highest/lowest in a symmetric window around it
-//======================================================================================================
+//----------------------------------------------------------------------
 static float Label_WillPeak(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                              double sample_price, double tp_pct, double sl_pct,
                              int extra_param) {
@@ -255,8 +292,9 @@ static float Label_WillValley(const HistoricalTick *ticks, int tick_idx, int tot
     return (near_start && drop_pct > 0.001) ? 1.0f : 0.0f;
 }
 
-//======================================================================================================
-// [PEAK_VALLEY_STABLE] — 3-class softmax target for BarrierGate primary path
+//----------------------------------------------------------------------
+// [SECTION]_[PEAK_VALLEY_STABLE — 3-class softmax target for BarrierGate primary path]
+//----------------------------------------------------------------------
 // Returns: 0 = stable (neither barrier hit), 1 = peak (down barrier hit first),
 //          2 = valley (up barrier hit first)
 // Used to train an XGBoost multi:softprob model that outputs P(stable)/P(peak)/P(valley).
@@ -266,7 +304,7 @@ static float Label_WillValley(const HistoricalTick *ticks, int tick_idx, int tot
 // tp_pct = up barrier (price reaches +tp% → "valley" since the entry was at a low)
 // sl_pct = down barrier (price reaches -sl% → "peak" since the entry was at a high)
 // extra_param = lookahead ticks (default 500). 0 means "scan to end of data."
-//======================================================================================================
+//----------------------------------------------------------------------
 static float Label_PeakValleyStable(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                                     double sample_price, double tp_pct, double sl_pct,
                                     int extra_param) {
@@ -283,9 +321,9 @@ static float Label_PeakValleyStable(const HistoricalTick *ticks, int tick_idx, i
     return 0.0f;  // neither hit within lookahead → stable
 }
 
-//======================================================================================================
-// [v5.14.5.A — CROSS-SECTIONAL TARGETS (FoxML_Core port)]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.14.5.A — CROSS-SECTIONAL TARGETS (FoxML_Core port)]
+//----------------------------------------------------------------------
 // Cross-sectional labels normalize/rank returns ACROSS symbols at each
 // timestamp. Today's engine is single-symbol (BTCUSDT) so the
 // cross-section size = 1 and all 3 metrics DEGENERATE to identity:
@@ -346,10 +384,10 @@ static float Label_CSVolScaledDemeaned(const HistoricalTick *ticks, int tick_idx
     return (float)future_return;
 }
 
-//======================================================================================================
-// [LABEL TABLE]
+//----------------------------------------------------------------------
+// [SECTION]_[LABEL TABLE]
+//----------------------------------------------------------------------
 // table-driven: add new label = add 1 entry here + 1 function above
-//======================================================================================================
 typedef float (*LabelFn)(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                            double sample_price, double tp_pct, double sl_pct,
                            int extra_param);
@@ -416,9 +454,9 @@ inline uint64_t LABEL_REGISTRY_HASH() {
     return h;
 }
 
-//======================================================================================================
-// [LABEL KIND HELPERS]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[LABEL KIND HELPERS]
+//----------------------------------------------------------------------
 // Single source of truth for "what kind of label is this." Reads num_classes
 // from label_table[]. Every metric/display site that touches label values
 // MUST branch on these — see "Label-type-aware metric invariant" in CLAUDE.md.
@@ -452,5 +490,32 @@ static inline const char *LabelType_KindName(int label_type) {
     if (LabelType_IsMulticlass(label_type)) return "multiclass";
     return "binary";
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [ROW]_[regime]_[num_classes=4 but FOREACH_REGIME has 5 values (0..4); a sampled MILD_TREND(4) exceeds num_class=4 at XGBoost train — TECH_DEBT-241]
+//======================================================================
+// [COMMENT]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// v5.10.0d — FOREACH_TARGET X-macro registry (audit Idea #2). Mirrors
+// FOREACH_FEATURE / FOREACH_STRATEGY pattern from v5.8.x. Adding,
+// removing, or reordering labels flips LABEL_REGISTRY_HASH() →
+// load-time stamp refusal, preventing silent label-set drift between
+// trainer and serve.
+//
+// Row schema:
+//   X(id_suffix, "key_name", "Display", "Description", Compute_Fn, num_classes)
+//   - id_suffix: appended to LABEL_<id_suffix> auto-generated constant
+//   - key_name: cfg parser key + stamp body identifier (load-bearing)
+//   - num_classes: 0 = binary, 1 = regression, ≥2 = multiclass
+//
+// APPEND-ONLY discipline. Reordering or removing a row flips the hash
+// → all stamps signed under the prior order refuse to load. Append at
+// the end.
+//======================================================================
+// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-241]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_TARGET]
+//======================================================================
 
 #endif // LABEL_FUNCTIONS_HPP
