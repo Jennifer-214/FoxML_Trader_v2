@@ -3,7 +3,29 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CONFIDENCE SCORE — PREDICTION QUALITY WEIGHTING]
+// [FILE]_[ML_Headers/ConfidenceScore.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SEAM]_[train-serve shared scorer — backtest suite (per-fold scoring) + live engine (ML threshold) consume the same confidence kernels]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[prediction-quality weighting — legacy 3-factor confidence + the v5.14.1.A 4-factor composite, the degradation-curve ladder, drift monitoring, and the snapshot persist registry]
+// [DIAGRAM]_[formula]
+//   legacy    (pre-v5.14.1): confidence = |IC| * freshness * stability        stability = 1 / (1 + RMSE)
+//   composite (v5.14.1.A):   confidence = |IC| * freshness * capacity * (1 - clamp(RMSE / RMSE_baseline, 0, 1))
+// [CONTAINS]
+//   - [STRUCT]_[RollingWindow]           (generic ring template; + [FUNCTION]_[RollingWindow_Push] family: Init)
+//   - [STRUCT]_[RollingIC]               (+ [FUNCTION]_[RollingIC_Push] family: Init; + [FUNCTION]_[RollingIC_Compute] with confidence_rank riding)
+//   - [STRUCT]_[RollingRMSE]             (+ [FUNCTION]_[RollingRMSE_Push] family: Init/Compute — running-sum O(1))
+//   - [FUNCTION]_[Confidence_Compute]    (+ Freshness/Stability helpers — the legacy 3-factor formula)
+//   - [STRUCT]_[RollingFreshness]        (+ [FUNCTION]_[RollingFreshness_Compute] family: Init/Mark)
+//   - [STRUCT]_[RollingCapacity]         (+ [FUNCTION]_[RollingCapacity_Compute] family: Init/UpdateADV)
+//   - [STRUCT]_[ConfidenceScorer]        (+ [FUNCTION]_[ConfidenceScorer_Compute] API family: Init/ComputeICVariant/InitComposite/BindCompositeCfg/Update/UpdateAndMark)
+//   - [FUNCTION]_[ConfidenceScorer_ComputeComposite]   (+ MarkPredict — the 4-factor opt-in path)
+//   - [REGISTRY]_[FOREACH_DEGRADATION_CURVE]           (enum + dispatch table + string helpers + the 4 curve fns + bounds-checked wrapper share the block)
+//   - [STRUCT]_[DriftSample] / [STRUCT]_[DriftHistory] (+ [FUNCTION]_[DriftHistory_CheckBreach] family: Init/Push)
+//   - [REGISTRY]_[FOREACH_CONFIDENCE_PERSIST_FIELD]    (fieldwise write/read/commit + RecomputeRunningSums share the block)
+//   - [FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1] (+ the 5 FROZEN LegacyV1 wire structs — terse, read-side only, never written)
+// [REFERENCE]_[SOURCE]_[FoxML/private LIVE_TRADING/prediction/confidence.py]
 //======================================================================================================
 // port of FoxML/private LIVE_TRADING/prediction/confidence.py.
 // weights predictions by quality: confidence = IC * freshness * stability.
@@ -14,7 +36,9 @@
 //   stability = 1 / (1 + rolling_RMSE)
 //
 // FoxML drops the capacity factor (kappa * ADV / planned_dollars) since we're
-// single-symbol — we follow suit.
+// single-symbol — the original port followed suit; since v5.14.1.A the
+// composite path re-adds a capacity term (RollingCapacity below; inert at the
+// target_dollars=0 default, so single-symbol behavior is unchanged).
 //
 // FoxML constants (from constants.py):
 //   freshness_tau = 300.0 seconds (5 min)
@@ -27,7 +51,7 @@
 //   multi-symbol: per-symbol IC buffers
 //   multi-horizon: per-horizon tau values
 //     → see ~/FoxML/private/LIVE_TRADING/common/constants.py FRESHNESS_TAU
-//   capacity factor: kappa * ADV / order_size
+//   capacity factor: LANDED v5.14.1.A (RollingCapacity — kappa * ADV / target_dollars)
 //     → see ~/FoxML/private/LIVE_TRADING/prediction/confidence.py:calculate_capacity()
 //======================================================================================================
 #ifndef CONFIDENCE_SCORE_HPP
@@ -50,15 +74,44 @@
 #define CONFIDENCE_IC_WINDOW_DEFAULT      32      // rolling window size
 #define CONFIDENCE_MIN_SAMPLES            5       // minimum for Spearman calc
 
-//======================================================================================================
-// [ROLLING IC — Spearman rank correlation]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[ROLLING IC — Spearman rank correlation]
+//----------------------------------------------------------------------
 // Spearman = Pearson correlation of ranks.
 // simpler than scipy.stats.spearmanr, but same result for small windows.
-//======================================================================================================
 
 #define ROLLING_IC_MAX_WINDOW 64
 
+//======================================================================
+// [STRUCT]_[RollingWindow]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[generic HOT-first ring-buffer template — RollingIC + RollingRMSE compose it (Class-18 mirror closed); BARE (no alignas) so the embedding consumer owns alignment]
+// [INSTANTIATION]_[[double,64]]
+// [REFERENCE]_[DESIGN_SPEC]_[generic-ring-buffer-template-pattern]
+// [REFERENCE]_[CLASS]_[18]
+//======================================================================
+// [CODE]
+//======================================================================
+template <typename T, unsigned N>
+struct RollingWindow {
+    static constexpr unsigned CAPACITY = N;
+
+    // HOT cluster (offset 0)
+    int count;     // total items inserted (saturates at window)
+    int head;      // ring buffer head
+    int window;    // active window size [2, N]
+
+    // 4B align pad (for T=double; 8-byte alignment) — samples at offset 16
+    // COLD cluster
+    T   samples[N];
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.15.5.E.C — Generic ring-buffer template. Variants compose this for
 // type-specific math. Closes Class-18 mirror between RollingIC + RollingRMSE
 // (both had identical count/head/window + samples ring-buffer skeleton).
@@ -74,20 +127,26 @@
 //
 // Layout: 12B HOT + 4B pad + N×sizeof(T) samples; natural sizeof handles
 // trailing alignment based on T's alignment.
-template <typename T, unsigned N>
-struct RollingWindow {
-    static constexpr unsigned CAPACITY = N;
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[528B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[9]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[RollingWindow]
+//======================================================================
 
-    // HOT cluster (offset 0)
-    int count;     // total items inserted (saturates at window)
-    int head;      // ring buffer head
-    int window;    // active window size [2, N]
-
-    // 4B align pad (for T=double; 8-byte alignment) — samples at offset 16
-    // COLD cluster
-    T   samples[N];
-};
-
+//======================================================================
+// [FUNCTION]_[RollingWindow_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the generic ring API family (Init rides) — zero+validate init; write-head-advance-saturate push]
+//======================================================================
+// [CODE]
+//======================================================================
 // Generic Init: zero state, validate window range.
 template <typename T, unsigned N>
 static inline void RollingWindow_Init(RollingWindow<T, N>* w, int window) {
@@ -105,20 +164,49 @@ static inline void RollingWindow_Push(RollingWindow<T, N>* w, T sample) {
     w->head++;
     if (w->count < w->window) w->count++;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingWindow_Push]
+//======================================================================
 
 // v5.15.5.E.C — Layout lock for the canonical RollingWindow<double, 64>
 // instantiation. 12B HOT + 4B pad + 512B samples = 528 natural. NOT alignas
 // (consumer owns alignment) → sizeof = 528.
 using RollingWindowDoubleICT = RollingWindow<double, ROLLING_IC_MAX_WINDOW>;
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingWindow<double,64>) == 528]
 static_assert(sizeof(RollingWindowDoubleICT) == 528,
     "RollingWindow<double, 64> sizeof MUST be 528 B (12B HOT + 4B pad + 512B samples).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(count) == 0]
 static_assert(offsetof(RollingWindowDoubleICT, count) == 0,
     "RollingWindow HOT scalar `count` MUST sit at offset 0.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(samples) == 16]
 static_assert(offsetof(RollingWindowDoubleICT, samples) == 16,
     "RollingWindow COLD `samples` MUST sit at offset 16 (after HOT cluster + 4B pad).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(RollingWindow<double,...>) == 8 — bare; consumer applies alignas(64)]
 static_assert(alignof(RollingWindowDoubleICT) == 8,
     "RollingWindow<double, ...> bare alignof = 8 (consumer applies alignas(64)).");
 
+//======================================================================
+// [STRUCT]_[RollingIC]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the Spearman input pair — 2 composed RollingWindow rings (predictions + actuals) advancing in lockstep; alignas(64) applied HERE (the composition owner)]
+// [REFERENCE]_[DESIGN_SPEC]_[generic-ring-buffer-template-pattern]
+// [REFERENCE]_[INVARIANT]_[H9]
+//======================================================================
+// [CODE]
+//======================================================================
+struct alignas(64) RollingIC {
+    RollingWindow<double, ROLLING_IC_MAX_WINDOW> predictions;
+    RollingWindow<double, ROLLING_IC_MAX_WINDOW> actuals;
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.15.5.E.A/C — RollingIC now COMPOSES 2× RollingWindow<double, 64>
 // (predictions + actuals) via the generic template. Class-18 mirror between
 // RollingIC + RollingRMSE CLOSED structurally. Spearman rank correlation
@@ -137,23 +225,42 @@ static_assert(alignof(RollingWindowDoubleICT) == 8,
 // pre-.E.C struct). The FOREACH_CONFIDENCE_PERSIST_FIELD paths change
 // from `ic.predictions` to `ic.predictions.samples` etc.; wire bytes
 // remain identical (same data values + offsets).
-struct alignas(64) RollingIC {
-    RollingWindow<double, ROLLING_IC_MAX_WINDOW> predictions;
-    RollingWindow<double, ROLLING_IC_MAX_WINDOW> actuals;
-};
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[1088B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[17]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[RollingIC]
+//======================================================================
 
 // v5.15.5.E.A/C — Layout lock for RollingIC composing 2× RollingWindow.
 // predictions @ 0 (528B) + actuals @ 528 (528B) = 1056 natural; alignas(64)
 // → 1088 (same as pre-.E.C). +32B trailing pad.
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingIC) == 1088]
 static_assert(sizeof(RollingIC) == 1088,
     "RollingIC sizeof MUST be 1088 B (17 cache lines with 32B trailing pad).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(predictions) == 0]
 static_assert(offsetof(RollingIC, predictions) == 0,
     "RollingIC `predictions` (RollingWindow) at offset 0.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(actuals) == 528]
 static_assert(offsetof(RollingIC, actuals) == 528,
     "RollingIC `actuals` (RollingWindow) at offset 528 (after predictions).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(RollingIC) == 64]
 static_assert(alignof(RollingIC) == 64,
     "RollingIC MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[RollingIC_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the (prediction, actual) pair API family (Init rides) — both rings advance in lockstep via the generic helpers]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.15.5.E.C — Init via generic RollingWindow_Init on both rings.
 static inline void RollingIC_Init(RollingIC *ric, int window) {
     RollingWindow_Init(&ric->predictions, window);
@@ -168,7 +275,21 @@ static inline void RollingIC_Push(RollingIC *ric, double prediction, double actu
     RollingWindow_Push(&ric->predictions, prediction);
     RollingWindow_Push(&ric->actuals,     actual);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingIC_Push]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[RollingIC_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[textbook Spearman — rank both rings (confidence_rank helper rides) then Pearson-correlate the ranks; returns IC in [-1,1], 0.0 on insufficient data]
+//======================================================================
+// [CODE]
+//======================================================================
 // compute ranks for an array (1-based, average ties)
 // simple O(n^2) — fine for window <= 64
 static inline void confidence_rank(const double *values, double *ranks, int n) {
@@ -238,10 +359,36 @@ static inline double RollingIC_Compute(const RollingIC *ric) {
     if (ic < -1.0) ic = -1.0;
     return ic;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingIC_Compute]
+//======================================================================
 
-//======================================================================================================
-// [ROLLING RMSE — prediction calibration stability]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[ROLLING RMSE — prediction calibration stability]
+//----------------------------------------------------------------------
+
+//======================================================================
+// [STRUCT]_[RollingRMSE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[composed RollingWindow of squared errors + the v5.15.5.E.D running sum — O(1) Compute via subtract-then-add maintenance at Push]
+// [REFERENCE]_[DESIGN_SPEC]_[generic-ring-buffer-template-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern]
+//======================================================================
+// [CODE]
+//======================================================================
+struct alignas(64) RollingRMSE {
+    RollingWindow<double, ROLLING_IC_MAX_WINDOW> window;
+    double sum_squared_errors;   // v5.15.5.E.D — running sum maintained at Push
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.15.5.E.A/C — RollingRMSE COMPOSES RollingWindow<double, 64>. Class-18
 // mirror with RollingIC closed via generic template per DESIGN_SPECS/generic-
 // ring-buffer-template-pattern.md.
@@ -253,22 +400,42 @@ static inline double RollingIC_Compute(const RollingIC *ric) {
 // Push maintains running sum via subtract-then-add at eviction (per the
 // pattern). Bytewise parity test in tests/controller_test.cpp locks the
 // running-sum-vs-walked equivalence.
-struct alignas(64) RollingRMSE {
-    RollingWindow<double, ROLLING_IC_MAX_WINDOW> window;
-    double sum_squared_errors;   // v5.15.5.E.D — running sum maintained at Push
-};
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[576B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[9]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[RollingRMSE]
+//======================================================================
 
 // v5.15.5.E.D — Layout lock. window (528B) + sum_squared_errors (8B) = 536
 // natural; alignas(64) → 576 B (same as .E.A pre-.E.D; +40B trailing pad).
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingRMSE) == 576]
 static_assert(sizeof(RollingRMSE) == 576,
     "RollingRMSE sizeof MUST be 576 B (9 cache lines).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(window) == 0]
 static_assert(offsetof(RollingRMSE, window) == 0,
     "RollingRMSE `window` (RollingWindow) at offset 0.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(sum_squared_errors) == 528]
 static_assert(offsetof(RollingRMSE, sum_squared_errors) == 528,
     "RollingRMSE `sum_squared_errors` at offset 528 (immediately after window struct).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(RollingRMSE) == 64]
 static_assert(alignof(RollingRMSE) == 64,
     "RollingRMSE MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[RollingRMSE_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[squared-error API family (Init + O(1) Compute ride) — Push maintains the running sum via subtract-then-add at eviction]
+// [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void RollingRMSE_Init(RollingRMSE *r, int window) {
     RollingWindow_Init(&r->window, window);
     r->sum_squared_errors = 0.0;   // v5.15.5.E.D — defensive explicit zero (memset covers it)
@@ -313,22 +480,36 @@ static inline void RollingRMSE_Push(RollingRMSE *r, double prediction, double ac
 // covering warm-up + steady-state).
 //
 // Pattern: sliding-window-online-statistics-pattern.md Approach 3 (sliding-
-// window incremental). 3rd canonical application; strengthens CLAUDE.md
-// item 29 to 3 production sites.
+// window incremental). 3rd canonical application of the sliding-window
+// pattern (the spec tracks its production sites).
 static inline double RollingRMSE_Compute(const RollingRMSE *r) {
     if (r->window.count < 2) return 1.0; // high RMSE = low confidence until enough data
     return sqrt(r->sum_squared_errors / (double)r->window.count);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingRMSE_Push]
+//======================================================================
 
-//======================================================================================================
-// [CONFIDENCE COMPUTATION]
-//======================================================================================================
-// confidence = IC * freshness * stability
-//   IC:        abs(Spearman rank correlation), floored at MIN_IC
-//   freshness: e^(-data_age_sec / tau)
-//   stability: 1 / (1 + RMSE)
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[CONFIDENCE COMPUTATION]
+//----------------------------------------------------------------------
 
+//======================================================================
+// [FUNCTION]_[Confidence_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the legacy 3-factor formula (Freshness + Stability helpers ride) — abs(IC) floored at MIN_IC, freshness decay, 1/(1+RMSE) stability]
+// [DIAGRAM]_[formula]
+//   confidence = |IC| * freshness * stability
+//     IC:        abs(Spearman rank correlation), floored at MIN_IC
+//     freshness: e^(-data_age_sec / tau)
+//     stability: 1 / (1 + RMSE)
+//======================================================================
+// [CODE]
+//======================================================================
 static inline double Confidence_Freshness(double data_age_sec, double tau) {
     if (tau <= 0.0) tau = CONFIDENCE_FRESHNESS_TAU_DEFAULT;
     if (data_age_sec <= 0.0) return 1.0;  // fresh data = max freshness
@@ -350,10 +531,15 @@ static inline double Confidence_Compute(double ic, double data_age_sec, double r
 
     return abs_ic * freshness * stability;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Confidence_Compute]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.1.A — COMPOSITE CONFIDENCE COMPONENTS]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.14.1.A — COMPOSITE CONFIDENCE COMPONENTS]
+//----------------------------------------------------------------------
 // Composite formula: IC × Freshness × Capacity × Stability_normalized
 // where Stability_normalized = 1 - clamp(rmse / rmse_baseline, 0, 1).
 //
@@ -363,21 +549,53 @@ static inline double Confidence_Compute(double ic, double data_age_sec, double r
 // pulled from training. Enables soft risk degradation (v5.14.9) by giving
 // the sizing path a continuous [0, 1] confidence scalar instead of a
 // binary kill-switch trip.
-//======================================================================================================
 
 // Default kappa for capacity calc (proportionality constant on ADV).
 #define CONFIDENCE_CAPACITY_KAPPA_DEFAULT  0.1
 // Default ADV smoothing alpha (10-sample EWMA).
 #define CONFIDENCE_CAPACITY_ALPHA_DEFAULT  0.1
 
-// Wall-clock-driven freshness with cfg-tunable tau. Replaces the
-// data_age_sec arg of the original Confidence_Freshness so the scorer
-// owns its own clock state — operator + tests can manipulate via Mark.
+//======================================================================
+// [STRUCT]_[RollingFreshness]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[wall-clock freshness state — the scorer owns its own clock (Mark) instead of a caller-passed data_age_sec]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RollingFreshness {
     uint64_t last_predict_us;   // wall-clock at last prediction (Mark)
     double   tau_secs;          // exponential decay time constant
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Wall-clock-driven freshness with cfg-tunable tau. Replaces the
+// data_age_sec arg of the original Confidence_Freshness so the scorer
+// owns its own clock state — operator + tests can manipulate via Mark.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[RollingFreshness]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[RollingFreshness_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[freshness in [0,1] (Init + Mark ride) — exp decay from last Mark; 0 when never marked (cold-start = stale); backward time clamps to 1]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void RollingFreshness_Init(RollingFreshness *f, double tau_secs) {
     f->last_predict_us = 0;
     f->tau_secs = (tau_secs > 0.0) ? tau_secs : CONFIDENCE_FRESHNESS_TAU_DEFAULT;
@@ -397,16 +615,54 @@ static inline double RollingFreshness_Compute(const RollingFreshness *f, uint64_
     double age_sec = (double)(now_us - f->last_predict_us) / 1e6;
     return exp(-age_sec / tau);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingFreshness_Compute]
+//======================================================================
 
-// Capacity factor: how much of the desired position size the market can
-// absorb without slippage degradation. target_dollars=0 = unbounded
-// (single-symbol small-account default; capacity always 1.0).
+//======================================================================
+// [STRUCT]_[RollingCapacity]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[market-absorption factor state — EWMA-smoothed ADV vs position-size target; target_dollars=0 = unbounded (capacity always 1.0)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RollingCapacity {
     double current_adv;       // EWMA-smoothed average daily volume estimate
     double target_dollars;    // cfg-tunable position-size target; 0 = unbounded
     double kappa;             // proportionality constant
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Capacity factor: how much of the desired position size the market can
+// absorb without slippage degradation. target_dollars=0 = unbounded
+// (single-symbol small-account default; capacity always 1.0).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[24B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[RollingCapacity]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[RollingCapacity_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[capacity in [0,1] (Init + UpdateADV ride) — kappa*ADV/target clamped; 1.0 when target_dollars=0 (unbounded default)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void RollingCapacity_Init(RollingCapacity *c,
                                           double target_dollars, double kappa) {
     c->current_adv    = 0.0;
@@ -431,18 +687,60 @@ static inline double RollingCapacity_Compute(const RollingCapacity *c) {
     if (cap < 0.0) cap = 0.0;
     return cap;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingCapacity_Compute]
+//======================================================================
 
-//======================================================================================================
-// [FULL CONFIDENCE SCORER — combines IC + RMSE buffers]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FULL CONFIDENCE SCORER — combines IC + RMSE buffers]
+//----------------------------------------------------------------------
+
+//======================================================================
+// [STRUCT]_[ConfidenceScorer]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the full scorer — HOT scalars at line 0, WARM ic+rmse rings at cache-line boundaries, COLD composite-mode fields at the tail (decision-first ND3)]
+// [DIAGRAM]
+//   line 0:      [last_confidence:8][freshness_tau:8][pad:48]
+//   lines 1-17:  ic   (RollingIC, 1088B)
+//   lines 18-26: rmse (RollingRMSE, 576B)
+//   lines 27:    freshness(16B) + capacity(24B) + rmse_baseline(8B) + pad(16B)
+// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+// [REFERENCE]_[DESIGN_SPEC]_[decision-first-cluster-layout-pattern]
+//======================================================================
+// [CODE]
+//======================================================================
+struct alignas(64) ConfidenceScorer {
+    //---- [SECTION]_[HOT cluster (offset 0; touched every slow-path Compute call)] ----
+    double last_confidence;       // cached result; written per Compute, read per snapshot
+    double freshness_tau;         // read per Compute
+    // 48B alignment pad → ic starts at offset 64 (alignas(64) on RollingIC)
+
+    //---- [SECTION]_[WARM cluster (offsets 64+; ring buffers updated per Push 10-100Hz)] ----
+    RollingIC ic;                 // 1088B = 17 cache lines
+    RollingRMSE rmse;             // 576B = 9 cache lines
+
+    //---- [SECTION]_[COLD cluster (composite-mode-only; touched once at boot + per Compute when enabled)] ----
+    RollingFreshness freshness;   // v5.14.1.A — 16B
+    RollingCapacity capacity;     // v5.14.1.A — 24B
+    double rmse_baseline;         // v5.14.1.A — bound to training-time RMSE; default 1.0
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.14.1.A — added freshness + capacity + rmse_baseline for composite formula.
 // Pre-v5.14.1 fields (ic, rmse, freshness_tau, last_confidence) preserved;
 // existing ConfidenceScorer_Compute path bytewise unchanged when caller
 // stays on the IC-only API. Composite opt-in via cfg flag (v5.14.1.B).
 //
 // IC SEMANTICS NOTE (v5.14.1.F doc-fix): the `ic` field's struct type
-// `RollingIC` is generically named but its `RollingIC_Compute` body at
-// `ML_Headers/ConfidenceScore.hpp:96+` ranks both predictions+actuals then
+// `RollingIC` is generically named but its `RollingIC_Compute` body (above)
+// ranks both predictions+actuals then
 // computes Pearson correlation of the ranks = textbook **Spearman rank
 // correlation**. Despite the generic struct name, this has been Spearman
 // since v5.x.x. cfg.confidence_ic_variant=0 (default) selects this Spearman
@@ -463,21 +761,16 @@ static inline double RollingCapacity_Compute(const RollingCapacity *c) {
 // Pre-.E.A design note about active variant + sizeof freeze is RESOLVED:
 // runtime layout can now evolve (snapshot v12 = field-by-field). Future
 // fields can be added via FOREACH_CONFIDENCE_PERSIST_FIELD registry.
-struct alignas(64) ConfidenceScorer {
-    // ════ HOT cluster (offset 0; touched every slow-path Compute call) ════
-    double last_confidence;       // cached result; written per Compute, read per snapshot
-    double freshness_tau;         // read per Compute
-    // 48B alignment pad → ic starts at offset 64 (alignas(64) on RollingIC)
-
-    // ════ WARM cluster (offsets 64+; ring buffers updated per Push 10-100Hz) ════
-    RollingIC ic;                 // 1088B = 17 cache lines
-    RollingRMSE rmse;             // 576B = 9 cache lines
-
-    // ════ COLD cluster (composite-mode-only; touched once at boot + per Compute when enabled) ════
-    RollingFreshness freshness;   // v5.14.1.A — 16B
-    RollingCapacity capacity;     // v5.14.1.A — 24B
-    double rmse_baseline;         // v5.14.1.A — bound to training-time RMSE; default 1.0
-};
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[1792B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[28]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ConfidenceScorer]
+//======================================================================
 
 // v5.15.5.E.A — Layout lock for ConfidenceScorer. last_confidence at offset 0
 // (HOT scalar; per-Compute read + snapshot read; decision-first ordering).
@@ -493,20 +786,35 @@ struct alignas(64) ConfidenceScorer {
 //   capacity        @ 1728 + 16  = 1744
 //   rmse_baseline   @ 1744 + 24  = 1768
 //   end at 1776; alignas(64) outer → sizeof = 1792 (+16B trailing pad)
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(ConfidenceScorer) == 1792]
 static_assert(sizeof(ConfidenceScorer) == 1792,
     "ConfidenceScorer sizeof MUST be 1792 B (28 cache lines exact).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(last_confidence) == 0 — decision-first ND3]
 static_assert(offsetof(ConfidenceScorer, last_confidence) == 0,
     "ConfidenceScorer HOT scalar `last_confidence` MUST sit at offset 0 "
     "(decision-first ordering per ND3).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(freshness_tau) == 8]
 static_assert(offsetof(ConfidenceScorer, freshness_tau) == 8,
     "ConfidenceScorer HOT scalar `freshness_tau` MUST sit at offset 8.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(ic) == 64]
 static_assert(offsetof(ConfidenceScorer, ic) == 64,
     "ConfidenceScorer WARM cluster `ic` MUST sit at offset 64 (cache-line aligned).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(rmse) == 1152]
 static_assert(offsetof(ConfidenceScorer, rmse) == 1152,
     "ConfidenceScorer WARM cluster `rmse` MUST sit at offset 1152 (after ic).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(ConfidenceScorer) == 64]
 static_assert(alignof(ConfidenceScorer) == 64,
     "ConfidenceScorer MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[ConfidenceScorer_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the scorer API family (Init / ComputeICVariant / InitComposite / BindCompositeCfg / Update / UpdateAndMark ride) — legacy 3-factor Compute is the terminus; composite path is the next block]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, double tau) {
     RollingIC_Init(&cs->ic, (window > 0) ? window : CONFIDENCE_IC_WINDOW_DEFAULT);
     RollingRMSE_Init(&cs->rmse, (window > 0) ? window : CONFIDENCE_IC_WINDOW_DEFAULT);
@@ -535,7 +843,7 @@ static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, doubl
 // variant's compute fn via FOREACH_IC_VARIANT X-macro. Caller passes
 // `variant` explicitly (typically `cfg.confidence_ic_variant` from
 // ControllerConfig) — NOT cached on ConfidenceScorer to avoid changing
-// sizeof and breaking snapshot save/load at PortfolioController.hpp:2094+2210
+// sizeof and breaking the PortfolioController snapshot save/load pair
 // (Class 4 — snapshot save/load asymmetry).
 //
 // Out-of-range variant → falls through to default case in the dispatch
@@ -572,7 +880,8 @@ static inline void ConfidenceScorer_InitComposite(ConfidenceScorer *cs,
 // ControllerConfig<F>* (ConfidenceScore.hpp lives in ML_Headers/, cfg lives
 // in CoreFrameworks/ — keeping the dependency direction one-way).
 //
-// Caller pattern (3 boot sites: EngineSharded, ControllerEventLoop, PortfolioController):
+// Caller pattern (the engine bind sites: EngineCommon boot, StrategyParameters,
+// ShardedSnapshotPersist post-load, PortfolioController legacy):
 //   ConfidenceScorer_Init(&cs, window, base_tau);
 //   ConfidenceScorer_BindCompositeCfg(&cs,
 //       BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
@@ -621,29 +930,24 @@ static inline double ConfidenceScorer_Compute(ConfidenceScorer *cs, double data_
     cs->last_confidence = Confidence_Compute(ic, data_age_sec, rmse, cs->freshness_tau);
     return cs->last_confidence;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ConfidenceScorer_Compute]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.1.A — COMPOSITE CONFIDENCE COMPUTE]
-//======================================================================================================
-// 4-factor composite: IC × Freshness × Capacity × Stability_normalized.
-//
-// Differs from ConfidenceScorer_Compute (3-factor IC × Freshness ×
-// 1/(1+RMSE)) in three ways:
-//   1. Adds Capacity term (silently 1.0 when target_dollars=0; default).
-//   2. Stability is normalized vs rmse_baseline (training-time RMSE),
-//      so "stability" means "how close are we to training-time
-//      calibration" rather than "absolute RMSE magnitude".
-//   3. Freshness uses wall-clock now_us against last Mark, not a
-//      caller-passed data_age_sec — the scorer owns its own clock state.
-//
-// Returns scalar in [0, 1]. Caller-provided now_us so tests + replay-
-// determinism can pin time.
-//
-// Mark must be called when a prediction is generated (typically inside
-// the slow-path predict loop, between Features_PackAll + Model_Predict).
-// Update is called when the outcome is known (post-fill, same as legacy
-// ConfidenceScorer_Update).
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ConfidenceScorer_ComputeComposite]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the v5.14.1.A 4-factor opt-in path (MarkPredict rides) — returns [0,1]; caller-provided now_us pins time for replay determinism + tests]
+// [DIAGRAM]_[formula]
+//   composite = |IC| * freshness * capacity * stability_normalized
+//   stability_normalized = 1 - clamp(rmse / rmse_baseline, 0, 1)
+//======================================================================
+// [CODE]
+//======================================================================
 static inline double ConfidenceScorer_ComputeComposite(ConfidenceScorer *cs,
                                                           uint64_t now_us) {
     double ic   = RollingIC_Compute(&cs->ic);
@@ -675,10 +979,48 @@ static inline double ConfidenceScorer_ComputeComposite(ConfidenceScorer *cs,
 static inline void ConfidenceScorer_MarkPredict(ConfidenceScorer *cs, uint64_t now_us) {
     RollingFreshness_Mark(&cs->freshness, now_us);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 4-factor composite: IC × Freshness × Capacity × Stability_normalized.
+//
+// Differs from ConfidenceScorer_Compute (3-factor IC × Freshness ×
+// 1/(1+RMSE)) in three ways:
+//   1. Adds Capacity term (silently 1.0 when target_dollars=0; default).
+//   2. Stability is normalized vs rmse_baseline (training-time RMSE),
+//      so "stability" means "how close are we to training-time
+//      calibration" rather than "absolute RMSE magnitude".
+//   3. Freshness uses wall-clock now_us against last Mark, not a
+//      caller-passed data_age_sec — the scorer owns its own clock state.
+//
+// Returns scalar in [0, 1]. Caller-provided now_us so tests + replay-
+// determinism can pin time.
+//
+// Mark must be called when a prediction is generated (typically inside
+// the slow-path predict loop, between Features_PackAll + Model_Predict).
+// Update is called when the outcome is known (post-fill, same as legacy
+// ConfidenceScorer_Update).
+//======================================================================
+// [END_FUNCTION]_[ConfidenceScorer_ComputeComposite]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.9 — SOFT RISK DEGRADATION LADDER]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_DEGRADATION_CURVE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v5.14.9 soft risk degradation ladder — composite confidence -> sizing-multiplier curve; enum + dispatch table + string helpers + the 4 BRANCHLESS curve fns + bounds-checked wrapper all auto-flow from the rows]
+// [COLUMN]_[name]_[curve identifier -> CURVE_<name> enum + Confidence_DegradationScale_<Name> fn naming]
+// [COLUMN]_[enum_value]_[dense 0..N-1 — indexes the fn-ptr dispatch table]
+// [COLUMN]_[compute_fn]_[the curve implementation wired into degradation_curve_fns[]]
+// [COLUMN]_[doc_string]_[operator-facing curve description]
+// [REFERENCE]_[DESIGN_SPEC]_[curve-registry-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+//======================================================================
+// [CODE]
+//======================================================================
 // Composite confidence → sizing-multiplier scaling. Replaces the broken-for-
 // composite v5.12.1.D math (which compared conf_now ∈ [0.001, 0.3] against
 // ml_buy_threshold ∈ [0.5, 0.7] → factor=0 silently).
@@ -702,8 +1044,10 @@ static inline void ConfidenceScorer_MarkPredict(ConfidenceScorer *cs, uint64_t n
 //
 // Pattern documented in DESIGN_SPECS/curve-registry-pattern.md.
 // Slow-path-only; hot path UNTOUCHED.
-//======================================================================================================
 
+//----------------------------------------------------------------------
+// [SECTION]_[forward decls + the registry rows]
+//----------------------------------------------------------------------
 // Forward-declare curve compute fns so the dispatch table can reference them.
 inline double Confidence_DegradationScale_Off    (double, double, double, double);
 inline double Confidence_DegradationScale_Linear (double, double, double, double);
@@ -717,6 +1061,9 @@ inline double Confidence_DegradationScale_Step   (double, double, double, double
     X(EXP,    2, Confidence_DegradationScale_Exp,    "quadratic falloff; preserves more size in middle") \
     X(STEP,   3, Confidence_DegradationScale_Step,   "binary 1.0 above midpoint else min_pct (debug)")
 
+//----------------------------------------------------------------------
+// [SECTION]_[auto-generated consumers — enum + count + dispatch table + string helpers]
+//----------------------------------------------------------------------
 // Auto-generated enum (CURVE_OFF / CURVE_LINEAR / CURVE_EXP / CURVE_STEP).
 #define X_GEN_ENUM(name, val, fn, doc) CURVE_##name = val,
 enum DegradationCurve {
@@ -768,13 +1115,12 @@ static inline int DegradationCurve_FromString(const char* s) {
     return -1;
 }
 
-//======================================================================================================
-// [CURVE COMPUTE FNS — v5.14.9.A]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[CURVE COMPUTE FNS — v5.14.9.A]
+//----------------------------------------------------------------------
 // All branchless. fmin/fmax → cmov; fma → 1 cycle on modern x86.
 // Defensive: if full <= min (operator misconfig), return min_pct unconditionally
 // (avoids div-by-zero; operator gets predictable degraded behavior).
-//======================================================================================================
 
 // OFF — factor=1.0 unconditionally. Preserves pre-v5.14.9 behavior bytewise
 // when cfg.risk_degradation_curve=0 (default).
@@ -820,10 +1166,15 @@ static inline double Confidence_DegradationScale(int curve, double conf,
     if (curve < 0 || curve >= FOREACH_DEGRADATION_CURVE_COUNT) return 1.0;
     return degradation_curve_fns[curve](conf, full, min, min_pct);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_DEGRADATION_CURVE]
+//======================================================================
 
-//======================================================================================================
-// [DRIFT HISTORY — v5.10.0e runtime IC monitoring]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[DRIFT HISTORY — v5.10.0e runtime IC monitoring]
+//----------------------------------------------------------------------
 // Time-series ring buffer of (IC, timestamp) pairs sampled at slow-path
 // cadence (typically post-fill drain when ConfidenceScorer_Update fires).
 // Sustained-breach detection: average IC over the last `window_us` is
@@ -834,47 +1185,74 @@ static inline double Confidence_DegradationScale(int curve, double conf,
 // ~4 minutes of history; at 1 sample/30s that's ~2 hours; the breach
 // window is operator-tunable via cfg.confidence_ic_floor_window so
 // fast-cadence operators get longer effective coverage.
-//======================================================================================================
+
 #define DRIFT_HISTORY_CAPACITY 256
 
 // v5.15.5.E.B — DriftHistory state flags bitmap. Replaces int breached +
 // int kill_tripped (8 bytes; 2 booleans) with uint8_t drift_state_flags
-// (1 byte; 2 bits used, 6 free for future flags). Per bitmap-flag-api.md +
-// CLAUDE.md item 20. Single-thread access (per-core slow-path); no atomic
+// (1 byte; 2 bits used, 6 free for future flags). Per bitmap-flag-api.md.
+// Single-thread access (per-core slow-path); no atomic
 // variant needed.
 constexpr uint8_t MASK_DRIFT_BREACHED     = BITMAP_BIT_U8(0);
 constexpr uint8_t MASK_DRIFT_KILL_TRIPPED = BITMAP_BIT_U8(1);
 // bits 2-7 reserved for future drift-state flags
 
+//======================================================================
+// [STRUCT]_[DriftSample]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the AoS (ic, ts) pair — one CheckBreach iteration touches ONE cache line instead of the pre-.E.B two parallel arrays 2048B apart]
+// [REFERENCE]_[DESIGN_SPEC]_[latency-vs-cache-decision-framework]
+//======================================================================
+// [CODE]
+//======================================================================
+struct DriftSample {
+    double   ic;   // IC value at this sample point (read by CheckBreach + snapshot aggregate)
+    uint64_t ts;   // wall-clock timestamp at sample (read by CheckBreach window filter)
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.15.5.E.B — AoS sample interleave per latency-vs-cache-decision-framework.md
 // + DESIGN_SPECS/aos-time-series-pattern (codification deferred to 2nd app per
 // TECH_DEBT-049 trigger). Pre-.E.B layout was parallel arrays (ic_samples[256] +
 // ts_us[256]) at 2048B offset apart → CheckBreach loop touched 2 cache lines
 // per iteration. Post-.E.B: each iteration touches 1 cache line (DriftSample
 // is 16B; samples[k] read pulls both .ic + .ts in one cache fill).
-struct DriftSample {
-    double   ic;   // IC value at this sample point (read by CheckBreach + snapshot aggregate)
-    uint64_t ts;   // wall-clock timestamp at sample (read by CheckBreach window filter)
-};
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[DriftSample]
+//======================================================================
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(DriftSample) == 16]
 static_assert(sizeof(DriftSample) == 16,
     "DriftSample MUST be 16 B (2 × 8B; AoS cache locality for CheckBreach).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(ic) == 0]
 static_assert(offsetof(DriftSample, ic) == 0, "DriftSample.ic at offset 0");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(ts) == 8]
 static_assert(offsetof(DriftSample, ts) == 8, "DriftSample.ts at offset 8");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(DriftSample) == 8]
 static_assert(alignof(DriftSample) == 8, "DriftSample 8B aligned");
 
-// v5.15.5.E.B — breach_first_us EXTRACTED to existing NodeContextDisplayMeta
-// sibling via FOREACH_DISPLAY_META_FIELD registry row (drift_breach_first_us).
-// Per cache-layout-discipline-for-hot-side-structs.md Rule 1 (display-only
-// field extraction) + closes Class-18 mirror with other display-only fields
-// on NodeContext (avoids creating yet another DisplayMeta sister struct).
-// Audit verified 2026-05-13: breach_first_us is WRITE-ONLY in current code
-// (set at first-breach detection; never read; not in snapshot). Preserved
-// for future GUI consumption via DisplayMeta access.
-
-// v5.15.5.E.B — DriftHistory full discipline: alignas(64) + HOT-first reorg +
-// AoS interleave + bit-packed flags + display-only field extracted. Pattern:
-// cache-layout-discipline-for-hot-side-structs.md Rules 1 + 4 + 5 + bitmap-
-// flag-api.md + latency-vs-cache-decision-framework.md.
+//======================================================================
+// [STRUCT]_[DriftHistory]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[IC drift ring — HOT count/head/flags at line 0, COLD 4096B AoS sample ring at offset 16; bit-packed state flags (MASK_DRIFT_*)]
+// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+//======================================================================
+// [CODE]
+//======================================================================
 struct alignas(64) DriftHistory {
     // HOT cluster (offset 0)
     int     count;              // monotonic insert count (saturates at CAPACITY)
@@ -886,21 +1264,62 @@ struct alignas(64) DriftHistory {
     // COLD cluster (offset 16; 4096B AoS ring buffer)
     DriftSample samples[DRIFT_HISTORY_CAPACITY];
 };
-
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.E.B — DriftHistory full discipline: alignas(64) + HOT-first reorg +
+// AoS interleave + bit-packed flags + display-only field extracted. Pattern:
+// cache-layout-discipline-for-hot-side-structs.md Rules 1 + 4 + 5 + bitmap-
+// flag-api.md + latency-vs-cache-decision-framework.md.
+//
+// v5.15.5.E.B — breach_first_us EXTRACTED to existing NodeContextDisplayMeta
+// sibling via FOREACH_DISPLAY_META_FIELD registry row (drift_breach_first_us).
+// Per cache-layout-discipline-for-hot-side-structs.md Rule 1 (display-only
+// field extraction) + closes Class-18 mirror with other display-only fields
+// on NodeContext (avoids creating yet another DisplayMeta sister struct).
+// Audit verified 2026-05-13: breach_first_us is WRITE-ONLY in current code
+// (set at first-breach detection; never read; not in snapshot). Preserved
+// for future GUI consumption via DisplayMeta access.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[4160B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[65]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[DriftHistory]
+//======================================================================
 // v5.15.5.E.B — Layout lock for DriftHistory.
 // 9 byte HOT + 7B pad + 4096B samples = 4112 natural; alignas(64) → 4160
 // (+48B trailing pad; 65 cache lines exact).
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(DriftHistory) == 4160]
 static_assert(sizeof(DriftHistory) == 4160,
     "DriftHistory sizeof MUST be 4160 B (65 cache lines with 48B trailing pad).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(count) == 0]
 static_assert(offsetof(DriftHistory, count) == 0,
     "DriftHistory HOT scalar `count` at offset 0.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(drift_state_flags) == 8]
 static_assert(offsetof(DriftHistory, drift_state_flags) == 8,
     "DriftHistory HOT bitmap `drift_state_flags` at offset 8.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(samples) == 16]
 static_assert(offsetof(DriftHistory, samples) == 16,
     "DriftHistory COLD `samples` at offset 16 (cache-aligned with 7B pad after flags).");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(DriftHistory) == 64]
 static_assert(alignof(DriftHistory) == 64,
     "DriftHistory MUST be cache-line aligned.");
 
+//======================================================================
+// [FUNCTION]_[DriftHistory_CheckBreach]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sustained-breach detector (Init + Push ride) — avg IC over the trailing window below floor with >= 5 samples; AoS ring walked backward from head]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void DriftHistory_Init(DriftHistory *dh) {
     memset(dh, 0, sizeof(*dh));
     // count = head = drift_state_flags = 0; samples[] = {0}; pad bytes cleared.
@@ -951,45 +1370,28 @@ static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_
     if (out_samples) *out_samples = n;
     return (avg < floor) ? 1 : 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[DriftHistory_CheckBreach]
+//======================================================================
 
-//======================================================================================================
-// [v5.15.5.E.0 — STRUCTURAL UNBLOCK: FOREACH_CONFIDENCE_PERSIST_FIELD + AUTOPOPULATE + shadow-load]
-//======================================================================================================
-// Closes Class-18 mirror between PortfolioController.hpp:2117 (raw fwrite)
-// and ShardedSnapshotPersist.hpp:247-256 (field-by-field) per
-// structural-fix-preferred-decision-framework.md + CLAUDE.md item 19.
-//
-// FOREACH registry IS the wire format spec. Both persistence sites use the
-// same fieldwise helpers — adding a new persisted field = ONE row in the
-// registry; both fwrite + fread bodies + commit path auto-generated via
-// macro expansion (autopopulate-pattern-for-production-caller-class.md).
-//
-// Subset matches sharded path's pre-.E behavior: only ic + rmse internals
-// persist. Composite-mode fields (freshness/capacity/rmse_baseline) are
-// EXCLUDED — wall-clock + EWMA state stale on reload; re-init from cfg
-// at boot is the correct behavior (legacy raw-fwrite was over-persisting).
-// last_confidence / freshness_tau / ic.window / rmse.window similarly omitted
-// (re-compute on next Compute / re-init from cfg / template constant).
-//
-// FIELD signature: X(member_path, type, count) where count=1 for scalar,
-// N for array. The macro expands inside `cs->{name}` access.
-//
-// Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md +
-// DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md.
-//======================================================================================================
-// v5.15.5.E.C — Field paths updated for RollingWindow<T,N> composition:
-//   ic.predictions → ic.predictions.samples (the array within RollingWindow)
-//   ic.actuals     → ic.actuals.samples
-//   ic.count       → ic.predictions.count (predictions + actuals stay in lockstep
-//                    via RollingIC_Push; canonically read from predictions)
-//   ic.head        → ic.predictions.head
-//   rmse.squared_errors → rmse.window.samples
-//   rmse.count     → rmse.window.count
-//   rmse.head      → rmse.window.head
-//
-// Wire bytes IDENTICAL to pre-.E.C: data values + byte offsets within
-// `ic` / `rmse` unchanged. predictions.samples starts at offset 16 of
-// RollingWindow (matches predictions array offset 16 of pre-.E.C RollingIC).
+//======================================================================
+// [REGISTRY]_[FOREACH_CONFIDENCE_PERSIST_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ConfidenceScorer wire-format spec — one row per persisted field; fwrite + fread + commit bodies auto-generate; RecomputeRunningSums restores the derived aggregate post-load]
+// [COLUMN]_[member_path]_[ConfidenceScorer member access path — the macro expands inside cs->{name}]
+// [COLUMN]_[type]_[element C type for sizeof in the fwrite/fread/memcpy expansion]
+// [COLUMN]_[count]_[element count — 1 for scalar, N for array]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth]
+// [REFERENCE]_[DESIGN_SPEC]_[autopopulate-pattern-for-production-caller-class]
+// [REFERENCE]_[INVARIANT]_[H9]
+// [REFERENCE]_[CLASS]_[18]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_CONFIDENCE_PERSIST_FIELD(X)                      \
     X(ic.predictions.samples,    double, ROLLING_IC_MAX_WINDOW)  \
     X(ic.actuals.samples,        double, ROLLING_IC_MAX_WINDOW)  \
@@ -1057,10 +1459,54 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
     }
     cs->rmse.sum_squared_errors = sum;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.E.0 — STRUCTURAL UNBLOCK: FOREACH_CONFIDENCE_PERSIST_FIELD + AUTOPOPULATE + shadow-load.
+// Closes Class-18 mirror between PortfolioController.hpp:2117 (raw fwrite)
+// and ShardedSnapshotPersist.hpp:247-256 (field-by-field) per
+// structural-fix-preferred-decision-framework.md.
+//
+// FOREACH registry IS the wire format spec. Both persistence sites use the
+// same fieldwise helpers — adding a new persisted field = ONE row in the
+// registry; both fwrite + fread bodies + commit path auto-generated via
+// macro expansion (autopopulate-pattern-for-production-caller-class.md).
+//
+// Subset matches sharded path's pre-.E behavior: only ic + rmse internals
+// persist. Composite-mode fields (freshness/capacity/rmse_baseline) are
+// EXCLUDED — wall-clock + EWMA state stale on reload; re-init from cfg
+// at boot is the correct behavior (legacy raw-fwrite was over-persisting).
+// last_confidence / freshness_tau / ic.window / rmse.window similarly omitted
+// (re-compute on next Compute / re-init from cfg / template constant).
+//
+// FIELD signature: X(member_path, type, count) where count=1 for scalar,
+// N for array. The macro expands inside `cs->{name}` access.
+//
+// Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md +
+// DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md.
+//
+// v5.15.5.E.C — Field paths updated for RollingWindow<T,N> composition:
+//   ic.predictions → ic.predictions.samples (the array within RollingWindow)
+//   ic.actuals     → ic.actuals.samples
+//   ic.count       → ic.predictions.count (predictions + actuals stay in lockstep
+//                    via RollingIC_Push; canonically read from predictions)
+//   ic.head        → ic.predictions.head
+//   rmse.squared_errors → rmse.window.samples
+//   rmse.count     → rmse.window.count
+//   rmse.head      → rmse.window.head
+//
+// Wire bytes IDENTICAL to pre-.E.C: data values + byte offsets within
+// `ic` / `rmse` unchanged. predictions.samples starts at offset 16 of
+// RollingWindow (matches predictions array offset 16 of pre-.E.C RollingIC).
+//======================================================================
+// [END_REGISTRY]_[FOREACH_CONFIDENCE_PERSIST_FIELD]
+//======================================================================
 
-//======================================================================================================
-// [v5.15.5.E.0 — LEGACY V1 WIRE STRUCT + SHADOW-LOAD MIGRATION]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.15.5.E.0 — LEGACY V1 WIRE STRUCT + SHADOW-LOAD MIGRATION]
+//----------------------------------------------------------------------
 // ConfidenceScorerLegacyV1 + sub-structs: FROZEN byte-format matching pre-.E
 // PortfolioController raw fwrite (CONTROLLER_SNAPSHOT_VERSION=11). Used ONLY
 // by ConfidenceScorer_ShadowLoadLegacyV1 during one-shot migration of v11
@@ -1069,7 +1515,8 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
 //
 // THESE STRUCTS ARE NEVER WRITTEN. Pure read-side wire-format target. After
 // TECH_DEBT-002 closes (legacy PortfolioController removal), they can be
-// deleted entirely + the shadow-load helper goes with them.
+// deleted entirely + the shadow-load helper goes with them. (Terse by
+// design — frozen trivial wire targets carry no [STRUCT] blocks.)
 //
 // Layout cloned from pre-.E.A ConfidenceScorer + sub-structs. Field order +
 // types match exactly. Compiler-generated padding matches because the struct
@@ -1078,7 +1525,7 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
 // Pattern: DESIGN_SPECS/shadow-load-state-transition-pattern.md +
 // DESIGN_SPECS/wire-format-byte-preservation-discipline.md +
 // DESIGN_SPECS/struct-padding-determinism-pattern.md.
-//======================================================================================================
+
 struct RollingIC_LegacyV1 {
     double predictions[ROLLING_IC_MAX_WINDOW];
     double actuals[ROLLING_IC_MAX_WINDOW];
@@ -1115,10 +1562,16 @@ struct ConfidenceScorerLegacyV1 {
     double               rmse_baseline;
 };
 
-// Shadow-load: read v11 raw-fwrite bytes, populate runtime ConfidenceScorer
-// via field-by-field copy. Composite-mode fields RE-INIT from cfg via
-// ConfidenceScorer_Init (wall-clock + EWMA stale on reload; re-warm correct).
-// Returns 0 on success; -1 on fread failure.
+//======================================================================
+// [FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one-shot v11 -> v12 migration read — raw LegacyV1 bytes into the runtime layout; stale wall-clock/EWMA/cfg-owned fields INTENTIONALLY DROPPED (re-init from cfg)]
+// [REFERENCE]_[DESIGN_SPEC]_[shadow-load-state-transition-pattern]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int ConfidenceScorer_ShadowLoadLegacyV1(ConfidenceScorer* cs, FILE* f) {
     ConfidenceScorerLegacyV1 wire;
     if (fread(&wire, sizeof(wire), 1, f) != 1) return -1;
@@ -1157,5 +1610,17 @@ static inline int ConfidenceScorer_ShadowLoadLegacyV1(ConfidenceScorer* cs, FILE
 
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Shadow-load: read v11 raw-fwrite bytes, populate runtime ConfidenceScorer
+// via field-by-field copy. Composite-mode fields RE-INIT from cfg via
+// ConfidenceScorer_Init (wall-clock + EWMA stale on reload; re-warm correct).
+// Returns 0 on success; -1 on fread failure.
+//======================================================================
+// [END_FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1]
+//======================================================================
 
 #endif // CONFIDENCE_SCORE_HPP
