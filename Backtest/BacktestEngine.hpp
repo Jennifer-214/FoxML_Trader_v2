@@ -3,13 +3,27 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BACKTEST ENGINE]
+// [FILE]_[Backtest/BacktestEngine.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the backtest training + validation harness — CSV loader, BacktestResults buffers, the Backtest_Run wrapper (delegates replay to BacktestSharded_Run), the forward-scan label post-pass, walk-forward + held-out XGBoost validation, and the parameter/hyperparam optimizer]
+// [CONTAINS]
+//   - [FUNCTION]_[BacktestData_Load] · [FUNCTION]_[BacktestData_ValidateSort]
+//   - [STRUCT]_[BacktestRunConfig] · [STRUCT]_[BacktestStats] · [STRUCT]_[BacktestResults]
+//   - [FUNCTION]_[Backtest_ComputeLabelsFromSamples] · [FUNCTION]_[Backtest_Run]
+//   - [STRUCT]_[WalkForwardResults] · [STRUCT]_[FullValidationResults]
+//   - [FUNCTION]_[Backtest_RunFullValidation] · [FUNCTION]_[Backtest_RunWalkForward] · [FUNCTION]_[HeldOutSplit_TrainEval]
+//   - [FUNCTION]_[ConfigField_Set] · [FUNCTION]_[Backtest_RunSweep] · [FUNCTION]_[Backtest_RunHyperparamTrainSweep]
 //======================================================================================================
-// replay loop for historical tick data through the identical engine code path.
-// produces the exact same trade results as live — same BuyGate, ExitGate,
-// PortfolioController_Tick calls in the same order.
-//
-// mirrors main.cpp:363-547 — if main.cpp's tick loop changes, update this.
+// The backtest harness. Historical tick replay itself lives in
+// BacktestSharded.hpp (the per-core architecture); Backtest_Run here is a thin
+// wrapper that calls BacktestSharded_Run and then runs the forward-scan label
+// post-pass. The legacy PortfolioController_Tick-driven replay body was DELETED
+// (E.7 / E.1.1) — there is no BuyGate/ExitGate loop in this file anymore. What
+// remains: the CSV data loader + sort validation, the BacktestResults/Stats
+// buffers, the streaming label computation, and the ML validation + optimization
+// paths (walk-forward CV, held-out train/eval, parameter sweep, hyperparam sweep).
 //======================================================================================================
 #ifndef BACKTEST_ENGINE_HPP
 #define BACKTEST_ENGINE_HPP
@@ -50,14 +64,19 @@
 
 // HistoricalTick is defined in LabelFunctions.hpp (single definition point)
 
-//======================================================================================================
-// [DATA LOADER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BacktestData_Load]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[load a Binance aggTrades or TickRecorder CSV into HistoricalTick[] — BacktestData_DetectFormat rides; locale-immune float parse (H5), bogus-timestamp filter]
+//======================================================================
+// [CODE]
+//======================================================================
 // loads Binance aggTrades CSV format:
 //   id,price,qty,first_id,last_id,timestamp,is_buyer_maker
 // or TickRecorder format:
 //   timestamp_us,price,quantity,is_buyer_maker
-//======================================================================================================
 static inline int BacktestData_DetectFormat(const char *header) {
     // TickRecorder format starts with "timestamp_us"
     if (strncmp(header, "timestamp_us", 12) == 0) return 1;
@@ -124,10 +143,21 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
     fprintf(stderr, "[backtest] loaded %d ticks from %s\n", *count, csv_path);
     return *count > 0 ? 1 : 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestData_Load]
+//======================================================================
 
-//======================================================================================================
-// [TICK SORT VALIDATION — v5.9.2c]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BacktestData_ValidateSort]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[validate the tick array is timestamp-monotonic — WARN / STRICT / AUTO per csv_sort_check_mode; HistoricalTick_CmpByTime rides as the qsort comparator]
+//======================================================================
+// [CODE]
+//======================================================================
 // Validates the tick array is timestamp-monotonic (`ticks[i].timestamp_us
 // >= ticks[i-1].timestamp_us`). Closes the silent-drift class where
 // concatenated daily exports / mistyped tick replays produce out-of-order
@@ -183,10 +213,21 @@ static inline int BacktestData_ValidateSort(HistoricalTick *ticks, int count,
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestData_ValidateSort]
+//======================================================================
 
-//======================================================================================================
-// [RUN CONFIG]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[BacktestRunConfig]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-run backtest request — data file paths, cfg source, feature-collection + label params, bandit-state prior override]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BacktestRunConfig {
     char data_paths[MAX_DATA_FILES][256];
     int num_data_files;
@@ -207,10 +248,23 @@ struct BacktestRunConfig {
     // prior, use default load only.
     char bandit_state_prior_path[400];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BacktestRunConfig]
+//======================================================================
 
-//======================================================================================================
-// [STATS]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[BacktestStats]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[computed backtest metrics — P&L, win/loss, profit factor, drawdown, Sharpe, expectancy; all_wins_run separates math from display, NaN-label counters]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BacktestStats {
     double sharpe_ratio;
     double profit_factor;
@@ -242,10 +296,23 @@ struct BacktestStats {
     uint32_t nan_labels_total;     // total NaN/Inf label outputs encountered
     uint32_t nan_labels_dropped;   // multiclass samples skipped from training
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BacktestStats]
+//======================================================================
 
-//======================================================================================================
-// [RESULTS]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[BacktestResults]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the backtest output buffers — stats + dynamic equity curve + dynamic ML feature/label/sample arrays; the lifecycle helpers Init / Free / Reset / EnsureCapacity ride]
+//======================================================================
+// [CODE]
+//======================================================================
 #define BACKTEST_EQUITY_INIT   8192    // initial equity_curve allocation, grows 2x as needed
 #define BACKTEST_SAMPLES_INIT  500000  // initial sample buffer allocation, grows as needed
 #define BACKTEST_TRADE_CSV     "logging/BACKTEST_order_history.csv"
@@ -271,6 +338,9 @@ struct BacktestResults {
     // config used (for comparison)
     ControllerConfig<BACKTEST_FP> config_used;
 };
+//----------------------------------------------------------------------
+// [SECTION]_[lifecycle: Init / Free / Reset / Ensure*Capacity]
+//----------------------------------------------------------------------
 
 static inline void BacktestResults_Init(BacktestResults *r) {
     memset(r, 0, sizeof(*r));
@@ -377,24 +447,23 @@ static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int n
     r->equity_capacity = new_cap;
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BacktestResults]
+//======================================================================
 
-//======================================================================================================
-// [TRAINING HELPERS]
-//======================================================================================================
-// XGBoost binary `scale_pos_weight` compensates for class imbalance.
-// At ratio 0.2% positive (typical for tight-barrier label sets on BTC),
-// the trivial "predict majority class" baseline gets >99% accuracy and
-// the loss function has zero pressure to learn the minority class —
-// every walk-forward fold flags as memorization. scale_pos_weight =
-// n_neg/n_pos rebalances the loss so positives count equally per-class.
-//
-// Multiclass (multi:softprob) ignores scale_pos_weight; use per-sample
-// weights via XGDMatrixSetFloatInfo("weight", ...) for those.
-// Regression (reg:squarederror) doesn't need it.
-//
-// Threshold for "positive": label >= 0.5f. Matches the convention used
-// in WalkForward_ComputeAccuracy and the binary-classifier label values
-// (0.0 = negative, 1.0 = positive, 0.5 = neutral and already filtered).
+//======================================================================
+// [FUNCTION]_[XGBoost_ComputeScalePosWeight]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[n_neg/n_pos for XGBoost binary scale_pos_weight — rebalances the loss so the rare positive class counts per-class equally; XGBoost_ComputeMulticlassWeights (inverse-frequency per-sample weights) rides]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline double XGBoost_ComputeScalePosWeight(const float *labels, int n,
                                                      int *out_n_pos = nullptr,
                                                      int *out_n_neg = nullptr) {
@@ -452,17 +521,38 @@ static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int cou
         for (int k = 0; k < K; k++) out_counts[k] = counts[k];
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// XGBoost binary `scale_pos_weight` compensates for class imbalance.
+// At ratio 0.2% positive (typical for tight-barrier label sets on BTC),
+// the trivial "predict majority class" baseline gets >99% accuracy and
+// the loss function has zero pressure to learn the minority class —
+// every walk-forward fold flags as memorization. scale_pos_weight =
+// n_neg/n_pos rebalances the loss so positives count equally per-class.
+//
+// Multiclass (multi:softprob) ignores scale_pos_weight; use per-sample
+// weights via XGDMatrixSetFloatInfo("weight", ...) for those.
+// Regression (reg:squarederror) doesn't need it.
+//
+// Threshold for "positive": label >= 0.5f. Matches the convention used
+// in WalkForward_ComputeAccuracy and the binary-classifier label values
+// (0.0 = negative, 1.0 = positive, 0.5 = neutral and already filtered).
+//======================================================================
+// [END_FUNCTION]_[XGBoost_ComputeScalePosWeight]
+//======================================================================
 
-//======================================================================================================
-// [STATS COMPUTE]
-//======================================================================================================
-// v5.8.4c: per-metric Compute_* helpers + MaxDrawdown_UpdateIncremental
-// live in CoreFrameworks/MetricCompute.hpp (included via
-// ShardedSnapshot.hpp / EngineTUI.hpp's transitive includes). Single
-// source of truth across backtest, live TUI, and per-core snapshot
-// paths — kills the 4-site profit_factor drift + 3-site expectancy
-// fabs() inconsistency + 2-site max_drawdown reimplementation.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BacktestStats_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fill BacktestStats from a PortfolioController — every metric routed through the shared Compute_* helpers (MetricCompute.hpp SSoT across backtest / live TUI / per-core snapshot); drawdown+sharpe come from the equity curve separately. NO callers at HEAD: the sharded path computes stats inline; this is legacy PortfolioController deadweight that retires with TECH_DEBT-191]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void BacktestStats_Compute(BacktestStats *stats,
                                           const PortfolioController<BACKTEST_FP> *ctrl,
                                           double starting_balance,
@@ -492,10 +582,21 @@ static inline void BacktestStats_Compute(BacktestStats *stats,
     // max drawdown — compute from equity curve in results (caller's job)
     // sharpe — needs equity curve data too
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestStats_Compute]
+//======================================================================
 
-//======================================================================================================
-// [MAX DRAWDOWN + SHARPE from equity curve]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BacktestStats_ComputeFromEquity]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[max drawdown (via the shared incremental helper) + annualized Sharpe from the equity curve — the trade-by-trade stats the PortfolioController path can't give]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
                                                     const double *equity, int count) {
     // v5.8.4c: max drawdown via shared MaxDrawdown_UpdateIncremental helper —
@@ -527,6 +628,11 @@ static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
     // rough: if 30 trades/day, 365 days = 10950 trades/year
     stats->sharpe_ratio = (stddev > 1e-12) ? mean / stddev * sqrt((double)n) : 0.0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestStats_ComputeFromEquity]
+//======================================================================
 
 // Forward decl for the sharded backtest path. The actual implementation lives
 // in Backtest/BacktestSharded.hpp which is included AFTER this declaration so
@@ -542,9 +648,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                         TUISnapshot *out_snapshot);
 }
 
-//======================================================================================================
-// [LABEL COMPUTATION HELPER — Track E.1]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Backtest_ComputeLabelsFromSamples]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[forward-scan label post-pass — streaming 2-file sliding window keeps peak RAM at O(2*max_per_file) not O(total_ticks); reloads the forward-looking ticks the replay discarded; no-op when collect_features=0]
+//======================================================================
 // Compute labels for a populated BacktestResults using forward-looking tick
 // data. Extracted from the legacy Backtest_Run body so both legacy and
 // sharded paths can share it (sharded path adopted feature collection in
@@ -582,6 +692,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 // Samples are guaranteed sorted by tidx (appended monotonically in
 // BacktestSharded.hpp's on_slow_path lambda). One linear cursor walk
 // through samples; no per-file O(N) sample scans.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                                                       const BacktestRunConfig *run_cfg) {
     if (!run_cfg->collect_features) return;
@@ -804,10 +917,19 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     }
     fputc('\n', stderr);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Backtest_ComputeLabelsFromSamples]
+//======================================================================
 
-//======================================================================================================
-// [RUN — Track E.7 thin wrapper]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Backtest_Run]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the public backtest entry — thin wrapper: BacktestSharded_Run then the forward-scan label post-pass then a phase-timer summary; the legacy PortfolioController body is gone (E.7)]
+//======================================================================
 // After Track E.7 (2026-04-26), Backtest_Run is a thin wrapper around the
 // sharded path. The legacy `PortfolioController_Tick`-driven body
 // (~350 LOC) has been deleted. Sharded is the only backtest path.
@@ -841,7 +963,9 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
 //     fields off `PortfolioController`. Sharded computes equivalent
 //     stats inline in `BacktestSharded_Run` (P&L, win/loss, drawdown,
 //     equity curve).
-//======================================================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Backtest_Run(BacktestResults *results,
                                  const BacktestRunConfig *run_cfg,
                                  volatile int *progress_pct,
@@ -868,10 +992,19 @@ static inline void Backtest_Run(BacktestResults *results,
         tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Backtest_Run]
+//======================================================================
 
-//======================================================================================================
-// [WALK-FORWARD VALIDATION]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[WalkForwardResults]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[walk-forward CV result aggregate — per-fold train/val metrics (WalkForwardFoldResult rides) + kind-aware means; the REAL generalization metric, in-sample accuracy is meaningless for financial ML]
+//======================================================================
 // uses purged temporal CV from ValidationSplit.hpp to train + evaluate per fold.
 // this is the REAL performance metric — in-sample accuracy is meaningless for financial ML.
 //
@@ -886,7 +1019,9 @@ static inline void Backtest_Run(BacktestResults *results,
 // without XGBoost, returns immediately with num_folds=0.
 //
 // source: FoxML intelligent_trainer.py walk-forward loop pattern
-//======================================================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 
 #define WALKFORWARD_MAX_FOLDS VALIDATION_MAX_FOLDS
 
@@ -924,10 +1059,21 @@ struct WalkForwardResults {
     double elapsed_ms;
     char fingerprint[65];   // SHA256 of config + data (empty if not computed)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[WalkForwardResults]
+//======================================================================
 
-//======================================================================================================
-// [FULL VALIDATION — walk-forward + held-out gap]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[HeldOutTrainEvalResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[held-out train+eval result — the deployment-proxy metric (one model on train+val, evaluated on the locked held-out portion); the full-validation section combines this with WF CV to measure the generalization gap]
+//======================================================================
 // Combines walk-forward CV (on train+val portion) with held-out test eval
 // (on the locked portion). Reports both side-by-side and computes the
 // generalization gap |WF_val - held_out|. Small gap = generalization is real;
@@ -951,6 +1097,9 @@ struct WalkForwardResults {
 // CV-style variance on the train+val portion. The held-out's job is to
 // answer "does ONE model trained on the full train+val portion actually
 // generalize to data we never touched?" — which is the deployment question.
+//======================================================================
+// [CODE]
+//======================================================================
 struct HeldOutTrainEvalResult {
     int   ok;            // 1 if training + eval succeeded
     int   eval_count;    // size of held-out portion actually evaluated (post-filter)
@@ -960,6 +1109,13 @@ struct HeldOutTrainEvalResult {
     float correlation;   // regression only; 0 for classification
     float train_metric;  // training-fold metric (sanity check — should exceed `metric`)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[HeldOutTrainEvalResult]
+//======================================================================
 
 // Forward declaration — definition follows Backtest_RunWalkForward so the
 // helper has visibility into WalkForward_Compute* and XGBoost_Compute* funcs.
@@ -969,7 +1125,15 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     int label_type,
     volatile int *cancel_flag);
 
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[FullValidationResults]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the full-validation result — WF CV on train+val, the locked held-out eval, and the generalization gap; carries the auto-stamp request/result fields + per-horizon stamp-body inputs]
+//======================================================================
+// [CODE]
+//======================================================================
 struct FullValidationResults {
     WalkForwardResults walkforward;        // WF CV on [0, trainval_end)
 
@@ -1036,6 +1200,13 @@ struct FullValidationResults {
     int       req_grid_member_idx   = 0;
     int       req_horizon_count     = 1;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[FullValidationResults]
+//======================================================================
 
 // Forward declaration — Backtest_RunWalkForward is defined further down in
 // this header (the implementation is large enough to live near the bottom).
@@ -1056,6 +1227,15 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             int label_type,
                                             const ControllerConfig<BACKTEST_FP> *cfg_override = nullptr);
 
+//======================================================================
+// [FUNCTION]_[Backtest_RunFullValidation]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[orchestrate full validation — WF CV on a sliced train+val view, held-out train/eval, the generalization gap, and the optional auto-stamp emit; preserves caller-set request fields across the result memset]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 const BacktestResults *data,
                                                 const HeldOutSplit *split,
@@ -1068,7 +1248,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     // v5.11.49 — preserve caller-set REQUEST fields across the memset.
     // The pre-fix `memset(out, 0, sizeof(*out))` wiped auto_stamp_path /
     // auto_stamp_secret / auto_stamp_format_version / req_label_* that
-    // the caller set BEFORE calling RFV — so the gate at line ~1100
+    // the caller set BEFORE calling RFV — so the gate below
     // (`if (out->ran_held_out && out->auto_stamp_path[0] != '\0')`)
     // ALWAYS saw an empty path → auto-stamp NEVER fired via this path.
     // Bug present since Phase 7prep c2 (commit 99ac494). Operators
@@ -1260,10 +1440,25 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Backtest_RunFullValidation]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[WalkForward_ComputeAccuracy]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the WF prediction-metric family — binary accuracy, the always-predict-best baseline, multiclass argmax accuracy, MSE, and Pearson correlation; each rides this block]
+//======================================================================
 // compute accuracy: fraction of predictions matching labels (for classification)
 // threshold: prediction >= thresh → class 1, else class 0
 // uses > 0.5f for truth so neutral (0.5) labels are never counted as positive
+//======================================================================
+// [CODE]
+//======================================================================
 static inline float WalkForward_ComputeAccuracy(const float *predictions, const float *labels,
                                                   int count, float threshold) {
     if (count <= 0) return 0.0f;
@@ -1369,7 +1564,21 @@ static inline float WalkForward_ComputeCorrelation(const float *predictions,
     if (denom <= 0.0) return 0.0f;
     return (float)(sum_pl / denom);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[WalkForward_ComputeAccuracy]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Backtest_RunWalkForward]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the walk-forward CV engine — pre-compact non-neutral samples, generate purged folds, train+predict an XGBoost booster per fold, aggregate kind-appropriate metrics + overfit flags; the deployment-realistic performance number]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             const BacktestResults *data,
                                             int n_splits, int horizon_ticks,
@@ -1593,7 +1802,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
         // v5.9.5h — XGBHyperparams struct + apply helper. Single source of
-        // truth shared with HeldOut training (BacktestEngine.hpp:~1592) and
+        // truth shared with HeldOut training (HeldOutSplit_TrainEval below) and
         // Train Model worker (BacktestPanels.hpp). Defaults match the
         // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
         // identical training output.
@@ -1985,13 +2194,25 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         tt::PhaseTimer_NowNs() - wf_start_ns;
     tt::PhaseTimer_Global().populated = 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Backtest_RunWalkForward]
+//======================================================================
 
-//======================================================================================================
-// [HELD-OUT TRAIN + EVAL — definition]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[HeldOutSplit_TrainEval]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[train ONE XGBoost model on the train+val portion and evaluate on the locked held-out portion — the deployment-proxy metric; hyperparams mirror the WF per-fold setup so the gap is apples-to-apples]
+//======================================================================
 // Forward-declared near the FullValidationResults struct so
 // Backtest_RunFullValidation can call it; defined here so all the helper
 // functions it uses (WalkForward_Compute*, XGBoost_Compute*) are visible.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     const BacktestResults *data,
     const HeldOutSplit *split,
@@ -2229,14 +2450,25 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     return r;
 #endif
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[HeldOutSplit_TrainEval]
+//======================================================================
 
-//======================================================================================================
-// [CONFIG FIELD SETTER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ConfigField_Set]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[set a cfg field by key name + double value (OPT_SET_* macro dispatch) — the optimizer's parameter-sweep setter; PCT keys stored decimal from a percent input, plus FPN / uint32 / int / XGBoost-hyperparam fields]
+//======================================================================
 // sets a config field by key name + double value. used by optimizer to sweep parameters.
 // returns 1 if field was found and set, 0 if unknown key.
 // handles both FPN_Binary and PCT fields (PCT keys are stored as decimal, value comes in as %).
-//======================================================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char *key, double value) {
     // percentage fields (config says 4.0, stored as 0.04)
     #define OPT_SET_PCT(name) \
@@ -2299,10 +2531,21 @@ static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char
     #undef OPT_SET_INT
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ConfigField_Set]
+//======================================================================
 
-//======================================================================================================
-// [OPTIMIZER]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[OptimizerResults]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the parameter-optimizer data model — OptimizerRange (a swept key + lo/hi/step) rides, the per-cell metric+stats grid, and the OptimizerMetric selector; a 1-2 param grid search over engine cfg fields]
+//======================================================================
+// [CODE]
+//======================================================================
 #define OPT_MAX_PARAMS 2
 #define OPT_MAX_STEPS  50
 #define OPT_MAX_GRID   (OPT_MAX_STEPS * OPT_MAX_STEPS)
@@ -2340,7 +2583,23 @@ static inline double OptimizerMetric(const BacktestStats *s, int metric) {
         default:                    return s->total_pnl;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[OptimizerResults]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Backtest_RunSweep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[engine-cfg parameter grid search — load base cfg, gate the sweep-range endpoints for capital-cap safety, run a backtest per cell, pick the best by the selected metric]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Backtest_RunSweep(OptimizerResults *opt,
                                       const BacktestRunConfig *base_cfg,
                                       const OptimizerRange *ranges, int num_params,
@@ -2419,10 +2678,19 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Backtest_RunSweep]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.D — HYPERPARAM TRAINING SWEEP]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Backtest_RunHyperparamTrainSweep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[training-side hyperparam grid search — no engine sweep; per cell overrides xgb_* via WF's cfg_override path, runs WF, records the val metric; optional pthread parallelism across cells]
+//======================================================================
 // Trains an XGBooster per sweep cell using shared feature_matrix +
 // labels (operator must Collect Features once first). Per cell,
 // applies override hyperparams via WF's cfg_override path, runs WF,
@@ -2447,7 +2715,9 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
 //
 // Metric: WF mean_val_accuracy (binary/multiclass) or
 // mean_val_correlation (regression). Stored as positive number; higher = better.
-//======================================================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 #ifdef USE_XGBOOST
 static inline void Backtest_RunHyperparamTrainSweep(
     OptimizerResults *opt,
@@ -2595,5 +2865,10 @@ static inline void Backtest_RunHyperparamTrainSweep(
             opt->best_idx, best_metric);
 }
 #endif // USE_XGBOOST
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Backtest_RunHyperparamTrainSweep]
+//======================================================================
 
 #endif // BACKTEST_ENGINE_HPP
