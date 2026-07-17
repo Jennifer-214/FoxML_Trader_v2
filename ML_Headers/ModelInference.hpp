@@ -2,7 +2,25 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 //======================================================================================================
-// [ML MODEL INFERENCE]
+// [FILE]_[ML_Headers/ModelInference.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SEAM]_[train-serve model + stamp contract — FEAT_* indices, MODEL_FORMAT_VERSION, and the HMAC-signed .stamp body are the identity the trainer emits and the engine verifies at load]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[XGBoost/LightGBM single-row inference + the H9 stamp emit/parse heart — ModelHandle lifecycle, ensemble predict paths, and the verify_model_stamp / stamp_write_for_model wire pair]
+// [CONTAINS]
+//   - [STRUCT]_[ModelHandle]              (bit-packed has_flags + X-macro stamp-derived fields; 5 cluster bands)
+//   - [FUNCTION]_[Model_Init] / [Model_Load] / [Model_Free] / [Model_IsLoaded]   (handle lifecycle)
+//   - [FUNCTION]_[Model_Predict] (+ _Normalized / _AtClass / _AOT stubs / _Ensemble / _Ensemble_Weighted / _PredictMulti)
+//   - [FUNCTION]_[FeatureLookback_Max]    (+ CountEnabled; over the FEATURE_LOOKBACKS temporal-reach table)
+//   - [FUNCTION]_[ModelFeatures_Pack]     (DEPRECATED frozen packer — equivalence-test reference only)
+//   - [STRUCT]_[ModelStampResult] / [STRUCT]_[StampInferenceCfgInputs]   (X-macro-generated stamp parse/emit sides)
+//   - [REGISTRY]_[FOREACH_LEGACY_PREFIXED_KEY]   (v1->v2 wire-key back-compat dispatch; 16 rows)
+//   - [FUNCTION]_[sha256_file_hex]        (+ stamp_parse_line — verify helpers)
+//   - [FUNCTION]_[verify_model_stamp]     (the stamp INGEST gate — H9 HMAC verify + drift checks)
+//   - [FUNCTION]_[stamp_write_for_model]  (the stamp EMIT side — canonical body + HMAC sign + atomic write)
+// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+// [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
 //======================================================================================================
 // thin C-style abstraction over XGBoost and LightGBM C APIs for single-row inference.
 // compiles to complete no-ops when neither backend is enabled (zero overhead).
@@ -139,20 +157,26 @@
 // Bump CURRENT when wire-format changes; bump MAX_SUPPORTED when next bump is planned.
 // Legacy versions ≥ 1 continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat (see verify_model_stamp).
 static constexpr uint32_t STAMP_FORMAT_VERSION_CURRENT      = 3;  // Ship-B DECIMAL epoch (money wire values re-encode); v2 = 16B-binary era (H21 tombstone), v1 = legacy prefix era
-static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 3;  // Ship-B: pre-epoch stamps [1,2] are HARD-INVALID (unconditional floor below — bypasses the strict fork)
+static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 3;  // Ship-B intent: pre-epoch stamps [1,2] HARD-INVALID — floor NOT YET IMPLEMENTED (parser accepts [0,3]; TECH_DEBT-237)
 
 // Ship-B P2 epoch guard (S-4/D-174 — the strict-gate bypass closed at the flip): stamps carry
 // ~30 money fields whose wire values re-encode at the decimal epoch. Tripwire: the flip commit
 // must bump CURRENT/MAX to 3 AND make pre-epoch refusal an UNCONDITIONAL hard-invalid class that
 // BYPASSES the held_out_gate_strict fork (strict=0 loads r.valid=0 today — a v2 stamp must NOT
 // enter the decimal engine), retiring the [1,2] legacy key dispatch (H21) + the retrain ritual.
+// ⚠ STATUS (P6.96 rot-check, 2026-07-16): the flip (`838bf09`) satisfied this tripwire by the
+// VERSION BUMP ALONE — the unconditional pre-epoch refusal was never coded (verify_model_stamp
+// still RELAXED-accepts [0, MAX]; only too-NEW rejects). TECH_DEBT-237 tracks the floor; blast
+// radius today = zero (no live models — dev fixtures only — + the Phase-D live-gate holds).
+// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-237]
+// [ASSERT]_[EPOCH_TRIPWIRE]_[MONEY_ENCODING_EPOCH == 0 || STAMP_FORMAT_VERSION_CURRENT >= 3]
 static_assert(MONEY_ENCODING_EPOCH == 0u || STAMP_FORMAT_VERSION_CURRENT >= 3u,
               "Ship-B epoch: the engine money type flipped to decimal — bump STAMP_FORMAT_VERSION "
               "to 3 + unconditional pre-epoch stamp refusal (bypass the strict fork) in THIS commit.");
 
-//======================================================================================================
-// [FEATURE LOOKBACK REGISTRY]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[FEATURE LOOKBACK REGISTRY]
+//----------------------------------------------------------------------
 // per-feature metadata: how many ticks back each feature reads.
 // used by:
 //   - ValidationSplit (purge gap = max lookback across features + buffer)
@@ -168,7 +192,6 @@ static_assert(MONEY_ENCODING_EPOCH == 0u || STAMP_FORMAT_VERSION_CURRENT >= 3u,
 //   stability tracking: save XGBoost importances per fold, compare across runs
 //     → see ~/FoxML/private/TRAINING/stability/feature_importance/analysis.py
 //     → thresholds: min_top_k_overlap=0.7, min_kendall_tau=0.6 (safety.yaml:157)
-//======================================================================================================
 struct FeatureLookback {
     int feat_idx;           // FEAT_* constant
     const char *name;       // human-readable name (for display/debugging)
@@ -220,8 +243,15 @@ static const FeatureLookback FEATURE_LOOKBACKS[] = {
 
 static const int FEATURE_LOOKBACK_COUNT = sizeof(FEATURE_LOOKBACKS) / sizeof(FEATURE_LOOKBACKS[0]);
 
-// compute max lookback across all enabled features
-// used by: ValidationSplit (purge gap), PortfolioController (warmup check)
+//======================================================================
+// [FUNCTION]_[FeatureLookback_Max]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[max temporal reach across enabled features (CountEnabled rides) — feeds the ValidationSplit purge gap + the PortfolioController warmup check]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int FeatureLookback_Max(void) {
     int max_lb = 0;
     for (int i = 0; i < FEATURE_LOOKBACK_COUNT; i++) {
@@ -239,10 +269,20 @@ static inline int FeatureLookback_CountEnabled(void) {
     }
     return count;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// compute max lookback across all enabled features
+// used by: ValidationSplit (purge gap), PortfolioController (warmup check)
+//======================================================================
+// [END_FUNCTION]_[FeatureLookback_Max]
+//======================================================================
 
-//======================================================================================================
-// conditional includes — only pull in headers when backend is enabled
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[conditional includes — only pull in headers when backend is enabled]
+//----------------------------------------------------------------------
 #ifdef USE_XGBOOST
 #include <xgboost/c_api.h>
 #endif
@@ -251,9 +291,137 @@ static inline int FeatureLookback_CountEnabled(void) {
 #include <LightGBM/c_api.h>
 #endif
 
-//======================================================================================================
-// [MODEL HANDLE — v5.15.0]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[ModelHandle]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the runtime model handle — HOT inference scalars in line 1, HOT-2 composite arrays in line 2, WARM scaler, COLD X-macro stamp-derived fields, COLD-2 runtime paths; bit-packed has_flags]
+// [INSTANTIATION]_[[64]]
+// [REFERENCE]_[DESIGN_SPEC]_[per-snapshot-cluster-layout-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[DESIGN_SPEC]_[struct-padding-determinism-pattern]
+// [REFERENCE]_[INVARIANT]_[[H12] [H18]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+struct alignas(64) ModelHandle {
+    // v5.12.3.B+E — prediction normalizer. Maps heterogeneous model
+    // outputs to a [0,1] buy-probability space so ensemble blend can
+    // average across mixed model types. Default NORM_IDENTITY = passthrough
+    // (preserves existing single-output semantics bytewise). Loader sets
+    // this from stamp body's label_kind at load time; never mutated post-
+    // load (per-handle invariant). normalizer_param holds tp_pct for
+    // NORM_REGRESSION; unused for other kinds.
+    //
+    // Elision-friendly design: hot-path-equivalent
+    // call site checks `if (m->normalizer == NORM_IDENTITY) return raw;`
+    // FIRST. Default state → 1-line early return → optimizer treats as
+    // ~1ns predicted-not-taken. Switch on enum is only entered when a
+    // model is actually trained with non-IDENTITY normalizer. ~1ns
+    // when off; ~5ns when on. Slow-path budget irrelevant either way
+    // (Model_Predict's XGBoost C API call dominates at ~1-5us).
+    enum prediction_normalizer_t {
+        NORM_IDENTITY        = 0,    // passthrough (default; current behavior)
+        NORM_REGRESSION      = 1,    // [-tp_pct, +tp_pct] → [0, 1] via clamp(0.5 + raw / (2*tp), 0, 1)
+        NORM_BARRIER_CLASS_1 = 2,    // 3-class barrier; explicit class-1 extraction
+        NORM_COMPOSITE       = 3,    // uses target_classes/class_weights from this struct (3.A)
+    };
+
+    //---- [SECTION]_[HOT CLUSTER — read during Model_Predict inference (cache line 1)] ----
+    void    *handle;                 //  8 B — opaque: BoosterHandle (XGB / LGBM)
+    int      backend;                //  4 B — MODEL_BACKEND_NONE / XGBOOST / LIGHTGBM
+    int      num_features;           //  4 B — expected input dimension
+    // v5.11.62 — buy class for multiclass models. Default 0 (binary positive
+    // class). NodeModelZoo loader sets: 0 for buy_signal; 1 for barrier
+    // num_outputs=3 (PEAK_VALLEY_STABLE class 1 = peak); 0 for regime
+    // (operator chooses semantics via cfg). Out-of-range falls back to 0.
+    int      num_outputs;            //  4 B — 1 = binary/regression, ≥2 = multiclass softmax
+    int      buy_class_idx;          //  4 B
+    // v5.9.3a — Gap H observability. Set by NodeModelZoo_TryLoadRole when
+    // scaler load fails in non-strict mode. Surfaces to
+    // PerNodeSnap.ml_scaler_load_failed for ML Status panel.
+    int      scaler_load_failed;     //  4 B
+    uint8_t  normalizer;             //  1 B — prediction_normalizer_t enum; default NORM_IDENTITY
+    // v5.12.3.A — composite-signal extractor. When num_classes_active > 1,
+    // Model_Predict returns Σ class_weights[i] × out_result[target_classes[i]]
+    // over the first num_classes_active entries. Default 1 + target[0]=buy_class_idx
+    // + weights[0]=1.0 preserves single-class behavior bytewise.
+    uint8_t  num_classes_active;     //  1 B — default 1
+    int16_t  _hot_pad0 = 0;          //  2 B — explicit zero-init padding (H12)
+    float    normalizer_param;       //  4 B — tp_pct for NORM_REGRESSION; unused otherwise
+    // v5.15.0 — bit-packed has_* state for stamp-derived field presence
+    // (REPLACES 14 uint8_t has_* direct fields). Bit positions allocated
+    // by FOREACH_STAMP_BOUND_MODEL_CONST; access via STAMP_HAS(*h, <name>)
+    // / STAMP_SET / STAMP_CLR aliases (shared with ModelStampResult +
+    // StampInferenceCfgInputs).
+    uint64_t has_flags;              //  8 B
+    // v5.15.1 — drift_flags_at_load: bits set at TryLoadRole post-verify
+    // chokepoint. Storage uses FOREACH_FAILURE_MODE bit positions via
+    // FAILURE_MASK_<name> (e.g., FAILURE_MASK_feature_hash_drift). Read
+    // by ShardedSnapshot_Publish which OR-aggregates across all 4 zoo
+    // roles into PerNodeSnap.failure_flags. Repurposes 2 B of v5.15.0's
+    // _hot_pad1; net cluster size unchanged.
+    uint16_t drift_flags_at_load;    //  2 B
+    // 14 B explicit zero-init padding (H12) fills HOT
+    // cluster to exactly one cache line + keeps target_classes (next
+    // cluster) at offset 64.
+    uint16_t _hot_pad1a = 0;         //  2 B
+    int32_t  _hot_pad1b[3] = {0, 0, 0};  // 12 B
+    // = 64 B used; cache line 1 fully consumed.
+
+    //---- [SECTION]_[HOT-2 — composite signal arrays read in Model_Predict (cache line 2)] ----
+    int      target_classes[8];      // 32 B — default [buy_class_idx, 0, 0, ...]
+    float    class_weights[8];       // 32 B — default [1.0, 0, 0, ...]
+
+    //---- [SECTION]_[WARM CLUSTER — feature standardizer (read every inference)] ----
+    // v5.9.3a — feature standardizer (mean-centering + unit-variance).
+    // Inline (not heap) per audit decision: NUM_REGISTERED_FEATURES is
+    // constexpr → struct size known at compile time. ~600 bytes; trivial
+    // vs the mmap'd XGBoost booster size. Apply path early-returns when
+    // has_scaler=0 (identity-applied).
+    tt::FeatureStandardizer scaler;
+
+    //---- [SECTION]_[COLD CLUSTER — stamp-derived value fields (X-macro auto-generated)] ----
+    // Walks FOREACH_STAMP_BOUND_MODEL_CONST (union of PRE_CFG + POST_CFG)
+    // with STAMP_HANDLE_GEN_<presence> dispatch. INCLUDE entries declared;
+    // SKIP_HANDLE entries omitted (parser-side-only: held_out_fraction,
+    // feature_scaler_present boolean, grid_member_*, label_registry_hash,
+    // feature_mask, expected_*).
+    #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
+        STAMP_HANDLE_GEN_##presence(name, type)
+    FOREACH_STAMP_BOUND_MODEL_CONST(X)
+    #undef X
+
+    // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) cascade close — cfg-derived cohort fields auto-gen on
+    // ModelHandle (sister to the ModelStampResult struct-gen + StampInferenceCfgInputs auto-gen
+    // sites below). Same STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() macro; F=64 brought into struct
+    // scope (same F-into-scope pattern at both sister sites). After Phase F HIGH-1 (b) row deletion at Step 2:
+    // handle.<name> auto-gen IS the sole source for cfg-derived field storage at runtime; NodeModelZoo
+    // load-time copy `handle.<name> = sr.<name>` flows sr (cfg-derived auto-gen on ModelStampResult)
+    // → handle (cfg-derived auto-gen here). Drift check via cfg_derived::drift_check_from_derived
+    // reads handle.<name> (cfg-derived) + cfg.<name> (cfg-derived) — same source-of-truth surface.
+    // EXCLUSION REDIRECT: 3 xgb_* names redirect to dead-prefixed per H18 sidecar (sister to
+    // the ModelStampResult exclusion below + FOREACH_STAMP_RESULT_FIELD_EXCLUSION sidecar).
+    static constexpr unsigned F_for_derived = F;  // bring template F into nested-struct scope
+    #define xgb_min_child_weight _stamp_result_excluded_xgb_min_child_weight
+    #define xgb_seed             _stamp_result_excluded_xgb_seed
+    #define xgb_train_nthread    _stamp_result_excluded_xgb_train_nthread
+    STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
+    #undef xgb_min_child_weight
+    #undef xgb_seed
+    #undef xgb_train_nthread
+
+    //---- [SECTION]_[COLD-2 CLUSTER — runtime-only identifiers (NOT in stamp registry)] ----
+    char     model_path[256];         // 256 B — display/logging path
+    char     training_fingerprint[65];//  65 B — SHA256 of config+data at training time
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Bit-packed has_flags + X-macro-generated stamp-derived value fields.
 // 14 uint8_t has_* direct fields → 1 uint64_t has_flags (bit-packed via
 // FOREACH_STAMP_BOUND_MODEL_CONST allocation, accessed via STAMP_HAS /
@@ -274,160 +442,58 @@ static inline int FeatureLookback_CountEnabled(void) {
 // (ModelStampResult, already X-macro-driven since v5.14.8.A.merged) and
 // runtime side (ModelHandle, now equally X-macro-driven).
 //
-// Layout discipline (per CLAUDE.md items 12, 20, 27 + per-snapshot-cluster-
+// Layout discipline (per per-snapshot-cluster-
 // layout-pattern.md + bitmap-flag-api.md + struct-padding-determinism-pattern.md):
 //   HOT cluster — read during Model_Predict inference (cache line 1)
 //   WARM cluster — scaler (read during inference for feature normalization)
 //   COLD cluster — stamp-derived metadata (boot-WARN, GUI panel surfaces)
 //   COLD-2 cluster — runtime-only paths / fingerprint (not in registry)
-//======================================================================================================
-template <unsigned F>
-struct alignas(64) ModelHandle {
-    // v5.12.3.B+E — prediction normalizer. Maps heterogeneous model
-    // outputs to a [0,1] buy-probability space so ensemble blend can
-    // average across mixed model types. Default NORM_IDENTITY = passthrough
-    // (preserves existing single-output semantics bytewise). Loader sets
-    // this from stamp body's label_kind at load time; never mutated post-
-    // load (per-handle invariant). normalizer_param holds tp_pct for
-    // NORM_REGRESSION; unused for other kinds.
-    //
-    // Elision-friendly design (per CLAUDE.md item 18): hot-path-equivalent
-    // call site checks `if (m->normalizer == NORM_IDENTITY) return raw;`
-    // FIRST. Default state → 1-line early return → optimizer treats as
-    // ~1ns predicted-not-taken. Switch on enum is only entered when a
-    // model is actually trained with non-IDENTITY normalizer. ~1ns
-    // when off; ~5ns when on. Slow-path budget irrelevant either way
-    // (Model_Predict's XGBoost C API call dominates at ~1-5us).
-    enum prediction_normalizer_t {
-        NORM_IDENTITY        = 0,    // passthrough (default; current behavior)
-        NORM_REGRESSION      = 1,    // [-tp_pct, +tp_pct] → [0, 1] via clamp(0.5 + raw / (2*tp), 0, 1)
-        NORM_BARRIER_CLASS_1 = 2,    // 3-class barrier; explicit class-1 extraction
-        NORM_COMPOSITE       = 3,    // uses target_classes/class_weights from this struct (3.A)
-    };
-
-    // =====================================================================
-    // HOT CLUSTER — read during Model_Predict inference (cache line 1)
-    // =====================================================================
-    void    *handle;                 //  8 B — opaque: BoosterHandle (XGB / LGBM)
-    int      backend;                //  4 B — MODEL_BACKEND_NONE / XGBOOST / LIGHTGBM
-    int      num_features;           //  4 B — expected input dimension
-    // v5.11.62 — buy class for multiclass models. Default 0 (binary positive
-    // class). NodeModelZoo loader sets: 0 for buy_signal; 1 for barrier
-    // num_outputs=3 (PEAK_VALLEY_STABLE class 1 = peak); 0 for regime
-    // (operator chooses semantics via cfg). Out-of-range falls back to 0.
-    int      num_outputs;            //  4 B — 1 = binary/regression, ≥2 = multiclass softmax
-    int      buy_class_idx;          //  4 B
-    // v5.9.3a — Gap H observability. Set by NodeModelZoo_TryLoadRole when
-    // scaler load fails in non-strict mode. Surfaces to
-    // PerNodeSnap.ml_scaler_load_failed for ML Status panel.
-    int      scaler_load_failed;     //  4 B
-    uint8_t  normalizer;             //  1 B — prediction_normalizer_t enum; default NORM_IDENTITY
-    // v5.12.3.A — composite-signal extractor. When num_classes_active > 1,
-    // Model_Predict returns Σ class_weights[i] × out_result[target_classes[i]]
-    // over the first num_classes_active entries. Default 1 + target[0]=buy_class_idx
-    // + weights[0]=1.0 preserves single-class behavior bytewise.
-    uint8_t  num_classes_active;     //  1 B — default 1
-    int16_t  _hot_pad0 = 0;          //  2 B — explicit zero-init padding (CLAUDE.md item 27)
-    float    normalizer_param;       //  4 B — tp_pct for NORM_REGRESSION; unused otherwise
-    // v5.15.0 — bit-packed has_* state for stamp-derived field presence
-    // (REPLACES 14 uint8_t has_* direct fields). Bit positions allocated
-    // by FOREACH_STAMP_BOUND_MODEL_CONST; access via STAMP_HAS(*h, <name>)
-    // / STAMP_SET / STAMP_CLR aliases (shared with ModelStampResult +
-    // StampInferenceCfgInputs).
-    uint64_t has_flags;              //  8 B
-    // v5.15.1 — drift_flags_at_load: bits set at TryLoadRole post-verify
-    // chokepoint. Storage uses FOREACH_FAILURE_MODE bit positions via
-    // FAILURE_MASK_<name> (e.g., FAILURE_MASK_feature_hash_drift). Read
-    // by ShardedSnapshot_Publish which OR-aggregates across all 4 zoo
-    // roles into PerNodeSnap.failure_flags. Repurposes 2 B of v5.15.0's
-    // _hot_pad1; net cluster size unchanged.
-    uint16_t drift_flags_at_load;    //  2 B
-    // 14 B explicit zero-init padding (CLAUDE.md item 27) fills HOT
-    // cluster to exactly one cache line + keeps target_classes (next
-    // cluster) at offset 64.
-    uint16_t _hot_pad1a = 0;         //  2 B
-    int32_t  _hot_pad1b[3] = {0, 0, 0};  // 12 B
-    // = 64 B used; cache line 1 fully consumed.
-
-    // =====================================================================
-    // HOT-2 — composite signal arrays read in Model_Predict (cache line 2)
-    // =====================================================================
-    int      target_classes[8];      // 32 B — default [buy_class_idx, 0, 0, ...]
-    float    class_weights[8];       // 32 B — default [1.0, 0, 0, ...]
-
-    // =====================================================================
-    // WARM CLUSTER — feature standardizer (read every inference)
-    // =====================================================================
-    // v5.9.3a — feature standardizer (mean-centering + unit-variance).
-    // Inline (not heap) per audit decision: NUM_REGISTERED_FEATURES is
-    // constexpr → struct size known at compile time. ~600 bytes; trivial
-    // vs the mmap'd XGBoost booster size. Apply path early-returns when
-    // has_scaler=0 (identity-applied).
-    tt::FeatureStandardizer scaler;
-
-    // =====================================================================
-    // COLD CLUSTER — stamp-derived value fields (X-macro auto-generated)
-    // =====================================================================
-    // Walks FOREACH_STAMP_BOUND_MODEL_CONST (union of PRE_CFG + POST_CFG)
-    // with STAMP_HANDLE_GEN_<presence> dispatch. INCLUDE entries declared;
-    // SKIP_HANDLE entries omitted (parser-side-only: held_out_fraction,
-    // feature_scaler_present boolean, grid_member_*, label_registry_hash,
-    // feature_mask, expected_*).
-    #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
-        STAMP_HANDLE_GEN_##presence(name, type)
-    FOREACH_STAMP_BOUND_MODEL_CONST(X)
-    #undef X
-
-    // v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) cascade close — cfg-derived cohort fields auto-gen on
-    // ModelHandle (sister to ModelStampResult struct-gen at line 1236 + StampInferenceCfgInputs at
-    // line 1742). Same STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() macro; F=64 brought into struct scope
-    // (sister pattern at lines 1173 + 1722). After Phase F HIGH-1 (b) row deletion at Step 2:
-    // handle.<name> auto-gen IS the sole source for cfg-derived field storage at runtime; NodeModelZoo
-    // load-time copy `handle.<name> = sr.<name>` flows sr (cfg-derived auto-gen on ModelStampResult)
-    // → handle (cfg-derived auto-gen here). Drift check via cfg_derived::drift_check_from_derived
-    // reads handle.<name> (cfg-derived) + cfg.<name> (cfg-derived) — same source-of-truth surface.
-    // EXCLUSION REDIRECT: 3 xgb_* names redirect to dead-prefixed per H18 sidecar (sister to
-    // ModelStampResult exclusion at line 1233-1239 + FOREACH_STAMP_RESULT_FIELD_EXCLUSION sidecar).
-    static constexpr unsigned F_for_derived = F;  // bring template F into nested-struct scope
-    #define xgb_min_child_weight _stamp_result_excluded_xgb_min_child_weight
-    #define xgb_seed             _stamp_result_excluded_xgb_seed
-    #define xgb_train_nthread    _stamp_result_excluded_xgb_train_nthread
-    STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
-    #undef xgb_min_child_weight
-    #undef xgb_seed
-    #undef xgb_train_nthread
-
-    // =====================================================================
-    // COLD-2 CLUSTER — runtime-only identifiers (NOT in stamp registry)
-    // =====================================================================
-    char     model_path[256];         // 256 B — display/logging path
-    char     training_fingerprint[65];//  65 B — SHA256 of config+data at training time
-};
-
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[6720B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[105]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ModelHandle]
+//======================================================================
 // Sanity asserts: ModelHandle must be cache-line sized + hot cluster fits
 // the first cache line. Static_assert at template-instantiation site to
 // catch field-additions that break the cluster layout.
 //
 // (Per per-snapshot-cluster-layout-pattern.md Step 5; complements
-// CLAUDE.md item 27 padding determinism.)
+// H12 padding determinism.)
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(ModelHandle<64>) % 64 == 0]
 static_assert(sizeof(ModelHandle<64>) % 64 == 0,
     "ModelHandle<64> must be cache-line sized; a field addition broke the cluster layout. "
     "Audit cluster boundaries + adjust _hot_padN fields or reorder.");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(ModelHandle<64>) == 64]
 static_assert(alignof(ModelHandle<64>) == 64,
     "ModelHandle<64> must be 64-byte aligned for cache-line independence.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(has_flags) < 64 — HOT cluster residency]
 static_assert(offsetof(ModelHandle<64>, has_flags) < 64,
     "has_flags must live in HOT cluster (cache line 1) — a field addition pushed it out.");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(target_classes) == 64 — HOT-2 boundary]
 static_assert(offsetof(ModelHandle<64>, target_classes) == 64,
     "target_classes must start cache line 2 (HOT-2 cluster boundary).");
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Model_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[brace-init zero-fill + the non-zero defaults (composite single-class, scaler identity) — the handle's clean-slate constructor]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void Model_Init(ModelHandle<F> *m) {
     // v5.15.0 — Brace-init zero-fills the entire struct (matches
-    // ModelStampResult{} discipline at verify_model_stamp:1316).
+    // the ModelStampResult{} discipline in verify_model_stamp).
     // Replaces ~50 lines of explicit field zero-inits with one statement.
     // Default member initializers (_hot_pad0/1 = 0) preserve padding
-    // determinism per CLAUDE.md item 27.
+    // determinism per H12.
     //
     // Zero-init correctly clears:
     //   - has_flags (all 13+ stamp-derived bit positions)
@@ -454,10 +520,21 @@ inline void Model_Init(ModelHandle<F> *m) {
     // FeatureStandardizer_Load post-Model_Load to populate from sidecar.
     tt::FeatureStandardizer_Init(&m->scaler);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Model_Init]
+//======================================================================
 
-//======================================================================================================
-// [LOAD]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Model_Load]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[backend-dispatched load — FNV checksum log, foxml_version format check (reject != MODEL_FORMAT_VERSION), fingerprint read, num_outputs probe via zero-row predict]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
     Model_Init(m);
@@ -578,45 +655,21 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
     }
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Model_Load]
+//======================================================================
 
-//======================================================================================================
-// [TREELITE AOT — INFRASTRUCTURE STUBS (v5.12.2.D)]
-//======================================================================================================
-// Stubs for compiled-tree inference. Returns -1 = "AOT not vendored;
-// caller falls back to MODEL_BACKEND_XGBOOST path." The real
-// implementation lands when Treelite is vendored to vendor/treelite/
-// (gitignored, ~hundreds of MB) + the operator runs the compile script
-// on their hardware. Ship plan:
-//   1. (this ship) — slot in the dispatch chain + stamp body fields +
-//      cfg flag + dlopen scaffolding stubs
-//   2. (follow-up) — vendor Treelite, wire actual dlopen + symbol resolve
-//      + Predict_AOT FFI shim
-//   3. (validation) — 1000-feature parity test: AOT == C API within 1e-6
-//
-// Failure-mode contract: the engine never fires Predict_AOT in this ship
-// because Model_LoadAOT always returns -1. Caller (NodeModelZoo) sees the
-// failure, logs a single INFO line, and proceeds with MODEL_BACKEND_XGBOOST.
-// Operator behavior is bytewise identical to pre-.D when use_aot_inference=0
-// or when AOT load fails — the cfg flag is opt-in and load failure is
-// transparent fallback.
-//======================================================================================================
-// [PREDICT NORMALIZED — mixed-output ensemble support (v5.12.3.B+E)]
-//======================================================================================================
-// Wraps Model_Predict + applies the per-handle normalizer to map any
-// model's raw output to a [0, 1] buy-probability space. Bandit ensemble
-// blend can average normalized values across mixed model types
-// (binary, regression, 3-class barrier).
-//
-// Elision-friendly: default NORM_IDENTITY → 1-line early return.
-// Branch is heavily predicted (default state); ~1ns runtime cost when
-// no model uses non-IDENTITY normalizer (= every existing operator
-// model today). Switch on enum is entered only after a model is trained
-// with a non-default label_kind that needs scale alignment.
-//
-// Strategy code unchanged per v5.11.62 invariant — strategy reads the
-// (already-normalized) float and acts on it. Composition lives in
-// Model_Predict + Model_Predict_Normalized; not in strategy.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Model_Predict_Normalized]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Model_Predict + per-handle normalizer -> [0,1] buy-probability space; NORM_IDENTITY default is a ~1ns early return]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline float Model_Predict_Normalized(ModelHandle<F>* m,
                                         const float* features,
@@ -648,28 +701,38 @@ inline float Model_Predict_Normalized(ModelHandle<F>* m,
             return raw;  // unrecognized → passthrough
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Wraps Model_Predict + applies the per-handle normalizer to map any
+// model's raw output to a [0, 1] buy-probability space. Bandit ensemble
+// blend can average normalized values across mixed model types
+// (binary, regression, 3-class barrier).
+//
+// Elision-friendly: default NORM_IDENTITY → 1-line early return.
+// Branch is heavily predicted (default state); ~1ns runtime cost when
+// no model uses non-IDENTITY normalizer (= every existing operator
+// model today). Switch on enum is entered only after a model is trained
+// with a non-default label_kind that needs scale alignment.
+//
+// Strategy code unchanged per v5.11.62 invariant — strategy reads the
+// (already-normalized) float and acts on it. Composition lives in
+// Model_Predict + Model_Predict_Normalized; not in strategy.
+//======================================================================
+// [END_FUNCTION]_[Model_Predict_Normalized]
+//======================================================================
 
-//======================================================================================================
-// [PREDICT AT CLASS — class-explicit predict (v5.12.3.E foundation)]
-//======================================================================================================
-// Decouples the class-extraction concern from the role-aliasing concern.
-// Strategy code (or ensemble blend) can ask for "this model's class N"
-// without knowing role-name semantics (buy_signal vs barrier vs regime).
-//
-// Foundation for the v5.11.62 architectural cleanup: future loader
-// refactor populates ezoo->primary_handles directly + sets per-handle
-// buy_class_idx; consumers call Model_Predict_AtClass with the
-// configured class index. Removes the tactical memcpy alias (which
-// requires the borrowed flag bookkeeping).
-//
-// In this ship: just the helper. Loader integration + alias removal
-// deferred to follow-up (when operator trains a 4th label kind that
-// breaks the current tactical patch's assumptions).
-//
-// Behavior: identical to Model_Predict but uses caller-supplied
-// class_idx instead of m->buy_class_idx. Default Model_Predict() ==
-// Model_Predict_AtClass(m, features, n, m->buy_class_idx).
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Model_Predict_AtClass]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[class-explicit predict — caller-supplied class_idx instead of m->buy_class_idx; decouples class extraction from role aliasing (v5.12.3.E foundation)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline float Model_Predict_AtClass(ModelHandle<F>* m,
                                      const float* features,
@@ -698,7 +761,41 @@ inline float Model_Predict_AtClass(ModelHandle<F>* m,
     (void)class_idx;
     return Model_Predict(m, features, num_features);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Decouples the class-extraction concern from the role-aliasing concern.
+// Strategy code (or ensemble blend) can ask for "this model's class N"
+// without knowing role-name semantics (buy_signal vs barrier vs regime).
+//
+// Foundation for the v5.11.62 architectural cleanup: future loader
+// refactor populates ezoo->primary_handles directly + sets per-handle
+// buy_class_idx; consumers call Model_Predict_AtClass with the
+// configured class index. Removes the tactical memcpy alias (which
+// requires the borrowed flag bookkeeping).
+//
+// In this ship: just the helper. Loader integration + alias removal
+// deferred to follow-up (when operator trains a 4th label kind that
+// breaks the current tactical patch's assumptions).
+//
+// Behavior: identical to Model_Predict but uses caller-supplied
+// class_idx instead of m->buy_class_idx. Default Model_Predict() ==
+// Model_Predict_AtClass(m, features, n, m->buy_class_idx).
+//======================================================================
+// [END_FUNCTION]_[Model_Predict_AtClass]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Model_LoadAOT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Treelite AOT INFRASTRUCTURE STUBS (Model_Predict_AOT rides) — always return -1/0.0f; engine transparently falls back to the XGBoost C API path]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int Model_LoadAOT(ModelHandle<F>* m, const char* path) {
     // INFRASTRUCTURE-ONLY in v5.12.2.D. Treelite vendor lib not present;
@@ -722,13 +819,41 @@ inline float Model_Predict_AOT(ModelHandle<F>* m, const float* features,
     (void)m; (void)features; (void)num_features;
     return 0.0f;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Stubs for compiled-tree inference (v5.12.2.D). Returns -1 = "AOT not
+// vendored; caller falls back to MODEL_BACKEND_XGBOOST path." The real
+// implementation lands when Treelite is vendored to vendor/treelite/
+// (gitignored, ~hundreds of MB) + the operator runs the compile script
+// on their hardware. Ship plan:
+//   1. (this ship) — slot in the dispatch chain + stamp body fields +
+//      cfg flag + dlopen scaffolding stubs
+//   2. (follow-up) — vendor Treelite, wire actual dlopen + symbol resolve
+//      + Predict_AOT FFI shim
+//   3. (validation) — 1000-feature parity test: AOT == C API within 1e-6
+//
+// Failure-mode contract: the engine never fires Predict_AOT in this ship
+// because Model_LoadAOT always returns -1. Caller (NodeModelZoo) sees the
+// failure, logs a single INFO line, and proceeds with MODEL_BACKEND_XGBOOST.
+// Operator behavior is bytewise identical to pre-.D when use_aot_inference=0
+// or when AOT load fails — the cfg flag is opt-in and load failure is
+// transparent fallback.
+//======================================================================
+// [END_FUNCTION]_[Model_LoadAOT]
+//======================================================================
 
-//======================================================================================================
-// [PREDICT]
-//======================================================================================================
-// returns raw model output (probability for classifiers, value for regressors)
-// returns 0.0f if no model loaded — caller should check Model_IsLoaded first
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Model_Predict]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the single-row predict — backend dispatch, composite-signal extraction when num_classes_active > 1, buy-class selection for multiclass; 0.0f when no model]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_features) {
     if (!m->handle) return 0.0f;
@@ -793,36 +918,26 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
 
     return 0.0f;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// returns raw model output (probability for classifiers, value for regressors)
+// returns 0.0f if no model loaded — caller should check Model_IsLoaded first
+//======================================================================
+// [END_FUNCTION]_[Model_Predict]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.4 — ENSEMBLE PREDICT (multi-horizon)]
-//======================================================================================================
-// Predict via N independent ModelHandles trained as a multi-horizon
-// ensemble. For each loaded model, compute prediction; return the
-// HIGHEST-ABSOLUTE-DEVIATION-FROM-NEUTRAL prediction (the most-confident
-// signal). Neutral = 0.5 for binary; this rule generalizes to "the
-// model that's surest about its prediction wins."
-//
-// Selection logic:
-//   - Binary models: distance from 0.5 = confidence; argmax(|p - 0.5|)
-//   - Regression: |p| as confidence proxy (zero = no edge)
-//
-// Returns:
-//   - The selected member's raw prediction value
-//   - *out_selected_idx (optional): which member won (0..count-1)
-//
-// Operator-side workflow:
-//   1. Train N horizons via Train Multi-Horizon (G.1)
-//   2. Engine boot loads N models per role into EnsembleModelZoo (G.3)
-//   3. Per slow-path predict, ensemble dispatch picks highest-confidence
-//      model's output (this function)
-//
-// Latency: linear in N (each member predicts independently). Operator
-// can measure via Item A timer; default cfg.horizon_count=0 keeps
-// single-model path with zero overhead.
-//
-// Single-model fallback: if count <= 1, returns Model_Predict on
-// models[0]. Safe to call from MLStrategy regardless of ensemble state.
+//======================================================================
+// [FUNCTION]_[Model_Predict_Ensemble]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v5.10.0a.G.4 multi-horizon argmax-confidence selection — the most-confident member's raw prediction wins (|p-0.5| binary / |p| regression); H20 cmov argmax]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline float Model_Predict_Ensemble(ModelHandle<F> *models,
                                       int count,
@@ -865,37 +980,50 @@ inline float Model_Predict_Ensemble(ModelHandle<F> *models,
     if (out_selected_idx) *out_selected_idx = best_idx;
     return best_pred;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Predict via N independent ModelHandles trained as a multi-horizon
+// ensemble. For each loaded model, compute prediction; return the
+// HIGHEST-ABSOLUTE-DEVIATION-FROM-NEUTRAL prediction (the most-confident
+// signal). Neutral = 0.5 for binary; this rule generalizes to "the
+// model that's surest about its prediction wins."
+//
+// Selection logic:
+//   - Binary models: distance from 0.5 = confidence; argmax(|p - 0.5|)
+//   - Regression: |p| as confidence proxy (zero = no edge)
+//
+// Returns:
+//   - The selected member's raw prediction value
+//   - *out_selected_idx (optional): which member won (0..count-1)
+//
+// Operator-side workflow:
+//   1. Train N horizons via Train Multi-Horizon (G.1)
+//   2. Engine boot loads N models per role into EnsembleModelZoo (G.3)
+//   3. Per slow-path predict, ensemble dispatch picks highest-confidence
+//      model's output (this function)
+//
+// Latency: linear in N (each member predicts independently). Operator
+// can measure via Item A timer; default cfg.horizon_count=0 keeps
+// single-model path with zero overhead.
+//
+// Single-model fallback: if count <= 1, returns Model_Predict on
+// models[0]. Safe to call from MLStrategy regardless of ensemble state.
+//======================================================================
+// [END_FUNCTION]_[Model_Predict_Ensemble]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.7 — WEIGHTED ENSEMBLE PREDICT (Bandit-Exp3 blend)]
-//======================================================================================================
-// Run prediction across N independent boosters; combine via weighted
-// blend: final = Σ weight_i × pred_i / Σ weight_i (NaN-skipped + agreement-
-// gated). Replaces G.4's argmax-confidence selection when operator sets
-// ensemble_blend_mode=weighted (default).
-//
-// Inputs:
-//   models: array of N independent ModelHandles (caller's responsibility
-//           to ensure they share the same scaler — true by G.3 LoadFromCfg
-//           invariant)
-//   count: how many models populated (1..ENSEMBLE_HORIZON_MAX)
-//   weights: per-arm weights from BanditState (already-normalized
-//            probabilities, OR raw weights — function renormalizes)
-//   disabled_mask: bit i set = skip horizon i (operator kill-switch via
-//                  cfg.core_N_disabled_horizons, parsed by
-//                  EnsembleModelZoo_SetDisabledHorizons)
-//   min_agreement_pct: ≥X fraction of non-disabled horizons must predict
-//                       same direction OR return 0.5 (no-edge sentinel,
-//                       MLStrategy treats as no-entry). 0.0 = disabled.
-//
-// Outputs:
-//   *out_dominant_idx: which arm contributed most to signal direction
-//                       (argmax weight × |p − 0.5|); -1 if no entry
-//   Returns: blended prediction, OR 0.5 if agreement check failed.
-//
-// Latency: linear in N (each model predicts independently). G.7 perf
-// optimization #1: features are pre-standardized once before this call;
-// each Model_Predict skips its own scaler.
+//======================================================================
+// [FUNCTION]_[Model_Predict_Ensemble_Weighted]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v5.10.0a.G.7 Bandit-blend — NaN-skipped weighted average across arms, disabled-mask kill switch, agreement gate (split ensemble -> 0.5 no-edge sentinel), dominant-arm tracking]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline float Model_Predict_Ensemble_Weighted(
     ModelHandle<F>* models,
@@ -996,18 +1124,51 @@ inline float Model_Predict_Ensemble_Weighted(
     }
     return (float)(sum_wp / sum_w);
 }
-
-//======================================================================================================
-// [PREDICT MULTI — multi-class softmax output]
-//======================================================================================================
-// fills `out_buf` with up to max_outputs class probabilities. returns the number
-// of class outputs actually written (== num_class for the loaded model). on
-// failure or no model loaded, returns 0 and leaves buf undisturbed.
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Run prediction across N independent boosters; combine via weighted
+// blend: final = Σ weight_i × pred_i / Σ weight_i (NaN-skipped + agreement-
+// gated). Replaces G.4's argmax-confidence selection when operator sets
+// ensemble_blend_mode=weighted (default).
 //
-// for binary classifiers, prefer Model_Predict — this works for them too but
-// returns 1 output. the function is intended for models trained with
-// objective=multi:softprob (XGBoost) or objective=multiclass (LightGBM).
-//======================================================================================================
+// Inputs:
+//   models: array of N independent ModelHandles (caller's responsibility
+//           to ensure they share the same scaler — true by G.3 LoadFromCfg
+//           invariant)
+//   count: how many models populated (1..ENSEMBLE_HORIZON_MAX)
+//   weights: per-arm weights from BanditState (already-normalized
+//            probabilities, OR raw weights — function renormalizes)
+//   disabled_mask: bit i set = skip horizon i (operator kill-switch via
+//                  cfg.core_N_disabled_horizons, parsed by
+//                  EnsembleModelZoo_SetDisabledHorizons)
+//   min_agreement_pct: ≥X fraction of non-disabled horizons must predict
+//                       same direction OR return 0.5 (no-edge sentinel,
+//                       MLStrategy treats as no-entry). 0.0 = disabled.
+//
+// Outputs:
+//   *out_dominant_idx: which arm contributed most to signal direction
+//                       (argmax weight × |p − 0.5|); -1 if no entry
+//   Returns: blended prediction, OR 0.5 if agreement check failed.
+//
+// Latency: linear in N (each model predicts independently). G.7 perf
+// optimization #1: features are pre-standardized once before this call;
+// each Model_Predict skips its own scaler.
+//======================================================================
+// [END_FUNCTION]_[Model_Predict_Ensemble_Weighted]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Model_PredictMulti]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[multi-class softmax output — fills out_buf with up to max_outputs class probabilities; 0 on failure, buf undisturbed]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_features,
                                float *out_buf, int max_outputs) {
@@ -1059,10 +1220,31 @@ inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_
 
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// fills `out_buf` with up to max_outputs class probabilities. returns the number
+// of class outputs actually written (== num_class for the loaded model). on
+// failure or no model loaded, returns 0 and leaves buf undisturbed.
+//
+// for binary classifiers, prefer Model_Predict — this works for them too but
+// returns 1 output. the function is intended for models trained with
+// objective=multi:softprob (XGBoost) or objective=multiclass (LightGBM).
+//======================================================================
+// [END_FUNCTION]_[Model_PredictMulti]
+//======================================================================
 
-//======================================================================================================
-// [FREE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Model_Free]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[backend-dispatched booster free; resets handle + backend to NONE (Model_IsLoaded rides below)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void Model_Free(ModelHandle<F> *m) {
     if (!m->handle) return;
@@ -1083,33 +1265,27 @@ inline void Model_Free(ModelHandle<F> *m) {
     m->backend = MODEL_BACKEND_NONE;
 }
 
-//======================================================================================================
 template <unsigned F>
 inline int Model_IsLoaded(const ModelHandle<F> *m) {
     return m->backend != MODEL_BACKEND_NONE && m->handle != NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Model_Free]
+//======================================================================
 
-//======================================================================================================
-// [FEATURE PACKING — DEPRECATED]
-//======================================================================================================
-// Replaced by Features_PackAll in ML_Headers/FeatureRegistry.hpp (v5.8.1b).
-// All 5 production callers (MLStrategy, StrategyParameters dispatcher,
-// BacktestSharded, PortfolioController regime/barrier paths) flipped at
-// v5.8.1b ship time.
-//
-// This function is now a frozen historical reference, kept ONLY so the
-// EXTENSIBILITY equivalence test in controller_test.cpp can validate that
-// Features_PackAll produces bytewise-identical output. Treat any change
-// to this body as breaking the regression contract — change Features_PackAll
-// instead, then re-pin the FEATURE_REGISTRY_HASH snapshot.
-//
-// Scheduled for full removal in v5.9 once the registry has a few months
-// of paper-validation behind it. At that point the equivalence test gets
-// retired alongside.
-//
+//======================================================================
+// [FUNCTION]_[ModelFeatures_Pack]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[DEPRECATED FROZEN packer — the equivalence-test reference for Features_PackAll (FeatureRegistry.hpp); NEVER change this body, change Features_PackAll + re-pin the hash]
+//======================================================================
+// [CODE]
+//======================================================================
 // Feature order is defined by FEAT_* constants — must match training pipeline.
 // forward-declare RegimeSignals to avoid circular include.
-//======================================================================================================
 template <unsigned F> struct RegimeSignals; // forward declaration
 
 template <unsigned F>
@@ -1155,48 +1331,47 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
     buf[FEAT_SPREAD_ZSCORE]       = (float)sig->spread_zscore;
     return MODEL_NUM_FEATURES;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Replaced by Features_PackAll in ML_Headers/FeatureRegistry.hpp (v5.8.1b).
+// All 5 production callers (MLStrategy, StrategyParameters dispatcher,
+// BacktestSharded, PortfolioController regime/barrier paths) flipped at
+// v5.8.1b ship time.
+//
+// This function is now a frozen historical reference, kept ONLY so the
+// EXTENSIBILITY equivalence test in controller_test.cpp can validate that
+// Features_PackAll produces bytewise-identical output. Treat any change
+// to this body as breaking the regression contract — change Features_PackAll
+// instead, then re-pin the FEATURE_REGISTRY_HASH snapshot.
+//
+// (The original v5.8.1b note scheduled "full removal in v5.9" — that
+// schedule lapsed BY CHOICE: the frozen packer is deliberately retained
+// as the equivalence-test reference; its retirement rides with retiring
+// the equivalence test itself, tracked alongside TECH_DEBT-002's legacy
+// PortfolioController removal era. Frozen at 34 features by design —
+// the equivalence pins the legacy range.)
+//======================================================================
+// [END_FUNCTION]_[ModelFeatures_Pack]
+//======================================================================
 
-//======================================================================================================
-// [v5.2.0 — held-out gate: model stamp verification]
-//======================================================================================================
-// A `.stamp` file lives alongside each `.bin` model:
-//
-//   models/aggressive/buy_signal.bin
-//   models/aggressive/buy_signal.stamp
-//
-// Stamp format (text, key=value lines, last line is signature):
-//
-//   model_format_version=12
-//   model_sha256=<hex of binary>
-//   trained_on=2026-04-28
-//   wf_mean_val=0.55
-//   held_out_metric=0.53
-//   gap=0.02
-//   gap_threshold=0.05
-//   signature=<HMAC-SHA256(secret, all-prior-lines-concatenated)>
-//
-// Verifier returns:
-//   1 = stamp present, signature valid, gap below threshold → safe to load
-//   0 = stamp present but FAILED (sig mismatch, gap too wide, format-version
-//       drift, or model_sha256 mismatch) → REJECT, log reason
-//  -1 = stamp file missing entirely → caller decides via held_out_gate_strict
-//
-// Empty `secret` = "accept any signature" mode (dev convenience).
-// Real production: set a non-empty secret + flip held_out_gate_strict=1.
-//
-// Safe from path traversal: caller passes the .bin path; we append ".stamp".
-// File reads are bounded; stamp file > 4KB is treated as malformed.
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.2.0 — held-out gate: model stamp verification]
+//----------------------------------------------------------------------
 
-// v5.14.8.A.merged — ModelStampResult migrated to X-macro generation
-// from FOREACH_STAMP_BOUND_MODEL_CONST registry. has_* flags bit-packed
-// into uint64_t has_flags (v5.14.8.A.merged.1 bit allocation enum).
-// All 26 architectural fields auto-flow from the registry; future field
-// addition = 1 row in registry → struct field + parser + emitter +
-// AUTOPOPULATE wiring all auto-derived. Closes TECH_DEBT-006.
-//
-// Caller migration: `r.has_<X>` → `STAMP_HAS(r, <group_or_entry>)`;
-// field reads continue as `r.<canonical_name>`.
+//======================================================================
+// [STRUCT]_[ModelStampResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the stamp PARSE side — runtime verdict fields + bit-packed has_flags + X-macro-generated architectural/cfg-derived/late-emit value fields]
+// [REFERENCE]_[INVARIANT]_[[H9] [H18]]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth]
+//======================================================================
+// [CODE]
+//======================================================================
 struct ModelStampResult {
     // v5.15.5.F.4d.1.B.3 Step 1.6.3 — F=64 brought into struct scope for STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN()
     // expansion (master STORAGE_T includes FPN_Binary<F>; expansion needs F in scope).
@@ -1213,7 +1388,7 @@ struct ModelStampResult {
     char     engine_version[16];     // v5.8.6: SemVer string at training time, "" if absent.
                                      // v5.15.5.F.4d.1.B.3 — INTENTIONAL TRUNCATION at 15 chars +
                                      // null. The engine_version field is used for cross-major
-                                     // version check (first integer digit; ModelInference.hpp:1428-1429)
+                                     // version check (first integer digit; verify_model_stamp)
                                      // + operator-facing display ("unknown" if absent). Full
                                      // version string preservation is NOT a design requirement.
                                      // Wire body retains the full string (HMAC chain unaffected);
@@ -1278,13 +1453,40 @@ struct ModelStampResult {
     // sees everything). FOREACH_STAMP_BOUND_MODEL_CONST already walked
     // both halves above (union expansion).
 };
-
-// Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
-// Out parameter `hex` must be at least 65 bytes (64 hex digits + NUL).
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.14.8.A.merged — ModelStampResult migrated to X-macro generation
+// from FOREACH_STAMP_BOUND_MODEL_CONST registry. has_* flags bit-packed
+// into uint64_t has_flags (v5.14.8.A.merged.1 bit allocation enum).
+// All 26 architectural fields auto-flow from the registry; future field
+// addition = 1 row in registry → struct field + parser + emitter +
+// AUTOPOPULATE wiring all auto-derived. Closes TECH_DEBT-006.
 //
-// v5.3.0 Phase B: now an in-process EVP wrapper. Was a popen("sha256sum ...")
-// shell-out in v5.2.0 — replaced for speed, shell-injection safety, and
-// removing the dependency on /usr/bin/sha256sum being installed.
+// Caller migration: `r.has_<X>` → `STAMP_HAS(r, <group_or_entry>)`;
+// field reads continue as `r.<canonical_name>`.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[5264B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[83]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[ModelStampResult]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[sha256_file_hex]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[verify helpers (stamp_parse_line rides) — in-process EVP SHA-256 file hash + the key=value line splitter]
+//======================================================================
+// [CODE]
+//======================================================================
 inline int sha256_file_hex(const char* path, char* hex_out, size_t hex_cap) {
     return tt::sha256_file_hex_inproc(path, hex_out, hex_cap);
 }
@@ -1302,17 +1504,36 @@ inline int stamp_parse_line(char* line, const char** key_out, const char** val_o
     if (nl) *nl = '\0';
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// sha256_file_hex: computes SHA-256 of a file. Reads in 64K chunks, safe
+// for any size. Out parameter `hex` must be at least 65 bytes (64 hex
+// digits + NUL).
+//
+// v5.3.0 Phase B: now an in-process EVP wrapper. Was a popen("sha256sum ...")
+// shell-out in v5.2.0 — replaced for speed, shell-injection safety, and
+// removing the dependency on /usr/bin/sha256sum being installed.
+//======================================================================
+// [END_FUNCTION]_[sha256_file_hex]
+//======================================================================
 
-// v5.15.5.F.4d.1.B.3 Step 1.6.7.4 — Legacy wire-key back-compat for SOFT version 1 → 2 bump.
-// Per DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
-//
-// 15 cfg-derived cohort fields lost the `inference_cfg_` prefix at v2 wire format. v1 stamps
-// continue loading on v2+ engine via parser dispatch: legacy key match → framework dispatch on
-// unprefixed sister name. Deletion target tracked at TECH_DEBT-101 (when production v1 stamps
-// eliminated). v1 LOAD test fixture at controller_test.cpp regression-locks back-compat.
-//
-// Adding a new (legacy, current) pair = add 1 row below; parser dispatch + tests auto-flow.
-// Removing the back-compat layer = delete the X-macro body + remove parser dispatch + close TECH_DEBT.
+//======================================================================
+// [REGISTRY]_[FOREACH_LEGACY_PREFIXED_KEY]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v1 -> v2 wire-key back-compat dispatch — 16 legacy `inference_cfg_*` keys map to their unprefixed sisters; parser dispatch + tests auto-flow per row]
+// [COLUMN]_[legacy_key]_[the v1-era prefixed wire key a legacy stamp carries]
+// [COLUMN]_[current_key]_[the unprefixed v2+ sister name the framework dispatch parses into]
+// [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-238]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_LEGACY_PREFIXED_KEY(X) \
     /* 9 thompson/.A.7 cohort (per Decision D v1.6 scope) */                          \
     X(inference_cfg_bandit_algorithm,            bandit_algorithm)                    \
@@ -1336,13 +1557,38 @@ inline int stamp_parse_line(char* line, const char** key_out, const char** val_o
     /* PRE_CFG inf-side row to cfg-derived cohort. v1 stamps emit prefixed key;     */ \
     /* v2 emits unprefixed via cfg-derived framework; back-compat keeps v1 loading. */ \
     X(inference_cfg_held_out_fraction,           held_out_fraction)
-
-// Verify a model stamp. See header for return values + format.
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.4d.1.B.3 Step 1.6.7.4 — Legacy wire-key back-compat for SOFT version 1 → 2 bump.
+// Per DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
 //
-// model_path: path to the .bin file. `.stamp` is implied by appending.
-// secret: HMAC secret. Empty string ("") = accept-any signature (dev mode).
-// gap_threshold: max acceptable generalization gap. Stamp gap must be ≤ this.
-// expected_format_version: caller passes MODEL_FORMAT_VERSION; mismatch fails.
+// 15 cfg-derived cohort fields lost the `inference_cfg_` prefix at v2 wire format. v1 stamps
+// continue loading on v2+ engine via parser dispatch: legacy key match → framework dispatch on
+// unprefixed sister name. Deletion target re-homed at TECH_DEBT-238 (the originally-cited
+// TECH_DEBT-101 entry was lost from the ledger; rg-verified dangling at P6.96) — and folds into
+// the TECH_DEBT-237 pre-epoch-floor fix ship, which deadens this layer entirely.
+// v1 LOAD test fixture at controller_test.cpp regression-locks back-compat.
+//
+// Adding a new (legacy, current) pair = add 1 row above; parser dispatch + tests auto-flow.
+// Removing the back-compat layer = delete the X-macro body + remove parser dispatch + close TECH_DEBT.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_LEGACY_PREFIXED_KEY]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[verify_model_stamp]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the stamp INGEST gate — parse key=value body, registry-driven field dispatch, drift checks (format/feature-hash/label-hash/feature-mask/gap), model-sha pin, H9 HMAC-SHA256 verify]
+// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-237]
+//======================================================================
+// [CODE]
+//======================================================================
 inline ModelStampResult verify_model_stamp(const char* model_path,
                                             const char* secret,
                                             double gap_threshold,
@@ -1493,7 +1739,7 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // v5.15.5.F.4d.1.B.3 Step 1.6.7.4 — Legacy prefixed wire-key back-compat (SOFT v1 → v2
             // bump). Translates each legacy `inference_cfg_<name>` key to its unprefixed sister
             // via framework dispatch. v1 stamps continue loading on v2+ engine. See
-            // FOREACH_LEGACY_PREFIXED_KEY above (line 1278+) for the closed-set list +
+            // FOREACH_LEGACY_PREFIXED_KEY (its own [REGISTRY] block above) for the closed-set list +
             // DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
             #define X(legacy_key, current_key) \
                 else if (strcmp(key, #legacy_key) == 0) { \
@@ -1550,6 +1796,8 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     // Reject FUTURE versions only — engine doesn't know how to interpret unknown shape. Legacy
     // versions ≥ 1 continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat dispatch + per-field
     // has_<name> Surface G semantic. Per Layer 6b SOFT bump procedure.
+    // ⚠ Ship-B intent says pre-epoch [1,2] must be UNCONDITIONALLY hard-invalid here — that floor
+    // was never coded (this relaxed accept is the actual behavior); TECH_DEBT-237 tracks it.
     if ((uint32_t)r.stamp_format_version > MAX_SUPPORTED_STAMP_FORMAT_VERSION) {
         r.valid = 0;
         snprintf(r.reason, sizeof(r.reason),
@@ -1707,25 +1955,67 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     }
     return r;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// A `.stamp` file lives alongside each `.bin` model:
+//
+//   models/aggressive/buy_signal.bin
+//   models/aggressive/buy_signal.stamp
+//
+// Stamp format (text, key=value lines, last line is signature):
+//
+//   model_format_version=12
+//   model_sha256=<hex of binary>
+//   trained_on=2026-04-28
+//   wf_mean_val=0.55
+//   held_out_metric=0.53
+//   gap=0.02
+//   gap_threshold=0.05
+//   signature=<HMAC-SHA256(secret, all-prior-lines-concatenated)>
+//
+// Verifier returns:
+//   1 = stamp present, signature valid, gap below threshold → safe to load
+//   0 = stamp present but FAILED (sig mismatch, gap too wide, format-version
+//       drift, or model_sha256 mismatch) → REJECT, log reason
+//  -1 = stamp file missing entirely → caller decides via held_out_gate_strict
+//
+// Empty `secret` = "accept any signature" mode (dev convenience).
+// Real production: set a non-empty secret + flip held_out_gate_strict=1.
+//
+// Safe from path traversal: caller passes the .bin path; we append ".stamp".
+// File reads are bounded; stamp file > 4KB is treated as malformed.
+//
+// Parameters:
+// model_path: path to the .bin file. `.stamp` is implied by appending.
+// secret: HMAC secret. Empty string ("") = accept-any signature (dev mode).
+// gap_threshold: max acceptable generalization gap. Stamp gap must be ≤ this.
+// expected_format_version: caller passes MODEL_FORMAT_VERSION; mismatch fails.
+//======================================================================
+// [END_FUNCTION]_[verify_model_stamp]
+//======================================================================
 
-//======================================================================================================
-// [v5.3.0 Phase B — stamp_write_for_model: sign + write a model stamp in-process]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.3.0 Phase B — stamp_write_for_model: sign + write a model stamp in-process]
+//----------------------------------------------------------------------
 // Inverse of verify_model_stamp. Computes SHA-256 of the model file,
 // builds the same canonical body the verifier reads, signs with
 // HMAC-SHA256, writes <model>.stamp atomically (write to .tmp, then
 // rename — POSIX atomic within a filesystem). Refuses to write when
 // |wf - held_out| > gap_threshold unless `force` is set.
 //
-// Field order in the canonical body MUST match tools/stamp_model.sh
-// byte-for-byte; bash-compat regression test in controller_test.cpp
-// catches drift.
+// Field order in the canonical body MUST match the verifier byte-for-byte.
+// (The retired tools/stamp_model.sh bash stamper defined the original
+// format — deleted at v5.15.5.F.4d.1.B.3, stamping is in-process now;
+// the bash-compat regression test in controller_test.cpp still locks the
+// canonical-body format against drift.)
 //
 // Locale pinning: %g/%f honor LC_NUMERIC. A stamp signed under
 // LC_NUMERIC=C wouldn't verify under LC_NUMERIC=de_DE because
 // 0.55 → "0,55" in some locales. We pin LC_NUMERIC=C for the canonical
 // body construction (per-thread via uselocale).
-//======================================================================================================
 
 struct StampWriteResult {
     int  ok;             // 1 = stamp written; 0 = refused (gap too wide, i/o, etc.)
@@ -1733,19 +2023,16 @@ struct StampWriteResult {
     char stamp_path[512]; // where it was written (or would have been)
 };
 
-// v5.9.2b — inference cfg fields bound to the stamp at training time.
-// Caller fills only the fields it has; has_* flags gate emit. Nullptr
-// passed for legacy callers means none of these fields emit (forward-
-// compat with v5.9.0/.1/.2 stamps).
-// v5.14.8.A.merged.3 — StampInferenceCfgInputs migrated to X-macro
-// generation from FOREACH_STAMP_BOUND_MODEL_CONST registry (matches
-// ModelStampResult; Option 1 unification). Both structs now use canonical
-// wire-key field names + uint64_t has_flags bit-packed via STAMP_HAS aliases.
-//
-// Production caller migration: replace manual population blocks with
-// `STAMP_MODEL_CONST_AUTOPOPULATE(inf, src)` macro call. Future field
-// additions auto-flow via the registry (extinguishes v5.9.5b production-
-// caller class for stamp body fields).
+//======================================================================
+// [STRUCT]_[StampInferenceCfgInputs]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the stamp EMIT-side input bundle — caller-filled fields gated by bit-packed has_flags; X-macro-generated to match ModelStampResult's canonical wire-key names]
+// [REFERENCE]_[INVARIANT]_[[H9] [H18]]
+//======================================================================
+// [CODE]
+//======================================================================
 struct StampInferenceCfgInputs {
     // v5.15.5.F.4d.1.B.3 Step 1.6.3 — F=64 brought into struct scope for STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN().
     static constexpr unsigned F = 64;
@@ -1778,12 +2065,40 @@ struct StampInferenceCfgInputs {
     // bit-packed in has_flags; STAMP_HAS(inf, expected_num_classes) etc.
     // for accessor.
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.9.2b — inference cfg fields bound to the stamp at training time.
+// Caller fills only the fields it has; has_* flags gate emit. Nullptr
+// passed for legacy callers means none of these fields emit (forward-
+// compat with v5.9.0/.1/.2 stamps).
+// v5.14.8.A.merged.3 — StampInferenceCfgInputs migrated to X-macro
+// generation from FOREACH_STAMP_BOUND_MODEL_CONST registry (matches
+// ModelStampResult; Option 1 unification). Both structs now use canonical
+// wire-key field names + uint64_t has_flags bit-packed via STAMP_HAS aliases.
+//
+// Production caller migration: replace manual population blocks with
+// `STAMP_MODEL_CONST_AUTOPOPULATE(inf, src)` macro call. Future field
+// additions auto-flow via the registry (extinguishes v5.9.5b production-
+// caller class for stamp body fields).
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[StampInferenceCfgInputs]
+//======================================================================
 
-// v5.15.5.F.4d.1.B.3 Step 1.6.4 — templated on F + cfg_ptr param for cfg-driven canonical body
-// emit via cfg_derived::populate_stamp_cfg_from_derived<F>. Default F=64 preserves call shape
-// for non-cfg callers (cfg_ptr=nullptr skips cfg-derived emit; matches Stamp_AssembleAndEmit ↔
-// stamp_write_for_model contract). Source-of-truth shift: cfg-derived wire keys read from cfg
-// at emit time (not from caller-populated inf). Cohort gating per-row from cfg_gate::lookup_populate.
+//======================================================================
+// [FUNCTION]_[stamp_write_for_model]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the stamp EMIT side — LC_NUMERIC=C-pinned canonical body (PRE_CFG -> cfg-derived -> POST_CFG registry order), H9 HMAC-SHA256 sign, atomic tmp+rename write; refuses on gap > threshold]
+// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F = 64>
 inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 const char* secret,
@@ -2003,5 +2318,18 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     r.ok = 1;
     return r;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.4d.1.B.3 Step 1.6.4 — templated on F + cfg_ptr param for cfg-driven canonical body
+// emit via cfg_derived::populate_stamp_cfg_from_derived<F>. Default F=64 preserves call shape
+// for non-cfg callers (cfg_ptr=nullptr skips cfg-derived emit; matches Stamp_AssembleAndEmit ↔
+// stamp_write_for_model contract). Source-of-truth shift: cfg-derived wire keys read from cfg
+// at emit time (not from caller-populated inf). Cohort gating per-row from cfg_gate::lookup_populate.
+//======================================================================
+// [END_FUNCTION]_[stamp_write_for_model]
+//======================================================================
 
 #endif // MODEL_INFERENCE_HPP
