@@ -420,34 +420,6 @@ inline int RidgeBlender_Compute(RidgeWeights<F>* out,
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.14.11.A — converts running sums (sum_x[N], sum_xx[N][N], window_count)
-// into N×N correlation matrix. Sum-of-squares form per
-// DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
-//
-// Shared by BOTH:
-//   - Refactored RidgeBlender_BuildCorr (full-recompute path; accumulates
-//     sum_x + sum_xx single-pass over flat history, then calls this finalize)
-//   - RidgeBlender_OnlineCycleStep with use_online_incremental=true
-//     (uses RidgeWeights<F>::online_sum_x + online_sum_xx directly)
-//
-// Architectural unification per Caramel decision 2026-05-11 (C):
-// single math kernel eliminates parallel correlation formulas → both paths
-// produce identical output given identical sums (within ~1e-13 sum convergence
-// when paths see same K records).
-//
-// Math (sum-of-squares form; numerically stable for bounded inputs × bounded K):
-//   mean[i]   = sum_x[i] / K
-//   var[i]    = max(sum_xx[i][i] / K - mean[i]², 0)
-//   cov[i][j] = sum_xx[i][j] / K - mean[i] × mean[j]
-//   corr[i][j] = cov[i][j] / sqrt(var[i] × var[j])    (clamped to [-1, 1])
-//
-// Edge cases:
-//   - window_count < 2  → identity matrix (not enough data)
-//   - var[i] < 1e-18    → identity row (constant predictions; Cholesky-safe)
-//   - n_models < n_in_sums → unused slots zeroed (Cholesky-safe)
-//
-// Cost: O(N²) — N(N+1)/2 unique pairs × constant per-pair work.
-//======================================================================================================
 template <unsigned F>
 inline void RidgeBlender_FinalizeCorrFromSums(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS],
                                                 const double sum_x[MAX_RIDGE_MODELS],
@@ -518,6 +490,36 @@ inline void RidgeBlender_FinalizeCorrFromSums(double corr_out[MAX_RIDGE_MODELS][
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.14.11.A — converts running sums (sum_x[N], sum_xx[N][N], window_count)
+// into N×N correlation matrix. Sum-of-squares form per
+// DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
+//
+// Shared by BOTH:
+//   - Refactored RidgeBlender_BuildCorr (full-recompute path; accumulates
+//     sum_x + sum_xx single-pass over flat history, then calls this finalize)
+//   - RidgeBlender_OnlineCycleStep with use_online_incremental=true
+//     (uses RidgeWeights<F>::online_sum_x + online_sum_xx directly)
+//
+// Architectural unification per Caramel decision 2026-05-11 (C):
+// single math kernel eliminates parallel correlation formulas → both paths
+// produce identical output given identical sums (within ~1e-13 sum convergence
+// when paths see same K records).
+//
+// Math (sum-of-squares form; numerically stable for bounded inputs × bounded K):
+//   mean[i]   = sum_x[i] / K
+//   var[i]    = max(sum_xx[i][i] / K - mean[i]², 0)
+//   cov[i][j] = sum_xx[i][j] / K - mean[i] × mean[j]
+//   corr[i][j] = cov[i][j] / sqrt(var[i] × var[j])    (clamped to [-1, 1])
+//
+// Edge cases:
+//   - window_count < 2  → identity matrix (not enough data)
+//   - var[i] < 1e-18    → identity row (constant predictions; Cholesky-safe)
+//   - n_models < n_in_sums → unused slots zeroed (Cholesky-safe)
+//
+// Cost: O(N²) — N(N+1)/2 unique pairs × constant per-pair work.
+//======================================================================
 // [END_FUNCTION]_[RidgeBlender_FinalizeCorrFromSums]
 //======================================================================
 
@@ -532,27 +534,6 @@ inline void RidgeBlender_FinalizeCorrFromSums(double corr_out[MAX_RIDGE_MODELS][
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.14.11.A REFACTORED — single-pass sum-of-squares accumulation +
-// shared FinalizeCorrFromSums. Replaces the prior 3-pass mean/var/corr
-// recomputation; unified math kernel with online incremental path.
-//
-// Algebraic equivalence (within ~1e-13 IEEE-754 finite precision) to prior
-// 3-pass form. Intentional bytewise break with v5.14.10 — PARITY contract
-// at v5.14.10 → v5.14.11 boundary is TOLERANCE 1e-9 (documented in plan
-// + PARITY_ISSUES.md). cfg=0 + cfg=1 within v5.14.11 share this finalize
-// kernel → tolerance ~1e-13 (sum convergence) between modes.
-//
-// Input: `history[]` is a flat array of K records, each with N model
-// predictions. For EnsembleModelZoo, this maps to ezoo->reward_ring's
-// PredictionRecord.predictions[] array (populated via BuildHistoryFromRing
-// or OnlineCycleStep helper).
-//
-// Cost: O(N² × K) — single-pass sum-of-squares accumulation. For N=8,
-// K=64 → ~4096 ops; ~700-1000ns (vs prior 3-pass ~1µs; ~300ns saving
-// per Caramel decision (C) 2026-05-11 latency reduction).
-//
-// Pattern documented in DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
-//======================================================================================================
 template <unsigned F>
 __attribute__((no_sanitize("address")))   // asan can't model the AVX-512 masked load/store on the 8-wide
                                            // buffers (correct-by-construction; verified by the v5.14.11.B.3
@@ -621,6 +602,29 @@ inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_M
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.14.11.A REFACTORED — single-pass sum-of-squares accumulation +
+// shared FinalizeCorrFromSums. Replaces the prior 3-pass mean/var/corr
+// recomputation; unified math kernel with online incremental path.
+//
+// Algebraic equivalence (within ~1e-13 IEEE-754 finite precision) to prior
+// 3-pass form. Intentional bytewise break with v5.14.10 — PARITY contract
+// at v5.14.10 → v5.14.11 boundary is TOLERANCE 1e-9 (documented in plan
+// + PARITY_ISSUES.md). cfg=0 + cfg=1 within v5.14.11 share this finalize
+// kernel → tolerance ~1e-13 (sum convergence) between modes.
+//
+// Input: `history[]` is a flat array of K records, each with N model
+// predictions. For EnsembleModelZoo, this maps to ezoo->reward_ring's
+// PredictionRecord.predictions[] array (populated via BuildHistoryFromRing
+// or OnlineCycleStep helper).
+//
+// Cost: O(N² × K) — single-pass sum-of-squares accumulation. For N=8,
+// K=64 → ~4096 ops; ~700-1000ns (vs prior 3-pass ~1µs; ~300ns saving
+// per Caramel decision (C) 2026-05-11 latency reduction).
+//
+// Pattern documented in DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
+//======================================================================
 // [END_FUNCTION]_[RidgeBlender_BuildCorr]
 //======================================================================
 
@@ -635,27 +639,6 @@ inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_M
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.14.11.A — per-record incremental update for the sliding-window K=64
-// correlation matrix. Two modes (selected by predictions_oldest_or_null):
-//
-//   1. Window NOT YET FULL (count < K): standard sum-of-squares add.
-//      Caller passes predictions_oldest_or_null = nullptr.
-//   2. Window FULL (count >= K): drop oldest + add new in one operation.
-//      Caller passes predictions_oldest_or_null = pointer to oldest record.
-//
-// Bounded-input guard: predictions must be in [0,1] for the sum-of-squares
-// numerical-stability argument to hold. BARRIER ensembles produce sigmoid
-// outputs (naturally [0,1]); non-BARRIER misconfigurations are caught in
-// debug builds via assert. Release builds compile out the assert.
-//
-// Per /parity-check re-audit 2026-05-11 LOW recommendation + Caramel
-// decision (B): fold into .A. Compiled out in release; debug catches.
-//
-// Cost: O(N²) — outer-product update with N=8 → ~64 fmadd; ~30ns scalar
-// (AVX-512 vectorization deferred to .B).
-//
-// Pattern documented in DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
-//======================================================================================================
 template <unsigned F>
 __attribute__((no_sanitize("address")))   // asan can't model the AVX-512 masked load/store (see RidgeBlender_BuildCorr / Bandit_GetProbabilities). TECH_DEBT-158.
 inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
@@ -771,6 +754,29 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.14.11.A — per-record incremental update for the sliding-window K=64
+// correlation matrix. Two modes (selected by predictions_oldest_or_null):
+//
+//   1. Window NOT YET FULL (count < K): standard sum-of-squares add.
+//      Caller passes predictions_oldest_or_null = nullptr.
+//   2. Window FULL (count >= K): drop oldest + add new in one operation.
+//      Caller passes predictions_oldest_or_null = pointer to oldest record.
+//
+// Bounded-input guard: predictions must be in [0,1] for the sum-of-squares
+// numerical-stability argument to hold. BARRIER ensembles produce sigmoid
+// outputs (naturally [0,1]); non-BARRIER misconfigurations are caught in
+// debug builds via assert. Release builds compile out the assert.
+//
+// Per /parity-check re-audit 2026-05-11 LOW recommendation + Caramel
+// decision (B): fold into .A. Compiled out in release; debug catches.
+//
+// Cost: O(N²) — outer-product update with N=8 → ~64 fmadd; ~30ns scalar
+// (AVX-512 vectorization deferred to .B).
+//
+// Pattern documented in DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
+//======================================================================
 // [END_FUNCTION]_[RidgeBlender_UpdateOnline]
 //======================================================================
 
@@ -783,26 +789,6 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.14.11.A — C1 helper extraction per Caramel decision 2026-05-11.
-// Single source of truth for ring-walk-backwards-from-head pattern;
-// replaces TWO mirror loops at StrategyParameters.hpp (buy + exit).
-// Class 18 mirror prevention per the structural-fix-preferred gradient.
-//
-// Templated on PredictionRecordT to avoid circular include with
-// NodeModelZoo.hpp. Caller provides concrete EnsembleModelZoo<F>::PredictionRecord
-// type at instantiation; helper accesses .predictions[i] field.
-//
-// Walks ring backwards from ring_head; writes most-recent-first into
-// history_out as a flat [avail × n_models] float array.
-//
-// Capacity contract: caller provides history_out buffer of size
-// RIDGE_HISTORY_DEPTH × MAX_RIDGE_MODELS = 512 floats. Helper writes
-// only avail × n_models entries; caller's BuildCorr / FinalizeCorrFromSums
-// reads only that range.
-//
-// Returns: avail = min(predict_call_count, RIDGE_HISTORY_DEPTH). 0 if
-// no records available.
-//======================================================================================================
 template <unsigned F, typename PredictionRecordT>
 inline int RidgeBlender_BuildHistoryFromRing(const PredictionRecordT* ring,
                                                int ring_head,
@@ -829,6 +815,28 @@ inline int RidgeBlender_BuildHistoryFromRing(const PredictionRecordT* ring,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.14.11.A — C1 helper extraction per Caramel decision 2026-05-11.
+// Single source of truth for ring-walk-backwards-from-head pattern;
+// replaces TWO mirror loops at StrategyParameters.hpp (buy + exit).
+// Class 18 mirror prevention per the structural-fix-preferred gradient.
+//
+// Templated on PredictionRecordT to avoid circular include with
+// NodeModelZoo.hpp. Caller provides concrete EnsembleModelZoo<F>::PredictionRecord
+// type at instantiation; helper accesses .predictions[i] field.
+//
+// Walks ring backwards from ring_head; writes most-recent-first into
+// history_out as a flat [avail × n_models] float array.
+//
+// Capacity contract: caller provides history_out buffer of size
+// RIDGE_HISTORY_DEPTH × MAX_RIDGE_MODELS = 512 floats. Helper writes
+// only avail × n_models entries; caller's BuildCorr / FinalizeCorrFromSums
+// reads only that range.
+//
+// Returns: avail = min(predict_call_count, RIDGE_HISTORY_DEPTH). 0 if
+// no records available.
+//======================================================================
 // [END_FUNCTION]_[RidgeBlender_BuildHistoryFromRing]
 //======================================================================
 
@@ -841,37 +849,6 @@ inline int RidgeBlender_BuildHistoryFromRing(const PredictionRecordT* ring,
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.14.11.A — C1 helper wrapper per Caramel decision 2026-05-11.
-// Full per-Ridge-cycle dispatch; both Ridge call sites (buy + exit) reduce
-// to a single helper call. Eliminates the parallel ring-walk + BuildCorr
-// mirror at StrategyParameters.hpp.
-//
-// Dispatches between:
-//   - use_online_incremental=false: full-recompute via BuildHistoryFromRing
-//     + refactored BuildCorr (calls shared FinalizeCorrFromSums internally).
-//     Used when cfg.ridge_online_corr=0 (default; cfg=0 replay regime).
-//   - use_online_incremental=true: sliding-window incremental via
-//     UpdateOnline + shared FinalizeCorrFromSums. Used when
-//     cfg.ridge_online_corr=1 (operator opt-in; cfg=1 replay regime).
-//
-// Returns:
-//    0 — corr_matrix populated in rw->corr_matrix; caller proceeds to
-//        RidgeBlender_Compute
-//   -1 — not enough history (predict_call_count < 2); caller falls through
-//        to bandit weights (Ridge override skipped this cycle)
-//
-// Cost (slow-path; per cycle, per core):
-//   - cfg=0 (full): ~700-1000ns (refactored BuildCorr + finalize)
-//   - cfg=1 (online): ~70-100ns (UpdateOnline + finalize; AVX-512 in .B
-//     drops further to ~30ns)
-//   - Per-record add/replace: O(N²) outer-product
-//   - Finalize: O(N²) per-pair scale + sqrt
-//
-// Pattern: structural unification per Caramel "redesign for better
-// functionality forward" 2026-05-11. Shared math kernel eliminates
-// parallel correlation formulas; single source of truth for the
-// corr-from-sums math.
-//======================================================================================================
 template <unsigned F, typename PredictionRecordT>
 inline int RidgeBlender_OnlineCycleStep(RidgeWeights<F>* rw,
                                           const PredictionRecordT* ring,
@@ -918,6 +895,39 @@ inline int RidgeBlender_OnlineCycleStep(RidgeWeights<F>* rw,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.14.11.A — C1 helper wrapper per Caramel decision 2026-05-11.
+// Full per-Ridge-cycle dispatch; both Ridge call sites (buy + exit) reduce
+// to a single helper call. Eliminates the parallel ring-walk + BuildCorr
+// mirror at StrategyParameters.hpp.
+//
+// Dispatches between:
+//   - use_online_incremental=false: full-recompute via BuildHistoryFromRing
+//     + refactored BuildCorr (calls shared FinalizeCorrFromSums internally).
+//     Used when cfg.ridge_online_corr=0 (default; cfg=0 replay regime).
+//   - use_online_incremental=true: sliding-window incremental via
+//     UpdateOnline + shared FinalizeCorrFromSums. Used when
+//     cfg.ridge_online_corr=1 (operator opt-in; cfg=1 replay regime).
+//
+// Returns:
+//    0 — corr_matrix populated in rw->corr_matrix; caller proceeds to
+//        RidgeBlender_Compute
+//   -1 — not enough history (predict_call_count < 2); caller falls through
+//        to bandit weights (Ridge override skipped this cycle)
+//
+// Cost (slow-path; per cycle, per core):
+//   - cfg=0 (full): ~700-1000ns (refactored BuildCorr + finalize)
+//   - cfg=1 (online): ~70-100ns (UpdateOnline + finalize; AVX-512 in .B
+//     drops further to ~30ns)
+//   - Per-record add/replace: O(N²) outer-product
+//   - Finalize: O(N²) per-pair scale + sqrt
+//
+// Pattern: structural unification per Caramel "redesign for better
+// functionality forward" 2026-05-11. Shared math kernel eliminates
+// parallel correlation formulas; single source of truth for the
+// corr-from-sums math.
 //======================================================================
 // [END_FUNCTION]_[RidgeBlender_OnlineCycleStep]
 //======================================================================

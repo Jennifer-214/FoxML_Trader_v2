@@ -57,24 +57,6 @@
 //======================================================================
 // [CODE]
 //======================================================================
-// The bundle of inputs the registered feature compute functions read.
-// Each compute fn reads what it needs and ignores the rest.
-//
-// v5.9.0a — tightened from the v5.8.1a forward-compat shape. Removed
-// 11 unused auxiliary fields (long_rolling, medium_rolling,
-// baseline_rolling, ema_price, ror, flow, book_imb, spread,
-// large_trade, cumdelta, tick_rate, timestamp_us). All 34 currently
-// registered features read from `signals` (precomputed by
-// Regime_ComputeSignals from the upstream raw state) or from
-// `short_rolling` (indices 11-14: vwap_dev, price_stddev, price_avg,
-// volume_avg). Aux state is upstream of `signals`, not duplicated
-// into the ctx.
-//
-// When a v5.10+ feature needs raw state access not surfaced by
-// RegimeSignals, re-add the specific field at that time. YAGNI
-// applies — declared-but-unused fields confuse readers + audit
-// tools (the v5.8 audit's false-CRITICAL came from misreading
-// these fields as required).
 template <unsigned F>
 struct FeatureComputeCtx {
     // Pre-computed regime signal bundle. Feature indices 0-10, 15-33
@@ -117,6 +99,27 @@ struct FeatureComputeCtx {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// The bundle of inputs the registered feature compute functions read.
+// Each compute fn reads what it needs and ignores the rest.
+//
+// v5.9.0a — tightened from the v5.8.1a forward-compat shape. Removed
+// 11 unused auxiliary fields (long_rolling, medium_rolling,
+// baseline_rolling, ema_price, ror, flow, book_imb, spread,
+// large_trade, cumdelta, tick_rate, timestamp_us). All currently
+// registered features read from `signals` (precomputed by
+// Regime_ComputeSignals from the upstream raw state) or from
+// `short_rolling` (indices 11-14: vwap_dev, price_stddev, price_avg,
+// volume_avg). Aux state is upstream of `signals`, not duplicated
+// into the ctx.
+//
+// When a v5.10+ feature needs raw state access not surfaced by
+// RegimeSignals, re-add the specific field at that time. YAGNI
+// applies — declared-but-unused fields confuse readers + audit
+// tools (the v5.8 audit's false-CRITICAL came from misreading
+// these fields as required).
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 //----------------------------------------------------------------------

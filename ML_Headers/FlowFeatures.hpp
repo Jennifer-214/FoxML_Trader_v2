@@ -260,11 +260,6 @@ static inline FPN_Binary<F> BookImbHistory_MeanShort(const BookImbalanceHistory<
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.D.A — alignas(64) ensures FlowState's 32 B never straddles two
-// cache lines. All 4 fields are HOT (Push and read both touch all 4 every
-// slow-path cycle); no HOT/WARM/COLD tier needed (whole struct fits in 1
-// cache line). Trailing 32 B pad is structural minimum given alignas(64)
-// requirement (32 B natural; pad to 64).
 struct alignas(64) FlowState {
     double ewma_10s;     // signed-volume EWMA, half-life 10s
     double ewma_1m;      // half-life 60s
@@ -291,6 +286,14 @@ struct alignas(64) FlowState {
 // it's cadence-independent — pushing every slow-path firing (variable
 // inter-tick time) produces the same approximate continuous EWMA as
 // pushing every wall-clock second would.
+//======================================================================
+// [COMMENT]_[layout — v5.15.5.D.A]
+//----------------------------------------------------------------------
+// v5.15.5.D.A — alignas(64) ensures FlowState's 32 B never straddles two
+// cache lines. All 4 fields are HOT (Push and read both touch all 4 every
+// slow-path cycle); no HOT/WARM/COLD tier needed (whole struct fits in 1
+// cache line). Trailing 32 B pad is structural minimum given alignas(64)
+// requirement (32 B natural; pad to 64).
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 //----------------------------------------------------------------------

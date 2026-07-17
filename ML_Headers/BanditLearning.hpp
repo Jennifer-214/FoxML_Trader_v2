@@ -229,21 +229,6 @@ static inline void Bandit_InitDefault(BanditState *b, int n_arms) {
 // [END_FUNCTION]_[Bandit_Init]
 //======================================================================
 
-// v5.15.5.A.3 — DEPRECATED legacy API. arm_names was extracted to
-// BanditDisplayMeta; this signature is preserved as a thin forwarder to
-// BanditDisplayMeta_SetArmName for any pre-v5.15.5.A.3 caller. New callers
-// should pass a BanditDisplayMeta* directly. This forwarder requires a
-// paired display meta separately set by the caller (no automatic pairing).
-//
-// PortfolioController + EnsembleModelZoo both add a BanditDisplayMeta
-// alongside their BanditState fields; callers using the legacy API need
-// to also pass the display meta. Removed in a future cleanup ship once
-// all callers are updated to the explicit-pair API.
-//
-// Kept inline (no body) — DO NOT call from new code; references will
-// trigger a deliberate undefined symbol at link time when migrated.
-// Update all call sites to BanditDisplayMeta_SetArmName(&meta, arm, name).
-
 //======================================================================
 // [FUNCTION]_[Bandit_GetProbabilities]
 //----------------------------------------------------------------------
@@ -533,9 +518,6 @@ static inline void Bandit_BlendWeights(const BanditState *b,
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.A.3 — Bandit_Print takes optional display meta. Pass nullptr
-// to print default "arm_N" labels; pass a populated BanditDisplayMeta*
-// to print human-readable names.
 static inline void Bandit_Print(const BanditState *b,
                                  const BanditDisplayMeta *m = nullptr) {
     double probs[BANDIT_MAX_ARMS], weights[BANDIT_MAX_ARMS];
@@ -561,6 +543,12 @@ static inline void Bandit_Print(const BanditState *b,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.A.3 — Bandit_Print takes optional display meta. Pass nullptr
+// to print default "arm_N" labels; pass a populated BanditDisplayMeta*
+// to print human-readable names.
+//======================================================================
 // [END_FUNCTION]_[Bandit_Print]
 //======================================================================
 
@@ -576,13 +564,6 @@ static inline void Bandit_Print(const BanditState *b,
 //======================================================================
 // [CODE]
 //======================================================================
-// Save BanditState array (one per regime) to JSON file. Returns 1 on
-// success, 0 on any failure (open, write, rename). Atomic via tmpfile +
-// rename.
-//
-// regime_names: optional; if non-NULL, written as "regime_name" field
-// inside each entry. Caller responsibility to provide an array of size
-// n_regimes (NUM_REGIMES). NULL → omits the field.
 static inline int Bandit_SaveJSON(const BanditState* bandits,
                                     int n_regimes,
                                     const char* path,
@@ -678,6 +659,14 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
+// Save BanditState array (one per regime) to JSON file. Returns 1 on
+// success, 0 on any failure (open, write, rename). Atomic via tmpfile +
+// rename.
+//
+// regime_names: optional; if non-NULL, written as "regime_name" field
+// inside each entry. Caller responsibility to provide an array of size
+// n_regimes (NUM_REGIMES). NULL → omits the field.
+//
 // Bandit weights are valuable — they encode "what horizons work for THIS
 // asset/regime/market." Without persistence, they reset to uniform every
 // restart, wasting hours of online learning. G.9 persists arrays of
