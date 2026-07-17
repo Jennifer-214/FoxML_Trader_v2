@@ -3,7 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FAILURE MODE REGISTRY — v5.14.8.B]
+// [FILE]_[MemHeaders/FailureModeRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [MONITORING_PLANE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ML failure-mode SSoT — 15 rows (11 BIT_FLAG in failure_flags uint16 / 3 COUNTER_U32 / 1 PERCENT_U8) with severity + panel format + tooltip + display group per row]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_FAILURE_MODE]   (storage-class/severity/group tokens + bit/mask gen + FAILURE_* accessors + count ride as sections)
+// [REFERENCE]_[DESIGN_SPEC]_[[x-macro-registry-with-presence-dispatch] [bitmap-flag-api]]
+// [REFERENCE]_[INVARIANT]_[H14]
 //======================================================================================================
 // Pseudo-registry for ML observability failure modes that surface to
 // PerNodeSnap + ML Status panel. Auto-generates 3 mechanical sites:
@@ -26,7 +34,7 @@
 // 6 sites per addition. Now: 1 registry line + 1 (smaller) hand-placed
 // panel branch. 4-of-6 sites mechanically generated.
 //
-// STORAGE CLASSES (data-oriented design per CLAUDE.md item 1, 18):
+// STORAGE CLASSES (data-oriented design + compile-time-elision disciplines):
 //   BIT_FLAG    — 1 bit in PerNodeSnap.failure_flags uint16_t bitmap.
 //                 Auto-allocates bit position via __COUNTER__ at struct
 //                 generation. Up to 16 BIT_FLAG entries (uint16_t cap).
@@ -63,9 +71,24 @@
 #include <stdint.h>
 #include "BitmapMacros.hpp"   // BITMAP_* primitives (v5.14.8.A.0.b.1)
 
-//======================================================================================================
-// [STORAGE CLASS TOKENS]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_FAILURE_MODE]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[15 failure-mode rows -> storage-class-dispatched PerNodeSnap fields/bits + FAILURE_BIT_/MASK_ constants + FAILURE_* accessors; 11 BIT_FLAGs (overflow assert at 16)]
+// [COLUMN]_[name]_[PerNodeSnap field/bit name + populator suffix (valid C identifier)]
+// [COLUMN]_[storage_class]_[BIT_FLAG / COUNTER_U32 / PERCENT_U8 token — drives field type + populator semantics]
+// [COLUMN]_[severity]_[SEV_RED / SEV_YELLOW / SEV_SAND — maps to color via SEVERITY_COLOR at panel render]
+// [COLUMN]_[format_str]_[printf-style label for panel display]
+// [COLUMN]_[tooltip_str]_[multi-line operator guidance (panel hover)]
+// [COLUMN]_[group_id]_[tt::GROUP_STANDALONE (0) or tt::GROUP_<X> combined-display row]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[STORAGE CLASS TOKENS]
+//------------------------------------------------------------------
 // Each entry's storage_class column is one of these tokens. Token-paste
 // dispatch generates the right struct field declaration + populator
 // helper at expansion time. See FAILURE_MODE_GEN_FIELD_<class> +
@@ -73,9 +96,9 @@
 // (No #defines needed for token names themselves — they're literal
 // tokens used in registry entries + dispatched via ##.)
 
-//======================================================================================================
-// [SEVERITY TOKENS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[SEVERITY TOKENS]
+//------------------------------------------------------------------
 // Map to FoxmlColors for ML Status panel rendering. Hand-placed panel
 // branch reads SEVERITY_COLOR(sev_token) at render time.
 
@@ -86,9 +109,9 @@
 // At panel render: `SEVERITY_COLOR(SEV_RED)` returns the right ImVec4.
 // Provided by GUI/FoxmlTheme.hpp; this header just enumerates names.
 
-//======================================================================================================
-// [GROUP_ID TOKENS — combined-display panel groups]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[GROUP_ID TOKENS — combined-display panel groups]
+//------------------------------------------------------------------
 // Entries with the same non-zero group_id share a panel display row.
 // Add new GROUP_<NAME> = next-available-id when introducing a new
 // combined-display group.
@@ -97,29 +120,14 @@ namespace tt {
 enum FailureModeGroupId : int {
     GROUP_STANDALONE  = 0,  // sentinel; standalone display
     GROUP_NAN_EVENTS  = 1,  // nan_feature_events + nan_prediction_events
-    GROUP_DRIFT       = 2,  // v5.15.1 — Model Health drift surface (7 entries)
+    GROUP_DRIFT       = 2,  // v5.15.1 — Model Health drift surface (8 entries since cfg_cross_binary_drift joined at v5.15.5.A.7)
     // Future combined-display groups append here.
 };
 }
 
-//======================================================================================================
-// [REGISTRY ENTRY SHAPE]
-//======================================================================================================
-// X(name, storage_class, severity, format_str, tooltip_str, group_id)
-//
-//   name           — PerNodeSnap field/bit name + populator suffix.
-//                    Must be a valid C identifier.
-//   storage_class  — BIT_FLAG / COUNTER_U32 / PERCENT_U8 token.
-//                    Drives field type + populator semantics.
-//   severity       — SEV_RED / SEV_YELLOW / SEV_SAND token. Maps to
-//                    color via SEVERITY_COLOR macro at panel render.
-//   format_str     — printf-style label for panel display
-//                    (e.g., "model: LOAD FAILED", "stale: %u feat").
-//   tooltip_str    — multi-line operator guidance string. Shown on
-//                    panel hover.
-//   group_id       — tt::GROUP_STANDALONE (0) for own display row;
-//                    tt::GROUP_<X> for combined-display.
-
+//------------------------------------------------------------------
+// [SECTION]_[THE REGISTRY ROWS]
+//------------------------------------------------------------------
 #define FOREACH_FAILURE_MODE(X)                                                                        \
     X(ml_model_load_failed,     BIT_FLAG,    SEV_RED,    "model: LOAD FAILED",                          \
       "ML strategy was selected but no model could be loaded.\n"                                        \
@@ -247,9 +255,9 @@ enum FailureModeGroupId : int {
       "Operator action: RETRAIN the model (the on-disk stamp is corrupt).",                             \
       tt::GROUP_STANDALONE)
 
-//======================================================================================================
-// [STORAGE-CLASS-AWARE FIELD GENERATION]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[STORAGE-CLASS-AWARE FIELD GENERATION]
+//------------------------------------------------------------------
 // Token-paste dispatch on storage_class column. Used by PerNodeSnap
 // struct generation in v5.14.8.C migration to declare the right
 // underlying field type.
@@ -270,9 +278,9 @@ enum FailureModeGroupId : int {
 #define FAILURE_MODE_FIELD_DECL(name, storage_class, sev, fmt, tooltip, group_id) \
     FAILURE_MODE_GEN_FIELD_##storage_class(name)
 
-//======================================================================================================
-// [BIT_FLAG MASK ALLOCATION]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[BIT_FLAG MASK ALLOCATION]
+//------------------------------------------------------------------
 // For BIT_FLAG entries, generate MASK_<name> = bit position. Use a
 // per-entry counter via enumeration. Up to 16 BIT_FLAG entries fit in
 // uint16_t failure_flags.
@@ -295,6 +303,7 @@ enum FailureModeBit : uint16_t {
 
     FAILURE_BIT_COUNT  // sentinel; total BIT_FLAG entries
 };
+// [ASSERT]_[BITMAP_OVERFLOW]_[FAILURE_BIT_COUNT <= 16]
 static_assert(FAILURE_BIT_COUNT <= 16,
               "FOREACH_FAILURE_MODE exceeds uint16_t failure_flags capacity");
 }  // namespace tt
@@ -310,9 +319,9 @@ static_assert(FAILURE_BIT_COUNT <= 16,
 FOREACH_FAILURE_MODE(X)
 #undef X
 
-//======================================================================================================
-// [ERGONOMIC ACCESSORS — alias to BITMAP_*]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[FAILURE_* ERGONOMIC ACCESSORS — alias to BITMAP_*]
+//------------------------------------------------------------------
 // BIT_FLAG accessors via BITMAP_* API. failure_flags is a uint16_t on
 // PerNodeSnap (declared in v5.14.8.C migration).
 //
@@ -331,13 +340,35 @@ FOREACH_FAILURE_MODE(X)
 #define FAILURE_ATOMIC_IS_SET(snap, name) \
     BITMAP_ATOMIC_IS_SET((snap).failure_flags, FAILURE_MASK_##name)
 
-//======================================================================================================
-// [TEST INSTRUMENTATION]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[TEST INSTRUMENTATION]
+//------------------------------------------------------------------
 // Compile-time count of total registry entries. Used by tests to assert
 // shape correctness.
 
 #define FAILURE_MODE_COUNT_ONE(name, storage_class, sev, fmt, tooltip, group_id) +1
 #define FOREACH_FAILURE_MODE_COUNT  (0 FOREACH_FAILURE_MODE(FAILURE_MODE_COUNT_ONE))
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// X(name, storage_class, severity, format_str, tooltip_str, group_id)
+//
+//   name           — PerNodeSnap field/bit name + populator suffix.
+//                    Must be a valid C identifier.
+//   storage_class  — BIT_FLAG / COUNTER_U32 / PERCENT_U8 token.
+//                    Drives field type + populator semantics.
+//   severity       — SEV_RED / SEV_YELLOW / SEV_SAND token. Maps to
+//                    color via SEVERITY_COLOR macro at panel render.
+//   format_str     — printf-style label for panel display
+//                    (e.g., "model: LOAD FAILED", "stale: %u feat").
+//   tooltip_str    — multi-line operator guidance string. Shown on
+//                    panel hover.
+//   group_id       — tt::GROUP_STANDALONE (0) for own display row;
+//                    tt::GROUP_<X> for combined-display.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_FAILURE_MODE]
+//======================================================================
 
 #endif // FAILURE_MODE_REGISTRY_HPP

@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BUDDY ALLOCATOR]
+// [FILE]_[MemHeaders/BuddyAllocator.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reserved buddy allocator (fox_ml::mem, NOT wired — zero includers) — 16B..1MB power-of-2 blocks, O(1) order lookup via free_list_bitmap; a KNOWN bitmap-index collision gap is flagged below]
+// [CONTAINS]
+//   - [STRUCT]_[BuddyAllocatorState]   (constants + BuddyFreeNode ride)
+//   - [FUNCTION]_[buddy_alloc_bytes]   (+ init / free_ptr / freelist ops / internal helpers family)
+//   - [FUNCTION]_[buddy_diag_snapshot]   (BuddyDiagSnapshot rides)
+//======================================================================================================
 //
 // v5.11.13 (2026-05-07) — typo fixes + O(1) order lookup.
 //
@@ -34,18 +43,27 @@
 
 namespace fox_ml {
 namespace mem {
-//==================================================================================
-// [CONSTANTS]
-//==================================================================================
+//======================================================================
+// [STRUCT]_[BuddyAllocatorState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 1MB in-struct pool + 17 per-order intrusive free lists + split/alloc bitmaps + stats + the v5.11.13 non-empty-list bitmap (constants + BuddyFreeNode ride)]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[CONSTANTS]
+//------------------------------------------------------------------
 static constexpr uint32_t BUDDY_MIN_ORDER       = 4;  // 16 bytes min block
 static constexpr uint32_t BUDDY_MAX_ORDER       = 20; // 1MB max block
 static constexpr uint32_t BUDDY_NUM_ORDERS      = BUDDY_MAX_ORDER - BUDDY_MIN_ORDER + 1;
 static constexpr uint32_t BUDDY_POOL_SIZE_BYTES = (1u << BUDDY_MAX_ORDER);
 static constexpr uint32_t BUDDY_SENTINEL        = 0xFFFFFFFFu;
 
-//==================================================================================
-// [TYPES]
-//==================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[TYPES]
+//------------------------------------------------------------------
 struct BuddyFreeNode {
     uint32_t next_offset;
     uint32_t prev_offset;
@@ -66,10 +84,26 @@ struct BuddyAllocatorState {
     // ≥ target by masking the high bits and __builtin_ctz'ing.
     uint32_t free_list_bitmap;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; header has ZERO includers (not wired), so the struct is in no TU's layout dump — quartet lands when wired, D-327)
+//======================================================================
+// [END_STRUCT]_[BuddyAllocatorState]
+//======================================================================
 
-//==================================================================================
-// [INTERNAL HELPERS] (buddy_internal_*)
-//==================================================================================
+//======================================================================
+// [FUNCTION]_[buddy_alloc_bytes]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the allocator family (init / free_ptr / freelist push-remove-pop / internal helpers ride) — split-down allocate, coalesce-up free; O(1) order find via masked ctz]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[INTERNAL HELPERS] (buddy_internal_*)
+//------------------------------------------------------------------
 // v5.11.13: rewrote in C++17 idioms (__builtin_clz / power-of-2 round-up)
 // — engine target is C++17. The pre-fix used <bit> (C++20 only),
 // which compiled standalone but broke when the test included this
@@ -120,9 +154,9 @@ static inline void buddy_internal_bitmap_clear(uint8_t *const bitmap, uint32_t c
     return (bitmap[idx >> 3] >> (idx & 7u)) & 1u;
 }
 
-//==================================================================================
-// [FREE LIST OPS] (buddy_freelist_*)
-//==================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[FREE LIST OPS] (buddy_freelist_*)
+//------------------------------------------------------------------
 static inline void buddy_freelist_push(BuddyAllocatorState *const state, uint32_t const order, uint32_t const offset) noexcept {
     uint32_t const list_idx   = order - BUDDY_MIN_ORDER;
     BuddyFreeNode *const node = reinterpret_cast<BuddyFreeNode *>(state->pool + offset);
@@ -177,9 +211,9 @@ static inline void buddy_freelist_remove(BuddyAllocatorState *const state, uint3
     return offset;
 }
 
-//==================================================================================
-// [PUBLIC API]
-//==================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[PUBLIC API]
+//------------------------------------------------------------------
 void buddy_init_state(BuddyAllocatorState *const state) noexcept {
     memset(state, 0, sizeof(BuddyAllocatorState));
 
@@ -274,10 +308,21 @@ void buddy_free_ptr(BuddyAllocatorState *const state, void *const ptr, size_t co
 
     buddy_freelist_push(state, order, offset);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[buddy_alloc_bytes]
+//======================================================================
 
-//==================================================================================
-// [DIAGNOSTICS]
-//==================================================================================
+//======================================================================
+// [FUNCTION]_[buddy_diag_snapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stats + per-order free-block counts into a BuddyDiagSnapshot (struct rides) — O(free blocks) walk; diagnostics only]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BuddyDiagSnapshot {
     uint64_t total_alloc_bytes;
     uint64_t total_free_bytes;
@@ -305,13 +350,18 @@ BuddyDiagSnapshot buddy_diag_snapshot(BuddyAllocatorState const *const state) no
     }
     return snap;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[buddy_diag_snapshot]
+//======================================================================
 
 } // namespace mem
 } // namespace fox_ml
 
-//==================================================================================
-// [USAGE EXAMPLE]
-//==================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[USAGE EXAMPLE]
+//------------------------------------------------------------------
 // fox_ml::mem::BuddyAllocatorState allocator;
 // fox_ml::mem::buddy_init_state(&allocator);
 //
@@ -322,5 +372,5 @@ BuddyDiagSnapshot buddy_diag_snapshot(BuddyAllocatorState const *const state) no
 //
 // static_cast<PositionState*>(pos)->~PositionState();
 // fox_ml::mem::buddy_free_ptr(&allocator, pos, sizeof(PositionState));
-//==================================================================================
+//------------------------------------------------------------------
 #endif // BUDDY_ALLOCATOR_H

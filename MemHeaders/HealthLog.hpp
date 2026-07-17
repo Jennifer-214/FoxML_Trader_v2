@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [HEALTH LOG — append-only structured diagnostic log, JSONL]
+// [FILE]_[MemHeaders/HealthLog.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[append-only JSONL diagnostic log — level-filtered (CRITICAL/WARN always emit), LC_NUMERIC=C-pinned, size-rotation + prune; the durable replacement for ad-hoc stderr fprintfs]
+// [CONTAINS]
+//   - [STRUCT]_[HealthLogState]   (HealthLogLevel enum rides)
+//   - [FUNCTION]_[Health_Log]   (+ Singleton / Configure pair / PruneRotated / Enabled / CriticalRateLimited family)
 //======================================================================================================
 // One line of JSON per event. Categories are caller-defined free-text
 // (e.g. "regime", "sl_emission", "sg_eval", "cooldown", "latency"); levels
@@ -53,6 +60,15 @@
 
 namespace tt {
 
+//======================================================================
+// [STRUCT]_[HealthLogState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[module-static config holder (HealthLogLevel enum rides) — path ("" = disabled) + min_level + v5.9.4 rotation policy; single-writer at boot, multi-reader]
+//======================================================================
+// [CODE]
+//======================================================================
 // Level enum — keep small ints so the cfg int comparison is cheap.
 // Negative values are MORE severe than INFO (always emit regardless of
 // min_level cfg). Positive values are MORE verbose (debug/trace).
@@ -90,7 +106,28 @@ struct HealthLogState {
     uint64_t max_bytes;
     int      keep_count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[536B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[9]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[HealthLogState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Health_Log]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the logger family (Singleton / Configure+WithRotation / PruneRotated / Enabled / CriticalRateLimited ride) — one JSONL line per event, escape + locale pin + post-write rotation]
+//======================================================================
+// [CODE]
+//======================================================================
 // Process-singleton. Engine init writes; all callers read.
 inline HealthLogState* HealthLog_Singleton() {
     static HealthLogState s = { {0}, HEALTH_INFO, 0, 0 };
@@ -342,6 +379,11 @@ inline int Health_LogCriticalRateLimited(uint64_t* last_emit_us,
 
     return Health_Log(HEALTH_CRITICAL, category, node_id, "%s", payload);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Health_Log]
+//======================================================================
 
 } // namespace tt
 
