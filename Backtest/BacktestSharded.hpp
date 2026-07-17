@@ -3,37 +3,35 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [SHARDED BACKTEST]
+// [FILE]_[Backtest/BacktestSharded.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-threaded sharded backtest — runs the per-core architecture against historical ticks through the SAME shared OMS fill+drain pipeline as live, so backtest-vs-live accounting is parity by construction]
+// [CONTAINS]
+//   - [FUNCTION]_[SharedBacktest_FromHistorical]
+//   - [FUNCTION]_[BacktestSharded_Run]
 //======================================================================================================
-// Phase 13 of the per-core sharding migration. Single-threaded sharded
-// backtest path. Mirrors Backtest_Run's interface but uses the per-core
-// architecture from CoreFrameworks/ShardedBacktestDriver.hpp internally.
+// Single-threaded sharded backtest path, built on the per-core architecture
+// from CoreFrameworks/ShardedBacktestDriver.hpp. Backtest_Run (BacktestEngine.hpp)
+// is now a thin UNCONDITIONAL wrapper around BacktestSharded_Run — the legacy
+// PortfolioController-coupled replay body was deleted and `engine_mode` no longer
+// dispatches (a leftover `engine_mode=single_core` is ignored / a no-op; E.1.1).
+// The file stays separate from BacktestEngine.hpp so the sharded run path is
+// testable in isolation.
 //
-// Why a separate file: the legacy Backtest_Run is ~350 LOC of replay logic
-// tightly coupled to PortfolioController. Adding a second 200 LOC path inline
-// would balloon the file. Keeping them separate makes it easy to:
-//   1. Compare implementations side by side during the migration
-//   2. Eventually delete the legacy path when sharded is the default
-//   3. Test each path in isolation
-//
-// The dispatcher in BacktestEngine.hpp peeks at config.engine_mode and routes
-// to either Backtest_Run (legacy) or BacktestSharded_Run (this file).
-//
-// What this DOES populate in BacktestResults:
+// What this populates in BacktestResults:
 //   - stats.total_pnl, stats.total_trades, stats.ticks_processed
 //   - stats.win_rate, stats.avg_win, stats.avg_loss, stats.profit_factor
 //   - stats.max_drawdown, stats.max_drawdown_pct
 //   - equity_curve (per-trade snapshots)
+//   - feature_matrix (when run_cfg->collect_features=1 — the Track E.1 hook packs
+//     a row per slow-path rebuild via Regime_ComputeSignals + Features_PackAll, the
+//     same feature SSoT the live ML serve path uses)
 //
-// What this DOES NOT populate (out of scope for the first migration cut):
-//   - feature_matrix (ML feature collection — sharded path doesn't have
-//     RollingStats wired into per-core context yet)
-//   - regime tracking, gate reason diagnostics
-//   - per-strategy stats breakdown
-//
-// These can be added once the sharded path is the default and the legacy
-// PortfolioController is wired into the controller core for the slow-path
-// stuff that doesn't change with sharding.
+// What this leaves regime-agnostic: sample_regimes[] is written 0 (each core may
+// run a different strategy — no single central regime), so Past Runs / regime
+// histograms treat sharded results as regime-agnostic.
 //======================================================================================================
 
 #pragma once
@@ -70,13 +68,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// [HELPERS]
-//======================================================================================================
-// Convert a HistoricalTick (double-based, from Binance aggTrades) into a
-// Tick<F> (the per-core architecture's tick struct). Done once per tick on
-// the backtest's single thread; cost is negligible compared to the gate eval.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[SharedBacktest_FromHistorical]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[convert a double-based HistoricalTick (Binance aggTrades) into a Tick<F> — once per tick on the single backtest thread, cost negligible vs the gate eval]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uint64_t seq) {
     Tick<F> t;
@@ -87,21 +87,29 @@ static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uin
     t.sequence  = seq;
     // v5.1.2 carry-forward — TODO(parity-check Finding #5):
     // h->is_buyer_maker IS available; the conversion drops it to mirror the
-    // live slow-path's hardcoded-0 (parity-preserving for now). When the
-    // live scalar-bus plumb-through happens (v5.10.X or v5.11+), change to:
+    // live slow-path's hardcoded-0 (parity-preserving for now — the live twin
+    // is EngineCommon.hpp's `/*is_buyer_maker=*/0` at the same Finding #5). When
+    // the live scalar-bus plumb-through lands, change to:
     //   t.is_buyer_maker = (uint8_t)(h->is_buyer_maker ? 1 : 0);
     // AND update both live + backtest slow-paths simultaneously.
-    // See plans/plan_checks/parity-2026-05-06-full.md Finding #5.
+    // See plans/_audits/parity-2026-05-06-full.md Finding #5.
     return t;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SharedBacktest_FromHistorical]
+//======================================================================
 
-//======================================================================================================
-// [RUN]
-//======================================================================================================
-// Sharded backtest entry point. Same signature as Backtest_Run for the
-// dispatcher. Loads tick files, runs the per-core architecture against them,
-// aggregates results.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BacktestSharded_Run]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[sharded backtest entry point — loads tick files, drives the per-core architecture through the shared OMS, aggregates P&L/win-loss/drawdown + equity curve; signature matches the Backtest_Run wrapper]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void BacktestSharded_Run(BacktestResults *results,
                                         const BacktestRunConfig *run_cfg,
                                         volatile int *progress_pct,
@@ -159,11 +167,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // Track E.2 — multi-strategy support. The prior SimpleDip-only gate
     // is gone; per-core strategy comes from cfg.node_strategies[i] (set
     // by ControllerConfig_Load from `core_N_strategy=...` directives,
-    // defaults to STRATEGY_SIMPLE_DIP when unset). Mirrors EngineSharded_Run
-    // lines 559-648.
+    // defaults to STRATEGY_SIMPLE_DIP when unset). Mirrors EngineSharded_Run.
 
     //----------------------------------------------------------------------
-    // Set up the per-core engine
+    // [SECTION]_[set up the per-core engine]
     //----------------------------------------------------------------------
     // Phase 03 chunk 1B: construct OMS first, then wire EventLoopState to it.
     ExchangeAdapter<BACKTEST_FP> empty_adapter{};
@@ -201,21 +208,21 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // block dropped at backtest side too (same fix as EngineSharded.hpp).
     // Bit is now set inside OMS_INIT_AUTOPOPULATE via the BIT-kind registry
     // row for `partial_exit_enabled` (driven by the parameter passed to
-    // OrderManager_Init at line 183 above). Adding a new cfg-derived boot
+    // OrderManager_Init above). Adding a new cfg-derived boot
     // bit flag = ONE row in FOREACH_OMS_FIELD; no more external SET sites.
     // Closes /dod-audit HIGH-1 (2026-05-13 Phase 3b audit).
     // v5.15.5.F.4d.1.B.4 Step C.2 — extracted to EngineCommon_ApplyBnbDiscount
     // (NEW for BACKTEST — closes PARITY-030 by-construction; LIVE sister at Step C.1
     // calls same helper. Pre-`.B.4` BACKTEST was missing BNB discount entirely; cohorts
-    // using pay_fees_in_bnb=1 had train-serve fee divergence). Body at
-    // CoreFrameworks/EngineCommon.hpp:152-164.
+    // using pay_fees_in_bnb=1 had train-serve fee divergence). Body in
+    // CoreFrameworks/EngineCommon.hpp (EngineCommon_ApplyBnbDiscount).
     EngineCommon_ApplyBnbDiscount(cfg);
 
     EventLoopState<BACKTEST_FP> state;
     // v5.15.5.F.4d.1.B.4 Step C.2 — extracted to EngineCommon_BootGlobal (closes
     // PARITY-026 sister-discipline via TECH_DEBT-119 fold; LIVE sister at Step C.1
-    // calls same helper). Body preserved verbatim from prior inline at BACKTEST :198 +
-    // :210-212 + :217-221 → CoreFrameworks/EngineCommon.hpp:181-200 (Init +
+    // calls same helper). Body preserved verbatim from the prior BACKTEST inline
+    // → CoreFrameworks/EngineCommon.hpp (EngineCommon_BootGlobal): Init +
     // ConfigureKillSwitch + Regime_Init loop with cfg-driven hysteresis per
     // cfg.nodes[i].regime_hysteresis). Note: helper INTERNAL order is
     // Init → KillSwitch → Regime; prior BACKTEST inline order was Init → Regime →
@@ -235,7 +242,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 
     // Risk slice per core: even split of (total_balance × risk_pct) across
     // cores, with cfg.node_risk_pct[i] override allowed. Mirrors
-    // EngineSharded_Run lines 549-557.
+    // EngineSharded_Run.
     double total_balance = Money_ToDouble(cfg.starting_balance);
     double default_risk = Money_ToDouble(cfg.risk_pct);
     if (default_risk <= 0.0) default_risk = 0.10;
@@ -259,7 +266,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // PARITY-028 (BindCompositeCfg + RollingTurnover_Init NEW for BACKTEST) +
         // PARITY-029 (Strategy_InitPerCore NEW for BACKTEST) by-construction; LIVE
         // sister at Step C.1 invokes same helper). Helper body preserved verbatim from
-        // prior inline at BACKTEST :252-417 → CoreFrameworks/EngineCommon.hpp:233-427.
+        // the prior BACKTEST inline → CoreFrameworks/EngineCommon.hpp (EngineCommon_BootPerCore).
         //
         // BACKTEST caller owns: node_balance precompute (O2 bytewise-identical math) +
         // ML zoo Free+Init prior-run state (static array vs LIVE aligned_alloc heap;
@@ -319,9 +326,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     rolling_long = RollingStats_Init<BACKTEST_FP, 512>(); // explicit reset each run
 
     //----------------------------------------------------------------------
-    // Track E.1 — train-serve parity state. Mirrors EngineSharded_Run's
-    // static locals (lines 522-547) so RegimeSignals fields fed to ML
-    // strategies + feature collection match what the live path produces.
+    // [SECTION]_[Track E.1 — train-serve parity state]
+    //----------------------------------------------------------------------
+    // Mirrors EngineSharded_Run's static locals so RegimeSignals fields fed to
+    // ML strategies + feature collection match what the live path produces.
     // Re-init each call so backtests are deterministic from a clean state.
     //----------------------------------------------------------------------
     static RORRegressor<BACKTEST_FP> regime_ror   = RORRegressor_Init<BACKTEST_FP>();
@@ -359,7 +367,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         FPN_Sub(FPN_FromDouble<BACKTEST_FP>(1.0), ema_alpha);
 
     //----------------------------------------------------------------------
-    // Track E.3 — depth replay. Mirrors how EngineSharded_Run reads
+    // [SECTION]_[Track E.3 — depth replay]
+    //----------------------------------------------------------------------
+    // Mirrors how EngineSharded_Run reads
     // book_imbalance from g_depth_shared.snapshots[active] each slow path.
     // DepthReplayState loads CSVs DepthRecorder wrote and advances the
     // current snapshot in lockstep with tick timestamps.
@@ -409,7 +419,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     drv.current_mid_price = depth_enabled ? &mid_price_holder : nullptr;
 
     //----------------------------------------------------------------------
-    // Track E.1 — feature collection hook. When collect_features=1, register
+    // [SECTION]_[Track E.1 — feature collection hook]
+    //----------------------------------------------------------------------
+    // When collect_features=1, register
     // a callback that fires after each slow-path rebuild and packs a row of
     // the feature_matrix using Regime_ComputeSignals (the same single
     // source-of-truth the live ML serve path uses). When collect_features=0,
@@ -419,8 +431,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         BacktestResults*  results;
         const ControllerConfig<BACKTEST_FP>* cfg;
         // warmup gate — skip collection until rolling stats have meaningful
-        // data. Mirrors legacy `ctrl.state != CONTROLLER_WARMUP` (lines
-        // 1034-1035 of PortfolioController.hpp).
+        // data. Mirrors legacy `ctrl.state != CONTROLLER_WARMUP` in
+        // PortfolioController.hpp.
         uint32_t          warmup_ticks;
         uint32_t          min_warmup_samples;
     };
@@ -453,7 +465,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             uint64_t fc_start_ns = tt::PhaseTimer_NowNs();
 
             // Regime_ComputeSignals with the EXACT inputs the live ML serve
-            // path uses (mirrors StrategyParameters.hpp:469). When the driver
+            // path uses (mirrors StrategyParameters.hpp). When the driver
             // doesn't have ROR/EMA wired (legacy callers), this branch is
             // skipped and the row gets zeroed signals — same as a non-ML run.
             RegimeSignals<BACKTEST_FP> sig;
@@ -533,7 +545,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     }
 
     //----------------------------------------------------------------------
-    // Replay loop
+    // [SECTION]_[replay loop]
     //----------------------------------------------------------------------
     struct timeval t_start, t_end;
     gettimeofday(&t_start, NULL);
@@ -645,7 +657,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             last_volume_d = ticks[i].qty;
 
             // Track E.1 — train-serve parity. Update EMA price every tick,
-            // mirroring EngineSharded_Run lines 769-774 + legacy
+            // mirroring EngineSharded_Run + legacy
             // PortfolioController_Tick. Driver reads the resulting value via
             // drv.ema_price on slow-path firings; without per-tick updates
             // sig->ema_sma_spread + sig->ema_above_sma stay stale or zero.
@@ -685,11 +697,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             ShardedBacktest_RunTick(&drv, t, total_processed);
 
             // Track E.7 — feed candle accumulator for the chart panel.
-            // Throttled to every 100th tick (legacy mirrors this exactly at
-            // BacktestEngine.hpp:761) — 1-min candles don't need every tick,
-            // and unthrottled CandleAccumulator's mutex contention freezes
-            // the GUI thread. Same pattern as EngineSharded fan_out (line
-            // ~785).
+            // Throttled to every 100th tick (legacy BacktestEngine.hpp mirrors
+            // this) — 1-min candles don't need every tick, and unthrottled
+            // CandleAccumulator's mutex contention freezes the GUI thread. Same
+            // pattern as EngineSharded fan_out.
             if (candle_acc && (total_processed % 100) == 0) {
                 CandleAccumulator_PushWithTime(candle_acc,
                     ticks[i].price, ticks[i].qty,
@@ -698,7 +709,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             }
 
             // Track E.2 — warmup-aware permission grant. Mirrors
-            // EngineSharded_Run lines 999-1019. Pre-E.2, BacktestSharded set
+            // EngineSharded_Run. Pre-E.2, BacktestSharded set
             // permission=1 at startup, which let strategies fire on garbage
             // rolling stats during the first ticks. Now we grant permission
             // only after rolling.count crosses min_warmup_samples (default
@@ -816,7 +827,7 @@ done:
                    + (t_end.tv_usec - t_start.tv_usec) / 1000.0;
 
     //----------------------------------------------------------------------
-    // Populate BacktestResults stats
+    // [SECTION]_[populate BacktestResults stats]
     //----------------------------------------------------------------------
     BacktestStats *stats = &results->stats;
     memset(stats, 0, sizeof(*stats));
@@ -895,5 +906,10 @@ done:
     fprintf(stderr, "[backtest sharded DEBUG] state.total_entries=%lu state.total_exits=%lu\n",
             (unsigned long)state.total_entries, (unsigned long)state.total_exits);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestSharded_Run]
+//======================================================================
 
 }  // namespace tt
