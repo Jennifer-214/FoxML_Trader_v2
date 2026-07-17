@@ -3,21 +3,34 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BITMAP MACROS — reusable bit-packed flag accessor API — v5.14.8.A.0.b]
+// [FILE]_[MemHeaders/BitmapMacros.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE H14 primitive header — BITMAP_* single-bit + BITMAP_ATOMIC_* + BIT/POPCOUNT/FIRST helpers + MBS_* K-state slot accessors; every flag registry builds on these]
+// [CONTAINS]
+//   - [MACRO]_[BITMAP_* (single-thread)]
+//   - [MACRO]_[BITMAP_ATOMIC_*]
+//   - [MACRO]_[BITMAP_BIT_* + POPCOUNT + FIRST]
+//   - [MACRO]_[MBS_*]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api] [multi-bit-state-encoding-pattern]]
+// [REFERENCE]_[INVARIANT]_[H14]
 //======================================================================================================
 // Common ergonomic API for bit-packed boolean flags + counter/percent
 // fields. Used by multiple registries to provide uniform access semantics:
 //   - FOREACH_STAMP_BOUND_MODEL_CONST has_flags (v5.14.8.A.merged)
 //   - FOREACH_FAILURE_MODE failure_flags (v5.14.8.B)
-//   - Future TECH_DEBT-013 sweep candidates (PerNodeSnap state flags,
-//     FOREACH_FEATURE enabled bitmap, engine-wide cfg flags, etc.)
+//   - the TECH_DEBT-013 sweep candidates as they land (PerNodeSnap state
+//     flags LANDED as FOREACH_PER_NODE_STATE_FLAG at v5.14.9.B.2; the
+//     NodeContext / OMS flag registries followed; FOREACH_FEATURE enabled
+//     bitmap, engine-wide cfg flags, etc. remain candidates)
 //
-// PRECEDENT (CLAUDE.md item 1): Portfolio<uint16_t> bitmap +
+// PRECEDENT (the uint16_t Portfolio bitmap): Portfolio<uint16_t> bitmap +
 // OrderManagerState.order_bitmap. This header generalizes the pattern
 // + provides ergonomic accessors so future bitmap consumers don't
 // reinvent.
 //
-// WHY THIS HEADER (data-oriented design per CLAUDE.md item 1, 18):
+// WHY THIS HEADER (data-oriented design + compile-time-elision disciplines):
 //   1. Memory: 16/32/64 binary states in 2/4/8 bytes (vs N bytes byte-per-flag)
 //   2. Branchless multi-flag check: (flags & (MASK_X | MASK_Y)) — one compare
 //   3. Atomic multi-flag updates: __atomic_fetch_or vs N separate stores
@@ -55,9 +68,12 @@
 #ifndef BITMAP_MACROS_HPP
 #define BITMAP_MACROS_HPP
 
-//------------------------------------------------------------------------------------------------------
-// [SINGLE-THREAD ACCESSORS]
-//------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------
+// [MACRO]_[BITMAP_* (single-thread)]
+// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-thread bit accessors — IS_SET/SET/CLR/TOGGLE/ANY/ALL/NONE; 1-cycle ops; IS_SET returns bool (int-truncation bug class sidestep)]
+//----------------------------------------------------------------------
 // Use when bitmap is only accessed from one thread (e.g., per-core slow
 // path's own state) OR when surrounding synchronization (mutex, seqlock)
 // already provides ordering.
@@ -102,9 +118,12 @@
 //   Cost: 1 cycle (AND + compare to 0).
 #define BITMAP_NONE(field, mask_set) (((field) & (mask_set)) == 0)
 
-//------------------------------------------------------------------------------------------------------
-// [ATOMIC ACCESSORS — cross-thread visibility]
-//------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------
+// [MACRO]_[BITMAP_ATOMIC_*]
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[cross-thread bit accessors — __atomic_* intrinsics, RELAXED default with _ORDER variants for stricter callers]
+//----------------------------------------------------------------------
 // Use when bitmap is shared across threads (e.g., observability flags
 // written by slow path, read by display thread; or per-core failure
 // flags read by other cores' panel rendering).
@@ -149,9 +168,12 @@
 #define BITMAP_ATOMIC_ANY(field, mask_set) \
     ((__atomic_load_n(&(field), __ATOMIC_RELAXED) & (mask_set)) != 0)
 
-//------------------------------------------------------------------------------------------------------
-// [HELPERS]
-//------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------
+// [MACRO]_[BITMAP_BIT_* + POPCOUNT + FIRST]
+// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[width-typed helpers — BIT_U8..U64 mask builders (signed-promotion-safe), POPCOUNT set-bit counts, FIRST ctz iteration]
+//----------------------------------------------------------------------
 
 // Bit-position helper: build a mask for bit N.
 //   Use the type-aware variant to avoid signed-int promotion bugs:
@@ -181,9 +203,12 @@
 #define BITMAP_FIRST_U32(field) ((unsigned)__builtin_ctz((unsigned)(field)))
 #define BITMAP_FIRST_U64(field) ((unsigned)__builtin_ctzll((unsigned long long)(field)))
 
-//------------------------------------------------------------------------------------------------------
-// [MULTI-BIT STATE (MBS_*) ACCESSORS — N-bit packed slots within bitmap fields]
-//------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------
+// [MACRO]_[MBS_*]
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[K-state N-bit slot accessors — GET/SET/EQ per width + ATOMIC_GET (no atomic SET: partial-word RMW needs a caller CAS loop) + SLOT_WIDTH/SLOT_MAX helpers]
+//----------------------------------------------------------------------
 // Per DESIGN_SPECS/multi-bit-state-encoding-pattern.md. Generalizes the
 // single-bit BITMAP_* primitives above to K-state fields (K=2..16) packed
 // into N-bit slots (N=ceil(log2(K))) within a shared bitmap word.

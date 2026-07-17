@@ -3,7 +3,19 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [OMS PHASED DRAIN]  (v5.15.5.C.4 Phase F — phase-separated drainer foundation)
+// [FILE]_[MemHeaders/OmsPhasedDrain.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[phase-separated drainer foundation — drain 3 SPSC rings into per-direction buckets once, then CLOSE -> DrainPostFill -> OPEN -> reconcile phases; H20 fn-pointer dispatch per queue]
+// [CONTAINS]
+//   - [STRUCT]_[OmsDrainBuckets]
+//   - [FUNCTION]_[OmsDrainBuckets_Reset]
+//   - [FUNCTION]_[OrderType_IsClose]
+//   - [FUNCTION]_[OrderManager_DrainIntoBuckets]   (+ the 3 drain-cmd handlers + 3 dispatch tables ride)
+//   - [FUNCTION]_[OrderManager_ProcessBucket_Closes]   (+ Opens / Reconciles family)
+// [REFERENCE]_[DESIGN_SPEC]_[[phase-separated-drainer-for-safe-cross-temporal-derives] [branchless-dispatch-discipline]]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================================================
 //
 // Implements the phase-separated drainer pattern per
@@ -31,7 +43,7 @@
 // as a backward-compat wrapper for tests that don't need phase-separation
 // semantics (no DrainPostFill interleave required).
 //
-// LATENCY (CLAUDE.md item 17):
+// LATENCY (the latency-cost discipline):
 //   - Drain pass: 3 rings × ~few ns/event = ~10-20 ns per cycle at typical
 //     1-5 events/cycle. Marginal vs prior single-pass.
 //   - Bucket-classification cost: 1 indexed read of `oms->orders[slot].type`
@@ -44,10 +56,13 @@
 // worst case at high event burst. Within slow-path 100μs budget by 3+
 // orders of magnitude.
 //
-// SIZE: OmsDrainBuckets struct is ~7 KB (sized at OMS_RESULT_QUEUE_SIZE for
-// each of close+open buckets + 64 for reconciles). Stack-allocated once at
-// drainer thread entry; reused per cycle. NOT added to OmsState (transient
-// per-cycle scratch; no need to persist or share across threads).
+// SIZE: OmsDrainBuckets struct is ~144 KB (576 slots × 256 B Command; sized
+// at OMS_RESULT_QUEUE_SIZE for each of close+open buckets + 64 for
+// reconciles). Stack-allocated once at drainer thread entry; reused per
+// cycle — fine on the default 8 MB thread stack, and per-cycle touch cost is
+// bounded by ACTUAL event count (Reset zeroes 3 ints; only written slots are
+// touched), not capacity. NOT added to OmsState (transient per-cycle
+// scratch; no need to persist or share across threads).
 //======================================================================================================
 
 #pragma once
@@ -59,16 +74,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// Per-direction bucket arrays + counts.
-//
-// Sized at OMS_RESULT_QUEUE_SIZE (256) for close + open buckets — worst case
-// all 256 events from one ring are the same direction. Reconcile bucket sized
-// at 64 to match `reconcile_queue` ring capacity.
-//
-// Stack-allocated by drainer thread at thread entry; reset per cycle by
-// DrainIntoBuckets. ~7 KB total; well within drainer thread's stack budget.
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[OmsDrainBuckets]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-direction Command buckets (close/open at OMS_RESULT_QUEUE_SIZE, reconcile at 64) + counts — drainer-thread stack scratch, reset per cycle]
+//======================================================================
+// [CODE]
+//======================================================================
 struct OmsDrainBuckets {
     // 256 × sizeof(Command) for close (SELL) fills
     Command close_bucket[OMS_RESULT_QUEUE_SIZE];
@@ -80,52 +94,90 @@ struct OmsDrainBuckets {
     Command reconcile_bucket[64];
     int     reconcile_n;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Per-direction bucket arrays + counts.
+//
+// Sized at OMS_RESULT_QUEUE_SIZE (256) for close + open buckets — worst case
+// all 256 events from one ring are the same direction. Reconcile bucket sized
+// at 64 to match `reconcile_queue` ring capacity.
+//
+// Stack-allocated by drainer thread at thread entry; reset per cycle by
+// DrainIntoBuckets. ~144 KB total (Command is 256 B; see the [DERIVED]
+// quartet) — within the default 8 MB thread stack; per-cycle touch cost is
+// bounded by actual event count, not capacity.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[147480B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2305]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[OmsDrainBuckets]
+//======================================================================
 
-//======================================================================================================
-// Reset bucket counts. Called at top of DrainIntoBuckets each cycle.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OmsDrainBuckets_Reset]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero the 3 bucket counts — top of DrainIntoBuckets each cycle]
+//======================================================================
+// [CODE]
+//======================================================================
 inline void OmsDrainBuckets_Reset(OmsDrainBuckets* b) {
     b->close_n = 0;
     b->open_n = 0;
     b->reconcile_n = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OmsDrainBuckets_Reset]
+//======================================================================
 
-//======================================================================================================
-// Branchless direction classifier — exploits the OrderType enum invariant:
+//======================================================================
+// [FUNCTION]_[OrderType_IsClose]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[branchless direction classifier — low-bit test exploits the OrderType even=BUY/odd=SELL invariant; true = CLOSE (SELL-direction)]
+//======================================================================
+// [CODE]
+//======================================================================
+inline bool OrderType_IsClose(uint8_t order_type) {
+    return (order_type & 1u) == 1u;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Exploits the OrderType enum invariant:
 //   ORDER_MARKET_BUY  = 0 (even)
 //   ORDER_MARKET_SELL = 1 (odd)
 //   ORDER_LIMIT_BUY   = 2 (even) — future maker
 //   ORDER_LIMIT_SELL  = 3 (odd)  — future maker
-//
-// Returns: true if order is a CLOSE (SELL-direction); false if OPEN (BUY).
-//======================================================================================================
-inline bool OrderType_IsClose(uint8_t order_type) {
-    return (order_type & 1u) == 1u;
-}
+//======================================================================
+// [END_FUNCTION]_[OrderType_IsClose]
+//======================================================================
 
-//======================================================================================================
-// Drain all 3 SPSC rings into per-direction buckets.
-//
-// Pass 1 — REST result_queue + WS ws_result_queue: each fill command's
-// Order.type determines whether it routes to close_bucket or open_bucket.
-// Order.type is STABLE between drain time + process time (set at order
-// creation; never mutated during fills); safe to classify at drain time.
-//
-// Pass 2 — reconcile_queue: all events route to reconcile_bucket (these
-// are balance adjustments; not direction-typed).
-//
-// Bucket overflow is IMPOSSIBLE BY DESIGN: bucket capacity matches ring
-// capacity. Worst-case all 256 events from one ring are the same direction
-// → close_bucket or open_bucket fills exactly. Combined cap from both rings
-// would overflow but we drain ONE ring's commands at a time; if both rings
-// were saturated, the second drain would still fit because ring capacity
-// is asymmetric to direction-per-ring distribution in practice. Defensive
-// bound check anyway (assert in debug; silently drop in release — same as
-// prior `OrderManager_Tick`).
-//======================================================================================================
-//======================================================================================================
-// [DRAIN CMD HANDLERS] (v5.15.5.F.4c.3 WIP2d-1.B.1 — per H20 + branchless-dispatch-discipline.md)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[OrderManager_DrainIntoBuckets]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[drain the 3 SPSC rings into per-direction buckets (the 3 drain-cmd handlers + 3 fn-pointer dispatch tables ride) — classify at drain time via the stable Order.type]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[DRAIN CMD HANDLERS — H20 fn-pointer dispatch (v5.15.5.F.4c.3 WIP2d-1.B.1)]
+//------------------------------------------------------------------
 // Per-queue fn pointer dispatch tables replace if/switch type-filter branches. Each cmd
 // flows through table indexed by `cmd.type & 0xF` → handler. Wrong-type cmds (queue
 // contract violation) land in handle_drain_noop_cmd. Pattern 1 (fn pointer table for
@@ -134,7 +186,6 @@ inline bool OrderType_IsClose(uint8_t order_type) {
 // Cost: ~3-5ns indirect call per cmd vs ~0ns steady-state branch. Per H20: branchless
 // preferred even when slower (mispredicts can't be optimized; mask code can be). Insurance
 // against future queue-contract drift causing silent mispredicts.
-//======================================================================================================
 template <unsigned F>
 using DrainCmdHandler = void (*)(const Command&, OrderManagerState<F>*, OmsDrainBuckets*);
 
@@ -242,16 +293,42 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
         g_reconcile_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 }
-
-//======================================================================================================
-// Process close-side fills (Phase A). Calls ProcessFillCommand on each
-// command in close_bucket. Mutations confined to close-side state
-// (Portfolio_CloseSlot bitmap clear; FillRecord exit-side writes; Position
-// values PRESERVED).
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Drain all 3 SPSC rings into per-direction buckets.
 //
-// CRITICAL: must run BEFORE Phase A.5 (DrainPostFill) so the consumer
-// reads CLOSE-form Position state. Phase F's invariant.
-//======================================================================================================
+// Pass 1 — REST result_queue + WS ws_result_queue: each fill command's
+// Order.type determines whether it routes to close_bucket or open_bucket.
+// Order.type is STABLE between drain time + process time (set at order
+// creation; never mutated during fills); safe to classify at drain time.
+//
+// Pass 2 — reconcile_queue: all events route to reconcile_bucket (these
+// are balance adjustments; not direction-typed).
+//
+// Bucket overflow is IMPOSSIBLE BY DESIGN: bucket capacity matches ring
+// capacity. Worst-case all 256 events from one ring are the same direction
+// → close_bucket or open_bucket fills exactly. Combined cap from both rings
+// would overflow but we drain ONE ring's commands at a time; if both rings
+// were saturated, the second drain would still fit because ring capacity
+// is asymmetric to direction-per-ring distribution in practice. Defensive
+// bound check anyway (assert in debug; silently drop in release — same as
+// prior `OrderManager_Tick`).
+//======================================================================
+// [END_FUNCTION]_[OrderManager_DrainIntoBuckets]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OrderManager_ProcessBucket_Closes]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the phase-processor family (Opens / Reconciles ride) — Phase A closes BEFORE DrainPostFill, Phase B opens AFTER, Phase C reconciles phase-invariant]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void OrderManager_ProcessBucket_Closes(OrderManagerState<F>* oms,
                                                OmsDrainBuckets* b) {
@@ -260,14 +337,14 @@ inline void OrderManager_ProcessBucket_Closes(OrderManagerState<F>* oms,
     }
 }
 
-//======================================================================================================
+//------------------------------------------------------------------
 // Process open-side fills (Phase B). Calls ProcessFillCommand on each
 // command in open_bucket. Portfolio_OpenSlot fires here; Position state
 // is OVERWRITTEN with new entry data.
 //
 // CRITICAL: must run AFTER Phase A.5 (DrainPostFill) — Phase A.5 needs
 // CLOSE-form Position state. Phase F's invariant.
-//======================================================================================================
+//------------------------------------------------------------------
 template <unsigned F>
 inline void OrderManager_ProcessBucket_Opens(OrderManagerState<F>* oms,
                                               OmsDrainBuckets* b) {
@@ -276,11 +353,11 @@ inline void OrderManager_ProcessBucket_Opens(OrderManagerState<F>* oms,
     }
 }
 
-//======================================================================================================
+//------------------------------------------------------------------
 // Process reconcile corrections (Phase C). Balance adjustments only; no
 // Position mutation. Phase-invariant safe — can run before, between, or
 // after Phase A/A.5/B without affecting Phase F invariants.
-//======================================================================================================
+//------------------------------------------------------------------
 template <unsigned F>
 inline void OrderManager_ProcessBucket_Reconciles(OrderManagerState<F>* oms,
                                                    OmsDrainBuckets* b) {
@@ -288,5 +365,20 @@ inline void OrderManager_ProcessBucket_Reconciles(OrderManagerState<F>* oms,
         OrderManager_ProcessReconcile(oms, b->reconcile_bucket[i]);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Process close-side fills (Phase A). Calls ProcessFillCommand on each
+// command in close_bucket. Mutations confined to close-side state
+// (Portfolio_CloseSlot bitmap clear; FillRecord exit-side writes; Position
+// values PRESERVED).
+//
+// CRITICAL: must run BEFORE Phase A.5 (DrainPostFill) so the consumer
+// reads CLOSE-form Position state. Phase F's invariant.
+//======================================================================
+// [END_FUNCTION]_[OrderManager_ProcessBucket_Closes]
+//======================================================================
 
 }  // namespace tt

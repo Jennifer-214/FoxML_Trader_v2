@@ -3,10 +3,21 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [OMS STATE FLAGS REGISTRY — v5.15.5.C.2 (S3a) + v5.15.5.C.3 (hybrid extension)]
+// [FILE]_[MemHeaders/OmsStateFlagRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[OrderManagerState COLD-cluster uint8_t oms_state_flags SSoT — HYBRID word: 3 single-bit flags (bits 0..2) + the 2-bit EVENT_LOG_MODE slot (bits 3..4); bits 5..7 reserved]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_OMS_STATE_FLAG]        (auto-gen bits/masks + overflow assert + count ride)
+//   - [REGISTRY]_[FOREACH_OMS_STATE_MULTI_BIT]   (slot constants + OmsEventLogMode enum + hybrid overlap/capacity asserts ride)
+//   - [MACRO]_[OMS_STATE_FLAG_*]
+//   - [MACRO]_[OMS_STATE_MULTI_BIT_*]
+// [REFERENCE]_[DESIGN_SPEC]_[multi-bit-state-encoding-pattern]
+// [REFERENCE]_[INVARIANT]_[[H14] [H9]]
 //======================================================================================================
 // Bit-packed boolean + K-state state for OrderManagerState (COLD cluster).
-// Per CLAUDE.md item 20 (BITMAP_* universalization) + DESIGN_SPECS/bitmap-
+// Per the BITMAP_* universalization discipline + DESIGN_SPECS/bitmap-
 // flag-api.md + DESIGN_SPECS/multi-bit-state-encoding-pattern.md, when 3+
 // boolean flags coexist on the same struct, bit-pack them into a uint8_t/
 // uint16_t/uint64_t bitmap rather than carrying byte-per-flag fields with
@@ -44,7 +55,7 @@
 // No BITMAP_ATOMIC_* / MBS_ATOMIC_* needed; regular BITMAP_SET/CLR + MBS_SET/GET
 // suffice.
 //
-// Wire-format note (CLAUDE.md item 15 — Parity-tested-by-construction):
+// Wire-format note (parity-tested-by-construction; H9 wire preservation):
 // kill_switch_tripped is persisted in ShardedSnapshotPersist as int (4 bytes
 // at a fixed offset). Save/load path read/write the BIT VALUE as int —
 // wire format unchanged (no snapshot version bump required). EVENT_LOG_MODE
@@ -64,15 +75,12 @@
 //   4. Migrate accessor sites: oms.NAME = val → MBS_SET_U8(oms.oms_state_flags, ...)
 //      and `if (oms.NAME == val)` → `if (MBS_EQ_U8(oms.oms_state_flags, ..., val))`
 //
-// Cross-references:
-//   CLAUDE.md item 20 (BITMAP_* API)
-//   CLAUDE.md item 13 (X-macro registry)
-//   CLAUDE.md item 1 (uint16_t Portfolio bitmap precedent)
-//   CLAUDE.md item 15 (Parity-tested-by-construction — wire format preserved)
+// Cross-references (the BITMAP_* API / X-macro registry disciplines + the
+// uint16_t Portfolio bitmap precedent + parity-tested-by-construction):
 //   DESIGN_SPECS/bitmap-flag-api.md (7th application of bitmap-flag-api)
 //   DESIGN_SPECS/multi-bit-state-encoding-pattern.md (2nd codebase application;
-//     promotes pattern toward CLAUDE.md item — see CLAUDE.local.md "codify"
-//     rule 2026-05-13)
+//     the predicted promotion HAPPENED — the manual SHIFT_*/MASK_* + MBS_*
+//     accessor discipline is codified as H14)
 //   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
 //   v5.15.5.B.3 FOREACH_NODE_STATE_FLAG (NodeStateFlagRegistry.hpp) — sister registry
 //   v5.15.5.C.2.1 FOREACH_OMS_META_SLOT (OmsExitPredictorMetaRegistry.hpp) —
@@ -86,17 +94,17 @@
 
 namespace tt {
 
-//======================================================================================================
-// [REGISTRY DEFINITION]
-//======================================================================================================
-// Tuple: X(name, doc_string)
-//   name       — UPPERCASE token; produces OMS_STATE_FLAG_<name> bit position
-//                + MASK_OMS_STATE_<name> uint8_t mask constant
-//   doc_string — human-readable description for audits + docs
-//
-// 3 entries used; 5 bits headroom in uint8_t. Promote storage to uint16_t
-// if/when a 9th entry needs adding (static_assert below catches overflow).
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_OMS_STATE_FLAG]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[3 BIT_FLAG rows (LIVE_TRADING / PARTIAL_EXIT_ENABLED / KILL_SWITCH_TRIPPED) -> sequential bits 0..2 of the hybrid word + MASK_OMS_STATE_<name> constants]
+// [COLUMN]_[name]_[UPPERCASE token; produces the OMS_STATE_FLAG_<name> bit + MASK_OMS_STATE_<name> constant]
+// [COLUMN]_[doc_string]_[human-readable description for audits + docs]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_OMS_STATE_FLAG(X)                                                                       \
     /* Live-trading mode flag. Set ONCE at engine init from cfg.live_trading. Gates Submit-time      */ \
     /* exchange-adapter dispatch (paper mode short-circuits; live mode calls adapter callbacks).     */ \
@@ -112,9 +120,9 @@ namespace tt {
     X(KILL_SWITCH_TRIPPED,                                                                              \
       "OMS-wide kill switch tripped; entries blocked until manual resume")
 
-//======================================================================================================
-// [AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]
+//------------------------------------------------------------------
 #define X_GEN_OMS_STATE_BIT(name, doc) OMS_STATE_FLAG_##name,
 enum OmsStateFlag {
     FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_BIT)
@@ -127,6 +135,7 @@ enum OmsStateFlag {
 FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_MASK)
 #undef X_GEN_OMS_STATE_MASK
 
+// [ASSERT]_[BITMAP_OVERFLOW]_[OMS_STATE_FLAG_COUNT <= 8]
 static_assert(OMS_STATE_FLAG_COUNT <= 8,
               "oms_state_flags is uint8_t; max 8 entries. Widen to uint16_t "
               "if adding a 9th — and update the field type on OrderManagerState.");
@@ -134,27 +143,38 @@ static_assert(OMS_STATE_FLAG_COUNT <= 8,
 // Public count for tests (uses >= per /readiness Check 21).
 #define X_GEN_OMS_STATE_COUNT_ONE(name, doc) +1
 #define FOREACH_OMS_STATE_FLAG_COUNT (0 FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_COUNT_ONE))
-
-//======================================================================================================
-// [MULTI-BIT SLOT REGISTRY — K-state fields co-located in oms_state_flags]
-//======================================================================================================
-// Sister registry to FOREACH_OMS_STATE_FLAG. Hosts K-state slots (K=2..16)
-// packed into N-bit regions of the SAME oms_state_flags uint8_t. Per
-// DESIGN_SPECS/multi-bit-state-encoding-pattern.md.
-//
-// Tuple: X(name, bits, shift, doc_string)
-//   name       — UPPERCASE token; produces BITS/SHIFT/MASK_OMS_STATE_<name>
-//   bits       — slot width (compile-time int constant; 1..8)
-//   shift      — slot bit position (compile-time int constant; MUST be
-//                 >= OMS_STATE_FLAG_COUNT to avoid overlap with single-bit
-//                 region; MUST not overlap with prior multi-bit slots)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(name, doc_string)
+//   name       — UPPERCASE token; produces OMS_STATE_FLAG_<name> bit position
+//                + MASK_OMS_STATE_<name> uint8_t mask constant
 //   doc_string — human-readable description for audits + docs
 //
-// Slot positions are explicit (not auto-derived from preceding slot widths)
-// for review-readability — operator sees the bit layout at a glance. Static-
-// asserts below validate no overlap between single-bit region + multi-bit
-// slots, and no overlap between multi-bit slots.
-//======================================================================================================
+// 3 single-bit entries (bits 0..2). Growth caveat — HYBRID word: bits 3..4
+// host the EVENT_LOG_MODE multi-bit slot, so a 4th single-bit flag collides
+// there (the overlap static_assert catches it); adding one means bumping
+// EVENT_LOG_MODE's SHIFT (bits 5..7 are free) or widening to uint16_t —
+// NOT simply appending until the <=8 overflow assert fires.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_OMS_STATE_FLAG]
+//======================================================================
+
+//======================================================================
+// [REGISTRY]_[FOREACH_OMS_STATE_MULTI_BIT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[K-state slots co-located in the SAME uint8_t (EVENT_LOG_MODE 2b@3, K=4 capacity; OmsEventLogMode enum + hybrid overlap/capacity asserts ride); explicit SHIFTs for at-a-glance layout]
+// [COLUMN]_[name]_[UPPERCASE token; produces BITS/SHIFT/MASK_OMS_STATE_<name>]
+// [COLUMN]_[bits]_[slot width (compile-time int constant; 1..8)]
+// [COLUMN]_[shift]_[slot bit position; >= OMS_STATE_FLAG_COUNT and clear of prior slots (asserts enforce)]
+// [COLUMN]_[doc_string]_[human-readable description for audits + docs]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_OMS_STATE_MULTI_BIT(X)                                                              \
     /* OMS event-log mode. K=2-4 states:                                                          */ \
     /*   0 = legacy   — OMS_Tick marks orders FILLED/REJECTED; portfolio mutation in              */ \
@@ -167,9 +187,9 @@ static_assert(OMS_STATE_FLAG_COUNT <= 8,
     X(EVENT_LOG_MODE, 2, 3,                                                                          \
       "OMS event-log mode: 0=legacy, 1=event-log (default since v4.7.15 train-serve parity)")
 
-//======================================================================================================
-// [AUTO-GENERATED MULTI-BIT SLOT CONSTANTS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[AUTO-GENERATED MULTI-BIT SLOT CONSTANTS]
+//------------------------------------------------------------------
 #define X_GEN_OMS_STATE_MULTI_BIT(name, bits, shift, doc)                                             \
     static constexpr uint8_t BITS_OMS_STATE_##name  = (uint8_t)(bits);                                \
     static constexpr uint8_t SHIFT_OMS_STATE_##name = (uint8_t)(shift);                               \
@@ -188,9 +208,11 @@ static constexpr uint8_t _OMS_STATE_SINGLE_BIT_REGION =
     (uint8_t)((1u << OMS_STATE_FLAG_COUNT) - 1u);
 
 // EVENT_LOG_MODE-specific overlap check (extend with similar checks per added slot):
+// [ASSERT]_[LAYOUT_LOCK]_[(EVENT_LOG_MODE_MASK & single-bit region) == 0]
 static_assert((MASK_OMS_STATE_EVENT_LOG_MODE & _OMS_STATE_SINGLE_BIT_REGION) == 0,
               "EVENT_LOG_MODE multi-bit slot overlaps single-bit flag region; "
               "increase SHIFT_OMS_STATE_EVENT_LOG_MODE or compact the single-bit cohort");
+// [ASSERT]_[BITMAP_OVERFLOW]_[EVENT_LOG_MODE SHIFT + BITS <= 8]
 static_assert(SHIFT_OMS_STATE_EVENT_LOG_MODE + BITS_OMS_STATE_EVENT_LOG_MODE <= 8,
               "EVENT_LOG_MODE slot overflows uint8_t; widen oms_state_flags to uint16_t "
               "(and update the field type on OrderManagerState + BITMAP_BIT_U8 → BITMAP_BIT_U16 throughout)");
@@ -204,6 +226,7 @@ enum OmsEventLogMode {
     // 2, 3 reserved for future modes
     OMS_EVENT_LOG_MODE_COUNT  // sentinel; must remain <= (1 << BITS_OMS_STATE_EVENT_LOG_MODE)
 };
+// [ASSERT]_[BITMAP_OVERFLOW]_[OMS_EVENT_LOG_MODE_COUNT <= 1 << EVENT_LOG_MODE_BITS]
 static_assert(OMS_EVENT_LOG_MODE_COUNT <= (1u << BITS_OMS_STATE_EVENT_LOG_MODE),
               "OMS_EVENT_LOG_MODE_COUNT exceeds EVENT_LOG_MODE slot capacity; "
               "widen BITS_OMS_STATE_EVENT_LOG_MODE in FOREACH_OMS_STATE_MULTI_BIT");
@@ -212,12 +235,35 @@ static_assert(OMS_EVENT_LOG_MODE_COUNT <= (1u << BITS_OMS_STATE_EVENT_LOG_MODE),
 #define X_GEN_OMS_STATE_MULTI_BIT_COUNT_ONE(name, bits, shift, doc) +1
 #define FOREACH_OMS_STATE_MULTI_BIT_COUNT \
     (0 FOREACH_OMS_STATE_MULTI_BIT(X_GEN_OMS_STATE_MULTI_BIT_COUNT_ONE))
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(name, bits, shift, doc_string)
+//   name       — UPPERCASE token; produces BITS/SHIFT/MASK_OMS_STATE_<name>
+//   bits       — slot width (compile-time int constant; 1..8)
+//   shift      — slot bit position (compile-time int constant; MUST be
+//                 >= OMS_STATE_FLAG_COUNT to avoid overlap with single-bit
+//                 region; MUST not overlap with prior multi-bit slots)
+//   doc_string — human-readable description for audits + docs
+//
+// Slot positions are explicit (not auto-derived from preceding slot widths)
+// for review-readability — operator sees the bit layout at a glance. The
+// static_asserts in-fence validate no overlap between single-bit region +
+// multi-bit slots, and no overlap between multi-bit slots.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_OMS_STATE_MULTI_BIT]
+//======================================================================
 
 }  // namespace tt
 
-//======================================================================================================
-// [OMS_STATE_FLAG_* convenience macros]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[OMS_STATE_FLAG_*]
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ergonomic bare-name accessors over oms.oms_state_flags (mirror the NODE_STATE_FLAG_* shape) — IS_SET/SET/CLR/TOGGLE + BITMAP_ANY for multi-flag]
+//----------------------------------------------------------------------
 // Mirror NODE_STATE_FLAG_* shape. Reads naturally:
 //   Set:    OMS_STATE_FLAG_SET(oms, KILL_SWITCH_TRIPPED)
 //   Clear:  OMS_STATE_FLAG_CLR(oms, KILL_SWITCH_TRIPPED)
@@ -232,16 +278,18 @@ static_assert(OMS_EVENT_LOG_MODE_COUNT <= (1u << BITS_OMS_STATE_EVENT_LOG_MODE),
 //
 // MASK_OMS_STATE_<name> lives in tt:: namespace; macros assume the tt::
 // scope is visible at call sites (most callers already `using namespace tt;`).
-//======================================================================================================
 
 #define OMS_STATE_FLAG_IS_SET(oms, name) BITMAP_IS_SET((oms).oms_state_flags, tt::MASK_OMS_STATE_##name)
 #define OMS_STATE_FLAG_SET(oms, name)    BITMAP_SET((oms).oms_state_flags, tt::MASK_OMS_STATE_##name)
 #define OMS_STATE_FLAG_CLR(oms, name)    BITMAP_CLR((oms).oms_state_flags, tt::MASK_OMS_STATE_##name)
 #define OMS_STATE_FLAG_TOGGLE(oms, name) BITMAP_TOGGLE((oms).oms_state_flags, tt::MASK_OMS_STATE_##name)
 
-//======================================================================================================
-// [OMS_STATE_MULTI_BIT_* convenience macros — K-state slot accessors]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[OMS_STATE_MULTI_BIT_*]
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[K-state slot accessors over the hybrid word — GET/SET/EQ via the MBS_*_U8 primitives; MASK + SHIFT auto-derived from the registry]
+//----------------------------------------------------------------------
 // Sister set to OMS_STATE_FLAG_* but for K-state slots (FOREACH_OMS_STATE_MULTI_BIT).
 // All slots are co-located in oms_state_flags uint8_t per the hybrid layout
 // documented at the top of this header.
@@ -255,7 +303,6 @@ static_assert(OMS_EVENT_LOG_MODE_COUNT <= (1u << BITS_OMS_STATE_EVENT_LOG_MODE),
 // MASK + SHIFT auto-derived from registry; call sites stay short. Macro arg
 // `oms` is a VALUE/REFERENCE (e.g., `oms` or `*state->oms`). For raw pointer
 // call sites use the underlying MBS_* primitives directly with `state->oms->oms_state_flags`.
-//======================================================================================================
 
 #define OMS_STATE_MULTI_BIT_GET(oms, name) \
     MBS_GET_U8((oms).oms_state_flags, tt::MASK_OMS_STATE_##name, tt::SHIFT_OMS_STATE_##name)
