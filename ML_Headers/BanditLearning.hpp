@@ -3,7 +3,22 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BANDIT LEARNING — EXP3-IX ONLINE STRATEGY SELECTION]
+// [FILE]_[ML_Headers/BanditLearning.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Exp3-IX multi-armed bandit (FoxML bandit.py port) — importance-weighted online arm selection + static-blend ramp + JSON state persistence; AVX-512 kernel with bytewise-identical scalar fallback]
+// [CONTAINS]
+//   - [STRUCT]_[BanditDisplayMeta]        (+ InitDefault / SetArmName helpers)
+//   - [STRUCT]_[BanditState]
+//   - [FUNCTION]_[Bandit_Init]            (+ InitDefault)
+//   - [FUNCTION]_[Bandit_GetProbabilities]
+//   - [FUNCTION]_[Bandit_Select]
+//   - [FUNCTION]_[Bandit_Update]
+//   - [FUNCTION]_[Bandit_GetWeights]
+//   - [FUNCTION]_[Bandit_BlendWeights]    (+ EffectiveBlend)
+//   - [FUNCTION]_[Bandit_SaveJSON]
+//   - [FUNCTION]_[Bandit_LoadJSON]        (+ the tt::json_io primitives)
 //======================================================================================================
 // port of FoxML/private LIVE_TRADING/learning/bandit.py + weight_optimizer.py.
 // Exp3-IX multi-armed bandit for online strategy/model selection with
@@ -61,21 +76,16 @@
 #define BANDIT_RAMP_UP_DEFAULT     100     // trades to reach full blend
 #define BANDIT_MAX_ARMS            8       // max arms supported
 
-//======================================================================================================
-// [BANDIT DISPLAY META — separate struct for human-readable arm names]
-//======================================================================================================
-// v5.15.5.A.3 — extracted from BanditState per CLAUDE.md item 7 + DESIGN_SPECS/
-// cache-layout-discipline-for-hot-side-structs.md Rule 1 (extract display-only
-// fields out of hot-side structs). arm_names is 256B (8 × 32) of display-only
-// data that was sitting inside BanditState, getting pulled into L1 every time
-// slow-path read weights/cum_reward/pulls. With NUM_REGIMES=5 BanditState
-// instances on ezoo, that was 1280B of arm_names noise per ezoo.
-//
-// New layout: BanditState has just the hot/slow-path math state.
-// BanditDisplayMeta lives separately at the OWNER level (PortfolioController
-// has 1 next to its bandit; EnsembleModelZoo has [NUM_REGIMES] in COLD cluster
-// next to bandits[]). Functions that NEED arm names take a BanditDisplayMeta*
-// parameter (nullable; falls back to "arm_N" default when null).
+//======================================================================
+// [STRUCT]_[BanditDisplayMeta]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[human-readable arm names, display-only — extracted OUT of BanditState (v5.15.5.A.3) so hot-side reads never pull 256B of labels; InitDefault + SetArmName ride in this section]
+// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BanditDisplayMeta {
     char arm_names[BANDIT_MAX_ARMS][32];   // human-readable arm names
 };
@@ -99,12 +109,44 @@ static inline void BanditDisplayMeta_SetArmName(BanditDisplayMeta *m, int arm, c
     if (!m || arm < 0 || arm >= BANDIT_MAX_ARMS || !name) return;
     snprintf(m->arm_names[arm], sizeof(m->arm_names[arm]), "%s", name);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.A.3 — extracted from BanditState per DESIGN_SPECS/
+// cache-layout-discipline-for-hot-side-structs.md Rule 1 (extract display-only
+// fields out of hot-side structs). arm_names is 256B (8 × 32) of display-only
+// data that was sitting inside BanditState, getting pulled into L1 every time
+// slow-path read weights/cum_reward/pulls. With NUM_REGIMES=5 BanditState
+// instances on ezoo, that was 1280B of arm_names noise per ezoo.
+//
+// New layout: BanditState has just the hot/slow-path math state.
+// BanditDisplayMeta lives separately at the OWNER level (PortfolioController
+// has 1 next to its bandit; EnsembleModelZoo has [NUM_REGIMES] in COLD cluster
+// next to bandits[]). Functions that NEED arm names take a BanditDisplayMeta*
+// parameter (nullable; falls back to "arm_N" default when null).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[256B]
+// [ALIGN]_[1]
+// [CACHE_LINES]_[4]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[BanditDisplayMeta]
+//======================================================================
 
-//======================================================================================================
-// [BANDIT STATE]
-//======================================================================================================
-// v5.15.5.A.3 — arm_names extracted to BanditDisplayMeta (above). Pure
-// math state; ~256B smaller than pre-v5.15.5.
+//======================================================================
+// [STRUCT]_[BanditState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCOPE]_[NODE]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[pure Exp3-IX math state — weights / cum_reward / pulls per arm + the exploration and blend knobs; display labels live in BanditDisplayMeta]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BanditState {
     double weights[BANDIT_MAX_ARMS];       // unnormalized weights (exp3-ix)
     double cum_reward[BANDIT_MAX_ARMS];    // cumulative P&L per arm (bps)
@@ -117,19 +159,43 @@ struct BanditState {
     int min_samples;        // minimum trades before bandit activates
     int ramp_up_samples;    // trades to ramp from 0 to blend_ratio
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.A.3 — arm_names extracted to BanditDisplayMeta (above). Pure
+// math state; ~256B smaller than pre-v5.15.5.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[200B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[BanditState]
+//======================================================================
 
 // v5.15.5.A.3 — shrinkage assertion: BanditState lost the 256B arm_names
 // (BANDIT_MAX_ARMS=8 × 32 = 256 bytes). New size should be <= OLD_SIZE - 256.
 // Pre-extraction sizeof was 456 bytes (weights[64] + cum_reward[64] + pulls[32]
 // + arm_names[256] + scalars[44]); post should be ~200 bytes.
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(BanditState) <= 256 — post-extraction shrinkage lock]
 static_assert(sizeof(BanditState) <= 256,
               "v5.15.5.A.3 BanditState shrinkage check: extracted arm_names "
               "should bring sizeof down to ~200 bytes; if assertion trips, "
               "either struct gained fields or extraction was partial");
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Bandit_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[uniform-weight init with clamped knobs (FoxML defaults on zero/negative args); InitDefault rides in this section]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Bandit_Init(BanditState *b, int n_arms,
                                 double gamma, double eta_max,
                                 double blend_ratio, int min_samples, int ramp_up) {
@@ -157,6 +223,11 @@ static inline void Bandit_InitDefault(BanditState *b, int n_arms) {
     Bandit_Init(b, n_arms, BANDIT_GAMMA_DEFAULT, BANDIT_ETA_MAX_DEFAULT,
                 BANDIT_BLEND_RATIO_DEFAULT, BANDIT_MIN_SAMPLES_DEFAULT, BANDIT_RAMP_UP_DEFAULT);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Bandit_Init]
+//======================================================================
 
 // v5.15.5.A.3 — DEPRECATED legacy API. arm_names was extracted to
 // BanditDisplayMeta; this signature is preserved as a thin forwarder to
@@ -173,10 +244,18 @@ static inline void Bandit_InitDefault(BanditState *b, int n_arms) {
 // trigger a deliberate undefined symbol at link time when migrated.
 // Update all call sites to BanditDisplayMeta_SetArmName(&meta, arm, name).
 
-//======================================================================================================
-// [PROBABILITIES]
-// p_i = (1 - gamma) * (w_i / sum_w) + gamma / K
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Bandit_GetProbabilities]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Exp3-IX selection probabilities — AVX-512 elementwise kernel with a BYTEWISE-IDENTICAL scalar fallback; sum reductions stay scalar for rounding-order determinism]
+// [DIAGRAM]_[formula]
+//   p_i = (1 - gamma) * (w_i / sum_w) + gamma / K
+// [REFERENCE]_[INVARIANT]_[H10]
+//======================================================================
+// [CODE]
+//======================================================================
 // asan cannot model AVX-512 masked/wide ops (_mm512_mask_storeu_pd / _mm512_loadu_pd over the
 // 8-wide weights/probs buffers, BANDIT_MAX_ARMS=8) and false-positives a SEGV on this correct-by-
 // construction SIMD kernel — verified bit-exact vs the scalar reference by the v5.11.7 byte-determinism
@@ -259,12 +338,21 @@ static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_o
 #endif
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Bandit_GetProbabilities]
+//======================================================================
 
-//======================================================================================================
-// [SELECT ARM]
-// samples from probability distribution. caller provides uniform random in [0,1).
-// returns arm index. use a PRNG or hardware RNG for the random value.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Bandit_Select]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[cumulative-distribution sample over GetProbabilities — caller supplies the uniform random in [0,1)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int Bandit_Select(const BanditState *b, double uniform_rand) {
     double probs[BANDIT_MAX_ARMS];
     Bandit_GetProbabilities(b, probs);
@@ -278,14 +366,31 @@ static inline int Bandit_Select(const BanditState *b, double uniform_rand) {
     }
     return b->n_arms - 1; // numerical safety: pick last arm
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// samples from probability distribution. caller provides uniform random in [0,1).
+// returns arm index. use a PRNG or hardware RNG for the random value.
+//======================================================================
+// [END_FUNCTION]_[Bandit_Select]
+//======================================================================
 
-//======================================================================================================
-// [UPDATE]
-// importance-weighted reward update:
-//   r_hat = reward / p_arm
+//======================================================================
+// [FUNCTION]_[Bandit_Update]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[importance-weighted Exp3-IX reward update with adaptive eta + explosion/vanish clamps (branchless max-find per H20)]
+// [DIAGRAM]_[formula]
+//   r_hat  = reward / p_arm
 //   w_arm *= exp(eta * r_hat)
-// with adaptive eta: min(eta_max, sqrt(ln(K) / (K * T)))
-//======================================================================================================
+//   eta    = min(eta_max, sqrt(ln(K) / (K * T)))
+// [REFERENCE]_[INVARIANT]_[H20]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Bandit_Update(BanditState *b, int arm, double reward_bps) {
     if (arm < 0 || arm >= b->n_arms) return;
 
@@ -327,11 +432,21 @@ static inline void Bandit_Update(BanditState *b, int arm, double reward_bps) {
     for (int i = 0; i < b->n_arms; i++)
         if (b->weights[i] < 1e-10) b->weights[i] = 1e-10;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Bandit_Update]
+//======================================================================
 
-//======================================================================================================
-// [NORMALIZED WEIGHTS]
-// returns weights summing to 1.0 (for blending / display)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Bandit_GetWeights]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[weights normalized to sum 1.0 (for blending / display); uniform fallback on non-positive sum]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Bandit_GetWeights(const BanditState *b, double *weights_out) {
     double sum_w = 0.0;
     for (int i = 0; i < b->n_arms; i++)
@@ -344,16 +459,23 @@ static inline void Bandit_GetWeights(const BanditState *b, double *weights_out) 
     for (int i = 0; i < b->n_arms; i++)
         weights_out[i] = b->weights[i] / sum_w;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Bandit_GetWeights]
+//======================================================================
 
-//======================================================================================================
-// [BLEND WITH STATIC WEIGHTS]
-// final = (1 - effective_blend) * static + effective_blend * bandit
-//
-// ramp-up schedule (from FoxML weight_optimizer.py):
-//   steps < min_samples:           effective_blend = 0 (100% static)
-//   min_samples <= steps < min+ramp: linear ramp from 0 to blend_ratio
-//   steps >= min+ramp:             effective_blend = blend_ratio
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Bandit_BlendWeights]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[static<->bandit weight blend with the FoxML ramp-up schedule; EffectiveBlend rides in this section]
+// [DIAGRAM]_[formula]
+//   final = (1 - effective_blend) * static + effective_blend * bandit
+//======================================================================
+// [CODE]
+//======================================================================
 static inline double Bandit_EffectiveBlend(const BanditState *b) {
     if (b->total_steps < b->min_samples) return 0.0;
     if (b->ramp_up_samples <= 0) return b->blend_ratio;
@@ -389,10 +511,28 @@ static inline void Bandit_BlendWeights(const BanditState *b,
             blended_out[i] /= sum;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// ramp-up schedule (from FoxML weight_optimizer.py):
+//   steps < min_samples:           effective_blend = 0 (100% static)
+//   min_samples <= steps < min+ramp: linear ramp from 0 to blend_ratio
+//   steps >= min+ramp:             effective_blend = blend_ratio
+//======================================================================
+// [END_FUNCTION]_[Bandit_BlendWeights]
+//======================================================================
 
-//======================================================================================================
-// [DIAGNOSTICS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Bandit_Print]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stderr diagnostics — per-arm pulls/avg/weight/prob; optional BanditDisplayMeta for human-readable names]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.15.5.A.3 — Bandit_Print takes optional display meta. Pass nullptr
 // to print default "arm_N" labels; pass a populated BanditDisplayMeta*
 // to print human-readable names.
@@ -418,29 +558,24 @@ static inline void Bandit_Print(const BanditState *b,
                 name, b->pulls[i], avg, weights[i], probs[i]);
     }
 }
-
-//======================================================================================================
-// [PERSISTENCE — JSON SAVE/LOAD]  (v5.10.0a.G.9)
-//======================================================================================================
-// Bandit weights are valuable — they encode "what horizons work for THIS
-// asset/regime/market." Without persistence, they reset to uniform every
-// restart, wasting hours of online learning. G.9 persists arrays of
-// BanditState (one per regime) to a JSON sidecar in the model bundle dir.
-//
-// Atomic write via fopen(tmp) + write + close + rename — matches stamp
-// persistence pattern; no partial-file window for concurrent readers.
-//
-// SHA validation: bundle SHA carried in the JSON; load returns 0 (caller
-// resets to uniform) on mismatch. Prevents stale weights from a different
-// model bundle silently re-applying.
-//
-// LOCALE: writes use "C" formatting (%.17g) for cross-locale round-trips.
-// Reader uses strtod which is locale-aware — pinning the LC_NUMERIC at
-// process boot is the engine's responsibility (already done; see
-// EngineSharded boot path).
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Bandit_Print]
+//======================================================================
 
 #define BANDIT_STATE_FORMAT_VERSION 1
 
+//======================================================================
+// [FUNCTION]_[Bandit_SaveJSON]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-regime BanditState array -> JSON sidecar; atomic tmp+rename write; LC_NUMERIC=C pinned per-thread at emit]
+// [REFERENCE]_[INVARIANT]_[H21]
+//======================================================================
+// [CODE]
+//======================================================================
 // Save BanditState array (one per regime) to JSON file. Returns 1 on
 // success, 0 on any failure (open, write, rename). Atomic via tmpfile +
 // rename.
@@ -522,7 +657,7 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
     fprintf(f, "}\n");
 
     // Restore caller's locale before fclose (file handle isn't locale-bound;
-    // restore order matches stamp_write_for_model precedent at ModelInference.hpp:1940).
+    // restore order matches the stamp_write_for_model precedent in ModelInference.hpp).
     if (pinned_locale) {
         uselocale(prev_locale);
         freelocale(pinned_locale);
@@ -538,10 +673,44 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Bandit weights are valuable — they encode "what horizons work for THIS
+// asset/regime/market." Without persistence, they reset to uniform every
+// restart, wasting hours of online learning. G.9 persists arrays of
+// BanditState (one per regime) to a JSON sidecar in the model bundle dir.
+//
+// Atomic write via fopen(tmp) + write + close + rename — matches stamp
+// persistence pattern; no partial-file window for concurrent readers.
+//
+// SHA validation: bundle SHA carried in the JSON; load returns 0 (caller
+// resets to uniform) on mismatch. Prevents stale weights from a different
+// model bundle silently re-applying.
+//
+// LOCALE: writes use "C" formatting (%.17g) for cross-locale round-trips.
+// The reader parses doubles via tt::parse_double_fast_advance
+// (std::from_chars — locale-immune per v5.11.4.C), so round-trips hold
+// regardless of process LC_NUMERIC.
+//======================================================================
+// [END_FUNCTION]_[Bandit_SaveJSON]
+//======================================================================
 
-//======================================================================================================
-// [JSON I/O PRIMITIVES — generic, reusable across Bandit + Thompson + future state-persistence]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[Bandit_LoadJSON]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[overlay persisted weights/cum_reward/pulls onto Init'd states — format/arms/regimes/SHA gates, uniform fallback on any miss; the tt::json_io primitives ride in this section]
+// [REFERENCE]_[INVARIANT]_[H21]
+//======================================================================
+// [CODE]
+//======================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[tt::json_io primitives — generic, reusable across Bandit + Thompson + future state-persistence]
+//----------------------------------------------------------------------
 // v5.14.10.C — extracted to tt::json_io namespace from Bandit_Json* sister
 // functions (per /merge-scan T4 finding). NOT a real JSON parser — just
 // walks to "key": and returns position past the colon; reads numeric arrays
@@ -622,6 +791,9 @@ static inline int parse_uint32_array(const char* p, uint32_t* out, int max_count
 
 }} // namespace tt::json_io
 
+//----------------------------------------------------------------------
+// [SECTION]_[Bandit_LoadJSON]
+//----------------------------------------------------------------------
 // Load BanditState array from JSON file. Returns 1 if loaded + valid;
 // 0 if missing/corrupt/sha-mismatch (caller falls back to uniform via
 // Bandit_Init).
@@ -759,8 +931,13 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
         p = end_brace ? end_brace + 1 : rid_p + 1;
     }
 
-    
+
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Bandit_LoadJSON]
+//======================================================================
 
 #endif // BANDIT_LEARNING_HPP
