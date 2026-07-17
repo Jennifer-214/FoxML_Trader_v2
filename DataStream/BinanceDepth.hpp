@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //======================================================================================================
-// [BINANCE DEPTH STREAM]
+// [FILE]_[DataStream/BinanceDepth.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the @depth5@100ms venue stream — own thread parses into a double-buffered BookSnapshot (atomic active_idx swap); engine reads on the slow path, zero hot-path impact; 10Hz strstr scan v5.11.16-audited]
+// [CONTAINS]
+//   - [STRUCT]_[BookSnapshot]   (BookLevel + BookSnapshot_Init ride)
+//   - [STRUCT]_[DepthStream]
+//   - [STRUCT]_[DepthSharedState]
+//   - [FUNCTION]_[depth_parse_json]
+//   - [FUNCTION]_[depth_thread_fn]   (+ DepthStream_Init rides; the DepthRecorder include-cycle break lives here)
 //======================================================================================================
 // subscribes to Binance @depth5@100ms websocket for top-of-book bid/ask data
 // runs on its own thread, writes to double-buffered BookSnapshot
@@ -18,9 +28,16 @@
 #include <stdlib.h>
 #include <time.h>
 
-//======================================================================================================
-// [BOOK SNAPSHOT]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[BookSnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[5-level book + derived spread/mid/imbalance features (BookLevel + BookSnapshot_Init ride) — FPN_Binary feature data (H4); last_update_id + local landing timestamp for the recorder]
+// [INSTANTIATION]_[[64]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct BookLevel {
     FPN_Binary<F> price;
     FPN_Binary<F> qty;
@@ -57,10 +74,23 @@ template <unsigned F> inline BookSnapshot<F> BookSnapshot_Init() {
     snap.timestamp_us = 0;
     return snap;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BookSnapshot]
+//======================================================================
 
-//======================================================================================================
-// [DEPTH STREAM STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[DepthStream]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the connection handle — socket + SSL pair + connected flag + pollfd]
+//======================================================================
+// [CODE]
+//======================================================================
 struct DepthStream {
     int sockfd;
     SSL_CTX *ssl_ctx;
@@ -68,14 +98,27 @@ struct DepthStream {
     int connected;
     struct pollfd pfd;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[DepthStream]
+//======================================================================
 
-//======================================================================================================
-// [SHARED STATE] — engine reads, depth thread writes
-//======================================================================================================
-// Forward decl for the recorder pointer field. Full definition in
-// DepthRecorder.hpp, included near the bottom of this header (just before
-// depth_thread_fn) so it can call the templated DepthRecorder_Write.
-struct DepthRecorder;
+//======================================================================
+// [STRUCT]_[DepthSharedState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[engine reads / depth thread writes — double-buffered snapshots + atomic active_idx + quit flag + connection cfg + nullable recorder]
+// [INSTANTIATION]_[[64]]
+//======================================================================
+// [CODE]
+//======================================================================
+struct DepthRecorder;  // fwd decl for the recorder pointer field — full definition in DepthRecorder.hpp,
+                       // included near the bottom of this header (just before depth_thread_fn)
+                       // so it can call the templated DepthRecorder_Write
 
 template <unsigned F> struct DepthSharedState {
     BookSnapshot<F> snapshots[2];
@@ -88,22 +131,23 @@ template <unsigned F> struct DepthSharedState {
     int reconnect_delay;
     DepthRecorder *recorder;     // null = recording disabled (Phase 8a c5)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[DepthSharedState]
+//======================================================================
 
-//======================================================================================================
-// [DEPTH JSON PARSER]
-//======================================================================================================
-// parses Binance @depth5 format:
-// {"lastUpdateId":123,"bids":[["price","qty"],...],"asks":[["price","qty"],...]}
-//
-// v5.11.16 (2026-05-07) — DataStream parsing audit. strstr/strchr scans on
-// the JSON buffer are bounded by null termination — `ws_read_frame` at
-// WebSocketUtil.hpp:140 writes `out[plen] = '\0'` on every frame, clamped
-// to plen <= max_len. v5.11.4.A locale-immune parsing already covered
-// number extraction (FPN_FromString is digit-by-digit; lastUpdateId reads
-// via strtoull which is locale-stable for base-10 unsigned integers).
-// Using the `len` parameter (previously unused) as a min-size sanity
-// guard catches truncated frames before any scanning.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[depth_parse_json]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[parse one @depth5 message into a BookSnapshot — up to 5 [price,qty] pairs per side via digit-by-digit FPN_FromString (locale-immune) + derived spread/mid/imbalances]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline int depth_parse_json(const char *json, int len, BookSnapshot<F> *snap) {
     // v5.11.16 — sanity floor. A real Binance @depth5 message is >= ~150
@@ -198,10 +242,35 @@ static inline int depth_parse_json(const char *json, int len, BookSnapshot<F> *s
     snap->update_count++;
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// parses Binance @depth5 format:
+// {"lastUpdateId":123,"bids":[["price","qty"],...],"asks":[["price","qty"],...]}
+//
+// v5.11.16 (2026-05-07) — DataStream parsing audit. strstr/strchr scans on
+// the JSON buffer are bounded by null termination — `ws_read_frame`
+// writes `out[plen] = '\0'` on every frame, clamped
+// to plen <= max_len. v5.11.4.A locale-immune parsing already covered
+// number extraction (FPN_FromString is digit-by-digit; lastUpdateId reads
+// via strtoull which is locale-stable for base-10 unsigned integers).
+// Using the `len` parameter (previously unused) as a min-size sanity
+// guard catches truncated frames before any scanning.
+//======================================================================
+// [END_FUNCTION]_[depth_parse_json]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[depth_thread_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the depth thread (DepthStream_Init rides) — interruptible reconnect loop, back-buffer parse + RELEASE active_idx swap, disconnect gap-log + Notify alert, recorder write]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline int DepthStream_Init(DepthSharedState<F> *shared, const char *symbol,
                                     const char *host, int port, int reconnect_delay) {
@@ -235,9 +304,9 @@ static inline int DepthStream_Init(DepthSharedState<F> *shared, const char *symb
     return 0;
 }
 
-//======================================================================================================
-// [THREAD FUNCTION]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[THREAD FUNCTION]
+//------------------------------------------------------------------
 // DepthRecorder.hpp includes this header for BookSnapshot<F>. Including it
 // HERE (after BookSnapshot + DepthSharedState are fully defined, before
 // depth_thread_fn) breaks the include cycle: the include guard short-circuits
@@ -327,5 +396,10 @@ static inline void *depth_thread_fn(void *arg) {
     if (ds->connected) ws_close(ds->ssl, ds->ssl_ctx, ds->sockfd);
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[depth_thread_fn]
+//======================================================================
 
 #endif // BINANCE_DEPTH_HPP

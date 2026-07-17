@@ -3,14 +3,22 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [DEPTH REPLAY STATE]
+// [FILE]_[DataStream/DepthReplayState.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[backtest analog of DepthSharedState — replays DepthRecorder CSVs into a BookSnapshot<F> advanced in lockstep with ticks; single-threaded by construction; locale-immune parse (F-055)]
+// [CONTAINS]
+//   - [STRUCT]_[DepthReplayState]
+//   - [FUNCTION]_[DepthReplayState_Advance]   (+ DateInt / Init / Free / LoadDay / GetSnapshot family)
+// [SEAM]_[record->replay — rows MUST parse exactly what DepthRecorder_Write emits (to_chars <-> parse_double_fast round-trip)]
 //======================================================================================================
 // Backtest analog of DepthSharedState (DataStream/BinanceDepth.hpp). Reads
 // the same daily CSV files DepthRecorder writes (Phase 8a) and exposes a
 // BookSnapshot<F> that BacktestSharded_Run can advance in lockstep with the
 // tick stream.
 //
-// CSV format (matches DepthRecorder_Write at DepthRecorder.hpp:249):
+// CSV format (matches DepthRecorder_Write's row emit):
 //   timestamp_us,last_update_id,bid_price,bid_qty,ask_price,ask_qty
 //   one row per @depth5@100ms snapshot (top-of-book only).
 //   "# GAP at_us=X reason=Y" comment lines mark recorded gaps; skipped on
@@ -23,7 +31,8 @@
 // `current` snapshot is a plain field updated synchronously inside
 // _Advance.
 //
-// Heap lifecycle (four-site rule from CLAUDE.md "Plan Review Checklist §4"):
+// Heap lifecycle (the four-site rule per the plan-review checklist
+// discipline — DOCS/CLAUDE_REVIEW.md):
 //   1. caller NULL-inits rows ptr in any zero-init / aggregate-init path
 //      (memset-zero satisfies this — rows stays NULL until _LoadDay)
 //   2. _LoadDay frees + re-allocates rows on every call (handles re-load
@@ -43,6 +52,16 @@
 #include <cstring>
 #include <ctime>
 
+//======================================================================
+// [STRUCT]_[DepthReplayState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the current snapshot + heap row buffer for the loaded day + monotonic cursor + day/file bookkeeping — interchangeable with DepthSharedState reads in slow-path code]
+// [INSTANTIATION]_[[64]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct DepthReplayState {
     // The "current" snapshot — what consumers read. Mirrors what
@@ -52,9 +71,9 @@ struct DepthReplayState {
     BookSnapshot<F> current;
 
     // Heap-allocated row buffer for the currently loaded day. Sorted by
-    // timestamp_us (CSV writer guarantees monotonic order, see
-    // DepthRecorder.hpp:236-246 — backward jumps in last_update_id flush
-    // a "# GAP" line + reset, but timestamps stay monotonic).
+    // timestamp_us (CSV writer guarantees monotonic order — see
+    // DepthRecorder_Write's gap detection: backward jumps in last_update_id
+    // flush a "# GAP" line + reset, but timestamps stay monotonic).
     BookSnapshot<F>* rows;
     int row_count;       // valid entries in [0, row_count)
     int row_capacity;    // allocation size
@@ -65,10 +84,26 @@ struct DepthReplayState {
     char symbol[32];
     char data_dir[256];  // {base_dir}/{SYMBOL}/depth/
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[DepthReplayState]
+//======================================================================
 
-//======================================================================================================
-// [DATE HELPER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[DepthReplayState_Advance]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the replay family (DateInt / Init / Free / LoadDay / GetSnapshot ride) — O(1)-amortized cursor walk to the latest row <= target_us; implicit day-crossing LoadDay; missing file = graceful stale-snapshot degrade]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[DATE HELPER]
+//------------------------------------------------------------------
 // Convert a microsecond timestamp to a YYYYMMDD integer (UTC). Mirrors
 // DepthRecorder_DateInt — both must agree so file boundaries align with
 // what the recorder wrote.
@@ -81,9 +116,9 @@ static inline int DepthReplay_DateInt(uint64_t timestamp_us) {
     return (tm_utc.tm_year + 1900) * 10000 + (tm_utc.tm_mon + 1) * 100 + tm_utc.tm_mday;
 }
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[INIT]
+//------------------------------------------------------------------
 // NULL-inits the row buffer + sets paths. Caller MUST call _Free at shutdown
 // to release any heap rows accumulated by _LoadDay calls.
 //
@@ -118,9 +153,9 @@ static inline void DepthReplayState_Init(DepthReplayState<F>* s,
              base_dir, needs_slash ? "/" : "", upper_sym);
 }
 
-//======================================================================================================
-// [FREE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[FREE]
+//------------------------------------------------------------------
 // Idempotent — safe to call on never-initialized memory IF the caller
 // zero-inits the struct first (the standard NULL-pointer check below
 // short-circuits cleanly). Required at backtest shutdown to avoid leaking
@@ -140,9 +175,9 @@ static inline void DepthReplayState_Free(DepthReplayState<F>* s) {
     s->file_present = 0;
 }
 
-//======================================================================================================
-// [LOAD DAY]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[LOAD DAY]
+//------------------------------------------------------------------
 // Open data/{SYMBOL}/depth/YYYY-MM-DD.csv and load all rows into rows[].
 // Frees + re-allocates the buffer if a previous day was loaded. Returns
 // the number of rows loaded (0 if file missing or empty).
@@ -259,9 +294,9 @@ static inline int DepthReplayState_LoadDay(DepthReplayState<F>* s, int date_int)
     return n;
 }
 
-//======================================================================================================
-// [ADVANCE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[ADVANCE]
+//------------------------------------------------------------------
 // Walk cursor forward to the latest row whose timestamp_us is <= target_us.
 // Updates `current` to that row. Cursor is monotonic — never rewinds within
 // a day. Calls _LoadDay implicitly when target's date crosses
@@ -295,9 +330,9 @@ static inline void DepthReplayState_Advance(DepthReplayState<F>* s,
     }
 }
 
-//======================================================================================================
-// [GET CURRENT]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[GET CURRENT]
+//------------------------------------------------------------------
 // Convenience accessor. The `current` field is also directly readable —
 // this just makes intent clearer at call sites.
 //======================================================================================================
@@ -305,5 +340,10 @@ template <unsigned F>
 static inline const BookSnapshot<F>* DepthReplayState_GetSnapshot(const DepthReplayState<F>* s) {
     return &s->current;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[DepthReplayState_Advance]
+//======================================================================
 
 #endif // DEPTH_REPLAY_STATE_HPP
