@@ -3,7 +3,18 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ROLLING MARKET STATISTICS]
+// [FILE]_[ML_Headers/RollingStats.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[rolling market statistics — O(1) sliding-window price/volume regression + monotonic min/max deques; feeds gate conditions + regime classification]
+// [CONTAINS]
+//   - [STRUCT]_[RollingStats]
+//   - [FUNCTION]_[RollingStats_Init]
+//   - [FUNCTION]_[RollingStats_Push]
+//   - [FUNCTION]_[RollingStats_VolumeSignificant]
+//   - [FUNCTION]_[RollingStats_EntrySpacing]
+//   - [FUNCTION]_[RollingStats_BuyPrice]
 //======================================================================================================
 // tracks rolling averages, trends, and regression quality for price and volume
 // used by the controller to set dynamic buy gate conditions and classify market regime
@@ -28,16 +39,26 @@
 #include "ReciprocalLUT.hpp"  // v5.11.2.A — branchless 1/n via precomputed reciprocals
 #include <cstddef>            // v5.11.2.B — offsetof() for cache-layout static_asserts
 
-//======================================================================================================
-// [ROLLING STATS STRUCT]
-//======================================================================================================
-// W must be power of 2 for branchless wrap with & (W - 1)
-// default W=128: at BTC trade frequency this is roughly 10-30 seconds of market data
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[RollingStats]
+//----------------------------------------------------------------------
+// [TAG]_[[SLOW_PATH] [DATA_ORIENTED_DESIGN] [BINARY_FP] [CONCURRENCY]]
+// [SCOPE]_[NODE]
+// [THREAD]_[[SLOW_WRITER] [GUI_READER]]
+// [INSTANTIATION]_[[128] [256] [512] [1024]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[rolling-window stats state — read-heavy outputs clustered at struct head, write-side head/count isolated on a fresh line via alignas(64), ring buffers + monotonic deques behind]
+// [REFERENCE]_[INVARIANT]_[[H4] [H6]]
+// [REFERENCE]_[AUDIT]_[latency-optimization-part-2.4]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 128> struct RollingStats {
     static_assert(W > 0 && (W & (W - 1)) == 0, "W must be power of 2");
 
-    // ── READ-HEAVY OUTPUTS (cache lines 0..4) ──
+    //------------------------------------------------------------------
+    // [SECTION]_[READ-HEAVY OUTPUTS]
+    //------------------------------------------------------------------
     // v5.11.2.B layout reorder: outputs cluster at struct head; engine writes
     // them once per slow-path cycle. GUI thread + strategies + regime detector
     // read every cycle. Pre-v5.11.2.B: head/count interleaved with outputs at
@@ -63,7 +84,9 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN_Binary<F> vwap_deviation;     // (price - vwap) / vwap (negative = below VWAP)
     // 13 × FPN_Binary<64>=16B = 208 bytes ≈ 4 cache lines (0-3) (Ship-A 16B flip; was 24B/312B/5 lines)
 
-    // ── WRITE-HEAVY INTERNAL STATE (cache-line-isolated from outputs) ──
+    //------------------------------------------------------------------
+    // [SECTION]_[WRITE-HEAVY INTERNAL STATE (cache-line-isolated from outputs)]
+    //------------------------------------------------------------------
     // alignas(64) on `head` forces it to start on a fresh cache line. The
     // running sums following stay clustered with head/count; engine mutates
     // all of these every Push, so co-locating them keeps write-side L1d
@@ -86,13 +109,17 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN_Binary<F> volume_sum_running;    // v5.11.2.C — running sum of volumes (separate from vol_sum which is for VWAP)
     FPN_Binary<F> vol_sum_xy_running;    // v5.11.2.C — running sum of i * volume[i]
 
-    // ── RING BUFFERS (large; only read during eviction, not iterated per Push) ──
+    //------------------------------------------------------------------
+    // [SECTION]_[RING BUFFERS (large; only read during eviction, not iterated per Push)]
+    //------------------------------------------------------------------
     FPN_Binary<F> price_buf[W];
     FPN_Binary<F> volume_buf[W];
     FPN_Binary<F> pv_buf[W];          // price*volume per sample (for eviction)
     int side_buf[W];           // is_buyer_maker flags for directional volume eviction
 
-    // ── MONOTONIC DEQUES for O(1) sliding-window min/max (v5.11.2.C) ──
+    //------------------------------------------------------------------
+    // [SECTION]_[MONOTONIC DEQUES for O(1) sliding-window min/max (v5.11.2.C)]
+    //------------------------------------------------------------------
     // Each deque holds slot indices into price_buf / volume_buf, ordered
     // chronologically (front = oldest). The min-deque maintains values
     // monotonically increasing front-to-back; max-deque monotonically
@@ -115,6 +142,23 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     int vmax_dq_head;
     int vmax_dq_size;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// W must be power of 2 for branchless wrap with & (W - 1)
+// default W=128: at BTC trade frequency this is roughly 10-30 seconds of market data
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[65984B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[1031]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[RollingStats]
+//======================================================================
 
 // v5.11.2.B layout invariants — compile-time enforced.
 // Verified for W=128 (default); alignas(64) on `head` propagates the discipline
@@ -124,9 +168,11 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
 // offsetof() is a preprocessor macro that splits on commas — wrap the
 // templated type in a using-alias so the comma stays inside the type.
 namespace detail { using RollingStats_64_128 = RollingStats<64, 128>; }
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(head) % 64 == 0]
 static_assert((offsetof(detail::RollingStats_64_128, head) % 64) == 0,
               "head must be cache-line-aligned (alignas(64) on field) — "
               "see plans/2026-05-06-latency-path-discipline.md Rule 1");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(head) >= 64*4 — head starts AFTER the output cluster]
 static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 4,
               "head must come AFTER the 4-cache-line output cluster (Ship-A 16B FPN_Binary; was 5 lines) — "
               "outputs (price_avg through vwap_deviation) read by GUI thread; "
@@ -138,14 +184,24 @@ static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 4,
 // no "scope" assumption: these are the unambiguous per-INSTANCE sizes. A layout change
 // is now a COMPILE error; recompute via tools/check_struct_size_budget.py and update the
 // number here. Sister to the alignment asserts above + check_struct_alignment.py(c).
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,128>) == 8640]
 static_assert(sizeof(RollingStats<64, 128>)  ==  8640, "RollingStats<64,128> size-pin (~8.4KB)");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,256>) == 16832]
 static_assert(sizeof(RollingStats<64, 256>)  == 16832, "RollingStats<64,256> size-pin (~16.4KB)");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,512>) == 33216]
 static_assert(sizeof(RollingStats<64, 512>)  == 33216, "RollingStats<64,512> size-pin (~32.4KB)");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,1024>) == 65984]
 static_assert(sizeof(RollingStats<64, 1024>) == 65984, "RollingStats<64,1024> size-pin (~64.4KB, NOT the stale ~1.5MB)");
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RollingStats_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero-init every output, running sum, ring slot + deque — call once before first Push]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_Init() {
     RollingStats<F, W> rs;
     for (int i = 0; i < (int)W; i++) {
@@ -189,18 +245,23 @@ template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_I
     rs.vmax_dq_size = 0;
     return rs;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RollingStats_Init]
+//======================================================================
 
-//======================================================================================================
-// [PUSH + RECOMPUTE]
-//======================================================================================================
-// adds a new price/volume sample and recomputes all rolling statistics
-// this runs on the slow path (every poll_interval ticks), not every tick
-// the computation is O(W) which at default 128 is well within the slow-path budget
-//
-// single pass computes 5 regression sums (following LinearRegression3X_Fit):
-//   sum_y (price), sum_y2 (price²), sum_xy (index*price), sum_vol, sum_vol_xy
-// x-values are time indices 0..count-1, so sum_x and sum_x2 are computed from count alone
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RollingStats_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [COMPLEXITY]_[O(1) amortized per push (running sums + monotonic deques); O(W) worst-case deque burst, total O(N) over N pushes]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[add one price/volume sample + recompute ALL rolling outputs — 9 mask-blend phases, no per-push window loop since v5.11.2.C]
+// [REFERENCE]_[INVARIANT]_[[H4] [H8]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W>
 inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_Binary<F> volume, int is_buyer_maker = 0) {
     // ── v5.11.2.C — O(1) Push: running sums + monotonic deques replace the
@@ -220,7 +281,9 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     //   8. Compute volume_delta (mask-blend on total_dir_vol != 0)
     //   9. Recompute regression outputs from running sums (no loop)
 
-    // ── 1. Old state capture ──
+    //------------------------------------------------------------
+    // [SECTION]_[1. Old state capture]
+    //------------------------------------------------------------
     int evict_int = (rs->count >= (int)W);
     uint64_t evict_mask = -(uint64_t)evict_int;
     int slot = rs->head;
@@ -232,7 +295,9 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     FPN_Binary<F> sum_v_snapshot = rs->volume_sum_running;  // for vol_sum_xy formula
     int count_old = rs->count;
 
-    // ── 2. Common eviction terms (zero when warmup, real when full) ──
+    //------------------------------------------------------------
+    // [SECTION]_[2. Common eviction terms (zero when warmup, real when full)]
+    //------------------------------------------------------------
     FPN_Binary<F> evict_p   = FPN_BlendOnMask(oldest_price,  FPN_Zero<F>(), evict_mask);
     FPN_Binary<F> evict_v   = FPN_BlendOnMask(oldest_volume, FPN_Zero<F>(), evict_mask);
     FPN_Binary<F> evict_pv  = FPN_BlendOnMask(oldest_pv,     FPN_Zero<F>(), evict_mask);
@@ -258,7 +323,9 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     rs->pv_sum  = FPN_AddSat(FPN_SubSat(rs->pv_sum,  evict_pv), new_pv);
     rs->vol_sum = FPN_AddSat(FPN_SubSat(rs->vol_sum, evict_v),  volume);
 
-    // ── 3. VWAP outputs (mask-blend on vol_sum != 0) ──
+    //------------------------------------------------------------
+    // [SECTION]_[3. VWAP outputs (mask-blend on vol_sum != 0)]
+    //------------------------------------------------------------
     uint64_t vol_nz_mask = -(uint64_t)(!FPN_IsZero(rs->vol_sum));
     FPN_Binary<F> safe_vol = FPN_BlendOnMask(rs->vol_sum, FPN_FromDouble<F>(1.0), vol_nz_mask);
     FPN_Binary<F> new_vwap = FPN_DivNoAssert(rs->pv_sum, safe_vol);
@@ -267,13 +334,17 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     rs->vwap           = FPN_BlendOnMask(new_vwap,     rs->vwap,           vol_nz_mask);
     rs->vwap_deviation = FPN_BlendOnMask(new_vwap_dev, rs->vwap_deviation, vol_nz_mask);
 
-    // ── 4. Write new sample to ring buffer (slot stays valid through deque updates) ──
+    //------------------------------------------------------------
+    // [SECTION]_[4. Write new sample to ring buffer (slot stays valid through deque updates)]
+    //------------------------------------------------------------
     rs->price_buf[slot]  = price;
     rs->volume_buf[slot] = volume;
     rs->pv_buf[slot]     = new_pv;
     rs->side_buf[slot]   = is_buyer_maker;
 
-    // ── 5. Running sums for regression ──
+    //------------------------------------------------------------
+    // [SECTION]_[5. Running sums for regression]
+    //------------------------------------------------------------
     // Position of new sample in the window: full → W-1; warmup → count_old.
     // Branchless: position = count_old + evict_int * (W - 1 - count_old).
     int position_int = count_old + evict_int * ((int)W - 1 - count_old);
@@ -298,7 +369,9 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     rs->price_sum_y2_running = FPN_AddSat(FPN_SubSat(rs->price_sum_y2_running, evict_p2), new_p2);
     rs->volume_sum_running   = FPN_AddSat(FPN_SubSat(rs->volume_sum_running,   evict_v),  volume);
 
-    // ── 6. Monotonic deque min/max updates ──
+    //------------------------------------------------------------
+    // [SECTION]_[6. Monotonic deque min/max updates]
+    //------------------------------------------------------------
     // (a) Pop expired entries from front. The old slot value is being aged out
     //     iff this slot is being evicted (count >= W) AND the deque front's
     //     stored slot index equals this slot. (Deque only references in-window
@@ -354,11 +427,15 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     rs->price_max  = rs->price_buf[rs->max_dq[rs->max_dq_head]];
     rs->volume_max = rs->volume_buf[rs->vmax_dq[rs->vmax_dq_head]];
 
-    // ── 7. Advance head + count ──
+    //------------------------------------------------------------
+    // [SECTION]_[7. Advance head + count]
+    //------------------------------------------------------------
     rs->head  = (rs->head + 1) & ((int)W - 1);
     rs->count += (rs->count < (int)W);
 
-    // ── 8. Volume delta = (buy - sell) / (buy + sell), branchless via mask-blend ──
+    //------------------------------------------------------------
+    // [SECTION]_[8. Volume delta = (buy - sell) / (buy + sell), branchless via mask-blend]
+    //------------------------------------------------------------
     FPN_Binary<F> total_dir_vol = FPN_AddSat(rs->buy_volume_sum, rs->sell_volume_sum);
     uint64_t total_nz_mask = -(uint64_t)(!FPN_IsZero(total_dir_vol));
     FPN_Binary<F> safe_total_dir = FPN_BlendOnMask(total_dir_vol, FPN_FromDouble<F>(1.0), total_nz_mask);
@@ -368,7 +445,9 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
 
     if (rs->count < 2) return;  // need at least 2 samples for regression
 
-    // ── 9. Regression outputs from running sums (no loop) ──
+    //------------------------------------------------------------
+    // [SECTION]_[9. Regression outputs from running sums (no loop)]
+    //------------------------------------------------------------
     int n = rs->count;
     FPN_Binary<F> n_fp = FPN_FromInt<F>(n);
     int64_t n_l = (int64_t)n;
@@ -410,26 +489,55 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     FPN_Binary<F> vol_slope = FPN_DivNoAssert(vol_num, safe_denom);
     rs->volume_slope = FPN_BlendOnMask(vol_slope, FPN_Zero<F>(), denom_nz_mask);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// adds a new price/volume sample and recomputes all rolling statistics
+// this runs on the slow path (every poll_interval ticks), not every tick
+//
+// running sums maintain the 5 regression sums (following LinearRegression3X_Fit):
+//   sum_y (price), sum_y2 (price²), sum_xy (index*price), sum_vol, sum_vol_xy
+// x-values are time indices 0..count-1, so sum_x and sum_x2 are computed from count alone
+//======================================================================
+// [END_FUNCTION]_[RollingStats_Push]
+//======================================================================
 
-//======================================================================================================
-// [VOLUME FILTER]
-//======================================================================================================
-// returns 1 if the given volume is >= multiplier * rolling_avg, 0 otherwise
-// branchless - produces a mask value the caller can AND with other conditions
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RollingStats_VolumeSignificant]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[volume >= multiplier * rolling_avg -> 1 else 0 — mask value, AND-able with other gate conditions]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W>
 inline int RollingStats_VolumeSignificant(const RollingStats<F, W> *rs, FPN_Binary<F> tick_volume, FPN_Binary<F> multiplier) {
     FPN_Binary<F> threshold = FPN_Mul(rs->volume_avg, multiplier);
     return FPN_GreaterThanOrEqual(tick_volume, threshold);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// returns 1 if the given volume is >= multiplier * rolling_avg, 0 otherwise
+// branchless - produces a mask value the caller can AND with other conditions
+//======================================================================
+// [END_FUNCTION]_[RollingStats_VolumeSignificant]
+//======================================================================
 
-//======================================================================================================
-// [ENTRY SPACING]
-//======================================================================================================
-// computes the minimum price distance between entries based on rolling volatility
-// spacing = stddev * spacing_multiplier
-// returns the FPN_Binary spacing value - caller compares against nearest existing position
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RollingStats_EntrySpacing]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[volatility-scaled minimum entry spacing = max(stddev * mult, 0.03% of avg price floor)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W>
 inline FPN_Binary<F> RollingStats_EntrySpacing(const RollingStats<F, W> *rs, FPN_Binary<F> spacing_multiplier) {
     // floor: at least 0.03% of avg price — prevents tight clustering when stddev is low
@@ -439,20 +547,41 @@ inline FPN_Binary<F> RollingStats_EntrySpacing(const RollingStats<F, W> *rs, FPN
     FPN_Binary<F> min_floor = FPN_Mul(rs->price_avg, FPN_FromDouble<F>(0.0003));
     return FPN_Max(vol_spacing, min_floor);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// computes the minimum price distance between entries based on rolling volatility
+// spacing = stddev * spacing_multiplier
+// returns the FPN_Binary spacing value - caller compares against nearest existing position
+//======================================================================
+// [END_FUNCTION]_[RollingStats_EntrySpacing]
+//======================================================================
 
-//======================================================================================================
-// [ENTRY OFFSET]
-//======================================================================================================
-// computes the buy gate price offset from rolling mean
-// buy_price = rolling_avg - (rolling_avg * offset_pct)
-// this means "only buy when price dips offset_pct below the rolling average"
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[RollingStats_BuyPrice]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[buy gate price = rolling_avg - (rolling_avg * offset_pct) — buy only on a dip below the mean]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned W>
 inline FPN_Binary<F> RollingStats_BuyPrice(const RollingStats<F, W> *rs, FPN_Binary<F> offset_pct) {
     FPN_Binary<F> offset = FPN_Mul(rs->price_avg, offset_pct);
     return FPN_Sub(rs->price_avg, offset);
 }
-
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// computes the buy gate price offset from rolling mean
+// buy_price = rolling_avg - (rolling_avg * offset_pct)
+// this means "only buy when price dips offset_pct below the rolling average"
+//======================================================================
+// [END_FUNCTION]_[RollingStats_BuyPrice]
+//======================================================================
 #endif // ROLLING_STATS_HPP
