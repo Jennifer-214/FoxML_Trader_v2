@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [DEPTH RECORDER]
+// [FILE]_[DataStream/DepthRecorder.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[orderbook snapshot CSV capture for replay + audit (TickRecorder sibling) — top-of-book rows via locale-immune std::to_chars (F-055/PARITY-036) + the "# GAP" marker audit contract]
+// [CONTAINS]
+//   - [STRUCT]_[DepthRecorder]
+//   - [FUNCTION]_[DepthRecorder_Write]   (+ MkdirP / DateInt / OpenFile / PruneOld / Init / LogGap / Close family)
 //======================================================================================================
 // records orderbook snapshots to CSV for replay + audit. sibling of TickRecorder.
 //
@@ -44,6 +51,15 @@
 #include <charconv>  // F-055/PARITY-036: std::to_chars locale-immune lossless emit
 #include "BinanceDepth.hpp" // BookSnapshot<F>
 
+//======================================================================
+// [STRUCT]_[DepthRecorder]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FILE* + rotation day + retention + the recorder-owned gap-detection state (last_seen_id/wallclock; 0 = no prior snapshot this run)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct DepthRecorder {
     FILE *file;
     uint64_t count;
@@ -59,8 +75,23 @@ struct DepthRecorder {
     uint64_t last_seen_id;
     uint64_t last_seen_wallclock_us;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[DepthRecorder]
+//======================================================================
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[DepthRecorder_Write]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the recorder family (MkdirP / DateInt / OpenFile / PruneOld / Init / LogGap / Close ride) — ~10Hz allocation-free row emit + internal gap detection (id backward / >2s silence)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void DepthRecorder_MkdirP(const char *path) {
     char tmp[300];
     strncpy(tmp, path, sizeof(tmp) - 1);
@@ -282,5 +313,10 @@ static inline void DepthRecorder_Close(DepthRecorder *rec) {
         fprintf(stderr, "[depth-recorder] closed after %llu snapshots\n",
                 (unsigned long long)rec->count);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[DepthRecorder_Write]
+//======================================================================
 
 #endif // DEPTH_RECORDER_HPP

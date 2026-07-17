@@ -3,7 +3,17 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [TRADE LOG]
+// [FILE]_[DataStream/TradeLog.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-symbol CSV order-history logger + hot-path ring buffer — consumed by BacktestEngine + the LEGACY single-core PortfolioController; the sharded live path uses ShardedTradeLog instead]
+// [CONTAINS]
+//   - [FUNCTION]_[_strategy_str]   (+ _regime_str rides — shared with MetricsLog)
+//   - [STRUCT]_[TradeLog]   (TradeLogRecord rides)
+//   - [FUNCTION]_[TradeLog_Init]   (+ Buy / Sell / Close family)
+//   - [STRUCT]_[TradeLogBuffer]
+//   - [FUNCTION]_[TradeLogBuffer_PushBuy]   (+ Init / PushSell / Drain family)
 //======================================================================================================
 // simple CSV append logger for recording buy/sell activity with gate conditions at time of fill
 // filename is {symbol}_order_history.csv so the symbol is implicit, no symbol column needed
@@ -14,6 +24,15 @@
 
 #include "../Strategies/StrategyInterface.hpp"
 
+//======================================================================
+// [FUNCTION]_[_strategy_str]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[strategy-id / regime-id -> CSV display strings (_regime_str rides) — shared with MetricsLog]
+//======================================================================
+// [CODE]
+//======================================================================
 // string helpers for CSV output (also used by MetricsLog)
 static inline const char *_strategy_str(int sid) {
     switch (sid) {
@@ -27,13 +46,24 @@ static inline const char *_strategy_str(int sid) {
 static inline const char *_regime_str(int rid) {
     return (rid >= 0 && rid < NUM_REGIMES) ? REGIME_INFO[rid].full_name : "RANGING";
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[_strategy_str]
+//======================================================================
 
 #include <stdio.h>
 #include <stdint.h>
 
-//======================================================================================================
-// [STRUCT]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[TradeLog]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FILE* + trade counter (TradeLogRecord — the 19-field CSV row payload — rides)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TradeLog {
     FILE *file;
     uint64_t trade_count;
@@ -50,10 +80,23 @@ struct TradeLogRecord {
     int regime;          // regime at time of trade
     char reason[16];     // "TP", "SL", "TIME", "SESSION_CLOSE"
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TradeLog]
+//======================================================================
 
-//======================================================================================================
-// [FUNCTIONS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TradeLog_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the file-writer family (Buy / Sell / Close ride) — logging/{symbol}_order_history.csv, header once on empty file, fflush per row]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int TradeLog_Init(TradeLog *log, const char *symbol) {
     char filename[256];
     const char *prefix = "logging/";
@@ -118,14 +161,21 @@ static inline void TradeLog_Close(TradeLog *log) {
         log->file = 0;
     }
 }
-//======================================================================================================
-// [BUFFERED TRADE LOG]
-//======================================================================================================
-// hot-path version: accumulates trade records in a ring buffer (~10ns per push).
-// slow-path drains the buffer to the CSV file (fprintf happens off the hot path).
-// NOTE: if engine crashes between fill and next slow-path drain, CSV entry is lost
-// (but position is preserved in binary snapshot).
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TradeLog_Init]
+//======================================================================
+
+//======================================================================
+// [STRUCT]_[TradeLogBuffer]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[64-slot record ring for the hot-path push / slow-path drain split (TRADE_LOG_BUF_SIZE rides)]
+//======================================================================
+// [CODE]
+//======================================================================
 #define TRADE_LOG_BUF_SIZE 64
 
 struct TradeLogBuffer {
@@ -133,7 +183,30 @@ struct TradeLogBuffer {
     uint32_t head;
     uint32_t count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// hot-path version: accumulates trade records in a ring buffer (~10ns per push).
+// slow-path drains the buffer to the CSV file (fprintf happens off the hot path).
+// NOTE: if engine crashes between fill and next slow-path drain, CSV entry is lost
+// (but position is preserved in binary snapshot).
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TradeLogBuffer]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[TradeLogBuffer_PushBuy]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ring family (Init / PushSell / Drain ride) — pushes ~10ns no-I/O; Drain replays in arrival order on the slow path; overflow drops (safety)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TradeLogBuffer_Init(TradeLogBuffer *buf) {
     buf->head = 0;
     buf->count = 0;
@@ -195,7 +268,9 @@ static inline void TradeLogBuffer_Drain(TradeLogBuffer *buf, TradeLog *log) {
     }
     buf->count = 0;
 }
-
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TradeLogBuffer_PushBuy]
+//======================================================================
 #endif // TRADE_LOG_HPP

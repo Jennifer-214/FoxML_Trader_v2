@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [TICK RECORDER]
+// [FILE]_[DataStream/TickRecorder.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[raw tick CSV capture for datasets — aggTrades-compatible rows via locale-immune std::to_chars (F-054/PARITY-036), daily rotation into _staging/, auto-prune]
+// [CONTAINS]
+//   - [STRUCT]_[TickRecorder]
+//   - [FUNCTION]_[TickRecorder_Push]   (+ MkdirP / DateInt / OpenFile / PruneOld / Init / Close family)
 //======================================================================================================
 // records raw tick data to CSV for building historical datasets for backtesting and ML training.
 // outputs Binance aggTrades-compatible format: timestamp_us,price,quantity,is_buyer_maker
@@ -29,6 +36,15 @@
 #include <dirent.h>
 #include <charconv>  // F-054/PARITY-036: std::to_chars locale-immune lossless emit
 
+//======================================================================
+// [STRUCT]_[TickRecorder]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FILE* + rotation day + symbol/dir + max_days retention — zero overhead when disabled (every call gates on the flag)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TickRecorder {
     FILE *file;
     uint64_t count;
@@ -38,8 +54,23 @@ struct TickRecorder {
     char data_dir[256];     // "data/{symbol}/"
     uint32_t max_days;      // auto-delete CSVs older than this
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TickRecorder]
+//======================================================================
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TickRecorder_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the recorder family (MkdirP / DateInt / OpenFile / PruneOld / Init / Close ride) — per-tick to_chars row + daily rotation + rotation-time prune; flush every 1024 ticks]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TickRecorder_MkdirP(const char *path) {
     char tmp[256];
     strncpy(tmp, path, sizeof(tmp) - 1);
@@ -213,5 +244,10 @@ static inline void TickRecorder_Close(TickRecorder *rec) {
     if (rec->enabled)
         fprintf(stderr, "[tick-recorder] closed after %lu ticks\n", (unsigned long)rec->count);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TickRecorder_Push]
+//======================================================================
 
 #endif // TICK_RECORDER_HPP
