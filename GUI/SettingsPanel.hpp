@@ -1,4 +1,16 @@
 #pragma once
+
+//======================================================================
+// [FILE]_[GUI/SettingsPanel.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the data-driven engine.cfg editor — the Global + per-core Settings tabs; a cfg field renders + persists on change via the bitmap-dispatch render tables (X-macro over FOREACH_*_CFG_FIELD) plus a hardcoded field_defs[] for fields not yet in the registry; GUI writes cfg + raises reload_requested, never mutates engine structs (H3)]
+// [CONTAINS]
+//   - [STRUCT]_[GlobalCfgRenderTable] / [PerNodeCfgRenderTable] / [CfgFieldDef] / [PerNodeFieldDef] / [SettingsState]
+//   - [FUNCTION]_[cfg_render_field] (in namespace tt) / [cfg_render_and_persist] / [cfg_write_field]
+//   - [FUNCTION]_[Settings_Init] / [Settings_Load] / [Settings_RenderGlobalTab] / [Settings_RenderPerCoreTab] / [GUI_Panel_Settings]
+//======================================================================
 // SettingsPanel — data-driven config editor for engine.cfg
 //
 // ADDING A NEW SETTING:
@@ -36,9 +48,7 @@
 #include "../FixedPoint/FixedPointN.hpp"   // is_fp_binary_v, FPN_FromDouble, FPN_ToDouble
 #include <type_traits>                     // is_floating_point_v, is_integral_v, is_array_v, is_unsigned_v
 
-//==========================================================================
-// [tt::cfg_render_field<T> — third sister of cfg_parse_field / cfg_save_field]
-//==========================================================================
+// tt::cfg_render_field<T> — the third sister of cfg_parse_field / cfg_save_field.
 // v5.15.5.F.4c — completes the tt:: dispatch trio. Lives here (not in
 // CoreFrameworks/CfgFieldDispatch.hpp) to keep ImGui dependency out of the
 // parser path per the CfgFieldDispatch.hpp parser-path design note.
@@ -52,9 +62,17 @@
 // dispatch. desc.kind is read ONLY for GUI presentation discrimination
 // (INT_ENUM dropdown vs BOOL checkbox vs INT slider) inside the integral
 // branch — NEVER to determine storage width.
-//==========================================================================
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[cfg_render_field]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the type-erased per-field ImGui render dispatch — one template branch per cfg field-type family (FPN / decimal / float / int / array), widget chosen from the descriptor; the tt:: dispatch layer the render tables call with T deduced (Class-23 tt-dispatch)]
+//======================================================================
+// [CODE]
+//======================================================================
     // Returns true if the field value changed this frame.
     template <typename T>
     inline bool cfg_render_field(T& field, const CfgFieldDescriptor& desc) {
@@ -160,12 +178,21 @@ namespace tt {
         ImGui::PopID();
         return changed;
     }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[cfg_render_field]
+//======================================================================
 
 }  // namespace tt
 
-//==========================================================================
-// [PER-FIELD RENDER FUNCTION POINTER TABLE — v5.15.5.F.4c]
-//==========================================================================
+//======================================================================
+// [STRUCT]_[GlobalCfgRenderTable]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[global cfg render-fn-pointer table — one X-macro render_<name> per FOREACH_GLOBAL_CFG_FIELD row dispatched via cfg_render_and_persist<T> with T deduced (Barrier-2, Class-23); fns[] indexes by field id]
+//======================================================================
 // Implements the type-erased dispatch layer of the bitmap dispatcher framework
 // (see CoreFrameworks/CfgFieldRegistry.hpp + DESIGN_SPECS/universal-registry-
 // bitmap-dispatcher-pattern.md). X-macro generates one static render_<name>()
@@ -189,7 +216,9 @@ namespace tt {
 // FIELD_IDX_*_END sentinel. Today both render against `gui_engine_cfg` (the
 // flat ControllerConfig<F> instance — fields haven't moved yet). Step 2 will
 // restructure to PerNodeCfgRenderTable receiving cfg.nodes[c] reference.
-//==========================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct GlobalCfgRenderTable {
     // v5.15.5.F.4c — render-and-persist fn signature: each call dispatches via
@@ -212,7 +241,24 @@ struct GlobalCfgRenderTable {
     };
     #undef X_GEN_GLOBAL_RENDER_PTR
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[GlobalCfgRenderTable]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[PerNodeCfgRenderTable]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-node cfg render-fn-pointer table — same X-macro generation over FOREACH_PER_NODE_CFG_FIELD; NO_FLAT_FIELD rows render a stub since per-core fields don't exist on the flat ControllerConfig]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct PerNodeCfgRenderTable {
     // Per-core render table. .F.4c.3 — still consumes ControllerConfig<F>&
@@ -249,15 +295,26 @@ struct PerNodeCfgRenderTable {
     };
     #undef X_GEN_PER_NODE_RENDER_PTR
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PerNodeCfgRenderTable]
+//======================================================================
 
 // Forward decl — cfg_write_field is defined later in this file.
 // Template instantiation of cfg_render_and_persist<T> below happens at call sites
 // (the bitmap walker), at which point cfg_write_field is already in scope.
 static inline void cfg_write_field(const char *path, const char *key, const char *value);
 
-//==========================================================================
-// [cfg_render_and_persist<T> — per-edit persistence helper — v5.15.5.F.4c]
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[cfg_render_and_persist]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render one cfg field + persist on change — cfg_render_field<T> drives the ImGui widget, then cfg_save_field<T> formats (locale-pinned) and cfg_write_field writes the single key=value]
+//======================================================================
 // Wraps the canonical "render-changed → file-written" flow:
 //   1. tt::cfg_render_field<T> dispatches to ImGui widget; returns true if value changed
 //   2. tt::cfg_save_field<T> formats current value to text buffer (locale-pinned)
@@ -269,7 +326,9 @@ static inline void cfg_write_field(const char *path, const char *key, const char
 //
 // Returns true if the value changed this frame (caller may track for global
 // dirty state or visual "modified" indicators).
-//==========================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 template <typename T>
 inline bool cfg_render_and_persist(T& field, const CfgFieldDescriptor& desc, const char* cfg_path) {
     const bool changed = tt::cfg_render_field(field, desc);
@@ -280,12 +339,24 @@ inline bool cfg_render_and_persist(T& field, const CfgFieldDescriptor& desc, con
     }
     return changed;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[cfg_render_and_persist]
+//======================================================================
 
-//==========================================================================
-// FIELD DESCRIPTOR — one entry per editable config field
-//==========================================================================
 enum CfgFieldType { CFG_FLOAT, CFG_INT, CFG_BOOL, CFG_PATH };
 
+//======================================================================
+// [STRUCT]_[CfgFieldDef]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one hardcoded field_defs[] entry — key, label, section, type, format, tooltip (the manual fields not yet migrated to FOREACH_CFG_FIELD)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct CfgFieldDef {
     const char *key;       // engine.cfg key name (e.g. "take_profit_pct")
     const char *label;     // GUI label (e.g. "TP %%")
@@ -294,6 +365,13 @@ struct CfgFieldDef {
     const char *fmt;       // printf format for floats (e.g. "%.2f")
     const char *tooltip;   // hover tooltip text (NULL = no tooltip)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[CfgFieldDef]
+//======================================================================
 
 // ── THE SINGLE SOURCE OF TRUTH ──
 // adding a field: add ONE line here. loading + rendering + saving are automatic.
@@ -548,8 +626,13 @@ static const CfgFieldDef field_defs[] = {
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 
-//==========================================================================
-// PER-CORE OVERRIDE FIELDS — v4.0
+//======================================================================
+// [STRUCT]_[PerNodeFieldDef]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one per-core override field descriptor for the per-node tab]
+//======================================================================
 //
 // One row per overridable field. The actual cfg key is built at render time:
 // "node_<N>_<key_suffix>". 0 / blank means "inherit from Global tab".
@@ -557,7 +640,9 @@ static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 // Adding a per-core field: add ONE entry here + ONE line in
 // PerNodeOverrides + ONE line in ControllerConfig_ResolveForCore + ONE
 // parser case in ControllerConfig_Load. Four sites total.
-//==========================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct PerNodeFieldDef {
     const char *key_suffix;   // e.g. "take_profit_pct" → cfg key node_0_take_profit_pct
     const char *label;
@@ -565,6 +650,13 @@ struct PerNodeFieldDef {
     const char *fmt;
     const char *tooltip;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[PerNodeFieldDef]
+//======================================================================
 
 static const PerNodeFieldDef per_node_fields[] = {
     // Trading overrides
@@ -676,9 +768,16 @@ static constexpr int NUM_PER_NODE_FIELDS =
     sizeof(per_node_fields) / sizeof(per_node_fields[0]);
 static constexpr int MAX_GUI_NODES = 16;
 
-//==========================================================================
-// SETTINGS STATE — auto-generated from field_defs (no manual struct)
-//==========================================================================
+//======================================================================
+// [STRUCT]_[SettingsState]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the Settings panel state — the loaded gui_engine_cfg, per-node strategy/model selections, the model-dir scan results, and dirty tracking]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 struct SettingsState {
     // v5.15.5.F.4c — GUI's typed mirror of engine.cfg (Option 2 GUI refactor: direct
     // ControllerConfig<F> access for scalar Kinds replaces parallel-array indirection).
@@ -720,10 +819,24 @@ struct SettingsState {
     char  model_scan_paths[MODEL_SCAN_MAX][256]; // full path "models/aggressive"
     bool  model_scan_done;                        // 1 after first scan
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[SettingsState]
+//======================================================================
 
-//==========================================================================
-// CFG FILE I/O
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[cfg_write_field]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[write a single key=value pair into the cfg file in place — the per-edit persistence primitive (preserves other lines + comments)]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void cfg_write_field(const char *path, const char *key, const char *value) {
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -786,12 +899,21 @@ static inline void cfg_write_field(const char *path, const char *key, const char
         fclose(f);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[cfg_write_field]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Settings_RescanModels]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[walk models/ and collect subdirs with a recognizable role file into the Model Dir dropdown source (capped at 32)]
+//======================================================================
 // Map cfg strategy name (e.g. "simple_dip") to STRATEGY_* index. Returns -1
 // on unknown. Mirror of the parser block in ControllerConfig_Load.
-//==========================================================================
-// MODEL DIRECTORY SCAN (v5.9.5f)
-//==========================================================================
 // Walk `models/` and collect subdirectories that contain a recognizable
 // role file. Reuses the same role-detection list as PastRuns_LoadOne
 // and Verify Stamp (both in BacktestPanels.hpp).
@@ -801,6 +923,9 @@ static inline void cfg_write_field(const char *path, const char *key, const char
 // Refresh-button-driven (no per-frame I/O): operator clicks "Refresh
 // Models" or panel auto-rescans on first appearing. ImGui render thread
 // stays free of opendir/stat (per /readiness check 17 hardening).
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Settings_RescanModels(SettingsState *s) {
     s->model_scan_count = 0;
     s->model_scan_done = true;
@@ -842,7 +967,22 @@ static inline void Settings_RescanModels(SettingsState *s) {
     }
     closedir(dir);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Settings_RescanModels]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[settings_strategy_name_to_id]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[map a strategy short-name string to its STRATEGY_* id]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int settings_strategy_name_to_id(const char *name) {
     if (strcmp(name, "mr") == 0 || strcmp(name, "mean_reversion") == 0) return 0;  // STRATEGY_MEAN_REVERSION
     if (strcmp(name, "momentum") == 0 || strcmp(name, "mom") == 0)      return 1;  // STRATEGY_MOMENTUM
@@ -853,12 +993,27 @@ static inline int settings_strategy_name_to_id(const char *name) {
     if (strcmp(name, "none") == 0)                                      return -1;
     return -1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[settings_strategy_name_to_id]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Settings_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[init the Settings state for a cfg path]
+//======================================================================
 // v5.8.4b: uniform `void X_Init(StateT*, const char*)` signature for the
 // FOREACH_PANEL(X) registry in GuiThread.hpp. Settings has lazy file
 // load (Settings_Load fires on first GUI_Panel_Settings render when
 // !s->loaded), so Init's job is just: zero the struct + stash cfg_path
 // so Settings_Load knows where to read.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Settings_Init(SettingsState *s, const char *cfg_path) {
     *s = SettingsState{};
     if (cfg_path) {
@@ -868,7 +1023,22 @@ static inline void Settings_Init(SettingsState *s, const char *cfg_path) {
         s->cfg_path[n] = '\0';
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Settings_Init]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Settings_Load]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[load engine.cfg into the Settings state — parse into gui_engine_cfg + per-node selections, with GUI-side default fallbacks]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Settings_Load(SettingsState *s) {
     // zero per-core overrides up front; populated below if cfg has them
     for (int c = 0; c < MAX_GUI_NODES; ++c) {
@@ -977,12 +1147,27 @@ static inline void Settings_Load(SettingsState *s) {
         s->gui_engine_cfg.num_execution_nodes = 4;  // matches ControllerConfig_Default
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Settings_Load]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[global_section_strategy]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[map a Global-tab section name to the STRATEGY_* it applies to (-1 = strategy-agnostic, always visible)]
+//======================================================================
 // v4.7.23: map a Global-tab section to the strategy it applies to.
 // Returns -1 if the section is strategy-agnostic (Trading defaults, Risk
 // Management, Regime Detection, etc. — always visible). Otherwise returns
 // the STRATEGY_* constant; the section is hidden when no configured core
 // uses that strategy.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int global_section_strategy(const char *section) {
     if (strcmp(section, "SimpleDip Tuning")     == 0) return STRATEGY_SIMPLE_DIP;
     if (strcmp(section, "MeanReversion Tuning") == 0) return STRATEGY_MEAN_REVERSION;
@@ -994,7 +1179,19 @@ static inline int global_section_strategy(const char *section) {
     if (strcmp(section, "Barrier")              == 0) return STRATEGY_ML;
     return -1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[global_section_strategy]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[any_node_uses_strategy]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[true if any configured node runs the given strategy (drives strategy-section visibility)]
+//======================================================================
 // True when any configured core is running this strategy.
 // v4.7.30: AUTO routes to MR/Momentum/SimpleDip/EMA Cross only (not ML).
 // Pre-v4.7.30 treated AUTO as "matches everything" — that surfaced ML
@@ -1003,6 +1200,9 @@ static inline int global_section_strategy(const char *section) {
 //
 // Source of truth: SettingsState's per_node_strategy[] (user intent —
 // what they have configured, may differ from live until Apply pressed).
+//======================================================================
+// [CODE]
+//======================================================================
 static inline bool any_node_uses_strategy(const SettingsState *s, int strat) {
     for (int c = 0; c < MAX_GUI_NODES; ++c) {
         int sid = s->per_node_strategy[c];
@@ -1013,10 +1213,22 @@ static inline bool any_node_uses_strategy(const SettingsState *s, int strat) {
     }
     return false;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[any_node_uses_strategy]
+//======================================================================
 
-//==========================================================================
-// GLOBAL TAB — renders the auto-generated field_defs[] layout
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[Settings_RenderGlobalTab]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Global tab — the registry-driven + hardcoded field layout, per-section strategy-gated visibility, per-edit persistence]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline bool Settings_RenderGlobalTab(SettingsState *s) {
     bool changed = false;
     const char *current_section = NULL;
@@ -1193,10 +1405,19 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
 
     return changed;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Settings_RenderGlobalTab]
+//======================================================================
 
-//==========================================================================
-// PER-CORE TAB — renders one core's PerNodeOverrides editor
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[per_node_field_strategy]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[map a per-node override key suffix to the STRATEGY_* it belongs to]
+//======================================================================
 // Each row is one override. Empty/0 = inherit from Global. The current value
 // from the Global tab is shown next to the input as a small grey hint.
 //
@@ -1215,6 +1436,9 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
 // Used by Settings_RenderPerCoreTab to scope the "Strategy-Specific" section
 // to fields relevant to THIS core's strategy. AUTO cores show all (since
 // AUTO routes to any strategy at runtime).
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int per_node_field_strategy(const char *key_suffix) {
     if (strncmp(key_suffix, "simpledip_", 10) == 0) return STRATEGY_SIMPLE_DIP;
     if (strncmp(key_suffix, "mr_",         3) == 0) return STRATEGY_MEAN_REVERSION;
@@ -1230,7 +1454,19 @@ static inline int per_node_field_strategy(const char *key_suffix) {
     if (strncmp(key_suffix, "foxml_",       6) == 0) return STRATEGY_ML;
     return -1;  // strategy-agnostic
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[per_node_field_strategy]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[per_node_field_visible]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[whether a per-node override field shows for a node's configured strategy]
+//======================================================================
 // True when this per-core field should be VISIBLE on the tab for a core
 // running `node_strategy`. STRATEGY_NONE shows nothing strategy-specific
 // (only the agnostic overrides).
@@ -1238,6 +1474,9 @@ static inline int per_node_field_strategy(const char *key_suffix) {
 // v4.7.30: AUTO routes to MR/Momentum/SimpleDip/EMA Cross only — NOT ML.
 // Pre-v4.7.30 AUTO showed ALL strategy-specific fields including ML's,
 // which never matter for an AUTO core. Now AUTO matches everything except ML.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline bool per_node_field_visible(const char *key_suffix, int node_strategy) {
     int field_strat = per_node_field_strategy(key_suffix);
     if (field_strat < 0) return true;       // agnostic
@@ -1246,7 +1485,22 @@ static inline bool per_node_field_visible(const char *key_suffix, int node_strat
     }
     return node_strategy == field_strat;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[per_node_field_visible]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[Settings_RenderPerCoreTab]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render one core's per-node override editor — each row inherits from Global when empty/0, with model/strategy hot-swap requests]
+//======================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                                               TUISharedState *shared = NULL,
                                               const TUISnapshot *snap = NULL) {
@@ -1674,13 +1928,25 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
     }
     return changed;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Settings_RenderPerCoreTab]
+//======================================================================
 
-//==========================================================================
-// RENDER — tabbed: Global + Core 0..N
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[GUI_Panel_Settings]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render the Settings panel — tabbed Global + per-core, cfg persistence + reload request, model/strategy hot-swap]
+//======================================================================
 // live_node_count > 0 → use it (number of cores actually registered with the
 // engine). 0 → fall back to the cfg's num_execution_nodes field. Reflects
 // running cores, not cfg-only intent — engine doesn't add/remove cores live.
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void GUI_Panel_Settings(SettingsState *s,
                                        volatile sig_atomic_t *reload_flag,
                                        int live_node_count = 0,
@@ -1786,3 +2052,8 @@ static inline void GUI_Panel_Settings(SettingsState *s,
 
     ImGui::End();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GUI_Panel_Settings]
+//======================================================================
