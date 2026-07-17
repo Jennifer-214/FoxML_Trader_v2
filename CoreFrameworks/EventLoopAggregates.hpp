@@ -99,42 +99,6 @@ struct EventLoopAggregates {
 // FPN_Binary happens once here, in the adapter, instead of being scattered across
 // every panel. realized + unrealized = total_pnl. balance + unrealized = equity.
 //======================================================================
-// [COMMENT]_[why an adapter exists + the mark-price contract]
-//----------------------------------------------------------------------
-// Why an adapter exists at all:
-//   Per-core sharding moves position state from a single PortfolioController
-//   into N execution cores plus a controller-side EventLoopState. The TUI was
-//   built for the single-controller world where balance and equity are direct
-//   fields on the controller. After sharding, those numbers are computed from
-//   per-core state — balance is still a global wallet but equity has to walk
-//   the active positions and add unrealized P&L from the latest mark price.
-//
-//   Rather than redesign the TUISnapshot struct (which has 100+ fields and
-//   touches every panel), we expose a small adapter that produces flat aggregate
-//   doubles. Phase 13 migration writes a 30-line shim that maps these into the
-//   existing TUISnapshot fields:
-//
-//     snap->balance      = agg.balance
-//     snap->equity       = agg.equity
-//     snap->realized     = agg.realized_pnl
-//     snap->unrealized   = agg.unrealized_pnl
-//     snap->total_pnl    = agg.realized_pnl + agg.unrealized_pnl
-//     snap->active_count = agg.active_position_count
-//     snap->max_drawdown = agg.max_drawdown
-//     snap->max_drawdown_pct      = agg.max_drawdown_pct
-//     snap->kill_switch_active    = agg.kill_switch_tripped
-//
-//   Existing panels keep working unchanged. Per-core debug views are out of
-//   scope for this phase — can be added later as a new optional panel.
-//
-// Mark price:
-//   Equity needs a mark price for unrealized P&L. The execution cores see ticks
-//   directly but the controller core does not — it processes events. The engine
-//   main publishes the latest tick price into the controller via a separate
-//   path (a "current price" memory cell or a 1-Hz price update event), and
-//   passes it as the mark_price argument to GetAggregates. Pass FPN_Zero to
-//   skip unrealized computation entirely (unrealized stays 0).
-//======================================================================
 // [END_STRUCT]_[EventLoopAggregates]
 //======================================================================
 
