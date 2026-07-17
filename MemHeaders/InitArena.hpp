@@ -3,7 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [INIT ARENA — unified init-time mmap-backed bump allocator (v5.11.6.A)]
+// [FILE]_[MemHeaders/InitArena.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[unified init-time bump allocator over one mmap(MAP_POPULATE) backing (malloc fallback) — single-writer at boot only; Meyer's-singleton global slot; Owns() disambiguates free-vs-skip]
+// [CONTAINS]
+//   - [STRUCT]_[InitArena]
+//   - [FUNCTION]_[InitArena_Alloc]   (+ Create / AllocOne / Destroy / Used / Remaining / Owns / Global family)
+// [REFERENCE]_[INVARIANT]_[H1]
 //======================================================================================================
 // Replaces the per-struct `malloc(sizeof(...))` / `new T()` pattern at engine
 // boot with a single mmap(MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE) backing
@@ -48,13 +56,43 @@
 
 namespace tt {
 
+//======================================================================
+// [STRUCT]_[InitArena]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the arena handle — backing base pointer + capacity + bump offset + is_mmap discriminator for the Destroy path]
+//======================================================================
+// [CODE]
+//======================================================================
 struct InitArena {
     uint8_t* base;       // start of the mmap'd region (or malloc'd fallback)
     size_t   capacity;   // total bytes available
     size_t   used;       // bump-pointer offset
     int      is_mmap;    // 1 = base was mmap'd; 0 = malloc fallback
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[32B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[InitArena]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[InitArena_Alloc]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the arena API family (Create / AllocOne / Destroy / Used / Remaining / Owns / Global ride) — aligned bump-pointer alloc, nullptr on exhaustion (caller malloc-fallback)]
+//======================================================================
+// [CODE]
+//======================================================================
 // Create a new arena of exactly `bytes` capacity. Pre-faults all pages via
 // MAP_POPULATE so subsequent allocations + first-write never page-fault.
 // On mmap failure, falls back to malloc with a stderr WARN; the caller can
@@ -200,5 +238,10 @@ inline InitArena*& InitArena_Global() {
     static InitArena* g = nullptr;
     return g;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[InitArena_Alloc]
+//======================================================================
 
 } // namespace tt
