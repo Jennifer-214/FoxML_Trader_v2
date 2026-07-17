@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ANSI TUI]
+// [FILE]_[DataStream/TUIAnsi.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero-dependency ANSI terminal dashboard — composable Section renderers over a TUISnapshot into one sync-output frame buffer; rendering ONLY (EngineTUI owns threads/snapshots/input)]
+// [CONTAINS]
+//   - [STRUCT]_[AnsiBuf]   (the FoxML truecolor palette + ab_* buffer family ride)
+//   - [FUNCTION]_[ab_goto]   (+ clear_row / goto_right / divider / r2_bar / halfblock_chart / sparkline / sparkline_pnl draw-helper family)
+//   - [FUNCTION]_[ANSI_Section_Header]   (+ the Section renderer family: TopBar / Market / Regime / BuyGate / Portfolio / PnL / Risk / Config / Stats / Positions / RightPanel)
+//   - [FUNCTION]_[ANSI_Layout_Render]   (+ layout ids + Standard / Charts / Compact layouts + ANSI_Render top-level)
 //======================================================================================================
 // terminal dashboard using raw ANSI escape codes — zero library dependencies
 // each section is a standalone render function: (AnsiBuf*, TUISnapshot*, row, width) → next row
@@ -33,10 +42,19 @@
 
 // TUISnapshot and TUIPositionSnap defined in EngineTUI.hpp (included before this)
 
-//======================================================================================================
-// [FOXML COLOR PALETTE — ANSI truecolor]
-//======================================================================================================
-// warm forest tones — RGB values from the notcurses palette (TUINotcurses.hpp)
+//======================================================================
+// [STRUCT]_[AnsiBuf]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[64K frame buffer + deferred erase-to-EOL row tracking (the FoxML truecolor palette + the ab_ clear/append/appendn/printf/flush family ride) — one write() per frame]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[FOXML COLOR PALETTE — ANSI truecolor]
+//------------------------------------------------------------------
+// warm forest tones — RGB values from the retired notcurses palette (TUINotcurses.hpp — deleted; the values live on here)
 // uses 24-bit truecolor: \033[38;2;R;G;Bm (foreground only, transparent background)
 //======================================================================================================
 #define A_RESET   "\033[0m"
@@ -58,12 +76,8 @@
 
 #define A_PNL(v) ((v) >= 0.0 ? A_GREEN : A_RED)
 
-//======================================================================================================
-// [RENDER BUFFER]
-//======================================================================================================
 // frame buffer — build entire screen content, flush in one write() with sync output
 // prevents flicker and minimizes syscalls
-//======================================================================================================
 struct AnsiBuf {
     char data[65536];
     int len;
@@ -102,16 +116,23 @@ static inline void ab_flush(AnsiBuf *ab) {
     write(STDOUT_FILENO, ab->data, ab->len);
 }
 
-//======================================================================================================
-// [HELPERS]
-//======================================================================================================
-// cursor positioning, divider lines, visual indicators
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[AnsiBuf]
+//======================================================================
 
-// move cursor to (row, col) — overwrites in place, no pre-clear
-// deferred \033[K erases tail of PREVIOUS row when starting a new row
-// columns 1 to col-1 are filled with spaces (overwrites stale left margin)
-// only call once per row — use \033[{col}G (CHA) for second positioning on same row
+//======================================================================
+// [FUNCTION]_[ab_goto]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the draw-helper family (clear_row / goto_right / divider / r2_bar / halfblock_chart / sparkline / sparkline_pnl ride) — cursor addressing + unicode charts over the ring-buffer series]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void ab_goto(AnsiBuf *ab, int row, int col) {
     // erase tail of previous row (cursor is still on that row)
     if (ab->last_row >= 0) ab_append(ab, "\033[K");
@@ -323,10 +344,33 @@ static inline void ab_sparkline_pnl(AnsiBuf *ab, const double *data, int head,
     }
     ab_append(ab, A_RESET);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// cursor positioning, divider lines, visual indicators
+//
+// ab_goto: move cursor to (row, col) — overwrites in place, no pre-clear
+// deferred \033[K erases tail of PREVIOUS row when starting a new row
+// columns 1 to col-1 are filled with spaces (overwrites stale left margin)
+// only call once per row — use \033[{col}G (CHA) for second positioning on same row
+//======================================================================
+// [END_FUNCTION]_[ab_goto]
+//======================================================================
 
-//======================================================================================================
-// [SECTION: HEADER]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ANSI_Section_Header]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the Section renderer family (TopBar / Market / Regime / BuyGate / Portfolio / PnL / Risk / Config / Stats / Positions / RightPanel ride) — each: (buf, snapshot, row, width) -> next row]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[HEADER]
+//------------------------------------------------------------------
 static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
                                        int y, int w, uint64_t start_time) {
     ab_divider(ab, y++, w, true);
@@ -1040,9 +1084,21 @@ static inline int ANSI_Section_PerNodeLatency(AnsiBuf *ab, const TUISnapshot *s,
     return y;
 }
 
-//======================================================================================================
-// [LAYOUT DEFINITIONS]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ANSI_Section_Header]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ANSI_Layout_Render]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the layout family (layout ids + RightPanel section + Standard / Charts / Compact + dispatch + the ANSI_Render top-level sync-output frame) — add a layout: one fn + one dispatch case]
+//======================================================================
+// [CODE]
+//======================================================================
 #define ANSI_LAYOUT_STANDARD  0
 #define ANSI_LAYOUT_CHARTS    1
 #define ANSI_LAYOUT_COMPACT   2
@@ -1255,5 +1311,10 @@ static inline void ANSI_Render(const TUISnapshot *s, int layout_id,
     ab_append(&ab, "\033[?2026l");   // end sync
     ab_flush(&ab);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ANSI_Layout_Render]
+//======================================================================
 
 #endif // TUI_ANSI_HPP
