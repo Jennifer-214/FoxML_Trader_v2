@@ -41,7 +41,7 @@
 //==========================================================================
 // v5.15.5.F.4c — completes the tt:: dispatch trio. Lives here (not in
 // CoreFrameworks/CfgFieldDispatch.hpp) to keep ImGui dependency out of the
-// parser path per CfgFieldDispatch.hpp:143-145 design note.
+// parser path per the CfgFieldDispatch.hpp parser-path design note.
 //
 // 3-barrier discipline per DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md:
 //   B1 — destination-by-reference; NO void*+offset overload
@@ -250,7 +250,7 @@ struct PerNodeCfgRenderTable {
     #undef X_GEN_PER_NODE_RENDER_PTR
 };
 
-// Forward decl — cfg_write_field is defined later in this file (line ~640).
+// Forward decl — cfg_write_field is defined later in this file.
 // Template instantiation of cfg_render_and_persist<T> below happens at call sites
 // (the bitmap walker), at which point cfg_write_field is already in scope.
 static inline void cfg_write_field(const char *path, const char *key, const char *value);
@@ -428,7 +428,7 @@ static const CfgFieldDef field_defs[] = {
         "Clamped [0.05, 0.30]. Engine-wide setup; one bundle per training run."},
     // v5.15.5.F.4d.1.B.2 Step 2 partial — gap_acceptable_threshold entry DELETED; registry-driven
     // render via FOREACH_GLOBAL_CFG_FIELD row at CfgFieldRegistry.hpp covers GUI render now.
-    // Manual cfg storage at ControllerConfig.hpp:889/:1729/:2554 stays at .B.2 (deferred to .B.3
+    // Manual cfg storage in ControllerConfig.hpp stays at .B.2 (deferred to .B.3
     // with cfg-storage-discipline amendment).
     // v4.7.31: ML model paths + barrier gate stay engine-wide for now.
     // ml_model_path is already overridable per-core via node_N_model_path;
@@ -447,9 +447,10 @@ static const CfgFieldDef field_defs[] = {
         "Path to P(will_valley) model (engine-wide). Per-node deferred."},
     // Per-core sharded engine — production since v4.x; legacy single_core is
     // deprecated and warns on boot. v4.7.26: removed the "Sharded Mode" toggle
-    // from the GUI — sharded is the only path users should see. Cfg parser
-    // still accepts engine_mode= for backwards compat with old cfg files;
-    // users who really want legacy can hand-edit. No UI surface = no foot-gun.
+    // from the GUI — sharded is the only path. A leftover engine_mode= in an old
+    // cfg file is silently ignored (a deleted global key doesn't fail the load),
+    // but it's a no-op: the legacy single_core engine was deleted (E.1.1), so
+    // there's no legacy path to select. No UI surface = no foot-gun.
     // v5.15.5.F.4c — num_execution_nodes migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1, 16]).
     // The field_defs[] entry is DELETED at .F.4c; live_node_count sync + per-core tab count
     // now read/write s->gui_engine_cfg.num_execution_nodes directly.
@@ -711,7 +712,7 @@ struct SettingsState {
     // I/O — render thread blocking is forbidden, see /readiness check 17).
     // Populated by SettingsPanel_RescanModels which walks `models/` and
     // detects subdirs containing a recognizable role file. Reuses the same
-    // file-detection logic as PastRuns_LoadOne (BacktestPanels.hpp:629).
+    // file-detection logic as PastRuns_LoadOne (BacktestPanels.hpp).
     // Capped at 32 model dirs — enough for any realistic deployment.
     static constexpr int MODEL_SCAN_MAX = 32;
     int   model_scan_count;
@@ -793,7 +794,7 @@ static inline void cfg_write_field(const char *path, const char *key, const char
 //==========================================================================
 // Walk `models/` and collect subdirectories that contain a recognizable
 // role file. Reuses the same role-detection list as PastRuns_LoadOne
-// (BacktestPanels.hpp:629) and Verify Stamp (BacktestPanels.hpp:1001-1005).
+// and Verify Stamp (both in BacktestPanels.hpp).
 // Result populates SettingsState.model_scan_* — feeds the Model Dir
 // Combo dropdown in per-core tabs.
 //
@@ -966,9 +967,9 @@ static inline void Settings_Load(SettingsState *s) {
 
     // v4.7.22: post-load defaults for fields the cfg may not have written.
     // Without this, the widget shows 0 even though the engine boots with
-    // the default. Only patch num_execution_nodes here — engine_mode is
-    // boolean and we can't distinguish "missing from cfg" from "explicitly
-    // 0", so flipping it would override user intent.
+    // the default. Only patch num_execution_nodes here — the retired
+    // engine_mode was boolean and we couldn't distinguish "missing from
+    // cfg" from "explicitly 0", so flipping it would have overridden intent.
     // v5.15.5.F.4c — num_execution_nodes moved to gui_engine_cfg (FOREACH_CFG_FIELD).
     // Apply default-fallback when cfg-file omitted the key (Settings_Load left it at 0
     // since ControllerConfig_Load itself defaults to 4; this is the GUI-side safety net).
@@ -1435,8 +1436,8 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         // Model Dir into TUISharedState's pending_model_path[node_id]
         // then atomic-stores the request flag. Engine slow-path consumer
         // reads with __ATOMIC_ACQUIRE, frees+reloads ml_zoos[c], swaps
-        // the handle. Mirrors the strategy hot-swap pattern at
-        // SettingsPanel.hpp:945.
+        // the handle. Mirrors the strategy hot-swap pattern elsewhere
+        // in this panel.
         ImGui::SameLine();
         bool can_swap = (shared != nullptr) &&
                         (s->per_node_model_dir[node_id][0] != '\0') &&
