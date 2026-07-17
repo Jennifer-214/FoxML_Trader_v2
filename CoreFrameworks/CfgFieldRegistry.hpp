@@ -471,8 +471,9 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     /* v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — held_out_fraction migration to cfg-derived cohort. \
      * Was MC PRE_CFG row at StampBoundModelConstRegistry.hpp emitting `inference_cfg_held_out_fraction` wire key; \
      * inf-driven via STAMP_INFERENCE_CFG_AUTOPOPULATE (deleted at Step 1.5). After Phase F: emits unprefixed \
-     * `held_out_fraction=` via cfg-derived framework call (populate_stamp_cfg_from_derived); legacy stamps \
-     * load via FOREACH_LEGACY_PREFIXED_KEY back-compat dispatch. Closes Class 21 (parallel descriptor between \
+     * `held_out_fraction=` via cfg-derived framework call (populate_stamp_cfg_from_derived); pre-epoch stamps \
+     * now REFUSE at the verify_model_stamp epoch floor (TECH_DEBT-237; legacy-key dispatch retired, TECH_DEBT-238). \
+     * Closes Class 21 (parallel descriptor between \
      * cfg-side + MC-side for same semantic). Sister precedent: gap_acceptable_threshold above. */ \
     X(FPN_Binary<F>,               KIND_DOUBLE,     held_out_fraction,           "Held-Out %",           "Validation",      CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.20, 0.0, 1.0), \
         "Fraction of training data reserved as held-out validation set. Default 0.20 = 20%. Stamp-bound (training-time value captured at stamp emit; engine load WARN on drift). v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) — migrated from MC PRE_CFG inf-side row to cfg-derived cohort; closes Class 21 parallel descriptor.", \

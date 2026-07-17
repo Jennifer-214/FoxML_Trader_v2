@@ -15,7 +15,6 @@
 //   - [FUNCTION]_[FeatureLookback_Max]    (+ CountEnabled; over the FEATURE_LOOKBACKS temporal-reach table)
 //   - [FUNCTION]_[ModelFeatures_Pack]     (DEPRECATED frozen packer — equivalence-test reference only)
 //   - [STRUCT]_[ModelStampResult] / [STRUCT]_[StampInferenceCfgInputs]   (X-macro-generated stamp parse/emit sides)
-//   - [REGISTRY]_[FOREACH_LEGACY_PREFIXED_KEY]   (v1->v2 wire-key back-compat dispatch; 16 rows)
 //   - [FUNCTION]_[sha256_file_hex]        (+ stamp_parse_line — verify helpers)
 //   - [FUNCTION]_[verify_model_stamp]     (the stamp INGEST gate — H9 HMAC verify + drift checks)
 //   - [FUNCTION]_[stamp_write_for_model]  (the stamp EMIT side — canonical body + HMAC sign + atomic write)
@@ -155,24 +154,34 @@
 // DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
 // CURRENT is the version emit produces; MAX_SUPPORTED is the upper bound parser accepts.
 // Bump CURRENT when wire-format changes; bump MAX_SUPPORTED when next bump is planned.
-// Legacy versions ≥ 1 continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat (see verify_model_stamp).
+// Pre-epoch versions (< EPOCH_FLOOR below) are HARD-INVALID at verify_model_stamp check 0c;
+// the v1 legacy-prefixed-key dispatch layer was retired with the floor (TECH_DEBT-238, H21).
 static constexpr uint32_t STAMP_FORMAT_VERSION_CURRENT      = 3;  // Ship-B DECIMAL epoch (money wire values re-encode); v2 = 16B-binary era (H21 tombstone), v1 = legacy prefix era
-static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 3;  // Ship-B intent: pre-epoch stamps [1,2] HARD-INVALID — floor NOT YET IMPLEMENTED (parser accepts [0,3]; TECH_DEBT-237)
+static constexpr uint32_t MAX_SUPPORTED_STAMP_FORMAT_VERSION = 3;  // parser accepts [EPOCH_FLOOR, MAX]; > MAX = future shape this engine can't interpret
+// TECH_DEBT-237 close (2026-07-17) — the DECIMAL-EPOCH FLOOR. Stamps below it (v1/v2 + the
+// field-absent pre-v5.9.0 case, which parses as 0) carry money wire values under the retired
+// binary-FPN encoding and are UNCONDITIONALLY hard-invalid in verify_model_stamp (check 0c;
+// valid=0, never -1 — the held_out_gate_strict fork only softens MISSING stamps, not pre-epoch
+// ones). The floor is the EPOCH boundary and NEVER moves with future CURRENT bumps.
+static constexpr uint32_t STAMP_FORMAT_VERSION_EPOCH_FLOOR   = 3;
 
 // Ship-B P2 epoch guard (S-4/D-174 — the strict-gate bypass closed at the flip): stamps carry
 // ~30 money fields whose wire values re-encode at the decimal epoch. Tripwire: the flip commit
 // must bump CURRENT/MAX to 3 AND make pre-epoch refusal an UNCONDITIONAL hard-invalid class that
 // BYPASSES the held_out_gate_strict fork (strict=0 loads r.valid=0 today — a v2 stamp must NOT
 // enter the decimal engine), retiring the [1,2] legacy key dispatch (H21) + the retrain ritual.
-// ⚠ STATUS (P6.96 rot-check, 2026-07-16): the flip (`838bf09`) satisfied this tripwire by the
-// VERSION BUMP ALONE — the unconditional pre-epoch refusal was never coded (verify_model_stamp
-// still RELAXED-accepts [0, MAX]; only too-NEW rejects). TECH_DEBT-237 tracks the floor; blast
-// radius today = zero (no live models — dev fixtures only — + the Phase-D live-gate holds).
-// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-237]
+// HISTORY: the flip (`838bf09`) satisfied this tripwire by the version bump alone — the refusal
+// half slipped (Class-38 phantom, caught at the P6.96 rot-check). BOTH halves are now REAL:
+// the 0c floor landed + the [1,2] legacy key dispatch retired (TECH_DEBT-237 / TECH_DEBT-238,
+// closed 2026-07-17).
 // [ASSERT]_[EPOCH_TRIPWIRE]_[MONEY_ENCODING_EPOCH == 0 || STAMP_FORMAT_VERSION_CURRENT >= 3]
 static_assert(MONEY_ENCODING_EPOCH == 0u || STAMP_FORMAT_VERSION_CURRENT >= 3u,
               "Ship-B epoch: the engine money type flipped to decimal — bump STAMP_FORMAT_VERSION "
               "to 3 + unconditional pre-epoch stamp refusal (bypass the strict fork) in THIS commit.");
+// [ASSERT]_[EPOCH_TRIPWIRE]_[EPOCH_FLOOR == 3 — the floor is the epoch boundary, pinned forever]
+static_assert(STAMP_FORMAT_VERSION_EPOCH_FLOOR == 3u,
+              "The decimal-epoch floor is the Ship-B boundary (3) and never moves with CURRENT "
+              "bumps — a v3+ stamp is decimal-era by definition (H21 append-only semantics).");
 
 //----------------------------------------------------------------------
 // [SECTION]_[FEATURE LOOKBACK REGISTRY]
@@ -1520,63 +1529,15 @@ inline int stamp_parse_line(char* line, const char** key_out, const char** val_o
 // [END_FUNCTION]_[sha256_file_hex]
 //======================================================================
 
-//======================================================================
-// [REGISTRY]_[FOREACH_LEGACY_PREFIXED_KEY]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[v1 -> v2 wire-key back-compat dispatch — 16 legacy `inference_cfg_*` keys map to their unprefixed sisters; parser dispatch + tests auto-flow per row]
-// [COLUMN]_[legacy_key]_[the v1-era prefixed wire key a legacy stamp carries]
-// [COLUMN]_[current_key]_[the unprefixed v2+ sister name the framework dispatch parses into]
-// [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
-// [REFERENCE]_[INVARIANT]_[H21]
-// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-238]
-//======================================================================
-// [CODE]
-//======================================================================
-#define FOREACH_LEGACY_PREFIXED_KEY(X) \
-    /* 9 thompson/.A.7 cohort (per Decision D v1.6 scope) */                          \
-    X(inference_cfg_bandit_algorithm,            bandit_algorithm)                    \
-    X(inference_cfg_thompson_mu_prior,           thompson_mu_prior)                   \
-    X(inference_cfg_thompson_precision_prior,    thompson_precision_prior)            \
-    X(inference_cfg_thompson_precision_obs,      thompson_precision_obs)              \
-    X(inference_cfg_thompson_exp3_blend_alpha,   thompson_exp3_blend_alpha)           \
-    X(inference_cfg_ml_tp_pct,                   ml_tp_pct)                           \
-    X(inference_cfg_ml_sl_pct,                   ml_sl_pct)                           \
-    X(inference_cfg_barrier_blend_mode,          barrier_blend_mode)                  \
-    X(inference_cfg_per_horizon_barrier_blend,   per_horizon_barrier_blend)           \
-    /* 1 standalone */                                                                \
-    X(inference_cfg_bandit_blend_ratio,          bandit_blend_ratio)                  \
-    /* 5 model-state cohort (Class 32 closure scope) */                               \
-    X(inference_cfg_confidence_threshold_scale,  confidence_threshold_scale)          \
-    X(inference_cfg_barrier_gate_enabled,        barrier_gate_enabled)                \
-    X(inference_cfg_confidence_hard_block_threshold, confidence_hard_block_threshold) \
-    X(inference_cfg_fee_rate_maker,              fee_rate_maker)                      \
-    X(inference_cfg_fee_rate_taker,              fee_rate_taker)                      \
-    /* 1 Phase F HIGH-1 (b) — held_out_fraction Class 21 closure: migrated from MC */ \
-    /* PRE_CFG inf-side row to cfg-derived cohort. v1 stamps emit prefixed key;     */ \
-    /* v2 emits unprefixed via cfg-derived framework; back-compat keeps v1 loading. */ \
-    X(inference_cfg_held_out_fraction,           held_out_fraction)
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [COMMENT]
-//----------------------------------------------------------------------
-// v5.15.5.F.4d.1.B.3 Step 1.6.7.4 — Legacy wire-key back-compat for SOFT version 1 → 2 bump.
-// Per DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
-//
-// 15 cfg-derived cohort fields lost the `inference_cfg_` prefix at v2 wire format. v1 stamps
-// continue loading on v2+ engine via parser dispatch: legacy key match → framework dispatch on
-// unprefixed sister name. Deletion target re-homed at TECH_DEBT-238 (the originally-cited
-// TECH_DEBT-101 entry was lost from the ledger; rg-verified dangling at P6.96) — and folds into
-// the TECH_DEBT-237 pre-epoch-floor fix ship, which deadens this layer entirely.
-// v1 LOAD test fixture at controller_test.cpp regression-locks back-compat.
-//
-// Adding a new (legacy, current) pair = add 1 row above; parser dispatch + tests auto-flow.
-// Removing the back-compat layer = delete the X-macro body + remove parser dispatch + close TECH_DEBT.
-//======================================================================
-// [END_REGISTRY]_[FOREACH_LEGACY_PREFIXED_KEY]
-//======================================================================
+// TOMBSTONE (H21 / TECH_DEBT-238, retired 2026-07-17) — FOREACH_LEGACY_PREFIXED_KEY.
+// The v1→v2 wire-key back-compat dispatch (16 `inference_cfg_*` → unprefixed pairs, SOFT-bump
+// Layer 6b, Step 1.6.7.4) lived here. The TECH_DEBT-237 pre-epoch floor (check 0c in
+// verify_model_stamp) hard-refuses every stamp that could carry those keys, making the layer
+// dead code by construction → deleted per H21 (remove dead code; never leave it compiled-in).
+// The legacy `inference_cfg_*` wire keys are RETIRED IDENTIFIERS: never re-accept them with
+// different semantics — a resurrected v1-era key means a new name, not this slot.
+// (The cited "v1 LOAD test fixture" never existed — rg-verified at the fix ship; the floor
+// tests in controller_test.cpp are the standing re-introduction guard.)
 
 //======================================================================
 // [FUNCTION]_[verify_model_stamp]
@@ -1736,17 +1697,9 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 }
             FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)
             #undef X
-            // v5.15.5.F.4d.1.B.3 Step 1.6.7.4 — Legacy prefixed wire-key back-compat (SOFT v1 → v2
-            // bump). Translates each legacy `inference_cfg_<name>` key to its unprefixed sister
-            // via framework dispatch. v1 stamps continue loading on v2+ engine. See
-            // FOREACH_LEGACY_PREFIXED_KEY (its own [REGISTRY] block above) for the closed-set list +
-            // DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
-            #define X(legacy_key, current_key) \
-                else if (strcmp(key, #legacy_key) == 0) { \
-                    PARSE_STAMP_CFG_TO_DERIVED(r, #current_key, val); \
-                }
-            FOREACH_LEGACY_PREFIXED_KEY(X)
-            #undef X
+            // (The v1 legacy-prefixed-key dispatch walk lived here — RETIRED with the
+            // TECH_DEBT-237 pre-epoch floor; see the FOREACH_LEGACY_PREFIXED_KEY tombstone
+            // above. Pre-epoch stamps never reach field consumption: check 0c refuses them.)
             // v5.15.5.F.4d.1.B.3 Step 1.6.3 (Decision C Approach A; codified at v1.12 plan body) —
             // single-call framework dispatch replaces inline X-macro walker. PARSE_STAMP_CFG_TO_DERIVED
             // returns true when key matches any STAMP_BOUND_CFG_DERIVED-flagged row across 4 master
@@ -1792,18 +1745,32 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
         }
     }
 
-    // 0b. v5.15.5.F.4d.1.B.3 Step 1.6.7.2 — stamp_format_version bounds check (RELAXED accept [1, MAX]).
-    // Reject FUTURE versions only — engine doesn't know how to interpret unknown shape. Legacy
-    // versions ≥ 1 continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat dispatch + per-field
-    // has_<name> Surface G semantic. Per Layer 6b SOFT bump procedure.
-    // ⚠ Ship-B intent says pre-epoch [1,2] must be UNCONDITIONALLY hard-invalid here — that floor
-    // was never coded (this relaxed accept is the actual behavior); TECH_DEBT-237 tracks it.
+    // 0b. v5.15.5.F.4d.1.B.3 Step 1.6.7.2 — stamp_format_version upper-bound check.
+    // Reject FUTURE versions — engine doesn't know how to interpret unknown shape.
     if ((uint32_t)r.stamp_format_version > MAX_SUPPORTED_STAMP_FORMAT_VERSION) {
         r.valid = 0;
         snprintf(r.reason, sizeof(r.reason),
             "stamp_format_version too new: stamp=%d engine_max=%u "
             "(retrain on an engine version that supports this stamp shape)",
             r.stamp_format_version, MAX_SUPPORTED_STAMP_FORMAT_VERSION);
+        return r;
+    }
+
+    // 0c. TECH_DEBT-237 close (2026-07-17) — the Ship-B S-4/D-174 pre-epoch FLOOR, landed.
+    // A stamp below the decimal epoch (stamp_format_version < 3 — INCLUDING 0 = field absent,
+    // pre-v5.9.0) carries its ~30 money wire fields under the retired binary-FPN encoding;
+    // parsing them into the decimal engine is the exact mis-decode S-4 forbids. UNCONDITIONAL
+    // hard-invalid: valid=0 (NEVER -1), so held_out_gate_strict=0 cannot admit it — the strict
+    // fork only softens MISSING stamps, never pre-epoch ones. Boot-time load path (H20
+    // boot-time exception); MONEY_ENCODING_EPOCH is constexpr, so the guard constant-folds
+    // away entirely on a binary-epoch build.
+    if (MONEY_ENCODING_EPOCH != 0u &&
+        (uint32_t)r.stamp_format_version < STAMP_FORMAT_VERSION_EPOCH_FLOOR) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "pre-epoch stamp (stamp_format_version=%d < %u): money fields carry the retired "
+            "binary encoding; decimal engine refuses — retrain to re-stamp (TECH_DEBT-237)",
+            r.stamp_format_version, STAMP_FORMAT_VERSION_EPOCH_FLOOR);
         return r;
     }
 
@@ -2171,8 +2138,8 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     // shape, not the stamp). Bumped on future stamp body schema changes.
     // v5.15.5.F.4d.1.B.3 Step 1.6.7.1-3 — version literal extracted to
     // STAMP_FORMAT_VERSION_CURRENT constant; SOFT bump 1 → 2 (15 cfg-derived
-    // cohort wire keys lose `inference_cfg_` prefix). Parser back-compat
-    // layer (FOREACH_LEGACY_PREFIXED_KEY) dual-recognizes v1 + v2 keys.
+    // cohort wire keys lose `inference_cfg_` prefix). The v1 dual-recognition
+    // layer was RETIRED with the TECH_DEBT-237 pre-epoch floor (2026-07-17).
     int has_stamp_ver = (format_version >= 5);
     // v5.9.2b — bumped from 2048 → 4096. Original ~700 bytes; 9 new
     // inference_cfg_* + training_poll_interval fields × ~50 bytes each
@@ -2239,7 +2206,7 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     //
     // Source-of-truth shift: cfg-derived wire keys now read from cfg AT EMIT TIME (not from
     // caller-populated inf). Wire keys lose `inference_cfg_` prefix at v2 wire format per
-    // SOFT bump (Step 1.6.7); v1 stamps load via FOREACH_LEGACY_PREFIXED_KEY back-compat.
+    // SOFT bump (Step 1.6.7); pre-epoch (v1/v2) stamps now REFUSE at check 0c (TECH_DEBT-237).
     //
     // cfg_ptr=nullptr → skip cfg-derived emit (legacy callers; equivalent to all-inf-has-zero
     // pre-migration). Stamp_AssembleAndEmit passes &cfg → cfg-derived rows emit per gate.

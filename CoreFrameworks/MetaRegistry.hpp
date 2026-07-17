@@ -57,12 +57,14 @@
     X(FOREACH_FAILURE_MODE,                 1,      FOREACH_REGISTRY,                  "Failure mode bit-flag storage registry (FailureModeRegistry.hpp).") \
     /* === OMS state registries === */                                                                                                                    \
     X(FOREACH_OMS_FIELD,                    1,      FOREACH_REGISTRY,                  "OMS state field registry (AUTOPOPULATE / drift check / etc.).") \
-    /* === WIP2d-1.B.0b — bulk registration of pre-existing registries (43 entries; closes Shortsighted #2 to 100%) === */
+    /* === WIP2d-1.B.0b — bulk registration of pre-existing registries (43 entries; closes Shortsighted #2 to 100%) === */ \
     X(FOREACH_STAMP_BOUND_MODEL_CONST           , 1,      FOREACH_REGISTRY                 , "Stamp-bound model-const fields (union of PRE_CFG + POST_CFG; canonical body emit order).") \
     X(FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS    , 1,      FOREACH_REGISTRY                 , "Stamp-bound model-const grouped fields (Y3 dispatch group anchor).") \
     X(FOREACH_STAMP_BOUND_MODEL_CONST_STANDALONE, 1,      FOREACH_REGISTRY                 , "Stamp-bound model-const standalone (non-grouped) fields.") \
     /* .E.0.10 (2026-06-11): enroll 2 pre-existing registries Check-1 flagged — H15 past-milestone close (the "convenient now" item) */ \
-    X(FOREACH_LEGACY_PREFIXED_KEY               , 1,      FOREACH_REGISTRY                 , "v1->v2 wire-key back-compat dispatch (16 legacy->unprefixed pairs; parser+tests auto-flow; deletion TECH_DEBT-101).") \
+    /* FOREACH_LEGACY_PREFIXED_KEY row RETIRED 2026-07-17 (TECH_DEBT-238): registry DELETED with the */ \
+    /* TECH_DEBT-237 pre-epoch stamp floor (H21 dead-code removal — the floor refuses every stamp    */ \
+    /* that could carry the 16 legacy inference_cfg_* keys; tombstone at ML_Headers/ModelInference.hpp). */ \
     X(FOREACH_STAMP_RESULT_FIELD_EXCLUSION      , 1,      FOREACH_REGISTRY                 , "ModelStampResult struct-field exclusion sidecar (3 xgb_* MODEL_CONST<->master-cfg name collisions; H18; check_struct_field_uniqueness.py).") \
     X(FOREACH_BARRIER_BLEND_MODE                , 1,      FOREACH_REGISTRY                 , "Barrier blend mode dispatch (LEGACY/BLEND/DOMINANT).") \
     X(FOREACH_IC_VARIANT                        , 1,      FOREACH_REGISTRY                 , "IC variant enum (per-core confidence IC method choice).") \

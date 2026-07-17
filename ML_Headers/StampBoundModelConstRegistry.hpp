@@ -292,8 +292,8 @@ namespace tt {
     /* fraction migrated to cfg-derived cohort at this ship. ModelHandle + ModelStampResult +     */ \
     /* StampInferenceCfgInputs all gain these fields via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN     */ \
     /* (cfg-derived auto-gen; sister to ModelStampResult struct-gen at ModelInference.hpp:1236).  */ \
-    /* v1 stamps continue loading via FOREACH_LEGACY_PREFIXED_KEY back-compat dispatch (parser    */ \
-    /* translates `inference_cfg_<name>=` → unprefixed → cfg-derived framework). `has_inference_cfg`*/ \
+    /* Pre-epoch (v1/v2) stamps now REFUSE at the verify_model_stamp epoch floor (TECH_DEBT-237); */ \
+    /* the legacy-key dispatch layer was retired with it (TECH_DEBT-238, H21). `has_inference_cfg`*/ \
     /* group bit + group declaration at line 231 retained as dead infra; future ship cleans up.   */ \
     /* v5.14.9.D PRECEDENT: freshness_tau DELETED via same pattern (TECH_DEBT-004 close).         */ \
     /* === bandit (standalone) — emitted at line 2189 === */                                        \
