@@ -3,7 +3,27 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CORE MODEL ZOO]
+// [FILE]_[ML_Headers/NodeModelZoo.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SEAM]_[the model-bundle boot seam — every trainer-emitted bundle (stamps + scalers + bandit/Thompson state) enters the engine through these loaders and their verify gates]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-node model zoo — 4-role single-zoo + the multi-horizon EnsembleModelZoo sidecar: stamp-gated loading, A6 corrupt-arm ingress, bandit/Thompson learning state + persistence, and the post-load setup registries]
+// [CONTAINS]
+//   - [STRUCT]_[NodeModelZoo]                (+ [FUNCTION]s: Init / TryLoadRole / LoadFromDir / Free family (LoadLegacy + HasAny) / VerifyExpected)
+//   - [STRUCT]_[PerArmBarriers] / [STRUCT]_[PredictionRecord] / [STRUCT]_[PerArmDrift]
+//   - [STRUCT]_[EnsembleModelZoo]            (HOT/WARM/COLD tiered; 4 roles x 8 arms)
+//   - [FUNCTION]_[ezoo_set_per_arm_barrier]  (+ EnsembleZoo_FinalizeCorrupt — the A6 ingress pair)
+//   - [FUNCTION]_[EnsembleModelZoo_Init]     (+ EnsurePrimary)
+//   - [FUNCTION]_[EnsembleModelZoo_TickRewardsFromLookback]   (+ RecordPrediction / UpdateDrift / TradeCloseReward — the G.8 family)
+//   - [FUNCTION]_[EnsembleModelZoo_InitBandits]               (Exp3 buy/exit + Thompson buy/exit — 4 fns)
+//   - [FUNCTION]_[EnsembleModelZoo_SetDisabledHorizons]       (+ Free)
+//   - [FUNCTION]_[EnsembleModelZoo_LoadFromCfg] / [EnsembleModelZoo_AutoDetectFromDir]   (+ VerifyGridMemberConsistency)
+//   - [FUNCTION]_[EnsembleModelZoo_LoadBanditState]           (G.9 Exp3 persistence family) / [EnsembleModelZoo_LoadThompsonState] (Thompson persistence family) / [EnsembleModelZoo_MaybeSaveBanditPeriodic] (tail family)
+//   - [REGISTRY]_[FOREACH_ENSEMBLE_POST_LOAD] / [REGISTRY]_[FOREACH_SINGLE_ZOO_POST_LOAD]   (the PARITY-009..012 structural close)
+//   - [FUNCTION]_[NodeModelZoo_CheckStaleModel]
+// [REFERENCE]_[INVARIANT]_[[H9] [H22]]
+// [REFERENCE]_[DESIGN_SPEC]_[postloadsetup-registry-pattern]
 //======================================================================================================
 // per-core bundle of role-specific model handles. lets each ML core load
 // multiple specialized models (barrier prediction, regime classifier, exit
@@ -63,12 +83,16 @@
 #define NODE_MODEL_EXIT        (1u << 2)  // exit timing model
 #define NODE_MODEL_BUY_SIGNAL  (1u << 3)  // legacy single-binary buy signal
 
-// v5.15.4 — alignas(64) required so heap-allocated NodeModelZoo via
-// aligned_alloc(64) (HotSwap_ShadowLoad_SingleZoo) gives the embedded
-// ModelHandle<F> members (which are themselves alignas(64) since v5.15.0)
-// correctly-aligned addresses. Without container-level alignas(64), heap
-// allocation via plain malloc gives only 16-byte alignment + AVX-512
-// vector-load fields inside ModelHandle could fault or run slow.
+//======================================================================
+// [STRUCT]_[NodeModelZoo]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-node 4-role model bundle (barrier/regime/exit/buy_signal) + loaded_mask + the v5.11.62 primary-role indirection strategy code reads]
+// [INSTANTIATION]_[[64]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct alignas(64) NodeModelZoo {
     ModelHandle<F> barrier;     // 3-class P(stable)/P(peak)/P(valley) when num_outputs=3
@@ -86,19 +110,49 @@ struct alignas(64) NodeModelZoo {
     int             primary_target_class;   // mirrors primary_handle->buy_class_idx for snapshot
     char            primary_role_name[16];  // "buy_signal" | "barrier" | "regime" | ""
 };
-
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.4 — alignas(64) required so heap-allocated NodeModelZoo via
+// aligned_alloc(64) (HotSwap_ShadowLoad_SingleZoo) gives the embedded
+// ModelHandle<F> members (which are themselves alignas(64) since v5.15.0)
+// correctly-aligned addresses. Without container-level alignas(64), heap
+// allocation via plain malloc gives only 16-byte alignment + AVX-512
+// vector-load fields inside ModelHandle could fault or run slow.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[26944B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[421]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[NodeModelZoo]
+//======================================================================
 // v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
 // Compiler enforces alignment + size %16 == 0 (alignas implies); we also
 // want size %64 == 0 so adjacent heap-allocated NodeModelZoo don't share
 // cache lines with neighboring allocations + cluster cleanly. Each
 // ModelHandle<F=64> is itself 64-byte aligned, so the struct sizeof
 // is already a multiple of 64 (verified by static_assert).
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(NodeModelZoo<64>) % 64 == 0]
 static_assert(sizeof(NodeModelZoo<64>) % 64 == 0,
               "v5.15.4: NodeModelZoo<64> size must be multiple of 64 for cache-line discipline");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(NodeModelZoo<64>) == 64]
 static_assert(alignof(NodeModelZoo<64>) == 64,
               "v5.15.4: NodeModelZoo<64> must be cache-line aligned");
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeModelZoo_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero-state init — all 4 role handles + mask + primary indirection cleared]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void NodeModelZoo_Init(NodeModelZoo<F> *zoo) {
     Model_Init(&zoo->barrier);
@@ -110,16 +164,22 @@ inline void NodeModelZoo_Init(NodeModelZoo<F> *zoo) {
     zoo->primary_target_class = 0;
     zoo->primary_role_name[0] = '\0';
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NodeModelZoo_Init]
+//======================================================================
 
-//======================================================================================================
-// try to load a single model from <dir>/<role>.json, falling back to <role>.xgb
-// returns 1 if loaded, 0 if file not found or load failed
-//======================================================================================================
-// v5.2.0: held-out gate. When `secret` is non-null + `strict != 0`, refuse
-// to load a model file that doesn't have a valid `.stamp` sibling. See
-// `verify_model_stamp` in ModelInference.hpp.
-//
-// Default args preserve pre-v5.2.0 callers — no gate when secret==nullptr.
+//======================================================================
+// [FUNCTION]_[NodeModelZoo_TryLoadRole]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-role load gate — stamp verify (held-out gate + drift walkers) -> Model_Load -> stamp-derived handle copies -> scaler sidecar 3-tier verify -> the v5.15.1 drift chokepoint]
+// [REFERENCE]_[INVARIANT]_[H9]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     const char *role_name, int backend,
@@ -511,18 +571,20 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         }
     }
 
-    //==================================================================
-    // v5.15.1 — drift detection chokepoint (single source of truth per
-    // handle for arch-field + CFG + HMAC + model-age drift bits).
+    //------------------------------------------------------------------
+    // [SECTION]_[v5.15.1 — drift detection chokepoint]
+    //------------------------------------------------------------------
+    // Single source of truth per handle for arch-field + CFG + HMAC +
+    // model-age drift bits.
     // Sets bits on handle->drift_flags_at_load using FOREACH_FAILURE_MODE
     // BIT_FLAG positions. ShardedSnapshot_Publish OR-aggregates across
     // all 4 zoo roles into PerNodeSnap.failure_flags for GUI Model Health
     // panel + (future v5.15.2) live-readiness boot gate consumption.
     //
     // Boot-only path; runs once per handle load. No slow-path or hot-path
-    // cost. Per CLAUDE.md item 9 (NaN-free chokepoint precedent): one
+    // cost. Per the NaN-free chokepoint precedent: one
     // chokepoint per concern, not scattered checks.
-    //==================================================================
+    //------------------------------------------------------------------
     if (have_sr) {
         // (1) Arch-field drift checks (registry-driven; auto-flows for
         //     future entries via FOREACH_ARCH_FIELD_DRIFT).
@@ -534,7 +596,7 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         #undef X
 
         // (2) CFG_BINDING_DRIFT aggregate bit (single-fact; consolidates
-        //     with existing CFG drift loop at L206-226 which already
+        //     with the X-macro drift check earlier in this fn, which already
         //     counted drifts into sr.inference_cfg_drift_count).
         if (sr.inference_cfg_drift_count > 0) {
             BITMAP_SET(handle->drift_flags_at_load, FAILURE_MASK_cfg_binding_drift);
@@ -570,11 +632,32 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
 
     return rc;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// try to load a single model from <dir>/<role>.json, falling back to <role>.xgb
+// returns 1 if loaded, 0 if file not found or load failed
+//
+// v5.2.0: held-out gate. When `secret` is non-null + `strict != 0`, refuse
+// to load a model file that doesn't have a valid `.stamp` sibling. See
+// `verify_model_stamp` in ModelInference.hpp.
+//
+// Default args preserve pre-v5.2.0 callers — no gate when secret==nullptr.
+//======================================================================
+// [END_FUNCTION]_[NodeModelZoo_TryLoadRole]
+//======================================================================
 
-//======================================================================================================
-// auto-discover and load all roles present in `dir`. missing roles silently
-// disabled. returns the number of roles loaded.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeModelZoo_LoadFromDir]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[auto-discover + load all 4 roles from a bundle dir (missing roles silently disabled) then pick the primary-role indirection: buy_signal > barrier > regime]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int NodeModelZoo_LoadFromDir(NodeModelZoo<F> *zoo, const char *dir, int backend,
                                      const char* held_out_stamp_secret = nullptr,
@@ -662,11 +745,28 @@ inline int NodeModelZoo_LoadFromDir(NodeModelZoo<F> *zoo, const char *dir, int b
             zoo->primary_target_class);
     return loaded;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// auto-discover and load all roles present in `dir`. missing roles silently
+// disabled. returns the number of roles loaded.
+//======================================================================
+// [END_FUNCTION]_[NodeModelZoo_LoadFromDir]
+//======================================================================
 
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeModelZoo_Free]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[lifecycle tail family (LoadLegacy single-path fallback + HasAny predicate ride) — free all 4 role handles + clear the mask]
+//======================================================================
+// [CODE]
+//======================================================================
 // legacy single-model fallback: load just the buy_signal role from a single
 // path (backward compat with the old core_N_model_path config field).
-//======================================================================================================
 template <unsigned F>
 inline int NodeModelZoo_LoadLegacy(NodeModelZoo<F> *zoo, const char *path, int backend) {
     if (!path || path[0] == '\0') return 0;
@@ -677,7 +777,6 @@ inline int NodeModelZoo_LoadLegacy(NodeModelZoo<F> *zoo, const char *path, int b
     return 0;
 }
 
-//======================================================================================================
 template <unsigned F>
 inline void NodeModelZoo_Free(NodeModelZoo<F> *zoo) {
     Model_Free(&zoo->barrier);
@@ -687,15 +786,25 @@ inline void NodeModelZoo_Free(NodeModelZoo<F> *zoo) {
     zoo->loaded_mask = 0;
 }
 
-//======================================================================================================
 template <unsigned F>
 inline int NodeModelZoo_HasAny(const NodeModelZoo<F> *zoo) {
     return zoo->loaded_mask != 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NodeModelZoo_Free]
+//======================================================================
 
-//======================================================================================================
-// [STUPID-PROOF VERIFY]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeModelZoo_VerifyExpected]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the STUPID-PROOF verify — expected.cfg (written by foxml_suite Save Run) vs live ML cfg; cadence + feature-format + gate/threshold/class mismatches; strict_mode fails the load]
+//======================================================================
+// [CODE]
+//======================================================================
 // reads <dir>/expected.cfg (written by foxml_suite Save Run) and verifies
 // the live ML config matches what the model was trained against. mismatches
 // are logged as warnings; if strict_mode is set, returns 0 to fail load.
@@ -709,7 +818,6 @@ inline int NodeModelZoo_HasAny(const NodeModelZoo<F> *zoo) {
 // also runs a structural check — if any model in the zoo has 3+ outputs
 // (multiclass softmax) but barrier_gate_enabled=0, warn that the engine
 // will only use one class and the model is being underutilized.
-//======================================================================================================
 template <unsigned F>
 // v4.3.1 — extended signature to also verify slow-path cadence + feature
 // pack version. live_poll_interval and live_feature_format_version are
@@ -879,10 +987,15 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
         return 1;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[NodeModelZoo_VerifyExpected]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.3 — ENSEMBLE MODEL ZOO (multi-horizon sidecar struct)]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.3 — ENSEMBLE MODEL ZOO (multi-horizon sidecar struct)]
+//----------------------------------------------------------------------
 // EnsembleModelZoo lives ALONGSIDE NodeModelZoo (not replacing it).
 // Single-horizon callers use NodeModelZoo unchanged; multi-horizon
 // callers populate EnsembleModelZoo when cfg.horizon_list non-empty.
@@ -903,38 +1016,63 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
 // arms_with_barriers_mask / corrupt_arms_mask) are uint8_t = 8 bits = 8 arms.
 // Pin the width to the arm count (bitmap-overflow-protection-discipline): widen
 // the masks (uint8 -> uint16) if ENSEMBLE_HORIZON_MAX ever grows past 8.
+// [ASSERT]_[BITMAP_OVERFLOW]_[ENSEMBLE_HORIZON_MAX <= 8 — per-arm uint8_t bitmap width pin]
 static_assert(ENSEMBLE_HORIZON_MAX <= 8,
               "per-arm uint8_t bitmaps hold 8 arms; widen the masks if ENSEMBLE_HORIZON_MAX grows");
 
-// v5.15.4 — alignas(64) required so heap-allocated EnsembleModelZoo via
-// aligned_alloc(64) (HotSwap_ShadowLoad_Ensemble) gives the embedded
-// alignment-sensitive members correctly-aligned addresses:
-//   - ModelHandle<F> arrays (alignas(64) per v5.15.0)
-//   - RidgeWeights<F> (AVX-512 vectorized; per CLAUDE.md item 25)
-//   - ThompsonBanditState (gained alignas/padding per v5.14.11.B.7)
-// Container struct also clusters cleanly at cache-line boundaries.
+//======================================================================
+// [STRUCT]_[PerArmBarriers]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the AoS (tp, sl) pair — one cache-line read at DOMINANT-mode dispatch fetches BOTH barriers for the dominant arm; 8 pairs = exactly 64B]
+// [REFERENCE]_[DESIGN_SPEC]_[per-horizon-barrier-blending-with-shadow-mode]
+//======================================================================
+// [CODE]
+//======================================================================
+struct PerArmBarriers {
+    float tp;  // label_tp_pct from stamp body (zero when stamp lacks the field)
+    float sl;  // label_sl_pct from stamp body
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.15.5.A.2.a — per-arm trained barriers (Layout C AoS).
 // Each entry pairs tp + sl floats so a single cache-line read at
 // DOMINANT-mode dispatch (read per_arm_barriers[h]) fetches BOTH
 // barriers for the dominant arm. struct{tp,sl} × 8 = 64 bytes
 // exactly = 1 cache line; alignas(64) prevents straddling.
 // Populated at LoadFromCfg per-arm copy site from each handle's
-// stamp-body label_tp_pct/label_sl_pct (already loaded by
-// NodeModelZoo_TryLoadRole at NodeModelZoo.hpp:349-350).
+// stamp-body label_tp_pct/label_sl_pct (already loaded by the
+// NodeModelZoo_TryLoadRole label_params copy).
 // Rationale: cache-miss cost (~100ns cold) is 75-100× cycle cost
-// per CLAUDE.md item 28 latency-vs-cache decision framework;
+// per the latency-vs-cache decision framework;
 // 1-cache-line read profile across both DOMINANT and BLEND modes
 // wins over SoA double[8] separate arrays (2 cache lines per
 // DOMINANT lookup). Pattern documented in
 // DESIGN_SPECS/per-horizon-barrier-blending-with-shadow-mode.md.
-struct PerArmBarriers {
-    float tp;  // label_tp_pct from stamp body (zero when stamp lacks the field)
-    float sl;  // label_sl_pct from stamp body
-};
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[8B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[PerArmBarriers]
+//======================================================================
 
-// v5.10.0a.G.8 — reward attribution ring buffer record (used in WARM cluster
-// below). Each predict writes a record; slow-path lookback walks ring for
-// reward attribution.
+//======================================================================
+// [STRUCT]_[PredictionRecord]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[reward-attribution ring record (G.8) — per-predict per-arm outputs + regime + price + the two rewarded flags]
+//======================================================================
+// [CODE]
+//======================================================================
 struct PredictionRecord {
     uint64_t predict_call;        // monotonic counter (increments per predict)
     int      regime_id;           // regime AT predict time (for attribution)
@@ -943,7 +1081,34 @@ struct PredictionRecord {
     uint8_t  rewarded_lookback;   // 1 = already rewarded by slow-path lookback
     uint8_t  rewarded_trade;      // 1 = already rewarded by trade-close
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.10.0a.G.8 — reward attribution ring buffer record (used in WARM cluster
+// below). Each predict writes a record; slow-path lookback walks ring for
+// reward attribution.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[56B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[PredictionRecord]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[PerArmDrift]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[drift-watchdog state per arm (G.8) — IC history ring + running average + the sticky demoted flag]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.10.0a.G.8 — drift watchdog state (used in WARM cluster below).
 struct PerArmDrift {
     float    ic_history[100];  // recent reward outcomes; capped at DRIFT_IC_HISTORY
@@ -951,13 +1116,34 @@ struct PerArmDrift {
     float    ic_avg;            // running average
     uint8_t  demoted;           // 1 = forced near-zero weight; sticky until recovery
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[412B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[7]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[PerArmDrift]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[EnsembleModelZoo]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the multi-horizon sidecar — 4 roles x 8 arms of handles + per-regime bandit/Thompson/Ridge state + reward ring + drift watchdogs, tiered HOT/WARM/COLD]
+// [INSTANTIATION]_[[64]]
+// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct alignas(64) EnsembleModelZoo {
-    // ============================================================================
-    // HOT CLUSTER — small fields touched every slow-path cycle when ensemble active
-    // ============================================================================
-    // Per CLAUDE.md item 28 + DESIGN_SPECS/cache-layout-discipline-for-hot-side-
+    //---- [SECTION]_[HOT CLUSTER — small fields touched every slow-path cycle when ensemble active] ----
+    // Per DESIGN_SPECS/cache-layout-discipline-for-hot-side-
     // structs.md Rule 4 (Hot/Warm/Cold tier clustering): small high-frequency
     // fields cluster at struct start so a single L1 fetch covers all of them
     // per slow-path cycle. Large arrays follow (each gets its own cache lines
@@ -1005,10 +1191,7 @@ struct alignas(64) EnsembleModelZoo {
     int             primary_count;     // mirrors *_count of chosen role
     int             primary_target_class; // class index for buy probability extraction
 
-    // ============================================================================
-    // LARGE HOT arrays — touched per-cycle for predict/dispatch; each large enough
-    // to occupy its own cache lines (clustering with small hot scalars wouldn't help)
-    // ============================================================================
+    //---- [SECTION]_[LARGE HOT arrays — touched per-cycle for predict/dispatch; each occupies its own cache lines] ----
 
     alignas(64) ModelHandle<F> barrier[ENSEMBLE_HORIZON_MAX];
     alignas(64) ModelHandle<F> regime[ENSEMBLE_HORIZON_MAX];
@@ -1037,9 +1220,7 @@ struct alignas(64) EnsembleModelZoo {
     // Size: ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B sister to buy_thompson_bandits[]).
     alignas(64) ThompsonBanditState exit_thompson_bandits[NUM_REGIMES];
 
-    // ============================================================================
-    // WARM CLUSTER — touched per regime-transition or sparse attribution paths
-    // ============================================================================
+    //---- [SECTION]_[WARM CLUSTER — touched per regime-transition or sparse attribution paths] ----
     // v5.14.0 — Ridge risk-parity blending state. Computed per slow-path cycle
     // when cfg.ridge_within_horizon=1 (default 0). Reads reward_ring history,
     // builds N×N correlation matrix, Cholesky-solves optimal weights, falls
@@ -1070,9 +1251,7 @@ struct alignas(64) EnsembleModelZoo {
     // Written on reward attribution events; demoted bit sticky until recovery.
     alignas(64) PerArmDrift drift[ENSEMBLE_HORIZON_MAX];
 
-    // ============================================================================
-    // COLD CLUSTER — boot / persistence / display only
-    // ============================================================================
+    //---- [SECTION]_[COLD CLUSTER — boot / persistence / display only] ----
     // v5.10.0a.G.9 — bandit state persistence config. base_dir captured at
     // AutoDetectFromDir / LoadFromCfg time; empty path = persistence disabled.
     alignas(64) char bandit_save_path[400];   // <node_model_dir>/bandit_state.json
@@ -1092,14 +1271,37 @@ struct alignas(64) EnsembleModelZoo {
     BanditDisplayMeta bandit_display[NUM_REGIMES];
     BanditDisplayMeta exit_bandit_display[NUM_REGIMES];
 };
-
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.4 — alignas(64) required so heap-allocated EnsembleModelZoo via
+// aligned_alloc(64) (HotSwap_ShadowLoad_Ensemble) gives the embedded
+// alignment-sensitive members correctly-aligned addresses:
+//   - ModelHandle<F> arrays (alignas(64) per v5.15.0)
+//   - RidgeWeights<F> (AVX-512 vectorized)
+//   - ThompsonBanditState (gained alignas/padding per v5.14.11.B.7)
+// Container struct also clusters cleanly at cache-line boundaries.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[258624B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[4041]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[EnsembleModelZoo]
+//======================================================================
 // v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
 // EnsembleModelZoo is large (~40-60KB depending on F) but the constituent
 // member alignments (ModelHandle alignas(64) × 32 slots + RidgeWeights
 // alignas(64) × 2 + ThompsonBanditState ×5) all sit on 64-byte boundaries,
 // so total size is a multiple of 64 (verified by static_assert).
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(EnsembleModelZoo<64>) % 64 == 0]
 static_assert(sizeof(EnsembleModelZoo<64>) % 64 == 0,
               "v5.15.4: EnsembleModelZoo<64> size must be multiple of 64 for cache-line discipline + AVX-512 alignment of RidgeWeights");
+// [ASSERT]_[LAYOUT_LOCK]_[alignof(EnsembleModelZoo<64>) == 64]
 static_assert(alignof(EnsembleModelZoo<64>) == 64,
               "v5.15.4: EnsembleModelZoo<64> must be cache-line aligned");
 
@@ -1114,17 +1316,17 @@ static_assert(alignof(EnsembleModelZoo<64>) == 64,
 // Exit-side analog (g_exit_reward_dispatch) consumed at ControllerEventLoop reward attribution sites.
 #include "bandit_dispatch_table.hpp"
 
-// v5.15.5.F.3 — registry-bitmap SET discipline accessor for per_arm_barriers.
-// Per DESIGN_SPECS/registry-bitmap-set-discipline.md Fix 3 (accessor wrapper).
-// Couples the data write (per_arm_barriers[idx].tp/sl) with the mark bit
-// (arms_with_barriers_mask bit-idx). Direct field-write sites become
-// detectable via /dod-audit Signature 1 ("data write without bit set").
-//
-// Pre-.F.3 BUG: LoadFromCfg copied per_arm_barriers but forgot to SET the
-// mask → downstream reader at StrategyParameters.hpp gated barrier blending
-// on the all-zero mask → ALL arms appeared barrierless → ensemble barrier
-// blending SILENTLY DISABLED. Operator saw no errors but features didn't
-// work as configured.
+//======================================================================
+// [FUNCTION]_[ezoo_set_per_arm_barrier]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the A6 corrupt-barrier ingress pair (EnsembleZoo_FinalizeCorrupt rides) — data write coupled with the mask bit; corrupt arms withheld + counted toward the majority-SHALT verdict]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-bitmap-set-discipline]
+// [REFERENCE]_[INVARIANT]_[H22]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void ezoo_set_per_arm_barrier(EnsembleModelZoo<F>* ezoo, int arm_idx,
                                        float tp, float sl) {
@@ -1160,7 +1362,35 @@ inline bool EnsembleZoo_FinalizeCorrupt(EnsembleModelZoo<F>* ezoo, double shalt_
     if (n_corrupt >= n_arms) return true;                    // all corrupt -> SHALT
     return (double)n_corrupt > shalt_ratio * (double)n_arms; // strict majority -> SHALT
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.3 — registry-bitmap SET discipline accessor for per_arm_barriers.
+// Per DESIGN_SPECS/registry-bitmap-set-discipline.md Fix 3 (accessor wrapper).
+// Couples the data write (per_arm_barriers[idx].tp/sl) with the mark bit
+// (arms_with_barriers_mask bit-idx). Direct field-write sites become
+// detectable via /dod-audit Signature 1 ("data write without bit set").
+//
+// Pre-.F.3 BUG: LoadFromCfg copied per_arm_barriers but forgot to SET the
+// mask → downstream reader at StrategyParameters.hpp gated barrier blending
+// on the all-zero mask → ALL arms appeared barrierless → ensemble barrier
+// blending SILENTLY DISABLED. Operator saw no errors but features didn't
+// work as configured.
+//======================================================================
+// [END_FUNCTION]_[ezoo_set_per_arm_barrier]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero-state init family (EnsurePrimary backstop rides) — all 32 handles + bandit/Thompson/Ridge/ring/drift state cleared; sink-fn-pointers default to noop]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
@@ -1283,10 +1513,24 @@ inline void EnsembleModelZoo_EnsurePrimary(EnsembleModelZoo<F>* ezoo) {
     }
     ezoo->primary_role_name[sizeof(ezoo->primary_role_name) - 1] = '\0';
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_Init]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.8 — REWARD RING WRITE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_TickRewardsFromLookback]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the G.8 reward-attribution family (RecordPrediction ring write + UpdateDrift watchdog ride) — lookback walk rewards aged records via the per-algorithm dispatch table]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.8 — REWARD RING WRITE]
+//------------------------------------------------------------------
 // Called from ML_BuildParameters after each predict. Writes per-arm
 // predictions + regime + sample_price into the ring at head; head
 // advances modulo RING_SIZE (oldest record overwritten).
@@ -1318,9 +1562,9 @@ inline void EnsembleModelZoo_RecordPrediction(EnsembleModelZoo<F>* ezoo,
                              % EnsembleModelZoo<F>::REWARD_RING_SIZE;
 }
 
-//======================================================================================================
-// [v5.10.0a.G.8 — DRIFT WATCHDOG (perf optimization #3)]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.8 — DRIFT WATCHDOG (perf optimization #3)]
+//------------------------------------------------------------------
 // Updates per-arm IC running history with reward outcome. If IC drops
 // below ic_floor for sustained window → demote (force near-zero weight
 // across all regimes). Recovery: IC rises above ic_floor + 0.02
@@ -1364,9 +1608,9 @@ inline void EnsembleModelZoo_UpdateDrift(EnsembleModelZoo<F>* ezoo,
     }
 }
 
-//======================================================================================================
-// [v5.10.0a.G.8 — SLOW-PATH LOOKBACK REWARDS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.8 — SLOW-PATH LOOKBACK REWARDS]
+//------------------------------------------------------------------
 // Walks reward ring; for records old enough that forward_ticks have
 // elapsed since predict time, computes per-arm reward based on whether
 // prediction direction matched the price move (current_price vs
@@ -1445,9 +1689,9 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
     }
 }
 
-//======================================================================================================
-// [v5.10.0a.G.8 — TRADE-CLOSE REWARD HOOK]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.8 — TRADE-CLOSE REWARD HOOK]
+//------------------------------------------------------------------
 // Called from EventLoop_DrainPostFill when a position closes (TP/SL
 // exit). Looks up the MOST RECENT prediction record (proxy for "the
 // model recommendation that drove this trade") and rewards based on
@@ -1513,19 +1757,24 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
     // v5.10.0a.G.9 — periodic save check (no-op when interval==0)
     EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, trade_updates);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_TickRewardsFromLookback]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.7 — INIT BANDITS]
-//======================================================================================================
-// Call AFTER LoadFromCfg / AutoDetectFromDir populates ezoo->buy_signal_count.
-// Initializes one BanditState per regime (NUM_REGIMES from FOREACH_REGIME),
-// each with n_arms = buy_signal_count. Uniform initial weights.
-//
-// eta: cfg.ensemble_bandit_eta (Bandit-Exp3 learning rate; 0.1 default)
-// min_warmup: cfg.ensemble_min_warmup_predictions (per regime; 100 default)
-//
-// Sets BITMAP_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) to gate G.7 dispatch (won't read bandits
-// before they're initialized).
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_InitBandits]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-regime bandit init family — Exp3 buy/exit + Thompson buy/exit (4 fns); each sets its MASK_EZOO_*_READY gate; Thompson inits wire the Pattern-5 sink-fn-pointers to real]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.7 — INIT BANDITS]
+//------------------------------------------------------------------
 template <unsigned F>
 inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
                                            double eta, int min_warmup) {
@@ -1612,9 +1861,9 @@ inline void EnsembleModelZoo_InitExitBandits(EnsembleModelZoo<F>* ezoo,
     BITMAP_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY);
 }
 
-//======================================================================================================
-// [v5.14.10.B — THOMPSON BANDIT INIT]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.14.10.B — THOMPSON BANDIT INIT]
+//------------------------------------------------------------------
 // Initializes one ThompsonBanditState per regime (NUM_REGIMES from FOREACH_REGIME),
 // with arms = ezoo->primary_count (same dimensions as bandits[]). Each posterior
 // starts at the prior (mu_post=mu_prior, precision_post=precision_prior); RNG
@@ -1664,12 +1913,12 @@ inline void EnsembleModelZoo_InitBuyThompsonBandits(EnsembleModelZoo<F>* ezoo,
     ezoo->buy_thompson_update_fn = &real_thompson_update;
 }
 
-//======================================================================================================
-// [v5.15.5.F.4d — EXIT-SIDE THOMPSON BANDIT INIT — hand-mirror of _InitThompsonBandits per FOREACH_BANDIT_SIDE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.15.5.F.4d — EXIT-SIDE THOMPSON BANDIT INIT — hand-mirror of _InitThompsonBandits per FOREACH_BANDIT_SIDE]
+//------------------------------------------------------------------
 // Sister to EnsembleModelZoo_InitBuyThompsonBandits above. Initializes one ThompsonBanditState per
-// regime over `exit_thompson_bandits[]` with arms = ezoo->exit_predictor_count (parallel to existing
-// _InitExitBandits Exp3 init at line ~1471 which uses the same arm count source). Closes pre-.F.4d
+// regime over `exit_thompson_bandits[]` with arms = ezoo->exit_predictor_count (parallel to the
+// _InitExitBandits Exp3 init above, which uses the same arm count source). Closes pre-.F.4d
 // asymmetry where buy-side had Thompson but exit-side was Exp3-only.
 //
 // Per § G.2 of v5.15.5.F.4d merged plan body. Pattern 5 sink-fn-pointer wiring at end sets
@@ -1716,13 +1965,34 @@ inline void EnsembleModelZoo_InitExitThompsonBandits(EnsembleModelZoo<F>* ezoo,
     // Pattern 5 sink-fn-pointer wire to real on successful init.
     ezoo->exit_thompson_update_fn = &real_thompson_update;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// InitBandits: call AFTER LoadFromCfg / AutoDetectFromDir populates
+// ezoo->buy_signal_count. Initializes one BanditState per regime
+// (NUM_REGIMES from FOREACH_REGIME), each with n_arms = buy_signal_count.
+// Uniform initial weights.
+//
+// eta: cfg.ensemble_bandit_eta (Bandit-Exp3 learning rate; 0.1 default)
+// min_warmup: cfg.ensemble_min_warmup_predictions (per regime; 100 default)
+//
+// Sets BITMAP_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) to gate G.7 dispatch (won't read bandits
+// before they're initialized).
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_InitBandits]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.7 — KILL-SWITCH PARSER]
-//======================================================================================================
-// Parses CSV string ("100,500") → bitmask of horizon indices that match.
-// Disabled horizons skip predict (saves N×predict cost per disabled);
-// their bandit weights stay frozen at last value (skipped by Bandit_Update).
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_SetDisabledHorizons]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the kill-switch CSV parser (Free rides) — horizon ticks -> disabled_horizon_mask; disabled arms skip predict + freeze their bandit weights]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline void EnsembleModelZoo_SetDisabledHorizons(EnsembleModelZoo<F>* ezoo,
                                                    const char* csv) {
@@ -1773,18 +2043,28 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
     ezoo->exit_reward_ring_head = 0;
     ezoo->exit_predict_call_count = 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// SetDisabledHorizons: parses CSV string ("100,500") → bitmask of horizon
+// indices that match. Disabled horizons skip predict (saves N×predict cost
+// per disabled); their bandit weights stay frozen at last value (skipped
+// by Bandit_Update).
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_SetDisabledHorizons]
+//======================================================================
 
-// Load N models per role from per-horizon directories. Operator's
-// Train Multi-Horizon worker (v5.10.0a.G.1) saves to:
-//   models/<class_or_regr>/<run_name>_horizon_<H>/<role>.json
-//
-// This loader expects:
-//   base_run_path = "models/<class>/<run_name>" (without _horizon_<H> suffix)
-// Per horizon h in horizon_list[]:
-//   try load <base_run_path>_horizon_<H>/<role>.json for each role
-//
-// Returns total models loaded across all roles + horizons. Sets
-// BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)=1 if any role got at least one horizon loaded.
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_LoadFromCfg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the multi-horizon loader — per horizon dir `<base>_horizon_<H>` try all 4 roles (horizon-mismatch refusal threaded), copy stamp barriers via the mask-coupled accessor, then pick the primary role]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                          const char *base_run_path,
@@ -1935,7 +2215,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     // inversion that the /plan-check + /merge-scan audits caught before
     // coding started.
     //
-    // Mirrors the barrier-role pattern (lines ~1280-1281) but applies to
+    // Mirrors the barrier-role buy_class_idx aliasing above but applies to
     // exit_predictor independently.
     for (int i = 0; i < ezoo->exit_predictor_count; ++i) {
         ezoo->exit_predictor[i].buy_class_idx =
@@ -1994,10 +2274,38 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     }
     return total_loaded;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Load N models per role from per-horizon directories. Operator's
+// Train Multi-Horizon worker (v5.10.0a.G.1) saves to:
+//   models/<class_or_regr>/<run_name>_horizon_<H>/<role>.json
+//
+// This loader expects:
+//   base_run_path = "models/<class>/<run_name>" (without _horizon_<H> suffix)
+// Per horizon h in horizon_list[]:
+//   try load <base_run_path>_horizon_<H>/<role>.json for each role
+//
+// Returns total models loaded across all roles + horizons. Sets
+// BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)=1 if any role got at least one horizon loaded.
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_LoadFromCfg]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.5 — AUTO-DETECT ENSEMBLE FROM DISK]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_AutoDetectFromDir]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[disk discovery of `_horizon_*` siblings -> sorted load via LoadFromCfg -> grid_member_count consistency verdict (VerifyGridMemberConsistency rides; mismatch unwinds the whole ensemble)]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.5 — AUTO-DETECT ENSEMBLE FROM DISK]
+//------------------------------------------------------------------
 // Scans <base_dir>_horizon_* siblings on disk. For each sibling found:
 //   - Verify load via NodeModelZoo_TryLoadRole
 //   - Read stamp body's grid_member_count + grid_member_idx (v5.10.0a.G.2)
@@ -2243,10 +2551,24 @@ inline int EnsembleModelZoo_AutoDetectFromDir(
 
     return total;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_AutoDetectFromDir]
+//======================================================================
 
-//======================================================================================================
-// [v5.10.0a.G.9 — BUNDLE SHA + BANDIT STATE LOAD/SAVE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_LoadBanditState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the G.9 Exp3 bandit persistence family (ComputeBundleId + buy/exit save/load ride) — bundle-id gate keyed on primary fingerprints; missing/mismatch leaves uniform priors]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.10.0a.G.9 — BUNDLE SHA + BANDIT STATE LOAD/SAVE]
+//------------------------------------------------------------------
 // "Bundle SHA": deterministic 64-char hex derived from each loaded
 // horizon's training_fingerprint. NOT a cryptographic SHA — just a
 // stable identifier for "this exact set of models." Detects when
@@ -2381,10 +2703,25 @@ inline int EnsembleModelZoo_LoadExitBanditState(
     }
     return loaded;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_LoadBanditState]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.10.C — THOMPSON STATE PERSISTENCE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_LoadThompsonState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the Thompson posterior persistence family (buy/exit save + load ride) — LC_NUMERIC=C-pinned %.17g JSON, format_version=1, bundle-id + n_arms gates, forward-compat-by-absence]
+// [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.14.10.C — THOMPSON STATE PERSISTENCE]
+//------------------------------------------------------------------
 // Mirrors v5.13.4.C exit_bandit_state.json pattern but writes ThompsonBanditState's
 // posterior (mu_post + precision_post + total_pulls) + per-regime RNG state to
 // <base_dir>/thompson_state.json. Same forward-compat-by-absence shape: legacy
@@ -2396,8 +2733,7 @@ inline int EnsembleModelZoo_LoadExitBanditState(
 //   - Layer 6 — Forward-compat-by-absence: missing file → uniform priors stay; missing fields default
 //   - format_version=1 header (PATH for FUTURE format upgrades; bumped via .X.Y if breaking)
 //
-// Skipped silently when initialized_thompson_bandits=0 (cfg=0 default = no Thompson activity to persist).
-//======================================================================================================
+// Skipped silently when the MASK_EZOO_BUY_THOMPSON_READY bit is unset (cfg=0 default = no Thompson activity to persist).
 
 // Save buy-side thompson state to <base_dir>/buy_thompson_state.json (v5.15.5.F.4d TECH_DEBT-084
 // rename from thompson_state.json for symmetric naming with exit_thompson_state.json). Load-side
@@ -2478,9 +2814,9 @@ inline int EnsembleModelZoo_SaveThompsonState(
     return 1;
 }
 
-//======================================================================================================
-// [v5.15.5.F.4d — EXIT-SIDE THOMPSON SAVE/LOAD — hand-mirror of buy-side per FOREACH_BANDIT_SIDE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.15.5.F.4d — EXIT-SIDE THOMPSON SAVE/LOAD — hand-mirror of buy-side per FOREACH_BANDIT_SIDE]
+//------------------------------------------------------------------
 // Per § G of v5.15.5.F.4d merged plan body. Filename scheme mirrors buy-side: persistence to
 // `thompson_exit_state.json` (parallel to `thompson_state.json` buy-side file). Same wire format
 // (format_version=1; same JSON shape) — just different filename + different ThompsonBanditState array
@@ -2490,7 +2826,6 @@ inline int EnsembleModelZoo_SaveThompsonState(
 // require renaming buy_thompson_bandits → buy_thompson_bandits across ~50 call sites; current hand-mirror
 // scoped to `.F.4d` as cost/benefit trade-off. Future cleanup ship collapses this into a single
 // X-macro consumer expansion when the rename lands.
-//======================================================================================================
 
 template <unsigned F>
 inline int EnsembleModelZoo_SaveExitThompsonState(
@@ -2698,9 +3033,9 @@ inline int EnsembleModelZoo_LoadThompsonState(
     return 1;
 }
 
-//======================================================================================================
-// [v5.15.5.F.4d — EXIT-SIDE THOMPSON LOAD — hand-mirror of buy-side per FOREACH_BANDIT_SIDE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[v5.15.5.F.4d — EXIT-SIDE THOMPSON LOAD — hand-mirror of buy-side per FOREACH_BANDIT_SIDE]
+//------------------------------------------------------------------
 // Mirror of EnsembleModelZoo_LoadThompsonState above. Loads from `thompson_exit_state.json`
 // (parallel filename to buy-side `thompson_state.json`). Same forward-compat-by-absence semantics:
 // missing file → uniform priors stay (no-op return 0); per-regime overlay with field-by-field
@@ -2708,7 +3043,6 @@ inline int EnsembleModelZoo_LoadThompsonState(
 //
 // Caller must call EnsembleModelZoo_InitExitThompsonBandits FIRST to set up uniform priors + arm
 // count + base RNG seed. This function only overlays.
-//======================================================================================================
 template <unsigned F>
 inline int EnsembleModelZoo_LoadExitThompsonState(
     EnsembleModelZoo<F>* ezoo, const char* base_dir) {
@@ -2824,7 +3158,21 @@ inline int EnsembleModelZoo_LoadExitThompsonState(
     fprintf(stderr, "[ensemble] loaded thompson exit state from %s\n", path);
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_LoadThompsonState]
+//======================================================================
 
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_MaybeSaveBanditPeriodic]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the periodic-save tail family (LoadBanditStateFromPath transfer-learning override + SetBanditSaveInterval ride) — threshold-crossing flush to bandit_save_path]
+//======================================================================
+// [CODE]
+//======================================================================
 // v5.10.0a.next.1 — load bandit state from an EXPLICIT path with optional
 // bundle-id check skip. Used by BacktestRunConfig.bandit_state_prior_path
 // when operator wants to bootstrap a new ensemble from a sibling bundle's
@@ -2907,16 +3255,31 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
                 ezoo->bandit_save_path, (unsigned long long)threshold);
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_MaybeSaveBanditPeriodic]
+//======================================================================
 
-//======================================================================================================
-// [v5.14.2.E.1 — POST-LOAD SETUP X-MACRO REGISTRIES]
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_ENSEMBLE_POST_LOAD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the canonical ensemble post-load setup steps — boot/backtest/hot-swap all expand THIS registry (the PARITY-009..012 Class-18 structural close); PostLoadSetup + IsReadyForInference contract ride]
+// [COLUMN]_[step_name]_[registry-row identifier for the setup step]
+// [COLUMN]_[call_expression]_[the invocation — (ezoo, cfg, node_id, base_run_path) in scope from the helper body]
+// [REFERENCE]_[DESIGN_SPEC]_[postloadsetup-registry-pattern]
+// [REFERENCE]_[CLASS]_[18]
+//======================================================================
+// [CODE]
+//======================================================================
 // Canonical post-load setup steps for single-zoo + ensemble. Same shape as
-// FOREACH_STAMP_BOUND_CFG (v5.14.1) — extract recurring pattern, eliminate
+// the stamp-bound cfg registries (v5.14.1) — extract recurring pattern, eliminate
 // the bug class structurally.
 //
-// Why: pre-v5.14.2.E, the boot ensemble setup at EngineSharded.hpp:1173-1201
-// was inlined as 7 sequential calls. Backtest (BacktestSharded.hpp) had a
+// Why: pre-v5.14.2.E, the boot ensemble setup (EngineSharded boot site)
+// was inlined as sequential calls. Backtest (BacktestSharded.hpp) had a
 // near-mirror that drifted (missed v5.13.4 InitExitBandits + LoadExitBanditState
 // = PARITY-010). Hot-swap (EnsembleHotSwap.hpp from v5.14.2.A) had a different
 // near-mirror that drifted MORE (missed 6 steps = PARITY-009). Single-zoo
@@ -2931,8 +3294,8 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
 // ValidateAgainstCfg is NOT in the registries — it's a cross-cutting validator
 // that takes BOTH zoo + ezoo as one combined check, called by caller AFTER
 // PostLoadSetup helpers run. Strict-mode failure handling stays at caller
-// level (boot Free+null vs hot-swap log-only — preserved per v5.10.0c
-// semantics at EngineSharded.hpp:2803-2806).
+// level (boot Free+null vs hot-swap log-only — preserved per the v5.10.0c
+// semantics at the EngineSharded boot site).
 
 // Multi-line blend_mode application extracted to helper for X-macro tuple
 // cleanliness. Selects per-core override OR global default; null-terminates
@@ -2995,7 +3358,8 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
 // v5.15.5.F.4d: 9 → 11 (added init_exit_thompson_bandits + load_exit_thompson_state for exit-side mirror).
 #define FOREACH_ENSEMBLE_POST_LOAD_COUNT 11
 
-// Canonical post-load setup for ensemble. All 7 setup steps in one place.
+// Canonical post-load setup for ensemble. All registry steps in one place
+// (count = FOREACH_ENSEMBLE_POST_LOAD_COUNT).
 // Boot, backtest, hot-swap call this; never inline the steps directly.
 //
 // Returns: void. Does NOT call ValidateAgainstCfg — that's the caller's
@@ -3026,27 +3390,39 @@ template <unsigned F>
 inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo) {
     if (!ezoo) return 0;
     // Step contracts (mirror FOREACH_ENSEMBLE_POST_LOAD):
-    // - InitBandits: initialized_bandits flag set (or no bandits possible — primary_count<2)
-    // - InitExitBandits: initialized_exit_bandits set (or no exit models — exit_predictor_count<2)
+    // - InitBandits: MASK_EZOO_BANDITS_READY set (or no bandits possible — primary_count<2)
+    // - InitExitBandits: MASK_EZOO_EXIT_BANDITS_READY set (or no exit models — exit_predictor_count<2)
     // - blend_mode: non-empty (defaults to global cfg.ensemble_blend_mode)
     // - SetDisabledHorizons: disabled_horizon_mask written (any value valid)
     // - LoadBanditState: no boolean to check; idempotent overlay
     // - SetBanditSaveInterval: bandit_save_interval set if cfg.ensemble_bandit_save_interval>0
     // - LoadExitBanditState: no boolean to check; idempotent overlay
-    // - InitThompsonBandits (v5.14.10.C): initialized_thompson_bandits set when primary_count>=2
-    // - LoadThompsonState (v5.14.10.C): no boolean to check; idempotent overlay (skipped silently when initialized=0)
+    // - InitThompsonBandits (v5.14.10.C): MASK_EZOO_BUY_THOMPSON_READY set when primary_count>=2
+    // - LoadThompsonState (v5.14.10.C): no boolean to check; idempotent overlay (skipped silently when the READY bit is unset)
     if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (ezoo->exit_predictor_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
     if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) return 0;
     if (ezoo->blend_mode[0] == '\0') return 0;
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_ENSEMBLE_POST_LOAD]
+//======================================================================
 
-// Canonical post-load setup steps for single-zoo.
-// Today: 1 entry (VerifyExpected). Designed for growth.
-// Each entry: X(step_name, call_expression). Expression returns int
-// (1=ok, 0=failure). Caller checks return code to decide strict-mode action
-// (Free+null at boot; flag-only at hot-swap per v5.10.0c semantics).
+//======================================================================
+// [REGISTRY]_[FOREACH_SINGLE_ZOO_POST_LOAD]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the canonical single-zoo post-load steps (today: VerifyExpected; designed for growth) — NodeModelZoo_PostLoadSetup expands it; sister to FOREACH_ENSEMBLE_POST_LOAD]
+// [COLUMN]_[step_name]_[registry-row identifier for the setup step]
+// [COLUMN]_[call_expression]_[the invocation — returns int (1=ok, 0=failure); caller decides strict-mode action]
+// [REFERENCE]_[DESIGN_SPEC]_[postloadsetup-registry-pattern]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_SINGLE_ZOO_POST_LOAD(X)                                        \
     X(verify_expected,     NodeModelZoo_VerifyExpected(zoo, base_run_path,      \
                                BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED),                         \
@@ -3075,27 +3451,29 @@ inline int NodeModelZoo_PostLoadSetup(const NodeModelZoo<F>* zoo,
 #undef X
     return all_ok;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Canonical post-load setup steps for single-zoo.
+// Today: 1 entry (VerifyExpected). Designed for growth.
+// Each entry: X(step_name, call_expression). Expression returns int
+// (1=ok, 0=failure). Caller checks return code to decide strict-mode action
+// (Free+null at boot; flag-only at hot-swap per v5.10.0c semantics).
+//======================================================================
+// [END_REGISTRY]_[FOREACH_SINGLE_ZOO_POST_LOAD]
+//======================================================================
 
-//======================================================================================================
-// [NodeModelZoo_CheckStaleModel — v5.14.8.E stale-model age gate]
-//======================================================================================================
-// Boot-time check: if the loaded model's stamp claims training_timestamp_us
-// older than cfg.model_max_age_hours, surface stale-model condition.
-//
-// Operator policy:
-//   cfg.model_max_age_hours == 0          → disabled (no check)
-//   strict_mode (held_out_gate_strict=1)  → REFUSE (return -1)
-//   strict_mode == 0                      → WARN (return 0; engine continues)
-//
-// Legacy stamps without training_timestamp_us (has_training_timestamp_us=0)
-// load with check skipped (forward-compat).
-//
-// Caller uses CRITICAL log for WARN/REFUSE surfacing. Rate-limited via
-// per-call-site static.
-//
-// Returns: -1 on REFUSE, 0 on OK or WARN. Caller checks strict_mode +
-// the returned value.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[NodeModelZoo_CheckStaleModel]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[v5.14.8.E stale-model age gate — stamp training_timestamp_us vs cfg.model_max_age_hours; -1 REFUSE in strict mode, rate-limited CRITICAL log otherwise]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 inline int NodeModelZoo_CheckStaleModel(const ModelHandle<F>* m,
                                           uint64_t now_us,
@@ -3127,5 +3505,29 @@ inline int NodeModelZoo_CheckStaleModel(const ModelHandle<F>* m,
 
     return strict_mode ? -1 : 0;  // REFUSE in strict; WARN otherwise
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Boot-time check: if the loaded model's stamp claims training_timestamp_us
+// older than cfg.model_max_age_hours, surface stale-model condition.
+//
+// Operator policy:
+//   cfg.model_max_age_hours == 0          → disabled (no check)
+//   strict_mode (held_out_gate_strict=1)  → REFUSE (return -1)
+//   strict_mode == 0                      → WARN (return 0; engine continues)
+//
+// Legacy stamps without training_timestamp_us (has_training_timestamp_us=0)
+// load with check skipped (forward-compat).
+//
+// Caller uses CRITICAL log for WARN/REFUSE surfacing. Rate-limited via
+// per-call-site static.
+//
+// Returns: -1 on REFUSE, 0 on OK or WARN. Caller checks strict_mode +
+// the returned value.
+//======================================================================
+// [END_FUNCTION]_[NodeModelZoo_CheckStaleModel]
+//======================================================================
 
 #endif // NODE_MODEL_ZOO_HPP
