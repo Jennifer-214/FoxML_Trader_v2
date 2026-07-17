@@ -276,9 +276,6 @@ static inline FIX_ParsedMessage FIX_Parse(const char *msg, int len) {
 //======================================================================
 // [CODE]
 //======================================================================
-// takes a parsed FIX message and converts price/volume into a DataStream<F> for the gates and
-// regression pipeline, only makes sense for trade entries (269=2) but we convert regardless and
-// let the caller filter by entry_type if they care
 template <unsigned F> inline DataStream<F> FIX_ToDataStream(const FIX_ParsedMessage *msg) {
     DataStream<F> stream;
     stream.price  = Money{ money_from_double_payload(msg->price) };
@@ -287,6 +284,12 @@ template <unsigned F> inline DataStream<F> FIX_ToDataStream(const FIX_ParsedMess
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// takes a parsed FIX message and converts price/volume into a DataStream<F> for the gates and
+// regression pipeline, only makes sense for trade entries (269=2) but we convert regardless and
+// let the caller filter by entry_type if they care
 //======================================================================
 // [END_FUNCTION]_[FIX_ToDataStream]
 //======================================================================
@@ -300,9 +303,6 @@ template <unsigned F> inline DataStream<F> FIX_ToDataStream(const FIX_ParsedMess
 //======================================================================
 // [CODE]
 //======================================================================
-// constructs a FIX market data snapshot string with proper checksum, returns length written
-// this is the faux exchange side - generates what a real exchange would send you
-// writes into buf which must be at least FIX_MAX_MSG_LEN bytes
 static inline int FIX_BuildMarketDataMsg(char *buf, int buf_size, uint32_t seq_num, const char *symbol, uint8_t entry_type, double price,
                                          double volume) {
     // build body first (everything between tag 8 and tag 10)
@@ -447,6 +447,12 @@ static inline int FIX_BuildMarketDataMsg(char *buf, int buf_size, uint32_t seq_n
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// constructs a FIX market data snapshot string with proper checksum, returns length written
+// this is the faux exchange side - generates what a real exchange would send you
+// writes into buf which must be at least FIX_MAX_MSG_LEN bytes
 //======================================================================
 // [END_FUNCTION]_[FIX_BuildMarketDataMsg]
 //======================================================================

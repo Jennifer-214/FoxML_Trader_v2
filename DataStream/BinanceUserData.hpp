@@ -3,7 +3,20 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [BINANCE USER DATA STREAM]
+// [FILE]_[DataStream/BinanceUserData.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the executionReport fill stream — WS + keepalive thread pair push CMD_WS_FILL into the OMS SPSC ring; KNOWN OPEN CAPITAL FINDINGS on the parser (TECH_DEBT-169/171, see the parse block)]
+// [CONTAINS]
+//   - [STRUCT]_[BinanceUserDataState]
+//   - [FUNCTION]_[ud_ws_read_frame]   (+ tcp_connect / tls_setup / handshake / send_pong / close ud_* family)
+//   - [FUNCTION]_[ud_obtain_listen_key]   (+ ud_keepalive_listen_key)
+//   - [FUNCTION]_[ud_parse_execution_report]
+//   - [FUNCTION]_[ud_ws_thread]
+//   - [FUNCTION]_[ud_keepalive_thread]
+//   - [FUNCTION]_[BinanceUserData_Init]   (+ Start / Shutdown family)
+//======================================================================================================
 //
 // Websocket subscriber for Binance's user data stream. Receives real-time
 // executionReport events (fills, rejections, cancellations) and pushes them
@@ -65,9 +78,15 @@
 
 namespace tt {
 
-//======================================================================================================
-// [STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[BinanceUserDataState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[WS-thread-owned connection state + dedicated REST instance (listen key) + the OMS SPSC ring pointer + shutdown/keepalive flags + atomic TUI observability counters]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BinanceUserDataState {
     // Connection state (WS thread owned)
     int      sockfd;
@@ -96,11 +115,23 @@ struct BinanceUserDataState {
     std::atomic<uint64_t> events_received;  // all events (fills + non-fills)
     std::atomic<uint64_t> reconnect_count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[BinanceUserDataState]
+//======================================================================
 
-//======================================================================================================
-// [WS PROTOCOL HELPERS — duplicated from BinanceCrypto.hpp with ud_ prefix]
-//======================================================================================================
-
+//======================================================================
+// [FUNCTION]_[ud_ws_read_frame]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ud_* WS protocol family (tcp_connect / tls_setup / handshake / send_pong / close ride) — duplicated from BinanceCrypto with the ud_ prefix (its versions are BinanceStream*-coupled)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int ud_tcp_connect(const char* host, const char* port) {
     struct addrinfo hints, *res, *rp;
     memset(&hints, 0, sizeof(hints));
@@ -233,13 +264,21 @@ static inline void ud_ws_close(BinanceUserDataState* s) {
     s->ws_connected.store(0, std::memory_order_relaxed);
 }
 
-//======================================================================================================
-// [LISTEN KEY MANAGEMENT — REST calls on dedicated instance]
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ud_ws_read_frame]
+//======================================================================
 
-// POST /api/v3/userDataStream — creates a listen key. API-key-only, no HMAC.
-// Retries with exponential backoff (1s, 2s, 4s, 8s, max 30s). Returns 1 on
-// success (listen_key populated), 0 after all retries exhausted.
+//======================================================================
+// [FUNCTION]_[ud_obtain_listen_key]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[listen-key REST pair (ud_keepalive_listen_key rides) — POST with exponential backoff (1..30s, shutdown-interruptible) / PUT refresh; API-key-only, no HMAC]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int ud_obtain_listen_key(BinanceUserDataState* s) {
     int delays[] = {0, 1, 2, 4, 8, 15, 30};
     int max_attempts = 7;
@@ -288,26 +327,27 @@ static inline int ud_keepalive_listen_key(BinanceUserDataState* s) {
     }
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// POST /api/v3/userDataStream — creates a listen key. API-key-only, no HMAC.
+// Retries with exponential backoff (1s, 2s, 4s, 8s, max 30s). Returns 1 on
+// success (listen_key populated), 0 after all retries exhausted.
+//======================================================================
+// [END_FUNCTION]_[ud_obtain_listen_key]
+//======================================================================
 
-//======================================================================================================
-// [EXECUTION REPORT PARSER]
-//======================================================================================================
-// Extracts fill data from a Binance executionReport JSON event.
-// Returns 1 if this is a fill event (x == "TRADE"), 0 otherwise.
-//
-// Relevant fields from the Binance docs:
-//   "e": "executionReport"   — event type
-//   "x": "TRADE"             — execution type (TRADE = fill)
-//   "X": "FILLED"            — order status
-//   "c": "oms_123"           — clientOrderId (our idempotency key)
-//   "i": 12345               — exchange orderId
-//   "L": "60123.45"          — last executed price
-//   "l": "0.001"             — last executed quantity
-//   "n": "0.06"              — commission amount
-//   "N": "BNB"               — commission asset
-//   "t": 98765               — trade ID (for deduplication)
-//   "T": 1234567890123       — transaction time (ms)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ud_parse_execution_report]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[extract one x=="TRADE" fill into a Command — price/qty/maker/status/commission; CARRIES the open .E.0.10 parser findings (A2 "z" unparsed, A4 commission non-authoritative, A5 side uncrosschecked — see the findings block below)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int ud_parse_execution_report(const char* json, int len,
                                              Command* cmd_out,
                                              uint64_t* trade_id_out) {
@@ -381,10 +421,55 @@ static inline int ud_parse_execution_report(const char* json, int len,
 
     return 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Extracts fill data from a Binance executionReport JSON event.
+// Returns 1 if this is a fill event (x == "TRADE"), 0 otherwise.
+//
+// Relevant fields from the Binance docs:
+//   "e": "executionReport"   — event type
+//   "x": "TRADE"             — execution type (TRADE = fill)
+//   "X": "FILLED"            — order status
+//   "c": "oms_123"           — clientOrderId (our idempotency key)
+//   "i": 12345               — exchange orderId
+//   "L": "60123.45"          — last executed price
+//   "l": "0.001"             — last executed quantity
+//   "n": "0.06"              — commission amount
+//   "N": "BNB"               — commission asset
+//   "t": 98765               — trade ID (for deduplication)
+//   "T": 1234567890123       — transaction time (ms)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// [[.E.0.10 adversarial hunt] [KNOWN OPEN CAPITAL FINDINGS — read before editing]]
+//----------------------------------------------------------------------
+// A2 (HIGH, TECH_DEBT-169): venue "z" (CUMULATIVE filled qty) is never
+//   parsed; downstream OMS overwrites filled_qty per event and frees the
+//   slot on the first fill — later partials of the same order are DROPPED.
+// A4 (MED→HIGH on BNB-pay, TECH_DEBT-169): the "n"/"N" commission parsed
+//   here is recorded but NOT booked authoritatively (Fee_Compute fabricates
+//   notional×rate downstream); the reconcile path drops commission entirely.
+//   Contract-to-be: carry venue commission + asset source-exact on BOTH
+//   the WS and reconcile paths (D-123).
+// A5 (MED, TECH_DEBT-171): venue "S" (side) is never parsed/cross-checked
+//   vs the local order type — a slot-decode slip books a buy as a sell
+//   with no guard (Knight-shaped).
+// Fixes ride .E.0.10 STOPs + the D-123 decimal-OrderResult rework — this
+// block is the at-site pointer, the disposition register is the SSoT.
+//======================================================================
+// [END_FUNCTION]_[ud_parse_execution_report]
+//======================================================================
 
-//======================================================================================================
-// [WS THREAD BODY]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ud_ws_thread]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the WS thread — listen-key -> WSS connect -> SSL_pending-aware poll loop -> parse + SPSC push (sole producer); keepalive-failure + disconnect reconnect with Notify alert]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void ud_ws_thread(BinanceUserDataState* s) {
     while (s->shutdown_requested.load(std::memory_order_acquire) == 0) {
         // 1. Obtain listen key
@@ -506,14 +591,21 @@ static inline void ud_ws_thread(BinanceUserDataState* s) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ud_ws_thread]
+//======================================================================
 
-//======================================================================================================
-// [KEEPALIVE THREAD BODY]
-//======================================================================================================
-// Refreshes the listen key every 25 minutes (Binance expires at 60 min).
-// On failure, sets keepalive_failed so the WS thread reconnects with a
-// fresh key.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ud_keepalive_thread]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[25-min listen-key refresh (Binance expires at 60) + per-cycle clock sync — retry-once then signal reconnect; 5-consecutive-failure circuit breaker disables WS fills]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void ud_keepalive_thread(BinanceUserDataState* s) {
     int consecutive_failures = 0;
     while (s->shutdown_requested.load(std::memory_order_acquire) == 0) {
@@ -568,18 +660,21 @@ static inline void ud_keepalive_thread(BinanceUserDataState* s) {
         }
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ud_keepalive_thread]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
-// Initialize the user data stream state. Does NOT connect — call
-// BinanceUserData_Start to spawn the threads and begin streaming.
-//
-// ws_host: the websocket host ("stream.binance.vision" for testnet,
-//          "stream.binance.com" for production)
-// rest_host: the REST host for listen key calls (same as adapter REST host)
-// ws_result_queue: pointer into the OMS's dedicated WS SPSC ring
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[BinanceUserData_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the lifecycle family (Start / Shutdown ride) — Init wires state + the dedicated REST instance (no connect); Start spawns the thread pair; Shutdown joins + cleans]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int BinanceUserData_Init(BinanceUserDataState* s,
                                         const char* ws_host,
                                         const char* rest_host,
@@ -616,18 +711,12 @@ static inline int BinanceUserData_Init(BinanceUserDataState* s,
     return 1;
 }
 
-//======================================================================================================
-// [START]
-//======================================================================================================
 static inline void BinanceUserData_Start(BinanceUserDataState* s) {
     s->ws_thread        = std::thread(ud_ws_thread, s);
     s->keepalive_thread = std::thread(ud_keepalive_thread, s);
     fprintf(stderr, "[UserData] WS + keepalive threads started\n");
 }
 
-//======================================================================================================
-// [SHUTDOWN]
-//======================================================================================================
 static inline void BinanceUserData_Shutdown(BinanceUserDataState* s) {
     s->shutdown_requested.store(1, std::memory_order_release);
     if (s->ws_thread.joinable())        s->ws_thread.join();
@@ -639,5 +728,20 @@ static inline void BinanceUserData_Shutdown(BinanceUserDataState* s) {
             (unsigned long long)s->events_received.load(),
             (unsigned long long)s->reconnect_count.load());
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Init does NOT connect — call BinanceUserData_Start to spawn the threads
+// and begin streaming.
+//
+// ws_host: the websocket host ("stream.binance.vision" for testnet,
+//          "stream.binance.com" for production)
+// rest_host: the REST host for listen key calls (same as adapter REST host)
+// ws_result_queue: pointer into the OMS's dedicated WS SPSC ring
+//======================================================================
+// [END_FUNCTION]_[BinanceUserData_Init]
+//======================================================================
 
 }  // namespace tt
