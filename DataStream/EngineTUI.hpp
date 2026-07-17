@@ -3,7 +3,27 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [ENGINE TUI]
+// [FILE]_[DataStream/EngineTUI.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[TUI thread lifecycle + the TUISnapshot/PerNodeSnap engine->display data contract — seqlock double-buffer publish (v5.11.3.B); read-only display except explicit user commands; the PortfolioController render half is LEGACY single-core]
+// [CONTAINS]
+//   - [STRUCT]_[EngineTUI]   (session constants + theme + the raw-mode signal handler ride)
+//   - [FUNCTION]_[TUI_Init]   (+ TUI_Cleanup)
+//   - [FUNCTION]_[TUI_Render]   (LEGACY single-core direct render)
+//   - [FUNCTION]_[TUI_HandleInput]   (LEGACY single-core input)
+//   - [STRUCT]_[TUIPositionSnap]
+//   - [STRUCT]_[MLSnapshot]   (+ MLSnapshot_Populate rides)
+//   - [STRUCT]_[TUISnapshot]   (the PerNodeSnap inner struct + the cluster-boundary assert ride)
+//   - [STRUCT]_[TUISharedState]
+//   - [FUNCTION]_[TUISnapshot_Publish_Begin]   (+ InitSeq / PublishHandle / End / ReadInto / Sequence seqlock family)
+//   - [FUNCTION]_[TUI_CopySnapshot]   (3 overloads — the legacy/backtest populate path)
+//   - [FUNCTION]_[TUI_PopulatePerCoreLatency]   (+ SlowPathLatency / AdvancedTopology / Topology populator family)
+//   - [FUNCTION]_[TUI_Render_Snapshot]   (+ TUI_ReadKey)
+//   - [FUNCTION]_[tui_thread_fn]
+// [REFERENCE]_[DESIGN_SPEC]_[[cross-thread-snapshot-publish-cluster-isolation] [per-snapshot-cluster-layout-pattern]]
+// [REFERENCE]_[INVARIANT]_[H6]
 //======================================================================================================
 // simple terminal UI using ANSI escape codes for monitoring the engine state
 // no framework, no dependencies beyond standard POSIX terminal control
@@ -37,11 +57,20 @@
 
 using namespace std;
 
-//======================================================================================================
-// [SESSION CONSTANTS]
+//======================================================================
+// [STRUCT]_[EngineTUI]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render cadence + saved terminal state + optional LATENCY_PROFILING accumulators (session constants + the FoxML truecolor theme + the raw-mode signal handler ride)]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[SESSION CONSTANTS]
+//------------------------------------------------------------------
 // session IDs match the partitioning in PortfolioController slow-path session detection.
 // adding a new session = update this and the bounds in the detection logic.
-//======================================================================================================
 #define SESSION_ASIAN     0
 #define SESSION_EU        1
 #define SESSION_US        2
@@ -51,12 +80,11 @@ using namespace std;
 // session names for display (indexed by session id; -1 = no session, render as "")
 static const char *SESSION_NAMES[] = {"ASIA", "EU", "US", "OVERNIGHT"};
 
-//======================================================================================================
-// [FOXML THEME - truecolor ANSI]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[FOXML THEME - truecolor ANSI]
+//------------------------------------------------------------------
 // colors pulled from the FoxML neovim colorscheme palette
 // uses 24-bit truecolor: \033[38;2;R;G;Bm (foreground)
-//======================================================================================================
 #define C_RESET   "\033[0m"
 #define C_BOLD    "\033[1m"
 
@@ -77,9 +105,6 @@ static const char *SESSION_NAMES[] = {"ASIA", "EU", "US", "OVERNIGHT"};
 // conditional P&L color: green if >= 0, red if < 0
 #define C_PNL(v) ((v) >= 0.0 ? C_GREEN : C_RED)
 
-//======================================================================================================
-// [STRUCT]
-//======================================================================================================
 struct EngineTUI {
     int enabled;
     uint64_t last_render_tick;
@@ -108,11 +133,10 @@ struct EngineTUI {
 #endif
 };
 
-//======================================================================================================
-// [TERMINAL RAW MODE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[TERMINAL RAW MODE]
+//------------------------------------------------------------------
 // global pointer for signal handler cleanup - only one TUI instance per process
-//======================================================================================================
 static EngineTUI *g_tui_instance = NULL;
 
 static void tui_signal_handler(int sig) {
@@ -125,10 +149,23 @@ static void tui_signal_handler(int sig) {
     signal(sig, SIG_DFL);
     raise(sig);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[EngineTUI]
+//======================================================================
 
-//======================================================================================================
-// [INIT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TUI_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[raw-mode setup + crash-restore signal handlers + hidden cursor (TUI_Cleanup rides — restores terminal + shows cursor)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TUI_Init(EngineTUI *tui, int enabled, uint32_t render_interval) {
     tui->enabled          = enabled;
     tui->last_render_tick = 0;
@@ -159,9 +196,9 @@ static inline void TUI_Init(EngineTUI *tui, int enabled, uint32_t render_interva
     fflush(stdout);
 }
 
-//======================================================================================================
-// [CLEANUP]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[CLEANUP]
+//------------------------------------------------------------------
 static inline void TUI_Cleanup(EngineTUI *tui) {
     if (!tui->raw_mode_active) return;
 
@@ -174,16 +211,21 @@ static inline void TUI_Cleanup(EngineTUI *tui) {
 
     g_tui_instance = NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TUI_Init]
+//======================================================================
 
-//======================================================================================================
-// [RENDER]
-//======================================================================================================
-// clears the screen and draws the full dashboard
-// only renders every render_interval ticks to avoid thrashing the terminal
-//
-// uses cursor home (\033[H) instead of clear (\033[2J) to reduce flicker -
-// overwrites in place rather than clearing and redrawing
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TUI_Render]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[LEGACY single-core direct render — reads PortfolioController live (no snapshot); every render_interval ticks; cursor-home overwrite to reduce flicker]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl,
                                const DataStream<F> *stream, uint64_t tick) {
@@ -561,16 +603,21 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
 
     fflush(stdout);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TUI_Render]
+//======================================================================
 
-//======================================================================================================
-// [HANDLE INPUT]
-//======================================================================================================
-// reads a single char from stdin and handles TUI commands
-// returns: 0 = no action, 'q' = quit requested, 'p' = pause toggled, 'r' = reload requested
-//
-// pause: sets buy gate price to 0 (disables buys), exit gate keeps running
-// unpause: restores buy gate to current conditions (regression will readjust on next slow path)
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TUI_HandleInput]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[LEGACY single-core input — q/p/r/s/k single-char commands acting directly on PortfolioController; pause = zero the buy gate, exit gate keeps running]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 static inline char TUI_HandleInput(EngineTUI *tui, PortfolioController<F> *ctrl,
                                     const char *config_path, int *running) {
@@ -619,23 +666,32 @@ static inline char TUI_HandleInput(EngineTUI *tui, PortfolioController<F> *ctrl,
 
     return 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TUI_HandleInput]
+//======================================================================
 
-//======================================================================================================
-// [MULTICORE TUI]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[MULTICORE TUI]
+//------------------------------------------------------------------
 // when MULTICORE_TUI is defined, the TUI runs on a separate thread with its own L1 cache.
 // the engine thread copies a snapshot of display state every slow-path cycle.
 // the TUI thread reads the snapshot and renders independently.
 // zero L1 cache pollution on the engine core.
-//======================================================================================================
+
 #ifdef MULTICORE_TUI
 #include <pthread.h>
 
-//======================================================================================================
-// [SNAPSHOT STRUCT]
-//======================================================================================================
-// all doubles — no FPN_Binary on the TUI thread. engine converts during snapshot copy.
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[TUIPositionSnap]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-position display row — all doubles (no FPN on the TUI thread; the engine converts during snapshot copy); idx = -1 marks an empty slot]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TUIPositionSnap {
     int idx;
     double entry, qty, tp, sl, orig_tp;
@@ -645,9 +701,23 @@ struct TUIPositionSnap {
     double hold_minutes;  // wall clock hold duration
     time_t entry_time;    // wall clock entry timestamp (for chart markers)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TUIPositionSnap]
+//======================================================================
 
-// FoxML display fields — populated once by MLSnapshot_Populate(), shared by
-// TUI_CopySnapshot and BacktestSnapshot_Copy.  add new ML fields here.
+//======================================================================
+// [STRUCT]_[MLSnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FoxML display fields + prediction-history ring (MLSnapshot_Populate rides — ONE populate fn shared by TUI_CopySnapshot and BacktestSnapshot_Copy)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct MLSnapshot {
     // summary (Phase 6C)
     double cost_bps;           // estimated trade cost in bps (CostModel)
@@ -762,7 +832,28 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
             snap->pred_count++;
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// FoxML display fields — populated once by MLSnapshot_Populate(), shared by
+// TUI_CopySnapshot and BacktestSnapshot_Copy.  add new ML fields here.
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[MLSnapshot]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[TUISnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE engine->display data contract — full dashboard state incl. the PerNodeSnap inner struct (per-core panel; alignas(64) bandit telemetry cluster) + the cluster-boundary assert; copied whole under the seqlock]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TUISnapshot {
     // market
     double price, volume;
@@ -964,7 +1055,7 @@ struct TUISnapshot {
     // OR the field must be deliberately legitimately-zero (e.g. hot-path
     // latency stats `samples`, `*_ns` are zero in sharded mode because
     // the populator doesn't surface them — slow-path latency `sp_*_ns`
-    // is the sharded equivalent at line ~939-944).
+    // is the sharded equivalent).
     //
     // The comprehensive parity audit at v5.9.2c (DOCS/changelogs/
     // 2026-05-02-v5.9-ml-hardening.md) verified all 49 actively-
@@ -1089,7 +1180,7 @@ struct TUISnapshot {
         double   ml_last_exit_prediction;
         int      ml_last_exit_dominant_horizon;
         // v5.15.5.A.6 — buy-side per-horizon barrier dispatch observability.
-        // Mirrors exit-side pattern at MLStatusPanel.hpp:179-198. Surfaces
+        // Mirrors the exit-side pattern at MLStatusPanel.hpp. Surfaces
         // which horizon's barriers drove the most recent ML buy trade
         // (DOMINANT mode) or the blended barrier value (BLEND mode).
         // -1 = no buy-side ensemble dispatch this cycle (LEGACY mode or
@@ -1107,20 +1198,20 @@ struct TUISnapshot {
         // v5.14.8.C — ML observability failure modes via FOREACH_FAILURE_MODE
         // registry. Bit-packed BIT_FLAG entries share `failure_flags` uint16_t
         // bitmap; COUNTER_U32 + PERCENT_U8 entries declare standalone fields.
-        // BIT_FLAG entries today: ml_model_load_failed (bit 0; SEV_RED),
-        // ml_scaler_load_failed (bit 1; SEV_YELLOW). 14 bits headroom.
-        // See MemHeaders/FailureModeRegistry.hpp for registry data.
+        // BIT_FLAG entries today: 11 of 16 used (2 load-failure + the 8-bit
+        // GROUP_DRIFT surface + ml_model_corrupt; 5 bits headroom).
+        // See MemHeaders/FailureModeRegistry.hpp for the row inventory.
         // Read at panel: if (FAILURE_IS_SET(pc, ml_model_load_failed)) { ... }
         // Set at slow path: FAILURE_SET(snap, ml_model_load_failed); / FAILURE_CLR.
         uint16_t failure_flags;              // BIT_FLAG entries (up to 16 today)
         // v5.14.9.B.2 — non-failure boolean state bitmap (TECH_DEBT-013
-        // candidate (3) close). 7 bits today (PERMISSION_ALLOWED,
-        // BITMAP_CONSISTENT, GATE_BUY_ABOVE, IS_ML, ML_MODEL_LOADED,
-        // STRATEGY_EXPLICITLY_SET, LADDER_BOTTOM_HIT). Adding a new bit:
-        // 1 row to FOREACH_PER_NODE_STATE_FLAG in
-        // MemHeaders/PerNodeStateFlagsRegistry.hpp.
+        // candidate (3) close). 11 bits today of 16 (the original 7 +
+        // ML_SCALER_PRESENT / DRIFT_BREACHED / DRIFT_KILL_TRIPPED /
+        // NODE_KILL_TRIPPED added at v5.15.1 TD-028; 5 bits headroom).
+        // Adding a new bit: 1 row to FOREACH_PER_NODE_STATE_FLAG in
+        // MemHeaders/PerNodeStateFlagsRegistry.hpp (the row inventory SSoT).
         // Read via STATE_FLAG_IS_SET(pc, NAME); set via STATE_FLAG_SET / CLR.
-        uint16_t state_flags;                // BIT_FLAG entries (up to 16 today; 7 used)
+        uint16_t state_flags;                // BIT_FLAG entries (11 of 16 used)
         double   ml_last_threshold;          // ml_buy_threshold at last decision
         double   ml_last_effective_threshold;// post-confidence-damping threshold actually used
         uint32_t ml_nan_feature_events;      // FOREACH_FAILURE_MODE COUNTER_U32; total feature-pack NaN/Inf events
@@ -1227,7 +1318,7 @@ struct TUISnapshot {
         // ensemble_active above per v5.14.10.0 per-snapshot-cluster-layout-pattern).
         // Populated only when cfg.bandit_algorithm != 0 + initialized_thompson_bandits=1
         // (cfg=0 default leaves at zero — ML Status panel skips render).
-        // Bit-packed state byte (per CLAUDE.md item 20):
+        // Bit-packed state byte (per the BITMAP_* packing discipline):
         //   bit 0      : THOMPSON_BANDIT_ACTIVE (1 = Thompson dispatch fired this cycle)
         //   bits 1-3   : THOMPSON_CHOSEN_ARM (0-7; argmax-of-posterior at last predict)
         //   bits 4-7   : reserved for future Thompson telemetry (mode, sub-strategy, ...)
@@ -1239,7 +1330,7 @@ struct TUISnapshot {
         static constexpr uint8_t MASK_THOMPSON_CHOSEN_ARM     = 0x0E;  // bits 1-3
         static constexpr uint8_t SHIFT_THOMPSON_CHOSEN_ARM    = 1;
         uint8_t  thompson_state;                                  // 1B  packed (active + chosen_arm)
-        // 7B padding before next 4B-aligned field
+        // (implicit padding to the next aligned field)
         // Display arrays (FLOAT — display precision sufficient; saves 32B/array vs double):
         float    thompson_mu_post[8];                             // 32B  posterior mean per arm (BANDIT_MAX_ARMS=8)
         float    thompson_precision_post[8];                      // 32B  posterior precision per arm (= 1/variance)
@@ -1276,14 +1367,29 @@ struct TUISnapshot {
 // Future ships will apply the same pattern to other clusters (ML
 // observability, gate diagnostics, slow-path observability) per the
 // DESIGN_SPECS doc; remaining clusters tracked as deferred items.
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(PerNodeSnap, ensemble_active) %64 == 0 — the bandit-cluster cache-line boundary]
 static_assert(offsetof(TUISnapshot::PerNodeSnap, ensemble_active) % 64 == 0,
     "v5.14.10.0: bandit telemetry cluster (PerNodeSnap::ensemble_active) "
     "must start on 64-byte cache-line boundary. Did a new field land before "
     "ensemble_active without preserving the alignas(64) marker?");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TUISnapshot]
+//======================================================================
 
-//======================================================================================================
-// [SHARED STATE]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[TUISharedState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the cross-thread seam — double-buffered snapshots under the seqlock seq (engine slow-path publishes, TUI/GUI reads) + the REVERSE control channel (GUI-written request flags / drag / hot-swap, engine-consumed)]
+// [THREAD]_[[SLOW_PATH_WRITER] [TUI_READER]]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TUISharedState {
     TUISnapshot snapshots[2];
     // v5.11.3.B — Seqlock encoding of publish state. Replaces the former
@@ -1368,13 +1474,23 @@ struct TUISharedState {
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TUISharedState]
+//======================================================================
 
-//======================================================================================================
-// [TUISnapshot SEQLOCK HELPERS (v5.11.3.B)]
-//======================================================================================================
-// Three-call publish: Init at boot, Begin/End around populate. Reader uses
-// ReadInto for a tear-free local copy.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TUISnapshot_Publish_Begin]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the seqlock family (InitSeq / PublishHandle / End / ReadInto / Sequence ride) — writer wait-free two-release-store publish; reader bounded-retry memcpy; direct seq mutation FORBIDDEN outside these]
+//======================================================================
+// [CODE]
+//======================================================================
 
 // Init the seqlock to a stable starting state (idx=0, parity=0). Both buffers
 // must already be zeroed by the caller (or set to a sentinel "not yet
@@ -1443,13 +1559,21 @@ static inline void TUISnapshot_ReadInto(const TUISharedState *shared, TUISnapsho
 static inline uint64_t TUISnapshot_Sequence(const TUISharedState *shared) {
     return shared->seq.load(std::memory_order_relaxed);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TUISnapshot_Publish_Begin]
+//======================================================================
 
-
-//======================================================================================================
-// [SNAPSHOT COPY]
-//======================================================================================================
-// runs on engine thread, every slow-path cycle. converts FPN_Binary→double.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TUI_CopySnapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the legacy/backtest populate path (3 overloads) — engine-thread per-slow-path-cycle FPN/Money -> double conversion into the snapshot; sharded populators fill the per-core fields separately]
+//======================================================================
+// [CODE]
+//======================================================================
 // overload: explicit price/volume (used by backtest — no DataStream available)
 template <unsigned F>
 static inline void TUI_CopySnapshot(TUISnapshot *snap,
@@ -1724,19 +1848,24 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->fee_ratio = (g_wins > 0.001) ?
         (Money_ToDouble(ctrl->total_fees) / g_wins) * 100.0 : 0.0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TUI_CopySnapshot]
+//======================================================================
 
-//======================================================================================================
-// [PER-CORE LATENCY POPULATOR — Phase 14, sharded mode only]
-//======================================================================================================
-// Called from the sharded engine's controller core. Walks the registered
-// execution cores, snapshots each one's NodeLatencyStats, and writes the
-// per-core fields into the TUISnapshot. The render path checks
-// snap->sharded_mode_active to decide whether to render the panel.
-//
-// CoresT is templated so this header doesn't need to know about the
-// ExecutionCore type. The caller passes a pointer to the core array and
-// num_nodes; the lambda accesses each core's latency_stats by index.
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TUI_PopulatePerCoreLatency]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the sharded populator family (PerCoreSlowPathLatency / AdvancedTopology / Topology ride) — templated on CoresT/StateT/OmsT so this header stays free of engine-type includes]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[PER-CORE LATENCY POPULATOR — Phase 14, sharded mode only]
+//------------------------------------------------------------------
 template <typename CoresT>
 static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
                                                 CoresT *nodes,
@@ -1811,9 +1940,9 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
     }
 }
 
-//======================================================================================================
-// [ADVANCED TOPOLOGY POPULATION (v5.0.3)]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[ADVANCED TOPOLOGY POPULATION (v5.0.3)]
+//------------------------------------------------------------------
 // Sibling to TUI_PopulateTopology — copies the live observability fields
 // from NodeContext into TUISnapshot::PerNodeSnap for the Engine Topology
 // panel's State/Cycles/LastCycle/Q-depth columns. Called from the GUI
@@ -1851,9 +1980,9 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
     }
 }
 
-//======================================================================================================
-// [TOPOLOGY POPULATION (Engine Topology panel)]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[TOPOLOGY POPULATION (Engine Topology panel)]
+//------------------------------------------------------------------
 // v5.0.2: snapshot the system + thread layout for the GUI Engine Topology
 // panel. Called ONCE at boot from EngineSharded_Run after thread spawn,
 // since the values are static for the lifetime of the engine.
@@ -1888,21 +2017,42 @@ static inline void TUI_PopulateTopology(TUISnapshot *snap,
         snap->per_node[i].poll_interval_ticks = poll_interval[i];
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// TUI_PopulatePerCoreLatency: called from the sharded engine's controller
+// core. Walks the registered execution cores, snapshots each one's
+// NodeLatencyStats, and writes the per-core fields into the TUISnapshot.
+// The render path checks snap->sharded_mode_active to decide whether to
+// render the panel.
+//
+// CoresT is templated so this header doesn't need to know about the
+// ExecutionCore type. The caller passes a pointer to the core array and
+// num_nodes; the lambda accesses each core's latency_stats by index.
+//======================================================================
+// [END_FUNCTION]_[TUI_PopulatePerCoreLatency]
+//======================================================================
 
-//======================================================================================================
-// [SHARDED SNAPSHOT COPY — lives in CoreFrameworks/ShardedSnapshot.hpp]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[SHARDED SNAPSHOT COPY — lives in CoreFrameworks/ShardedSnapshot.hpp]
+//------------------------------------------------------------------
 // TUI_CopySnapshotSharded is in a separate header because it depends on
 // EventLoopState and EventLoopAggregates (OMS headers) which EngineTUI.hpp
 // doesn't include. EngineSharded.hpp includes ShardedSnapshot.hpp after
 // both dependencies are available.
-//======================================================================================================
+//------------------------------------------------------------------
 
-//======================================================================================================
-// [RENDER FROM SNAPSHOT]
-//======================================================================================================
-// runs on TUI thread. reads only from snapshot (all doubles, no FPN_Binary).
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[TUI_Render_Snapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[TUI-thread dashboard render from the local snapshot copy (TUI_ReadKey rides) — reads only doubles, never engine state]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
     if (!tui->enabled) return;
 
@@ -2111,19 +2261,30 @@ static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
     fflush(stdout);
 }
 
-//======================================================================================================
-// [TUI READ KEY]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[TUI READ KEY]
+//------------------------------------------------------------------
 static inline char TUI_ReadKey(EngineTUI *tui) {
     if (!tui->enabled) return 0;
     char c = 0;
     read(STDIN_FILENO, &c, 1);
     return c;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TUI_Render_Snapshot]
+//======================================================================
 
-//======================================================================================================
-// [TUI THREAD FUNCTION]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[tui_thread_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the TUI thread — raw-mode + non-blocking stdin, 10 FPS tear-free ReadInto + ANSI_Render, q/p/r/s/k/l keys -> atomic request flags; terminal restored on exit]
+//======================================================================
+// [CODE]
+//======================================================================
 #include "TUIAnsi.hpp"
 
 static inline void *tui_thread_fn(void *arg) {
@@ -2196,9 +2357,11 @@ static inline void *tui_thread_fn(void *arg) {
 
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[tui_thread_fn]
+//======================================================================
 
 #endif // MULTICORE_TUI
-
-//======================================================================================================
-//======================================================================================================
 #endif // ENGINE_TUI_HPP
