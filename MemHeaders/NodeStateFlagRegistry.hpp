@@ -3,10 +3,19 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CORE CONTEXT STATE FLAGS REGISTRY — v5.15.5.B.3]
+// [FILE]_[MemHeaders/NodeStateFlagRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[NodeContext uint8_t node_state_flags SSoT — 6 slow-path-LIVE BIT_FLAG rows (dirty/kill/model-load/cfg-drift/warmup-log/model-corrupt); single-writer per core]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_NODE_STATE_FLAG]   (auto-gen enum/masks + overflow assert + count macro ride the block)
+//   - [MACRO]_[NODE_STATE_FLAG_*]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[INVARIANT]_[H14]
 //======================================================================================================
-// Bit-packed boolean state for NodeContext. Per CLAUDE.md item 20
-// (BITMAP_* universalization) + DESIGN_SPECS/bitmap-flag-api.md, when
+// Bit-packed boolean state for NodeContext. Per the BITMAP_*
+// universalization discipline + DESIGN_SPECS/bitmap-flag-api.md, when
 // 3+ boolean flags coexist on the same struct, bit-pack them into a
 // uint8_t/uint16_t/uint64_t bitmap rather than carrying byte-per-flag
 // fields with their own alignment padding.
@@ -36,13 +45,11 @@
 //   3. Migrate writer sites: ctx.NAME = 1 → NODE_STATE_FLAG_SET(ctx, NAME)
 //   4. Migrate reader sites: if (ctx.NAME) → NODE_STATE_FLAG_IS_SET(ctx, NAME)
 //
-// Cross-references:
-//   CLAUDE.md item 20 (BITMAP_* API)
-//   CLAUDE.md item 13 (X-macro registry)
-//   CLAUDE.md item 1 (uint16_t Portfolio bitmap precedent)
+// Cross-references (the BITMAP_* API / X-macro registry disciplines +
+// the uint16_t Portfolio bitmap precedent):
 //   DESIGN_SPECS/bitmap-flag-api.md (6th application of bitmap-flag-api per /readiness Check 21)
 //   DESIGN_SPECS/x-macro-registry-with-presence-dispatch.md
-//   CLAUDE.local.md 2026-05-11 cohort-audit rule (all 5 booleans audited together)
+//   cohort-audit rule per cfg-flag-eligibility-criteria.md (all 5 booleans audited together)
 //======================================================================================================
 #ifndef NODE_STATE_FLAG_REGISTRY_HPP
 #define NODE_STATE_FLAG_REGISTRY_HPP
@@ -52,17 +59,17 @@
 
 namespace tt {
 
-//======================================================================================================
-// [REGISTRY DEFINITION]
-//======================================================================================================
-// Tuple: X(name, doc_string)
-//   name       — UPPERCASE token; produces NODE_STATE_FLAG_<name> bit position
-//                + MASK_NODE_STATE_<name> uint8_t mask constant
-//   doc_string — human-readable description for audits + docs
-//
-// 6 entries used; 2 bits headroom in uint8_t. Promote storage to uint16_t
-// if/when a 9th entry needs adding (static_assert below catches overflow).
-//======================================================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_NODE_STATE_FLAG]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[6 BIT_FLAG rows -> sequential NODE_STATE_FLAG_<name> enum bits + MASK_NODE_STATE_<name> uint8_t constants; 2 bits headroom (overflow assert at 8)]
+// [COLUMN]_[name]_[UPPERCASE token; produces the NODE_STATE_FLAG_<name> bit + MASK_NODE_STATE_<name> constant]
+// [COLUMN]_[doc_string]_[human-readable description for audits + docs]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_NODE_STATE_FLAG(X)                                                                  \
     /* v4.0 pending_params dirty bit. Single-threaded set by RebuildOneCore on cycle close;       */ \
     /* cleared by PushParameters_OneCore after pushing the new param block. Branchless gate at    */ \
@@ -102,9 +109,9 @@ namespace tt {
     X(MODEL_CORRUPT,                                                                                  \
       "ML model barrier failed ingress validation for the majority of arms — node refuses NEW trades (retrain)")
 
-//======================================================================================================
-// [AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]
+//------------------------------------------------------------------
 #define X_GEN_NODE_STATE_BIT(name, doc) NODE_STATE_FLAG_##name,
 enum NodeStateFlag {
     FOREACH_NODE_STATE_FLAG(X_GEN_NODE_STATE_BIT)
@@ -117,6 +124,7 @@ enum NodeStateFlag {
 FOREACH_NODE_STATE_FLAG(X_GEN_NODE_STATE_MASK)
 #undef X_GEN_NODE_STATE_MASK
 
+// [ASSERT]_[BITMAP_OVERFLOW]_[NODE_STATE_FLAG_COUNT <= 8]
 static_assert(NODE_STATE_FLAG_COUNT <= 8,
               "node_state_flags is uint8_t; max 8 entries. Widen to uint16_t "
               "if adding a 9th — and update the field type on NodeContext.");
@@ -124,12 +132,30 @@ static_assert(NODE_STATE_FLAG_COUNT <= 8,
 // Public count for tests (uses >= per /readiness Check 21).
 #define X_GEN_NODE_STATE_COUNT_ONE(name, doc) +1
 #define FOREACH_NODE_STATE_FLAG_COUNT (0 FOREACH_NODE_STATE_FLAG(X_GEN_NODE_STATE_COUNT_ONE))
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(name, doc_string)
+//   name       — UPPERCASE token; produces NODE_STATE_FLAG_<name> bit position
+//                + MASK_NODE_STATE_<name> uint8_t mask constant
+//   doc_string — human-readable description for audits + docs
+//
+// 6 entries used; 2 bits headroom in uint8_t. Promote storage to uint16_t
+// if/when a 9th entry needs adding (static_assert above catches overflow).
+//======================================================================
+// [END_REGISTRY]_[FOREACH_NODE_STATE_FLAG]
+//======================================================================
 
 }  // namespace tt
 
-//======================================================================================================
-// [NODE_STATE_FLAG_* convenience macros]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[NODE_STATE_FLAG_*]
+// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ergonomic bare-name accessors over ctx.node_state_flags (mirror the STATE_FLAG_* shape) — IS_SET/SET/CLR/TOGGLE + BITMAP_ANY for multi-flag]
+//----------------------------------------------------------------------
 // Mirror PerNodeStateFlagsRegistry STATE_FLAG_* shape. Reads naturally:
 //   Set:    NODE_STATE_FLAG_SET(ctx, DIRTY)
 //   Clear:  NODE_STATE_FLAG_CLR(ctx, DIRTY)
@@ -139,7 +165,6 @@ static_assert(NODE_STATE_FLAG_COUNT <= 8,
 //
 // MASK_NODE_STATE_<name> lives in tt:: namespace; macros assume the tt::
 // scope is visible at call sites (most callers already `using namespace tt;`).
-//======================================================================================================
 
 #define NODE_STATE_FLAG_IS_SET(ctx, name) BITMAP_IS_SET((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
 #define NODE_STATE_FLAG_SET(ctx, name)    BITMAP_SET((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)

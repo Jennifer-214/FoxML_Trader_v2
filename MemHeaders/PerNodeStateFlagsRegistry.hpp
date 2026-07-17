@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [PER-CORE STATE FLAGS REGISTRY — v5.14.9.B.2]
+// [FILE]_[MemHeaders/PerNodeStateFlagsRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [MONITORING_PLANE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[PerNodeSnap uint16_t state_flags SSoT — 11 pure BIT_FLAG observability rows; one row auto-flows the STATE_FLAG_<name> bit + MASK_<name> constant]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_PER_NODE_STATE_FLAG]   (auto-gen enum/masks + overflow assert + count macro ride the block)
+//   - [MACRO]_[STATE_FLAG_*]
+// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[INVARIANT]_[H14]
 //======================================================================================================
 // Bit-packed observability state for PerNodeSnap. Distinct from the
 // FOREACH_FAILURE_MODE registry (FailureModeRegistry.hpp) which carries
@@ -13,7 +22,7 @@
 // invariants, observability flags).
 //
 // Auto-generates 2 mechanical sites:
-//   1. enum SCALE_<NAME> bit position (sequential allocation)
+//   1. enum STATE_FLAG_<NAME> bit position (sequential allocation)
 //   2. MASK_<NAME> uint16_t mask constant
 //
 // Drives 2 hand-placed sites:
@@ -26,14 +35,14 @@
 // = 96 bytes per engine). Post-registry: 1 uint16_t (2 bytes × 16 cores
 // = 32 bytes). 3× shrink + cache-locality win + branchless multi-flag check.
 //
-// Pattern: per CLAUDE.md item 20 (BITMAP_* universalization) +
+// Pattern: per the BITMAP_* universalization discipline +
 // DESIGN_SPECS/bitmap-flag-api.md. Same shape as FailureModeRegistry's
 // BIT_FLAG storage class but stripped of severity/grouping/mixed storage
 // (this domain doesn't need them).
 //
 // Adding a new flag (1 row):
 //   1. Append X(NAME, "doc") to FOREACH_PER_NODE_STATE_FLAG
-//   2. Auto-generated GATE_<NAME> bit + MASK_<NAME> constant
+//   2. Auto-generated STATE_FLAG_<NAME> bit + MASK_<NAME> constant
 //   3. Add setter site at the writer (slow path / snapshot copy)
 //   4. Add reader sites where consumers check the bit
 //   5. Tests for set/clear/check
@@ -51,19 +60,17 @@
 
 namespace tt {
 
-//======================================================================================================
-// [REGISTRY DEFINITION]
-//======================================================================================================
-// Tuple: X(name, doc_string)
-//   name           — UPPERCASE token; produces GATE_<name> bit + MASK_<name> constant
-//   doc_string     — human-readable description for audits + cfg.example
-//
-// Names match the SEMANTIC ROLE of the flag, not the source field name
-// it migrated from. E.g., the old `permission` uint8_t → MASK_PERMISSION_ALLOWED
-// (positive form: bit set = entries allowed). Follow this convention for
-// new flags so reader sites read naturally: `if (BITMAP_IS_SET(flags, MASK_X))`.
-//======================================================================================================
-
+//======================================================================
+// [REGISTRY]_[FOREACH_PER_NODE_STATE_FLAG]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[11 BIT_FLAG rows -> sequential STATE_FLAG_<name> enum bits + MASK_<name> uint16_t constants; 5 bits headroom (overflow assert at 16)]
+// [COLUMN]_[name]_[UPPERCASE token; produces the STATE_FLAG_<name> bit + MASK_<name> constant]
+// [COLUMN]_[doc_string]_[human-readable description for audits + cfg.example]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_PER_NODE_STATE_FLAG(X)                                                              \
     /* Migrated from PerNodeSnap.permission (v5.6.1) — 0=forbidden, 1=allowed */                   \
     X(PERMISSION_ALLOWED,                                                                            \
@@ -98,9 +105,9 @@ namespace tt {
     X(NODE_KILL_TRIPPED,                                                                             \
       "operator-driven core kill OR MTM-kill OR manual-kill active right now")
 
-//======================================================================================================
-// [AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]
+//------------------------------------------------------------------
 
 #define X_GEN_STATE_FLAG_BIT(name, doc) STATE_FLAG_##name,
 enum PerNodeStateFlag {
@@ -114,18 +121,38 @@ enum PerNodeStateFlag {
 FOREACH_PER_NODE_STATE_FLAG(X_GEN_STATE_FLAG_MASK)
 #undef X_GEN_STATE_FLAG_MASK
 
+// [ASSERT]_[BITMAP_OVERFLOW]_[PER_NODE_STATE_FLAG_COUNT <= 16]
 static_assert(PER_NODE_STATE_FLAG_COUNT <= 16,
               "PerNodeSnap state_flags uint16_t exhausted; expand to uint32_t");
 
 // Public count macro for tests (uses >= per /readiness Check 21).
 #define X_GEN_STATE_FLAG_COUNT_ONE(name, doc) +1
 #define FOREACH_PER_NODE_STATE_FLAG_COUNT (0 FOREACH_PER_NODE_STATE_FLAG(X_GEN_STATE_FLAG_COUNT_ONE))
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(name, doc_string)
+//   name           — UPPERCASE token; produces STATE_FLAG_<name> bit + MASK_<name> constant
+//   doc_string     — human-readable description for audits + cfg.example
+//
+// Names match the SEMANTIC ROLE of the flag, not the source field name
+// it migrated from. E.g., the old `permission` uint8_t → MASK_PERMISSION_ALLOWED
+// (positive form: bit set = entries allowed). Follow this convention for
+// new flags so reader sites read naturally: `if (BITMAP_IS_SET(flags, MASK_X))`.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_PER_NODE_STATE_FLAG]
+//======================================================================
 
 }  // namespace tt
 
-//======================================================================================================
-// [STATE_FLAG_* convenience macros — mirror FAILURE_IS_SET shape]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[STATE_FLAG_*]
+// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ergonomic bare-name accessors over snap.state_flags (mirror the FAILURE_IS_SET shape) — IS_SET/SET/CLR/TOGGLE + BITMAP_ANY for multi-flag]
+//----------------------------------------------------------------------
 // Same ergonomic pattern as FAILURE_IS_SET in FailureModeRegistry. Lets
 // GUI + slow-path call sites use bare flag names without scope-prefixing.
 //
@@ -138,7 +165,6 @@ static_assert(PER_NODE_STATE_FLAG_COUNT <= 16,
 // Note: MASK_<name> lives in tt:: namespace (auto-generated by registry).
 // These macros assume the tt:: scope is visible at the call site (most
 // callers already `using namespace tt;` for FAILURE_IS_SET sister macro).
-//======================================================================================================
 
 #define STATE_FLAG_IS_SET(snap, name)  BITMAP_IS_SET((snap).state_flags, tt::MASK_##name)
 #define STATE_FLAG_SET(snap, name)     BITMAP_SET((snap).state_flags, tt::MASK_##name)
