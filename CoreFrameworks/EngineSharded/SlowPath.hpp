@@ -62,19 +62,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Per-fill bookkeeping that runs on the drainer thread after order fills come
-// back from the exchange (Binance user-data WS → drainer reads → calls this).
-//
-// Originally a lambda inside EngineSharded_Run; hoisted to named function at
-// v5.15.5.F.4d.1.B.6 per Decision B (Option a; captures → explicit args).
-// Body unchanged from lambda body modulo capture → arg translation.
-//
-// v5.15.5.F.4c.3 WIP2d-1.B.1 — static const fee_rate_taker_d cache DELETED (Class 27
-// fn-local variant; froze first-cfg-value globally). fee_rate_taker_for_cf scalar
-// param chain DELETED from EventLoop_DrainPostFill / DrainPostFillOneCore signatures —
-// OneCore reads per-core fee from o->pre_resolved.fee_rate (Order carries pre-resolved
-// value via Order_BindPreResolved at submit time). See decision-time-data-binding-
-// pattern.md + RECURRING_BUG_PATTERNS Class 27.
 template<unsigned F>
 inline void EngineSharded_SlowPath_DrainPostFill(
     EventLoopState<F>& state,
@@ -92,6 +79,22 @@ inline void EngineSharded_SlowPath_DrainPostFill(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Per-fill bookkeeping that runs on the drainer thread after order fills come
+// back from the exchange (Binance user-data WS → drainer reads → calls this).
+//
+// Originally a lambda inside EngineSharded_Run; hoisted to named function at
+// v5.15.5.F.4d.1.B.6 per Decision B (Option a; captures → explicit args).
+// Body unchanged from lambda body modulo capture → arg translation.
+//
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — static const fee_rate_taker_d cache DELETED (Class 27
+// fn-local variant; froze first-cfg-value globally). fee_rate_taker_for_cf scalar
+// param chain DELETED from EventLoop_DrainPostFill / DrainPostFillOneCore signatures —
+// OneCore reads per-core fee from o->pre_resolved.fee_rate (Order carries pre-resolved
+// value via Order_BindPreResolved at submit time). See decision-time-data-binding-
+// pattern.md + RECURRING_BUG_PATTERNS Class 27.
+//======================================================================
 // [END_FUNCTION]_[EngineSharded_SlowPath_DrainPostFill]
 //======================================================================
 
@@ -104,23 +107,6 @@ inline void EngineSharded_SlowPath_DrainPostFill(
 //======================================================================
 // [CODE]
 //======================================================================
-// v4.7.8: manual force-close requests from the GUI. User clicks a button on the
-// Positions panel → GUI sets manual_close_requested[slot]=1 → drainer reads +
-// emits a synthetic SELL via OrderManager_Submit bypassing the hot-path SG.
-// Race with the hot path (ExecutionCore could fire a real SL on the same slot
-// in the same window) is tolerated: HandleFill checks the bitmap before
-// CloseSlot, so a double-close becomes a no-op on the second attempt.
-// Slow-path only.
-//
-// **Decision H merge (v5.15.5.F.4d.1.B.6):** Originally TWO lambda variants —
-// LIVE (under #ifdef USE_IMGUI_GUI) + NO-OP (under #else). Merged into ONE
-// function with the #ifdef moved INSIDE the body. Single source of truth +
-// matches `.B.4 EngineCommon_BootPerCore` dual-cfg pattern (cfg-flag
-// conditionalization inside helper). Under non-GUI build the body is
-// preprocessor-elided (function still exists but does nothing).
-//
-// shared_ptr is nullable: pass `&g_shared` under USE_IMGUI_GUI; nullptr otherwise.
-// Body's #ifdef gate guarantees shared_ptr is only dereferenced when valid.
 template<unsigned F>
 inline void EngineSharded_SlowPath_DrainManualCloses(
     EventLoopState<F>& state,
@@ -204,6 +190,26 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v4.7.8: manual force-close requests from the GUI. User clicks a button on the
+// Positions panel → GUI sets manual_close_requested[slot]=1 → drainer reads +
+// emits a synthetic SELL via OrderManager_Submit bypassing the hot-path SG.
+// Race with the hot path (ExecutionCore could fire a real SL on the same slot
+// in the same window) is tolerated: HandleFill checks the bitmap before
+// CloseSlot, so a double-close becomes a no-op on the second attempt.
+// Slow-path only.
+//
+// **Decision H merge (v5.15.5.F.4d.1.B.6):** Originally TWO lambda variants —
+// LIVE (under #ifdef USE_IMGUI_GUI) + NO-OP (under #else). Merged into ONE
+// function with the #ifdef moved INSIDE the body. Single source of truth +
+// matches `.B.4 EngineCommon_BootPerCore` dual-cfg pattern (cfg-flag
+// conditionalization inside helper). Under non-GUI build the body is
+// preprocessor-elided (function still exists but does nothing).
+//
+// shared_ptr is nullable: pass `&g_shared` under USE_IMGUI_GUI; nullptr otherwise.
+// Body's #ifdef gate guarantees shared_ptr is only dereferenced when valid.
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]
 //======================================================================

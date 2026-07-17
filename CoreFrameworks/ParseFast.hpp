@@ -54,10 +54,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Parse a NUL-terminated decimal string to double. Returns 0.0 on parse
-// failure (matches atof's silent-failure semantic so existing callers
-// don't need new error handling — but unlike atof, doesn't depend on
-// LC_NUMERIC). Caller is responsible for NUL-termination.
 static inline double parse_double_fast(const char *s) {
     if (s == nullptr || *s == '\0') return 0.0;
     size_t n = std::strlen(s);
@@ -67,6 +63,13 @@ static inline double parse_double_fast(const char *s) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Parse a NUL-terminated decimal string to double. Returns 0.0 on parse
+// failure (matches atof's silent-failure semantic so existing callers
+// don't need new error handling — but unlike atof, doesn't depend on
+// LC_NUMERIC). Caller is responsible for NUL-termination.
 //======================================================================
 // [END_FUNCTION]_[parse_double_fast]
 //======================================================================

@@ -32,9 +32,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// ORDER MATTERS — operator parsers (TradeReader / TUI history panel /
-// offline analysis tools) read columns by position.
-// DO NOT reorder existing columns; APPEND new columns at the end.
 #define FOREACH_TRADE_LOG_COL(X)                                                              \
     X(timestamp_us,    "%lu",  (unsigned long)timestamp_us)                                   \
     X(node_id,         "%u",   (unsigned)node_id)                                             \
@@ -130,6 +127,12 @@ inline void TradeLog_EmitHeader(FILE* f) {
     } while (0);
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// ORDER MATTERS — operator parsers (TradeReader / TUI history panel /
+// offline analysis tools) read columns by position.
+// DO NOT reorder existing columns; APPEND new columns at the end.
 //======================================================================
 // [COMMENT]_[origin + caller contract + byte-format preservation]
 //----------------------------------------------------------------------

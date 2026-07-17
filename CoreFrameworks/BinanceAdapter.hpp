@@ -99,8 +99,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// One pending order awaiting submission to Binance. Fits in the SPSC
-// ring; trivially copyable as required by SPSCRing's static_assert.
 struct PendingSubmission {
     uint64_t      client_id;
     OrderType     type;
@@ -111,6 +109,11 @@ struct PendingSubmission {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// One pending order awaiting submission to Binance. Fits in the SPSC
+// ring; trivially copyable as required by SPSCRing's static_assert.
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 // [SIZE]_[40B]
@@ -192,14 +195,6 @@ struct BinanceAdapterState {
 //======================================================================
 // [CODE]
 //======================================================================
-// Pop pending submissions from the SPSC queue, call the appropriate
-// BinanceOrderAPI function on this worker's own instance, build an
-// OrderResult, and invoke the callback. Sleep briefly when idle to avoid
-// burning the core.
-//
-// Each worker is launched with its own worker_index so it knows which
-// workers_api[] slot to use. Lifetime: from BinanceAdapter_Init until
-// shutdown_requested flips.
 static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int worker_index) {
     BinanceOrderAPI* api = &state->workers_api[worker_index];
 
@@ -301,6 +296,17 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Pop pending submissions from the SPSC queue, call the appropriate
+// BinanceOrderAPI function on this worker's own instance, build an
+// OrderResult, and invoke the callback. Sleep briefly when idle to avoid
+// burning the core.
+//
+// Each worker is launched with its own worker_index so it knows which
+// workers_api[] slot to use. Lifetime: from BinanceAdapter_Init until
+// shutdown_requested flips.
+//======================================================================
 // [END_FUNCTION]_[BinanceAdapter_WorkerLoop]
 //======================================================================
 
@@ -313,19 +319,6 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
 //======================================================================
 // [CODE]
 //======================================================================
-// Set up the adapter: zero state, initialize each worker's BinanceOrderAPI
-// against the given host + credentials, start the worker threads. Returns
-// 1 on success, 0 on failure (any worker's BinanceOrderAPI_Init failure
-// is fatal — partial init is rolled back).
-//
-// host typically comes from bcfg.use_testnet selection in the caller —
-// "testnet.binance.vision" or "api.binance.us". Credentials come from
-// LoadSecrets in the caller. The adapter copies them into each worker's
-// BinanceOrderAPI via BinanceOrderAPI_Init's strncpy.
-//
-// worker_count clamps to [1, MAX_BINANCE_WORKERS]. Phase 02 ships with
-// 1; future commits scale up after the back-to-back stress test passes.
-//======================================================================================================
 static inline int BinanceAdapter_Init(BinanceAdapterState* state,
                                        const char* host,
                                        const char* api_key,
@@ -375,6 +368,21 @@ static inline int BinanceAdapter_Init(BinanceAdapterState* state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Set up the adapter: zero state, initialize each worker's BinanceOrderAPI
+// against the given host + credentials, start the worker threads. Returns
+// 1 on success, 0 on failure (any worker's BinanceOrderAPI_Init failure
+// is fatal — partial init is rolled back).
+//
+// host typically comes from bcfg.use_testnet selection in the caller —
+// "testnet.binance.vision" or "api.binance.us". Credentials come from
+// LoadSecrets in the caller. The adapter copies them into each worker's
+// BinanceOrderAPI via BinanceOrderAPI_Init's strncpy.
+//
+// worker_count clamps to [1, MAX_BINANCE_WORKERS]. Phase 02 ships with
+// 1; future commits scale up after the back-to-back stress test passes.
+//======================================================================
 // [END_FUNCTION]_[BinanceAdapter_Init]
 //======================================================================
 
@@ -387,9 +395,6 @@ static inline int BinanceAdapter_Init(BinanceAdapterState* state,
 //======================================================================
 // [CODE]
 //======================================================================
-// Signal workers to exit, join each one, then cleanup each
-// BinanceOrderAPI instance. Idempotent — safe to call twice or to call
-// without a successful Init (shutdown_requested is already 0 by default).
 static inline void BinanceAdapter_ShutdownState(BinanceAdapterState* state) {
     state->shutdown_requested.store(1, std::memory_order_release);
     for (int i = 0; i < state->worker_count; ++i) {
@@ -405,6 +410,12 @@ static inline void BinanceAdapter_ShutdownState(BinanceAdapterState* state) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Signal workers to exit, join each one, then cleanup each
+// BinanceOrderAPI instance. Idempotent — safe to call twice or to call
+// without a successful Init (shutdown_requested is already 0 by default).
+//======================================================================
 // [END_FUNCTION]_[BinanceAdapter_ShutdownState]
 //======================================================================
 
@@ -417,12 +428,6 @@ static inline void BinanceAdapter_ShutdownState(BinanceAdapterState* state) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Push a PendingSubmission onto the queue. Returns 1 on success, 0 on
-// queue-full failure (drops the submission with a log + counter bump).
-// The actual REST call happens later on a worker thread.
-//
-// The drainer is the only caller, so the SPSC producer-side contract
-// holds with worker_count == 1.
 static inline int BinanceAdapter_SubmitMarketBuy(void* ctx, uint64_t client_id,
                                                   double qty,
                                                   OrderCallback cb, void* user) {
@@ -444,6 +449,15 @@ static inline int BinanceAdapter_SubmitMarketBuy(void* ctx, uint64_t client_id,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Push a PendingSubmission onto the queue. Returns 1 on success, 0 on
+// queue-full failure (drops the submission with a log + counter bump).
+// The actual REST call happens later on a worker thread.
+//
+// The drainer is the only caller, so the SPSC producer-side contract
+// holds with worker_count == 1.
 //======================================================================
 // [END_FUNCTION]_[BinanceAdapter_SubmitMarketBuy]
 //======================================================================
@@ -491,6 +505,18 @@ static inline int BinanceAdapter_SubmitMarketSell(void* ctx, uint64_t client_id,
 //======================================================================
 // [CODE]
 //======================================================================
+static inline int BinanceAdapter_GetBalancesImpl(void* ctx, double* base_out, double* quote_out) {
+    BinanceAdapterState* state = (BinanceAdapterState*)ctx;
+    if (state->worker_count < 1) return 0;
+    // Use worker 0's instance. Caller is responsible for ensuring the
+    // worker thread isn't actively making a call right now.
+    return BinanceOrderAPI_GetBalances(&state->workers_api[0], quote_out, base_out);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // get_balances and query_order block on the network. They are NOT called
 // from the drainer or any hot path. Phase 05 reconciliation uses them.
 // Phase 02 just provides workable stubs that go through worker 0's
@@ -501,16 +527,6 @@ static inline int BinanceAdapter_SubmitMarketSell(void* ctx, uint64_t client_id,
 // Phase 02 limitation: callers must serialize sync queries against the
 // worker thread externally. Phase 05 reconciliation handles this by
 // pausing submissions during a reconciliation pass.
-//======================================================================================================
-static inline int BinanceAdapter_GetBalancesImpl(void* ctx, double* base_out, double* quote_out) {
-    BinanceAdapterState* state = (BinanceAdapterState*)ctx;
-    if (state->worker_count < 1) return 0;
-    // Use worker 0's instance. Caller is responsible for ensuring the
-    // worker thread isn't actively making a call right now.
-    return BinanceOrderAPI_GetBalances(&state->workers_api[0], quote_out, base_out);
-}
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[BinanceAdapter_GetBalancesImpl]
 //======================================================================
@@ -573,10 +589,6 @@ static inline void BinanceAdapter_ShutdownImpl(void* ctx) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Build the function-pointer vtable that the OMS uses to call into this
-// adapter. F is the FPN_Binary width — the concrete adapter doesn't use F
-// (everything goes through `double` at the BinanceOrderAPI boundary) but
-// the template parameter matches the OMS's ExchangeAdapter<F> field type.
 template <unsigned F>
 static inline ExchangeAdapter<F> BinanceAdapter_Get(BinanceAdapterState* state) {
     ExchangeAdapter<F> adapter;
@@ -590,6 +602,13 @@ static inline ExchangeAdapter<F> BinanceAdapter_Get(BinanceAdapterState* state) 
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Build the function-pointer vtable that the OMS uses to call into this
+// adapter. F is the FPN_Binary width — the concrete adapter doesn't use F
+// (everything goes through `double` at the BinanceOrderAPI boundary) but
+// the template parameter matches the OMS's ExchangeAdapter<F> field type.
 //======================================================================
 // [END_FUNCTION]_[BinanceAdapter_Get]
 //======================================================================

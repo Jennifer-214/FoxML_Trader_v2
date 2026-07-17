@@ -111,20 +111,6 @@ inline void Strategy_SeedFromCfg(MeanReversionState<F>* s, const ControllerConfi
 //======================================================================
 // [CODE]
 //======================================================================
-// Allocates the right state struct on the heap, calls the strategy's
-// `_Init` to populate initial values from rolling stats + cfg.
-// Idempotent: if state already exists, free it first (used during
-// hot-swap, where one strategy is replaced with another).
-//
-// `buy_conds_scratch` is a stack-local that the legacy `_Init` signature
-// fills in. Sharded engine doesn't use BuySideGateConditions (it uses
-// GateParameters via _BuildParameters); the scratch is just a sink so
-// the signature works without modifying legacy code.
-//
-// v5.8.0: switch dispatch generated from FOREACH_STRATEGY(X). Each row
-// emits one case that allocates the registered state type, runs the
-// optional cfg seed, then calls the registered _Init function.
-//======================================================================================================
 template <unsigned F>
 inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot);
 
@@ -179,6 +165,22 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Allocates the right state struct on the heap, calls the strategy's
+// `_Init` to populate initial values from rolling stats + cfg.
+// Idempotent: if state already exists, free it first (used during
+// hot-swap, where one strategy is replaced with another).
+//
+// `buy_conds_scratch` is a stack-local that the legacy `_Init` signature
+// fills in. Sharded engine doesn't use BuySideGateConditions (it uses
+// GateParameters via _BuildParameters); the scratch is just a sink so
+// the signature works without modifying legacy code.
+//
+// v5.8.0: switch dispatch generated from FOREACH_STRATEGY(X). Each row
+// emits one case that allocates the registered state type, runs the
+// optional cfg seed, then calls the registered _Init function.
+//======================================================================
 // [END_FUNCTION]_[Strategy_InitPerCore]
 //======================================================================
 
@@ -191,17 +193,6 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
 //======================================================================
 // [CODE]
 //======================================================================
-// Called from EventLoop_RebuildOneCore each slow-path cadence, BEFORE
-// Strategy_BuildParameters. Updates per-strategy adaptive state from the
-// latest market observations. Pure no-op when state is null (e.g. AUTO
-// cores pre-Phase 3, STRATEGY_NONE cores) — preserves prior behavior.
-//
-// Phase 2.1 (SimpleDip): SimpleDip_Adapt is itself a no-op; the actual
-// state update (recent_high) happens inside SimpleDip_BuildParameters
-// where rolling is in scope. Wiring exists for symmetry with other
-// strategies and to establish the dispatcher pattern Phase 2.2-2.5
-// will fill in.
-//======================================================================================================
 template <unsigned F>
 inline void Strategy_AdaptPerCore(
     EventLoopState<F>* state,
@@ -271,6 +262,19 @@ inline void Strategy_AdaptPerCore(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Called from EventLoop_RebuildOneCore each slow-path cadence, BEFORE
+// Strategy_BuildParameters. Updates per-strategy adaptive state from the
+// latest market observations. Pure no-op when state is null (e.g. AUTO
+// cores pre-Phase 3, STRATEGY_NONE cores) — preserves prior behavior.
+//
+// Phase 2.1 (SimpleDip): SimpleDip_Adapt is itself a no-op; the actual
+// state update (recent_high) happens inside SimpleDip_BuildParameters
+// where rolling is in scope. Wiring exists for symmetry with other
+// strategies and to establish the dispatcher pattern Phase 2.2-2.5
+// will fill in.
+//======================================================================
 // [END_FUNCTION]_[Strategy_AdaptPerCore]
 //======================================================================
 
@@ -283,23 +287,6 @@ inline void Strategy_AdaptPerCore(
 //======================================================================
 // [CODE]
 //======================================================================
-// Strategies that ratchet SL upward (MR, Momentum, EmaCross trailing logic)
-// route writes through this helper so the fee-floor cap is uniform: the
-// ratchet can never push effective_sl above entry × (1 - 3 × fee_rate_taker).
-// Without the cap, an over-tight ratchet would exit on the first tiny pullback
-// at near-breakeven gross which becomes net-negative after round-trip fees.
-//
-// Mirrors the cap that EventLoop_TrailingSLRatchetOneCore (the generic
-// ratcheter, v5.1.7) applies. Both can run concurrently and write to the
-// same field — the higher value wins via FPN_GreaterThan check.
-//
-// `entry_price` is the position entry — needed to compute the fee floor.
-// Caller passes the relevant slot's entry_price (under partials, leg A and
-// leg B share the same entry).
-//
-// Returns true iff the write actually advanced ratchet_sl. Side effect:
-// dirty=1 set on advance (so seqlock pushes next cycle).
-//======================================================================================================
 template <unsigned F>
 inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
                                      Money proposed_sl, Money entry_price,
@@ -358,6 +345,25 @@ inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Strategies that ratchet SL upward (MR, Momentum, EmaCross trailing logic)
+// route writes through this helper so the fee-floor cap is uniform: the
+// ratchet can never push effective_sl above entry × (1 - 3 × fee_rate_taker).
+// Without the cap, an over-tight ratchet would exit on the first tiny pullback
+// at near-breakeven gross which becomes net-negative after round-trip fees.
+//
+// Mirrors the cap that EventLoop_TrailingSLRatchetOneCore (the generic
+// ratcheter, v5.1.7) applies. Both can run concurrently and write to the
+// same field — the higher value wins via FPN_GreaterThan check.
+//
+// `entry_price` is the position entry — needed to compute the fee floor.
+// Caller passes the relevant slot's entry_price (under partials, leg A and
+// leg B share the same entry).
+//
+// Returns true iff the write actually advanced ratchet_sl. Side effect:
+// dirty=1 set on advance (so seqlock pushes next cycle).
+//======================================================================
 // [END_FUNCTION]_[Strategy_WriteRatchetSL]
 //======================================================================
 
@@ -370,20 +376,6 @@ inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
 //======================================================================
 // [CODE]
 //======================================================================
-// Called from EventLoop_RebuildOneCore each slow-path cadence, AFTER
-// Strategy_BuildParameters, ONLY for cores with at least one open slot.
-// Dispatches to per-strategy logic that writes ratchet_sl via the shared
-// helper above.
-//
-// Pre-Phase 2.2 the strategy-specific exit-adjust logic was orphaned (per
-// postmortem F8); the generic EventLoop_TrailingSLRatchetOneCore was the
-// only ratchet path. With the dispatcher wired, both run — the higher
-// ratchet_sl wins.
-//
-// `current_price` is the rolling price_avg (slow-path doesn't see live tick).
-// Strategies that need a regression-based confidence gate read from their
-// own state (which Adapt populated this cycle).
-//======================================================================================================
 template <unsigned F, unsigned W>
 inline void Strategy_ExitAdjustPerCore(
     EventLoopState<F>* state,
@@ -419,6 +411,22 @@ inline void Strategy_ExitAdjustPerCore(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Called from EventLoop_RebuildOneCore each slow-path cadence, AFTER
+// Strategy_BuildParameters, ONLY for cores with at least one open slot.
+// Dispatches to per-strategy logic that writes ratchet_sl via the shared
+// helper above.
+//
+// Pre-Phase 2.2 the strategy-specific exit-adjust logic was orphaned (per
+// postmortem F8); the generic EventLoop_TrailingSLRatchetOneCore was the
+// only ratchet path. With the dispatcher wired, both run — the higher
+// ratchet_sl wins.
+//
+// `current_price` is the rolling price_avg (slow-path doesn't see live tick).
+// Strategies that need a regression-based confidence gate read from their
+// own state (which Adapt populated this cycle).
+//======================================================================
 // [END_FUNCTION]_[Strategy_ExitAdjustPerCore]
 //======================================================================
 
@@ -431,10 +439,6 @@ inline void Strategy_ExitAdjustPerCore(
 //======================================================================
 // [CODE]
 //======================================================================
-// Idempotent: safe to call on slots where strategy_state == nullptr.
-// Dispatches by strategy_state_kind to call the right `delete` (void*
-// can't be deleted directly).
-//======================================================================================================
 template <unsigned F>
 inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
     if (slot < 0 || slot >= MAX_EXECUTION_NODES) return;
@@ -498,6 +502,12 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Idempotent: safe to call on slots where strategy_state == nullptr.
+// Dispatches by strategy_state_kind to call the right `delete` (void*
+// can't be deleted directly).
 //======================================================================
 // [END_FUNCTION]_[Strategy_FreePerCore]
 //======================================================================

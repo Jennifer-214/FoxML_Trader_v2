@@ -53,24 +53,6 @@
 //======================================================================
 // [CODE]
 //======================================================================
-// X(variant_id, name_tag, label_str, compute_call)
-//
-//   variant_id   — integer enum value used by cfg.confidence_ic_variant.
-//                  Stable; do NOT renumber existing entries (operators have
-//                  cfg files referencing these). Append-only.
-//   name_tag     — short C identifier used for struct field naming if
-//                  per-variant fields are ever added (currently only
-//                  spearman has a backing field on ConfidenceScorer.ic).
-//   label_str    — human-readable name for log/TUI display.
-//   compute_call — call-site expression that returns a double IC ∈ [-1, 1].
-//                  Receives `cs` (ConfidenceScorer*) in scope at the dispatch
-//                  site. e.g. `RollingIC_Compute(&cs->ic)` for spearman.
-//
-// IMPORTANT: compute_call is evaluated at the dispatcher; the macro doesn't
-// know which struct field holds the variant's state. Keeps the registry
-// independent of ConfidenceScorer's internal layout.
-//======================================================================================================
-
 #define FOREACH_IC_VARIANT(X)                                                              \
     /* v5.14.1.F — Spearman (default; existing RollingIC implementation). */               \
     X(0, spearman, "spearman",  RollingIC_Compute(&cs->ic))                                \
@@ -119,6 +101,25 @@
     }())
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// X(variant_id, name_tag, label_str, compute_call)
+//
+//   variant_id   — integer enum value used by cfg.confidence_ic_variant.
+//                  Stable; do NOT renumber existing entries (operators have
+//                  cfg files referencing these). Append-only.
+//   name_tag     — short C identifier used for struct field naming if
+//                  per-variant fields are ever added (currently only
+//                  spearman has a backing field on ConfidenceScorer.ic).
+//   label_str    — human-readable name for log/TUI display.
+//   compute_call — call-site expression that returns a double IC ∈ [-1, 1].
+//                  Receives `cs` (ConfidenceScorer*) in scope at the dispatch
+//                  site. e.g. `RollingIC_Compute(&cs->ic)` for spearman.
+//
+// IMPORTANT: compute_call is evaluated at the dispatcher; the macro doesn't
+// know which struct field holds the variant's state. Keeps the registry
+// independent of ConfidenceScorer's internal layout.
 //======================================================================
 // [END_REGISTRY]_[FOREACH_IC_VARIANT]
 //======================================================================

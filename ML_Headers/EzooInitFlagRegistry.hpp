@@ -72,19 +72,6 @@
 //======================================================================
 // [CODE]
 //======================================================================================================
-// Tuple: X(name, doc_string)
-//   name        — UPPERCASE token; bit position determined by registry order;
-//                 generates MASK_EZOO_<name> constant + EZOO_INIT_FLAG_<name>
-//                 enum value (for diagnostic / iteration use).
-//   doc_string  — operator-facing description (for engine.cfg.example auto-doc
-//                 + MLStatusPanel tooltips if surfaced).
-//
-// APPEND-ONLY discipline. Reordering shifts MASK_EZOO_<name> bit positions,
-// which would invalidate any stamp body that recorded the bitmap value
-// (none today; future-proof discipline if init_flags is ever stamped).
-//
-// LEGACY POSITIONAL STABILITY: ACTIVE is the first entry (bit 0) — matches
-// the conceptual "is the ensemble active at all" semantic that's most-tested.
 #define FOREACH_EZOO_INIT_FLAG(X) \
     X(ACTIVE,                  "Ensemble path active (1 = use ensemble, 0 = single-zoo fallback)") \
     X(BANDITS_READY,           "Exp3 buy-side bandits wired (post-LoadFromCfg + _InitBandits)") \
@@ -153,6 +140,22 @@ static_assert(EZOO_INIT_FLAG_ACTIVE == 0,
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(name, doc_string)
+//   name        — UPPERCASE token; bit position determined by registry order;
+//                 generates MASK_EZOO_<name> constant + EZOO_INIT_FLAG_<name>
+//                 enum value (for diagnostic / iteration use).
+//   doc_string  — operator-facing description (for engine.cfg.example auto-doc
+//                 + MLStatusPanel tooltips if surfaced).
+//
+// APPEND-ONLY discipline. Reordering shifts MASK_EZOO_<name> bit positions,
+// which would invalidate any stamp body that recorded the bitmap value
+// (none today; future-proof discipline if init_flags is ever stamped).
+//
+// LEGACY POSITIONAL STABILITY: ACTIVE is the first entry (bit 0) — matches
+// the conceptual "is the ensemble active at all" semantic that's most-tested.
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------

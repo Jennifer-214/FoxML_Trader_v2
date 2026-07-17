@@ -80,16 +80,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Bag of pointers to everything the driver needs to step a single tick. The
-// caller owns all the underlying objects and is responsible for their
-// lifetime; the driver just orchestrates them. Keeping it as a struct of
-// pointers (instead of inlining the state) lets the production BacktestEngine
-// reuse its existing PortfolioController-adjacent objects without copying.
-//
-// rolling and config are optional (nullptr disables the slow-path strategy
-// rebuild). Useful for tests that want pure event drain validation without
-// the full strategy pipeline.
-//======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 struct ShardedBacktestDriver {
     EventLoopState<F>*       state;
@@ -150,6 +140,18 @@ struct ShardedBacktestDriver {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Bag of pointers to everything the driver needs to step a single tick. The
+// caller owns all the underlying objects and is responsible for their
+// lifetime; the driver just orchestrates them. Keeping it as a struct of
+// pointers (instead of inlining the state) lets the production BacktestEngine
+// reuse its existing PortfolioController-adjacent objects without copying.
+//
+// rolling and config are optional (nullptr disables the slow-path strategy
+// rebuild). Useful for tests that want pure event drain validation without
+// the full strategy pipeline.
+//======================================================================
 // [END_STRUCT]_[ShardedBacktestDriver]
 //======================================================================
 
@@ -162,11 +164,6 @@ struct ShardedBacktestDriver {
 //======================================================================
 // [CODE]
 //======================================================================
-// Wire the driver to its dependencies. The state must already be initialized
-// and have its execution cores registered + strategies assigned. Set rolling
-// and config to nullptr to skip the slow-path strategy rebuild step (the
-// driver still drains events and runs the kill switch).
-//======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
                                         EventLoopState<F>* state,
@@ -206,6 +203,13 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Wire the driver to its dependencies. The state must already be initialized
+// and have its execution cores registered + strategies assigned. Set rolling
+// and config to nullptr to skip the slow-path strategy rebuild step (the
+// driver still drains events and runs the kill switch).
+//======================================================================
 // [END_FUNCTION]_[ShardedBacktestDriver_Init]
 //======================================================================
 
@@ -219,13 +223,6 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
 //======================================================================
 // [CODE]
 //======================================================================
-// Step the entire engine through a single tick. tick_index is 0-based and is
-// used to determine slow-path cadence (firing every slow_path_interval ticks).
-//
-// The order is load-bearing for determinism — RollingStats first so the
-// slow-path rebuild sees fresh stats, then fan-out to cores, then drain
-// events, then slow-path on cadence. Pitfall P11.6 covers this ordering
-// requirement.
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                                      const Tick<F>& tick,
@@ -424,6 +421,16 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Step the entire engine through a single tick. tick_index is 0-based and is
+// used to determine slow-path cadence (firing every slow_path_interval ticks).
+//
+// The order is load-bearing for determinism — RollingStats first so the
+// slow-path rebuild sees fresh stats, then fan-out to cores, then drain
+// events, then slow-path on cadence. Pitfall P11.6 covers this ordering
+// requirement.
+//======================================================================
 // [END_FUNCTION]_[ShardedBacktest_RunTick]
 //======================================================================
 
@@ -436,9 +443,6 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
 //======================================================================
 // [CODE]
 //======================================================================
-// Convenience wrapper that runs a whole tick stream end-to-end and does the
-// final event drain. For tests that just want to feed an array and check the
-// outcome.
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
                                  const Tick<F>* ticks,
@@ -475,6 +479,12 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Convenience wrapper that runs a whole tick stream end-to-end and does the
+// final event drain. For tests that just want to feed an array and check the
+// outcome.
 //======================================================================
 // [END_FUNCTION]_[ShardedBacktest_Run]
 //======================================================================

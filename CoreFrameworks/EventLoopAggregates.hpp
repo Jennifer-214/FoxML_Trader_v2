@@ -69,9 +69,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// All fields are doubles because the TUI consumes doubles. The conversion from
-// FPN_Binary happens once here, in the adapter, instead of being scattered across
-// every panel. realized + unrealized = total_pnl. balance + unrealized = equity.
 struct EventLoopAggregates {
     // realized side — reflects executed trades
     double balance;              // global wallet (starting + sum of realized net P&L)
@@ -95,6 +92,12 @@ struct EventLoopAggregates {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// All fields are doubles because the TUI consumes doubles. The conversion from
+// FPN_Binary happens once here, in the adapter, instead of being scattered across
+// every panel. realized + unrealized = total_pnl. balance + unrealized = equity.
 //======================================================================
 // [COMMENT]_[why an adapter exists + the mark-price contract]
 //----------------------------------------------------------------------
@@ -144,19 +147,6 @@ struct EventLoopAggregates {
 //======================================================================
 // [CODE]
 //======================================================================
-// Walk the EventLoopState once and emit the aggregate struct. O(MAX_PORTFOLIO_POSITIONS)
-// per call but only the bits set in active_bitmap are read for unrealized P&L.
-// Cheap enough to call on every snapshot rebuild (slow path, ~1Hz).
-//
-// mark_price: latest known market price. Pass FPN_Zero to skip unrealized P&L
-// (equity will == balance, useful when there's no current price available
-// such as during warmup or replay seek).
-//
-// pitfall P10.1 caveat: the portfolio bitmap and per-position fields read here
-// are mutated by the controller core (the same core calling this), so there is
-// no concurrency hazard. The execution cores never write to EventLoopState's
-// portfolio — only the controller's _OnEvent does. Snapshot reads from one
-// core, writes from one core, no atomics required.
 template <unsigned F>
 inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* state,
                                                     Money mark_price) {
@@ -209,6 +199,22 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Walk the EventLoopState once and emit the aggregate struct. O(MAX_PORTFOLIO_POSITIONS)
+// per call but only the bits set in active_bitmap are read for unrealized P&L.
+// Cheap enough to call on every snapshot rebuild (slow path, ~1Hz).
+//
+// mark_price: latest known market price. Pass FPN_Zero to skip unrealized P&L
+// (equity will == balance, useful when there's no current price available
+// such as during warmup or replay seek).
+//
+// pitfall P10.1 caveat: the portfolio bitmap and per-position fields read here
+// are mutated by the controller core (the same core calling this), so there is
+// no concurrency hazard. The execution cores never write to EventLoopState's
+// portfolio — only the controller's _OnEvent does. Snapshot reads from one
+// core, writes from one core, no atomics required.
 //======================================================================
 // [END_FUNCTION]_[EventLoop_GetAggregates]
 //======================================================================

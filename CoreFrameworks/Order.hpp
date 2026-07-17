@@ -164,13 +164,6 @@ static constexpr uint32_t MASK_ORDER_BANDIT_3BIT          = 0x7u;
 //======================================================================
 // [CODE]
 //======================================================================
-// Decision-time-bound values pre-resolved at Order submit time via Order_BindPreResolved().
-// HandleFill (drainer thread) reads o->pre_resolved.fee_rate directly — zero OMS cache
-// lookup. Per DESIGN_SPECS/decision-time-data-binding-pattern.md § Sub-struct refinement
-// (closes Class 27 — scalar cfg-mirror flattens per-instance distinction).
-//
-// Future per-resolved fields extend HERE (single-line addition) + Order_BindPreResolved
-// extends concurrently. Consumer sites unchanged. Placed at end of Order<F> HOT cluster.
 template <unsigned F>
 struct OrderPreResolved {
     Money fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
@@ -183,6 +176,16 @@ struct OrderPreResolved {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Decision-time-bound values pre-resolved at Order submit time via Order_BindPreResolved().
+// HandleFill (drainer thread) reads o->pre_resolved.fee_rate directly — zero OMS cache
+// lookup. Per DESIGN_SPECS/decision-time-data-binding-pattern.md § Sub-struct refinement
+// (closes Class 27 — scalar cfg-mirror flattens per-instance distinction).
+//
+// Future per-resolved fields extend HERE (single-line addition) + Order_BindPreResolved
+// extends concurrently. Consumer sites unchanged. Placed at end of Order<F> HOT cluster.
 //======================================================================
 // [END_STRUCT]_[OrderPreResolved]
 //======================================================================
@@ -203,16 +206,6 @@ static_assert(sizeof(OrderPreResolved<64>) == 48,
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.F.4c.3 WIP2d-1.B.1 — Order<F> bit-packed flags + OrderPreResolved sub-struct.
-// Closes Class 27 (OMS scalar cfg-mirror cluster) via Order pre-resolve at submit.
-// Cluster design as-landed at F.4c.3 (sizes since re-derived — the sizeof assert below is current):
-// HOT/COLD perfectly aligned; no inter-cluster cache-line mixing. Per cache-layout-discipline-
-// for-hot-side-structs.md + decision-first-cluster-layout-pattern.md.
-//
-// Previous (v5.15.5.C.1): Order<F> = 280 B with line-3 HOT/COLD mixing.
-// New (v5.15.5.F.4c.3 WIP2d-1.B.1): Order<F> = 320 B with clean cluster boundaries.
-// `exchange_id[64]` is touched only on terminal-state transitions + error/REJECTED
-// logging — drainer + Submit hot paths never read it. Stays in COLD tail.
 template <unsigned F>
 struct Order {
     // ────────── HOT cluster (sizeof assert-locked at file end; A25 grew pre_resolved → no longer cache-line-exact) ──────────
@@ -254,6 +247,19 @@ struct Order {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — Order<F> bit-packed flags + OrderPreResolved sub-struct.
+// Closes Class 27 (OMS scalar cfg-mirror cluster) via Order pre-resolve at submit.
+// Cluster design as-landed at F.4c.3 (sizes since re-derived — the sizeof assert below is current):
+// HOT/COLD perfectly aligned; no inter-cluster cache-line mixing. Per cache-layout-discipline-
+// for-hot-side-structs.md + decision-first-cluster-layout-pattern.md.
+//
+// Previous (v5.15.5.C.1): Order<F> = 280 B with line-3 HOT/COLD mixing.
+// New (v5.15.5.F.4c.3 WIP2d-1.B.1): Order<F> = 320 B with clean cluster boundaries.
+// `exchange_id[64]` is touched only on terminal-state transitions + error/REJECTED
+// logging — drainer + Submit hot paths never read it. Stays in COLD tail.
 //======================================================================
 // [COMMENT]_[why this exists]
 //----------------------------------------------------------------------
@@ -394,14 +400,6 @@ inline void MBS_OrderSetBanditContext(Order<F>* o, int state, int regime, int ar
 //======================================================================
 // [CODE]
 //======================================================================
-// Initialize an order to PENDING state with the given identifying fields.
-// FPN_Binary amounts are zeroed; the caller fills in requested_qty (and optionally requested_price
-// for limit orders) BEFORE calling OrderManager_Submit. Caller calls Order_SetIsMaker +
-// Order_BindPreResolved BEFORE submit when fee/slippage accounting matters.
-//
-// id and client_id are set equal — phase 01 uses the local monotonic id as the idempotency
-// key. Phase 06 (production hardening) may decouple them if retry semantics require a stable
-// client_id across retries.
 template <unsigned F>
 inline void Order_Init(Order<F>* o, uint64_t id, int16_t node_id, OrderType type) {
     o->id              = id;
@@ -428,6 +426,17 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t node_id, OrderType type
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Initialize an order to PENDING state with the given identifying fields.
+// FPN_Binary amounts are zeroed; the caller fills in requested_qty (and optionally requested_price
+// for limit orders) BEFORE calling OrderManager_Submit. Caller calls Order_SetIsMaker +
+// Order_BindPreResolved BEFORE submit when fee/slippage accounting matters.
+//
+// id and client_id are set equal — phase 01 uses the local monotonic id as the idempotency
+// key. Phase 06 (production hardening) may decouple them if retry semantics require a stable
+// client_id across retries.
+//======================================================================
 // [END_FUNCTION]_[Order_Init]
 //======================================================================
 
@@ -441,19 +450,6 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t node_id, OrderType type
 //======================================================================
 // [CODE]
 //======================================================================
-// Pre-resolve per-instance cfg values onto the Order. Call this AFTER Order_Init + AFTER
-// caller has set is_maker (via Order_SetIsMaker), BEFORE OrderManager_Submit.
-//
-// Per DESIGN_SPECS/decision-time-data-binding-pattern.md § Sub-struct refinement (closes
-// Class 27 — OMS scalar cfg-mirror flattens per-instance distinction). HandleFill (drainer
-// thread) reads from o->pre_resolved directly; zero cross-thread cfg read; hot-swap safe
-// (in-flight Orders keep their rate; new Orders get current rate).
-//
-// Future per-resolved fields extend OrderPreResolved + this fn body in lockstep. Consumer
-// sites unchanged when adding new fields.
-//
-// Template note: caller MUST include CoreFrameworks/ControllerConfig.hpp for PerNodeCfg<F>
-// definition; this fn body uses PerNodeCfg<F>'s field accessors.
 template <unsigned F>
 inline void Order_BindPreResolved(Order<F>* o, const ::PerNodeCfg<F>& node_cfg) {
     bool is_maker = Order_GetIsMaker(o);
@@ -467,6 +463,22 @@ inline void Order_BindPreResolved(Order<F>* o, const ::PerNodeCfg<F>& node_cfg) 
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Pre-resolve per-instance cfg values onto the Order. Call this AFTER Order_Init + AFTER
+// caller has set is_maker (via Order_SetIsMaker), BEFORE OrderManager_Submit.
+//
+// Per DESIGN_SPECS/decision-time-data-binding-pattern.md § Sub-struct refinement (closes
+// Class 27 — OMS scalar cfg-mirror flattens per-instance distinction). HandleFill (drainer
+// thread) reads from o->pre_resolved directly; zero cross-thread cfg read; hot-swap safe
+// (in-flight Orders keep their rate; new Orders get current rate).
+//
+// Future per-resolved fields extend OrderPreResolved + this fn body in lockstep. Consumer
+// sites unchanged when adding new fields.
+//
+// Template note: caller MUST include CoreFrameworks/ControllerConfig.hpp for PerNodeCfg<F>
+// definition; this fn body uses PerNodeCfg<F>'s field accessors.
+//======================================================================
 // [END_FUNCTION]_[Order_BindPreResolved]
 //======================================================================
 
@@ -479,18 +491,6 @@ inline void Order_BindPreResolved(Order<F>* o, const ::PerNodeCfg<F>& node_cfg) 
 //======================================================================
 // [CODE]
 //======================================================================
-// Called at HandleFill entry. Always-on runtime check; cost = 1 bit-test + predicted-not-taken branch
-// (~0 cycles amortized in production). Production: bit always set because OrderManager_Submit sig
-// requires node_cfg → BindPreResolved always called inside Submit. Test fixtures constructing Order
-// directly via Order_Init + HandleFill bypass: bit not set → stderr warn. Tests asserting on fee
-// accumulation will fail (visible canary); tests that don't care about fees get the warning but
-// continue (cosmetic only).
-//
-// Why warn-not-abort: drainer thread; aborting kills the engine on the rare misuse. Production
-// invariant catches this at compile time via sig; runtime check is a test-build belt-and-suspenders.
-//
-// Closes silent-zero-fee-rate class structurally (Class 27 sister).
-//======================================================================================================
 template <unsigned F>
 inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
     if (__builtin_expect(!Order_GetPreResolvedBound(o), 0)) {
@@ -505,6 +505,20 @@ inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Called at HandleFill entry. Always-on runtime check; cost = 1 bit-test + predicted-not-taken branch
+// (~0 cycles amortized in production). Production: bit always set because OrderManager_Submit sig
+// requires node_cfg → BindPreResolved always called inside Submit. Test fixtures constructing Order
+// directly via Order_Init + HandleFill bypass: bit not set → stderr warn. Tests asserting on fee
+// accumulation will fail (visible canary); tests that don't care about fees get the warning but
+// continue (cosmetic only).
+//
+// Why warn-not-abort: drainer thread; aborting kills the engine on the rare misuse. Production
+// invariant catches this at compile time via sig; runtime check is a test-build belt-and-suspenders.
+//
+// Closes silent-zero-fee-rate class structurally (Class 27 sister).
 //======================================================================
 // [END_FUNCTION]_[Order_WarnIfNotPreResolved]
 //======================================================================

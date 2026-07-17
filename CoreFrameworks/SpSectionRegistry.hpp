@@ -29,11 +29,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Order matters — sections are sampled IN this order each cycle. Inserting
-// in the middle SHIFTS subsequent section indices (slow_path_breakdown[]
-// array elements re-map). For backward compat with prior snapshot files
-// that may persist per-section breakdown counts, append new sections at
-// the END of the registry.
 #define FOREACH_SP_SECTION(X)                                                                       \
     X(ROLLING,   "EventLoop_UpdateRollingStateOneCore + cadence setup (depth read, swap pickup, mtm_price); dominates cycle (~100-300μs steady-state with W=1024)") \
     X(REBUILD,   "EventLoop_RebuildOneCore: regime classify + strategy dispatch + gate compute (~5-30μs typical)") \
@@ -76,6 +71,14 @@ static_assert(SP_SECTION_COUNT >= 5,
               "(ROLLING, REBUILD, PUSH, TIME_EXIT, TRAIL_SL).");
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Order matters — sections are sampled IN this order each cycle. Inserting
+// in the middle SHIFTS subsequent section indices (slow_path_breakdown[]
+// array elements re-map). For backward compat with prior snapshot files
+// that may persist per-section breakdown counts, append new sections at
+// the END of the registry.
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------

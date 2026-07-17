@@ -31,32 +31,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Atomic ensemble model swap. Replaces the v5.10.0c REFUSE path that
-// rejected hot-swap when ensemble inference was active. Same-thread
-// (slow-path c is single-reader/writer for its own ezoo); brief
-// window with empty zoo is safe — ML inference also runs on this
-// same slow-path thread, can't preempt itself.
-//
-// Reuses the v5.13.0 / v5.13.4 ensemble + bandit primitives:
-//   Free → Init → LoadFromCfg → InitBandits → InitExitBandits
-//   → LoadBanditState → LoadExitBanditState
-//
-// Lives in its own header (split from EngineSharded.hpp) so tests can
-// exercise the helper without dragging in the full sharded engine
-// (Binance, Notify, Depth recorder globals, etc.). Boundary-stable
-// refactor — caller side unchanged; only the storage location moved.
-//
-// Caller responsibilities:
-//   - swap_ezoo must be non-null and own its handle storage
-//   - Open-position gate already passed (caller checks
-//     acknowledge_hot_swap_with_open_positions)
-//   - Caller clears the swap_model_path_requested[] atomic flag
-//
-// Returns 1 on success, 0 on failure (caller logs + sets
-// model_load_failed). Failure modes:
-//   - Empty new_base_dir
-//   - No cached horizons in ezoo (boot must have been broken)
-//   - LoadFromCfg returns 0 roles loaded
 template <unsigned F>
 inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
                                           const ControllerConfig<F>& cfg,
@@ -146,6 +120,35 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Atomic ensemble model swap. Replaces the v5.10.0c REFUSE path that
+// rejected hot-swap when ensemble inference was active. Same-thread
+// (slow-path c is single-reader/writer for its own ezoo); brief
+// window with empty zoo is safe — ML inference also runs on this
+// same slow-path thread, can't preempt itself.
+//
+// Reuses the v5.13.0 / v5.13.4 ensemble + bandit primitives:
+//   Free → Init → LoadFromCfg → InitBandits → InitExitBandits
+//   → LoadBanditState → LoadExitBanditState
+//
+// Lives in its own header (split from EngineSharded.hpp) so tests can
+// exercise the helper without dragging in the full sharded engine
+// (Binance, Notify, Depth recorder globals, etc.). Boundary-stable
+// refactor — caller side unchanged; only the storage location moved.
+//
+// Caller responsibilities:
+//   - swap_ezoo must be non-null and own its handle storage
+//   - Open-position gate already passed (caller checks
+//     acknowledge_hot_swap_with_open_positions)
+//   - Caller clears the swap_model_path_requested[] atomic flag
+//
+// Returns 1 on success, 0 on failure (caller logs + sets
+// model_load_failed). Failure modes:
+//   - Empty new_base_dir
+//   - No cached horizons in ezoo (boot must have been broken)
+//   - LoadFromCfg returns 0 roles loaded
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_HotSwapEnsemble]
 //======================================================================

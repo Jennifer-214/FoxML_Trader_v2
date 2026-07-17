@@ -185,8 +185,6 @@ static_assert(sizeof(Position<64>) - POSITION_PERSIST_BYTES<64>() == 0,
 //======================================================================
 // [CODE]
 //======================================================================
-// bitmap-based like OrderPool - same __builtin_ctz pattern, no array shifting on removal,
-// hot-path exit gate only walks set bits so cleared positions are skipped automatically
 template <unsigned F> struct Portfolio {
     uint16_t active_bitmap; // hot: read first every tick by ExitGate (cache line 0)
     uint16_t _pad0;
@@ -198,6 +196,11 @@ template <unsigned F> struct Portfolio {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// bitmap-based like OrderPool - same __builtin_ctz pattern, no array shifting on removal,
+// hot-path exit gate only walks set bits so cleared positions are skipped automatically
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 //----------------------------------------------------------------------
@@ -218,8 +221,6 @@ template <unsigned F> struct Portfolio {
 //======================================================================
 // [CODE]
 //======================================================================
-// ExitRecord snapshots all position data at exit time — slot may be reused by a
-// new fill before DrainExits runs, so nothing downstream should read from the slot
 template <unsigned F> struct ExitRecord {
     uint32_t position_index;    // slot index (for entry_ticks/entry_strategy lookup only)
     int reason;                 // 0 = take profit, 1 = stop loss
@@ -234,6 +235,11 @@ template <unsigned F> struct ExitRecord {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// ExitRecord snapshots all position data at exit time — slot may be reused by a
+// new fill before DrainExits runs, so nothing downstream should read from the slot
 //======================================================================
 // [END_STRUCT]_[ExitRecord]
 //======================================================================
@@ -262,8 +268,6 @@ template <unsigned F> inline void ExitBuffer_Clear(ExitBuffer<F> *buf) {
 //======================================================================
 // [CODE]
 //======================================================================
-// exact net proceeds pending in exit buffer — matches what DrainExits/RecordExit will credit
-// reads ALL data from ExitRecord (not position slots — those may have been reused)
 template <unsigned F>
 inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
                                           Money fee_rate, Money slippage_pct) {
@@ -282,6 +286,11 @@ inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// exact net proceeds pending in exit buffer — matches what DrainExits/RecordExit will credit
+// reads ALL data from ExitRecord (not position slots — those may have been reused)
 //======================================================================
 // [END_FUNCTION]_[ExitBuffer_PendingProceeds]
 //======================================================================
@@ -303,11 +312,6 @@ inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
 //======================================================================
 // [CODE]
 //======================================================================
-// A28/TD-182 (sister A19): full-struct Position reset — the SINGLE source for clearing a slot to defaults.
-// The subset-zeroing class recurs when each clear site hand-lists fields (A19 = ratchet_tp never cleared;
-// A28 = original_tp/original_sl/pair_index/entry_timestamp_us never cleared → stale trail anchor + mis-paired
-// legs on slot reuse). Every reset site (Init/ClearPositions) calls this. pair_index defaults to -1 (unpaired),
-// NOT 0. Sets values only — no Position layout change, so no PORTFOLIO_SNAPSHOT_VERSION/H21 concern.
 template <unsigned F> inline void Position_Reset(Position<F>* p) {
     // Full-struct clear to defaults, single-sourced off FOREACH_POSITION_FIELD's `init`
     // column (the DMIs) + zeroes _pad_pos (H12: the pad reaches the wire via the blob dump).
@@ -321,6 +325,14 @@ template <unsigned F> inline void Position_Reset(Position<F>* p) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// A28/TD-182 (sister A19): full-struct Position reset — the SINGLE source for clearing a slot to defaults.
+// The subset-zeroing class recurs when each clear site hand-lists fields (A19 = ratchet_tp never cleared;
+// A28 = original_tp/original_sl/pair_index/entry_timestamp_us never cleared → stale trail anchor + mis-paired
+// legs on slot reuse). Every reset site (Init/ClearPositions) calls this. pair_index defaults to -1 (unpaired),
+// NOT 0. Sets values only — no Position layout change, so no PORTFOLIO_SNAPSHOT_VERSION/H21 concern.
 //======================================================================
 // [END_FUNCTION]_[Position_Reset]
 //======================================================================
@@ -484,10 +496,6 @@ struct PositionEntryArgs {
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.F.2 — Portfolio_OpenSlot now takes a const-ref PositionEntryArgs.
-// Live-entry path + replay path populate identically (struct-shape parity).
-// Old multi-arg signature shim (next overload) preserves backward compat
-// for existing call sites; deprecated but functional.
 template <unsigned F>
 inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
                                 const PositionEntryArgs<F>& args) {
@@ -517,6 +525,13 @@ inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.2 — Portfolio_OpenSlot now takes a const-ref PositionEntryArgs.
+// Live-entry path + replay path populate identically (struct-shape parity).
+// Old multi-arg signature shim (next overload) preserves backward compat
+// for existing call sites; deprecated but functional.
 //======================================================================
 // [END_FUNCTION]_[Portfolio_OpenSlot]
 //======================================================================
@@ -550,16 +565,19 @@ inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
 //======================================================================
 // [CODE]
 //======================================================================
-// Canonical fill P&L gross — the SINGLE SOURCE so the per-core, OMS-aggregate, and replay
-// accounting paths cannot drift (D-190; feedback_single_source_the_computation_not_just_the_mode).
-// 1-mul form: round the price DIFFERENCE once, then scale by qty (matches the authoritative OMS
-// books). NB round((exit−entry)×qty) != round(exit×qty)−round(entry×qty) under decimal half-even —
-// open-coding the 2-mul form at any site (was DrainPostFill :1536) re-introduces a 1-ULP divergence.
 inline Money Money_FillGross(Money entry_price, Money exit_price, Money quantity) {
     return Money_Mul(Money_Sub(exit_price, entry_price), quantity);
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Canonical fill P&L gross — the SINGLE SOURCE so the per-core, OMS-aggregate, and replay
+// accounting paths cannot drift (D-190; feedback_single_source_the_computation_not_just_the_mode).
+// 1-mul form: round the price DIFFERENCE once, then scale by qty (matches the authoritative OMS
+// books). NB round((exit−entry)×qty) != round(exit×qty)−round(entry×qty) under decimal half-even —
+// open-coding the 2-mul form at any site (was DrainPostFill :1536) re-introduces a 1-ULP divergence.
 //======================================================================
 // [END_FUNCTION]_[Money_FillGross]
 //======================================================================
@@ -615,9 +633,6 @@ inline void Portfolio_UpdatePosition(Portfolio<F> *portfolio, int index, Money n
 //======================================================================
 // [CODE]
 //======================================================================
-// unrealized P&L: for each active position, (current_price - entry_price) * quantity
-// this is the signal the controller feeds to regression - measures whether current
-// gate conditions are producing positions that are making money
 template <unsigned F> inline Money Portfolio_ComputePnL(const Portfolio<F> *portfolio, Money current_price) {
     Money total = Money_Zero();
     uint16_t active  = portfolio->active_bitmap;
@@ -634,6 +649,12 @@ template <unsigned F> inline Money Portfolio_ComputePnL(const Portfolio<F> *port
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// unrealized P&L: for each active position, (current_price - entry_price) * quantity
+// this is the signal the controller feeds to regression - measures whether current
+// gate conditions are producing positions that are making money
 //======================================================================
 // [END_FUNCTION]_[Portfolio_ComputePnL]
 //======================================================================
@@ -660,9 +681,6 @@ template <unsigned F> inline Money Portfolio_ComputeValue(const Portfolio<F> *po
 //======================================================================
 // [CODE]
 //======================================================================
-// runs every tick - walks active bitmap, checks each position's TP/SL against current price
-// branchless comparisons, writes to exit buffer using count += should_exit pattern
-// clears position bit immediately on exit so next tick's gate skips it
 template <unsigned F>
 inline void PositionExitGate(Portfolio<F> *portfolio, Money current_price, ExitBuffer<F> *exit_buf, uint64_t tick) {
     uint16_t active = portfolio->active_bitmap;
@@ -703,6 +721,12 @@ inline void PositionExitGate(Portfolio<F> *portfolio, Money current_price, ExitB
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// runs every tick - walks active bitmap, checks each position's TP/SL against current price
+// branchless comparisons, writes to exit buffer using count += should_exit pattern
+// clears position bit immediately on exit so next tick's gate skips it
 //======================================================================
 // [END_FUNCTION]_[PositionExitGate]
 //======================================================================

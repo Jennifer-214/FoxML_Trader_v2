@@ -118,10 +118,6 @@ struct ReconciliationLoopState {
 //======================================================================
 // [CODE]
 //======================================================================
-// One reconciliation cycle. Queries exchange balances, computes expected
-// balances from OMS state, reports drift.
-//
-// Returns 1 if drift was detected and a CMD_RECONCILE was pushed, 0 if clean.
 template <unsigned F>
 static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
     s->total_polls.fetch_add(1, std::memory_order_relaxed);
@@ -189,6 +185,13 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// One reconciliation cycle. Queries exchange balances, computes expected
+// balances from OMS state, reports drift.
+//
+// Returns 1 if drift was detected and a CMD_RECONCILE was pushed, 0 if clean.
 //======================================================================
 // [END_FUNCTION]_[ReconciliationLoop_Pass]
 //======================================================================

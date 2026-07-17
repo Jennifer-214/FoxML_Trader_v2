@@ -115,12 +115,6 @@ inline void Momentum_Init(MomentumState<F> *state,
 //======================================================================
 // [CODE]
 //======================================================================
-// same feedback loop as MR but tuning breakout_mult instead of offset:
-//   1. idle squeeze: lower breakout threshold when no positions and price is running
-//   2. P&L regression: adjust breakout_mult based on profitability
-//      positive P&L slope → lower threshold (enter breakouts earlier)
-//      negative P&L slope → raise threshold (wait for stronger confirmation)
-//======================================================================================================
 template <unsigned F>
 inline void Momentum_Adapt(MomentumState<F> *state,
                             FPN_Binary<F> current_price,
@@ -196,6 +190,14 @@ inline void Momentum_Adapt(MomentumState<F> *state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// same feedback loop as MR but tuning breakout_mult instead of offset:
+//   1. idle squeeze: lower breakout threshold when no positions and price is running
+//   2. P&L regression: adjust breakout_mult based on profitability
+//      positive P&L slope → lower threshold (enter breakouts earlier)
+//      negative P&L slope → raise threshold (wait for stronger confirmation)
+//======================================================================
 // [END_FUNCTION]_[Momentum_Adapt]
 //======================================================================
 
@@ -209,9 +211,6 @@ inline void Momentum_Adapt(MomentumState<F> *state,
 //======================================================================
 // [CODE]
 //======================================================================
-// computes breakout buy conditions: buy_price = avg + (stddev * breakout_mult)
-// gate_direction = 1 means BuyGate checks price >= buy_price (buy above)
-//======================================================================================================
 template <unsigned F>
 inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
                                                      const RollingStats<F> *rolling,
@@ -285,6 +284,11 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// computes breakout buy conditions: buy_price = avg + (stddev * breakout_mult)
+// gate_direction = 1 means BuyGate checks price >= buy_price (buy above)
+//======================================================================
 // [END_FUNCTION]_[Momentum_BuySignal]
 //======================================================================
 
@@ -297,10 +301,6 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
 //======================================================================
 // [CODE]
 //======================================================================
-// momentum trailing: tighter SL trail (failures reverse fast), wider TP trail (let runs extend)
-// uses the same hold_score = SNR * R² pattern as MR but with different multipliers
-// the key difference: momentum uses cfg->momentum_sl_mult (tighter) instead of cfg->sl_trail_mult
-//======================================================================================================
 template <unsigned F>
 inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, Money current_price,
                                   const RollingStats<F> *rolling,
@@ -434,6 +434,12 @@ inline void Momentum_ExitAdjustSharded(
 } // namespace tt
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// momentum trailing: tighter SL trail (failures reverse fast), wider TP trail (let runs extend)
+// uses the same hold_score = SNR * R² pattern as MR but with different multipliers
+// the key difference: momentum uses cfg->momentum_sl_mult (tighter) instead of cfg->sl_trail_mult
 //======================================================================
 // [END_FUNCTION]_[Momentum_ExitAdjust]
 //======================================================================

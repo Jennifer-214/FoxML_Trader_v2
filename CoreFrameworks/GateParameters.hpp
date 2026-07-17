@@ -287,8 +287,6 @@ static inline bool SG_Evaluate(const Money& current_price, const Money& entry_pr
 //======================================================================
 // [CODE]
 //======================================================================
-// Initialize a GateParameters pack to safe defaults. Permission=0 semantics: with
-// these params + permission=0 the execution core will not trade.
 template <unsigned F>
 static inline void GateParameters_Init(GateParameters<F>* params) {
     params->bg_price_threshold = Money_Zero();
@@ -306,6 +304,11 @@ static inline void GateParameters_Init(GateParameters<F>* params) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Initialize a GateParameters pack to safe defaults. Permission=0 semantics: with
+// these params + permission=0 the execution core will not trade.
 //======================================================================
 // [END_FUNCTION]_[GateParameters_Init]
 //======================================================================

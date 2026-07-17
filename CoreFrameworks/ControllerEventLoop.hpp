@@ -118,26 +118,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.1.0 per-core data plane — each engine owns its rolling/regime/flow state instead of reading
-// producer-owned shared state. See plans/2026-04-28-v5.1-data-plane-
-// decouple.md for the full design.
-//
-// SINGLE-WRITER RULE per engine:
-//   - per_node_slow arch:  Producer writes per-tick (ema_price) to all N
-//                          cores in fan_out; per-cadence updates done by
-//                          per-core slow-path c on its OWN slow_state
-//   - backtest:            Single thread; loops c=0..N
-//
-// READ PATTERN: per-core slow-path body (per-core thread) reads
-// state.nodes[c].slow_state. ema_price is producer-written; per-cadence
-// fields are written by the per-core thread itself (no cross-thread for
-// those). ema_price has eventual-consistency cross-thread reads (relaxed
-// loads — same as pre-v5.1.0 shared design but now per-core targets).
-//
-// Window sizes are template-fixed (RollingStats<F, 128> etc.). Per-core
-// override of window size is a future enhancement requiring runtime-
-// sized buffers — currently every engine uses identical windows.
-//======================================================================================================
 template <unsigned F>
 struct NodeSlowState {
     // ---- v5.15.5.B.1 — HOT cluster at struct head (lazy-rebuild gate + ema_price) ----
@@ -223,6 +203,28 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.1.0 per-core data plane — each engine owns its rolling/regime/flow state instead of reading
+// producer-owned shared state. See plans/2026-04-28-v5.1-data-plane-
+// decouple.md for the full design.
+//
+// SINGLE-WRITER RULE per engine:
+//   - per_node_slow arch:  Producer writes per-tick (ema_price) to all N
+//                          cores in fan_out; per-cadence updates done by
+//                          per-core slow-path c on its OWN slow_state
+//   - backtest:            Single thread; loops c=0..N
+//
+// READ PATTERN: per-core slow-path body (per-core thread) reads
+// state.nodes[c].slow_state. ema_price is producer-written; per-cadence
+// fields are written by the per-core thread itself (no cross-thread for
+// those). ema_price has eventual-consistency cross-thread reads (relaxed
+// loads — same as pre-v5.1.0 shared design but now per-core targets).
+//
+// Window sizes are template-fixed (RollingStats<F, 128> etc.). Per-core
+// override of window size is a future enhancement requiring runtime-
+// sized buffers — currently every engine uses identical windows.
+//======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 // [SIZE]_[199104B]
 // [ALIGN]_[64]
@@ -245,6 +247,22 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 //======================================================================
 // [CODE]
 //======================================================================
+struct alignas(64) SlowPathTelemetry {
+    std::atomic<uint64_t> last_tick_us{0};
+    std::atomic<uint64_t> cycles_total{0};
+    std::atomic<uint64_t> yield_count{0};
+    std::atomic<uint8_t>  state{0};
+};
+static_assert(alignof(SlowPathTelemetry) == 64,
+              "SlowPathTelemetry MUST be cache-line aligned for cross-thread "
+              "isolation. See cross-thread-snapshot-publish-cluster-isolation.md.");
+static_assert(sizeof(SlowPathTelemetry) == 64,
+              "SlowPathTelemetry MUST occupy exactly one cache line.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.15.5.B.2 — v5.0.3-era thread observability fields, wrapped in alignas(64) cluster for
 // cross-thread cache-line isolation. Single-writer is the slow-path thread
 // that owns this core (or producer in centralized mode); GUI publish reads
@@ -263,20 +281,6 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 // Pattern: cross-thread-snapshot-publish-cluster-isolation.md (ND1 first ref).
 // ~25 B used in 64 B cache line — generous padding kept intentional for
 // future flag additions + crosstalk prevention.
-//======================================================================================================
-struct alignas(64) SlowPathTelemetry {
-    std::atomic<uint64_t> last_tick_us{0};
-    std::atomic<uint64_t> cycles_total{0};
-    std::atomic<uint64_t> yield_count{0};
-    std::atomic<uint8_t>  state{0};
-};
-static_assert(alignof(SlowPathTelemetry) == 64,
-              "SlowPathTelemetry MUST be cache-line aligned for cross-thread "
-              "isolation. See cross-thread-snapshot-publish-cluster-isolation.md.");
-static_assert(sizeof(SlowPathTelemetry) == 64,
-              "SlowPathTelemetry MUST occupy exactly one cache line.");
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_STRUCT]_[SlowPathTelemetry]
 //======================================================================
@@ -295,33 +299,6 @@ static_assert(sizeof(SlowPathTelemetry) == 64,
 //======================================================================
 // [CODE]
 //======================================================================
-// per-core controller-side state. one slot per registered execution core.
-// the node_id field is implicit: nodes[i].core->node_id == i. holds the
-// "intended" trade parameters that the controller wants applied at the next
-// entry — phase 05 will replace this with a real parameter-slot push protocol,
-// for phase 04 it's just a hot-update field the controller writes between
-// entries and reads at entry time.
-//
-// statistics (entries_processed / exits_processed) are bumped from the drain
-// loop, useful for monitoring per-core throughput in the TUI later.
-//======================================================================================================
-// v5.15.5.B.1 — Fields grouped into HOT/WARM/COLD clusters by access frequency
-// (cache-layout-discipline-for-hot-side-structs.md Rule 4); intra-cluster
-// ordering is decision-first (decision-first-cluster-layout-pattern.md):
-// gate_state bitmap at offset 0 for cycle-entry bail-out + forward-sequential
-// subsequent fields for Intel/AMD stride-prefetcher friendliness.
-//
-// Explicit `struct alignas(64)` makes inter-slot false-sharing prevention
-// LOCAL — previously TRANSITIVE via embedded NodeLatencyStats's alignas(64);
-// a future refactor removing that would silently break the nodes[16] inter-
-// slot guarantee. Static_asserts after the struct close lock the invariant
-// at compile time.
-//
-// Safe to reorder: ShardedSnapshotPersist is field-by-field fwrite (no memcpy
-// of struct bytes); no HMAC / SHA-256 / wire-format path uses raw NodeContext
-// bytes; safety greps cleared 2026-05-12. CLAUDE.md item 27 (struct-padding
-// determinism) explicitly NOT in scope — NodeContext is not in byte-
-// equivalence path.
 template <unsigned F>
 struct alignas(64) NodeContext {
     // ════════════════════════════════════════════════════════════════════
@@ -655,6 +632,36 @@ static_assert(offsetof(NodeContext<64>, sp_telemetry) % 64 == 0,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// per-core controller-side state. one slot per registered execution core.
+// the node_id field is implicit: nodes[i].core->node_id == i. holds the
+// "intended" trade parameters that the controller wants applied at the next
+// entry — phase 05 will replace this with a real parameter-slot push protocol,
+// for phase 04 it's just a hot-update field the controller writes between
+// entries and reads at entry time.
+//
+// statistics (entries_processed / exits_processed) are bumped from the drain
+// loop, useful for monitoring per-core throughput in the TUI later.
+//
+// v5.15.5.B.1 — Fields grouped into HOT/WARM/COLD clusters by access frequency
+// (cache-layout-discipline-for-hot-side-structs.md Rule 4); intra-cluster
+// ordering is decision-first (decision-first-cluster-layout-pattern.md):
+// gate_state bitmap at offset 0 for cycle-entry bail-out + forward-sequential
+// subsequent fields for Intel/AMD stride-prefetcher friendliness.
+//
+// Explicit `struct alignas(64)` makes inter-slot false-sharing prevention
+// LOCAL — previously TRANSITIVE via embedded NodeLatencyStats's alignas(64);
+// a future refactor removing that would silently break the nodes[16] inter-
+// slot guarantee. Static_asserts after the struct close lock the invariant
+// at compile time.
+//
+// Safe to reorder: ShardedSnapshotPersist is field-by-field fwrite (no memcpy
+// of struct bytes); no HMAC / SHA-256 / wire-format path uses raw NodeContext
+// bytes; safety greps cleared 2026-05-12. CLAUDE.md item 27 (struct-padding
+// determinism) explicitly NOT in scope — NodeContext is not in byte-
+// equivalence path.
+//======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 // [SIZE]_[7168B]
 // [ALIGN]_[64]
@@ -677,6 +684,20 @@ static_assert(offsetof(NodeContext<64>, sp_telemetry) % 64 == 0,
 //======================================================================
 // [CODE]
 //======================================================================
+struct alignas(64) WsHeartbeatTelemetry {
+    std::atomic<uint64_t> last_tick_us{0};
+    std::atomic<uint64_t> ticks_per_5s{0};
+    uint64_t              bucket_last_sec[5]{0, 0, 0, 0, 0};  // producer-only writer; not atomic
+    uint32_t              bucket_count[5]{0, 0, 0, 0, 0};     // producer-only writer; not atomic
+};
+static_assert(alignof(WsHeartbeatTelemetry) == 64,
+              "WsHeartbeatTelemetry MUST be cache-line aligned for cross-thread "
+              "isolation. See cross-thread-snapshot-publish-cluster-isolation.md.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // v5.15.5.B.2 — v5.12.1.A + v5.12.1.C WS heartbeat fields, wrapped in alignas(64) cluster
 // for cross-thread cache-line isolation on EventLoopState. Single-writer is
 // the producer thread (live) or backtest driver (offline). Readers: per-core
@@ -693,18 +714,6 @@ static_assert(offsetof(NodeContext<64>, sp_telemetry) % 64 == 0,
 //   ticks_per_5s       — rolling tick count over last 5 seconds
 //   bucket_last_sec[5] — second-tag of each rotating bucket (stale detection)
 //   bucket_count[5]    — tick count in each bucket
-//======================================================================================================
-struct alignas(64) WsHeartbeatTelemetry {
-    std::atomic<uint64_t> last_tick_us{0};
-    std::atomic<uint64_t> ticks_per_5s{0};
-    uint64_t              bucket_last_sec[5]{0, 0, 0, 0, 0};  // producer-only writer; not atomic
-    uint32_t              bucket_count[5]{0, 0, 0, 0, 0};     // producer-only writer; not atomic
-};
-static_assert(alignof(WsHeartbeatTelemetry) == 64,
-              "WsHeartbeatTelemetry MUST be cache-line aligned for cross-thread "
-              "isolation. See cross-thread-snapshot-publish-cluster-isolation.md.");
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 // [SIZE]_[128B]
@@ -726,42 +735,6 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.B.2 — per-core display-only state, extracted from NodeContext per
-// cache-layout-discipline-for-hot-side-structs.md Rule 1 (extract
-// display-only fields off the HOT cluster of slow-path-cycled structs).
-//
-// These fields are WRITTEN by slow-path-body (gate-diag capture +
-// observability counter increments + cfg-drift counters at boot) but
-// READ ONLY by ShardedSnapshot publisher (ShardedSnapshot.hpp + entry
-// log emission). They DO NOT influence per-cycle decision code.
-//
-// Parallel-array layout: EventLoopState has display_meta[MAX_EXECUTION_NODES]
-// paired by index with nodes[] — meta for core i lives at display_meta[i].
-// Separate storage = slow-path cycle's HOT cluster access doesn't pull
-// display-meta cache lines into L1 unnecessarily; ~9-10 KB of cold data
-// stays out of the HOT/WARM working set.
-//
-// Single-writer per core (slow-path thread for this core); single-reader
-// per snapshot (publisher thread at ~30 Hz). Cross-thread accesses do
-// not happen on per-cycle cadence so no alignas isolation is needed
-// within DisplayMeta (homogeneous low-cadence access). The aggregate
-// `EventLoopState::display_meta[MAX_EXECUTION_NODES]` array IS sized to
-// be a multiple of 64 bytes via static_assert below.
-//
-// FIELDS ARE REGISTRY-GENERATED. See
-// `MemHeaders/DisplayMetaRegistry.hpp` for the two FOREACH registries
-// that drive every aspect of this struct:
-//   FOREACH_GATE_DIAG_PAIR(X)   — 12 FPN_Binary<F> gate-diag fields (paired)
-//   FOREACH_DISPLAY_META_FIELD(X) — 12 heterogeneous counters + flags
-// To add a new field: append ONE row to the appropriate registry; the
-// struct decl, init helper, snapshot publisher reads, etc. auto-flow.
-// See DESIGN_SPECS/display-execution-invariant-registry-pattern.md (ND2).
-//
-// `slow_path_latency` + `slow_path_breakdown[]` are KEPT as direct
-// fields because NodeLatencyStats has its own Init/Enable/Sample
-// helpers + alignas(64) discipline; shoehorning them into a uniform
-// registry shape would lose the type safety.
-//======================================================================================================
 template <unsigned F>
 struct NodeContextDisplayMeta {
     // ------------------------------------------------------------------
@@ -825,6 +798,44 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.B.2 — per-core display-only state, extracted from NodeContext per
+// cache-layout-discipline-for-hot-side-structs.md Rule 1 (extract
+// display-only fields off the HOT cluster of slow-path-cycled structs).
+//
+// These fields are WRITTEN by slow-path-body (gate-diag capture +
+// observability counter increments + cfg-drift counters at boot) but
+// READ ONLY by ShardedSnapshot publisher (ShardedSnapshot.hpp + entry
+// log emission). They DO NOT influence per-cycle decision code.
+//
+// Parallel-array layout: EventLoopState has display_meta[MAX_EXECUTION_NODES]
+// paired by index with nodes[] — meta for core i lives at display_meta[i].
+// Separate storage = slow-path cycle's HOT cluster access doesn't pull
+// display-meta cache lines into L1 unnecessarily; ~9-10 KB of cold data
+// stays out of the HOT/WARM working set.
+//
+// Single-writer per core (slow-path thread for this core); single-reader
+// per snapshot (publisher thread at ~30 Hz). Cross-thread accesses do
+// not happen on per-cycle cadence so no alignas isolation is needed
+// within DisplayMeta (homogeneous low-cadence access). The aggregate
+// `EventLoopState::display_meta[MAX_EXECUTION_NODES]` array IS sized to
+// be a multiple of 64 bytes via static_assert below.
+//
+// FIELDS ARE REGISTRY-GENERATED. See
+// `MemHeaders/DisplayMetaRegistry.hpp` for the two FOREACH registries
+// that drive every aspect of this struct:
+//   FOREACH_GATE_DIAG_PAIR(X)   — 12 FPN_Binary<F> gate-diag fields (paired)
+//   FOREACH_DISPLAY_META_FIELD(X) — 12 heterogeneous counters + flags
+// To add a new field: append ONE row to the appropriate registry; the
+// struct decl, init helper, snapshot publisher reads, etc. auto-flow.
+// See DESIGN_SPECS/display-execution-invariant-registry-pattern.md (ND2).
+//
+// `slow_path_latency` + `slow_path_breakdown[]` are KEPT as direct
+// fields because NodeLatencyStats has its own Init/Enable/Sample
+// helpers + alignas(64) discipline; shoehorning them into a uniform
+// registry shape would lose the type safety.
+//======================================================================
 // [END_STRUCT]_[NodeContextDisplayMeta]
 //======================================================================
 
@@ -838,19 +849,6 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 //======================================================================
 // [CODE]
 //======================================================================
-// holds everything the controller core needs to process events from N
-// execution cores. cores array is indexed by registration order; once a core
-// is registered its slot index is its node_id forever (no compaction on
-// unregister, just mark inactive).
-//
-// Phase 03 chunk 1B: all financial state (portfolio, balance, realized_pnl,
-// fee_rate, kill switch, trade log) now lives in OrderManagerState. the OMS
-// pointer is the ONLY path to reach them. EventLoopState is a thin dispatcher
-// that owns per-core contexts, event counters, and the OMS back-pointer.
-//
-// total_events_processed is a heartbeat / liveness counter useful for
-// detecting a stalled controller (TUI shows it growing each frame).
-//======================================================================================================
 template <unsigned F>
 struct alignas(64) EventLoopState {
     NodeContext<F> nodes[MAX_EXECUTION_NODES];
@@ -910,6 +908,21 @@ struct alignas(64) EventLoopState {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// holds everything the controller core needs to process events from N
+// execution cores. cores array is indexed by registration order; once a core
+// is registered its slot index is its node_id forever (no compaction on
+// unregister, just mark inactive).
+//
+// Phase 03 chunk 1B: all financial state (portfolio, balance, realized_pnl,
+// fee_rate, kill switch, trade log) now lives in OrderManagerState. the OMS
+// pointer is the ONLY path to reach them. EventLoopState is a thin dispatcher
+// that owns per-core contexts, event counters, and the OMS back-pointer.
+//
+// total_events_processed is a heartbeat / liveness counter useful for
+// detecting a stalled controller (TUI shows it growing each frame).
+//======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 // [SIZE]_[272640B]
 // [ALIGN]_[64]
@@ -946,37 +959,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.F.2 — walks state->oms->event_log + reconstructs per-core attribution state
-// (entries_processed, exits_processed, node_realized, node_fees, node_open_
-// notional, node_wins, node_losses). Idempotent + safe to call multiple
-// times on the same log content; expects per-core fields to be zero-init'd
-// before call (NODE_CTX_INIT_AUTOPOPULATE handles that).
-//
-// Closes the Class-18 mirror between:
-//   - ShardedSnapshot_Load (restores per-core fields field-by-field)
-//   - Portfolio_FromEventLog (restores ONLY OMS-level state; per-core fields
-//     left at Init defaults — caused .F.2 Budget -100% display bug + drainer
-//     risk gate misbehavior).
-//
-// Per the structural-fix-preferred gradient (structural fix preferred when a bug class can recur)
-// + DESIGN_SPECS/structural-fix-preferred-decision-framework.md.
-//
-// Algorithm:
-//   1. Walk events in order; track per-slot "outstanding entry" record.
-//   2. BUY event → record (price, qty, entry_fee) for slot + bump entries_-
-//      processed + add notional to node_open_notional.
-//   3. SELL event → match against slot's outstanding entry → compute gross +
-//      net + fees → bump exits_processed + accumulate node_realized + fees +
-//      wins/losses + subtract entry_notional from node_open_notional.
-//
-// v5.15.5.F.4c.3 WIP2d-1.B.1 — `cores` param added (nullptr-tolerant) for per-core fee_rate
-// during replay. Per cfg-scope-discipline § "consumer over per-core array"; caller passes
-// `cfg.nodes`. Recovery-path nullable semantic per Decision 2 — nullptr → FPN_Zero fees in
-// reconstructed accounting (acceptable for legacy replay; primary recovery is HandleFill).
-//
-// Branchless nullptr handling per H20 + branchless-dispatch-discipline.md Pattern 3:
-// hoist a SINGLE cmov at fn entry to select effective_nodes; loop body reads
-// effective_nodes[idx].field with zero per-iteration branches.
 // Fwd-decl: Sharded_SlotNode is defined with its geometry family below; this
 // early consumer precedes the definition (same tt namespace). (D-294)
 static inline int Sharded_SlotNode(int slot, int partial_exit_enabled);
@@ -1047,6 +1029,40 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.2 — walks state->oms->event_log + reconstructs per-core attribution state
+// (entries_processed, exits_processed, node_realized, node_fees, node_open_
+// notional, node_wins, node_losses). Idempotent + safe to call multiple
+// times on the same log content; expects per-core fields to be zero-init'd
+// before call (NODE_CTX_INIT_AUTOPOPULATE handles that).
+//
+// Closes the Class-18 mirror between:
+//   - ShardedSnapshot_Load (restores per-core fields field-by-field)
+//   - Portfolio_FromEventLog (restores ONLY OMS-level state; per-core fields
+//     left at Init defaults — caused .F.2 Budget -100% display bug + drainer
+//     risk gate misbehavior).
+//
+// Per the structural-fix-preferred gradient (structural fix preferred when a bug class can recur)
+// + DESIGN_SPECS/structural-fix-preferred-decision-framework.md.
+//
+// Algorithm:
+//   1. Walk events in order; track per-slot "outstanding entry" record.
+//   2. BUY event → record (price, qty, entry_fee) for slot + bump entries_-
+//      processed + add notional to node_open_notional.
+//   3. SELL event → match against slot's outstanding entry → compute gross +
+//      net + fees → bump exits_processed + accumulate node_realized + fees +
+//      wins/losses + subtract entry_notional from node_open_notional.
+//
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — `cores` param added (nullptr-tolerant) for per-core fee_rate
+// during replay. Per cfg-scope-discipline § "consumer over per-core array"; caller passes
+// `cfg.nodes`. Recovery-path nullable semantic per Decision 2 — nullptr → FPN_Zero fees in
+// reconstructed accounting (acceptable for legacy replay; primary recovery is HandleFill).
+//
+// Branchless nullptr handling per H20 + branchless-dispatch-discipline.md Pattern 3:
+// hoist a SINGLE cmov at fn entry to select effective_nodes; loop body reads
+// effective_nodes[idx].field with zero per-iteration branches.
+//======================================================================
 // [END_FUNCTION]_[EventLoopState_ReconstructPerCoreFromEventLog]
 //======================================================================
 
@@ -1059,11 +1075,6 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
 //======================================================================
 // [CODE]
 //======================================================================
-// zero the dispatcher state, install the OMS back-pointer. all financial
-// state (portfolio, balance, fee_rate, kill switch, trade log) lives in the
-// OMS — EventLoopState just holds per-core contexts and event counters.
-// the OMS must be initialized via OrderManager_Init BEFORE calling this.
-//======================================================================================================
 template <unsigned F>
 inline void EventLoopState_Init(EventLoopState<F>* state,
                                 OrderManagerState<F>* oms) {
@@ -1196,6 +1207,13 @@ inline void EventLoopState_Free(EventLoopState<F>* state) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// zero the dispatcher state, install the OMS back-pointer. all financial
+// state (portfolio, balance, fee_rate, kill switch, trade log) lives in the
+// OMS — EventLoopState just holds per-core contexts and event counters.
+// the OMS must be initialized via OrderManager_Init BEFORE calling this.
+//======================================================================
 // [END_FUNCTION]_[EventLoopState_Init]
 //======================================================================
 
@@ -1208,16 +1226,6 @@ inline void EventLoopState_Free(EventLoopState<F>* state) {
 //======================================================================
 // [CODE]
 //======================================================================
-// claim a slot for this execution core. node_id is set to the slot index so
-// future events from this core route to the right portfolio slot.
-//
-// returns the assigned slot (== node_id), or -1 if MAX_EXECUTION_NODES is full.
-//
-// the intended_tp / intended_sl / intended_qty parameters are the trade
-// parameters the controller wants to apply on the next entry. phase 05 will
-// allow the controller to update them between entries via a separate push
-// protocol; for phase 04 they're set once at registration and reused.
-//======================================================================================================
 template <unsigned F>
 inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
                                        ExecutionCore<F>* core,
@@ -1237,6 +1245,18 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// claim a slot for this execution core. node_id is set to the slot index so
+// future events from this core route to the right portfolio slot.
+//
+// returns the assigned slot (== node_id), or -1 if MAX_EXECUTION_NODES is full.
+//
+// the intended_tp / intended_sl / intended_qty parameters are the trade
+// parameters the controller wants to apply on the next entry. phase 05 will
+// allow the controller to update them between entries via a separate push
+// protocol; for phase 04 they're set once at registration and reused.
 //======================================================================
 // [END_FUNCTION]_[EventLoopState_RegisterCore]
 //======================================================================
@@ -1381,18 +1401,6 @@ static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg)
 //======================================================================
 // [CODE]
 //======================================================================
-// assign a strategy to a registered core. the strategy_id is used by
-// Strategy_BuildParameters (phase 06+) to dispatch to the right strategy's
-// _BuildParameters function during slow-path parameter rebuilds.
-//
-// STRATEGY_NONE disables the core (parameter pushes are skipped, the
-// execution core's permission stays at 0). this is the safe default — see
-// pitfall P6.5 (cores running undefined strategies).
-//
-// allocated_balance is the share of total balance this core is permitted to
-// risk on a single trade. set by Regime_AllocateCores (phase 06+). units are
-// FPN_Binary<F> currency, not percentage.
-//======================================================================================================
 template <unsigned F>
 inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
                                             uint8_t strategy_id,
@@ -1407,6 +1415,20 @@ inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// assign a strategy to a registered core. the strategy_id is used by
+// Strategy_BuildParameters (phase 06+) to dispatch to the right strategy's
+// _BuildParameters function during slow-path parameter rebuilds.
+//
+// STRATEGY_NONE disables the core (parameter pushes are skipped, the
+// execution core's permission stays at 0). this is the safe default — see
+// pitfall P6.5 (cores running undefined strategies).
+//
+// allocated_balance is the share of total balance this core is permitted to
+// risk on a single trade. set by Regime_AllocateCores (phase 06+). units are
+// FPN_Binary<F> currency, not percentage.
 //======================================================================
 // [END_FUNCTION]_[EventLoopState_SetCoreStrategy]
 //======================================================================
@@ -1546,50 +1568,6 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 //======================================================================
 // [CODE]
 //======================================================================
-// Run by the drainer thread after every OrderManager_Tick. Consumes the
-// FillRecords + masks populated by OrderManager_HandleFill and applies
-// per-core NodeContext updates that the legacy mode-0 path used to do
-// inside EventLoop_OnEvent: node_open_notional, node_realized, node_fees,
-// node_wins/node_losses, ConfidenceScorer feedback, SL cooldown,
-// pnl_feeder push.
-//
-// Slot → node_id mapping is partials-aware via oms_state_flags
-// PARTIAL_EXIT_ENABLED bit (v5.15.5.C.2 / S3a).
-// Both legs of a paired trade route their stats to the SAME NodeContext
-// (one per core, not one per leg) — partials only split the exit
-// schedule, not the allocation.
-//
-// Per-leg vs per-trade fields (load-bearing under partials):
-//   - PER-LEG (every exit fill contributes): node_realized,
-//     node_open_notional, node_fees. Each leg has its own qty + entry
-//     notional + fee, so all aggregate.
-//   - PER-TRADE (leg-A only fires the signal): node_wins/node_losses,
-//     ConfidenceScorer_Update, active_prediction reset, pnl_feeder push,
-//     sl_cooldown_remaining. One trade = one outcome signal. Mirrors the
-//     entry-side rule that last_entry_tick + last_entry_price +
-//     active_prediction are stamped only on leg-A entries.
-//
-// v4.7.4: prior behavior fired the per-trade hooks on EVERY leg bit,
-// causing IC contamination on the ConfidenceScorer (1 valid (X, ret_a)
-// pair + 1 garbage (0, ret_b) pair after active_prediction was wiped on
-// leg-A iter), 2× pnl_feeder pushes per trade, doubled W/L counters. The
-// double-fire was actually present since v4.7.0 partials but only
-// became visible once cores were swapped to STRATEGY_ML.
-//
-// All slow-path. Single-threaded (drainer is sole reader, OMS_Tick on
-// the same thread is sole writer). FPN_Binary-pure on the per-core math.
-//======================================================================================================
-// v4.7.38 (Phase C.1): per-core helper. Walks ONLY this core's slots in
-// the open/close masks. Clears only its own bits (`mask &= ~my_mask`).
-// Wrapper EventLoop_DrainPostFill calls this for each registered core.
-//
-// Atomicity note: in the centralized path (drainer thread is sole caller,
-// today's mode), plain uint16_t writes to last_opened_mask / last_closed_mask
-// are safe. When Phase C.2 spawns per-core slow-path threads, EACH thread's
-// OneCore call clears its own bits — multiple writers to the same uint16
-// becomes a race. Phase C.2 will convert these to std::atomic<uint16_t>
-// and use fetch_and(~my_mask). For Phase C.1 (this commit), single-writer
-// drainer keeps plain access safe.
 template <unsigned F>
 inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              OrderManagerState<F>* oms,
@@ -2048,6 +2026,53 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Run by the drainer thread after every OrderManager_Tick. Consumes the
+// FillRecords + masks populated by OrderManager_HandleFill and applies
+// per-core NodeContext updates that the legacy mode-0 path used to do
+// inside EventLoop_OnEvent: node_open_notional, node_realized, node_fees,
+// node_wins/node_losses, ConfidenceScorer feedback, SL cooldown,
+// pnl_feeder push.
+//
+// Slot → node_id mapping is partials-aware via oms_state_flags
+// PARTIAL_EXIT_ENABLED bit (v5.15.5.C.2 / S3a).
+// Both legs of a paired trade route their stats to the SAME NodeContext
+// (one per core, not one per leg) — partials only split the exit
+// schedule, not the allocation.
+//
+// Per-leg vs per-trade fields (load-bearing under partials):
+//   - PER-LEG (every exit fill contributes): node_realized,
+//     node_open_notional, node_fees. Each leg has its own qty + entry
+//     notional + fee, so all aggregate.
+//   - PER-TRADE (leg-A only fires the signal): node_wins/node_losses,
+//     ConfidenceScorer_Update, active_prediction reset, pnl_feeder push,
+//     sl_cooldown_remaining. One trade = one outcome signal. Mirrors the
+//     entry-side rule that last_entry_tick + last_entry_price +
+//     active_prediction are stamped only on leg-A entries.
+//
+// v4.7.4: prior behavior fired the per-trade hooks on EVERY leg bit,
+// causing IC contamination on the ConfidenceScorer (1 valid (X, ret_a)
+// pair + 1 garbage (0, ret_b) pair after active_prediction was wiped on
+// leg-A iter), 2× pnl_feeder pushes per trade, doubled W/L counters. The
+// double-fire was actually present since v4.7.0 partials but only
+// became visible once cores were swapped to STRATEGY_ML.
+//
+// All slow-path. Single-threaded (drainer is sole reader, OMS_Tick on
+// the same thread is sole writer). FPN_Binary-pure on the per-core math.
+//
+// v4.7.38 (Phase C.1): per-core helper. Walks ONLY this core's slots in
+// the open/close masks. Clears only its own bits (`mask &= ~my_mask`).
+// Wrapper EventLoop_DrainPostFill calls this for each registered core.
+//
+// Atomicity note: in the centralized path (drainer thread is sole caller,
+// today's mode), plain uint16_t writes to last_opened_mask / last_closed_mask
+// are safe. When Phase C.2 spawns per-core slow-path threads, EACH thread's
+// OneCore call clears its own bits — multiple writers to the same uint16
+// becomes a race. Phase C.2 will convert these to std::atomic<uint16_t>
+// and use fetch_and(~my_mask). For Phase C.1 (this commit), single-writer
+// drainer keeps plain access safe.
+//======================================================================
 // [END_FUNCTION]_[EventLoop_DrainPostFillOneCore]
 //======================================================================
 
@@ -2061,28 +2086,6 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
 //======================================================================
 // [CODE]
 //======================================================================
-// process one TradeEvent. dispatches to entry or exit handling based on
-// event.type bits. updates portfolio + balance + statistics. does NOT call
-// kill switch eval, regime update, or any code that might mutate gate_params
-// (those go through deferred dirty-flag mechanisms in later phases).
-//
-// entry handling:
-//   - look up NodeContext for event.node_id (the source core)
-//   - read intended TP/SL/qty from the context (set by controller earlier)
-//   - call Portfolio_OpenSlot to write the position fields and set the bit
-//   - bump per-core entries_processed counter
-//
-// exit handling:
-//   - call Portfolio_CloseSlot which clears the bit and returns gross P&L
-//   - apply fees: net = gross - (gross * fee_rate)  (matches existing
-//     PortfolioController fee model)
-//   - balance += net, realized_pnl += net
-//   - bump per-core exits_processed counter
-//
-// invalid event types (type == 0 or type == TRADE_EVENT_ENTRY|TRADE_EVENT_EXIT)
-// are silently ignored — the branchless ExecutionCore_Tick can never produce
-// them, but defensive logic in case of replay or fuzz testing.
-//======================================================================================================
 template <unsigned F>
 inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& event_in,
                               // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg array (nullptr fallback).
@@ -2231,6 +2234,30 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// process one TradeEvent. dispatches to entry or exit handling based on
+// event.type bits. updates portfolio + balance + statistics. does NOT call
+// kill switch eval, regime update, or any code that might mutate gate_params
+// (those go through deferred dirty-flag mechanisms in later phases).
+//
+// entry handling:
+//   - look up NodeContext for event.node_id (the source core)
+//   - read intended TP/SL/qty from the context (set by controller earlier)
+//   - call Portfolio_OpenSlot to write the position fields and set the bit
+//   - bump per-core entries_processed counter
+//
+// exit handling:
+//   - call Portfolio_CloseSlot which clears the bit and returns gross P&L
+//   - apply fees: net = gross - (gross * fee_rate)  (matches existing
+//     PortfolioController fee model)
+//   - balance += net, realized_pnl += net
+//   - bump per-core exits_processed counter
+//
+// invalid event types (type == 0 or type == TRADE_EVENT_ENTRY|TRADE_EVENT_EXIT)
+// are silently ignored — the branchless ExecutionCore_Tick can never produce
+// them, but defensive logic in case of replay or fuzz testing.
+//======================================================================
 // [END_FUNCTION]_[EventLoop_OnEvent]
 //======================================================================
 
@@ -2243,16 +2270,6 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
 //======================================================================
 // [CODE]
 //======================================================================
-// round-robin across all registered cores. for each core, pop up to
-// MAX_EVENTS_PER_DRAIN_PER_NODE events from its event ring and process each
-// via _OnEvent. returns total events processed in this pass.
-//
-// the per-core cap prevents one chatty core from monopolizing a drain pass
-// and starving the others (pitfall P4.1). under sustained burst load, the
-// loop iterates fast enough that 16 events × 16 cores = 256 events per pass
-// is plenty for realistic event rates (a busy strategy fires entries at
-// most a few times per second).
-//======================================================================================================
 template <unsigned F>
 inline int EventLoop_DrainEvents(EventLoopState<F>* state) {
     int total_drained = 0;
@@ -2272,6 +2289,18 @@ inline int EventLoop_DrainEvents(EventLoopState<F>* state) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// round-robin across all registered cores. for each core, pop up to
+// MAX_EVENTS_PER_DRAIN_PER_NODE events from its event ring and process each
+// via _OnEvent. returns total events processed in this pass.
+//
+// the per-core cap prevents one chatty core from monopolizing a drain pass
+// and starving the others (pitfall P4.1). under sustained burst load, the
+// loop iterates fast enough that 16 events × 16 cores = 256 events per pass
+// is plenty for realistic event rates (a busy strategy fires entries at
+// most a few times per second).
+//======================================================================
 // [END_FUNCTION]_[EventLoop_DrainEvents]
 //======================================================================
 
@@ -2284,6 +2313,18 @@ inline int EventLoop_DrainEvents(EventLoopState<F>* state) {
 //======================================================================
 // [CODE]
 //======================================================================
+template <unsigned F>
+inline void EventLoop_QueueParameters(EventLoopState<F>* state, int slot,
+                                       const GateParameters<F>& new_params) {
+    if (slot < 0 || slot >= state->registered_count) return;
+    state->nodes[slot].pending_params = new_params;
+    NODE_STATE_FLAG_SET(state->nodes[slot], DIRTY);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // stage a new GateParameters pack for the given core and mark it dirty. the
 // next call to _PushParameters will atomically push it through the core's
 // triple-buffered ParameterSlot.
@@ -2297,16 +2338,6 @@ inline int EventLoop_DrainEvents(EventLoopState<F>* state) {
 //
 // pitfall P5.3: the dirty bit is single-writer because the controller is
 // single-threaded. no atomic needed.
-//======================================================================================================
-template <unsigned F>
-inline void EventLoop_QueueParameters(EventLoopState<F>* state, int slot,
-                                       const GateParameters<F>& new_params) {
-    if (slot < 0 || slot >= state->registered_count) return;
-    state->nodes[slot].pending_params = new_params;
-    NODE_STATE_FLAG_SET(state->nodes[slot], DIRTY);
-}
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[EventLoop_QueueParameters]
 //======================================================================
@@ -2320,28 +2351,6 @@ inline void EventLoop_QueueParameters(EventLoopState<F>* state, int slot,
 //======================================================================
 // [CODE]
 //======================================================================
-// walk every registered core. for each one, dispatch to its strategy's
-// _BuildParameters via Strategy_BuildParameters and store the result in
-// pending_params. mark dirty so the next _PushParameters call hands them off
-// to the execution cores via the seqlock.
-//
-// this is the upper layer of the parameter pipeline:
-//   _RebuildAll (this function): strategy → pending_params, mark dirty
-//   _PushParameters (phase 05):  pending_params → ExecutionCore.param_slot
-//
-// runs on the controller core, slow path. typical cadence is once per ~3 sim
-// seconds aligned with the existing PortfolioController slow path. cost is
-// ~1µs per core (one Strategy_BuildParameters call) so 16 cores → ~16µs per
-// rebuild. that's well inside the slow-path budget.
-//
-// returns the number of cores that had their pending_params rebuilt. cores
-// with strategy_id == STRATEGY_NONE are skipped (they get a zeroed pack from
-// the dispatcher but we don't bother marking them dirty since the execution
-// core's permission stays at 0 anyway).
-//
-// pitfall P5.6 alignment: this is called from the slow path AFTER
-// RollingStats_Push, so the rolling state is fresh.
-//======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline int EventLoop_RebuildAllParameters(
     EventLoopState<F>* state,
@@ -2412,6 +2421,30 @@ inline int EventLoop_RebuildAllParameters(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// walk every registered core. for each one, dispatch to its strategy's
+// _BuildParameters via Strategy_BuildParameters and store the result in
+// pending_params. mark dirty so the next _PushParameters call hands them off
+// to the execution cores via the seqlock.
+//
+// this is the upper layer of the parameter pipeline:
+//   _RebuildAll (this function): strategy → pending_params, mark dirty
+//   _PushParameters (phase 05):  pending_params → ExecutionCore.param_slot
+//
+// runs on the controller core, slow path. typical cadence is once per ~3 sim
+// seconds aligned with the existing PortfolioController slow path. cost is
+// ~1µs per core (one Strategy_BuildParameters call) so 16 cores → ~16µs per
+// rebuild. that's well inside the slow-path budget.
+//
+// returns the number of cores that had their pending_params rebuilt. cores
+// with strategy_id == STRATEGY_NONE are skipped (they get a zeroed pack from
+// the dispatcher but we don't bother marking them dirty since the execution
+// core's permission stays at 0 anyway).
+//
+// pitfall P5.6 alignment: this is called from the slow path AFTER
+// RollingStats_Push, so the rolling state is fresh.
+//======================================================================
 // [END_FUNCTION]_[EventLoop_RebuildAllParameters]
 //======================================================================
 
@@ -2425,25 +2458,6 @@ inline int EventLoop_RebuildAllParameters(
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.1.2 — pushes (price, volume, timestamp, depth) into ONE engine's slow_state.
-// Single-writer rule: caller must be the sole writer of state.nodes[c].slow_state
-// for the duration of this call:
-//   - per_node_slow: per-core slow-path c writes own only
-//   - backtest: linear iteration, single-thread
-//
-// Mirrors the cadence-update logic that v5.0.x had in producer's fan_out
-// (in EngineSharded.hpp pre-v5.1.2). Centralized in this
-// helper so both callers (per_node_slow + backtest) do exactly the same
-// work — train-serve parity is structural.
-//
-// Inputs:
-//   price, volume          — current tick (slow-path-cadence sample)
-//   timestamp_us           — wall-clock us of this update
-//   is_buyer_maker         — Binance flag (1 = aggressive sell, 0 = aggressive buy)
-//   depth_imbalance        — book imbalance from depth WS / replay (FPN_Zero if depth disabled)
-//   depth_spread           — spread (FPN_Zero if depth disabled)
-//   depth_enabled          — gate the depth-history pushes
-//======================================================================================================
 template <unsigned F>
 inline void EventLoop_UpdateRollingStateOneCore(
     EventLoopState<F>* state, int slot,
@@ -2499,6 +2513,27 @@ inline void EventLoop_UpdateEmaPriceAllCores(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.1.2 — pushes (price, volume, timestamp, depth) into ONE engine's slow_state.
+// Single-writer rule: caller must be the sole writer of state.nodes[c].slow_state
+// for the duration of this call:
+//   - per_node_slow: per-core slow-path c writes own only
+//   - backtest: linear iteration, single-thread
+//
+// Mirrors the cadence-update logic that v5.0.x had in producer's fan_out
+// (in EngineSharded.hpp pre-v5.1.2). Centralized in this
+// helper so both callers (per_node_slow + backtest) do exactly the same
+// work — train-serve parity is structural.
+//
+// Inputs:
+//   price, volume          — current tick (slow-path-cadence sample)
+//   timestamp_us           — wall-clock us of this update
+//   is_buyer_maker         — Binance flag (1 = aggressive sell, 0 = aggressive buy)
+//   depth_imbalance        — book imbalance from depth WS / replay (FPN_Zero if depth disabled)
+//   depth_spread           — spread (FPN_Zero if depth disabled)
+//   depth_enabled          — gate the depth-history pushes
+//======================================================================
 // [END_FUNCTION]_[EventLoop_UpdateRollingStateOneCore]
 //======================================================================
 
@@ -2512,15 +2547,6 @@ inline void EventLoop_UpdateEmaPriceAllCores(
 //======================================================================
 // [CODE]
 //======================================================================
-// v4.7.38 (Phase C.1): single-core variant of RebuildAllParameters.
-// Caller must precompute book_imbalance_blocked (cheap — one FPN_Binary compare)
-// and skip cores with strategy_id == STRATEGY_NONE before calling.
-//
-// v5.12.1.B (clock hoist): optional `now_us` param at end. When non-zero,
-// caller has already read system_clock at slow-path entry; recovery check
-// uses it instead of doing its own clock_gettime. Default 0 = back-compat
-// (legacy callers, tests). Saves ~50ns/cycle in flatten-recovery window
-// when caller hoists. See CLAUDE.md item 16 (reuse-audit principle).
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void EventLoop_RebuildOneCore(
     EventLoopState<F>* state,
@@ -3438,6 +3464,18 @@ inline void EventLoop_RebuildOneCore(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v4.7.38 (Phase C.1): single-core variant of RebuildAllParameters.
+// Caller must precompute book_imbalance_blocked (cheap — one FPN_Binary compare)
+// and skip cores with strategy_id == STRATEGY_NONE before calling.
+//
+// v5.12.1.B (clock hoist): optional `now_us` param at end. When non-zero,
+// caller has already read system_clock at slow-path entry; recovery check
+// uses it instead of doing its own clock_gettime. Default 0 = back-compat
+// (legacy callers, tests). Saves ~50ns/cycle in flatten-recovery window
+// when caller hoists. See CLAUDE.md item 16 (reuse-audit principle).
+//======================================================================
 // [END_FUNCTION]_[EventLoop_RebuildOneCore]
 //======================================================================
 
@@ -3451,20 +3489,6 @@ inline void EventLoop_RebuildOneCore(
 //======================================================================
 // [CODE]
 //======================================================================
-// walk all registered cores. for each one with dirty == 1, atomically push
-// pending_params through ExecutionCore_SetParameters (which goes through the
-// triple-buffered ParameterSlot). clear the dirty flag. returns the number of
-// cores pushed (for monitoring).
-//
-// the push is wait-free on the consumer side. the execution core can keep
-// ticking through this entire function and will see either the old or the
-// new params atomically — never a torn intermediate.
-//
-// CRITICAL P4.7 invariant: this is the ONLY function that writes to a core's
-// param_slot. _OnEvent must NEVER touch core->param_slot directly because
-// the execution core is reading it concurrently. _OnEvent only updates the
-// controller-side Portfolio + balance + intended_tp/sl/qty.
-//======================================================================================================
 template <unsigned F>
 inline int EventLoop_PushParameters(EventLoopState<F>* state,
                                      uint64_t publish_tick = 0) {
@@ -3488,6 +3512,22 @@ inline int EventLoop_PushParameters(EventLoopState<F>* state,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// walk all registered cores. for each one with dirty == 1, atomically push
+// pending_params through ExecutionCore_SetParameters (which goes through the
+// triple-buffered ParameterSlot). clear the dirty flag. returns the number of
+// cores pushed (for monitoring).
+//
+// the push is wait-free on the consumer side. the execution core can keep
+// ticking through this entire function and will see either the old or the
+// new params atomically — never a torn intermediate.
+//
+// CRITICAL P4.7 invariant: this is the ONLY function that writes to a core's
+// param_slot. _OnEvent must NEVER touch core->param_slot directly because
+// the execution core is reading it concurrently. _OnEvent only updates the
+// controller-side Portfolio + balance + intended_tp/sl/qty.
 //======================================================================
 // [END_FUNCTION]_[EventLoop_PushParameters]
 //======================================================================
@@ -3627,26 +3667,6 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Walk the active-position bitmap, force-close any leg held longer than
-// cfg.max_hold_ticks WITH gross gain below cfg.min_hold_gain_pct.
-// Profitable positions are kept (still working). No-op when
-// cfg.max_hold_ticks == 0 (default). Same logic in live + backtest now —
-// adding a new exit gate updates ONE site.
-//
-// Defensive guard: entry_t > now_tick (snapshot-restored future stamp)
-// would underflow the uint64 subtraction → time-exit fires every cycle.
-// Reset to current and skip when detected; next genuine entry stamps fresh.
-//
-// Caller supplies the elapsed-tick basis + current price:
-//   - Live: `ticks_produced.load()` and `last_price.load()` atomics
-//   - Backtest: `tick_index` and `tick.price` (from RunTick)
-//
-// Counts every leg-exit as one heartbeat increment (matches live's pre-
-// extraction wiring). Uses OrderManager_Submit directly because time-exit
-// bypasses the SG-driven event path.
-//======================================================================================================
-// v4.7.38 (Phase C.1): per-core helper, processes only this core's slots.
-// Caller-checked preconditions (cfg.max_hold_ticks > 0 && current_price > 0).
 template <unsigned F>
 inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
                                        OrderManagerState<F>* oms,
@@ -3714,6 +3734,29 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Walk the active-position bitmap, force-close any leg held longer than
+// cfg.max_hold_ticks WITH gross gain below cfg.min_hold_gain_pct.
+// Profitable positions are kept (still working). No-op when
+// cfg.max_hold_ticks == 0 (default). Same logic in live + backtest now —
+// adding a new exit gate updates ONE site.
+//
+// Defensive guard: entry_t > now_tick (snapshot-restored future stamp)
+// would underflow the uint64 subtraction → time-exit fires every cycle.
+// Reset to current and skip when detected; next genuine entry stamps fresh.
+//
+// Caller supplies the elapsed-tick basis + current price:
+//   - Live: `ticks_produced.load()` and `last_price.load()` atomics
+//   - Backtest: `tick_index` and `tick.price` (from RunTick)
+//
+// Counts every leg-exit as one heartbeat increment (matches live's pre-
+// extraction wiring). Uses OrderManager_Submit directly because time-exit
+// bypasses the SG-driven event path.
+//
+// v4.7.38 (Phase C.1): per-core helper, processes only this core's slots.
+// Caller-checked preconditions (cfg.max_hold_ticks > 0 && current_price > 0).
+//======================================================================
 // [END_FUNCTION]_[EventLoop_TimeExitOneCore]
 //======================================================================
 
@@ -3726,33 +3769,6 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
 //======================================================================
 // [CODE]
 //======================================================================
-// Live-only safety net for extended WS dropouts during real-money trading.
-// Slow-path reads producer's last_ws_tick_us (set in EngineSharded fan_out
-// at every WS tick); when the gap to local_now_us exceeds
-// cfg.ws_dead_time_flatten_threshold_secs and the gate cfg flag is set,
-// CAS-wins one slow-path thread invokes EventLoop_FlattenAll to push
-// market-exit commands for every active position into the standard
-// drainer queue.
-//
-// Disabled by default (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED) = 0); flip to 1
-// BEFORE live-capital deployment. Backtest must keep it 0 — backtest's
-// tick-driven last_ws_tick_us would otherwise produce a huge gap vs
-// local clock and fire phantom flattens.
-//
-// SLOW PATH only. NOT branchless (early returns are cheaper than
-// branchless mask compute when the predicate is almost-always false —
-// cfg flag default 0 → first branch returns immediately, ~5ns total).
-// When enabled, full check costs ~100-200ns (clock_gettime via vDSO +
-// atomic load + comparisons). Well within 100μs slow-path budget.
-//
-// Hot path UNTOUCHED.
-//======================================================================================================
-// EventLoop_FlattenAll: walk active-position bitmap, push market exits
-// via OMS_PushSubmit. Drainer is sole Submit caller (CLAUDE.md item 5)
-// so we go through PushSubmit, not Submit directly. Returns count of
-// commands queued (0 if portfolio empty). Idempotent — caller (CAS
-// winner) invokes once per flatten event; subsequent CAS-failed callers
-// don't re-enter.
 template <unsigned F>
 inline int EventLoop_FlattenAll(EventLoopState<F>* state,
                                  OrderManagerState<F>* oms,
@@ -3937,6 +3953,36 @@ inline int EventLoop_TryClearRecovery(OrderManagerState<F>* oms,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Live-only safety net for extended WS dropouts during real-money trading.
+// Slow-path reads producer's last_ws_tick_us (set in EngineSharded fan_out
+// at every WS tick); when the gap to local_now_us exceeds
+// cfg.ws_dead_time_flatten_threshold_secs and the gate cfg flag is set,
+// CAS-wins one slow-path thread invokes EventLoop_FlattenAll to push
+// market-exit commands for every active position into the standard
+// drainer queue.
+//
+// Disabled by default (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED) = 0); flip to 1
+// BEFORE live-capital deployment. Backtest must keep it 0 — backtest's
+// tick-driven last_ws_tick_us would otherwise produce a huge gap vs
+// local clock and fire phantom flattens.
+//
+// SLOW PATH only. NOT branchless (early returns are cheaper than
+// branchless mask compute when the predicate is almost-always false —
+// cfg flag default 0 → first branch returns immediately, ~5ns total).
+// When enabled, full check costs ~100-200ns (clock_gettime via vDSO +
+// atomic load + comparisons). Well within 100μs slow-path budget.
+//
+// Hot path UNTOUCHED.
+//
+// EventLoop_FlattenAll: walk active-position bitmap, push market exits
+// via OMS_PushSubmit. Drainer is sole Submit caller (CLAUDE.md item 5)
+// so we go through PushSubmit, not Submit directly. Returns count of
+// commands queued (0 if portfolio empty). Idempotent — caller (CAS
+// winner) invokes once per flatten event; subsequent CAS-failed callers
+// don't re-enter.
+//======================================================================
 // [END_FUNCTION]_[EventLoop_FlattenAll]
 //======================================================================
 
@@ -3949,25 +3995,6 @@ inline int EventLoop_TryClearRecovery(OrderManagerState<F>* oms,
 //======================================================================
 // [CODE]
 //======================================================================
-// v4.7.17 (extracted from EngineSharded) — for each active position with gross gain >= cfg.tp_hold_score, write a
-// trailing SL = current_price - (price_stddev × cfg.sl_trail_mult) into
-// pending_params.ratchet_sl. Hot path picks it up via the existing
-// seqlock on the next param push. Only ratchets UP (FPN_Max in hot path
-// drops smaller ratchet values). No-op when cfg.tp_hold_score == 0
-// (default) OR cfg.sl_trail_mult == 0 OR rolling.price_stddev == 0.
-//
-// Caller supplies current price:
-//   - Live: `last_price.load()` atomic
-//   - Backtest: `tick.price`
-//
-// Reads rolling.price_stddev directly (caller-owned RollingStats).
-//======================================================================================================
-// v4.7.38 (Phase C.1): per-core helper. Caller-checked preconditions.
-// Implicitly fixes a pre-existing bug where the original walked
-// active_bitmap by slot but indexed state->nodes[slot] (per-core array) —
-// under partials, slot 1 (core 0's leg B) wrongly read/wrote core 1's
-// pending_params. OneCore correctly uses node_id for nodes[] indexing
-// while still iterating per-slot for portfolio.positions[].
 template <unsigned F, unsigned W>
 inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
                                                  const ControllerConfig<F>& cfg,
@@ -4032,6 +4059,28 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v4.7.17 (extracted from EngineSharded) — for each active position with gross gain >= cfg.tp_hold_score, write a
+// trailing SL = current_price - (price_stddev × cfg.sl_trail_mult) into
+// pending_params.ratchet_sl. Hot path picks it up via the existing
+// seqlock on the next param push. Only ratchets UP (FPN_Max in hot path
+// drops smaller ratchet values). No-op when cfg.tp_hold_score == 0
+// (default) OR cfg.sl_trail_mult == 0 OR rolling.price_stddev == 0.
+//
+// Caller supplies current price:
+//   - Live: `last_price.load()` atomic
+//   - Backtest: `tick.price`
+//
+// Reads rolling.price_stddev directly (caller-owned RollingStats).
+//
+// v4.7.38 (Phase C.1): per-core helper. Caller-checked preconditions.
+// Implicitly fixes a pre-existing bug where the original walked
+// active_bitmap by slot but indexed state->nodes[slot] (per-core array) —
+// under partials, slot 1 (core 0's leg B) wrongly read/wrote core 1's
+// pending_params. OneCore correctly uses node_id for nodes[] indexing
+// while still iterating per-slot for portfolio.positions[].
+//======================================================================
 // [END_FUNCTION]_[EventLoop_TrailingSLRatchetOneCore]
 //======================================================================
 
@@ -4044,20 +4093,6 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
 //======================================================================
 // [CODE]
 //======================================================================
-// One-shot ratchet of SL to fee-floored breakeven when an open position
-// crosses net-profitable (gain > round-trip taker fees). Mirrors trailing-
-// SL ratchet's OneCore/Wrapper precedent + writes to the same
-// pending_params.ratchet_sl with max-only semantics — composes cleanly
-// with trailing-SL when both enabled (trailing wins via max once gain
-// exceeds tp_hold_score; breakeven holds the floor below).
-//
-// Independent of trailing-SL preconditions (sl_trail_mult / tp_hold_score
-// can both be zero; breakeven still fires).
-//
-// Slow-path cost: per-cycle when bit set; ~80-150ns per active position
-// (active_bitmap walk + entry-price load + gain compute + FPN_Binary compare).
-// Bit unset → wrapper early-exits in ~1ns. Below 100µs slow-path budget.
-
 template <unsigned F>
 inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
                                                 const ControllerConfig<F>& cfg,
@@ -4103,6 +4138,22 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// One-shot ratchet of SL to fee-floored breakeven when an open position
+// crosses net-profitable (gain > round-trip taker fees). Mirrors trailing-
+// SL ratchet's OneCore/Wrapper precedent + writes to the same
+// pending_params.ratchet_sl with max-only semantics — composes cleanly
+// with trailing-SL when both enabled (trailing wins via max once gain
+// exceeds tp_hold_score; breakeven holds the floor below).
+//
+// Independent of trailing-SL preconditions (sl_trail_mult / tp_hold_score
+// can both be zero; breakeven still fires).
+//
+// Slow-path cost: per-cycle when bit set; ~80-150ns per active position
+// (active_bitmap walk + entry-price load + gain compute + FPN_Binary compare).
+// Bit unset → wrapper early-exits in ~1ns. Below 100µs slow-path budget.
 //======================================================================
 // [END_FUNCTION]_[EventLoop_BreakevenOnProfitOneCore]
 //======================================================================

@@ -163,23 +163,6 @@ inline int PaperResetArchive_CreateDirectories(const char* path) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Composes the full summary.json structure:
-//
-//   {
-//     "session":     { start_us, end_us, start_iso, end_iso, duration_us },
-//     "global":      { balance_start, balance_end, realized_pnl, total_fees,
-//                       total_maker_fees, total_taker_fees, maker_fills_count,
-//                       taker_fills_count, total_entries, total_exits,
-//                       kill_switch_tripped },
-//     "per_node":    [ { node_id, strategy_id, ..., last_confidence } × num_nodes ],
-//     "per_strategy":[ { strategy_id, entries, exits, realized, fees, wins, losses,
-//                         gross_wins, gross_losses, open_notional } × N strategies ],
-//     "per_regime":  []   ← Phase 6 placeholder; populated by trade-log parser
-//                          in Phase 5.B follow-up or focused per-regime aggregator.
-//   }
-//
-// Returns 1 on success, 0 on file-open failure or null path.
-//======================================================================================================
 template <unsigned F>
 inline int Summary_WriteJson(const char* output_path,
                               const EventLoopState<F>& state,
@@ -262,6 +245,25 @@ inline int Summary_WriteJson(const char* output_path,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Composes the full summary.json structure:
+//
+//   {
+//     "session":     { start_us, end_us, start_iso, end_iso, duration_us },
+//     "global":      { balance_start, balance_end, realized_pnl, total_fees,
+//                       total_maker_fees, total_taker_fees, maker_fills_count,
+//                       taker_fills_count, total_entries, total_exits,
+//                       kill_switch_tripped },
+//     "per_node":    [ { node_id, strategy_id, ..., last_confidence } × num_nodes ],
+//     "per_strategy":[ { strategy_id, entries, exits, realized, fees, wins, losses,
+//                         gross_wins, gross_losses, open_notional } × N strategies ],
+//     "per_regime":  []   ← Phase 6 placeholder; populated by trade-log parser
+//                          in Phase 5.B follow-up or focused per-regime aggregator.
+//   }
+//
+// Returns 1 on success, 0 on file-open failure or null path.
 //======================================================================
 // [END_FUNCTION]_[Summary_WriteJson]
 //======================================================================

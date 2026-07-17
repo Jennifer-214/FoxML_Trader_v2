@@ -79,10 +79,6 @@
 //======================================================================
 // STATE
 //======================================================================================================
-// Per-arm Gaussian conjugate posterior. POD struct (memset-friendly).
-// Layout: doubles aligned, then ints, then small fields. ~112 bytes per state
-// (8 arms × 8B mu_post + 8 arms × 8B precision_post + 8 arms × 4B total_pulls
-// + 4B n_arms + 3 × 8B hyperparams + 8B rng_state + ~8B padding).
 struct ThompsonBanditState {
     double   mu_post[BANDIT_MAX_ARMS];           // posterior mean per arm
     double   precision_post[BANDIT_MAX_ARMS];    // posterior precision per arm (= 1/variance)
@@ -101,6 +97,13 @@ struct ThompsonBanditState {
 
 //======================================================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Per-arm Gaussian conjugate posterior. POD struct (memset-friendly).
+// Layout: doubles aligned, then ints, then small fields. ~112 bytes per state
+// (8 arms × 8B mu_post + 8 arms × 8B precision_post + 8 arms × 4B total_pulls
+// + 4B n_arms + 3 × 8B hyperparams + 8B rng_state + ~8B padding).
 //======================================================================
 // [END_STRUCT]_[ThompsonBanditState]
 //======================================================================

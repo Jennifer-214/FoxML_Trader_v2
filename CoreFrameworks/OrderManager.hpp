@@ -248,9 +248,6 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer forward declarations.
-// Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md. Noop fn provides
-// the always-call default; real fns wired at boot when respective subsystems enable.
 template <unsigned F> struct OrderManagerState;
 template <unsigned F>
 inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money);
@@ -665,6 +662,12 @@ struct OrderManagerState {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer forward declarations.
+// Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md. Noop fn provides
+// the always-call default; real fns wired at boot when respective subsystems enable.
+//======================================================================
 // [COMMENT]_[the facade — what lives here + why]
 //----------------------------------------------------------------------
 // Phase 03 (option D — facade): the OMS now owns all the financial state
@@ -873,16 +876,6 @@ static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
 //======================================================================
 // [CODE]
 //======================================================================
-// Templated on F so it matches the OrderManagerState<F>* user_ctx. Each F
-// instantiation produces a distinct function pointer, which the adapter
-// stores type-erased as `OrderCallback`. The callback is the only path
-// by which the worker thread mutates OMS state — it pushes a Command
-// into the result_queue and returns. The drainer thread later picks it
-// up via OrderManager_Tick.
-//
-// Pushing into the SPSC ring is wait-free. If the queue is full (should
-// never happen with size 256 unless something is very wrong), the result
-// is dropped with a log message.
 template <unsigned F>
 static void OrderManager_FillResultCallback(void* user_ctx,
                                              uint64_t client_id,
@@ -901,6 +894,19 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Templated on F so it matches the OrderManagerState<F>* user_ctx. Each F
+// instantiation produces a distinct function pointer, which the adapter
+// stores type-erased as `OrderCallback`. The callback is the only path
+// by which the worker thread mutates OMS state — it pushes a Command
+// into the result_queue and returns. The drainer thread later picks it
+// up via OrderManager_Tick.
+//
+// Pushing into the SPSC ring is wait-free. If the queue is full (should
+// never happen with size 256 unless something is very wrong), the result
+// is dropped with a log message.
+//======================================================================
 // [END_FUNCTION]_[OrderManager_FillResultCallback]
 //======================================================================
 
@@ -914,6 +920,22 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 //======================================================================
 // [CODE]
 //======================================================================
+template <unsigned F>
+inline void OrderManager_Init(OrderManagerState<F>* oms,
+                              const ExchangeAdapter<F>& adapter,
+                              int live_trading,
+                              int partial_exit_enabled,
+                              Money starting_balance,
+                              int event_log_mode = 0,
+                              const char* event_log_path = "logging/order_events.bin") {
+    OMS_INIT_AUTOPOPULATE(oms, adapter, live_trading, partial_exit_enabled,
+                          starting_balance, event_log_mode, event_log_path);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Zero the order table, clear the bitmap, install the adapter and the
 // live_trading flag. The adapter is copied by value — the caller still
 // owns whatever the adapter.ctx points at, but the function pointers
@@ -970,19 +992,6 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` param DELETED. Per-Order fee_rate lives on
 // Order::pre_resolved (set at submit via Order_BindPreResolved with cfg.nodes[c]). OMS no
 // longer holds a global fee_rate. Callers drop the arg.
-template <unsigned F>
-inline void OrderManager_Init(OrderManagerState<F>* oms,
-                              const ExchangeAdapter<F>& adapter,
-                              int live_trading,
-                              int partial_exit_enabled,
-                              Money starting_balance,
-                              int event_log_mode = 0,
-                              const char* event_log_path = "logging/order_events.bin") {
-    OMS_INIT_AUTOPOPULATE(oms, adapter, live_trading, partial_exit_enabled,
-                          starting_balance, event_log_mode, event_log_path);
-}
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[OrderManager_Init]
 //======================================================================
@@ -997,34 +1006,6 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 //======================================================================
 // [CODE]
 //======================================================================
-// Paper mode:
-//   Mode 0 (legacy): Bump total_submitted and total_filled, return the next
-//   id. No slot allocation, no adapter call, no result queue traffic.
-//   Symmetric with the legacy fire-and-forget pattern but routed through the
-//   OMS so the counters are consistent across paper and live.
-//
-//   Mode 1 (event log): allocate a slot, mark ORDER_SUBMITTED, push a
-//   synthetic CMD_FILL_RESULT into the result queue so OMS_Tick handles
-//   it uniformly. The fill handler then opens/closes portfolio slots and
-//   appends to the event log, just like in live mode.
-//
-// Live mode:
-//   1. Allocate a free slot from the bitmap. Drop on full (logged).
-//   2. Populate the Order with id, type, qty, mark ORDER_SUBMITTED.
-//   3. Call adapter.submit_market_buy or _market_sell with the OMS
-//      pointer as user_ctx and OrderManager_FillResultCallback<F> as
-//      the callback. The adapter enqueues to its worker thread and
-//      returns immediately — Submit does NOT block.
-//   4. If the adapter rejects the enqueue (its queue is full), mark
-//      the slot REJECTED and free it.
-//
-// qty is Money per the FPN_Binary-only-accounting rule in CLAUDE.md.
-//
-// Phase 03 chunk 3: extra context parameters for the fill handler.
-//   intended_tp / intended_sl: TP/SL to apply at fill time (entry only).
-//   strategy_id: STRATEGY_* constant for trade log CSV.
-//   event_price: market price at submit time; used as the fill price in
-//     paper mode (no adapter callback to supply one).
 template <unsigned F>
 inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitCommand<F>& cmd) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
@@ -1190,6 +1171,37 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Paper mode:
+//   Mode 0 (legacy): Bump total_submitted and total_filled, return the next
+//   id. No slot allocation, no adapter call, no result queue traffic.
+//   Symmetric with the legacy fire-and-forget pattern but routed through the
+//   OMS so the counters are consistent across paper and live.
+//
+//   Mode 1 (event log): allocate a slot, mark ORDER_SUBMITTED, push a
+//   synthetic CMD_FILL_RESULT into the result queue so OMS_Tick handles
+//   it uniformly. The fill handler then opens/closes portfolio slots and
+//   appends to the event log, just like in live mode.
+//
+// Live mode:
+//   1. Allocate a free slot from the bitmap. Drop on full (logged).
+//   2. Populate the Order with id, type, qty, mark ORDER_SUBMITTED.
+//   3. Call adapter.submit_market_buy or _market_sell with the OMS
+//      pointer as user_ctx and OrderManager_FillResultCallback<F> as
+//      the callback. The adapter enqueues to its worker thread and
+//      returns immediately — Submit does NOT block.
+//   4. If the adapter rejects the enqueue (its queue is full), mark
+//      the slot REJECTED and free it.
+//
+// qty is Money per the FPN_Binary-only-accounting rule in CLAUDE.md.
+//
+// Phase 03 chunk 3: extra context parameters for the fill handler.
+//   intended_tp / intended_sl: TP/SL to apply at fill time (entry only).
+//   strategy_id: STRATEGY_* constant for trade log CSV.
+//   event_price: market price at submit time; used as the fill price in
+//     paper mode (no adapter callback to supply one).
+//======================================================================
 // [END_FUNCTION]_[OrderManager_Submit]
 //======================================================================
 
@@ -1202,20 +1214,6 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
 //======================================================================
 // [CODE]
 //======================================================================
-// v4.7.37 (Phase B reordered): producer threads call OMS_PushSubmit instead
-// of OrderManager_Submit. Drainer thread pops from submit_queues and calls
-// OrderManager_Submit serially, preserving the documented "drainer is sole
-// Submit caller" OMS contract.
-//
-// Per-core SPSC: each node_id has its own queue. Today's caller (producer
-// slow-path) is the sole producer for ALL queues — still SPSC per ring.
-// When Phase C spawns per-core slow-paths, each thread is the sole producer
-// for its own ring. SPSC contract holds in both modes.
-//
-// Returns false if the queue is full (caller should consider this an error
-// — slow-path submission backlog suggests drainer is starved). Returns true
-// on successful push.
-//======================================================================================================
 template <unsigned F>
 inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cmd) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
@@ -1239,6 +1237,22 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v4.7.37 (Phase B reordered): producer threads call OMS_PushSubmit instead
+// of OrderManager_Submit. Drainer thread pops from submit_queues and calls
+// OrderManager_Submit serially, preserving the documented "drainer is sole
+// Submit caller" OMS contract.
+//
+// Per-core SPSC: each node_id has its own queue. Today's caller (producer
+// slow-path) is the sole producer for ALL queues — still SPSC per ring.
+// When Phase C spawns per-core slow-paths, each thread is the sole producer
+// for its own ring. SPSC contract holds in both modes.
+//
+// Returns false if the queue is full (caller should consider this an error
+// — slow-path submission backlog suggests drainer is starved). Returns true
+// on successful push.
+//======================================================================
 // [END_FUNCTION]_[OMS_PushSubmit]
 //======================================================================
 
@@ -1251,13 +1265,6 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
 //======================================================================
 // [CODE]
 //======================================================================
-// v4.7.37 (Phase B reordered): called from the drainer thread's loop, before
-// OrderManager_Tick. Drains all per-core submit queues and calls
-// OrderManager_Submit for each command. Single-threaded — preserves OMS
-// contract.
-//
-// Returns the number of commands drained.
-//======================================================================================================
 template <unsigned F>
 inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
     int drained = 0;
@@ -1275,6 +1282,15 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v4.7.37 (Phase B reordered): called from the drainer thread's loop, before
+// OrderManager_Tick. Drains all per-core submit queues and calls
+// OrderManager_Submit for each command. Single-threaded — preserves OMS
+// contract.
+//
+// Returns the number of commands drained.
+//======================================================================
 // [END_FUNCTION]_[OMS_DrainSubmit]
 //======================================================================
 
@@ -1289,19 +1305,6 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.C.2 (S5): single-source-of-truth for the 8-line fee bookkeeping
-// duplicated byte-identical at both entry-fill and exit-fill sites in
-// HandleFill (only differing in entry_fee vs exit_fee). Class 18 mirror
-// close (CLAUDE.md item 19 + DESIGN_SPECS/structural-fix-preferred-
-// decision-framework.md). Future fee categories (taker_rebate,
-// partial_taker, etc.) extend this single helper rather than touching
-// N call sites.
-//======================================================================================================
-// v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless via mask-select counters + ternary FPN_Binary store.
-// Pre-r-6: `if (is_maker) { maker++; maker_fees+= } else { taker++; taker_fees+= }` — 1 branch per fill.
-// Post-r-6: always-compute both counter increments via mask (0 or 1); ternary FPN_AddSat-or-nop on each
-// fee bucket lowers to cmov. Per branchless-dispatch-discipline.md Pattern 3 mask-select. ~3-5 cycles
-// extra per fill (drainer slow path; ~0.005% of 100μs budget) for deterministic latency.
 template <unsigned F>
 inline void OrderManager_AccountMakerTakerFee(
     OrderManagerState<F>* oms, int is_maker, Money fee) {
@@ -1314,6 +1317,22 @@ inline void OrderManager_AccountMakerTakerFee(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.C.2 (S5): single-source-of-truth for the 8-line fee bookkeeping
+// duplicated byte-identical at both entry-fill and exit-fill sites in
+// HandleFill (only differing in entry_fee vs exit_fee). Class 18 mirror
+// close (CLAUDE.md item 19 + DESIGN_SPECS/structural-fix-preferred-
+// decision-framework.md). Future fee categories (taker_rebate,
+// partial_taker, etc.) extend this single helper rather than touching
+// N call sites.
+//
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless via mask-select counters + ternary FPN_Binary store.
+// Pre-r-6: `if (is_maker) { maker++; maker_fees+= } else { taker++; taker_fees+= }` — 1 branch per fill.
+// Post-r-6: always-compute both counter increments via mask (0 or 1); ternary FPN_AddSat-or-nop on each
+// fee bucket lowers to cmov. Per branchless-dispatch-discipline.md Pattern 3 mask-select. ~3-5 cycles
+// extra per fill (drainer slow path; ~0.005% of 100μs budget) for deterministic latency.
 //======================================================================
 // [END_FUNCTION]_[OrderManager_AccountMakerTakerFee]
 //======================================================================
@@ -1328,14 +1347,6 @@ inline void OrderManager_AccountMakerTakerFee(
 //======================================================================
 // [CODE]
 //======================================================================
-// GUARD — maker/taker fee-desync (DORMANT; the reactivatable-assumption shape, Class-40 sibling).
-// pre_resolved.fee_rate is bound at SUBMIT as TAKER (the engine is MARKET-only — OrderManager_Submit refuses
-// non-MARKET, and MARKET fills are always taker). So a maker fill CANNOT occur today: this is a NEVER-TAKEN
-// branch (zero behavior change now). If it ever fires, LIMIT orders were enabled WITHOUT re-resolving
-// fee_rate from is_maker at fill time → the taker-rate fee is charged + bucketed as maker (a live fee
-// over-charge + wrong P&L split). Fail LOUD so it can't ship silently. The real fix: re-resolve
-// pre_resolved.fee_rate from is_maker BEFORE enabling LIMIT orders (TECH_DEBT-154). __builtin_expect-rare
-// per H20 exception (cold capital-check; matches the file's existing FILE*-null guard convention).
 template <unsigned F>
 inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
     if (__builtin_expect(Order_GetIsMaker(o) != 0, 0)) {
@@ -1345,6 +1356,17 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// GUARD — maker/taker fee-desync (DORMANT; the reactivatable-assumption shape, Class-40 sibling).
+// pre_resolved.fee_rate is bound at SUBMIT as TAKER (the engine is MARKET-only — OrderManager_Submit refuses
+// non-MARKET, and MARKET fills are always taker). So a maker fill CANNOT occur today: this is a NEVER-TAKEN
+// branch (zero behavior change now). If it ever fires, LIMIT orders were enabled WITHOUT re-resolving
+// fee_rate from is_maker at fill time → the taker-rate fee is charged + bucketed as maker (a live fee
+// over-charge + wrong P&L split). Fail LOUD so it can't ship silently. The real fix: re-resolve
+// pre_resolved.fee_rate from is_maker BEFORE enabling LIMIT orders (TECH_DEBT-154). __builtin_expect-rare
+// per H20 exception (cold capital-check; matches the file's existing FILE*-null guard convention).
 //======================================================================
 // [END_FUNCTION]_[OMS_GuardTakerBoundFeeBasis]
 //======================================================================
@@ -1528,9 +1550,6 @@ inline constexpr FillHandler<F> g_fill_dispatch[4] = {
 //======================================================================
 // [CODE]
 //======================================================================
-// Slim entrypoint: bounds guard (H20 exception #4) + pre-resolve discipline warn + audit log append
-// + branchless dispatch via fn pointer table. All BUY/SELL-specific logic lives in handle_buy_fill /
-// handle_sell_fill above. Future LIMIT_BUY/LIMIT_SELL types extend mechanically — 2 rows in g_fill_dispatch.
 template <unsigned F>
 inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
                                      Money fill_price, Money fill_qty,
@@ -1582,6 +1601,12 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Slim entrypoint: bounds guard (H20 exception #4) + pre-resolve discipline warn + audit log append
+// + branchless dispatch via fn pointer table. All BUY/SELL-specific logic lives in handle_buy_fill /
+// handle_sell_fill above. Future LIMIT_BUY/LIMIT_SELL types extend mechanically — 2 rows in g_fill_dispatch.
+//======================================================================
 // [END_FUNCTION]_[OrderManager_HandleFill]
 //======================================================================
 
@@ -1594,11 +1619,6 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
 //======================================================================
 // [CODE]
 //======================================================================
-// Looks up the order by id, applies the fill or rejection, runs the mode 1
-// fill handler if applicable, frees the slot. Called from the unified drain
-// loop in OrderManager_Tick for both CMD_FILL_RESULT and CMD_WS_FILL.
-//
-// Returns 1 if the command was processed, 0 if skipped (dedup, not found, etc.)
 template <unsigned F>
 inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Command& cmd) {
     // WS surprise fill (order_id == 0): log and skip.
@@ -1701,6 +1721,14 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Looks up the order by id, applies the fill or rejection, runs the mode 1
+// fill handler if applicable, frees the slot. Called from the unified drain
+// loop in OrderManager_Tick for both CMD_FILL_RESULT and CMD_WS_FILL.
+//
+// Returns 1 if the command was processed, 0 if skipped (dedup, not found, etc.)
+//======================================================================
 // [END_FUNCTION]_[OrderManager_ProcessFillCommand]
 //======================================================================
 
@@ -1714,12 +1742,6 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 //======================================================================
 // [CODE]
 //======================================================================
-// Sum over open slots of (entry_price*qty + entry_fee) = the cash that left the account
-// to OPEN the held positions. oms->balance is FLAT-ACCOUNT value (start + sum realized; a
-// BUY never debits it -- Portfolio_OpenSlot only), so to predict the venue's FREE cash you
-// net this committed cost back out. Single-sourced (A21/D-216) so the reconciler and the
-// .E.1 venue-net aggregator share ONE body (avoids a Class-43 parallel-derivation vs
-// node_open_notional). entry_fee = the per-Position BOOKED fee (venue-exact in USDT, D-109).
 template <unsigned F>
 inline Money OMS_OpenPositionCost(const OrderManagerState<F>* oms) {
     Money cost = Money_Zero();
@@ -1734,6 +1756,15 @@ inline Money OMS_OpenPositionCost(const OrderManagerState<F>* oms) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Sum over open slots of (entry_price*qty + entry_fee) = the cash that left the account
+// to OPEN the held positions. oms->balance is FLAT-ACCOUNT value (start + sum realized; a
+// BUY never debits it -- Portfolio_OpenSlot only), so to predict the venue's FREE cash you
+// net this committed cost back out. Single-sourced (A21/D-216) so the reconciler and the
+// .E.1 venue-net aggregator share ONE body (avoids a Class-43 parallel-derivation vs
+// node_open_notional). entry_fee = the per-Position BOOKED fee (venue-exact in USDT, D-109).
 //======================================================================
 // [END_FUNCTION]_[OMS_OpenPositionCost]
 //======================================================================
@@ -1750,13 +1781,6 @@ inline Money OMS_OpenPositionCost(const OrderManagerState<F>* oms) {
 //======================================================================
 // [CODE]
 //======================================================================
-// expected_free_cash = balance - OMS_OpenPositionCost - Sum_inflight((requested-filled)*price + est_fee).
-// Asset-agnostic STRUCTURE (cash = ledger - committed-cost - inflight-reserved); long-only cost-sign +
-// single-currency settlement are crypto-spot-specific -- .E.6 equities extend with signed-qty + a margin
-// term (D-216). All Money (H4). NOTE (Class-38): o.filled_qty is per-invocation today (the Order.hpp:179
-// "running total" comment is aspirational) -> (requested-filled) == requested now; the -filled term is
-// INERT but kept as the correct .E.1 form, CO-GATED with the A2/A16 cumulative-fill landing. NOTE: inflight
-// SELL is omitted -- cash-leg-correct; a mis-booked SELL is caught by the BTC/qty leg (.E.1 venue-net).
 template <unsigned F>
 inline Money OMS_ExpectedFreeCash(const OrderManagerState<F>* oms) {
     Money expected = Money_Sub(oms->balance, OMS_OpenPositionCost(oms));
@@ -1777,6 +1801,16 @@ inline Money OMS_ExpectedFreeCash(const OrderManagerState<F>* oms) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// expected_free_cash = balance - OMS_OpenPositionCost - Sum_inflight((requested-filled)*price + est_fee).
+// Asset-agnostic STRUCTURE (cash = ledger - committed-cost - inflight-reserved); long-only cost-sign +
+// single-currency settlement are crypto-spot-specific -- .E.6 equities extend with signed-qty + a margin
+// term (D-216). All Money (H4). NOTE (Class-38): o.filled_qty is per-invocation today (the Order.hpp:179
+// "running total" comment is aspirational) -> (requested-filled) == requested now; the -filled term is
+// INERT but kept as the correct .E.1 form, CO-GATED with the A2/A16 cumulative-fill landing. NOTE: inflight
+// SELL is omitted -- cash-leg-correct; a mis-booked SELL is caught by the BTC/qty leg (.E.1 venue-net).
 //======================================================================
 // [END_FUNCTION]_[OMS_ExpectedFreeCash]
 //======================================================================
@@ -1838,10 +1872,6 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
 //======================================================================
 // [CODE]
 //======================================================================
-// Drainer thread calls this on every drain pass. Drains three SPSC rings
-// sequentially (REST fills, WS fills, reconcile corrections) and dispatches
-// each command to the appropriate handler. Adding a new command source is
-// one new SPSCRing field + one drain call here + one handler function.
 template <unsigned F>
 inline void OrderManager_Tick(OrderManagerState<F>* oms) {
     // Drain all three command queues through the unified dispatcher.
@@ -1869,6 +1899,13 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Drainer thread calls this on every drain pass. Drains three SPSC rings
+// sequentially (REST fills, WS fills, reconcile corrections) and dispatches
+// each command to the appropriate handler. Adding a new command source is
+// one new SPSCRing field + one drain call here + one handler function.
 //======================================================================
 // [END_FUNCTION]_[OrderManager_Tick]
 //======================================================================
@@ -1907,13 +1944,6 @@ inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Opens cfg.calibration_log_path in append mode. Writes a header row if
-// the file is new (size == 0). Engine boot calls this AFTER OrderManager_Init
-// when the cfg field is non-empty. Single-thread (boot); after this returns
-// the FILE* is read-only on the drainer thread (sole writer in HandleFill).
-//
-// Returns 0 on success / -1 on failure (failure is non-fatal: log goes to
-// stderr; engine continues without calibration logging this session).
 template <unsigned F>
 inline int OrderManager_OpenCalibrationLog(OrderManagerState<F>* oms,
                                              const char* path) {
@@ -1942,6 +1972,16 @@ inline int OrderManager_OpenCalibrationLog(OrderManagerState<F>* oms,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Opens cfg.calibration_log_path in append mode. Writes a header row if
+// the file is new (size == 0). Engine boot calls this AFTER OrderManager_Init
+// when the cfg field is non-empty. Single-thread (boot); after this returns
+// the FILE* is read-only on the drainer thread (sole writer in HandleFill).
+//
+// Returns 0 on success / -1 on failure (failure is non-fatal: log goes to
+// stderr; engine continues without calibration logging this session).
 //======================================================================
 // [END_FUNCTION]_[OrderManager_OpenCalibrationLog]
 //======================================================================

@@ -34,19 +34,6 @@
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.A.7 — Cohort-migrated 2 orphan ack flags from direct int cfg fields:
-//   - acknowledge_inference_cfg_drift  (was ControllerConfig.hpp:861 int field; v5.9.5i)
-//   - acknowledge_cross_binary_version_drift (was :853 int field; v5.9.4)
-// Both are operator-decision flags ("suppress this drift category WARN/REFUSE").
-// Closes the orphan-boolean tail of TECH_DEBT-009's v5.14.9.F.4 partial migration.
-// Per-core override comes free via PER_NODE_OVERRIDE_BITMAP_DOMAINS (ops domain
-// already listed there). Cohort migration per CLAUDE.local.md 2026-05-11 rule +
-// cfg-flag-eligibility-criteria.md (boot-frozen, engine-wide, slow-path-tolerant).
-//
-// Backward-compat: operator's existing `acknowledge_*_drift=1` cfg keys still parse
-// (the FOREACH_OPS_CFG_FLAG-walker parser at ControllerConfig.hpp:~2220 matches via
-// the legacy_field column; sets the corresponding bit). No cfg-file migration needed.
-
 #define FOREACH_OPS_CFG_FLAG(X)                                                                                                                                                                                                                                       \
     X(SESSION_FILTER_ENABLED,                  session_filter_enabled,                  "Session Filter",                  "Toggles",                  "per-session gate multipliers (Asian/European/US)")                                                            \
     X(NOTIFY_ENABLED,                          notify_enabled,                          "Notify",                          "Operational Monitoring",   "external notification backend (Slack/email/etc.)")                                                             \
@@ -84,6 +71,21 @@ FOREACH_OPS_CFG_FLAG(X_GEN_OPS_CFG_MASK)
 // #define OPS_CFG_FLAG_AUTOPOPULATE_FROM_PAIR(target_flags, _session_filter, _notify) /* RETIRED v5.15.5.A.7 */
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.A.7 — Cohort-migrated 2 orphan ack flags from direct int cfg fields:
+//   - acknowledge_inference_cfg_drift  (was ControllerConfig.hpp:861 int field; v5.9.5i)
+//   - acknowledge_cross_binary_version_drift (was :853 int field; v5.9.4)
+// Both are operator-decision flags ("suppress this drift category WARN/REFUSE").
+// Closes the orphan-boolean tail of TECH_DEBT-009's v5.14.9.F.4 partial migration.
+// Per-core override comes free via PER_NODE_OVERRIDE_BITMAP_DOMAINS (ops domain
+// already listed there). Cohort migration per CLAUDE.local.md 2026-05-11 rule +
+// cfg-flag-eligibility-criteria.md (boot-frozen, engine-wide, slow-path-tolerant).
+//
+// Backward-compat: operator's existing `acknowledge_*_drift=1` cfg keys still parse
+// (the FOREACH_OPS_CFG_FLAG-walker parser at ControllerConfig.hpp:~2220 matches via
+// the legacy_field column; sets the corresponding bit). No cfg-file migration needed.
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------

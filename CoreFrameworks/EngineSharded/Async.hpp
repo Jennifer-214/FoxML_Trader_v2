@@ -121,29 +121,6 @@ inline LatencyHistogram g_engine_drainer_cycle_hist{};
 //======================================================================
 // [CODE]
 //======================================================================
-// Pushes a single tick out to every core's tick ring, updates global state (ticks_produced
-// counter, last_price/_volume atomics, ema_price replication), records the tick to CSV
-// when enabled, feeds the GUI candle accumulator, and at slow-path cadence (every
-// poll_interval ticks) runs the cfg hot-reload + per-core kill-switch reset + book
-// depth read + paper-reset coordination + GUI TUISnapshot publish.
-//
-// Originally a lambda inside the producer thread of EngineSharded_Run; hoisted to a
-// named function at v5.15.5.F.4d.1.B.6 per Decision B (Option a; captures → explicit
-// args). Body unchanged from lambda body modulo capture → arg translation.
-//
-// **Args translated from lambda captures (24 captures + 4 explicit params):**
-//   - by-ref captures (13): seq, ticks_produced, last_price, last_volume, cfg, state,
-//     oms, slow_path_counter, ema_price, paper_reset_in_progress, topo_hot_cpu,
-//     topo_slow_cpu, topo_poll_interval
-//   - by-value captures (8): num_nodes, slow_path_interval, tsc_ghz, ema_alpha,
-//     live_trading, topo_producer_cpu, topo_drainer_cpu, topo_nproc
-//   - file-local-static args (6 — NOT captures; passed because they're function-local
-//     statics in EngineSharded_Run and CANNOT be referenced from header scope):
-//     tick_rings, cores, tick_rec, depth_shared, shared_ptr (GUI), candle_acc_ptr (GUI)
-//   - explicit params (4): price_d, volume_d, ts_us, is_buyer_maker
-//
-// Returns false on shutdown observation (caller breaks out of producer loop).
-//======================================================================================================
 template<unsigned F>
 inline bool EngineSharded_Async_FanOut(
     // Explicit lambda params
@@ -795,6 +772,31 @@ inline bool EngineSharded_Async_FanOut(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Pushes a single tick out to every core's tick ring, updates global state (ticks_produced
+// counter, last_price/_volume atomics, ema_price replication), records the tick to CSV
+// when enabled, feeds the GUI candle accumulator, and at slow-path cadence (every
+// poll_interval ticks) runs the cfg hot-reload + per-core kill-switch reset + book
+// depth read + paper-reset coordination + GUI TUISnapshot publish.
+//
+// Originally a lambda inside the producer thread of EngineSharded_Run; hoisted to a
+// named function at v5.15.5.F.4d.1.B.6 per Decision B (Option a; captures → explicit
+// args). Body unchanged from lambda body modulo capture → arg translation.
+//
+// **Args translated from lambda captures (24 captures + 4 explicit params):**
+//   - by-ref captures (13): seq, ticks_produced, last_price, last_volume, cfg, state,
+//     oms, slow_path_counter, ema_price, paper_reset_in_progress, topo_hot_cpu,
+//     topo_slow_cpu, topo_poll_interval
+//   - by-value captures (8): num_nodes, slow_path_interval, tsc_ghz, ema_alpha,
+//     live_trading, topo_producer_cpu, topo_drainer_cpu, topo_nproc
+//   - file-local-static args (6 — NOT captures; passed because they're function-local
+//     statics in EngineSharded_Run and CANNOT be referenced from header scope):
+//     tick_rings, cores, tick_rec, depth_shared, shared_ptr (GUI), candle_acc_ptr (GUI)
+//   - explicit params (4): price_d, volume_d, ts_us, is_buyer_maker
+//
+// Returns false on shutdown observation (caller breaks out of producer loop).
+//======================================================================
 // [END_FUNCTION]_[EngineSharded_Async_FanOut]
 //======================================================================
 
@@ -807,15 +809,6 @@ inline bool EngineSharded_Async_FanOut(
 //======================================================================
 // [CODE]
 //======================================================================
-// Drains each core's TradeEvent ring (up to MAX_EVENTS_PER_DRAIN_PER_NODE per ring per
-// cycle), calls EventLoop_OnEvent for bookkeeping, computes order qty (with partial-
-// exit-leg split), builds SubmitCommand, and pushes to OMS via OMS_PushSubmit (so the
-// drainer's later OMS_DrainSubmit pass serializes Submit calls). Returns the total
-// number of events drained this cycle.
-//
-// Originally a lambda inside EngineSharded_Run drainer thread; hoisted to a named
-// function at v5.15.5.F.4d.1.B.6 per Decision B (Option a). Body unchanged from lambda
-// body modulo capture → arg translation (4 by-ref captures → explicit args).
 template<unsigned F>
 inline int EngineSharded_Async_DrainWithSubmit(
     EventLoopState<F>& state,
@@ -992,6 +985,18 @@ inline int EngineSharded_Async_DrainWithSubmit(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Drains each core's TradeEvent ring (up to MAX_EVENTS_PER_DRAIN_PER_NODE per ring per
+// cycle), calls EventLoop_OnEvent for bookkeeping, computes order qty (with partial-
+// exit-leg split), builds SubmitCommand, and pushes to OMS via OMS_PushSubmit (so the
+// drainer's later OMS_DrainSubmit pass serializes Submit calls). Returns the total
+// number of events drained this cycle.
+//
+// Originally a lambda inside EngineSharded_Run drainer thread; hoisted to a named
+// function at v5.15.5.F.4d.1.B.6 per Decision B (Option a). Body unchanged from lambda
+// body modulo capture → arg translation (4 by-ref captures → explicit args).
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_Async_DrainWithSubmit]
 //======================================================================

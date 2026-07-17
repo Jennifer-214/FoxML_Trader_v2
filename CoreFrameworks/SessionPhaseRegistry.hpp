@@ -37,12 +37,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Coverage: START/END ranges MUST collectively cover [0, 24) with no gaps
-// or overlaps. Validated via static_asserts below.
-//
-// Adding a 5th session: append one row. ControllerConfig field + default
-// + parser + GUI + consumer dispatch + cfg.example all auto-flow via the
-// FOREACH_SESSION_PHASE expansions at each site.
 #define FOREACH_SESSION_PHASE(X)                                                                    \
     X(ASIAN,     asian,      0,  7, 1.5, "00:00-06:59 UTC; thin liquidity, wider gates")            \
     X(EUROPEAN,  european,   7, 13, 1.0, "07:00-12:59 UTC; London open, normal liquidity")          \
@@ -133,6 +127,15 @@ static_assert(SESSION_BY_HOUR[22] < SESSION_PHASE_COUNT, "SESSION_BY_HOUR[22] ou
 static_assert(SESSION_BY_HOUR[23] < SESSION_PHASE_COUNT, "SESSION_BY_HOUR[23] out of range");
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Coverage: START/END ranges MUST collectively cover [0, 24) with no gaps
+// or overlaps. Validated via static_asserts below.
+//
+// Adding a 5th session: append one row. ControllerConfig field + default
+// + parser + GUI + consumer dispatch + cfg.example all auto-flow via the
+// FOREACH_SESSION_PHASE expansions at each site.
 //======================================================================
 // [COMMENT]_[TECH_DEBT-040 close + the float-cohort variant + branchless dispatch rationale]
 //----------------------------------------------------------------------

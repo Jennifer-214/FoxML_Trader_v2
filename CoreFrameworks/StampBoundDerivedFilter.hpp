@@ -53,12 +53,6 @@
 //======================================================================
 // [CODE]
 //======================================================================
-// Canonical body emit — locale-pinned per Layer 2.
-// Walks per-core descriptors first, then global (canonical wire order).
-// Returns body length (bytes written, excluding NUL terminator).
-//
-// At .A: emit produces empty body since zero rows flagged STAMP_BOUND_CFG_DERIVED.
-// .B activates real per-type emit via tt::cfg_emit_synthetic_field<T>.
 inline size_t STAMP_BOUND_CFG_emit_canonical_body(char* buf, size_t cap) {
     size_t pos = 0;
 
@@ -98,6 +92,15 @@ inline size_t STAMP_BOUND_CFG_emit_canonical_body(char* buf, size_t cap) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Canonical body emit — locale-pinned per Layer 2.
+// Walks per-core descriptors first, then global (canonical wire order).
+// Returns body length (bytes written, excluding NUL terminator).
+//
+// At .A: emit produces empty body since zero rows flagged STAMP_BOUND_CFG_DERIVED.
+// .B activates real per-type emit via tt::cfg_emit_synthetic_field<T>.
 //======================================================================
 // [END_FUNCTION]_[STAMP_BOUND_CFG_emit_canonical_body]
 //======================================================================

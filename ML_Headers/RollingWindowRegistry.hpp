@@ -56,6 +56,16 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
+#define FOREACH_ROLLING_WINDOW(X) \
+    X(short,    128)              \
+    X(long,     512)              \
+    X(medium,   256)              \
+    X(baseline, 1024)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Tuple: X(name, window_size)
 //   name        — lower_snake_case suffix; produces `rolling_<name>` field
 //                 name on NodeSlowState
@@ -71,14 +81,6 @@ namespace tt {
 // add per-window consumer references manually where the semantic fit is
 // clear (e.g., rolling_micro for sub-second metrics → add reference in
 // the consumer that needs it).
-//------------------------------------------------------------------------------
-#define FOREACH_ROLLING_WINDOW(X) \
-    X(short,    128)              \
-    X(long,     512)              \
-    X(medium,   256)              \
-    X(baseline, 1024)
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_REGISTRY]_[FOREACH_ROLLING_WINDOW]
 //======================================================================

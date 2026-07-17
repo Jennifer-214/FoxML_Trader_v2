@@ -55,17 +55,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Query the exchange for current balances. If non-zero BTC exists at startup
-// (sharded has no persistent state, so any BTC is by definition orphan from
-// a prior session), market-sell it to recover USDT. Returns the post-
-// recovery USDT balance via *usdt_out.
-//
-// On failure to query balances, returns false — caller should treat as
-// fatal and refuse to start (better to halt than trade with unknown state).
-//
-// Notify alerts fire if notify != nullptr; otherwise alerts are stderr-only.
-// Phase 4 (persistence) will refine this — once we have a snapshot of
-// expected positions, we can reconcile rather than blindly selling.
 static inline bool EngineSharded_OrphanRecovery(
     BinanceAdapterState* adapter,
     NotifyState* notify,
@@ -147,6 +136,20 @@ static inline bool EngineSharded_OrphanRecovery(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Query the exchange for current balances. If non-zero BTC exists at startup
+// (sharded has no persistent state, so any BTC is by definition orphan from
+// a prior session), market-sell it to recover USDT. Returns the post-
+// recovery USDT balance via *usdt_out.
+//
+// On failure to query balances, returns false — caller should treat as
+// fatal and refuse to start (better to halt than trade with unknown state).
+//
+// Notify alerts fire if notify != nullptr; otherwise alerts are stderr-only.
+// Phase 4 (persistence) will refine this — once we have a snapshot of
+// expected positions, we can reconcile rather than blindly selling.
+//======================================================================
 // [END_FUNCTION]_[EngineSharded_OrphanRecovery]
 //======================================================================
 
@@ -160,22 +163,6 @@ static inline bool EngineSharded_OrphanRecovery(
 //======================================================================
 // [CODE]
 //======================================================================
-// Walk the OMS portfolio bitmap, submit a market sell for each open position
-// via the BinanceAdapter queue, then wait (with timeout) for the bitmap to
-// clear as fills arrive through the user-data WS → drainer → OnEvent path.
-// Called on quit signal BEFORE the executor / drainer threads are joined,
-// so the normal exit flow can process the resulting fills.
-//
-// Refuses to silently exit with open positions — the legacy guarantee from
-// main.cpp:56-101 was "we NEVER reconnect with orphaned positions." Same
-// applies here: graceful shutdown means a flat book.
-//
-// Returns the number of positions still open after the timeout (0 = clean).
-// Caller logs/alerts based on the return value.
-//
-// Architecture note: uses queue-based BinanceAdapter_SubmitMarketSell, NOT
-// direct BinanceOrderAPI_MarketSell on workers_api[0]. The worker thread
-// owns workers_api[0] and we'd race if we touched it directly.
 template <unsigned F>
 static inline int EngineSharded_ForceCloseOnShutdown(
     OrderManagerState<F>* oms,
@@ -290,6 +277,25 @@ static inline int EngineSharded_ForceCloseOnShutdown(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Walk the OMS portfolio bitmap, submit a market sell for each open position
+// via the BinanceAdapter queue, then wait (with timeout) for the bitmap to
+// clear as fills arrive through the user-data WS → drainer → OnEvent path.
+// Called on quit signal BEFORE the executor / drainer threads are joined,
+// so the normal exit flow can process the resulting fills.
+//
+// Refuses to silently exit with open positions — the legacy guarantee from
+// main.cpp:56-101 was "we NEVER reconnect with orphaned positions." Same
+// applies here: graceful shutdown means a flat book.
+//
+// Returns the number of positions still open after the timeout (0 = clean).
+// Caller logs/alerts based on the return value.
+//
+// Architecture note: uses queue-based BinanceAdapter_SubmitMarketSell, NOT
+// direct BinanceOrderAPI_MarketSell on workers_api[0]. The worker thread
+// owns workers_api[0] and we'd race if we touched it directly.
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_ForceCloseOnShutdown]
 //======================================================================

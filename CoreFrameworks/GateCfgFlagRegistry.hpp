@@ -36,16 +36,6 @@
 //======================================================================
 // [CODE]
 //======================================================================
-// Domain identity: entry/exit gate mechanics. Add here if the flag governs
-// when/how entries are gated or how exits dispatch (depth book gating, EMA-vs-rolling
-// gate price, no-trade band suppression, cost-aware sizing gate, ML barrier gating,
-// param staleness gating).
-
-// metadata_flags column added at .B.3 Step 0.5d.a.0 per Meta-gap M1b cohort migration discipline;
-// sister to FOREACH_ML_CFG_FLAG .B.2 migration. Only BARRIER_GATE_ENABLED has STAMP_BOUND_CFG_DERIVED;
-// other 5 rows get 0 (no stamp-binding consumer at this ship).
-// CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED requires CfgFieldRegistry.hpp to be in scope at
-// CONSUMER X-macro expansion site (not at FOREACH_GATE_CFG_FLAG definition site — text-only here).
 #define FOREACH_GATE_CFG_FLAG(X)                                                                                                                                                                                                                                          \
     X(DEPTH_ENABLED,                depth_enabled,                "Order Book",            "Toggles",         0,                                                "order book depth feed + book imbalance gate")                                                                \
     X(GATE_EMA_ENABLED,             gate_ema_enabled,             "EMA Enabled",           "EMA Gate",        0,                                                "use EMA price for gate (vs rolling avg)")                                                                    \
@@ -93,6 +83,19 @@ FOREACH_GATE_CFG_FLAG(X_GEN_GATE_CFG_MASK)
     } while (0)
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Domain identity: entry/exit gate mechanics. Add here if the flag governs
+// when/how entries are gated or how exits dispatch (depth book gating, EMA-vs-rolling
+// gate price, no-trade band suppression, cost-aware sizing gate, ML barrier gating,
+// param staleness gating).
+//
+// metadata_flags column added at .B.3 Step 0.5d.a.0 per Meta-gap M1b cohort migration discipline;
+// sister to FOREACH_ML_CFG_FLAG .B.2 migration. Only BARRIER_GATE_ENABLED has STAMP_BOUND_CFG_DERIVED;
+// other 5 rows get 0 (no stamp-binding consumer at this ship).
+// CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED requires CfgFieldRegistry.hpp to be in scope at
+// CONSUMER X-macro expansion site (not at FOREACH_GATE_CFG_FLAG definition site — text-only here).
 //======================================================================
 // [COMMENT]_[family position + eligibility]
 //----------------------------------------------------------------------

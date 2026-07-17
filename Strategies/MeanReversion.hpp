@@ -134,19 +134,6 @@ inline void MeanReversion_Init(MeanReversionState<F> *state,
 //======================================================================
 // [CODE]
 //======================================================================
-// called every slow-path tick. three responsibilities:
-//   1. idle squeeze - loosen filters when portfolio is empty and price is
-//   running away
-//   2. feeder push - feed P&L into regression buffer
-//   3. regression + filter adjustment - adapt offset/vol_mult based on P&L
-//   trend
-//
-// offset mode conditioning: only the ACTIVE mode's offset (percentage or
-// stddev) is adapted. the inactive mode's value stays frozen at its init/reload
-// value. this prevents idle squeeze and regression from drifting the inactive
-// value (e.g. squeezing stddev_mult from 0 to offset_stddev_min while in
-// percentage mode).
-//======================================================================================================
 template <unsigned F>
 inline void MeanReversion_Adapt(MeanReversionState<F> *state,
                                 FPN_Binary<F> current_price, FPN_Binary<F> portfolio_delta,
@@ -296,6 +283,21 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// called every slow-path tick. three responsibilities:
+//   1. idle squeeze - loosen filters when portfolio is empty and price is
+//   running away
+//   2. feeder push - feed P&L into regression buffer
+//   3. regression + filter adjustment - adapt offset/vol_mult based on P&L
+//   trend
+//
+// offset mode conditioning: only the ACTIVE mode's offset (percentage or
+// stddev) is adapted. the inactive mode's value stays frozen at its init/reload
+// value. this prevents idle squeeze and regression from drifting the inactive
+// value (e.g. squeezing stddev_mult from 0 to offset_stddev_min while in
+// percentage mode).
+//======================================================================
 // [END_FUNCTION]_[MeanReversion_Adapt]
 //======================================================================
 
@@ -309,12 +311,6 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 //======================================================================
 // [CODE]
 //======================================================================
-// called every slow-path tick after Adapt. computes buy gate conditions from
-// rolling stats using the current adaptive filter values, then applies
-// regression-based gate shift if available. optionally gates on long-window
-// trend for multi-timeframe confirmation. returns the conditions for the engine
-// to write to ctrl->buy_conds.
-//======================================================================================================
 template <unsigned F>
 inline BuySideGateConditions<F> MeanReversion_BuySignal(
     MeanReversionState<F> *state, const RollingStats<F> *rolling,
@@ -441,6 +437,14 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// called every slow-path tick after Adapt. computes buy gate conditions from
+// rolling stats using the current adaptive filter values, then applies
+// regression-based gate shift if available. optionally gates on long-window
+// trend for multi-timeframe confirmation. returns the conditions for the engine
+// to write to ctrl->buy_conds.
+//======================================================================
 // [END_FUNCTION]_[MeanReversion_BuySignal]
 //======================================================================
 
@@ -453,20 +457,6 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
 //======================================================================
 // [CODE]
 //======================================================================
-// called every slow-path tick after Adapt. adjusts TP/SL for positions that are
-// "running" (price above original TP) based on trend strength and consistency.
-//
-// hold_score = SNR * R² where:
-//   SNR = price_slope / price_stddev (signal-to-noise: is the trend big
-//   relative to noise?) R² = price regression R² (consistency: is the trend
-//   reliable?)
-// the product requires BOTH magnitude AND consistency — choppy whipsaws (high
-// SNR, low R²) and slow bleeds (low SNR, high R²) both produce low scores.
-//
-// when hold_score >= threshold: ratchet TP and SL upward (trailing)
-// when hold_score drops below: stop ratcheting, exit gate catches pullback at
-// last raised TP
-//======================================================================================================
 template <unsigned F>
 inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
                                      Money current_price,
@@ -628,6 +618,22 @@ inline void MeanReversion_ExitAdjustSharded(
 } // namespace tt
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// called every slow-path tick after Adapt. adjusts TP/SL for positions that are
+// "running" (price above original TP) based on trend strength and consistency.
+//
+// hold_score = SNR * R² where:
+//   SNR = price_slope / price_stddev (signal-to-noise: is the trend big
+//   relative to noise?) R² = price regression R² (consistency: is the trend
+//   reliable?)
+// the product requires BOTH magnitude AND consistency — choppy whipsaws (high
+// SNR, low R²) and slow bleeds (low SNR, high R²) both produce low scores.
+//
+// when hold_score >= threshold: ratchet TP and SL upward (trailing)
+// when hold_score drops below: stop ratcheting, exit gate catches pullback at
+// last raised TP
 //======================================================================
 // [END_FUNCTION]_[MeanReversion_ExitAdjust]
 //======================================================================

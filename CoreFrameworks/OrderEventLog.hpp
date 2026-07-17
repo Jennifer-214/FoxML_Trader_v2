@@ -107,14 +107,6 @@ enum OrderEventType : uint8_t {
 //======================================================================
 // [CODE]
 //======================================================================
-// One lifecycle event for one order. Self-contained — the fold function
-// can reconstruct the portfolio from a stream of these without consulting
-// any external state (no NodeContext lookup needed, no Order table needed).
-//
-// For OEVT_FULL_FILL buy events, tp and sl carry the intended take-profit
-// and stop-loss at fill time. For sells and non-fill events they're zero.
-// This makes the event log self-contained for replay — the fold doesn't
-// need to know what the controller's intended TP/SL was at the time.
 template <unsigned F>
 struct OrderEvent {
     uint64_t       event_id;       // monotonic across the log
@@ -134,6 +126,17 @@ struct OrderEvent {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// One lifecycle event for one order. Self-contained — the fold function
+// can reconstruct the portfolio from a stream of these without consulting
+// any external state (no NodeContext lookup needed, no Order table needed).
+//
+// For OEVT_FULL_FILL buy events, tp and sl carry the intended take-profit
+// and stop-loss at fill time. For sells and non-fill events they're zero.
+// This makes the event log self-contained for replay — the fold doesn't
+// need to know what the controller's intended TP/SL was at the time.
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 //----------------------------------------------------------------------
@@ -199,8 +202,6 @@ constexpr size_t ORDER_EVENT_LOG_MAX_CAPACITY = 32768;
 //======================================================================
 // [CODE]
 //======================================================================
-// Phase 07 file header — written at the start of the event log file.
-// Carries the FPN_Binary width and entry size for forward compatibility.
 struct OrderEventLogFileHeader {
     char     magic[8];       // "OMSEL02\0" (OMSEL01 = pre-epoch binary era, H21 tombstone)
     uint32_t fpn_width;      // F template parameter (e.g. 64)
@@ -210,6 +211,11 @@ struct OrderEventLogFileHeader {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Phase 07 file header — written at the start of the event log file.
+// Carries the FPN_Binary width and entry size for forward compatibility.
 //======================================================================
 // [END_STRUCT]_[OrderEventLogFileHeader]
 //======================================================================
@@ -403,14 +409,6 @@ inline void OrderEventLog_Free(OrderEventLog<F>* log) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Apply one event to the in-memory log + disk. The memcpy + fwrite pieces
-// of the original Append. Caller is responsible for any
-// thread-safety: this body assumes single-threaded access to log->entries
-// and log->disk_file.
-//
-// Used by:
-//   - OrderEventLog_Append in sync mode (caller is the drainer)
-//   - OrderEventLog_AsyncWriterRoutine (caller is the writer thread)
 template <unsigned F>
 inline int OrderEventLog_ApplyEvent(OrderEventLog<F>* log, const OrderEvent<F>& event) {
     // v5.11.5.C — fixed mmap'd capacity. Overflow drops the event + bumps a
@@ -436,6 +434,17 @@ inline int OrderEventLog_ApplyEvent(OrderEventLog<F>* log, const OrderEvent<F>& 
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Apply one event to the in-memory log + disk. The memcpy + fwrite pieces
+// of the original Append. Caller is responsible for any
+// thread-safety: this body assumes single-threaded access to log->entries
+// and log->disk_file.
+//
+// Used by:
+//   - OrderEventLog_Append in sync mode (caller is the drainer)
+//   - OrderEventLog_AsyncWriterRoutine (caller is the writer thread)
+//======================================================================
 // [END_FUNCTION]_[OrderEventLog_ApplyEvent]
 //======================================================================
 
@@ -448,8 +457,6 @@ inline int OrderEventLog_ApplyEvent(OrderEventLog<F>* log, const OrderEvent<F>& 
 //======================================================================
 // [CODE]
 //======================================================================
-// The caller fills in all fields except event_id, which is assigned by
-// this function from next_event_id.
 template <unsigned F>
 inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
     if (log->entries == nullptr) return 0;  // logging disabled (malloc failed)
@@ -483,6 +490,11 @@ inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// The caller fills in all fields except event_id, which is assigned by
+// this function from next_event_id.
 //======================================================================
 // [END_FUNCTION]_[OrderEventLog_Append]
 //======================================================================
@@ -596,13 +608,6 @@ inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Like Init, but also opens a binary file for write-through. Events are
-// appended to disk on every OrderEventLog_Append call. The file carries a
-// small header for forward compatibility (magic + FPN_Binary width + entry size).
-//
-// If the file already exists, LoadFromDisk should be called BEFORE this to
-// replay the events into memory. This function opens the file in append
-// mode so existing data is preserved.
 template <unsigned F>
 inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) {
     // only init the buffer if not already allocated (LoadFromDisk may have
@@ -670,6 +675,16 @@ inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) 
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Like Init, but also opens a binary file for write-through. Events are
+// appended to disk on every OrderEventLog_Append call. The file carries a
+// small header for forward compatibility (magic + FPN_Binary width + entry size).
+//
+// If the file already exists, LoadFromDisk should be called BEFORE this to
+// replay the events into memory. This function opens the file in append
+// mode so existing data is preserved.
+//======================================================================
 // [END_FUNCTION]_[OrderEventLog_InitWithFile]
 //======================================================================
 
@@ -682,12 +697,6 @@ inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) 
 //======================================================================
 // [CODE]
 //======================================================================
-// Truncate the disk event log to header-only (or remove + recreate) and zero
-// the in-memory state. Called from the engine's paper-reset handler so a
-// fresh boot doesn't replay 40 zombie events from a prior session.
-//
-// Keeps the same file handle open in append mode after the truncation so
-// subsequent appends keep working without reinitializing.
 template <unsigned F>
 inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
     // In-memory: clear count + reset id sequence. Buffer stays allocated.
@@ -722,6 +731,15 @@ inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Truncate the disk event log to header-only (or remove + recreate) and zero
+// the in-memory state. Called from the engine's paper-reset handler so a
+// fresh boot doesn't replay 40 zombie events from a prior session.
+//
+// Keeps the same file handle open in append mode after the truncation so
+// subsequent appends keep working without reinitializing.
+//======================================================================
 // [END_FUNCTION]_[OrderEventLog_Reset]
 //======================================================================
 
@@ -735,12 +753,6 @@ inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Reads events from a previously-written event log file and populates the
-// in-memory buffer. Validates the file header for magic + FPN_Binary width match.
-// Returns the number of events loaded, or -1 on error.
-//
-// Call this BEFORE InitWithFile if the file already exists. The loaded
-// events are available for Portfolio_FromEventLog replay.
 template <unsigned F>
 inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
     FILE* f = std::fopen(path, "rb");
@@ -826,6 +838,15 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Reads events from a previously-written event log file and populates the
+// in-memory buffer. Validates the file header for magic + FPN_Binary width match.
+// Returns the number of events loaded, or -1 on error.
+//
+// Call this BEFORE InitWithFile if the file already exists. The loaded
+// events are available for Portfolio_FromEventLog replay.
+//======================================================================
 // [END_FUNCTION]_[OrderEventLog_LoadFromDisk]
 //======================================================================
 
@@ -838,9 +859,6 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Convenience builder for the common case: a full fill from the OMS
-// callback. Fills all the fields so the caller doesn't have to zero-init
-// and set each one individually.
 template <unsigned F>
 inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
                                           uint64_t timestamp_us,
@@ -869,6 +887,12 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Convenience builder for the common case: a full fill from the OMS
+// callback. Fills all the fields so the caller doesn't have to zero-init
+// and set each one individually.
 //======================================================================
 // [END_FUNCTION]_[OrderEvent_MakeFill]
 //======================================================================
@@ -912,20 +936,6 @@ struct FoldResult {
 //======================================================================
 // [CODE]
 //======================================================================
-// Walk the event log in order, replay every FULL_FILL, and produce the
-// resulting Portfolio + balance + realized P&L. The output is
-// deterministic: same events in, same state out, every time. This is the
-// foundation for phase 07 replay and the phase 03 head-to-head test.
-//
-// The fold only processes OEVT_FULL_FILL events. Other event types
-// (SUBMITTED, ACKNOWLEDGED, REJECTED, CANCELED) don't affect portfolio
-// or balance. OEVT_PARTIAL_FILL is deferred to phase 06 — partial fills
-// don't occur in phase 03 (market orders fill fully).
-//
-// Fee model: symmetric (entry fee + exit fee), each = price * qty * fee_rate.
-// Matches the OnEvent computation at ControllerEventLoop.hpp.
-//
-// Returns the number of fill events processed (for verification).
 template <unsigned F>
 inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
                                             Money starting_balance,
@@ -982,6 +992,23 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Walk the event log in order, replay every FULL_FILL, and produce the
+// resulting Portfolio + balance + realized P&L. The output is
+// deterministic: same events in, same state out, every time. This is the
+// foundation for phase 07 replay and the phase 03 head-to-head test.
+//
+// The fold only processes OEVT_FULL_FILL events. Other event types
+// (SUBMITTED, ACKNOWLEDGED, REJECTED, CANCELED) don't affect portfolio
+// or balance. OEVT_PARTIAL_FILL is deferred to phase 06 — partial fills
+// don't occur in phase 03 (market orders fill fully).
+//
+// Fee model: symmetric (entry fee + exit fee), each = price * qty * fee_rate.
+// Matches the OnEvent computation at ControllerEventLoop.hpp.
+//
+// Returns the number of fill events processed (for verification).
 //======================================================================
 // [END_FUNCTION]_[Portfolio_FromEventLog]
 //======================================================================

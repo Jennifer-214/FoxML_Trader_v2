@@ -102,22 +102,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Bundle of ML-only extras that the dispatcher passes through to ML_BuildParameters
-// as a single void*. Keeps the dispatcher signature stable when more ML inputs
-// are added (cost model, vol scaler) — just add a field here.
-//
-// Non-ML strategies don't see this; the dispatcher's void* ml_ctx is opaque to
-// them.
-//
-// Field semantics:
-//   model_handle    — &NodeModelZoo<F>, populated by EngineSharded per core
-//   confidence      — &NodeContext::confidence, fed (pred, return) at exit fill
-//   out_prediction  — written by ML_BuildParameters with the prediction value
-//                     used in the gate decision; drainer snapshots this into
-//                     active_prediction at entry-submit time
-//   out_confidence  — written with the conf used (so snapshot reads match the
-//                     value that drove the gate decision; no recomputation)
-//======================================================================================================
 struct MLBuildContext {
     void*               model_handle;
     ConfidenceScorer*   confidence;
@@ -242,6 +226,24 @@ struct MLBuildContext {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Bundle of ML-only extras that the dispatcher passes through to ML_BuildParameters
+// as a single void*. Keeps the dispatcher signature stable when more ML inputs
+// are added (cost model, vol scaler) — just add a field here.
+//
+// Non-ML strategies don't see this; the dispatcher's void* ml_ctx is opaque to
+// them.
+//
+// Field semantics:
+//   model_handle    — &NodeModelZoo<F>, populated by EngineSharded per core
+//   confidence      — &NodeContext::confidence, fed (pred, return) at exit fill
+//   out_prediction  — written by ML_BuildParameters with the prediction value
+//                     used in the gate decision; drainer snapshots this into
+//                     active_prediction at entry-submit time
+//   out_confidence  — written with the conf used (so snapshot reads match the
+//                     value that drove the gate decision; no recomputation)
+//======================================================================
 // [END_STRUCT]_[MLBuildContext]
 //======================================================================
 
@@ -254,18 +256,6 @@ struct MLBuildContext {
 //======================================================================
 // [CODE]
 //======================================================================
-// Shared logic across all strategies' _BuildParameters. Pre-v4.0.3 these
-// were silently ignored by sharded strategies — now applied uniformly.
-//
-// Spacing: zero-gate the entry if it's within `stddev × spacing_multiplier`
-// of the last entry on this core. Prevents clustering N positions at
-// near-identical prices (which produces correlated wins/losses, not
-// independent diversification).
-//
-// Fee floor: ratchet TP up so it clears `entry × fee_rate × fee_floor_mult`.
-// Round-trip fees on a position are 2 × fee_rate (entry + exit), so
-// fee_floor_mult of 5 means TP must clear ~2.5× round-trip fees.
-//======================================================================================================
 template <unsigned F, unsigned W = 128>
 inline bool Strategy_SpacingOk(Money proposed_entry,
                                 Money last_entry,
@@ -327,6 +317,20 @@ inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strateg
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Shared logic across all strategies' _BuildParameters. Pre-v4.0.3 these
+// were silently ignored by sharded strategies — now applied uniformly.
+//
+// Spacing: zero-gate the entry if it's within `stddev × spacing_multiplier`
+// of the last entry on this core. Prevents clustering N positions at
+// near-identical prices (which produces correlated wins/losses, not
+// independent diversification).
+//
+// Fee floor: ratchet TP up so it clears `entry × fee_rate × fee_floor_mult`.
+// Round-trip fees on a position are 2 × fee_rate (entry + exit), so
+// fee_floor_mult of 5 means TP must clear ~2.5× round-trip fees.
 //======================================================================
 // [END_FUNCTION]_[Strategy_SpacingOk]
 //======================================================================
@@ -491,17 +495,6 @@ inline void SimpleDip_BuildParameters(
 //======================================================================
 // [CODE]
 //======================================================================
-// Real MeanReversion uses a regression feedback loop to adapt entry_offset_pct
-// and volume_multiplier based on recent P&L. The state lives in
-// `MeanReversionState<F>` and is mutated by `MeanReversion_Adapt`. Porting it
-// to a pure function requires moving the regression state out of the strategy
-// and into the controller (or accepting that the controller calls _Adapt
-// before each _BuildParameters cycle).
-//
-// For phase 06, this stub produces a safe deterministic pack: same entry
-// price as SimpleDip but with the MR strategy_id so dispatcher routing works
-// for tests. Full port is followup work.
-//======================================================================================================
 template <unsigned F, unsigned W = 128>
 inline void MeanReversion_BuildParameters(
     const RollingStats<F, W>* rolling,
@@ -568,6 +561,19 @@ inline void MeanReversion_BuildParameters(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Real MeanReversion uses a regression feedback loop to adapt entry_offset_pct
+// and volume_multiplier based on recent P&L. The state lives in
+// `MeanReversionState<F>` and is mutated by `MeanReversion_Adapt`. Porting it
+// to a pure function requires moving the regression state out of the strategy
+// and into the controller (or accepting that the controller calls _Adapt
+// before each _BuildParameters cycle).
+//
+// For phase 06, this stub produces a safe deterministic pack: same entry
+// price as SimpleDip but with the MR strategy_id so dispatcher routing works
+// for tests. Full port is followup work.
+//======================================================================
 // [END_FUNCTION]_[MeanReversion_BuildParameters]
 //======================================================================
 
@@ -580,12 +586,6 @@ inline void MeanReversion_BuildParameters(
 //======================================================================
 // [CODE]
 //======================================================================
-// Real Momentum uses ROR (rate-of-rate, slope-of-slope) and R² gates from
-// the rolling regression. It buys ABOVE the price (gate_direction = 1) when
-// momentum is rising. Like MeanReversion, the adaptive feedback loop needs
-// to be relocated to controller-side state before this becomes a pure
-// function.
-//======================================================================================================
 template <unsigned F, unsigned W = 128>
 inline void Momentum_BuildParameters(
     const RollingStats<F, W>* rolling,
@@ -696,6 +696,14 @@ inline void Momentum_BuildParameters(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Real Momentum uses ROR (rate-of-rate, slope-of-slope) and R² gates from
+// the rolling regression. It buys ABOVE the price (gate_direction = 1) when
+// momentum is rising. Like MeanReversion, the adaptive feedback loop needs
+// to be relocated to controller-side state before this becomes a pure
+// function.
+//======================================================================
 // [END_FUNCTION]_[Momentum_BuildParameters]
 //======================================================================
 
@@ -708,11 +716,6 @@ inline void Momentum_BuildParameters(
 //======================================================================
 // [CODE]
 //======================================================================
-// Real EMA Cross uses an EMA computed by the controller on the slow path,
-// then buys dips when fast EMA is above slow EMA. The EMA state lives in
-// the controller, not the strategy. Once the controller exposes a clean
-// "current EMA" output, the port becomes straightforward.
-//======================================================================================================
 template <unsigned F, unsigned W = 128>
 inline void EmaCross_BuildParameters(
     const RollingStats<F, W>* rolling,
@@ -807,6 +810,13 @@ inline void EmaCross_BuildParameters(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Real EMA Cross uses an EMA computed by the controller on the slow path,
+// then buys dips when fast EMA is above slow EMA. The EMA state lives in
+// the controller, not the strategy. Once the controller exposes a clean
+// "current EMA" output, the port becomes straightforward.
+//======================================================================
 // [END_FUNCTION]_[EmaCross_BuildParameters]
 //======================================================================
 
@@ -820,25 +830,6 @@ inline void EmaCross_BuildParameters(
 //======================================================================
 // [CODE]
 //======================================================================
-// Packs features from rolling stats, runs inference on whichever role models
-// are loaded in the per-core NodeModelZoo, computes BarrierGate modulation,
-// and produces gate parameters.
-//
-// Model resolution priority (first match wins):
-//   1. NODE_MODEL_BARRIER (3-class softmax: stable/peak/valley) — primary path
-//   2. NODE_MODEL_BUY_SIGNAL (single-binary, complementary interpretation) — legacy
-//   3. no models → fall back to SimpleDip behavior
-//
-// BarrierGate modulation (when BITMAP_IS_SET(node_cfg->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)):
-//   - hard block when bg.blocked (p_peak > BARRIER_HARD_BLOCK)
-//   - hard block when prediction < ml_buy_threshold (signal too cold)
-//   - else soft modulation: scale trade_size by bg.gate ∈ [g_min, 1.0]
-//
-// ml_ctx_ptr is &MLBuildContext (Phase 6prep sharded c13/c15). Legacy callers
-// (experiment tests) pass nullptr — no model, no
-// confidence damping, fall back to SimpleDip. Sharded production path always
-// passes a real MLBuildContext.
-//======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ML_BuildParameters(
     const RollingStats<F, W>* rolling,
@@ -1742,6 +1733,27 @@ inline void ML_BuildParameters(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Packs features from rolling stats, runs inference on whichever role models
+// are loaded in the per-core NodeModelZoo, computes BarrierGate modulation,
+// and produces gate parameters.
+//
+// Model resolution priority (first match wins):
+//   1. NODE_MODEL_BARRIER (3-class softmax: stable/peak/valley) — primary path
+//   2. NODE_MODEL_BUY_SIGNAL (single-binary, complementary interpretation) — legacy
+//   3. no models → fall back to SimpleDip behavior
+//
+// BarrierGate modulation (when BITMAP_IS_SET(node_cfg->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)):
+//   - hard block when bg.blocked (p_peak > BARRIER_HARD_BLOCK)
+//   - hard block when prediction < ml_buy_threshold (signal too cold)
+//   - else soft modulation: scale trade_size by bg.gate ∈ [g_min, 1.0]
+//
+// ml_ctx_ptr is &MLBuildContext (Phase 6prep sharded c13/c15). Legacy callers
+// (experiment tests) pass nullptr — no model, no
+// confidence damping, fall back to SimpleDip. Sharded production path always
+// passes a real MLBuildContext.
+//======================================================================
 // [END_FUNCTION]_[ML_BuildParameters]
 //======================================================================
 
@@ -1754,18 +1766,6 @@ inline void ML_BuildParameters(
 //======================================================================
 // [CODE]
 //======================================================================
-// the slow path calls this once per registered execution core. dispatches to
-// the strategy's _BuildParameters by strategy_id. STRATEGY_NONE produces a
-// zero-init pack so the core has safe defaults but won't trade (combined
-// with permission=0 enforced by the run loop, this is bulletproof).
-//
-// the dispatcher is the integration point between the per-core sharded
-// architecture and the strategy library. adding a new strategy:
-//   1. define STRATEGY_FOO constant in StrategyInterface.hpp (or wherever)
-//   2. write Foo_BuildParameters following the pattern above
-//   3. add a case to this switch
-//   4. done — Strategy_BuildParameters dispatches to it automatically
-//======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void Strategy_BuildParameters(
     uint8_t strategy_id,
@@ -2068,6 +2068,20 @@ inline void Strategy_BuildParameters(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// the slow path calls this once per registered execution core. dispatches to
+// the strategy's _BuildParameters by strategy_id. STRATEGY_NONE produces a
+// zero-init pack so the core has safe defaults but won't trade (combined
+// with permission=0 enforced by the run loop, this is bulletproof).
+//
+// the dispatcher is the integration point between the per-core sharded
+// architecture and the strategy library. adding a new strategy:
+//   1. define STRATEGY_FOO constant in StrategyInterface.hpp (or wherever)
+//   2. write Foo_BuildParameters following the pattern above
+//   3. add a case to this switch
+//   4. done — Strategy_BuildParameters dispatches to it automatically
 //======================================================================
 // [END_FUNCTION]_[Strategy_BuildParameters]
 //======================================================================

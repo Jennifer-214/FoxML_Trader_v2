@@ -92,11 +92,6 @@ static inline void ShardedOrderLatency_Reset(ShardedOrderLatency* lat) {
 //======================================================================
 // [CODE]
 //======================================================================
-// Record one sample. elapsed_us is the steady_clock duration of the REST
-// round trip; success is the BinanceOrderAPI return value (1 = ok, 0 = fail).
-// Updates count, failures (if !success), total_us, min_us, max_us. The
-// min/max use compare-exchange-weak loops because multiple writers might
-// race in a future thread-pool world; safe and cheap with one writer too.
 static inline void ShardedOrderLatency_Sample(ShardedOrderLatency* lat,
                                               uint64_t elapsed_us, int success) {
     lat->count.fetch_add(1, std::memory_order_relaxed);
@@ -115,6 +110,14 @@ static inline void ShardedOrderLatency_Sample(ShardedOrderLatency* lat,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Record one sample. elapsed_us is the steady_clock duration of the REST
+// round trip; success is the BinanceOrderAPI return value (1 = ok, 0 = fail).
+// Updates count, failures (if !success), total_us, min_us, max_us. The
+// min/max use compare-exchange-weak loops because multiple writers might
+// race in a future thread-pool world; safe and cheap with one writer too.
 //======================================================================
 // [END_FUNCTION]_[ShardedOrderLatency_Sample]
 //======================================================================

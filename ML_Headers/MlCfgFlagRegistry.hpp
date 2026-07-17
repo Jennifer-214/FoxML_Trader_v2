@@ -59,19 +59,6 @@
 //======================================================================
 // [CODE]
 //======================================================================
-// Tuple: X(NAME, legacy_field, doc)
-//
-// Domain identity: ML/confidence-mechanic toggles. Add here if the flag governs
-// ML pipeline behavior (confidence scoring, bandit warmup, exit-model arms,
-// volatility scaling, lazy slow-path rebuild).
-
-// Tuple: X(NAME, legacy_field, display_label, section, metadata_flags, doc)  [6-col v5.15.5.F.4d.1.B.2+]
-// metadata_flags column added at .B.2 cohort migration; 5 STAMP_BOUND-eligible rows
-// gain STAMP_BOUND_CFG_DERIVED bit (CONFIDENCE_COMPOSITE_ENABLED + RIDGE_WITHIN_HORIZON +
-// RIDGE_ACROSS_HORIZONS + EXIT_BLENDER_MODE + PER_HORIZON_BARRIER_BLEND); 7 runtime-only
-// rows get 0. Cohort fields auto-flow through new cfg-derived consumer framework when the
-// framework consumer template fns are extended to walk FOREACH_ML_CFG_FLAG (Step 0.5b of
-// .B.2 plan body).
 #define FOREACH_ML_CFG_FLAG(X)                                                                                                                                                                          \
     X(CONFIDENCE_ENABLED,           confidence_enabled,           "Confidence",            "FoxML",       0,                                                "scale entry threshold by confidence score")                                                  \
     X(CONFIDENCE_COMPOSITE_ENABLED, confidence_composite_enabled, "Composite Confidence",  "FoxML",       CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "use 4-factor composite confidence (vs legacy 3-factor); stamp-bound")                         \
@@ -166,6 +153,22 @@ FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(NAME, legacy_field, doc)
+//
+// Domain identity: ML/confidence-mechanic toggles. Add here if the flag governs
+// ML pipeline behavior (confidence scoring, bandit warmup, exit-model arms,
+// volatility scaling, lazy slow-path rebuild).
+//
+// Tuple: X(NAME, legacy_field, display_label, section, metadata_flags, doc)  [6-col v5.15.5.F.4d.1.B.2+]
+// metadata_flags column added at .B.2 cohort migration; 5 STAMP_BOUND-eligible rows
+// gain STAMP_BOUND_CFG_DERIVED bit (CONFIDENCE_COMPOSITE_ENABLED + RIDGE_WITHIN_HORIZON +
+// RIDGE_ACROSS_HORIZONS + EXIT_BLENDER_MODE + PER_HORIZON_BARRIER_BLEND); 7 runtime-only
+// rows get 0. Cohort fields auto-flow through new cfg-derived consumer framework when the
+// framework consumer template fns are extended to walk FOREACH_ML_CFG_FLAG (Step 0.5b of
+// .B.2 plan body).
 //======================================================================
 // [END_REGISTRY]_[FOREACH_ML_CFG_FLAG]
 //======================================================================

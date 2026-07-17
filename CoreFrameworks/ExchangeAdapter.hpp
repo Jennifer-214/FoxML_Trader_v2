@@ -29,9 +29,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Result of a single order submission. Populated by the adapter worker
-// thread and passed to the OrderCallback. POD so it can be memcpy'd into
-// SPSCRing slots without ceremony.
 struct OrderResult {
     int      success;             // 1 = filled (or partial), 0 = failed
     char     exchange_id[64];     // assigned by exchange on success, "" on failure
@@ -50,6 +47,12 @@ struct OrderResult {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Result of a single order submission. Populated by the adapter worker
+// thread and passed to the OrderCallback. POD so it can be memcpy'd into
+// SPSCRing slots without ceremony.
 //======================================================================
 // [END_STRUCT]_[OrderResult]
 //======================================================================
@@ -73,20 +76,6 @@ typedef void (*OrderCallback)(void* user_ctx,
 //======================================================================
 // [CODE]
 //======================================================================
-// Generic adapter interface. Each concrete adapter (BinanceAdapter,
-// MockAdapter, etc.) populates a value of this struct via its _Get function
-// and the OMS embeds it by value inside OrderManagerState. The ctx pointer
-// stays valid for the lifetime of the adapter (typically the lifetime of
-// the engine) so the OMS can pass it back to every method.
-//
-// All function pointers must be non-null when the adapter is wired into
-// the OMS. There is no "optional method" — adapters that don't support
-// query_order should provide a stub that returns 0 with an error code.
-//
-// The template parameter F lets the adapter type-check against FPN_Binary<F>
-// fields if it needs them. Phase 02 BinanceAdapter doesn't actually use F
-// in its function signatures (it converts at the boundary) but keeping
-// the template makes future adapters easier.
 template <unsigned F>
 struct ExchangeAdapter {
     // Async submit. Returns 1 on enqueue success, 0 on enqueue failure
@@ -110,6 +99,23 @@ struct ExchangeAdapter {
 };
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Generic adapter interface. Each concrete adapter (BinanceAdapter,
+// MockAdapter, etc.) populates a value of this struct via its _Get function
+// and the OMS embeds it by value inside OrderManagerState. The ctx pointer
+// stays valid for the lifetime of the adapter (typically the lifetime of
+// the engine) so the OMS can pass it back to every method.
+//
+// All function pointers must be non-null when the adapter is wired into
+// the OMS. There is no "optional method" — adapters that don't support
+// query_order should provide a stub that returns 0 with an error code.
+//
+// The template parameter F lets the adapter type-check against FPN_Binary<F>
+// fields if it needs them. Phase 02 BinanceAdapter doesn't actually use F
+// in its function signatures (it converts at the boundary) but keeping
+// the template makes future adapters easier.
 //======================================================================
 // [COMMENT]_[the interface contract]
 //----------------------------------------------------------------------

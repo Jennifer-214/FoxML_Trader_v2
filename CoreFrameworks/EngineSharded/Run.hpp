@@ -167,8 +167,6 @@ inline ShardedOrderLatency g_sharded_order_lat;
 //======================================================================
 // [CODE]
 //======================================================================
-// Quick TSC frequency calibration so the latency dump can show ns alongside
-// raw cycles. ~50ms of busy work, plenty accurate for diagnostic display.
 static inline double EngineSharded_CalibrateTscGhz() {
     auto wall0 = std::chrono::high_resolution_clock::now();
     uint32_t hi0, lo0;
@@ -191,6 +189,11 @@ static inline double EngineSharded_CalibrateTscGhz() {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Quick TSC frequency calibration so the latency dump can show ns alongside
+// raw cycles. ~50ms of busy work, plenty accurate for diagnostic display.
+//======================================================================
 // [END_FUNCTION]_[EngineSharded_CalibrateTscGhz]
 //======================================================================
 
@@ -203,9 +206,6 @@ static inline double EngineSharded_CalibrateTscGhz() {
 //======================================================================
 // [CODE]
 //======================================================================
-// Best-effort core pinning. Returns 1 on success, 0 on failure (logged but
-// not fatal — if pinning fails the engine still runs, just with potentially
-// worse tail latency due to scheduler migration).
 static inline int EngineSharded_PinThread(int cpu_id) {
 #ifdef __linux__
     cpu_set_t cpuset;
@@ -240,6 +240,12 @@ static inline int EngineSharded_DrainerCpu(int num_nodes)      { return num_node
 static inline int EngineSharded_NodeSlowCpuBase(int num_nodes) { return num_nodes + 2; }  // CPU N+2.. (fallback base)
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Best-effort core pinning. Returns 1 on success, 0 on failure (logged but
+// not fatal — if pinning fails the engine still runs, just with potentially
+// worse tail latency due to scheduler migration).
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_PinThread]
 //======================================================================
@@ -365,8 +371,6 @@ static inline int EngineSharded_SmartSlowPathPins(int producer_cpu,
 //======================================================================
 // [CODE]
 //======================================================================
-// Dumps per-core latency stats in a compact table after the run finishes.
-// One row per core, all converted to ns via the calibrated TSC frequency.
 template <unsigned F>
 static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
                                               int num_nodes, double tsc_ghz) {
@@ -395,6 +399,11 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Dumps per-core latency stats in a compact table after the run finishes.
+// One row per core, all converted to ns via the calibrated TSC frequency.
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_DumpLatency]
 //======================================================================
@@ -445,13 +454,6 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
 //------------------------------------------------------------------------------
 // Phase 7.B — drainer-cycle bench gate histogram
 //------------------------------------------------------------------------------
-// `g_engine_drainer_cycle_hist` is now declared in EngineSharded/Async.hpp (v5.15.5.F.4d.1.B.6
-// Phase B Step B.2; co-located with drain_with_submit hoist that originated the per-cycle
-// rdtsc bracket). Inline (C++17); same single-shared-storage semantics. References from this
-// file (LatencyHistogram_Reset call below, drainer thread BENCH-accumulate, shutdown summary
-// at end of EngineSharded_Run) all resolve via `tt::g_engine_drainer_cycle_hist`.
-//======================================================================================================
-
 template <unsigned F, bool BENCH = false>
 static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                       const BinanceConfig& bcfg) {
@@ -2531,6 +2533,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// `g_engine_drainer_cycle_hist` is now declared in EngineSharded/Async.hpp (v5.15.5.F.4d.1.B.6
+// Phase B Step B.2; co-located with drain_with_submit hoist that originated the per-cycle
+// rdtsc bracket). Inline (C++17); same single-shared-storage semantics. References from this
+// file (LatencyHistogram_Reset call below, drainer thread BENCH-accumulate, shutdown summary
+// at end of EngineSharded_Run) all resolve via `tt::g_engine_drainer_cycle_hist`.
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_Run]
 //======================================================================

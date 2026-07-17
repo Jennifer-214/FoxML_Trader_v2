@@ -576,11 +576,6 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
 //======================================================================
 // [CODE]
 //======================================================================
-// single-site functions for state transitions that have mandatory side effects.
-// every kill/halt/exit path goes through these — no scattered field assignments.
-
-// KillSwitch_Activate: halt all buying immediately, zero gate state
-// called from: hot-path equity crash, slow-path daily loss, slow-path drawdown
 template <unsigned F>
 inline void KillSwitch_Activate(PortfolioController<F> *ctrl, int reason) {
     ctrl->kill_switch_active = 1;
@@ -791,6 +786,14 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// single-site functions for state transitions that have mandatory side effects.
+// every kill/halt/exit path goes through these — no scattered field assignments.
+//
+// KillSwitch_Activate: halt all buying immediately, zero gate state
+// called from: hot-path equity crash, slow-path daily loss, slow-path drawdown
+//======================================================================
 // [END_FUNCTION]_[KillSwitch_Activate]
 //======================================================================
 
@@ -803,8 +806,6 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
 //======================================================================
 // [CODE]
 //======================================================================
-// processes TP/SL exits: books P&L, updates balance, logs trades, triggers cooldown
-// called from both warmup (loaded positions can exit) and slow path
 template <unsigned F>
 inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
   for (uint32_t i = 0; i < ctrl->exit_buf.count; i++) {
@@ -824,6 +825,11 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
 //======================================================================================================
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// processes TP/SL exits: books P&L, updates balance, logs trades, triggers cooldown
+// called from both warmup (loaded positions can exit) and slow path
 //======================================================================
 // [END_FUNCTION]_[PortfolioController_DrainExits]
 //======================================================================
@@ -989,8 +995,6 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
 //======================================================================
 // [CODE]
 //======================================================================
-// called every tick. fill consumption runs every tick (zero unprotected
-// exposure). regression/adjustment runs every poll_interval ticks (slow path).
 template <unsigned F>
 inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                                      OrderPool<F> *pool, Money current_price,
@@ -1991,6 +1995,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// called every tick. fill consumption runs every tick (zero unprotected
+// exposure). regression/adjustment runs every poll_interval ticks (slow path).
 //======================================================================
 // [END_FUNCTION]_[PortfolioController_Tick]
 //======================================================================

@@ -146,10 +146,6 @@ inline void MLStrategy_Adapt_Canonical(
 //======================================================================
 // [CODE]
 //======================================================================
-// packs features from rolling stats + regime signals, runs model inference.
-// if prediction > threshold, returns buy conditions; otherwise returns zero-gate.
-// gate_direction = 0 (buy below avg, like MR) — model decides WHEN, not WHERE.
-//======================================================================================================
 template <unsigned F> struct RegimeSignals; // forward declaration
 template <unsigned F> struct ControllerConfig; // forward declaration
 
@@ -239,6 +235,12 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// packs features from rolling stats + regime signals, runs model inference.
+// if prediction > threshold, returns buy conditions; otherwise returns zero-gate.
+// gate_direction = 0 (buy below avg, like MR) — model decides WHEN, not WHERE.
+//======================================================================
 // [END_FUNCTION]_[MLStrategy_BuySignal]
 //======================================================================
 
@@ -251,13 +253,6 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 //======================================================================
 // [CODE]
 //======================================================================
-// uses fixed TP/SL from config (ml_tp_pct / ml_sl_pct).
-// no trailing — keep it simple until we have exit models.
-// TP/SL are set at fill time by the controller, not here.
-//======================================================================================================
-// R²-scaled trailing TP/SL (same pattern as Momentum_ExitAdjust).
-// ratchets TP/SL upward when price runs past original TP in a strong trend.
-// uses tp_trail_mult / sl_trail_mult from config with R² gating.
 template <unsigned F>
 inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, Money current_price,
                                    const RollingStats<F> *rolling,
@@ -360,6 +355,16 @@ inline void MLStrategy_ExitAdjustSharded(
 } // namespace tt
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// uses fixed TP/SL from config (ml_tp_pct / ml_sl_pct).
+// no trailing — keep it simple until we have exit models.
+// TP/SL are set at fill time by the controller, not here.
+//
+// R²-scaled trailing TP/SL (same pattern as Momentum_ExitAdjust).
+// ratchets TP/SL upward when price runs past original TP in a strong trend.
+// uses tp_trail_mult / sl_trail_mult from config with R² gating.
 //======================================================================
 // [END_FUNCTION]_[MLStrategy_ExitAdjust]
 //======================================================================

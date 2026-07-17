@@ -78,23 +78,6 @@
 //======================================================================
 // [CODE]
 //======================================================================================================
-// Tuple: X(name, field_name, doc_string)
-//   name        — UPPERCASE token; used for PER_ARM_FLAG_<name> enum
-//                 (for telemetry / debug; ezoo fields use the field_name)
-//   field_name  — exact C identifier for the uint8_t bitmap field that
-//                 lives on EnsembleModelZoo. Bit N = arm N has this flag.
-//   doc_string  — operator-facing description (engine.cfg.example /
-//                 MLStatusPanel tooltip if surfaced).
-//
-// APPEND-ONLY discipline. Reordering shifts PER_ARM_FLAG_<name> enum
-// values which would invalidate any future telemetry that records the
-// enum (none today; future-proof discipline). Field NAMES are stable
-// — renaming a field would require updating every consumer.
-//
-// DEFAULT VALUE: all per-arm flag fields default to 0 (no arms have
-// the flag). LoadFromCfg / runtime code sets bits as conditions become
-// true. Clearing on reload is the responsibility of EnsembleModelZoo_Init
-// (which memsets the struct or explicit zero-init).
 #define FOREACH_PER_ARM_FLAG(X) \
     X(DISABLED,        disabled_horizon_mask,    "Per-arm operator-disabled (legacy v5.14; cfg.disabled_horizons CSV)") \
     X(LOADED_BARRIERS, arms_with_barriers_mask,  "Per-arm has stamp-recorded TP/SL barriers (v5.15.5+)") \
@@ -181,6 +164,26 @@ static_assert(PER_ARM_FLAG_COUNT >= 2,
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tuple: X(name, field_name, doc_string)
+//   name        — UPPERCASE token; used for PER_ARM_FLAG_<name> enum
+//                 (for telemetry / debug; ezoo fields use the field_name)
+//   field_name  — exact C identifier for the uint8_t bitmap field that
+//                 lives on EnsembleModelZoo. Bit N = arm N has this flag.
+//   doc_string  — operator-facing description (engine.cfg.example /
+//                 MLStatusPanel tooltip if surfaced).
+//
+// APPEND-ONLY discipline. Reordering shifts PER_ARM_FLAG_<name> enum
+// values which would invalidate any future telemetry that records the
+// enum (none today; future-proof discipline). Field NAMES are stable
+// — renaming a field would require updating every consumer.
+//
+// DEFAULT VALUE: all per-arm flag fields default to 0 (no arms have
+// the flag). LoadFromCfg / runtime code sets bits as conditions become
+// true. Clearing on reload is the responsibility of EnsembleModelZoo_Init
+// (which memsets the struct or explicit zero-init).
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------

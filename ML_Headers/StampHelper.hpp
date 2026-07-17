@@ -80,18 +80,6 @@ namespace tt {
 //======================================================================
 // StampArgs<F> — POD struct for per-call inputs
 //======================================================================================================
-// Default member init for all fields → callers fill only what differs.
-// Single-horizon callers (train_model_worker_fn) leave horizon_* +
-// grid_member_* at defaults. Multi-horizon callers (mh_run_one_horizon_fv
-// → RFV) set them via FullValidationResults.req_grid_*.
-//
-// Per CLAUDE.md item 27: explicit defaults zero-init padding (POD struct
-// is stack-allocated; not used in byte-equivalence contexts directly but
-// the discipline applies for any future memcmp use).
-//
-// Per CLAUDE.local.md cohort-audit rule: cohort = function-arg struct;
-// stack-allocated; no cache concerns.
-
 template <unsigned F>
 struct StampArgs {
     // === stamp_write_for_model invariants (caller-provided) ===
@@ -147,6 +135,20 @@ struct StampArgs {
 //======================================================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Default member init for all fields → callers fill only what differs.
+// Single-horizon callers (train_model_worker_fn) leave horizon_* +
+// grid_member_* at defaults. Multi-horizon callers (mh_run_one_horizon_fv
+// → RFV) set them via FullValidationResults.req_grid_*.
+//
+// Per CLAUDE.md item 27: explicit defaults zero-init padding (POD struct
+// is stack-allocated; not used in byte-equivalence contexts directly but
+// the discipline applies for any future memcmp use).
+//
+// Per CLAUDE.local.md cohort-audit rule: cohort = function-arg struct;
+// stack-allocated; no cache concerns.
+//======================================================================
 // [END_STRUCT]_[StampArgs]
 //======================================================================
 
@@ -162,16 +164,6 @@ struct StampArgs {
 //======================================================================
 // Stamp_AssembleAndEmit — canonical helper
 //======================================================================================================
-// Walks STAMP_CFG_AUTOPOPULATE for cfg-bound fields (closes PARITY-020 for
-// callers that previously missed this call). Manually populates per-call
-// model-const fields from StampArgs (NOT via the quarantined
-// STAMP_MODEL_CONST_AUTOPOPULATE macro per PARITY-022). Computes today's
-// ISO date if `args.trained_on_iso` is empty. Falls back to build-time
-// constants for feature_registry_hash + engine_version when args defaults
-// (allows callers to override but doesn't require it).
-//
-// Returns: StampWriteResult from stamp_write_for_model.
-
 template <unsigned F>
 inline StampWriteResult Stamp_AssembleAndEmit(
     const char* output_stamp_path,
@@ -395,6 +387,18 @@ inline StampWriteResult Stamp_AssembleAndEmit(
 
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Walks STAMP_CFG_AUTOPOPULATE for cfg-bound fields (closes PARITY-020 for
+// callers that previously missed this call). Manually populates per-call
+// model-const fields from StampArgs (NOT via the quarantined
+// STAMP_MODEL_CONST_AUTOPOPULATE macro per PARITY-022). Computes today's
+// ISO date if `args.trained_on_iso` is empty. Falls back to build-time
+// constants for feature_registry_hash + engine_version when args defaults
+// (allows callers to override but doesn't require it).
+//
+// Returns: StampWriteResult from stamp_write_for_model.
 //======================================================================
 // [END_FUNCTION]_[Stamp_AssembleAndEmit]
 //======================================================================

@@ -283,30 +283,6 @@ static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == 
 //======================================================================
 // [CODE]
 //======================================================================
-// Distinct from NodeContext::halt_reason (controller-level halts:
-// spacing, vwap, long-slope, vol-delta, min-stddev, sl-cooldown,
-// warmup, core-budget, core-kill, imbalance — set in
-// ControllerEventLoop.hpp's gate rebuild loop).
-//
-// strategy_halt_reason captures STRATEGY-INTERNAL vetoes — the
-// reasons a strategy zero-gates or sets BUY_BLOCKED before the
-// controller-level checks run. Each strategy's _BuildParameters
-// MUST set strategy_halt_reason before Gate_Zero or BUY_BLOCKED
-// is set in `out`. Reset to SHALT_OK at the top of each rebuild.
-//
-// Display priority in the GUI: controller halt_reason > 0 wins;
-// else strategy_halt_reason > 0 wins; else gate_flags & BUY_BLOCKED;
-// else "no signal".
-//
-// v5.8.2 — registry-driven via FOREACH_SHALT(X). Adding a new SHALT
-// code is a single-line change here; the GUI mirror in
-// DashboardPanels.hpp now reads SHALT_SHORT_NAMES directly. Bound
-// assertion in controller_test.cpp uses NUM_SHALT_CODES.
-//
-// Row format: X(<id>, <short_name>, <description>)
-// IDs are append-only; never reorder or remove (existing trade logs
-// reference numeric values).
-//======================================================================================================
 #define FOREACH_SHALT(X) \
     X(OK,               "ok",             "all strategies pass") \
     X(NO_UPTREND,       "no-uptrend",     "EmaCross / MeanReversion long-trend gate") \
@@ -355,6 +331,32 @@ static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHAL
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Distinct from NodeContext::halt_reason (controller-level halts:
+// spacing, vwap, long-slope, vol-delta, min-stddev, sl-cooldown,
+// warmup, core-budget, core-kill, imbalance — set in
+// ControllerEventLoop.hpp's gate rebuild loop).
+//
+// strategy_halt_reason captures STRATEGY-INTERNAL vetoes — the
+// reasons a strategy zero-gates or sets BUY_BLOCKED before the
+// controller-level checks run. Each strategy's _BuildParameters
+// MUST set strategy_halt_reason before Gate_Zero or BUY_BLOCKED
+// is set in `out`. Reset to SHALT_OK at the top of each rebuild.
+//
+// Display priority in the GUI: controller halt_reason > 0 wins;
+// else strategy_halt_reason > 0 wins; else gate_flags & BUY_BLOCKED;
+// else "no signal".
+//
+// v5.8.2 — registry-driven via FOREACH_SHALT(X). Adding a new SHALT
+// code is a single-line change here; the GUI mirror in
+// DashboardPanels.hpp now reads SHALT_SHORT_NAMES directly. Bound
+// assertion in controller_test.cpp uses NUM_SHALT_CODES.
+//
+// Row format: X(<id>, <short_name>, <description>)
+// IDs are append-only; never reorder or remove (existing trade logs
+// reference numeric values).
+//======================================================================
 // [END_REGISTRY]_[FOREACH_SHALT]
 //======================================================================
 
@@ -369,23 +371,6 @@ static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHAL
 //======================================================================
 // [CODE]
 //======================================================================
-// These are set by the slow-path gate rebuild loop (ControllerEventLoop)
-// when a cross-cutting filter (spacing, vwap, vol-delta, book-imbalance,
-// etc.) zero-gates a core. SHALT_* (above) is the strategy-internal
-// equivalent set by individual strategies.
-//
-// IDs are append-only — never reorder or remove. Trade logs and per-core
-// snapshots persist this value as a raw integer; reordering breaks
-// historical decode.
-//
-// HALT_WARMUP (=7) is reserved-but-unused: warmup state is gated via
-// `permission=0` upstream of the zero_gate path (see EngineSharded.hpp
-// init), so no halt_reason=7 is ever written by current code. Kept in
-// the registry for back-compat with older trade logs that may have
-// recorded it before the permission mechanism took over.
-//
-// Row format: X(<id>, <short_name>, <description>)
-//======================================================================================================
 #define FOREACH_HALT_REASON(X) \
     X(OK,           "ok",           "all gates pass") \
     X(SPACING,      "spacing",      "proposed entry too close to last entry") \
@@ -423,6 +408,25 @@ static_assert(sizeof(HALT_NAMES) / sizeof(*HALT_NAMES) == NUM_HALT_REASONS,
               "HALT_NAMES out of sync with NUM_HALT_REASONS");
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// These are set by the slow-path gate rebuild loop (ControllerEventLoop)
+// when a cross-cutting filter (spacing, vwap, vol-delta, book-imbalance,
+// etc.) zero-gates a core. SHALT_* (above) is the strategy-internal
+// equivalent set by individual strategies.
+//
+// IDs are append-only — never reorder or remove. Trade logs and per-core
+// snapshots persist this value as a raw integer; reordering breaks
+// historical decode.
+//
+// HALT_WARMUP (=7) is reserved-but-unused: warmup state is gated via
+// `permission=0` upstream of the zero_gate path (see EngineSharded.hpp
+// init), so no halt_reason=7 is ever written by current code. Kept in
+// the registry for back-compat with older trade logs that may have
+// recorded it before the permission mechanism took over.
+//
+// Row format: X(<id>, <short_name>, <description>)
 //======================================================================
 // [END_REGISTRY]_[FOREACH_HALT_REASON]
 //======================================================================

@@ -550,9 +550,6 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================
 // [CODE]
 //======================================================================
-// 79 rows. Each per-core row lives at `cfg.nodes[c].<field>` (one instance per
-// execution core; up to MAX_EXECUTION_NODES = 16). PER_NODE_OK metadata bit
-// is REMOVED — registry membership IS the scope assertion.
 #define FOREACH_PER_NODE_CFG_FIELD(X)                                                                                                                                                                                \
     /* === Trading (6) === */                                                                                                                                                                                         \
     X(Money, KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         CfgFieldDescriptor::CAPITAL_BOUND_GAIN,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -865,6 +862,12 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 79 rows. Each per-core row lives at `cfg.nodes[c].<field>` (one instance per
+// execution core; up to MAX_EXECUTION_NODES = 16). PER_NODE_OK metadata bit
+// is REMOVED — registry membership IS the scope assertion.
+//======================================================================
 // [END_REGISTRY]_[FOREACH_PER_NODE_CFG_FIELD]
 //======================================================================
 
@@ -880,19 +883,6 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================
 // [CODE]
 //======================================================================
-// PURPOSE: documented exemptions for per-core fields that can't fit
-// FOREACH_PER_NODE_CFG_FIELD yet (awaiting KIND_STRING / KIND_FILE_PATH /
-// KIND_HEX64 at .F.4e) OR are TRANSITIONAL during shadow-window migration.
-//
-// Every entry MUST have a row in DOCS/MANUAL_FIELDS_INVENTORY.md with full
-// rationale + migration trigger. CI cross-checks bidirectionally via
-// tools/check_per_node_registry_integrity.py — drift = BUILD ERROR.
-//
-// ControllerConfig<F> declares these arrays via EMIT_MANUAL_PER_NODE_DECL
-// X-macro expansion ONLY; no manual `core_X[16]` declarations allowed outside.
-//
-// SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
-//======================================================================================================
 #define FOREACH_MANUAL_PER_NODE_FIELD(X)                                                                                  \
     /* type,                name,                      suffix,  rationale (matches MANUAL_FIELDS_INVENTORY.md) */         \
     /* === String arrays awaiting KIND_STRING / KIND_FILE_PATH at .F.4e === */                                            \
@@ -920,6 +910,21 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// PURPOSE: documented exemptions for per-core fields that can't fit
+// FOREACH_PER_NODE_CFG_FIELD yet (awaiting KIND_STRING / KIND_FILE_PATH /
+// KIND_HEX64 at .F.4e) OR are TRANSITIONAL during shadow-window migration.
+//
+// Every entry MUST have a row in DOCS/MANUAL_FIELDS_INVENTORY.md with full
+// rationale + migration trigger. CI cross-checks bidirectionally via
+// tools/check_per_node_registry_integrity.py — drift = BUILD ERROR.
+//
+// ControllerConfig<F> declares these arrays via EMIT_MANUAL_PER_NODE_DECL
+// X-macro expansion ONLY; no manual `core_X[16]` declarations allowed outside.
+//
+// SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
+//======================================================================
 // [END_REGISTRY]_[FOREACH_MANUAL_PER_NODE_FIELD]
 //======================================================================
 
@@ -937,31 +942,6 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================
 // [CODE]
 //======================================================================
-// PURPOSE: meta-registry binding each FOREACH_<DOMAIN>_CFG_FLAG child registry to its
-// per-core bitmap storage field. SINGLE source of truth for the 5 bitmap fields on
-// PerNodeCfg<F>; adding a new domain registry = 1 row here + 1 row in MANUAL_FIELDS_INVENTORY.md.
-//
-// DRIVES (auto-flows):
-//   1. Struct field declarations in PerNodeCfg<F> via FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
-//   2. Bitmap-overflow static_asserts per domain (defense in depth alongside per-registry asserts)
-//      via FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT) per
-//      bitmap-overflow-protection-discipline.md
-//   3. WIP2e bitmap-rebuild walker: iterates this meta-registry; for each domain walks
-//      `child_registry` to rebuild bitmap from flat KIND_BOOL rows at slow-path cadence
-//   4. CI cross-check: every domain registered ↔ MANUAL_FIELDS_INVENTORY.md Section B row;
-//      added domain registry without bitmap field = BUILD ERROR (closes domain-bitmap-drift class)
-//
-// FIRST CANONICAL APPLICATION of meta-registry-pattern-for-codebase-registry-discipline.md
-// (Stage 3 ACTIVE at .F.4c.3 WIP2d-0.B; one ship before .F.4d FOREACH_REGISTRY codebase-wide
-// meta-registry + H15 codification). The pattern composes upward — at .F.4d this meta-registry
-// gets a row in FOREACH_REGISTRY top-level meta-registry.
-//
-// Row shape: X(align_n, DOMAIN_TOKEN, field_name, storage_type, child_registry_token)
-//   - align_n:    8 = alignas(8) cluster boundary; 0 = natural alignment
-//   - DOMAIN_TOKEN: pastes with _CFG_COUNT for static_assert (e.g., LIFECYCLE → LIFECYCLE_CFG_COUNT)
-//   - storage_type: bitmap storage type (uint8_t / uint16_t per FOREACH_X_CFG_FLAG bit count)
-//   - child_registry_token: FOREACH_<DOMAIN>_CFG_FLAG (used by WIP2e rebuild walker)
-//======================================================================================================
 #define FOREACH_PER_NODE_DOMAIN_BITMAP(X)                                                              \
     /* align, domain,    field,                  storage,  child registry token */                    \
     X(8,      LIFECYCLE, lifecycle_cfg_flags,    uint8_t,  FOREACH_LIFECYCLE_CFG_FLAG)                 \
@@ -997,6 +977,33 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// PURPOSE: meta-registry binding each FOREACH_<DOMAIN>_CFG_FLAG child registry to its
+// per-core bitmap storage field. SINGLE source of truth for the 5 bitmap fields on
+// PerNodeCfg<F>; adding a new domain registry = 1 row here + 1 row in MANUAL_FIELDS_INVENTORY.md.
+//
+// DRIVES (auto-flows):
+//   1. Struct field declarations in PerNodeCfg<F> via FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
+//   2. Bitmap-overflow static_asserts per domain (defense in depth alongside per-registry asserts)
+//      via FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT) per
+//      bitmap-overflow-protection-discipline.md
+//   3. WIP2e bitmap-rebuild walker: iterates this meta-registry; for each domain walks
+//      `child_registry` to rebuild bitmap from flat KIND_BOOL rows at slow-path cadence
+//   4. CI cross-check: every domain registered ↔ MANUAL_FIELDS_INVENTORY.md Section B row;
+//      added domain registry without bitmap field = BUILD ERROR (closes domain-bitmap-drift class)
+//
+// FIRST CANONICAL APPLICATION of meta-registry-pattern-for-codebase-registry-discipline.md
+// (Stage 3 ACTIVE at .F.4c.3 WIP2d-0.B; one ship before .F.4d FOREACH_REGISTRY codebase-wide
+// meta-registry + H15 codification). The pattern composes upward — at .F.4d this meta-registry
+// gets a row in FOREACH_REGISTRY top-level meta-registry.
+//
+// Row shape: X(align_n, DOMAIN_TOKEN, field_name, storage_type, child_registry_token)
+//   - align_n:    8 = alignas(8) cluster boundary; 0 = natural alignment
+//   - DOMAIN_TOKEN: pastes with _CFG_COUNT for static_assert (e.g., LIFECYCLE → LIFECYCLE_CFG_COUNT)
+//   - storage_type: bitmap storage type (uint8_t / uint16_t per FOREACH_X_CFG_FLAG bit count)
+//   - child_registry_token: FOREACH_<DOMAIN>_CFG_FLAG (used by WIP2e rebuild walker)
+//======================================================================
 // [END_REGISTRY]_[FOREACH_PER_NODE_DOMAIN_BITMAP]
 //======================================================================
 
@@ -1012,6 +1019,19 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 //======================================================================
 // [CODE]
 //======================================================================
+#define FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC(X)                                                           \
+    /* target_field,  source_array_field */                                                              \
+    X(strategy,       node_strategies)
+
+// Payload macro: emit per-core sync line. Used by PopulateCoresFromFlat (templated;
+// `cfg` + `c` in scope from caller's per-core loop).
+#define EMIT_NO_FLAT_FIELD_SYNC(target, source) \
+    cfg->nodes[c].target = cfg->source[c];
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // PURPOSE: auxiliary registry for FOREACH_PER_NODE_CFG_FIELD rows tagged NO_FLAT_FIELD.
 // These rows lack a ControllerConfig flat scalar; the auto-flow copy walker skips them via
 // the NO_FLAT_FIELD bit. THIS registry provides the manual sync source mapping (legacy
@@ -1032,17 +1052,6 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // CI check (tools/check_per_node_registry_integrity.py — added WIP2d-1.B.0 Check 7):
 // every row here must have BOTH a FOREACH_PER_NODE_CFG_FIELD row with NO_FLAT_FIELD bit
 // AND a FOREACH_MANUAL_PER_NODE_FIELD row matching the source. Closes Shortsighted #4.
-//======================================================================================================
-#define FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC(X)                                                           \
-    /* target_field,  source_array_field */                                                              \
-    X(strategy,       node_strategies)
-
-// Payload macro: emit per-core sync line. Used by PopulateCoresFromFlat (templated;
-// `cfg` + `c` in scope from caller's per-core loop).
-#define EMIT_NO_FLAT_FIELD_SYNC(target, source) \
-    cfg->nodes[c].target = cfg->source[c];
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_REGISTRY]_[FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC]
 //======================================================================
@@ -1058,6 +1067,20 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 //======================================================================
 // [CODE]
 //======================================================================
+#define FOREACH_PER_NODE_ARRAY_OVERRIDE(X)                                                               \
+    /* target_field,      source_array_field */                                                          \
+    X(risk_pct,           node_risk_pct)                                                                  \
+    X(max_drawdown_pct,   node_max_drawdown_pct)
+
+// Payload macro: emit per-core raw-copy overwrite. Used by PopulateCoresFromFlat AFTER the copy walker
+// (last-wins; `cfg` + `c` in scope from caller's per-core loop).
+#define EMIT_PER_NODE_ARRAY_OVERRIDE(target, source) \
+    cfg->nodes[c].target = cfg->source[c];
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // PURPOSE: the two TRANSITIONAL capital arrays (node_risk_pct / node_max_drawdown_pct) carry the LIVE
 // per-node override value, but ControllerConfig_ResolveForCore does NOT merge them — they are standalone
 // FOREACH_MANUAL_PER_NODE_FIELD arrays, NOT PER_NODE_OVERRIDE_FIELDS — so nodes[c].<field> was a dead
@@ -1082,18 +1105,6 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // retire together (the NodeState relayout leaf owns that layout change).
 //
 // Row shape: X(target_field, source_array_field)  [target on PerNodeCfg<F>; source on ControllerConfig<F>]
-//======================================================================================================
-#define FOREACH_PER_NODE_ARRAY_OVERRIDE(X)                                                               \
-    /* target_field,      source_array_field */                                                          \
-    X(risk_pct,           node_risk_pct)                                                                  \
-    X(max_drawdown_pct,   node_max_drawdown_pct)
-
-// Payload macro: emit per-core raw-copy overwrite. Used by PopulateCoresFromFlat AFTER the copy walker
-// (last-wins; `cfg` + `c` in scope from caller's per-core loop).
-#define EMIT_PER_NODE_ARRAY_OVERRIDE(target, source) \
-    cfg->nodes[c].target = cfg->source[c];
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_REGISTRY]_[FOREACH_PER_NODE_ARRAY_OVERRIDE]
 //======================================================================

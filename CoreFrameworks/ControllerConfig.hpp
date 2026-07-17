@@ -87,45 +87,6 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 //======================================================================
 // [CODE]
 //======================================================================
-// One slot per execution core (16 max). Each field shadows a same-named
-// `ControllerConfig` field; non-zero overrides the global; zero (default)
-// means "inherit from global". Resolved per-core via
-// `ControllerConfig_ResolveForCore(global, node_id)` on every slow-path
-// rebuild.
-//
-// Why this exists: pre-4.0, each strategy *type* had its own override
-// (`mr_tp_pct`, `momentum_tp_mult`, etc.) but those overrides were
-// account-wide — Core 0 running MR @ 4% TP and Core 1 running MR @ 6% TP
-// was impossible. Per-core overrides let you A/B identical strategies
-// with different tunings on different cores, without touching the global
-// defaults.
-//
-// Cfg syntax: `node_N_<field>=<value>`
-//   node_0_take_profit_pct=4.0
-//   node_1_take_profit_pct=6.0
-//   node_2_mr_tp_pct=3.5
-//   node_0_ml_buy_threshold=0.6
-//
-// Adding a field: extend this struct + add the override line in
-// `ControllerConfig_ResolveForCore` + add a parser case in
-// `ControllerConfig_Load`'s per-core block + surface in the Settings
-// panel's per-core tab. Four sites, all in this file + SettingsPanel.hpp.
-//======================================================================================================
-// v4.7.24: per-core override fields driven by ONE X-macro list. Adding a
-// new override = ONE line in this macro. Struct members, init zeroing,
-// resolver overwrite logic, and cfg parser ALL auto-derive from this list.
-//
-// PCT(name)  — percentage field; cfg writes 4.0, stored as 0.04. Parser
-//              divides by 100.0 at load.
-// RAW(name)  — raw FPN_Binary field; cfg writes 3.0, stored as 3.0. Parser uses
-//              atof directly.
-//
-// Field NAMES MUST MATCH same-named members of ControllerConfig exactly —
-// the resolver does a direct field-by-field overwrite by name.
-//
-// Pre-v4.7.24 this required 4 separate edits across this file (struct,
-// init, resolver, parser) — easy to forget one site and silently lose
-// the override on a new field. The X-macro collapses that to one line.
 #define PER_NODE_OVERRIDE_FIELDS(PCT, RAW) \
     /* Trading */ \
     PCT(take_profit_pct) \
@@ -272,6 +233,48 @@ template <unsigned F> struct PerNodeOverrides {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// One slot per execution core (16 max). Each field shadows a same-named
+// `ControllerConfig` field; non-zero overrides the global; zero (default)
+// means "inherit from global". Resolved per-core via
+// `ControllerConfig_ResolveForCore(global, node_id)` on every slow-path
+// rebuild.
+//
+// Why this exists: pre-4.0, each strategy *type* had its own override
+// (`mr_tp_pct`, `momentum_tp_mult`, etc.) but those overrides were
+// account-wide — Core 0 running MR @ 4% TP and Core 1 running MR @ 6% TP
+// was impossible. Per-core overrides let you A/B identical strategies
+// with different tunings on different cores, without touching the global
+// defaults.
+//
+// Cfg syntax: `node_N_<field>=<value>`
+//   node_0_take_profit_pct=4.0
+//   node_1_take_profit_pct=6.0
+//   node_2_mr_tp_pct=3.5
+//   node_0_ml_buy_threshold=0.6
+//
+// Adding a field: extend this struct + add the override line in
+// `ControllerConfig_ResolveForCore` + add a parser case in
+// `ControllerConfig_Load`'s per-core block + surface in the Settings
+// panel's per-core tab. Four sites, all in this file + SettingsPanel.hpp.
+//
+// v4.7.24: per-core override fields driven by ONE X-macro list. Adding a
+// new override = ONE line in this macro. Struct members, init zeroing,
+// resolver overwrite logic, and cfg parser ALL auto-derive from this list.
+//
+// PCT(name)  — percentage field; cfg writes 4.0, stored as 0.04. Parser
+//              divides by 100.0 at load.
+// RAW(name)  — raw FPN_Binary field; cfg writes 3.0, stored as 3.0. Parser uses
+//              atof directly.
+//
+// Field NAMES MUST MATCH same-named members of ControllerConfig exactly —
+// the resolver does a direct field-by-field overwrite by name.
+//
+// Pre-v4.7.24 this required 4 separate edits across this file (struct,
+// init, resolver, parser) — easy to forget one site and silently lose
+// the override on a new field. The X-macro collapses that to one line.
+//======================================================================
 // [END_REGISTRY]_[PER_NODE_OVERRIDE_FIELDS]
 //======================================================================
 
@@ -298,16 +301,6 @@ template <unsigned F> struct PerNodeOverrides {
 // flat ControllerConfig<F>::<field> AND the per-core cfg.nodes[c].<field>
 // exist. Parser populates nodes[0] from flat after parse (Step 3 will add
 // [core N] section parser). Consumers migrate to cfg.nodes[c].<field> one at
-// a time; flat fields delete after the last consumer migrates.
-//
-// DESIGN_SPECS/per-instance-registry-pattern.md — this struct is the first
-// canonical application; future axes (per-symbol, per-strategy, per-horizon,
-// per-regime) instantiate sister PerXxxCfg<F> structs from sister registries.
-//
-// Layout: alignas(64) — fits AVX-512 boundary; per-core instances at
-// nodes[c] address cleanly to cache lines without cross-core false sharing.
-// Compiler auto-pads sizeof to a multiple of 64 for nodes[] array alignment.
-//======================================================================================================
 template <unsigned F>
 struct alignas(64) PerNodeCfg {
     // === Cfg surface (92 fields) — auto-generated from FOREACH_PER_NODE_FIELD_TYPE ===
@@ -381,6 +374,18 @@ static_assert(sizeof(PerNodeCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
               "or document exemption in MANUAL_FIELDS_INVENTORY.md.");
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// a time; flat fields delete after the last consumer migrates.
+//
+// DESIGN_SPECS/per-instance-registry-pattern.md — this struct is the first
+// canonical application; future axes (per-symbol, per-strategy, per-horizon,
+// per-regime) instantiate sister PerXxxCfg<F> structs from sister registries.
+//
+// Layout: alignas(64) — fits AVX-512 boundary; per-core instances at
+// nodes[c] address cleanly to cache lines without cross-core false sharing.
+// Compiler auto-pads sizeof to a multiple of 64 for nodes[] array alignment.
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 // [SIZE]_[1344B]
@@ -1599,6 +1604,17 @@ inline FPN_Binary<F> cfg_capture_node_raw_override(ControllerConfig<F>& cfg, con
 //======================================================================
 // [CODE]
 //======================================================================
+template <unsigned F>
+inline Money Fee_Compute(const ControllerConfig<F>* cfg, Money notional, int is_maker) {
+    Money rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
+    return Money_Mul(notional, rate);
+}
+
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Phase 8 — apply the correct fee rate based on whether the fill was a maker or taker.
 // Single source of truth for fee math on a per-fill basis.
 //
@@ -1627,14 +1643,6 @@ inline FPN_Binary<F> cfg_capture_node_raw_override(ControllerConfig<F>& cfg, con
 // New per-core consumer MUST NOT introduce a Fee_Compute() call site without
 // switching to o->pre_resolved.fee_rate. Check 10 detects via UNINDEXED-GLOBAL
 // pattern at per-core consumer sites.
-template <unsigned F>
-inline Money Fee_Compute(const ControllerConfig<F>* cfg, Money notional, int is_maker) {
-    Money rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
-    return Money_Mul(notional, rate);
-}
-
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[Fee_Compute]
 //======================================================================
@@ -1649,15 +1657,6 @@ inline Money Fee_Compute(const ControllerConfig<F>* cfg, Money notional, int is_
 //======================================================================
 // [CODE]
 //======================================================================
-// Build a stack-local copy of the global cfg with per-core overrides applied.
-// Strategies receive the resolved config and don't need to know about the
-// override mechanism. Cost: one ~12.5KB struct copy + 18 conditionals per
-// rebuild. With 4 cores at 5Hz slow path = 20 copies/sec, ~250KB/sec — well
-// inside any reasonable budget.
-//
-// Zero in any override field means "inherit global". This matches the
-// existing strategy-type-override convention (mr_tp_pct=0 → use take_profit_pct).
-//======================================================================================================
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_ResolveForCore(
     const ControllerConfig<F>& global, int node_id) {
@@ -1698,6 +1697,17 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Build a stack-local copy of the global cfg with per-core overrides applied.
+// Strategies receive the resolved config and don't need to know about the
+// override mechanism. Cost: one ~12.5KB struct copy + 18 conditionals per
+// rebuild. With 4 cores at 5Hz slow path = 20 copies/sec, ~250KB/sec — well
+// inside any reasonable budget.
+//
+// Zero in any override field means "inherit global". This matches the
+// existing strategy-type-override convention (mr_tp_pct=0 → use take_profit_pct).
+//======================================================================
 // [END_FUNCTION]_[ControllerConfig_ResolveForCore]
 //======================================================================
 
@@ -1710,27 +1720,6 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 //======================================================================
 // [CODE]
 //======================================================================
-// v5.15.5.F.4c.3 Step 2 — copies the resolved per-core view (flat fields + legacy PerNodeOverrides
-// merged via ControllerConfig_ResolveForCore) into cfg->nodes[c] for each
-// execution core. This is the Step 2 SHADOW transition: nodes[c] is populated
-// from the flat path so consumers migrating to read cfg.nodes[c].<field> see
-// identical values to consumers still reading cfg.<field> + ResolveForCore.
-//
-// The X-macro walker iterates FOREACH_PER_NODE_CFG_FIELD; each row emits one
-// field assignment `cfg->nodes[c].name = resolved.name`. Adding a new per-core
-// row to the registry automatically adds a populate line — no changes needed
-// here.
-//
-// Called at end of ControllerConfig_Default + ControllerConfig_Load. After
-// Step 3 lands the `[core N]` section parser, the parser will write nodes[c]
-// directly + this shadow function becomes a no-op / gets deleted.
-//
-// Runtime note: GUI cfg edits mutate the flat fields directly via
-// tt::cfg_render_field<T>; nodes[c] becomes stale until next reload. Step 2
-// consumers tolerate this (no migrated reader runs on the GUI-mutated path
-// without a reload signal yet). Step 6 wires GUI edits to also update
-// nodes[c] via reload-from-file or direct-sync hook.
-//======================================================================================================
 template <unsigned F>
 inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
     for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
@@ -1783,6 +1772,29 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// v5.15.5.F.4c.3 Step 2 — copies the resolved per-core view (flat fields + legacy PerNodeOverrides
+// merged via ControllerConfig_ResolveForCore) into cfg->nodes[c] for each
+// execution core. This is the Step 2 SHADOW transition: nodes[c] is populated
+// from the flat path so consumers migrating to read cfg.nodes[c].<field> see
+// identical values to consumers still reading cfg.<field> + ResolveForCore.
+//
+// The X-macro walker iterates FOREACH_PER_NODE_CFG_FIELD; each row emits one
+// field assignment `cfg->nodes[c].name = resolved.name`. Adding a new per-core
+// row to the registry automatically adds a populate line — no changes needed
+// here.
+//
+// Called at end of ControllerConfig_Default + ControllerConfig_Load. After
+// Step 3 lands the `[core N]` section parser, the parser will write nodes[c]
+// directly + this shadow function becomes a no-op / gets deleted.
+//
+// Runtime note: GUI cfg edits mutate the flat fields directly via
+// tt::cfg_render_field<T>; nodes[c] becomes stale until next reload. Step 2
+// consumers tolerate this (no migrated reader runs on the GUI-mutated path
+// without a reload signal yet). Step 6 wires GUI edits to also update
+// nodes[c] via reload-from-file or direct-sync hook.
 //======================================================================
 // [END_FUNCTION]_[ControllerConfig_PopulateCoresFromFlat]
 //======================================================================
@@ -2295,25 +2307,6 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 //======================================================================
 // [CODE]
 //======================================================================
-// Post-parse pass that applies mode-specific default tightening when the
-// operator hasn't explicitly set a key. Honors explicit overrides via
-// `cfg_keys_explicit` bitmap.
-//
-// Currently: `trading_mode=LIVE` flips two defaults toward stricter
-// production semantics. Paper/shadow modes are passthrough.
-//   - `model_verify_strict`: 0 (WARN) → 1 (STRICT)
-//   - `reconcile_mode`:      1 (WARN) → 0 (STRICT)
-//
-// Stderr logs each auto-flip at boot so operators see what changed +
-// why. Setting either key explicitly in cfg suppresses the flip (the
-// bitmap bit is set by the parser at parse time; normalize checks it).
-//
-// Called from EngineSharded_Run AFTER ControllerConfig_Load + BEFORE
-// LiveReadiness_Verify so the boot gate sees normalized values.
-//
-// Forward-compat: future mode-specific flip rules (e.g., AUTO_SYNC mode
-// flipping kill switch thresholds, SHADOW mode skipping reconciliation
-// entirely) get added here + a new MASK_CFG_KEY_* bit per tracked key.
 template <unsigned F>
 inline void ControllerConfig_NormalizeForMode(ControllerConfig<F>& cfg) {
     if (cfg.trading_mode != TRADING_MODE_LIVE) return;
@@ -2355,6 +2348,28 @@ inline bool ControllerConfig_IsLiveCapital(const ControllerConfig<F>& cfg) {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Post-parse pass that applies mode-specific default tightening when the
+// operator hasn't explicitly set a key. Honors explicit overrides via
+// `cfg_keys_explicit` bitmap.
+//
+// Currently: `trading_mode=LIVE` flips two defaults toward stricter
+// production semantics. Paper/shadow modes are passthrough.
+//   - `model_verify_strict`: 0 (WARN) → 1 (STRICT)
+//   - `reconcile_mode`:      1 (WARN) → 0 (STRICT)
+//
+// Stderr logs each auto-flip at boot so operators see what changed +
+// why. Setting either key explicitly in cfg suppresses the flip (the
+// bitmap bit is set by the parser at parse time; normalize checks it).
+//
+// Called from EngineSharded_Run AFTER ControllerConfig_Load + BEFORE
+// LiveReadiness_Verify so the boot gate sees normalized values.
+//
+// Forward-compat: future mode-specific flip rules (e.g., AUTO_SYNC mode
+// flipping kill switch thresholds, SHADOW mode skipping reconciliation
+// entirely) get added here + a new MASK_CFG_KEY_* bit per tracked key.
+//======================================================================
 // [END_FUNCTION]_[ControllerConfig_NormalizeForMode]
 //======================================================================
 
@@ -2368,8 +2383,6 @@ inline bool ControllerConfig_IsLiveCapital(const ControllerConfig<F>& cfg) {
 //======================================================================
 // [CODE]
 //======================================================================
-// simple key=value text file parser, no JSON, no external libs
-// returns defaults if file is missing or unreadable
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   ControllerConfig<F> cfg = ControllerConfig_Default<F>();
@@ -3561,6 +3574,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// simple key=value text file parser, no JSON, no external libs
+// returns defaults if file is missing or unreadable
 //======================================================================
 // [END_FUNCTION]_[ControllerConfig_Load]
 //======================================================================

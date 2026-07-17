@@ -118,16 +118,6 @@ static inline void MaxDrawdown_UpdateIncremental(
 //======================================================================
 // [CODE]
 //======================================================================
-// IDs are append-only — never reorder. The values match the offset of
-// the corresponding field on BacktestStats; tests pin a few for
-// stability but most metrics are accessed via name lookup not enum ID,
-// so reordering is structurally safer than for SHALT/HALT/REGIME
-// (which have persisted integer codes).
-//
-// Compute helpers above are NOT in this registry — they take varying
-// input shapes (equity arrays vs scalar inputs) and aren't dispatched
-// uniformly. This registry is for METADATA (name + format), not for
-// dispatch.
 #define FOREACH_BACKTEST_METRIC(X) \
     X(SHARPE_RATIO,     "sharpe_ratio",     "%.3f") \
     X(PROFIT_FACTOR,    "profit_factor",    "%.2f") \
@@ -164,6 +154,19 @@ static_assert(sizeof(BACKTEST_METRIC_FORMATS) / sizeof(*BACKTEST_METRIC_FORMATS)
               "BACKTEST_METRIC_FORMATS out of sync with NUM_BACKTEST_METRICS");
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// IDs are append-only — never reorder. The values match the offset of
+// the corresponding field on BacktestStats; tests pin a few for
+// stability but most metrics are accessed via name lookup not enum ID,
+// so reordering is structurally safer than for SHALT/HALT/REGIME
+// (which have persisted integer codes).
+//
+// Compute helpers above are NOT in this registry — they take varying
+// input shapes (equity arrays vs scalar inputs) and aren't dispatched
+// uniformly. This registry is for METADATA (name + format), not for
+// dispatch.
 //======================================================================
 // [END_REGISTRY]_[FOREACH_BACKTEST_METRIC]
 //======================================================================

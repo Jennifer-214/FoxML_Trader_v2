@@ -211,9 +211,6 @@ static inline uint64_t Notify_NowMonotonicUs() {
 //======================================================================
 // [CODE]
 //======================================================================
-// Drains the queue and invokes the backend. Backend is called WITHOUT the
-// state lock held (so a slow backend doesn't block enqueue). On shutdown,
-// drains remaining events before exiting (per test sidecar Group 5).
 static inline void *notify_worker_fn(void *arg) {
     NotifyState *ns = (NotifyState *)arg;
 
@@ -247,6 +244,12 @@ static inline void *notify_worker_fn(void *arg) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Drains the queue and invokes the backend. Backend is called WITHOUT the
+// state lock held (so a slow backend doesn't block enqueue). On shutdown,
+// drains remaining events before exiting (per test sidecar Group 5).
 //======================================================================
 // [END_FUNCTION]_[notify_worker_fn]
 //======================================================================
@@ -291,8 +294,6 @@ static inline void NotifyState_Init(NotifyState *ns,
 //======================================================================
 // [CODE]
 //======================================================================
-// Non-blocking enqueue. Drops events on full queue (rate-limit failsafe).
-// Cooldown gate uses CLOCK_MONOTONIC (NTP-jump-safe).
 static inline void Notify_Send(NotifyState *ns, int level, int kind,
                                 const char *subject, const char *body) {
     if (!ns || !ns->worker_started) return;
@@ -343,6 +344,11 @@ static inline void Notify_Send(NotifyState *ns, int level, int kind,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Non-blocking enqueue. Drops events on full queue (rate-limit failsafe).
+// Cooldown gate uses CLOCK_MONOTONIC (NTP-jump-safe).
 //======================================================================
 // [END_FUNCTION]_[Notify_Send]
 //======================================================================
@@ -407,6 +413,14 @@ static inline int NotifyBackend_Stderr(const NotifyEvent *evt, void *state) {
 //======================================================================
 // [CODE]
 //======================================================================
+struct NotifyCommandState {
+    char template_str[512]; // copied from cfg at Init; not modified
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Runs a configurable shell command for each event. Decouples the engine
 // from any specific notification service. Templates MUST wrap %s in single
 // quotes — Notify_ShellEscape replaces internal ' with '\'' but does NOT
@@ -436,12 +450,6 @@ static inline int NotifyBackend_Stderr(const NotifyEvent *evt, void *state) {
 // the command exits — a hung curl will back up the queue. Recommend prepending
 // `timeout 10 ` to the cfg default. Worker thread is dedicated so this won't
 // affect the engine hot path.
-
-struct NotifyCommandState {
-    char template_str[512]; // copied from cfg at Init; not modified
-};
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 // [SIZE]_[512B]
@@ -461,22 +469,6 @@ struct NotifyCommandState {
 //======================================================================
 // [CODE]
 //======================================================================
-// Shell-quote `in` into `out`. Replaces internal ' with '\'' (close-escape-
-// reopen). Does NOT add enclosing quotes — the USER TEMPLATE provides them
-// (e.g., `notify-send 'Engine: %s' '%s'`). Worst case ~4x input + 1.
-//
-// Why not enclose: the user's template typically already has '%s' (single-
-// quoted placeholder) so it can sit inside JSON strings, dunst args, curl -d
-// payloads, etc. Doubly-quoting (template's quote + our enclosure) produces
-// ''-pairs that bash parses as empty strings, breaking the surrounding
-// quoted region. Standard shell-escape contract: caller wraps with quotes.
-//
-// Limitations: assumes user's surrounding context is SINGLE quotes. For
-// JSON payloads (curl -d '{"content":"%s"}'), values with " or \ also need
-// JSON escaping — out of scope here. Plain-text alerts (the engine's
-// default format) work everywhere; messages with ", \, or other JSON-
-// special chars may break the JSON layer when sent to Discord/Slack.
-// Document this for users; provide a wrapper script if needed.
 static inline void Notify_ShellEscape(char *out, size_t out_cap, const char *in) {
     if (out_cap == 0) return;
     size_t pos = 0;
@@ -497,6 +489,25 @@ static inline void Notify_ShellEscape(char *out, size_t out_cap, const char *in)
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Shell-quote `in` into `out`. Replaces internal ' with '\'' (close-escape-
+// reopen). Does NOT add enclosing quotes — the USER TEMPLATE provides them
+// (e.g., `notify-send 'Engine: %s' '%s'`). Worst case ~4x input + 1.
+//
+// Why not enclose: the user's template typically already has '%s' (single-
+// quoted placeholder) so it can sit inside JSON strings, dunst args, curl -d
+// payloads, etc. Doubly-quoting (template's quote + our enclosure) produces
+// ''-pairs that bash parses as empty strings, breaking the surrounding
+// quoted region. Standard shell-escape contract: caller wraps with quotes.
+//
+// Limitations: assumes user's surrounding context is SINGLE quotes. For
+// JSON payloads (curl -d '{"content":"%s"}'), values with " or \ also need
+// JSON escaping — out of scope here. Plain-text alerts (the engine's
+// default format) work everywhere; messages with ", \, or other JSON-
+// special chars may break the JSON layer when sent to Discord/Slack.
+// Document this for users; provide a wrapper script if needed.
+//======================================================================
 // [END_FUNCTION]_[Notify_ShellEscape]
 //======================================================================
 
@@ -509,11 +520,6 @@ static inline void Notify_ShellEscape(char *out, size_t out_cap, const char *in)
 //======================================================================
 // [CODE]
 //======================================================================
-// Manual %s substitution — NOT printf-based. Prevents format-string injection
-// from user-supplied templates (template comes from cfg, may have stray %d/%n).
-// Substitutes up to two %s with subject + body in order. Other characters
-// pass through literally. Returns 1 on success, 0 if the command buffer
-// overflowed before completion (still tries to run what fit).
 static inline int Notify_BuildCommand(char *out, size_t out_cap,
                                        const char *tmpl,
                                        const char *subj_esc,
@@ -542,6 +548,14 @@ static inline int Notify_BuildCommand(char *out, size_t out_cap,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Manual %s substitution — NOT printf-based. Prevents format-string injection
+// from user-supplied templates (template comes from cfg, may have stray %d/%n).
+// Substitutes up to two %s with subject + body in order. Other characters
+// pass through literally. Returns 1 on success, 0 if the command buffer
+// overflowed before completion (still tries to run what fit).
 //======================================================================
 // [END_FUNCTION]_[Notify_BuildCommand]
 //======================================================================

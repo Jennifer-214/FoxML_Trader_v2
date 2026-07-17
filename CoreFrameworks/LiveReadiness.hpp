@@ -57,11 +57,6 @@ enum LiveReadinessSeverity : uint8_t {
 //======================================================================
 // [CODE]
 //======================================================================
-// OR-aggregates drift_flags_at_load across all 4 zoo roles. Boot-gate
-// helpers use this to query drift state from the source-of-truth
-// (handle) rather than from PerNodeSnap.failure_flags (which isn't
-// populated until snapshot publish — i.e., AFTER pthread spawns; boot
-// gate runs BEFORE).
 template <unsigned F>
 inline uint16_t aggregate_zoo_drift(const NodeModelZoo<F>* zoo) {
     if (!zoo) return 0;
@@ -72,6 +67,14 @@ inline uint16_t aggregate_zoo_drift(const NodeModelZoo<F>* zoo) {
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// OR-aggregates drift_flags_at_load across all 4 zoo roles. Boot-gate
+// helpers use this to query drift state from the source-of-truth
+// (handle) rather than from PerNodeSnap.failure_flags (which isn't
+// populated until snapshot publish — i.e., AFTER pthread spawns; boot
+// gate runs BEFORE).
 //======================================================================
 // [END_FUNCTION]_[aggregate_zoo_drift]
 //======================================================================
@@ -192,6 +195,16 @@ inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
 //======================================================================
 // [CODE]
 //======================================================================
+template <unsigned F>
+inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
+                                             const EventLoopState<F>&) {
+    return !ControllerConfig_IsLiveCapital(cfg);  // PASS unless live capital is requested -> REFUSE in live
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
 // Live trading is gated behind the WHOLE .E-series live-readiness rework (per-node aggregator +
 // reconciliation + the cross-thread torn-read closure; the sprint end-goal). Until .E lands, live
 // capital is REFUSED at boot — fail-safe: no accidental live trading on the pre-.E engine. Routes
@@ -201,13 +214,6 @@ inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
 // >>> H21 TOMBSTONE: REMOVE this fn + its FOREACH_LIVE_READINESS_CHECK row at .E / v5.16, when the
 //     live-readiness rework actually lands. Do NOT silently leave it — it would block the intended
 //     go-live. Tracked: TECH_DEBT-203 (removal) + the .E.1-foundation live-readiness completion. <<<
-template <unsigned F>
-inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
-                                             const EventLoopState<F>&) {
-    return !ControllerConfig_IsLiveCapital(cfg);  // PASS unless live capital is requested -> REFUSE in live
-}
-//======================================================================
-// [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[check_live_capital_gated_until_e]
 //======================================================================
@@ -291,12 +297,6 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
 //======================================================================
 // [CODE]
 //======================================================================
-// Returns: 0 on PASS (no failures); -1 on REFUSE (live + any REFUSE-sev
-// failed); 1 on WARN-only (paper/shadow, OR live + only WARN-sev failed).
-//
-// X-macro walks the registry inline; each entry's fn_ptr called once;
-// log + tally per severity; final summary log. Compile-time table; no
-// runtime dispatch overhead.
 template <unsigned F>
 inline int LiveReadiness_Verify(const ControllerConfig<F>& cfg,
                                 const EventLoopState<F>& state) {
@@ -344,6 +344,15 @@ inline int LiveReadiness_Verify(const ControllerConfig<F>& cfg,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Returns: 0 on PASS (no failures); -1 on REFUSE (live + any REFUSE-sev
+// failed); 1 on WARN-only (paper/shadow, OR live + only WARN-sev failed).
+//
+// X-macro walks the registry inline; each entry's fn_ptr called once;
+// log + tally per severity; final summary log. Compile-time table; no
+// runtime dispatch overhead.
 //======================================================================
 // [END_FUNCTION]_[LiveReadiness_Verify]
 //======================================================================

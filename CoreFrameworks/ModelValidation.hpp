@@ -127,26 +127,6 @@ inline void log_drift_pair(LogFn& log_fn, const char* name, const T1& stamp_v, c
 //======================================================================
 // [CODE]
 //======================================================================
-// Cross-zoo validator extracted from EngineSharded_Run boot loop body. Subsumes
-// drift detection across single zoo + ensemble parallel-array handles via
-// FOREACH_CFG_DRIFT_CHECK X-macro walker (18 entries: 8 cross-binary WARN +
-// 6 inference_cfg Tier 1/2 + 4 v5.15.5.A.7 per-horizon barrier cohort = 18).
-//
-// Writes cfg_drift_tier1/tier2_count + strict_refused into ctx. Returns 0 on
-// accept, -1 on REFUSE in strict mode (Tier 1 mismatch).
-//
-// Callable from:
-//   - EngineSharded_Run boot loop
-//   - EngineSharded_Run hot swap branch (single-zoo + ensemble paths)
-//   - BacktestSharded validate (PARITY-012)
-//
-// Ensemble support: pass &ml_ensemble_zoos[i] for ezoo when ensemble active,
-// else nullptr.
-//
-// LogFn template parameter (v5.15.5.A.7) — default tt::StderrLog preserves
-// pre-refactor production behavior; tests pass capturing functor for log
-// content assertions without stderr-redirect.
-//======================================================================================================
 template <unsigned F, typename LogFn = tt::StderrLog>
 static inline int NodeModelZoo_ValidateAgainstCfg(
     NodeModelZoo<F>* zoo,
@@ -280,6 +260,28 @@ static inline int NodeModelZoo_ValidateAgainstCfg(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Cross-zoo validator extracted from EngineSharded_Run boot loop body. Subsumes
+// drift detection across single zoo + ensemble parallel-array handles via
+// FOREACH_CFG_DRIFT_CHECK X-macro walker (18 entries: 8 cross-binary WARN +
+// 6 inference_cfg Tier 1/2 + 4 v5.15.5.A.7 per-horizon barrier cohort = 18).
+//
+// Writes cfg_drift_tier1/tier2_count + strict_refused into ctx. Returns 0 on
+// accept, -1 on REFUSE in strict mode (Tier 1 mismatch).
+//
+// Callable from:
+//   - EngineSharded_Run boot loop
+//   - EngineSharded_Run hot swap branch (single-zoo + ensemble paths)
+//   - BacktestSharded validate (PARITY-012)
+//
+// Ensemble support: pass &ml_ensemble_zoos[i] for ezoo when ensemble active,
+// else nullptr.
+//
+// LogFn template parameter (v5.15.5.A.7) — default tt::StderrLog preserves
+// pre-refactor production behavior; tests pass capturing functor for log
+// content assertions without stderr-redirect.
 //======================================================================
 // [END_FUNCTION]_[NodeModelZoo_ValidateAgainstCfg]
 //======================================================================

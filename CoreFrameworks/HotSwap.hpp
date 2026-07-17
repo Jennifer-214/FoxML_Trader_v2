@@ -64,27 +64,6 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
-// Shadow-loads a new EnsembleModelZoo<F> from new_path; on success
-// atomically swaps state.nodes[node_idx].ensemble_handle to the new
-// allocation + Free's the old. Pre-swap state untouched on any failure.
-//
-// Returns:
-//    0  = success (new ezoo active in slot)
-//   -1  = aligned_alloc OOM
-//   -2  = load failed (no roles found OR no horizons cached)
-//   -3  = strict validate failed
-//
-// Reclamation strategy A (single-owner): per-core slow-path thread is
-// the SOLE caller (writer = reader). Hot-path uses seqlock-cached cycle
-// parameters and never reads ensemble_handle directly. So Free + free()
-// of old_ezoo is safe immediately after atomic swap; no RCU grace.
-//
-// Caller responsibilities:
-//   - state.nodes[node_idx].ensemble_handle must currently point at a
-//     heap-allocated EnsembleModelZoo<F>* (boot path migrated to
-//     aligned_alloc(64) in v5.15.4) OR nullptr (first-time load).
-//   - new_path is non-null + non-empty
-//   - Clears the swap_model_path_requested[] atomic flag after this returns
 template <unsigned F>
 inline int HotSwap_ShadowLoad_Ensemble(
     EventLoopState<F>& state,
@@ -211,6 +190,30 @@ inline int HotSwap_ShadowLoad_Ensemble(
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Shadow-loads a new EnsembleModelZoo<F> from new_path; on success
+// atomically swaps state.nodes[node_idx].ensemble_handle to the new
+// allocation + Free's the old. Pre-swap state untouched on any failure.
+//
+// Returns:
+//    0  = success (new ezoo active in slot)
+//   -1  = aligned_alloc OOM
+//   -2  = load failed (no roles found OR no horizons cached)
+//   -3  = strict validate failed
+//
+// Reclamation strategy A (single-owner): per-core slow-path thread is
+// the SOLE caller (writer = reader). Hot-path uses seqlock-cached cycle
+// parameters and never reads ensemble_handle directly. So Free + free()
+// of old_ezoo is safe immediately after atomic swap; no RCU grace.
+//
+// Caller responsibilities:
+//   - state.nodes[node_idx].ensemble_handle must currently point at a
+//     heap-allocated EnsembleModelZoo<F>* (boot path migrated to
+//     aligned_alloc(64) in v5.15.4) OR nullptr (first-time load).
+//   - new_path is non-null + non-empty
+//   - Clears the swap_model_path_requested[] atomic flag after this returns
+//======================================================================
 // [END_FUNCTION]_[HotSwap_ShadowLoad_Ensemble]
 //======================================================================
 
@@ -223,16 +226,6 @@ inline int HotSwap_ShadowLoad_Ensemble(
 //======================================================================
 // [CODE]
 //======================================================================
-// Parallel to HotSwap_ShadowLoad_Ensemble for single-zoo NodeModelZoo<F>.
-// Allocates new zoo on heap, loads from new_path, atomically swaps
-// state.nodes[node_idx].model_handle, Free's old. Pre-swap untouched on
-// failure.
-//
-// Returns:
-//    0  = success
-//   -1  = aligned_alloc OOM
-//   -2  = load failed (0 roles found)
-//   -3  = strict validate failed (post-load drift)
 template <unsigned F>
 inline int HotSwap_ShadowLoad_SingleZoo(
     EventLoopState<F>& state,
@@ -315,6 +308,19 @@ inline int HotSwap_ShadowLoad_SingleZoo(
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Parallel to HotSwap_ShadowLoad_Ensemble for single-zoo NodeModelZoo<F>.
+// Allocates new zoo on heap, loads from new_path, atomically swaps
+// state.nodes[node_idx].model_handle, Free's old. Pre-swap untouched on
+// failure.
+//
+// Returns:
+//    0  = success
+//   -1  = aligned_alloc OOM
+//   -2  = load failed (0 roles found)
+//   -3  = strict validate failed (post-load drift)
 //======================================================================
 // [END_FUNCTION]_[HotSwap_ShadowLoad_SingleZoo]
 //======================================================================

@@ -126,15 +126,6 @@ static_assert(MONEY_ENCODING_EPOCH == 0u || SHARDED_SNAPSHOT_VERSION >= 9u + MON
 //======================================================================
 // [CODE]
 //======================================================================
-// Returns 1 on success, 0 on any I/O failure. On failure the previous good
-// file (if any) is unchanged — atomic rename never moves the .tmp into
-// place if writes failed.
-//
-// `partial_exit_enabled` is the engine's current cfg.partial_exit_enabled
-// (1 if partials are on, 0 otherwise). Persisted in the header so the
-// loader can refuse a snapshot taken under a different toggle state —
-// position slot indices have different meaning between the two
-// geometries (1:1 vs paired legs A+B).
 template <unsigned F>
 inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
                                   const char* filepath,
@@ -312,6 +303,18 @@ fail:
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Returns 1 on success, 0 on any I/O failure. On failure the previous good
+// file (if any) is unchanged — atomic rename never moves the .tmp into
+// place if writes failed.
+//
+// `partial_exit_enabled` is the engine's current cfg.partial_exit_enabled
+// (1 if partials are on, 0 otherwise). Persisted in the header so the
+// loader can refuse a snapshot taken under a different toggle state —
+// position slot indices have different meaning between the two
+// geometries (1:1 vs paired legs A+B).
+//======================================================================
 // [END_FUNCTION]_[ShardedSnapshot_Save]
 //======================================================================
 
@@ -325,20 +328,6 @@ fail:
 //======================================================================
 // [CODE]
 //======================================================================
-// Returns 1 on successful load (state populated from file), 0 on any
-// validation failure (bad magic, version, core count). On failure the
-// state is left untouched — caller continues with fresh init.
-//
-// Safety: explicit checks on magic + version + core count BEFORE any
-// state mutation. The first per-core read failure aborts the whole load
-// and rolls back to the in-memory snapshot taken at function entry.
-//
-// `partial_exit_enabled` is the engine's CURRENT cfg.partial_exit_enabled
-// (1 if partials are on, 0 otherwise). Loader refuses files written under
-// a different toggle state — slot indices have different meaning between
-// the two geometries (1:1 vs paired legs A+B), so reusing positions
-// across the toggle creates "zombie" entries that look real in the GUI
-// panel but can't be exited by the hot path.
 template <unsigned F>
 inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
                                   int partial_exit_enabled,
@@ -706,6 +695,23 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
 }
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Returns 1 on successful load (state populated from file), 0 on any
+// validation failure (bad magic, version, core count). On failure the
+// state is left untouched — caller continues with fresh init.
+//
+// Safety: explicit checks on magic + version + core count BEFORE any
+// state mutation. The first per-core read failure aborts the whole load
+// and rolls back to the in-memory snapshot taken at function entry.
+//
+// `partial_exit_enabled` is the engine's CURRENT cfg.partial_exit_enabled
+// (1 if partials are on, 0 otherwise). Loader refuses files written under
+// a different toggle state — slot indices have different meaning between
+// the two geometries (1:1 vs paired legs A+B), so reusing positions
+// across the toggle creates "zombie" entries that look real in the GUI
+// panel but can't be exited by the hot path.
 //======================================================================
 // [END_FUNCTION]_[ShardedSnapshot_Load]
 //======================================================================
