@@ -59,6 +59,7 @@ template <unsigned F> struct OrderPool {
 // [[2026-03-14] [EDIT]]
 //----------------------------------------------------------------------
 // templated on FP precision - engine code picks the width with e.g. CurrentOrder<64>
+//
 //======================================================================
 // [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
 //======================================================================

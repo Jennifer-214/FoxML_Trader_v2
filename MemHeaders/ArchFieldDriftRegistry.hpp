@@ -116,31 +116,9 @@
 //   FOREACH_ARCH_FIELD_DRIFT(X)
 //   #undef X
 //
-// This registry covers ARCHITECTURAL drift sources that are NOT cfg-bound:
-//   - feature_hash:    FOREACH_FEATURE registry hash drift (schema change)
-//   - label_hash:      FOREACH_TARGET registry hash drift
-//   - build_flags:     compile-time build flag hash drift
-//   - scaler_binding:  loaded scaler bound to different feature set than model
-//
-// Adding a new architectural drift check = 1 row. Engine
-// boot's TryLoadRole walks both registries (CFG + ARCH) + sets the
-// corresponding FOREACH_FAILURE_MODE BIT_FLAG drift entries on the
-// ModelHandle.drift_flags_at_load uint16_t. ShardedSnapshot_Publish
-// OR-aggregates across all 4 zoo roles into PerNodeSnap.failure_flags
-// for GUI Model Health rendering + boot-gate consumption.
-//
-// CLOSES recurring "add new arch-field drift check requires touching the
-// drift detection site" pattern. Same Class 18 mirror shape that
-// FOREACH_STAMP_BOUND_CFG closed on the cfg side; same shape that v5.15.0
-// extinguished on the parser side. /merge-scan HIGH-1 consolidation: this
-// is the NEW chokepoint for arch-field drift; the existing CFG check stays
-// as the chokepoint for cfg drift; cfg_binding_drift bit is OR-set once
-// after the CFG check runs (preserves existing logic; no parallel detection).
-//
-// CROSS-REFERENCE: extends `FailureModeRegistry.hpp` BIT_FLAG entries
-// (FOREACH_FAILURE_MODE adds 7 drift entries in v5.15.1; this registry
-// drives 4 of them — the other 3 (CFG_BINDING_DRIFT, STAMP_HMAC_NOT_VERIFIED,
-// MODEL_AGE_WARN) are single-fact checks not driven by this registry).
+// Coverage scope, add-a-row auto-flow, Class-18 closure lineage, and the
+// FOREACH_FAILURE_MODE cross-reference: see the [FILE] header above (the
+// file-scope banner is the single home for those paragraphs).
 //======================================================================
 // [END_REGISTRY]_[FOREACH_ARCH_FIELD_DRIFT]
 //======================================================================

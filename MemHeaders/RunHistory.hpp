@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [RUN HISTORY — append-only JSONL log of validation runs]
+// [FILE]_[MemHeaders/RunHistory.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[append-only JSONL log of validation runs — schema-v1 line per run, LC_NUMERIC=C-pinned emit, fsync-per-line crash safety]
+// [CONTAINS]
+//   - [FUNCTION]_[RunHistory_Append]   (RunHistoryEntry input record + RUN_HISTORY_SCHEMA_VERSION ride the block)
+// [REFERENCE]_[INVARIANT]_[H9]
 //======================================================================================================
 // One JSONL line per completed validation run. Captures the metrics, the
 // gap, whether a stamp was written, and a timestamp. Lets the operator
@@ -51,6 +58,15 @@
 
 namespace tt {
 
+//======================================================================
+// [FUNCTION]_[RunHistory_Append]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[append one schema-v1 JSONL line (RunHistoryEntry record + version define ride) — thread-local LC_NUMERIC=C pin around the emit; 1 on success incl. flush+close]
+//======================================================================
+// [CODE]
+//======================================================================
 #define RUN_HISTORY_SCHEMA_VERSION 1
 
 struct RunHistoryEntry {
@@ -124,6 +140,11 @@ static inline int RunHistory_Append(const char* path, const RunHistoryEntry& e) 
     int close_ok = (fclose(f) == 0);
     return (written > 0 && flush_ok && close_ok) ? 1 : 0;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RunHistory_Append]
+//======================================================================
 
 } // namespace tt
 
