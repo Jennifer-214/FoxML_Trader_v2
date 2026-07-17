@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //======================================================================================================
-// [WEBSOCKET UTILITIES]
+// [FILE]_[DataStream/WebSocketUtil.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[shared TCP + SSL + WebSocket plumbing under the venue streams (BinanceCrypto / BinanceDepth) — connect, SNI, RFC-6455 handshake/frame-read/close/pong]
+// [CONTAINS]
+//   - [FUNCTION]_[ws_read_frame]   (+ base64 / tcp_connect / ssl_setup / handshake / close / send_pong family)
 //======================================================================================================
 // shared TCP, SSL, and WebSocket functions used by both BinanceCrypto and BinanceDepth
 // extracted to avoid duplicating connection/framing code across stream types
@@ -17,9 +23,18 @@
 #include <string.h>
 #include <stdio.h>
 
-//======================================================================================================
-// [BASE64]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[ws_read_frame]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the WS utility family (base64 / tcp_connect / ssl_setup / handshake / close / send_pong ride) — frame reader handles 7/16/64-bit payload lengths + masking; handshake strstr is once-per-connect (not an inner loop; H5-compatible)]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[BASE64]
+//------------------------------------------------------------------
 static const char ws_b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static inline void ws_base64_encode(const unsigned char *in, int len, char *out) {
@@ -37,9 +52,9 @@ static inline void ws_base64_encode(const unsigned char *in, int len, char *out)
     out[j] = '\0';
 }
 
-//======================================================================================================
-// [TCP CONNECT]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[TCP CONNECT]
+//------------------------------------------------------------------
 static inline int ws_tcp_connect(const char *host, int port) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
@@ -56,9 +71,9 @@ static inline int ws_tcp_connect(const char *host, int port) {
     return fd;
 }
 
-//======================================================================================================
-// [SSL SETUP]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[SSL SETUP]
+//------------------------------------------------------------------
 static inline int ws_ssl_setup(SSL_CTX **ctx_out, SSL **ssl_out, int sockfd, const char *host) {
     *ctx_out = SSL_CTX_new(TLS_client_method());
     if (!*ctx_out) return -1;
@@ -72,9 +87,9 @@ static inline int ws_ssl_setup(SSL_CTX **ctx_out, SSL **ssl_out, int sockfd, con
     return 0;
 }
 
-//======================================================================================================
-// [WEBSOCKET HANDSHAKE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[WEBSOCKET HANDSHAKE]
+//------------------------------------------------------------------
 static inline int ws_handshake(SSL *ssl, const char *host, const char *path) {
     unsigned char key_bytes[16];
     RAND_bytes(key_bytes, 16);
@@ -104,9 +119,9 @@ static inline int ws_handshake(SSL *ssl, const char *host, const char *path) {
     return strstr(resp, "101") ? 0 : -1;
 }
 
-//======================================================================================================
-// [WEBSOCKET FRAME READER]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[WEBSOCKET FRAME READER]
+//------------------------------------------------------------------
 static inline int ws_read_frame(SSL *ssl, char *out, int max_len, int *opcode) {
     unsigned char hdr[2];
     int r = SSL_read(ssl, hdr, 2);
@@ -141,9 +156,9 @@ static inline int ws_read_frame(SSL *ssl, char *out, int max_len, int *opcode) {
     return plen;
 }
 
-//======================================================================================================
-// [WEBSOCKET CLOSE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[WEBSOCKET CLOSE]
+//------------------------------------------------------------------
 static inline void ws_close(SSL *ssl, SSL_CTX *ctx, int sockfd) {
     unsigned char close_frame[6] = {0x88, 0x80, 0, 0, 0, 0};
     SSL_write(ssl, close_frame, 6);
@@ -153,12 +168,17 @@ static inline void ws_close(SSL *ssl, SSL_CTX *ctx, int sockfd) {
     close(sockfd);
 }
 
-//======================================================================================================
-// [PONG RESPONSE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[PONG RESPONSE]
+//------------------------------------------------------------------
 static inline void ws_send_pong(SSL *ssl) {
     unsigned char pong[2] = {0x8A, 0x00};
     SSL_write(ssl, pong, 2);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ws_read_frame]
+//======================================================================
 
 #endif // WEBSOCKET_UTIL_HPP

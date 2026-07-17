@@ -3,7 +3,15 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [MOCK DATA GENERATOR]
+// [FILE]_[DataStream/MockGenerator.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[deterministic mock tick generator (LCG random walk + drift -> FauxFIX messages) — test substrate; consumed by tests/test_common.hpp + tests/integration_test.cpp]
+// [CONTAINS]
+//   - [FUNCTION]_[MockRNG_Next]   (MockRNG struct + Seed / Double / Range ride)
+//   - [STRUCT]_[MockGenerator]   (MockGeneratorConfig + Init ride)
+//   - [FUNCTION]_[MockGenerator_NextTick]   (+ Batch rides)
 //======================================================================================================
 // generates fake market data ticks as FIX messages for testing the full pipeline
 // uses a simple LCG random number generator so its deterministic given a seed - same seed same
@@ -18,12 +26,17 @@
 
 #include "FauxFIX.hpp"
 
-//======================================================================================================
-// [LCG RANDOM]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[MockRNG_Next]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[LCG random family (MockRNG struct + Seed / Double / Range ride) — Numerical Recipes constants, period 2^64; deterministic given a seed]
+//======================================================================
+// [CODE]
+//======================================================================
 // linear congruential generator - fast, deterministic, not cryptographic but we dont need that
 // constants from Numerical Recipes, period is 2^64
-//======================================================================================================
 struct MockRNG {
     uint64_t state;
 };
@@ -47,10 +60,21 @@ static inline double MockRNG_Double(MockRNG *rng) {
 static inline double MockRNG_Range(MockRNG *rng, double lo, double hi) {
     return lo + MockRNG_Double(rng) * (hi - lo);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MockRNG_Next]
+//======================================================================
 
-//======================================================================================================
-// [GENERATOR CONFIG]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[MockGenerator]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[generator state (MockGeneratorConfig + Init ride) — config + RNG + current price + FIX seq_num]
+//======================================================================
+// [CODE]
+//======================================================================
 struct MockGeneratorConfig {
     double start_price;     // initial price (e.g. 150.0)
     double volatility;      // per-tick price movement scale (e.g. 0.5 means +/-$0.50)
@@ -62,9 +86,6 @@ struct MockGeneratorConfig {
     uint64_t seed;          // RNG seed for reproducibility
 };
 
-//======================================================================================================
-// [GENERATOR STATE]
-//======================================================================================================
 struct MockGenerator {
     MockGeneratorConfig config;
     MockRNG rng;
@@ -78,13 +99,23 @@ static inline void MockGenerator_Init(MockGenerator *gen, MockGeneratorConfig co
     gen->current_price = config.start_price;
     gen->seq_num = 1;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[MockGenerator]
+//======================================================================
 
-//======================================================================================================
-// [GENERATE NEXT TICK]
-//======================================================================================================
-// advances the price by one random step and builds a FIX message for it
-// returns the length written to buf, and fills out the parsed message for convenience
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[MockGenerator_NextTick]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[advance the walk one step and build + parse-back a FIX message (Batch rides) — drift + noise, floor clamp, randomized volume with spikes]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline int MockGenerator_NextTick(MockGenerator *gen, char *buf, int buf_size, FIX_ParsedMessage *parsed_out) {
     // random walk step: drift + random noise centered around 0
     double noise = MockRNG_Range(&gen->rng, -gen->config.volatility, gen->config.volatility);
@@ -113,19 +144,17 @@ static inline int MockGenerator_NextTick(MockGenerator *gen, char *buf, int buf_
     return len;
 }
 
-//======================================================================================================
-// [GENERATE BATCH]
-//======================================================================================================
 // generates count ticks into an array of parsed messages, useful for filling regression buffers
 // buf is scratch space for building FIX messages (reused each tick)
-//======================================================================================================
 static inline void MockGenerator_Batch(MockGenerator *gen, FIX_ParsedMessage *messages, int count,
                                         char *scratch_buf, int scratch_size) {
     for (int i = 0; i < count; i++) {
         MockGenerator_NextTick(gen, scratch_buf, scratch_size, &messages[i]);
     }
 }
-
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MockGenerator_NextTick]
+//======================================================================
 #endif // MOCK_GENERATOR_HPP

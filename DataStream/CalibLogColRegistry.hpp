@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [CALIBRATION LOG COLUMN REGISTRY — v5.14.10.D]
+// [FILE]_[DataStream/CalibLogColRegistry.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the calibration-CSV column SSoT — 47 rows (legacy 9 prefix byte-locked + 6 bandit singletons + 32 per-arm telemetry); header + row emit both walk the ONE list]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_CALIB_LOG_COL]   (8-arm coverage assert + count ride)
+//   - [FUNCTION]_[CalibLog_EmitHeader]
+//   - [MACRO]_[CALIB_LOG_EMIT_ROW]
+// [REFERENCE]_[DESIGN_SPEC]_[calibration-log-column-registry]
 //======================================================================================================
 // FOREACH_CALIB_LOG_COL(X) registry — adds a new calibration log CSV column
 // in 1 row. Closes TECH_DEBT-010 (recurring sister-literal pattern: header
@@ -35,15 +44,17 @@
 //
 // BYTE-FORMAT PRESERVATION:
 //   Existing operator-side parsers (calibration analysis tooling) depend on
-//   the EXACT 9-column shape of `timestamp_us,slot,exit_predicted_flag,predicted_p,
-//   entry_price,exit_price,gain_pct,realized_pnl_bps,was_win`. The registry
-//   tuple ORDER + col_name + fmt MUST match the pre-refactor output bytewise.
+//   the legacy 9-column PREFIX `timestamp_us,slot,exit_predicted_flag,predicted_p,
+//   entry_price,exit_price,gain_pct,realized_pnl_bps,was_win` (columns are
+//   APPEND-ONLY — the Step 8 § M bandit columns append after it). The legacy
+//   tuple ORDER + col_name + fmt MUST match the pre-v5.14.10.D output bytewise.
 //   Snapshot tests in tests/controller_test.cpp v5.14.10.D verify this.
 //
 // FUTURE COLUMNS (1 row each):
-//   - cfg=2 dual-mode telemetry: exp3_chosen_arm, thompson_chosen_arm, regime_id_at_pick
-//     (DEFERRED — needs Order struct or OMS state extension to flow data
-//     from predict-time to fill-time; tracked as TECH_DEBT-NNN)
+//   - cfg=2 dual-mode telemetry: LANDED at v5.15.5.F.4d Step 8 § M — the
+//     chosen_arm / regime_id_at_emit / thompson_telemetry_arm singletons flow
+//     from predict-time to fill-time via Order::flags_packed bits 17-25
+//     (the "needs Order struct extension" deferral resolved by landing)
 //   - Maker fill metrics (deferred until v6.0 maker work)
 //   - New ML observability surfaces (whatever future ships add)
 //
@@ -55,23 +66,18 @@
 #include <cstdio>
 #include "../ML_Headers/BanditLearning.hpp"  // v5.15.5.F.4d Step 8 § M — BANDIT_MAX_ARMS for hand-written-8-arm static_assert; registry inherently references per-arm bandit state
 
-//======================================================================================================
-// [REGISTRY TUPLE]
-//======================================================================================================
-// Order MATTERS — operator parsers depend on column ordering.
-// DO NOT reorder existing columns; APPEND new columns at the end.
-//
-// v5.15.5.F.4d Step 8 § M ACTIVE — 6 singleton + 32 per-arm bandit-telemetry cols appended after
-// legacy 9. Decoded from Order::flags_packed bits 17-25 via MBS_* accessors (singletons) + per-slot
-// FOREACH_OMS_PER_SLOT_FIELD bandit_reward_bps[pslot] + per-arm Exp3 probabilities (via
-// Bandit_GetProbabilities into local exp3_probs[BANDIT_MAX_ARMS]) + per-arm Thompson posterior
-// state (ezoo->buy_thompson_bandits[regime_clamped].{mu_post,precision_post,total_pulls}[arm]). All
-// ezoo-touching cols null-coalesce to 0/0.0 when ezoo_ref is nullptr (test fixtures + non-ML cores
-// with calibration_log_path set). Per-arm hand-written (8 arms × 4 families = 32 rows; sidecar M.2
-// chose hand-write over preprocessor token-paste indirection for robustness + auditability).
-// Per-arm layout is ARM-MAJOR (exp3_w_arm0, thompson_mu_arm0, thompson_prec_arm0, thompson_pulls_arm0,
-// then arm1, ..., arm7) so per-arm clusters stay grouped for CSV scrubbing.
-// Adding a 9th arm later: append 4 more rows + bump BANDIT_MAX_ARMS at BanditLearning.hpp:62.
+//======================================================================
+// [REGISTRY]_[FOREACH_CALIB_LOG_COL]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[47 append-only CSV columns (legacy 9 byte-locked prefix + 6 bandit singletons + 32 per-arm ARM-MAJOR) — order IS the wire format for operator parsers]
+// [COLUMN]_[col_name]_[bare identifier; CSV header AND macro-generated names]
+// [COLUMN]_[printf_fmt]_[per-column printf format string]
+// [COLUMN]_[value_expr]_[expression read at row-write time; MUST be valid in the caller scope (see CALLER SCOPE CONTRACT)]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_CALIB_LOG_COL(X)                                                                                                                       \
     /* legacy 9 cols — UNCHANGED (operator parsers depend on byte order) */                                                                            \
     X(timestamp_us,        "%llu",  (unsigned long long)ts_us)                                                                                         \
@@ -127,21 +133,47 @@
 // v5.15.5.F.4d Step 8 § M — hand-written 8-arm coverage invariant.
 // If BANDIT_MAX_ARMS grows, append 4 more rows (exp3_w_armN + thompson_mu_armN + thompson_prec_armN
 // + thompson_pulls_armN) to FOREACH_CALIB_LOG_COL above + bump this assert.
+// [ASSERT]_[REGISTRY_COVERAGE]_[BANDIT_MAX_ARMS == 8 — hand-written per-arm rows track it]
 static_assert(BANDIT_MAX_ARMS == 8,
               "FOREACH_CALIB_LOG_COL hand-written for 8 arms; bump arm rows + BANDIT_MAX_ARMS together");
 
-//======================================================================================================
-// [AUTO-GENERATED COUNT]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[AUTO-GENERATED COUNT]
+//------------------------------------------------------------------
 #define X_GEN_CALIB_LOG_COUNT_ONE(name, fmt, expr) +1
 #define FOREACH_CALIB_LOG_COL_COUNT (0 FOREACH_CALIB_LOG_COL(X_GEN_CALIB_LOG_COUNT_ONE))
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Order MATTERS — operator parsers depend on column ordering.
+// DO NOT reorder existing columns; APPEND new columns at the end.
+//
+// v5.15.5.F.4d Step 8 § M ACTIVE — 6 singleton + 32 per-arm bandit-telemetry cols appended after
+// legacy 9. Decoded from Order::flags_packed bits 17-25 via MBS_* accessors (singletons) + per-slot
+// FOREACH_OMS_PER_SLOT_FIELD bandit_reward_bps[pslot] + per-arm Exp3 probabilities (via
+// Bandit_GetProbabilities into local exp3_probs[BANDIT_MAX_ARMS]) + per-arm Thompson posterior
+// state (ezoo->buy_thompson_bandits[regime_clamped].{mu_post,precision_post,total_pulls}[arm]). All
+// ezoo-touching cols null-coalesce to 0/0.0 when ezoo_ref is nullptr (test fixtures + non-ML cores
+// with calibration_log_path set). Per-arm hand-written (8 arms × 4 families = 32 rows; sidecar M.2
+// chose hand-write over preprocessor token-paste indirection for robustness + auditability).
+// Per-arm layout is ARM-MAJOR (exp3_w_arm0, thompson_mu_arm0, thompson_prec_arm0, thompson_pulls_arm0,
+// then arm1, ..., arm7) so per-arm clusters stay grouped for CSV scrubbing.
+// Adding a 9th arm later: append 4 more rows + bump BANDIT_MAX_ARMS at BanditLearning.hpp.
+//======================================================================
+// [END_REGISTRY]_[FOREACH_CALIB_LOG_COL]
+//======================================================================
 
-//======================================================================================================
-// [HEADER EMITTER — comma-separated col_name list + trailing \n]
-//======================================================================================================
-// Single function emits the canonical CSV header. Walks registry; first
-// column has no leading comma; trailing \n at end. Byte-identical to the
-// pre-v5.14.10.D hand-coded header literal at OrderManager.hpp:1293-1295.
+//======================================================================
+// [FUNCTION]_[CalibLog_EmitHeader]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[canonical CSV header from the registry walk — first column uncomma'd, trailing newline; byte-identical to the pre-v5.14.10.D hand-coded literal]
+//======================================================================
+// [CODE]
+//======================================================================
 inline void CalibLog_EmitHeader(FILE* f) {
     if (!f) return;
     int first = 1;
@@ -154,18 +186,25 @@ inline void CalibLog_EmitHeader(FILE* f) {
     #undef X_GEN_CALIB_LOG_HEADER
     std::fprintf(f, "\n");
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CalibLog_EmitHeader]
+//======================================================================
 
-//======================================================================================================
-// [ROW EMITTER — macro expanded in caller scope]
-//======================================================================================================
+//----------------------------------------------------------------------
+// [MACRO]_[CALIB_LOG_EMIT_ROW]
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the row emitter statement (+ its X_GEN_CALIB_LOG_ROW walker) — expands IN CALLER SCOPE per the CALLER SCOPE CONTRACT; byte-identical to the pre-v5.14.10.D hand-coded fprintf]
+//----------------------------------------------------------------------
 // Used as a STATEMENT inside HandleFill (or any other caller that has the
 // expected variables in scope per CALLER SCOPE CONTRACT above). Wraps in
 // a do-while-0 block so it can be used like a single statement; declares
 // `_calib_first` local to avoid clashing with caller variables.
 //
 // Walks registry; emits each value with caller-supplied fmt; comma-separates;
-// adds trailing \n. Byte-identical to the pre-v5.14.10.D hand-coded fprintf
-// at OrderManager.hpp:1008-1013.
+// adds trailing \n.
 #define CALIB_LOG_EMIT_ROW(file_handle)                                                            \
     do {                                                                                            \
         int _calib_first = 1;                                                                       \

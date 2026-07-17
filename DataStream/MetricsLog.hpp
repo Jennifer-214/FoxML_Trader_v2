@@ -3,7 +3,14 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [METRICS LOG]
+// [FILE]_[DataStream/MetricsLog.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[LEGACY single-core-era diagnostics CSV — ORPHANED at HEAD (zero includers/callers anywhere incl. tests; verified 2026-07-17); deletion candidate, see the TECH_DEBT-031 currency note]
+// [CONTAINS]
+//   - [STRUCT]_[MetricsLog]   (+ Init / Close / _metrics_timestamp ride)
+//   - [FUNCTION]_[MetricsLog_SlowPath]   (+ MetricsLog_Event)
 //======================================================================================================
 // slow-path diagnostics logger — records engine state every slow-path cycle
 // separate from trade log (which only records buys/sells)
@@ -32,6 +39,15 @@
 #include <stdio.h>
 #include <time.h>
 
+//======================================================================
+// [STRUCT]_[MetricsLog]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FILE* + initialized flag (Init / Close / _metrics_timestamp ride) — append-mode CSV, header written on empty file]
+//======================================================================
+// [CODE]
+//======================================================================
 struct MetricsLog {
     FILE *file;
     int initialized;
@@ -75,12 +91,24 @@ static inline void _metrics_timestamp(char *buf, int bufsize) {
 }
 
 // _regime_str and _strategy_str defined in TradeLog.hpp (shared)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; header is ORPHANED (zero includers) so the struct is in no TU's layout dump — quartet lands if revived, D-327)
+//======================================================================
+// [END_STRUCT]_[MetricsLog]
+//======================================================================
 
-//======================================================================================================
-// [SLOW PATH SNAPSHOT]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[MetricsLog_SlowPath]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-slow-path-cycle full-state CSV row (MetricsLog_Event rides — sparse row + free-form details) — LEGACY PortfolioController<F> reader; orphaned with the file]
+//======================================================================
+// [CODE]
+//======================================================================
 // call every slow-path cycle — records full engine state
-//======================================================================================================
 template <unsigned F>
 static inline void MetricsLog_SlowPath(MetricsLog *log,
                                          const PortfolioController<F> *ctrl,
@@ -132,9 +160,6 @@ static inline void MetricsLog_SlowPath(MetricsLog *log,
     fflush(log->file);
 }
 
-//======================================================================================================
-// [EVENT LOGGING]
-//======================================================================================================
 template <unsigned F>
 static inline void MetricsLog_Event(MetricsLog *log,
                                       const PortfolioController<F> *ctrl,
@@ -166,5 +191,10 @@ static inline void MetricsLog_Event(MetricsLog *log,
 
     fflush(log->file);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[MetricsLog_SlowPath]
+//======================================================================
 
 #endif // METRICS_LOG_HPP
