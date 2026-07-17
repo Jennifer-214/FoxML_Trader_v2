@@ -1,4 +1,15 @@
 #pragma once
+//======================================================================
+// [FILE]_[GUI/GuiThread.hpp]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the SDL2 + Dear ImGui + ImPlot render loop (gui_thread_fn) — a drop-in replacement for the ANSI TUI thread; reads TUISnapshot tear-free each frame, sends commands via atomic flags, renders every panel at ~60fps off the trading path (H3)]
+// [CONTAINS]
+//   - [REGISTRY]_[FOREACH_PANEL]   (the 4 stateful-panel rows + the PANEL_* id enum)
+//   - [STRUCT]_[GuiContext]
+//   - [FUNCTION]_[Gui_Init] / [Gui_Shutdown] / [Gui_BeginFrame] / [Gui_SetupDefaultLayout] / [Gui_HandleKeys] / [gui_thread_fn]
+//======================================================================
 // GuiThread — SDL2 + Dear ImGui + implot render loop
 // replaces the ANSI TUI thread when built with USE_IMGUI_GUI
 //
@@ -30,9 +41,18 @@
 #include "EngineHeaderPanel.hpp"     // v5.8.6b: engine version + registry hash header
 #include "MLStatusPanel.hpp"         // v5.9.0b: per-core ML observability
 
-//==========================================================================
-// STATEFUL PANEL REGISTRY — v5.8.4b
-//==========================================================================
+//======================================================================
+// [REGISTRY]_[FOREACH_PANEL]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 4 stateful GUI panels — one row auto-generates the panel's declaration + its _Init call + the PANEL_* id enum; add a stateful panel = 1 row]
+// [COLUMN]_[var_id]_[panel local-variable name -> PANEL_<var_id> enum id]
+// [COLUMN]_[state_type]_[the panel's state struct type]
+// [COLUMN]_[init_fn]_[the uniform _Init(state*, path) function]
+// [COLUMN]_[init_param]_[the init path arg, or "" when the panel needs none]
+// [REFERENCE]_[INVARIANT]_[[H15] [H21]]
+//======================================================================
 // Single source of truth for the 4 stateful GUI panels. Each row carries
 // state struct type + uniform `_Init(state*, const char* path)` function
 // + init param (path or "" for panels that don't need one).
@@ -42,8 +62,9 @@
 //   2. Append one row here
 //   3. Recompile — declarations + init calls auto-generate
 //
-// Stateless panels (BuyGate, Market, Account, Positions, Risk, Stats —
-// the 10 panels that take only `snap` and have no per-frame state) keep
+// Stateless panels (Header, Market, BuyGate, Account, Positions, Stats,
+// Latency, ML Intelligence, … — the ~11 dashboard panels that take only
+// `snap` and have no per-frame state) keep
 // their direct GUI_Panel_X(snap) calls in the render loop; registry
 // would add no value there.
 //
@@ -55,7 +76,9 @@
 // I/O cleanup.
 //
 // Row format: X(<var_id>, <state_type>, <init_fn>, <init_param_path>)
-//==========================================================================
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_PANEL(X) \
     X(trade_history,    TradeHistory,                 TradeHistory_Init,        "logging/btcusdt_order_history.csv") \
     X(log_viewer,       LogViewer,                    LogViewer_Init,           "logging/engine.log") \
@@ -69,19 +92,45 @@ enum {
 #undef X
     NUM_STATEFUL_PANELS
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [ROW]_[strategy_quality]_[::tt:: qualified — its state + init live in the tt namespace, unlike the other three rows]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_PANEL]
+//======================================================================
 
-//==========================================================================
-// GUI CONTEXT
-//==========================================================================
+//======================================================================
+// [STRUCT]_[GuiContext]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the SDL2 window + GL context + running flag owned by the render thread]
+//======================================================================
+// [CODE]
+//======================================================================
 struct GuiContext {
     SDL_Window   *window;
     SDL_GLContext gl_ctx;
     bool          running;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[GuiContext]
+//======================================================================
 
-//==========================================================================
-// GUI INIT
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[Gui_Init]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[bring up the window — SDL2 + GL 3.3 core context + ImGui/ImPlot contexts, load Hack+CJK fonts, re-pin LC_NUMERIC=C (SDL clobbers it), apply the FoxML theme + transparency, restore the persisted font scale]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline bool Gui_Init(GuiContext *gui, const char *title, int w, int h) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         fprintf(stderr, "[gui] SDL_Init error: %s\n", SDL_GetError());
@@ -215,10 +264,21 @@ static inline bool Gui_Init(GuiContext *gui, const char *title, int w, int h) {
     gui->running = true;
     return true;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Gui_Init]
+//======================================================================
 
-//==========================================================================
-// GUI SHUTDOWN
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[Gui_Shutdown]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[tear down the ImGui/ImPlot/SDL/GL contexts + window in reverse init order]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Gui_Shutdown(GuiContext *gui) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
@@ -228,10 +288,21 @@ static inline void Gui_Shutdown(GuiContext *gui) {
     SDL_DestroyWindow(gui->window);
     SDL_Quit();
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Gui_Shutdown]
+//======================================================================
 
-//==========================================================================
-// GUI FRAME
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[Gui_BeginFrame]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-frame begin — pump SDL events into ImGui + quit-on-close, start the ImGui/GL frame, open the full-window passthrough dockspace; Gui_EndFrame rides (render draw data, transparent clear, swap)]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline bool Gui_BeginFrame(GuiContext *gui) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -266,11 +337,21 @@ static inline void Gui_EndFrame(GuiContext *gui) {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     SDL_GL_SwapWindow(gui->window);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Gui_BeginFrame]
+//======================================================================
 
-//==========================================================================
-// DEFAULT DOCK LAYOUT — runs once on first frame (no ini file yet)
-// chart 60% left, dashboard panels stacked 40% right
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[Gui_SetupDefaultLayout]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[build the one-time default dock layout (no ini yet) — chart 60% left (price over volume/P&L/equity), the dashboard panels stacked 40% right]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Gui_SetupDefaultLayout(ImGuiID dockspace_id) {
     ImGui::DockBuilderRemoveNode(dockspace_id);
     ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
@@ -317,10 +398,21 @@ static inline void Gui_SetupDefaultLayout(ImGuiID dockspace_id) {
 
     ImGui::DockBuilderFinish(dockspace_id);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Gui_SetupDefaultLayout]
+//======================================================================
 
-//==========================================================================
-// GUI KEYBOARD — same controls as ANSI TUI
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[Gui_HandleKeys]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[map the ANSI-TUI keys (Q/P/R/S/K) to atomic command flags on TUISharedState — quit / pause / reload / regime-cycle / kill-reset; skipped while ImGui wants the keyboard]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void Gui_HandleKeys(TUISharedState *shared) {
     if (ImGui::GetIO().WantCaptureKeyboard) return;
 
@@ -335,10 +427,21 @@ static inline void Gui_HandleKeys(TUISharedState *shared) {
     if (ImGui::IsKeyPressed(ImGuiKey_K))
         __atomic_store_n(&shared->kill_reset_requested, 1, __ATOMIC_RELEASE);
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Gui_HandleKeys]
+//======================================================================
 
-//==========================================================================
-// GUI THREAD — drop-in replacement for tui_thread_fn
-//==========================================================================
+//======================================================================
+// [FUNCTION]_[gui_thread_fn]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the render-thread entry (drop-in for tui_thread_fn) — init the window, declare+init the 4 FOREACH_PANEL stateful panels, then loop: read the snapshot tear-free, handle keys, render header/ML/dashboard/charts/settings/history/log/quality at ~60fps until quit]
+//======================================================================
+// [CODE]
+//======================================================================
 static inline void *gui_thread_fn(void *arg) {
     TUISharedState *shared = (TUISharedState *)arg;
 
@@ -450,3 +553,8 @@ static inline void *gui_thread_fn(void *arg) {
     Gui_Shutdown(&gui);
     return NULL;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[gui_thread_fn]
+//======================================================================
