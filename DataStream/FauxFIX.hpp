@@ -3,7 +3,16 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FAUX FIX PROTOCOL]
+// [FILE]_[DataStream/FauxFIX.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[simplified FIX 4.4 market-data parser + builder for the test pipeline (SOH or '|' delimited) — checksum-validated parse; MockGenerator is the producer]
+// [CONTAINS]
+//   - [STRUCT]_[FIX_ParsedMessage]   (protocol constants ride)
+//   - [FUNCTION]_[FIX_Parse]   (+ ParseTag / ParseDouble / ParseUint / ComputeChecksum family)
+//   - [FUNCTION]_[FIX_ToDataStream]
+//   - [FUNCTION]_[FIX_BuildMarketDataMsg]
 //======================================================================================================
 // simplified FIX 4.4 market data parser - real FIX uses SOH (0x01) as delimiter between tag=value
 // pairs, we use the same format but also support '|' as a stand-in for readability in test data
@@ -40,21 +49,26 @@
 #include <stdint.h>
 #include <string.h>
 
-//======================================================================================================
-// [CONSTANTS]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[FIX_ParsedMessage]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[extracted fields of one FIX message (protocol constants ride) — symbol/msg_type/entry_type/seq/price/volume/checksum + valid flag]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[CONSTANTS]
+//------------------------------------------------------------------
 #define FIX_SOH '\x01'
 #define FIX_MAX_SYMBOL_LEN 8
 #define FIX_MAX_FIELDS 32
 #define FIX_MAX_MSG_LEN 512
 
-//======================================================================================================
-// [PARSED MESSAGE STRUCT]
-//======================================================================================================
 // holds the extracted fields from a single FIX message, symbol is null-terminated
 // msg_type: 'W' = snapshot, 'X' = incremental, 'D' = new order single
 // entry_type: 0 = bid, 1 = offer, 2 = trade
-//======================================================================================================
 struct FIX_ParsedMessage {
     char symbol[FIX_MAX_SYMBOL_LEN];
     char msg_type;      // tag 35
@@ -65,10 +79,26 @@ struct FIX_ParsedMessage {
     uint8_t checksum;   // tag 10
     int valid;          // 1 if parsed ok, 0 if malformed
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[FIX_ParsedMessage]
+//======================================================================
 
-//======================================================================================================
-// [PARSER HELPERS]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[FIX_Parse]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the parse family (ParseTag / ParseDouble / ParseUint / ComputeChecksum ride) — tag=value walk into FIX_ParsedMessage; checksum validated when tag 10 present]
+//======================================================================
+// [CODE]
+//======================================================================
+//------------------------------------------------------------------
+// [SECTION]_[PARSER HELPERS]
+//------------------------------------------------------------------
 // parse a single tag=value pair, advancing the pointer past the delimiter
 // returns the tag number, writes value start and length into out params
 //======================================================================================================
@@ -97,9 +127,9 @@ static inline int FIX_ParseTag(const char *msg, int *pos, int len, int *tag_out,
     return 1;
 }
 
-//======================================================================================================
-// [SIMPLE DOUBLE PARSER]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[SIMPLE DOUBLE PARSER]
+//------------------------------------------------------------------
 // parses a decimal string into a double, handles optional sign and decimal point
 // not meant to be fast, just correct enough for test data
 //======================================================================================================
@@ -135,9 +165,9 @@ static inline double FIX_ParseDouble(const char *s, int len) {
     return neg ? -result : result;
 }
 
-//======================================================================================================
-// [INT PARSER]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[INT PARSER]
+//------------------------------------------------------------------
 static inline uint32_t FIX_ParseUint(const char *s, int len) {
     uint32_t result = 0;
     for (int i = 0; i < len; i++) {
@@ -148,9 +178,9 @@ static inline uint32_t FIX_ParseUint(const char *s, int len) {
     return result;
 }
 
-//======================================================================================================
-// [CHECKSUM]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[CHECKSUM]
+//------------------------------------------------------------------
 // real FIX checksum: sum of all bytes from tag 8 up to (not including) "10=" field, mod 256
 // we compute it over the whole message up to the last delimiter before tag 10
 //======================================================================================================
@@ -173,9 +203,9 @@ static inline uint8_t FIX_ComputeChecksum(const char *msg, int len) {
     return sum;
 }
 
-//======================================================================================================
-// [PARSE MESSAGE]
-//======================================================================================================
+//------------------------------------------------------------------
+// [SECTION]_[PARSE MESSAGE]
+//------------------------------------------------------------------
 // takes a raw FIX message string (SOH or | delimited) and fills out a FIX_ParsedMessage
 // validates checksum if tag 10 is present
 //======================================================================================================
@@ -231,28 +261,48 @@ static inline FIX_ParsedMessage FIX_Parse(const char *msg, int len) {
 
     return parsed;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FIX_Parse]
+//======================================================================
 
-//======================================================================================================
-// [CONVERT TO DATASTREAM]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[FIX_ToDataStream]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[parsed price/volume -> DataStream<F> for gates + regression — converts regardless of entry_type (caller filters); test-data double bridge]
+//======================================================================
+// [CODE]
+//======================================================================
 // takes a parsed FIX message and converts price/volume into a DataStream<F> for the gates and
 // regression pipeline, only makes sense for trade entries (269=2) but we convert regardless and
 // let the caller filter by entry_type if they care
-//======================================================================================================
 template <unsigned F> inline DataStream<F> FIX_ToDataStream(const FIX_ParsedMessage *msg) {
     DataStream<F> stream;
     stream.price  = Money{ money_from_double_payload(msg->price) };
     stream.volume = Money{ money_from_double_payload(msg->volume) };
     return stream;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FIX_ToDataStream]
+//======================================================================
 
-//======================================================================================================
-// [BUILD FIX MESSAGE]
-//======================================================================================================
+//======================================================================
+// [FUNCTION]_[FIX_BuildMarketDataMsg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the faux exchange side — builds a checksum-correct 35=W snapshot (body-length patched in place); returns length written into a >=FIX_MAX_MSG_LEN buffer]
+//======================================================================
+// [CODE]
+//======================================================================
 // constructs a FIX market data snapshot string with proper checksum, returns length written
 // this is the faux exchange side - generates what a real exchange would send you
 // writes into buf which must be at least FIX_MAX_MSG_LEN bytes
-//======================================================================================================
 static inline int FIX_BuildMarketDataMsg(char *buf, int buf_size, uint32_t seq_num, const char *symbol, uint8_t entry_type, double price,
                                          double volume) {
     // build body first (everything between tag 8 and tag 10)
@@ -395,7 +445,9 @@ static inline int FIX_BuildMarketDataMsg(char *buf, int buf_size, uint32_t seq_n
     buf[out_len] = '\0';
     return out_len;
 }
-
-//======================================================================================================
-//======================================================================================================
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FIX_BuildMarketDataMsg]
+//======================================================================
 #endif // FAUX_FIX_HPP
