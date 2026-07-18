@@ -60,7 +60,7 @@ static inline const char *_regime_str(int rid) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[FILE* + trade counter (TradeLogRecord — the 19-field CSV row payload — rides)]
+// [OVERVIEW]_[the append-only CSV trade-log handle — FILE* + running trade counter]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -68,7 +68,23 @@ struct TradeLog {
     FILE *file;
     uint64_t trade_count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+//======================================================================
+// [END_STRUCT]_[TradeLog]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[TradeLogRecord]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 19-field CSV row payload — tick + prices/qtys/gate diagnostics + is_buy/strategy/regime + the exit reason; the append-only trade-log column set (H21)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TradeLogRecord {
     uint64_t tick;
     double price, quantity, entry_price, delta_pct;
@@ -85,7 +101,7 @@ struct TradeLogRecord {
 //======================================================================
 // [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
 //======================================================================
-// [END_STRUCT]_[TradeLog]
+// [END_STRUCT]_[TradeLogRecord]
 //======================================================================
 
 //======================================================================

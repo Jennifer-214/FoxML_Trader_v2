@@ -67,11 +67,11 @@ static inline double MockRNG_Range(MockRNG *rng, double lo, double hi) {
 //======================================================================
 
 //======================================================================
-// [STRUCT]_[MockGenerator]
+// [STRUCT]_[MockGeneratorConfig]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[generator state (MockGeneratorConfig + Init ride) — config + RNG + current price + FIX seq_num]
+// [OVERVIEW]_[the mock price-feed knobs — start price / volatility / drift / base volume + spike / floor price / symbol / RNG seed]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -85,6 +85,23 @@ struct MockGeneratorConfig {
     const char *symbol;     // ticker symbol (e.g. "AAPL")
     uint64_t seed;          // RNG seed for reproducibility
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[MockGeneratorConfig]
+//======================================================================
+
+//======================================================================
+// [STRUCT]_[MockGenerator]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[generator state — config + RNG + current price + FIX seq_num (Init rides)]
+//======================================================================
+// [CODE]
+//======================================================================
 
 struct MockGenerator {
     MockGeneratorConfig config;

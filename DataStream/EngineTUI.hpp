@@ -15,7 +15,7 @@
 //   - [FUNCTION]_[TUI_HandleInput]   (LEGACY single-core input)
 //   - [STRUCT]_[TUIPositionSnap]
 //   - [STRUCT]_[MLSnapshot]   (+ MLSnapshot_Populate rides)
-//   - [STRUCT]_[TUISnapshot]   (the PerNodeSnap inner struct + the cluster-boundary assert ride)
+//   - [STRUCT]_[TUISnapshot]   (⊃ nested [STRUCT]_[PerNodeSnap] per-node record + the cluster-boundary assert ride)
 //   - [STRUCT]_[TUISharedState]
 //   - [FUNCTION]_[TUISnapshot_Publish_Begin]   (+ InitSeq / PublishHandle / End / ReadInto / Sequence seqlock family)
 //   - [FUNCTION]_[TUI_CopySnapshot]   (3 overloads — the legacy/backtest populate path)
@@ -1069,6 +1069,15 @@ struct TUISnapshot {
     // correctly. This catches "added field but forgot populator" at
     // PR time rather than runtime.
     // ─────────────────────────────────────────────────────────────────
+    //==================================================================
+    // [STRUCT]_[PerNodeSnap]
+    //------------------------------------------------------------------
+    // [TAG]_[[ENGINE] [MONITORING_PLANE]]
+    // [SCHEMA]_[v1.0]
+    // [OVERVIEW]_[the per-node TUI display record — hot/slow latency quartiles + strategy/halt reason + gate flags + gate diagnostics + ML observability; one per execution node, published tear-free via the seqlock]
+    //==================================================================
+    // [CODE]
+    //==================================================================
     struct PerNodeSnap {
         // Hot-path latency (per-tick gate eval cycles).
         uint64_t samples;
@@ -1347,6 +1356,13 @@ struct TUISnapshot {
         // registry). Drift bits + tooltips give enough operator signal today.
         uint64_t handle_training_timestamp_us;                    // 8 B (representative role; 0 if no timestamp)
     };
+    //==================================================================
+    // [END_CODE]
+    //==================================================================
+    // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+    //==================================================================
+    // [END_STRUCT]_[PerNodeSnap]
+    //==================================================================
     PerNodeSnap per_node[16];      // up to MAX_EXECUTION_NODES
 };
 

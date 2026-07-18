@@ -20,11 +20,27 @@
 
 static constexpr int MAX_TRADES = 512;
 
+//======================================================================
+// [STRUCT]_[TradeMarker]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one chart trade marker — price + buy/sell flag + TP/other-exit flag]
+//======================================================================
+// [CODE]
+//======================================================================
 struct TradeMarker {
     double price;
     int is_sell;       // 0 = buy, 1 = sell
     int is_tp;         // 1 = TP exit, 0 = SL/other
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[TradeMarker]
+//======================================================================
 
 struct EquityPoint {
     double cumulative_pnl;
