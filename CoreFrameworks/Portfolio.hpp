@@ -257,11 +257,27 @@ template <unsigned F> struct ExitRecord {
 // [END_STRUCT]_[ExitRecord]
 //======================================================================
 
+//======================================================================
+// [STRUCT]_[ExitBuffer]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [HOT_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-tick exit staging ring — count (hot, cache-line-0 with records[0]) + 16 ExitRecord slots, drained after the tick]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct ExitBuffer {
     uint32_t count;             // hot: read first every tick (cache line 0 with records[0])
     uint32_t _pad0;             // align records to 8 bytes
     ExitRecord<F> records[16];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[ExitBuffer]
+//======================================================================
 
 template <unsigned F> inline void ExitBuffer_Init(ExitBuffer<F> *buf) {
     buf->count = 0;

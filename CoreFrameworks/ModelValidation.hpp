@@ -80,12 +80,28 @@ namespace tt {
 // dependency-injection.md: zero runtime overhead in production (compiler inlines
 // StderrLog::operator() at the call site).
 
+//======================================================================
+// [STRUCT]_[StderrLog]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [HELPER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the default production LogFn functor — a printf-style operator() forwarding to fprintf(stderr); tests inject a capturing functor instead (zero runtime overhead, inlined)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct StderrLog {
     template <typename... Args>
     void operator()(const char* fmt, Args... args) const {
         fprintf(stderr, fmt, args...);
     }
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[StderrLog]
+//======================================================================
 
 // Type-dispatched value pair logger for drift-detection output. Replaces ~14
 // manual `fprintf(stderr, "stamp=%g cfg=%g", ...)` lines (each with custom

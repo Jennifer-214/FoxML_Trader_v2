@@ -130,6 +130,17 @@ enum CommandType : uint8_t {
 // [END_ENUM]_[CommandType]
 //======================================================================
 
+//======================================================================
+// [STRUCT]_[Command]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
+// [THREAD]_[[WORKER_WRITER] [DRAINER_READER]]
+// [SYNC]_[SPSC]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a drainer-inbound command POD (CMD_FILL_RESULT etc.) — type + order_id + OrderResult; non-templated so the SPSC ring slots stay Money-width-independent]
+//======================================================================
+// [CODE]
+//======================================================================
 // Non-templated POD so the SPSCRing slots stay self-contained regardless
 // of Money width.
 struct Command {
@@ -138,6 +149,13 @@ struct Command {
     uint64_t     order_id;
     OrderResult  result;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[Command]
+//======================================================================
 
 constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 

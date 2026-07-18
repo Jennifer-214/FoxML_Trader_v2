@@ -1334,6 +1334,15 @@ static_assert(cfg_field_names_unique(g_per_node_cfg_field_descriptors),
 // via X-macro instantiation pass.
 //======================================================================================================
 
+//======================================================================
+// [STRUCT]_[CfgMaskArray]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a fixed-size uint64 mask wrapper (N_WORDS = (N_FIELDS+63)/64) + operator[] access; cfg_compute_mask folds one into .rodata per metadata bit at compile time]
+//======================================================================
+// [CODE]
+//======================================================================
 // CfgMaskArray<N_WORDS> — fixed-size mask wrapper. N_WORDS is computed per
 // registry as (N_FIELDS + 63) / 64.
 template <size_t N_WORDS>
@@ -1344,6 +1353,13 @@ struct CfgMaskArray {
     constexpr uint64_t operator[](size_t i) const { return words[i]; }
     constexpr uint64_t& operator[](size_t i)      { return words[i]; }
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[CfgMaskArray]
+//======================================================================
 
 // cfg_compute_mask<Bit>(arr) — walks descriptor array at compile time; produces
 // per-bit mask into .rodata. Zero runtime init cost.

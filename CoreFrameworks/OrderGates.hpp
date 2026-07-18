@@ -67,11 +67,27 @@ template <unsigned F> struct ProfitTarget {
     FPN_Binary<F> profit_target;
 };
 
+//======================================================================
+// [STRUCT]_[BuySideGateConditions]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [HOT_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the buy-gate inputs — price + volume conditions + gate_direction (0=buy-below/mean-reversion, 1=buy-above/momentum); Gate_Zero branchlessly masks .price on a failed gate]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct BuySideGateConditions {
     FPN_Binary<F> price;
     FPN_Binary<F> volume;
     int gate_direction = 0;  // 0 = buy below price (mean reversion), 1 = buy above price (momentum)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[BuySideGateConditions]
+//======================================================================
 
 template <unsigned F> struct SellSideGateConditions {
     FPN_Binary<F> price;

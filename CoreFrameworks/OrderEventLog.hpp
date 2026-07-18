@@ -932,6 +932,15 @@ inline OrderEvent<F> OrderEvent_MakeRejection(uint64_t order_id,
     return e;
 }
 
+//======================================================================
+// [STRUCT]_[FoldResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the deterministic event-log fold result — final Money balance + realized P&L + the rebuilt Portfolio + fills-processed count]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F>
 struct FoldResult {
     Money balance;
@@ -939,6 +948,13 @@ struct FoldResult {
     Portfolio<F> portfolio;
     int    fills_processed;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[FoldResult]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[Portfolio_FromEventLog]

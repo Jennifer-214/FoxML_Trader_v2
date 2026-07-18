@@ -9,7 +9,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[THE cfg model — ControllerConfig (hashed RAW into model lineage) + per-node overrides/PerNodeCfg + capital-fault gates + resolve/normalize/parse pipeline]
 // [CONTAINS]
-//   - [REGISTRY]_[PER_NODE_OVERRIDE_FIELDS]   (+ INT + BITMAP_DOMAINS sisters; PerNodeOverrides storage)
+//   - [REGISTRY]_[PER_NODE_OVERRIDE_FIELDS]   (+ INT + BITMAP_DOMAINS sisters) ⊃ nested [STRUCT]_[PerNodeOverrides] storage
 //   - [STRUCT]_[PerNodeCfg]
 //   - [STRUCT]_[ControllerConfig]
 //   - [FUNCTION]_[ControllerConfig_CapitalRangeSweep] (+ cfg_compile_ok / cfg_capital_gate_ok /
@@ -208,6 +208,15 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
     X(risk,      RISK,      uint8_t,  FOREACH_RISK_CFG_FLAG)                             \
     X(ops,       OPS,       uint8_t,  FOREACH_OPS_CFG_FLAG)
 
+//======================================================================
+// [STRUCT]_[PerNodeOverrides]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-node cfg override storage — Money + FPN_Binary + INT + bitmap-domain override fields, X-macro-materialized from PER_NODE_OVERRIDE_FIELDS; 0/unset = inherit global]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct PerNodeOverrides {
 #define _DECL_OV_MONEY(name) Money name;
 #define _DECL_OV_RAW(name)   FPN_Binary<F> name;
@@ -230,6 +239,14 @@ template <unsigned F> struct PerNodeOverrides {
     PER_NODE_OVERRIDE_BITMAP_DOMAINS(_DECL_OV_BITMAP_FIELDS)
 #undef _DECL_OV_BITMAP_FIELDS
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[PerNodeOverrides]
+//======================================================================
+
 //======================================================================
 // [END_CODE]
 //======================================================================

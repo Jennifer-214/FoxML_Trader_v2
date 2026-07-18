@@ -115,11 +115,27 @@ static const char *REJECT_REASON_NAMES[NUM_REJECT_REASONS] = {
 
 // centralized gate reason metadata — renderers look up name/description here.
 // add new gate reasons: one #define above + one row below.
+//======================================================================
+// [STRUCT]_[GateReasonDef]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one row of GATE_REASON_TABLE — gate-reason display metadata (short name + description [may be a printf fmt] + danger flag for red/yellow)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct GateReasonDef {
     const char *name;        // short label: "warmup", "kill"
     const char *description; // detail text (may be printf format string for dynamic data)
     int is_danger;           // 1 for KILL/DANGER (red color), 0 for others (yellow)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[GateReasonDef]
+//======================================================================
 
 static const GateReasonDef GATE_REASON_TABLE[NUM_GATE_REASONS] = {
     {"ok",         "",                                                  0},
@@ -216,12 +232,28 @@ template <unsigned F> struct PortfolioController {
   BanditDisplayMeta bandit_display_meta;
 
   // per-strategy reward attribution
+  //====================================================================
+  // [STRUCT]_[StrategyStats]
+  //--------------------------------------------------------------------
+  // [TAG]_[[ENGINE] [MONITORING_PLANE] [DECIMAL]]
+  // [SCHEMA]_[v1.0]
+  // [OVERVIEW]_[per-strategy reward attribution — realized Money P&L + win/loss/total-trade counts; one row per strategy arm (strategy_stats[5])]
+  //====================================================================
+  // [CODE]
+  //====================================================================
   struct StrategyStats {
     Money realized_pnl;
     uint32_t wins;
     uint32_t losses;
     uint32_t total_trades;
   };
+  //====================================================================
+  // [END_CODE]
+  //====================================================================
+  // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+  //====================================================================
+  // [END_STRUCT]_[StrategyStats]
+  //====================================================================
   StrategyStats strategy_stats[5]; // 0=MR, 1=Momentum, 2=SimpleDip, 3=ML, 4=EmaCross
 
   int state;
