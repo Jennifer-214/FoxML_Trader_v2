@@ -9,7 +9,8 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[top-K arm-pick stability (v5.14.1.G) — symmetric-difference ratio between consecutive masks; observability only, never a trading input]
 // [CONTAINS]
-//   - [FUNCTION]_[RollingTurnover_Push]   (struct + Init/topk_mask/Compute share the file)
+//   - [STRUCT]_[RollingTurnover]
+//   - [FUNCTION]_[RollingTurnover_Push]   (Init/topk_mask_from_weights/Compute read-outs share the block)
 //======================================================================================================
 // Tracks how stable the ensemble's top-K arm picks are over time.
 // Symmetric-difference between consecutive top-K bit-masks → ratio in
@@ -35,11 +36,11 @@
 #define ROLLING_TURNOVER_MAX_TOPK   8   // matches ENSEMBLE_HORIZON_MAX
 
 //======================================================================
-// [FUNCTION]_[RollingTurnover_Push]
+// [STRUCT]_[RollingTurnover]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [MONITORING_PLANE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[popcount(prev XOR cur) / popcount-union ratio into the ring; the struct + Init/topk_mask/Compute ride in this section]
+// [OVERVIEW]_[the top-K mask ring + head/count/window/topk cursor + last-push ratio; ephemeral per-node diagnostic state]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -51,6 +52,23 @@ struct RollingTurnover {
     int     topk;             // K value (cfg-tunable; ≤ MAX_TOPK)
     double  last_turnover;    // most recent push's symmetric-diff ratio
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RollingTurnover]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[RollingTurnover_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[popcount(prev XOR cur) / popcount-union ratio into the ring; Init/topk_mask_from_weights/Compute ride in this block]
+//======================================================================
+// [CODE]
+//======================================================================
 
 //======================================================================================================
 // INIT

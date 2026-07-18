@@ -24,7 +24,8 @@
 //   - [REGISTRY]_[FOREACH_DEGRADATION_CURVE]           (enum + dispatch table + string helpers + the 4 curve fns + bounds-checked wrapper share the block)
 //   - [STRUCT]_[DriftSample] / [STRUCT]_[DriftHistory] (+ [FUNCTION]_[DriftHistory_CheckBreach] family: Init/Push)
 //   - [REGISTRY]_[FOREACH_CONFIDENCE_PERSIST_FIELD]    (fieldwise write/read/commit + RecomputeRunningSums share the block)
-//   - [FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1] (+ the 5 FROZEN LegacyV1 wire structs — terse, read-side only, never written)
+//   - [STRUCT]_[RollingIC_LegacyV1] / [STRUCT]_[RollingRMSE_LegacyV1] / [STRUCT]_[RollingFreshness_LegacyV1] / [STRUCT]_[RollingCapacity_LegacyV1] / [STRUCT]_[ConfidenceScorerLegacyV1]   ([DEPRECATED] v11 wire-read targets — read-only, never written)
+//   - [FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1]   (reads the LegacyV1 targets; one-shot v11 migration)
 // [REFERENCE]_[SOURCE]_[FoxML/private LIVE_TRADING/prediction/confidence.py]
 //======================================================================================================
 // port of FoxML/private LIVE_TRADING/prediction/confidence.py.
@@ -1515,8 +1516,7 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
 //
 // THESE STRUCTS ARE NEVER WRITTEN. Pure read-side wire-format target. After
 // TECH_DEBT-002 closes (legacy PortfolioController removal), they can be
-// deleted entirely + the shadow-load helper goes with them. (Terse by
-// design — frozen trivial wire targets carry no [STRUCT] blocks.)
+// deleted entirely + the shadow-load helper goes with them.
 //
 // Layout cloned from pre-.E.A ConfidenceScorer + sub-structs. Field order +
 // types match exactly. Compiler-generated padding matches because the struct
@@ -1526,6 +1526,15 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
 // DESIGN_SPECS/wire-format-byte-preservation-discipline.md +
 // DESIGN_SPECS/struct-padding-determinism-pattern.md.
 
+//======================================================================
+// [STRUCT]_[RollingIC_LegacyV1]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingIC layout (predictions/actuals rings + count/head/window); read-only, deletable when TECH_DEBT-002 closes]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RollingIC_LegacyV1 {
     double predictions[ROLLING_IC_MAX_WINDOW];
     double actuals[ROLLING_IC_MAX_WINDOW];
@@ -1533,25 +1542,89 @@ struct RollingIC_LegacyV1 {
     int head;
     int window;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RollingIC_LegacyV1]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[RollingRMSE_LegacyV1]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingRMSE layout (squared-error ring + count/head/window); read-only, deletable when TECH_DEBT-002 closes]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RollingRMSE_LegacyV1 {
     double squared_errors[ROLLING_IC_MAX_WINDOW];
     int count;
     int head;
     int window;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RollingRMSE_LegacyV1]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[RollingFreshness_LegacyV1]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingFreshness layout (last-predict-us + tau-secs); read-only, deletable when TECH_DEBT-002 closes]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RollingFreshness_LegacyV1 {
     uint64_t last_predict_us;
     double   tau_secs;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RollingFreshness_LegacyV1]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[RollingCapacity_LegacyV1]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingCapacity layout (current-adv / target-dollars / kappa); read-only, deletable when TECH_DEBT-002 closes]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RollingCapacity_LegacyV1 {
     double current_adv;
     double target_dollars;
     double kappa;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RollingCapacity_LegacyV1]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[ConfidenceScorerLegacyV1]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[FROZEN v11 wire-read target — the composite pre-.E.A ConfidenceScorer (ic/rmse/freshness/capacity sub-structs + tau/confidence/baseline); the shadow-load reader's fread target; read-only, deletable when TECH_DEBT-002 closes]
+//======================================================================
+// [CODE]
+//======================================================================
 struct ConfidenceScorerLegacyV1 {
     RollingIC_LegacyV1   ic;
     RollingRMSE_LegacyV1 rmse;
@@ -1561,6 +1634,13 @@ struct ConfidenceScorerLegacyV1 {
     RollingCapacity_LegacyV1  capacity;
     double               rmse_baseline;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[ConfidenceScorerLegacyV1]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1]

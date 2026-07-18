@@ -9,7 +9,8 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[O(1) Welford mean/variance for unbounded streams (fixed-window sibling: RollingStats) — P&L distribution, drift detection, z-scores]
 // [CONTAINS]
-//   - [FUNCTION]_[Welford_Push]   (WelfordTracker + Init/Variance/Stddev/ZScore/Reset share the file)
+//   - [STRUCT]_[WelfordTracker]
+//   - [FUNCTION]_[Welford_Push]   (Init/Variance/Stddev/ZScore/Reset read-outs share the block)
 //======================================================================================================
 // O(1) incremental mean/variance tracker — numerically stable for unbounded streams.
 // complementary to RollingStats (which uses a fixed-window ring buffer).
@@ -22,11 +23,11 @@
 #include "../FixedPoint/FixedPointN.hpp"
 
 //======================================================================
-// [FUNCTION]_[Welford_Push]
+// [STRUCT]_[WelfordTracker]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the classic two-delta update (numerically stable) + min/max; Variance/Stddev/ZScore read-outs share the section]
+// [OVERVIEW]_[the O(1) accumulator state — count + running mean + m2 (sum of squared deviations) + running min/max]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -38,6 +39,23 @@ struct WelfordTracker {
     FPN_Binary<F> min_val;
     FPN_Binary<F> max_val;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[WelfordTracker]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Welford_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the classic two-delta update (numerically stable) + min/max; Init + Variance/Stddev/ZScore/Reset read-outs share the block]
+//======================================================================
+// [CODE]
+//======================================================================
 
 template <unsigned F>
 inline WelfordTracker<F> Welford_Init() {

@@ -57,11 +57,27 @@ template <unsigned F> struct LinearRegression3XModel {
 //======================================================================================================
 // this struct just has where there data lives before the regression takes place, apparently this is called a ring buffer, it holds the last 8 price sampels which is from the [MAX_WINDOW], head is where the next write goes, and count tracks which sample your on within the sample window, you can extend this for more intervals, but then the assert size changes, ill probably look into making that confirgurable outside of the file and based on dynamic observations but for now this works as i learn it, this also means that once the buffer gets full, it will start overwriting the oldest data point, which creates like a moving average for the slope, so basically it gives you the most recent output for the 8 prices
 //======================================================================================================
+//======================================================================
+// [STRUCT]_[RegressionFeederX]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the price-sample ring (last MAX_WINDOW prices) + head/count cursor — the feeder the regression fits over; persisted via FOREACH_FEEDER_PERSIST_FIELD]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct RegressionFeederX {
     FPN_Binary<F> price_samples[MAX_WINDOW];
     int head;
     int count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RegressionFeederX]
+//======================================================================
 
 //======================================================================
 // [REGISTRY]_[FOREACH_FEEDER_PERSIST_FIELD]

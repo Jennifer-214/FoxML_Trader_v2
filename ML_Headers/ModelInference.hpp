@@ -201,12 +201,28 @@ static_assert(STAMP_FORMAT_VERSION_EPOCH_FLOOR == 3u,
 //   stability tracking: save XGBoost importances per fold, compare across runs
 //     → see ~/FoxML/private/TRAINING/stability/feature_importance/analysis.py
 //     → thresholds: min_top_k_overlap=0.7, min_kendall_tau=0.6 (safety.yaml:157)
+//======================================================================
+// [STRUCT]_[FeatureLookback]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one row of the FEATURE_LOOKBACKS table — a feature's FEAT_* index + name + temporal reach (lookback ticks) + enabled flag]
+//======================================================================
+// [CODE]
+//======================================================================
 struct FeatureLookback {
     int feat_idx;           // FEAT_* constant
     const char *name;       // human-readable name (for display/debugging)
     int lookback_ticks;     // how many ticks back this feature reads (from RollingStats window)
     int enabled;            // 1 = active, 0 = disabled (future: feature toggling)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[FeatureLookback]
+//======================================================================
 
 // default lookbacks for current features (from RollingStats 128-tick + 512-tick windows)
 // table is append-only — matches FEAT_* ordering for direct indexing
@@ -1984,11 +2000,27 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
 // 0.55 → "0,55" in some locales. We pin LC_NUMERIC=C for the canonical
 // body construction (per-thread via uselocale).
 
+//======================================================================
+// [STRUCT]_[StampWriteResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the stamp-write outcome — ok flag + human-readable error + the resolved stamp path (written or would-be)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct StampWriteResult {
     int  ok;             // 1 = stamp written; 0 = refused (gap too wide, i/o, etc.)
     char error[256];     // human-readable failure reason
     char stamp_path[512]; // where it was written (or would have been)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[StampWriteResult]
+//======================================================================
 
 //======================================================================
 // [STRUCT]_[StampInferenceCfgInputs]

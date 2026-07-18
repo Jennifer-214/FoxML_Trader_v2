@@ -9,7 +9,8 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[regression-on-regression — slope-of-slopes (the second derivative of price); the trend-acceleration signal feeding regime detection]
 // [CONTAINS]
-//   - [FUNCTION]_[RORRegressor_Compute]   (RORRegressor + Init/Push + the DATA FLOW diagram share the file)
+//   - [STRUCT]_[RORRegressor]
+//   - [FUNCTION]_[RORRegressor_Compute]   (Init/Push + the DATA FLOW diagram share the block)
 //======================================================================================================
 // regression on regression - takes the slope outputs from LinearRegression3X and runs a second
 // regression on them, so instead of y=price x=time, its y=slope x=time, which tells you if the
@@ -21,11 +22,11 @@
 
 #include "LinearRegression3X.hpp"
 //======================================================================
-// [FUNCTION]_[RORRegressor_Compute]
+// [STRUCT]_[RORRegressor]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[linearize the slope ring oldest->newest, fit -> slope-of-slopes; RORRegressor struct + Init/Push share this section]
+// [OVERVIEW]_[the slope + r-squared sample rings (the inner-regression outputs) + head/count cursor]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -41,6 +42,23 @@ struct RORRegressor {
     int head;
     int count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RORRegressor]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[RORRegressor_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[linearize the slope ring oldest->newest, fit -> slope-of-slopes; RORRegressor Init/Push share this section]
+//======================================================================
+// [CODE]
+//======================================================================
 //------------------------------------------------------------------------------
 // [SECTION]_[INIT FUNCTION]
 //------------------------------------------------------------------------------

@@ -9,7 +9,8 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-trade reward ring attributed to strategy arms — DrainCSV appends logging/reward_attribution.csv for offline bandit analysis]
 // [CONTAINS]
-//   - [STRUCT]_[RewardTracker]         (RewardRecord element shares the block)
+//   - [STRUCT]_[RewardRecord]
+//   - [STRUCT]_[RewardTracker]
 //   - [FUNCTION]_[RewardTracker_Push]  (+ Init / DrainCSV share the file)
 //======================================================================================================
 // ring buffer of per-trade reward records attributed to strategy arms.
@@ -24,11 +25,11 @@
 #include <time.h>
 
 //======================================================================
-// [STRUCT]_[RewardTracker]
+// [STRUCT]_[RewardRecord]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [PERSISTENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[256-slot reward ring + the RewardRecord element (timestamp/strategy/bps/prices/hold/reason)]
+// [OVERVIEW]_[one per-trade reward row — exit timestamp / strategy-arm / reward-bps / entry+exit price / hold / exit-reason; the reward_attribution.csv schema]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -43,7 +44,23 @@ struct RewardRecord {
     uint64_t hold_ticks;     // ticks held
     int exit_reason;         // 0 = TP, 1 = SL, 2 = time, etc.
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RewardRecord]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[RewardTracker]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[256-slot ring of RewardRecord + head/count cursor]
+//======================================================================
+// [CODE]
+//======================================================================
 struct RewardTracker {
     RewardRecord records[REWARD_TRACKER_MAX];
     int head;

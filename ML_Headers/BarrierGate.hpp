@@ -9,6 +9,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[peak/valley classifier gate (FoxML barrier.py port) — soft gate = (1-p_peak)^gamma * (0.5+0.5*p_valley)^delta, hard block above 0.6]
 // [CONTAINS]
+//   - [STRUCT]_[BarrierGateResult]
 //   - [FUNCTION]_[BarrierGate_Compute]
 //======================================================================================================
 // blocks entries before local price peaks using two binary classifiers:
@@ -26,27 +27,44 @@
 
 #include <math.h>
 
-//======================================================================
-// [FUNCTION]_[BarrierGate_Compute]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[hard block when p_peak > 0.6, else the soft gate formula floored at g_min; BarrierGateResult struct rides in this section]
-//======================================================================
-// [CODE]
-//======================================================================
 // tuning constants (FoxML defaults)
 #define BARRIER_G_MIN              0.2    // minimum gate value (never fully block)
 #define BARRIER_GAMMA              1.0    // peak penalty exponent
 #define BARRIER_DELTA              0.5    // valley bonus exponent
 #define BARRIER_HARD_BLOCK         0.6    // p_peak above this = hard block (gate = 0)
 
+//======================================================================
+// [STRUCT]_[BarrierGateResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the gate result — gate value [0,1] + the two model probabilities (p_peak/p_valley) + the hard-block flag]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BarrierGateResult {
     double gate;       // [0, 1] — 0 = blocked, 1 = fully open
     double p_peak;     // model output: probability of imminent peak
     double p_valley;   // model output: probability of imminent valley
     int blocked;       // 1 if hard-blocked (p_peak > threshold)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[BarrierGateResult]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BarrierGate_Compute]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[hard block when p_peak > 0.6, else the soft gate formula floored at g_min]
+//======================================================================
+// [CODE]
+//======================================================================
 
 // compute barrier gate value from peak/valley predictions
 static inline BarrierGateResult BarrierGate_Compute(double p_peak, double p_valley) {

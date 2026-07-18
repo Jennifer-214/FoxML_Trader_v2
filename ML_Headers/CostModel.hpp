@@ -9,7 +9,8 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[trading-cost estimate (FoxML cost_model.py port) — spread + vol-timing + impact terms; gates unprofitable entries in backtest AND live]
 // [CONTAINS]
-//   - [FUNCTION]_[CostModel_Estimate]   (+ EstimateDefault / Breakeven / ShouldTrade + TradingCosts share the file)
+//   - [STRUCT]_[TradingCosts]
+//   - [FUNCTION]_[CostModel_Estimate]   (+ EstimateDefault / Breakeven / ShouldTrade share the block)
 //======================================================================================================
 // port of FoxML/private LIVE_TRADING/arbitration/cost_model.py.
 // estimates trading costs: spread + volatility timing + market impact.
@@ -42,11 +43,11 @@
 #define COST_K3_DEFAULT  1.0    // market impact
 
 //======================================================================
-// [FUNCTION]_[CostModel_Estimate]
+// [STRUCT]_[TradingCosts]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[cost = k1*spread + k2*vol*10000*sqrt(h/5) + k3*10*sqrt(participation/0.01); Breakeven/ShouldTrade gates share the section]
+// [OVERVIEW]_[the decomposed cost estimate — spread / timing / impact components + their total (all bps)]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -56,6 +57,23 @@ struct TradingCosts {
     double impact_cost;     // market impact component (bps)
     double total_cost;      // sum of all costs (bps)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[TradingCosts]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[CostModel_Estimate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[cost = k1*spread + k2*vol*10000*sqrt(h/5) + k3*10*sqrt(participation/0.01); EstimateDefault/Breakeven/ShouldTrade gates share the block]
+//======================================================================
+// [CODE]
+//======================================================================
 
 //======================================================================================================
 // cost = k1*spread + k2*vol*10000*sqrt(h/5) + k3*impact(q, ADV)
