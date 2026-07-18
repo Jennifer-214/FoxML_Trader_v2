@@ -271,11 +271,26 @@ namespace cfg_gate {
 // over cfg-derived cohort; sister to FOREACH_PER_NODE_DOMAIN_BITMAP shape but for consumer cohort
 // rather than storage cohort).
 
+//======================================================================
+// [REGISTRY]_[FOREACH_STAMP_BOUND_DERIVED_COHORT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the cfg-derived cohort META-walker — one BASE_X token expands to all 4 cfg registries (PER_NODE + GLOBAL + ML_CFG_FLAG + GATE_CFG_FLAG) so a consumer cannot silently skip one; Class-21 drift-impossible by construction]
+// [REFERENCE]_[INVARIANT]_[[H15] [H19]]
+//======================================================================
+// [CODE]
+//======================================================================
 #define FOREACH_STAMP_BOUND_DERIVED_COHORT(BASE_X)                                                  \
     FOREACH_PER_NODE_CFG_FIELD(BASE_X##_PER_NODE)                                                   \
     FOREACH_GLOBAL_CFG_FIELD(BASE_X##_GLOBAL)                                                       \
     FOREACH_ML_CFG_FLAG(BASE_X##_ML_CFG_FLAG)                                                       \
     FOREACH_GATE_CFG_FLAG(BASE_X##_GATE_CFG_FLAG)
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_STAMP_BOUND_DERIVED_COHORT]
+//======================================================================
 
 //------------------------------------------------------------------
 // [SECTION]_[Consumer macros — Step 2 of .B.1 framework consolidation]

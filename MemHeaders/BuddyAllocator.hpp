@@ -315,11 +315,11 @@ void buddy_free_ptr(BuddyAllocatorState *const state, void *const ptr, size_t co
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[buddy_diag_snapshot]
+// [STRUCT]_[BuddyDiagSnapshot]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [MONITORING_PLANE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[stats + per-order free-block counts into a BuddyDiagSnapshot (struct rides) — O(free blocks) walk; diagnostics only]
+// [OVERVIEW]_[the allocator diagnostics snapshot — total alloc/free bytes + alloc/free counts + per-order free-block counts]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -330,6 +330,23 @@ struct BuddyDiagSnapshot {
     uint32_t free_count;
     uint32_t free_blocks_per_order[BUDDY_NUM_ORDERS];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[BuddyDiagSnapshot]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[buddy_diag_snapshot]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stats + per-order free-block counts into a BuddyDiagSnapshot — O(free blocks) walk; diagnostics only]
+//======================================================================
+// [CODE]
+//======================================================================
 
 BuddyDiagSnapshot buddy_diag_snapshot(BuddyAllocatorState const *const state) noexcept {
     BuddyDiagSnapshot snap{};

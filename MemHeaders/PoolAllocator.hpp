@@ -25,11 +25,11 @@
 #include "../FixedPoint/FixedPointN.hpp"
 
 //======================================================================
-// [STRUCT]_[OrderPool]
+// [STRUCT]_[CurrentOrder]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [TAG]_[[ENGINE] [DECIMAL]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the 64-slot bitmap pool (CurrentOrder slot type rides) — slots pointer + uint64 occupancy bitmap + capacity]
+// [OVERVIEW]_[one pool slot — the order id + its Money price + quantity]
 // [INSTANTIATION]_[[64]]
 //======================================================================
 // [CODE]
@@ -39,7 +39,24 @@ template <unsigned F> struct CurrentOrder {
     Money price;
     Money quantity;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[CurrentOrder]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[OrderPool]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BITMAP_PACKED]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 64-slot bitmap pool — CurrentOrder slots pointer + uint64 occupancy bitmap + capacity]
+// [INSTANTIATION]_[[64]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F> struct OrderPool {
     CurrentOrder<F> *slots;
     uint64_t bitmap;

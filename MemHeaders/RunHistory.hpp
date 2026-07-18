@@ -58,17 +58,17 @@
 
 namespace tt {
 
+#define RUN_HISTORY_SCHEMA_VERSION 1
+
 //======================================================================
-// [FUNCTION]_[RunHistory_Append]
+// [STRUCT]_[RunHistoryEntry]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[append one schema-v1 JSONL line (RunHistoryEntry record + version define ride) — thread-local LC_NUMERIC=C pin around the emit; 1 on success incl. flush+close]
+// [OVERVIEW]_[one schema-v1 run-history record — model path + WF/held-out metrics + gap-acceptance flags + stamp outcome; the JSONL line's field set]
 //======================================================================
 // [CODE]
 //======================================================================
-#define RUN_HISTORY_SCHEMA_VERSION 1
-
 struct RunHistoryEntry {
     const char* model_path;        // model .bin path (or "" if save-less run)
     double      wf_mean_val;
@@ -81,6 +81,23 @@ struct RunHistoryEntry {
     int         stamp_ok;          // 0 or 1
     const char* stamp_path;        // path written (or "" if no stamp)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[RunHistoryEntry]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[RunHistory_Append]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[append one schema-v1 JSONL line — thread-local LC_NUMERIC=C pin around the emit; 1 on success incl. flush+close]
+//======================================================================
+// [CODE]
+//======================================================================
 
 // Append one line to the history file. Returns 1 on success, 0 on i/o failure.
 // `path` may not exist yet — file is created on first append.
