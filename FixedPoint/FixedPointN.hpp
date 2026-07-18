@@ -3,13 +3,49 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FIXED-POINT ARITHMETIC LIBRARY — THE 16B BINARY CORE]
+// [FILE]_[FixedPoint/FixedPointN.hpp]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 16B numeric SSoT — binary features (FPN_Binary<64> / fp2_*) + decimal money (FixedPoint<10,8> / Money_*) over one shared bare-__int128 core + the certified umul/udiv/divmul kernels]
+// [CONTAINS]
+//   - [STRUCT]_[FPN_Binary<64>]         (16B binary feature core)
+//   - [STRUCT]_[FixedPoint<2,64>]       (binary radix-parametrized core)
+//   - [STRUCT]_[FixedPoint<10,8>]       (decimal money core)
+//   - [TYPE]_[Money]                    (money alias + is_fp_binary/is_fp_decimal traits + MONEY_ENCODING_EPOCH)
+//   - [FUNCTION]_[umul_128x128_256]     (the ONE certified 128x128->256 product)
+//   - [FUNCTION]_[udiv256_qr]           (certified 256-bit long division)
+//   - [FUNCTION]_[divmul_pow10]         (certified /10^8 reduce)
+//   - fp2_* binary ops + Money_* decimal family (over the certified kernels)
+// [REFERENCE]_[INVARIANT]_[[H4] [H9] [H12] [H21]]
+// [REFERENCE]_[DECISION]_[[D-125] [D-142] [D-163] [D-176]]
+// [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-242]
 //======================================================================================================
+// [COMMENT]_[vestigial FPN_* carve-out — LEFT UNCONVERTED by design]
+//------------------------------------------------------------------------------------------------------
+// The generic `template <unsigned F>` FPN_* op family below (everything from the [N-WORD HELPERS] banner
+// down to the [NATIVE 128-BIT SPECIALIZATIONS FOR F=64] banner — FPN_Mul / FPN_Zero / FPN_Mag* / the
+// transcendentals / the conversions) still carries PRE-Ship-A 24B sign-magnitude bodies
+// (`.w[]` / `.sign` / `FPN_Binary<F>::N`) and is deliberately LEFT UNCONVERTED: it is the D-163-deferred
+// op-family reshape, never executed (Ship B named the money ops `Money_*` per D-176 and left the binary
+// `FPN_*` generic bodies untouched). Documenting to-be-reshaped code = do-it-twice. NOT a bug, NOT
+// campaign-caused (`git diff HEAD` on this file = empty; last touched by the Ship A/B commits). Whether
+// the engine's feature math genuinely RUNS on this family or routes through the `.v` fp2_*/Money_*
+// surfaces is UNRESOLVED — a build-routing trace (nm/disasm a strategy TU) settles it; that is the
+// reshape ship's job, NOT this docs pass (engine-green does not prove deadness — the dependent
+// `FPN_Binary<F>::N` does not hard-error at instantiation). The LIVE `.v` surfaces — the `<64>`
+// specializations that route through fp2_*, the certified kernels, and the Money_* family — ARE
+// converted below.
+//======================================================================================================
+// [COMMENT]_[binary core model]
+//------------------------------------------------------------------------------------------------------
 // FPN_Binary<64> is the ONLY binary instantiation: 16B two's-complement __int128, value = v / 2^64
 // (sign in the top bit; no sign field, no padding; 4 per cache line). The arbitrary-width uint64_t
 // w[] generic body was SHED at Ship A (v5.15.5.F.4d.1.E.0.7); the spelling FPN -> FPN_Binary landed
 // at A.5 (E.0.8, D-143/D-163). The FRAC template parameter is RETAINED for the D-129 future width work.
-//
+//======================================================================================================
+// [COMMENT]_[usage]
+//------------------------------------------------------------------------------------------------------
 // usage:
 //   FPN_Binary<64> a = FPN_FromDouble<64>(3.14);
 //   FPN_Binary<64> b = FPN_FromDouble<64>(2.0);
@@ -26,21 +62,48 @@
 #include <math.h>
 #include <type_traits>  // v5.15.5.F.4b — std::false_type / std::true_type for the binary-domain type trait (is_fp_binary<T> since Ship A)
 
-//======================================================================================================
-// [FIXED-POINT NUMBER REPRESENTATION]
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[FPN_Binary<64>]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONLY binary instantiation — 16B two's-complement __int128, value = v / 2^64; the feature-math core]
+// [REFERENCE]_[DECISION]_[[D-143] [D-163]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F> struct FPN_Binary;                         // primary: declaration only (arbitrary width shed)
+template <> struct FPN_Binary<64> {
+    __int128 v;                                           // value = v / 2^64 (two's-complement; sign in the top bit)
+    static constexpr unsigned F = 64;                     // T::F access for templated dispatchers (tt::cfg_*_field<T>)
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why full-specialization, not an alias]
+//----------------------------------------------------------------------
 // v5.15.5.F.4d.1.E Ship A (D-143 intent: FPN_Binary<64> = the 16B binary core). MECHANISM = full-specialization,
 // NOT an alias: an alias template `using FPN_Binary = FixedPoint<2,F>` makes FPN_Binary<F> a NON-DEDUCED context, breaking
 // `FPN_Op(args)` template-arg deduction across the F-generic engine (red-build caught it at CfgFieldDispatch).
 // So FPN_Binary<64> is a concrete 16B specialization (layout-identical to FixedPoint<2,64>: bare __int128 v), and
 // is_fp_binary is EXTENDED to cover it below (so the B6 wire-dispatchers see it as binary). The 24B
 // sign-magnitude generic body is SHED — only <64> is defined; F=128 was trait-test-only (rewritten this ship).
-// The old `.w[]`/`.sign` aggregate-access sites red-build → ported to `.v`.
-template <unsigned F> struct FPN_Binary;                         // primary: declaration only (arbitrary width shed)
-template <> struct FPN_Binary<64> {
-    __int128 v;                                           // value = v / 2^64 (two's-complement; sign in the top bit)
-    static constexpr unsigned F = 64;                     // T::F access for templated dispatchers (tt::cfg_*_field<T>)
-};
+// ACCURACY (TECH_DEBT-242): the ~2,144 CONSUMER sites' old `.w[]`/`.sign` aggregate-access red-build → ported
+// to `.v`; the generic `FPN_*` OP-FAMILY bodies were NOT ported (they still carry `.w[]`/`.sign`) — that is
+// the vestigial reshape deferred to TECH_DEBT-242 (see the FILE-header carve-out).
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[FPN_Binary<64>]
+//======================================================================
+
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(FPN_Binary<64>) == 16]
+// [WHY]_[Ship A: the 16B two's-complement binary core, 4 per cache line (was 24B sign-mag)]
 static_assert(sizeof(FPN_Binary<64>) == 16, "Ship A: FPN_Binary<64> is the 16B two's-complement binary core (was 24B sign-mag)");
 
 // v5.15.5.F.4b — type trait for FPN_Binary<F> detection in templated dispatchers.
@@ -79,6 +142,16 @@ static_assert(sizeof(FPN_Binary<64>) == 16, "Ship A: FPN_Binary<64> is the 16B t
 // sign-magnitude's 24B w[2]+sign+_padding). Value-equivalent to the retired 24B core BY CONSTRUCTION
 // (same unsigned product, same sign rule) — proven 423/0 at the Ship-A acceptance (op-slice since
 // retired at close, workspace 84caea6; see the E.0.7 acceptance record; D-125/D-139).
+//======================================================================
+// [STRUCT]_[FixedPoint<2,64>]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the binary radix-parametrized core — value = v / 2^64; layout-identical to FPN_Binary<64>]
+// [REFERENCE]_[DECISION]_[[D-99] [D-125]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <int RADIX, int FRAC> struct FixedPoint;   // generic; exactly TWO specializations: <2,64> binary (Ship A) + <10,8> money (Ship B)
 
 template <> struct FixedPoint<2, 64> {
@@ -86,33 +159,104 @@ template <> struct FixedPoint<2, 64> {
     static constexpr int RADIX = 2;
     static constexpr int FRAC  = 64;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[FixedPoint<2,64>]
+//======================================================================
+
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(FixedPoint<2,64>) == 16]
+// [WHY]_[Ship A: the binary core is a bare 16B __int128 two's-complement (no sign field, no padding)]
 static_assert(sizeof(FixedPoint<2,64>) == 16,
               "Ship A: the binary core is a bare 16B __int128 two's-complement (no sign field, no padding)");
 
-// Ship B P1 (D-97/D-104/D-125): the DECIMAL MONEY instantiation — value = v / 10^8, signed
-// two's-complement, EXACT for every Binance price/qty (<= 8dp). Same 16B bare-__int128 storage
-// as binary (radix appears only in the mul-reduce/div, never in storage). Domain: the money
-// CLOSURE invariant keeps |v| <= 2^63-1 (every Money_* op saturates results there + sets the
-// S-17 sticky flag), which puts every product inside the PROVEN divmul domain by construction.
+//======================================================================
+// [STRUCT]_[FixedPoint<10,8>]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the decimal money core — value = v / 10^8, EXACT for every Binance price/qty (<= 8dp)]
+// [REFERENCE]_[DECISION]_[[D-97] [D-104] [D-125]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H12]]
+//======================================================================
+// [CODE]
+//======================================================================
 template <> struct FixedPoint<10, 8> {
     __int128 v;                              // value = v / 10^8 — exact decimal money (D-104)
     static constexpr int RADIX = 10;
     static constexpr int FRAC  = 8;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[money domain + closure invariant]
+//----------------------------------------------------------------------
+// Ship B P1 (D-97/D-104/D-125): the DECIMAL MONEY instantiation — value = v / 10^8, signed
+// two's-complement, EXACT for every Binance price/qty (<= 8dp). Same 16B bare-__int128 storage
+// as binary (radix appears only in the mul-reduce/div, never in storage). Domain: the money
+// CLOSURE invariant keeps |v| <= 2^63-1 (every Money_* op saturates results there + sets the
+// S-17 sticky flag), which puts every product inside the PROVEN divmul domain by construction.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[FixedPoint<10,8>]
+//======================================================================
+
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(FixedPoint<10,8>) == 16]
+// [WHY]_[Ship B: the decimal money core is a bare 16B __int128 (no sign field, no padding)]
 static_assert(sizeof(FixedPoint<10,8>) == 16,
               "Ship B: the decimal money core is a bare 16B __int128 (no sign field, no padding)");
+// [ASSERT]_[PADDING_FREE]_[has_unique_object_representations_v<FixedPoint<10,8>>]
+// [WHY]_[Ship B/H12-F-076: the money type must stay padding-free (memcmp/SHA-256/HMAC surfaces)]
 static_assert(std::has_unique_object_representations_v<FixedPoint<10,8>>,
               "Ship B/H12-F-076: the money type must stay padding-free (memcmp/SHA-256/HMAC surfaces)");
+//======================================================================
+// [TYPE]_[Money]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the money-domain alias = FixedPoint<10,8> — exact decimal at venue 8dp; op family Money_*]
+// [REFERENCE]_[DECISION]_[[D-176] [D-181]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H9] [H12] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
 using Money = FixedPoint<10, 8>;             // D-176: the money domain alias; the op family is Money_*
-static_assert(sizeof(Money) == 16,           // H9 wire/persist pin by the DOMAIN name (redundant with the
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_TYPE]_[Money]
+//======================================================================
+
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(Money) == 16]
+// [WHY]_[H9 wire/persist pin by the DOMAIN name — ~30 fwrite/fread/memcmp/SHA/HMAC sites; a layout change must be a compile error HERE + a snapshot-VERSION bump (H21), never a silent wire break]
+static_assert(sizeof(Money) == 16,
               "Money's wire/persist size is load-bearing (~30 fwrite/fread/memcmp/SHA/HMAC sites); a layout "
               "change must be a compile error HERE + a snapshot-VERSION bump (H21), never a silent wire break");
 
-// Disjoint domain traits (B6 mechanical guard): binary <2,FRAC> vs decimal <10,FRAC>. Since A.5 the
-// binary domain has exactly ONE trait spelling: is_fp_binary_v (legacy is_FPN_v retired). Every tt::
-// wire dispatcher will static_assert exhaustively over these (binary || decimal || float || ...) →
-// a missing decimal branch becomes a COMPILE ERROR, which is what turns the silent-lossy-emit risk
-// into a build break.
+//======================================================================
+// [TYPE]_[fp_domain_traits]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[disjoint binary(<2,F>) vs decimal(<10,F>) domain traits (B6) — tt:: wire dispatchers static_assert exhaustively over these, so a missing branch is a COMPILE error, not a silent-lossy emit]
+// [REFERENCE]_[DECISION]_[[D-143] [D-163]]
+// [REFERENCE]_[CLASS]_[23]
+//======================================================================
+// [CODE]
+//======================================================================
 template <typename T>  struct is_fp_binary                     : std::false_type {};
 template <int F>       struct is_fp_binary<FixedPoint<2, F>>   : std::true_type  {};
 template <typename T> inline constexpr bool is_fp_binary_v  = is_fp_binary<T>::value;
@@ -124,7 +268,38 @@ template <typename T> inline constexpr bool is_fp_decimal_v = is_fp_decimal<T>::
 // B6 wire-dispatchers (which gate on is_fp_binary_v) treat it as binary. ONE binary-domain trait
 // (D-143/B6; the legacy is_FPN_v alias that briefly lived here was retired at A.5 — D-163).
 template <> struct is_fp_binary<FPN_Binary<64>> : std::true_type {};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why disjoint domain traits]
+//----------------------------------------------------------------------
+// Disjoint domain traits (B6 mechanical guard): binary <2,FRAC> vs decimal <10,FRAC>. Since A.5 the
+// binary domain has exactly ONE trait spelling: is_fp_binary_v (legacy is_FPN_v retired). Every tt::
+// wire dispatcher will static_assert exhaustively over these (binary || decimal || float || ...) →
+// a missing decimal branch becomes a COMPILE ERROR, which is what turns the silent-lossy-emit risk
+// into a build break.
+//======================================================================
+// [END_TYPE]_[fp_domain_traits]
+//======================================================================
 
+//======================================================================
+// [TYPE]_[MONEY_ENCODING_EPOCH]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[EngineMoneyT alias + the derived value-encoding epoch — flipping EngineMoneyT to Money IS the epoch transition; the trait-keyed guard no sizeof/layout can see (16B->16B)]
+// [REFERENCE]_[DECISION]_[[D-174] [D-181]]
+// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
+using EngineMoneyT = Money;                                           // FLIPPED at P2b — THE EPOCH (D-181)
+inline constexpr unsigned MONEY_ENCODING_EPOCH = is_fp_decimal_v<EngineMoneyT> ? 1u : 0u;
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[the P2 epoch switch — do NOT flip outside the migration commit]
+//----------------------------------------------------------------------
 // P2 EPOCH SWITCH (markers-first, D-174 #14 / S-4): the type the ENGINE'S MONEY FIELDS use.
 // Flipping this alias to `Money` IS the value-encoding epoch transition — MONEY_ENCODING_EPOCH
 // derives from it, every persisted-surface version floor auto-raises, and the per-surface
@@ -134,8 +309,9 @@ template <> struct is_fp_binary<FPN_Binary<64>> : std::true_type {};
 // The S-4 lesson made structural: the flip is 16B->16B, so NO sizeof/layout guard can see it —
 // these ENCODING-keyed guards are the net. DO NOT flip outside the P2 migration commit.
 // (Placed AFTER the traits — is_fp_decimal_v must be visible to the constexpr derivation.)
-using EngineMoneyT = Money;                                           // FLIPPED at P2b — THE EPOCH (D-181)
-inline constexpr unsigned MONEY_ENCODING_EPOCH = is_fp_decimal_v<EngineMoneyT> ? 1u : 0u;
+//======================================================================
+// [END_TYPE]_[MONEY_ENCODING_EPOCH]
+//======================================================================
 
 //======================================================================================================
 // [N-WORD HELPERS]
@@ -494,7 +670,7 @@ template <unsigned F> inline FPN_Binary<F> FPN_FromString(const char *str) {
 //  FPN_FromFP64/ToFP64 had no engine consumers. H21 n/a: build-internal symbols, never persisted.)
 
 //======================================================================================================
-// [GUARDS]
+// GUARDS
 //======================================================================================================
 
 // Branchless mask-blend selection. Picks if_true when mask = all-1s, if_false when mask = 0.
@@ -1271,14 +1447,17 @@ inline constexpr __int128 FP2_64_MAX = (__int128)(((unsigned __int128)1 << 127) 
 inline __int128 i128_abs(__int128 v)           { __int128 s = v >> 127; return (v ^ s) - s; }
 inline __int128 i128_cneg(__int128 v, int neg) { __int128 m = -(__int128)(neg & 1); return (v ^ m) - m; }  // neg ? -v : v
 
-// The ONE certified unsigned 128×128→256 product (Ship-B P0.2, S-19/D-174). Extracted from the
-// byte-identical inner blocks of FP64_Mul (FixedPoint64.hpp:140-156) + fp2_mul below, so that
-// #3 divmul_pow10, #7 Money Div, and the to_decimal cast consume the SAME body — a third hand
-// copy would drift (the Class-18 shape the merge-scan flagged). FP64_Mul keeps its inline copy
-// until the Ship-B FP64 absorb deletes that file (the copy dies with it).
-// DOMAIN: both |a|,|b| < 2^127 (the 16B core magnitude ceiling — the money-domain closure
-// invariant guarantees it for every caller). In-domain, `mid` provably cannot wrap
-// (a_hi,b_hi ≤ 2^63-1 ⇒ lh+hl+carry < 2^128); outside it this composition is NOT total.
+//======================================================================
+// [FUNCTION]_[umul_128x128_256]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE certified unsigned 128x128->256 product — the single shared body fp2_mul / divmul_pow10 / Money_Div / to_decimal all consume (anti-Class-18)]
+// [REFERENCE]_[DECISION]_[[D-174]]
+// [REFERENCE]_[CLASS]_[18]
+//======================================================================
+// [CODE]
+//======================================================================
 struct u256 { unsigned __int128 hi, lo; };   // product = hi·2^128 + lo
 inline u256 umul_128x128_256(unsigned __int128 a, unsigned __int128 b) {
     uint64_t a_lo = (uint64_t)a, a_hi = (uint64_t)(a >> 64);
@@ -1291,10 +1470,36 @@ inline u256 umul_128x128_256(unsigned __int128 a, unsigned __int128 b) {
     unsigned __int128 shifted = hh + (mid >> 64);
     return { shifted, ((unsigned __int128)(uint64_t)mid << 64) | (uint64_t)ll };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why one certified product + the domain]
+//----------------------------------------------------------------------
+// The ONE certified unsigned 128×128→256 product (Ship-B P0.2, S-19/D-174). Extracted from the
+// byte-identical inner blocks of FP64_Mul (FixedPoint64.hpp:140-156) + fp2_mul below, so that
+// #3 divmul_pow10, #7 Money Div, and the to_decimal cast consume the SAME body — a third hand
+// copy would drift (the Class-18 shape the merge-scan flagged). FP64_Mul keeps its inline copy
+// until the Ship-B FP64 absorb deletes that file (the copy dies with it).
+// DOMAIN: both |a|,|b| < 2^127 (the 16B core magnitude ceiling — the money-domain closure
+// invariant guarantees it for every caller). In-domain, `mid` provably cannot wrap
+// (a_hi,b_hi ≤ 2^63-1 ⇒ lh+hl+carry < 2^128); outside it this composition is NOT total.
+//======================================================================
+// [END_FUNCTION]_[umul_128x128_256]
+//======================================================================
 
 // (fp2_from_fpn REMOVED — the 24B-sign-mag → 16B decoder is obsolete now that FPN_Binary<64> IS the 16B type;
 //  D-143 + Class-40 dead-code removal. The slice that used it retires at this flip.)
 
+//======================================================================
+// [FUNCTION]_[fp2_mul]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[signed 16B binary multiply — extract-sign/abs -> the certified umul product -> reduce >>64 -> branchless saturate (R2) -> reapply sign]
+// [REFERENCE]_[DECISION]_[[D-147] [D-174]]
+//======================================================================
+// [CODE]
+//======================================================================
 inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     bool neg = (a.v < 0) ^ (b.v < 0);
     // INT_MIN-safe abs in unsigned space (the i128_abs (v^s)-s trick) — UB-free even at -2^127,
@@ -1320,6 +1525,11 @@ inline FixedPoint<2,64> fp2_mul(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     unsigned __int128 neg_m = -(unsigned __int128)((int)neg & (int)(mag != 0));   // canonicalize -0 -> +0
     return { (__int128)(((unsigned __int128)(-v) & neg_m) | ((unsigned __int128)v & ~neg_m)) };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[fp2_mul]
+//======================================================================
 inline FixedPoint<2,64> fp2_neg(FixedPoint<2,64> a) { __int128 v = -a.v; return { v }; }   // (INT_MIN guard in prod fold)
 inline FixedPoint<2,64> fp2_abs(FixedPoint<2,64> a) { return { a.v < 0 ? -a.v : a.v }; }
 inline FixedPoint<2,64> fp2_addsat(FixedPoint<2,64> a, FixedPoint<2,64> b) {
@@ -1341,6 +1551,33 @@ inline FixedPoint<2,64> fp2_sub(FixedPoint<2,64> a, FixedPoint<2,64> b) {
 }
 inline FixedPoint<2,64> fp2_min(FixedPoint<2,64> a, FixedPoint<2,64> b) { return { a.v < b.v ? a.v : b.v }; }
 inline FixedPoint<2,64> fp2_max(FixedPoint<2,64> a, FixedPoint<2,64> b) { return { a.v > b.v ? a.v : b.v }; }
+//======================================================================
+// [FUNCTION]_[udiv256_qr]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the certified 256-bit restoring long division — arbitrary hi:lo dividend, returns quotient + remainder; the shared body binary div + money divmul both consume]
+// [REFERENCE]_[DECISION]_[[D-174]]
+//======================================================================
+// [CODE]
+//======================================================================
+struct udiv_qr_t { unsigned __int128 q, r; };
+inline udiv_qr_t udiv256_qr(unsigned __int128 hi, unsigned __int128 lo, unsigned __int128 b_mag) {
+    unsigned __int128 rem_hi = hi, rem_lo = lo, q = 0;
+    for (int bit = 0; bit < 128; bit++) {
+        rem_hi = (rem_hi << 1) | (rem_lo >> 127);   // shift the 256-bit remainder left 1
+        rem_lo <<= 1;
+        int ge = (rem_hi >= b_mag);
+        rem_hi = ge ? (rem_hi - b_mag) : rem_hi;     // conditional subtract (cmov)
+        q = (q << 1) | (unsigned __int128)ge;        // quotient bit, MSB-first
+    }
+    return { q, rem_hi };
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[the certified long-division algorithm + the seed invariant]
+//----------------------------------------------------------------------
 // (a_mag << 64) / b_mag → 128-bit quotient magnitude, bit-by-bit long division. This IS the certified
 // FPN_DivNoAssert algorithm (shift remainder, compare top half ≥ divisor, conditional-subtract, MSB-first
 // quotient bit) lifted to the magnitude level on __int128 — same proven math, no FPN_Binary<64> dependency.
@@ -1354,21 +1591,22 @@ inline FixedPoint<2,64> fp2_max(FixedPoint<2,64> a, FixedPoint<2,64> b) { return
 // (the trip-0 MSB concern from the design audit): initial hi must be < 2^127 so the first shift
 // cannot drop a bit — binary's seed hi = a_mag >> 64 < 2^64; money's divmul seed hi = (a·10^8)>>128
 // < 2^26; thereafter the restoring invariant (rem_hi < b after each subtract) bounds the shift.
-struct udiv_qr_t { unsigned __int128 q, r; };
-inline udiv_qr_t udiv256_qr(unsigned __int128 hi, unsigned __int128 lo, unsigned __int128 b_mag) {
-    unsigned __int128 rem_hi = hi, rem_lo = lo, q = 0;
-    for (int bit = 0; bit < 128; bit++) {
-        rem_hi = (rem_hi << 1) | (rem_lo >> 127);   // shift the 256-bit remainder left 1
-        rem_lo <<= 1;
-        int ge = (rem_hi >= b_mag);
-        rem_hi = ge ? (rem_hi - b_mag) : rem_hi;     // conditional subtract (cmov)
-        q = (q << 1) | (unsigned __int128)ge;        // quotient bit, MSB-first
-    }
-    return { q, rem_hi };
-}
+//======================================================================
+// [END_FUNCTION]_[udiv256_qr]
+//======================================================================
 inline unsigned __int128 udiv_q64(unsigned __int128 a_mag, unsigned __int128 b_mag) {
     return udiv256_qr(a_mag >> 64, a_mag << 64, b_mag).q;    // the original seed, re-wrapped (value-identical)
 }
+//======================================================================
+// [FUNCTION]_[fp2_div]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[signed 16B binary divide — abs -> the certified udiv_q64 long-division core -> branchless saturate (R2) -> reapply sign]
+// [REFERENCE]_[DECISION]_[[D-174]]
+//======================================================================
+// [CODE]
+//======================================================================
 inline FixedPoint<2,64> fp2_div(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     bool neg = (a.v < 0) ^ (b.v < 0);
     unsigned __int128 am = a.v<0?(unsigned __int128)(-a.v):(unsigned __int128)a.v;
@@ -1380,6 +1618,11 @@ inline FixedPoint<2,64> fp2_div(FixedPoint<2,64> a, FixedPoint<2,64> b) {
     unsigned __int128 neg_m = -(unsigned __int128)((int)neg & (int)(qm != 0));
     return { (__int128)(((unsigned __int128)(-v) & neg_m) | ((unsigned __int128)v & ~neg_m)) };  // branchless sign
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[fp2_div]
+//======================================================================
 inline FixedPoint<2,64> fp2_sqrt(FixedPoint<2,64> a) {                          // sqrt domain: a > 0 else 0 (matches generic)
     if (a.v <= 0) return { (__int128)0 };
     unsigned __int128 m = (unsigned __int128)a.v;                              // |v| (a > 0 here)
@@ -1544,12 +1787,17 @@ inline thread_local uint64_t money_op_flags = 0;
 inline constexpr __int128 MONEY_MAX = (__int128)(((unsigned __int128)1 << 63) - 1);  // closure ceiling (R2-sister)
 inline constexpr unsigned __int128 MONEY_SCALE = 100000000ull;                       // 10^8 (D-104)
 
-// #3 — the PROVEN decimal reduce (D-140): floor(P / 10^8) for 0 <= P < 2^127 via the
-// Granlund–Montgomery reciprocal multiply q = (P*M) >> 153 with the exhaustively-validated magic
-// (proof record: plan_checks/2026-06-01-11-phase1-divmul-proof/PROOF.md — G-M bound + validated
-// predicate + 208k differential vs Python decimal). M is 127-bit -> P*M <= 254 bits, inside the
-// certified 256-bit primitive with 2 bits margin. Returns (q, r = P - q*10^8), r in [0, 10^8).
-// Constant-time: one umul_128x128_256 + one shift + one 128-bit mul-subtract. NEVER __udivti3.
+//======================================================================
+// [FUNCTION]_[divmul_pow10]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the PROVEN constant-time decimal reduce — floor(P / 10^8) via Granlund-Montgomery reciprocal multiply; NEVER __udivti3]
+// [DOMAIN]_[0 <= P < 2^127]
+// [REFERENCE]_[DECISION]_[[D-140] [D-174]]
+//======================================================================
+// [CODE]
+//======================================================================
 struct divmul_qr { unsigned __int128 q, r; };
 inline divmul_qr divmul_pow10(unsigned __int128 P) {
     constexpr unsigned __int128 M =
@@ -1559,13 +1807,32 @@ inline divmul_qr divmul_pow10(unsigned __int128 P) {
     unsigned __int128 r = P - q * MONEY_SCALE;
     return { q, r };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[the Granlund-Montgomery magic + the proof]
+//----------------------------------------------------------------------
+// #3 — the PROVEN decimal reduce (D-140): floor(P / 10^8) for 0 <= P < 2^127 via the
+// Granlund–Montgomery reciprocal multiply q = (P*M) >> 153 with the exhaustively-validated magic
+// (proof record: plan_checks/2026-06-01-11-phase1-divmul-proof/PROOF.md — G-M bound + validated
+// predicate + 208k differential vs Python decimal). M is 127-bit -> P*M <= 254 bits, inside the
+// certified 256-bit primitive with 2 bits margin. Returns (q, r = P - q*10^8), r in [0, 10^8).
+// Constant-time: one umul_128x128_256 + one shift + one 128-bit mul-subtract. NEVER __udivti3.
+//======================================================================
+// [END_FUNCTION]_[divmul_pow10]
+//======================================================================
 
-// #4 — branchless rounding from (q, r), divisor-generalized HALF-EVEN (D-128/D-174a; the
-// overflow-free form from the D-93 fold — a literal `2r` compare overflows u128 for #7's runtime
-// divisors, so compare r against half = d>>1; an exact tie exists only for EVEN d). ONE body for
-// d = 10^8 (mul reduce) / 2^64 (the P1c cast) / runtime divisor (#7 Div) = D-105
-// uniform-everywhere-incl-replay BY CONSTRUCTION. Unsigned magnitudes; the caller reapplies sign
-// (value-symmetric — verified against ROUND_HALF_EVEN over signed pairs by the oracle).
+//======================================================================
+// [FUNCTION]_[money_round_half_even]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[branchless divisor-generalized rounding from (q, r) — ONE body for the mul-reduce, the cast, and runtime-divisor Div (D-105 uniform-everywhere incl. replay)]
+// [ROUNDING]_[half-even to nearest; ties-to-even exist only for EVEN divisors]
+// [REFERENCE]_[DECISION]_[[D-105] [D-128] [D-174]]
+//======================================================================
+// [CODE]
+//======================================================================
 inline unsigned __int128 money_round_half_even(unsigned __int128 q, unsigned __int128 r,
                                                unsigned __int128 d) {
     unsigned __int128 half = d >> 1;
@@ -1575,11 +1842,35 @@ inline unsigned __int128 money_round_half_even(unsigned __int128 q, unsigned __i
                             & (q & 1));
     return q + up;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why the overflow-free half-compare form]
+//----------------------------------------------------------------------
+// #4 — branchless rounding from (q, r), divisor-generalized HALF-EVEN (D-128/D-174a; the
+// overflow-free form from the D-93 fold — a literal `2r` compare overflows u128 for #7's runtime
+// divisors, so compare r against half = d>>1; an exact tie exists only for EVEN d). ONE body for
+// d = 10^8 (mul reduce) / 2^64 (the P1c cast) / runtime divisor (#7 Div) = D-105
+// uniform-everywhere-incl-replay BY CONSTRUCTION. Unsigned magnitudes; the caller reapplies sign
+// (value-symmetric — verified against ROUND_HALF_EVEN over signed pairs by the oracle).
+//======================================================================
+// [END_FUNCTION]_[money_round_half_even]
+//======================================================================
 
-// Money_Mul — exact decimal multiply with half-even reduce. In-domain operands (closure
-// |v| <= 2^63-1) give P <= (2^63-1)^2 < 2^126: p.hi == 0 and the divmul precondition holds BY
-// CONSTRUCTION. Out-of-domain (hand-built) operands stay TOTAL + deterministic: p.hi != 0 folds
-// into the overflow mask -> saturate + flag (never garbage-as-value).
+//======================================================================
+// [FUNCTION]_[Money_Mul]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[exact decimal multiply — the #2-shared shape: abs -> certified umul -> divmul_pow10 reduce -> half-even -> closure saturate + S-17 flag -> sign]
+// [DOMAIN]_[closure |v| <= 2^63-1; out-of-domain stays TOTAL via saturate+flag]
+// [ROUNDING]_[half-even (money_round_half_even, d = 10^8)]
+// [OVERFLOW]_[saturate to ±(2^63-1) + MONEY_FLAG_OVERFLOW sticky]
+// [REFERENCE]_[DECISION]_[[D-174] [D-176]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H11]]
+//======================================================================
+// [CODE]
+//======================================================================
 inline Money Money_Mul(Money a, Money b) {
     int neg = (int)((a.v < 0) ^ (b.v < 0));
     unsigned __int128 amag = (unsigned __int128)i128_abs(a.v);
@@ -1594,16 +1885,33 @@ inline Money Money_Mul(Money a, Money b) {
     mag = (mag & ~of_m) | (lim & of_m);                                  // saturate to the closure ceiling
     return { i128_cneg((__int128)mag, neg) };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[domain + totality]
+//----------------------------------------------------------------------
+// Money_Mul — exact decimal multiply with half-even reduce. In-domain operands (closure
+// |v| <= 2^63-1) give P <= (2^63-1)^2 < 2^126: p.hi == 0 and the divmul precondition holds BY
+// CONSTRUCTION. Out-of-domain (hand-built) operands stay TOTAL + deterministic: p.hi != 0 folds
+// into the overflow mask -> saturate + flag (never garbage-as-value).
+//======================================================================
+// [END_FUNCTION]_[Money_Mul]
+//======================================================================
 
-// Money_Div — #7 (P1b): (a/1e8)/(b/1e8) at <10,8> = (a·10^8)/b with half-even on the TRUE
-// remainder (r = P − q·b ∈ [0,b), exactly #4's contract with d = b). Seed = the certified
-// product a_mag·10^8 (in-domain ≤ 2^90, hi==0; defensively total to ≤ 2^154, rem_hi ≤ 2^26),
-// divided by the GENERALIZED certified long division udiv256_qr (defined with the binary core
-// ops above — the decimal section sits after them). Div-by-zero: deterministic saturate to
-// ±MONEY_MAX by sign(a) + the DISTINCT DIVZERO sticky bit (OVERFLOW suppressed on dz); all call
-// sites pre-guard today (verified at the D-93 audit) — the op stays TOTAL regardless. Quotient
-// overflow (tiny divisors — the audit's Q5 catch): closure saturate + OVERFLOW bit, same as Mul.
-// NEVER __udivti3 (constant 128-trip cmov loop).
+//======================================================================
+// [FUNCTION]_[Money_Div]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[exact decimal divide (#7) — (a*10^8)/b via the generalized certified udiv256_qr with half-even on the TRUE remainder; distinct DIVZERO sticky bit]
+// [DOMAIN]_[in-domain a_mag*10^8 <= 2^90; defensively total to <= 2^154]
+// [ROUNDING]_[half-even on r in [0,b) (money_round_half_even, d = b)]
+// [OVERFLOW]_[saturate to ±(2^63-1); OVERFLOW bit on tiny divisors, distinct DIVZERO bit on b==0]
+// [REFERENCE]_[DECISION]_[[D-174] [D-176]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H11]]
+//======================================================================
+// [CODE]
+//======================================================================
 inline Money Money_Div(Money a, Money b) {
     int neg = (int)((a.v < 0) ^ (b.v < 0));
     unsigned __int128 amag = (unsigned __int128)i128_abs(a.v);
@@ -1620,6 +1928,23 @@ inline Money Money_Div(Money a, Money b) {
     q = (q & ~of_m) | (lim & of_m);
     return { i128_cneg((__int128)q, neg) };                             // b==0 ⇒ neg=(a<0): ±MAX by sign(a)
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[the seed, the div-by-zero contract, the totality]
+//----------------------------------------------------------------------
+// Money_Div — #7 (P1b): (a/1e8)/(b/1e8) at <10,8> = (a·10^8)/b with half-even on the TRUE
+// remainder (r = P − q·b ∈ [0,b), exactly #4's contract with d = b). Seed = the certified
+// product a_mag·10^8 (in-domain ≤ 2^90, hi==0; defensively total to ≤ 2^154, rem_hi ≤ 2^26),
+// divided by the GENERALIZED certified long division udiv256_qr (defined with the binary core
+// ops above — the decimal section sits after them). Div-by-zero: deterministic saturate to
+// ±MONEY_MAX by sign(a) + the DISTINCT DIVZERO sticky bit (OVERFLOW suppressed on dz); all call
+// sites pre-guard today (verified at the D-93 audit) — the op stays TOTAL regardless. Quotient
+// overflow (tiny divisors — the audit's Q5 catch): closure saturate + OVERFLOW bit, same as Mul.
+// NEVER __udivti3 (constant 128-trip cmov loop).
+//======================================================================
+// [END_FUNCTION]_[Money_Div]
+//======================================================================
 
 // Money_Add / Money_Sub — exact in __int128 BY DOMAIN (|a|,|b| ≤ 2^63-1 ⇒ |a±b| ≤ 2^64-2 ≪ 2^127:
 // the i128 sum/difference CANNOT wrap, so no certified-saturate body is needed — these are exact
@@ -1780,10 +2105,18 @@ template<> inline FPN_Binary<64> FPN_FromString<64>(const char *str) {
 //======================================================================================================
 // [DECIMAL MONEY PARSE + CASTS — Ship B P1c (#5 + D-170 casts; placed here so fp_scan is in scope)]
 //======================================================================================================
-// Money_FromString — #5: exact venue-decimal-string -> <10,8>, NEVER via double. Returns
-// (value, flags): the per-site failure table (design sidecar) keys on the flags — LIVE-context
-// consumers REFUSE on MALFORMED/EXCESS_DP per D-174b/c; paper/cfg contexts may round+warn.
-// SEPARATE mechanism from money_op_flags by design (S-16 note).
+//======================================================================
+// [FUNCTION]_[Money_FromString]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[#5 — exact venue-decimal-string -> <10,8>, NEVER via double; returns (value, flags) for the per-site LIVE-refuse table]
+// [ROUNDING]_[half-even on > 8 fractional digits (the defensive EXCESS_DP arm)]
+// [OVERFLOW]_[saturate to the closure ceiling + MONEY_PARSE_OVERFLOW; SEPARATE from money_op_flags (S-16)]
+// [REFERENCE]_[DECISION]_[[D-170] [D-174]]
+//======================================================================
+// [CODE]
+//======================================================================
 inline constexpr uint32_t MONEY_PARSE_MALFORMED = 1u << 0;   // bad char / second dot / digitless
 inline constexpr uint32_t MONEY_PARSE_OVERFLOW  = 1u << 1;   // |value| exceeds the closure ceiling (saturated)
 inline constexpr uint32_t MONEY_PARSE_EXCESS_DP = 1u << 2;   // > 8 fractional digits (venue contract says <= 8; value half-even-rounded)
@@ -1812,24 +2145,63 @@ inline MoneyParse Money_FromString(const char *str) {
     int sg = s.neg & (scaled != 0);                                  // -0 canonicalizes to +0 (mirror the live parser)
     return { Money{ i128_cneg((__int128)scaled, sg) }, flags };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[the per-site failure table + the excess-dp arm]
+//----------------------------------------------------------------------
+// Money_FromString — #5: exact venue-decimal-string -> <10,8>, NEVER via double. Returns
+// (value, flags): the per-site failure table (design sidecar) keys on the flags — LIVE-context
+// consumers REFUSE on MALFORMED/EXCESS_DP per D-174b/c; paper/cfg contexts may round+warn.
+// SEPARATE mechanism from money_op_flags by design (S-16 note).
+//======================================================================
+// [END_FUNCTION]_[Money_FromString]
+//======================================================================
 
-// Money_ToBinary — the D-170 INGRESS cast (decimal -> binary feature domain; per-tick capable):
-// b = round_he(m * 2^64 / 10^8) via the PROVEN divmul on (|m| << 64) — |m| <= 2^63-1 => the
-// dividend < 2^127 sits INSIDE the D-140 proven domain (the fold's range note; no new proof).
-// Saturation provably UNREACHABLE this direction (q < 2^101 << 2^127) => NO flag, no dead arm
-// (S-16). Branchless; ~one umul + shift + round.
+//======================================================================
+// [FUNCTION]_[Money_ToBinary]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the D-170 INGRESS seam — decimal money -> binary feature domain (H4 named crossing); round_he(m * 2^64 / 10^8) via the PROVEN divmul]
+// [ROUNDING]_[half-even]
+// [REFERENCE]_[DECISION]_[[D-170] [D-140]]
+// [REFERENCE]_[INVARIANT]_[H4]
+//======================================================================
+// [CODE]
+//======================================================================
 inline FPN_Binary<64> Money_ToBinary(Money m) {
     unsigned __int128 mag = (unsigned __int128)i128_abs(m.v);
     divmul_qr dr = divmul_pow10(mag << 64);
     unsigned __int128 q = money_round_half_even(dr.q, dr.r, MONEY_SCALE);
     return { i128_cneg((__int128)q, (int)(m.v < 0)) };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why saturation is unreachable this direction]
+//----------------------------------------------------------------------
+// b = round_he(m * 2^64 / 10^8) via the PROVEN divmul on (|m| << 64) — |m| <= 2^63-1 => the
+// dividend < 2^127 sits INSIDE the D-140 proven domain (the fold's range note; no new proof).
+// Saturation provably UNREACHABLE this direction (q < 2^101 << 2^127) => NO flag, no dead arm
+// (S-16). Branchless; ~one umul + shift + round.
+//======================================================================
+// [END_FUNCTION]_[Money_ToBinary]
+//======================================================================
 
-// Money_FromBinary — the EGRESS cast (binary threshold -> money at gate-build cadence, D-170):
-// m = round_he(b * 10^8 / 2^64) via the certified product; divisor d = 2^64 (even => exact ties
-// possible; #4's generalized form handles it). Saturation REACHABLE (binary values reach ~2^63
-// => *10^8 ~ 2^90 > ceiling) => closure saturate + S-17 OVERFLOW flag (a silently-saturated
-// threshold would be a wrong gate — load-bearing, per the fold).
+//======================================================================
+// [FUNCTION]_[Money_FromBinary]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the D-170 EGRESS seam — binary threshold -> money at gate-build cadence (H4 named crossing); round_he(b * 10^8 / 2^64) via the certified product]
+// [ROUNDING]_[half-even (d = 2^64, even -> exact ties handled)]
+// [OVERFLOW]_[REACHABLE -> closure saturate + MONEY_FLAG_OVERFLOW (a silently-saturated threshold = a wrong gate)]
+// [REFERENCE]_[DECISION]_[D-170]
+// [REFERENCE]_[INVARIANT]_[H4]
+//======================================================================
+// [CODE]
+//======================================================================
 inline Money Money_FromBinary(FPN_Binary<64> b) {
     unsigned __int128 mag = (unsigned __int128)i128_abs(b.v);
     u256 p = umul_128x128_256(mag, MONEY_SCALE);
@@ -1843,6 +2215,18 @@ inline Money Money_FromBinary(FPN_Binary<64> b) {
     q = (q & ~of_m) | (lim & of_m);
     return { i128_cneg((__int128)q, (int)(b.v < 0)) };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why saturation is reachable + load-bearing this direction]
+//----------------------------------------------------------------------
+// m = round_he(b * 10^8 / 2^64) via the certified product; divisor d = 2^64 (even => exact ties
+// possible; #4's generalized form handles it). Saturation REACHABLE (binary values reach ~2^63
+// => *10^8 ~ 2^90 > ceiling) => closure saturate + S-17 OVERFLOW flag (a silently-saturated
+// threshold would be a wrong gate — load-bearing, per the fold).
+//======================================================================
+// [END_FUNCTION]_[Money_FromBinary]
+//======================================================================
 
 // --- P2a: the Money one-liner op set the migration consumes (all trivial .v ops; the closure
 // domain |v| <= 2^63-1 makes INT_MIN edges unreachable — negate/abs are exact). Compares/min/max
@@ -1859,11 +2243,17 @@ inline int   Money_Eq(Money a, Money b)         { return a.v == b.v; }
 inline int   Money_Gt(Money a, Money b)         { return a.v >  b.v; }
 inline int   Money_Ge(Money a, Money b)         { return a.v >= b.v; }
 
-// ── #6 — venue-step quantizer (Ship-B P4; design: 11-new-function-designs.md) ──────────
-// Floor |v| to a multiple of step, sign restored (trunc toward zero — the venue
-// LOT_SIZE truncation rule; Binance rejects non-multiples). step <= 0 is identity.
-// Division routes through the certified udiv256_qr (128÷128 sub-case: hi=0) —
-// NEVER a plain wide divide (no __udivti3 on any path).
+//======================================================================
+// [FUNCTION]_[Money_QuantizeToStep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[#6 venue-step quantizer — floor |v| to a multiple of step (trunc toward zero, the Binance LOT_SIZE rule); step <= 0 is identity]
+// [ROUNDING]_[truncate toward zero (venue LOT_SIZE, not half-even)]
+// [REFERENCE]_[DECISION]_[D-174]
+//======================================================================
+// [CODE]
+//======================================================================
 inline Money Money_QuantizeToStep(Money v, Money step) {
     if (step.v <= 0) return v;
     unsigned __int128 mag  = (unsigned __int128)(v.v < 0 ? -v.v : v.v);
@@ -1873,6 +2263,19 @@ inline Money Money_QuantizeToStep(Money v, Money step) {
     __int128 r = (__int128)rmag;
     return Money{ v.v < 0 ? -r : r };
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[venue LOT_SIZE truncation + no-libcall divide]
+//----------------------------------------------------------------------
+// #6 — venue-step quantizer (Ship-B P4; design: 11-new-function-designs.md).
+// Floor |v| to a multiple of step, sign restored (trunc toward zero — the venue
+// LOT_SIZE truncation rule; Binance rejects non-multiples). step <= 0 is identity.
+// Division routes through the certified udiv256_qr (128÷128 sub-case: hi=0) —
+// NEVER a plain wide divide (no __udivti3 on any path).
+//======================================================================
+// [END_FUNCTION]_[Money_QuantizeToStep]
+//======================================================================
 inline Money Money_BlendOnMask(Money if_true, Money if_false, uint64_t mask) {
     unsigned __int128 m = (unsigned __int128)(__int128)(int64_t)mask;  // 0 / all-ones-128 (sign-extended)
     return { (__int128)(((unsigned __int128)if_true.v & m) | ((unsigned __int128)if_false.v & ~m)) };
@@ -1888,18 +2291,46 @@ inline Money Money_FromInt(int64_t i) {
 }
 // Money_ToDouble — DISPLAY-ONLY (H4-exempt): GUI/diag/inf-bridge consumption. Never accounting.
 inline double Money_ToDouble(Money a)           { return (double)a.v / 1e8; }
-// money_from_double_payload — the cfg-PAYLOAD bridge ONLY (registry default/clamp literals,
-// <=8dp by authoring convention => exact at 1e-8). TOTAL: saturates past the closure ceiling
-// (a raw llround(d*1e8) is UB past 2^63 — x86 yields INT64_MIN, which silently inverted a clamp
-// during P2a testing). NEVER a general money ingress (that's Money_FromString — exact).
+//======================================================================
+// [FUNCTION]_[money_from_double_payload]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the cfg-PAYLOAD bridge ONLY (registry default/clamp literals, <=8dp) — NOT a general money ingress; use Money_FromString for that]
+// [OVERFLOW]_[TOTAL — saturates past the closure ceiling (raw llround(d*1e8) is UB past 2^63)]
+// [REFERENCE]_[INVARIANT]_[H4]
+//======================================================================
+// [CODE]
+//======================================================================
 inline __int128 money_from_double_payload(double d) {
     double s = d * 1e8;
     if (!(s < 9.2233720368547e18))  return (__int128)(((unsigned __int128)1 << 63) - 1);   // +sat (incl. NaN-safe ordering)
     if (!(s > -9.2233720368547e18)) return -(__int128)(((unsigned __int128)1 << 63) - 1);  // -sat
     return (__int128)llround(s);
 }
-// money_scale_down_pow10 — exact ÷10^k with #4 half-even (k <= 19): the S-18 PCT ingress helper
-// (file "0.075" percent -> parse exact -> ÷100 -> stored fraction; ONE rounding total for <=6dp).
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why saturate — the P2a silent-clamp-inversion story]
+//----------------------------------------------------------------------
+// the cfg-PAYLOAD bridge ONLY (registry default/clamp literals, <=8dp by authoring convention
+// => exact at 1e-8). TOTAL: saturates past the closure ceiling (a raw llround(d*1e8) is UB past
+// 2^63 — x86 yields INT64_MIN, which silently inverted a clamp during P2a testing). NEVER a
+// general money ingress (that's Money_FromString — exact).
+//======================================================================
+// [END_FUNCTION]_[money_from_double_payload]
+//======================================================================
+//======================================================================
+// [FUNCTION]_[money_scale_down_pow10]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[exact ÷10^k (k <= 19) — the S-18 PCT ingress helper (file "0.075" percent -> parse exact -> ÷100 -> stored fraction)]
+// [ROUNDING]_[half-even; ONE rounding total for <=6dp]
+// [REFERENCE]_[DECISION]_[D-174]
+//======================================================================
+// [CODE]
+//======================================================================
 inline Money money_scale_down_pow10(Money a, unsigned k) {
     unsigned __int128 mag = (unsigned __int128)i128_abs(a.v);
     uint64_t d = FP_POW10[k < 20u ? k : 19u];
@@ -1909,9 +2340,21 @@ inline Money money_scale_down_pow10(Money a, unsigned k) {
     unsigned __int128 q = money_round_half_even(dr.q, dr.r, (unsigned __int128)d);
     return { i128_cneg((__int128)q, (int)(a.v < 0)) };
 }
-// Money_ToCString — EXACT decimal emit, always 8 fractional digits ("123.45670000"); the
-// FromString inverse (round-trips bit-exactly; the #6 width-param wire variant lands with
-// quantize). Returns chars written (excl. NUL); 0 on insufficient cap (needs <= 32).
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[money_scale_down_pow10]
+//======================================================================
+//======================================================================
+// [FUNCTION]_[Money_ToCString]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[EXACT decimal emit, always 8 fractional digits ("123.45670000") — the Money_FromString inverse, round-trips bit-exactly]
+// [REFERENCE]_[DECISION]_[D-174]
+//======================================================================
+// [CODE]
+//======================================================================
 inline int Money_ToCString(Money a, char *buf, int cap) {
     if (cap < 32) { if (cap > 0) buf[0] = '\0'; return 0; }
     unsigned __int128 mag = (unsigned __int128)i128_abs(a.v);
@@ -1929,5 +2372,10 @@ inline int Money_ToCString(Money a, char *buf, int cap) {
     buf[n] = '\0';
     return n;
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Money_ToCString]
+//======================================================================
 
 #endif // FIXED_POINT_N_H
