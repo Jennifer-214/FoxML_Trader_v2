@@ -9,7 +9,10 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the original GCN sketch — a tiny fixed-point MLP (forward + backward pass) for gate control; exploratory-era module]
 // [CONTAINS]
-//   - [FUNCTION]_[GCN_forward]   (GCN_input/GCN_network structs + GCN_backward share the file)
+//   - [STRUCT]_[GCN_input]
+//   - [STRUCT]_[GCN_network]
+//   - [FUNCTION]_[GCN_forward]
+//   - [FUNCTION]_[GCN_backward]
 //======================================================================================================
 // This is going to just control the gate conditions, basically the watcher module i referenced earlier, im not sure how to actually implement this yet or everything it needs but i figure going ahead and sketching i tout will work,
 //
@@ -23,11 +26,11 @@
 #include "LinearRegression3X.hpp"
 #include "ROR_regressor.hpp"
 //======================================================================
-// [FUNCTION]_[GCN_forward]
+// [STRUCT]_[GCN_input]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [BINARY_FP]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[fixed-point MLP forward + backward over template-sized layers; the GCN_input/GCN_network structs ride in this section]
+// [OVERVIEW]_[the 6 fixed-point MLP inputs (volume/price/portfolio/slope/…) + operator[] for offset-indexed access]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -40,8 +43,27 @@ template <unsigned F> struct GCN_input {
     FPN_Binary<F> slope_of_slopes;
     FPN_Binary<F> &operator[](unsigned i) { return (&volume)[i]; }
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[GCN_input]
+//======================================================================
+
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(GCN_input<64>) == 6 * sizeof(FPN_Binary<64>)]
+// [WHY]_[the 6 inputs are contiguous FPN_Binary — operator[] indexes them by offset from &volume]
 static_assert(sizeof(GCN_input<64>) == 6 * sizeof(FPN_Binary<64>), "GCN_input size mismatch");
 
+//======================================================================
+// [STRUCT]_[GCN_network]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the MLP weights + biases — template-sized hidden/output layers as flat 1D arrays (2D-grid indexing)]
+//======================================================================
+// [CODE]
+//======================================================================
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS> struct GCN_network {
     FPN_Binary<F> w_hidden[INPUTS * HIDDEN];
     FPN_Binary<F> b_hidden[HIDDEN];
@@ -51,16 +73,28 @@ template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS> struct
     FPN_Binary<F> b_output[OUTPUTS];
     FPN_Binary<F> output[OUTPUTS];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[GCN_network]
+//======================================================================
 
-//------------------------------------------------------------------------------
-// [SECTION]_[FORWARD PASS]
-//------------------------------------------------------------------------------
+//======================================================================
+// [FUNCTION]_[GCN_forward]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the MLP forward pass — bias + weighted-sum + ReLU per hidden neuron, then hidden->output]
+//======================================================================
+// [CODE]
+//======================================================================
 //im gonna go back through these and make them branchless this is just boilerplate lol
 //
 //this is basically doing a standard forward pass where or each hidden nueron, it starts with the bias, then loops through every input and multiplies it be the weight connecting it to the hidden nuerion, and accumulates the result, then it applies ReLU, and does the same thing from hidden layer to output layer
 //
 //the weight indexing is how you layout a 2D grid in a 1D array, so you have inputs going to hidden nuerons, and its just a grid of inputs * hidden weights, i wish i actually understood this stuff like on a deeper leve than conceptual, its really interesting but idk, maybe im just stupid, i have ZERO clue why people are cloning my stuff, like if your doing it to make me feel better thanks i guess, it kind of works until it doesnt
-//------------------------------------------------------------------------------
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS>
 void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &input) {
     // Compute hidden layer
@@ -83,12 +117,22 @@ void GCN_forward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &inp
         // No activation function on output layer for regression tasks
     }
 }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[GCN_forward]
+//======================================================================
 
-//------------------------------------------------------------------------------
-// [SECTION]_[BACKWARD PASS]
-//------------------------------------------------------------------------------
+//======================================================================
+// [FUNCTION]_[GCN_backward]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BINARY_FP]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the MLP backward pass — output error -> backprop through the weights -> nudge by learning_rate]
+//======================================================================
+// [CODE]
+//======================================================================
 //this apparently is just the if you know what the output was, and you know what you wanted it to be, you have the error difference, and then you push that back through it to figure out how much each weight contrinbuted to the error, and then you can nudge them in the opposite direction, by the learning rate
-//------------------------------------------------------------------------------
 template <unsigned F, unsigned INPUTS, unsigned HIDDEN, unsigned OUTPUTS>
 void GCN_backward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &input, FPN_Binary<F> &target, FPN_Binary<F> learning_rate) {
     // Compute output layer error
@@ -118,6 +162,6 @@ void GCN_backward(GCN_network<F, INPUTS, HIDDEN, OUTPUTS> &net, GCN_input<F> &in
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [END_FUNCTION]_[GCN_forward]
+// [END_FUNCTION]_[GCN_backward]
 //======================================================================
 #endif
