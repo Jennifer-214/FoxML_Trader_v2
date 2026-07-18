@@ -396,6 +396,15 @@ typedef float (*LabelFn)(const HistoricalTick *ticks, int tick_idx, int total_ti
 //   0 = binary classification (output is single P(class=1))
 //   1 = regression (output is continuous value)
 //  ≥2 = multiclass (output is K class probabilities, softmax-trained)
+//======================================================================
+// [STRUCT]_[LabelDef]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [FRAMEWORK_DISCIPLINE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one FOREACH_TARGET label-table row — id + snake/display names + description + the LabelFn pointer + num_classes (0=binary, 1=regression, >=2=multiclass)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct LabelDef {
     int id;
     const char *name;          // snake_case for config / programmatic use
@@ -404,6 +413,13 @@ struct LabelDef {
     LabelFn fn;
     int num_classes;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[LabelDef]
+//======================================================================
 
 // v5.10.0d — auto-generated from FOREACH_TARGET(X). Adding/removing/
 // reordering rows must happen by editing the X-macro above; this table

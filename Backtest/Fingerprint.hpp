@@ -43,12 +43,28 @@
 // public domain implementation. processes data in 64-byte blocks.
 // based on the FIPS 180-4 specification.
 
+//======================================================================
+// [STRUCT]_[SHA256_State]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the streaming SHA-256 state — the 8 hash words + total length + the 64-byte block buffer + its fill count]
+//======================================================================
+// [CODE]
+//======================================================================
 struct SHA256_State {
     uint32_t h[8];
     uint64_t total_len;
     uint8_t  buf[64];
     int      buf_len;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[SHA256_State]
+//======================================================================
 
 static inline uint32_t sha256_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 static inline uint32_t sha256_ch(uint32_t x, uint32_t y, uint32_t z) { return (x & y) ^ (~x & z); }

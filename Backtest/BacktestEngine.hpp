@@ -1025,6 +1025,15 @@ static inline void Backtest_Run(BacktestResults *results,
 
 #define WALKFORWARD_MAX_FOLDS VALIDATION_MAX_FOLDS
 
+//======================================================================
+// [STRUCT]_[WalkForwardFoldResult]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one walk-forward fold's metrics — train/val accuracy (classification) OR mse/correlation (regression) + sample counts + the OverfitReport + per-feature importances]
+//======================================================================
+// [CODE]
+//======================================================================
 struct WalkForwardFoldResult {
     // classification metrics — populated for binary + multiclass label kinds
     float train_accuracy;     // [0..1]
@@ -1040,6 +1049,13 @@ struct WalkForwardFoldResult {
     float feature_importances[MODEL_MAX_FEATURES]; // from XGBoost (stability tracking hook)
     int valid;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[WalkForwardFoldResult]
+//======================================================================
 
 struct WalkForwardResults {
     WalkForwardFoldResult folds[WALKFORWARD_MAX_FOLDS];
@@ -2550,11 +2566,27 @@ static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char
 #define OPT_MAX_STEPS  50
 #define OPT_MAX_GRID   (OPT_MAX_STEPS * OPT_MAX_STEPS)
 
+//======================================================================
+// [STRUCT]_[OptimizerRange]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one swept optimizer parameter — the cfg key + lo/hi/step range + steps() (the grid cell count for this axis)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct OptimizerRange {
     char key[32];
     double lo, hi, step;
     int steps() const { return (step > 1e-12) ? (int)((hi - lo) / step) + 1 : 1; }
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[OptimizerRange]
+//======================================================================
 
 struct OptimizerResults {
     double metric[OPT_MAX_GRID];       // selected metric per cell

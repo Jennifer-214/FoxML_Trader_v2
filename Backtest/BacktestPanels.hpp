@@ -372,6 +372,15 @@ static inline void *backtest_worker_fn(void *arg) {
 // what Train Multi-Horizon does) — it's giving operator a quick way to
 // see label class distribution for each candidate horizon BEFORE
 // committing to a multi-horizon train run.
+//======================================================================
+// [STRUCT]_[CollectMultiHorizonWorkerArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[worker-thread args for the multi-horizon label-collect job — run_control + the snapped horizon list + parallel per-horizon TP/SL barrier arrays]
+//======================================================================
+// [CODE]
+//======================================================================
 struct CollectMultiHorizonWorkerArgs {
     RunControlState *run_control;
     int snap_horizon_count;
@@ -384,6 +393,13 @@ struct CollectMultiHorizonWorkerArgs {
     float snap_tp_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     float snap_sl_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[CollectMultiHorizonWorkerArgs]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[collect_multi_horizon_worker_fn]
@@ -3259,6 +3275,15 @@ static inline void *walkforward_worker_fn(void *arg) {
 // into worker args at click time (matches v5.10.0E pattern). Operator can
 // keep editing the input ranges while sweep runs without affecting the
 // in-flight cells.
+//======================================================================
+// [STRUCT]_[HyperparamSweepWorkerArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[worker-thread args for the hyperparameter grid sweep — panel state + result data + the swept OptimizerRange set + the walk-forward split params (all click-time snapshots)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct HyperparamSweepWorkerArgs {
     TrainingPanelState *state;
     const BacktestResults *data;
@@ -3270,6 +3295,13 @@ struct HyperparamSweepWorkerArgs {
     int snap_wf_buffer_ticks;
     int snap_wf_min_train;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[HyperparamSweepWorkerArgs]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[hp_sweep_worker_fn]
@@ -3327,6 +3359,15 @@ static inline void *hp_sweep_worker_fn(void *arg) {
 // v5.8.7 — full-validation worker thread. Mirrors walkforward_worker_fn but
 // calls Backtest_RunFullValidation, which carries the v5.8.6 auto-stamp
 // wiring (FEATURE_REGISTRY_HASH + engine_version embedded in stamp body).
+//======================================================================
+// [STRUCT]_[FullValidationWorkerArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[worker-thread args for Run Full Validation — panel state + data + click-time snapshots of model path / stamp secret / label params (capture-at-click defeats the ImGui edit race)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct FullValidationWorkerArgs {
     TrainingPanelState *state;
     const BacktestResults *data;
@@ -3348,6 +3389,13 @@ struct FullValidationWorkerArgs {
     double  snap_label_tp_pct;
     double  snap_label_sl_pct;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[FullValidationWorkerArgs]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[fullvalidation_worker_fn]
@@ -4040,6 +4088,15 @@ static inline void *train_model_worker_fn(void *arg) {
 //
 // Click-time snapshot mirrors v5.10.0E pattern.
 //======================================================================================================
+//======================================================================
+// [STRUCT]_[MultiHorizonWorkerArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[worker-thread args for the multi-horizon training run — panel/run state + click-snapshots of run name / model path / XGBoost hyperparams / per-horizon TP-SL + WF/held-out/auto-stamp params + sell-side routing]
+//======================================================================
+// [CODE]
+//======================================================================
 struct MultiHorizonWorkerArgs {
     TrainingPanelState *state;
     RunControlState *run_control;
@@ -4080,6 +4137,13 @@ struct MultiHorizonWorkerArgs {
     int  snap_training_side;
     int  snap_label_kind_per_horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[MultiHorizonWorkerArgs]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[mh_run_one_horizon_fv]
@@ -4441,6 +4505,15 @@ static inline void mh_run_one_horizon_fv(
 // BacktestResults + own labels[] buffer to avoid race with other threads
 // recomputing labels concurrently). Forces config_used.xgb_train_nthread=1
 // for bytewise-determinism parity with serial-mode-with-nthread=1.
+//======================================================================
+// [STRUCT]_[MultiHorizonParallelJob]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one per-horizon parallel job — an isolated result copy + horizon index/barriers + WF/held-out/auto-stamp snapshots + local run cfg + grid-member identification (PARITY-021)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct MultiHorizonParallelJob {
     TrainingPanelState *state;
     BacktestResults isolated_results;  // shallow copy + own labels[]
@@ -4465,6 +4538,13 @@ struct MultiHorizonParallelJob {
     // that no production caller populated).
     int horizon_count;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//======================================================================
+// [END_STRUCT]_[MultiHorizonParallelJob]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[mh_per_horizon_parallel_worker]
