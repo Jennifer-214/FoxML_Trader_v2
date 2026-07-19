@@ -368,7 +368,13 @@ struct CfgFieldDef {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[48B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[CfgFieldDef]
 //======================================================================
@@ -653,7 +659,13 @@ struct PerNodeFieldDef {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[40B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PerNodeFieldDef]
 //======================================================================

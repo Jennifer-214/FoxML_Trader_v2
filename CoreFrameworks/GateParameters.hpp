@@ -182,7 +182,9 @@ struct alignas(64) GateParameters {
 // truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
 // "this core has no assigned strategy, do not trade".
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[192B]
 // [ALIGN]_[64]

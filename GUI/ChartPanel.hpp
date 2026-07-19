@@ -65,7 +65,13 @@ struct ChartSettings {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[24B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ChartSettings]
 //======================================================================
@@ -98,7 +104,13 @@ struct ChartState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[295032B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4610]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ChartState]
 //======================================================================
@@ -204,7 +216,13 @@ struct DragState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[24B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[DragState]
 //======================================================================

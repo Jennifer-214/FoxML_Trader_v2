@@ -63,7 +63,9 @@ struct ShardedOrderLatency {
 // (in phase 02 the writers may be multiple worker threads — the
 // compare_exchange_weak loops on min/max already handle that case safely.)
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[40B]
 // [ALIGN]_[8]

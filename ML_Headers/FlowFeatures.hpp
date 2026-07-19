@@ -113,7 +113,9 @@ struct alignas(64) BookImbalanceHistory {
 // (sliding-window incremental) Multi-window variant; 2nd canonical
 // application after v5.14.11.A RidgeBlender correlation matrix.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[16448B]
 // [ALIGN]_[64]
@@ -295,7 +297,9 @@ struct alignas(64) FlowState {
 // cache line). Trailing 32 B pad is structural minimum given alignas(64)
 // requirement (32 B natural; pad to 64).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[64B]
 // [ALIGN]_[64]
@@ -423,7 +427,9 @@ struct alignas(64) LargeTradeState {
 // leads the struct; COLD sizes[W] follows (exact offsets + sizeof pinned by
 // the layout-lock asserts below — the mechanical SSoT).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[16448B]
 // [ALIGN]_[64]
@@ -565,7 +571,9 @@ struct alignas(64) SpreadState {
 // cluster (sum + sum_sq + count + head) leads, COLD samples[W] follows
 // (exact offsets + sizeof pinned by the layout-lock asserts below).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[16448B]
 // [ALIGN]_[64]

@@ -90,7 +90,9 @@ struct DrainerConstants {
 // Per `function-struct-alignment-for-single-mov-access.md` — naturally
 // aligned; single-mov access for all fields when passed by const ref.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[16B]
 // [ALIGN]_[4]

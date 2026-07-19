@@ -251,7 +251,13 @@ struct BacktestRunConfig {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[578112B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[9033]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestRunConfig]
 //======================================================================
@@ -299,7 +305,13 @@ struct BacktestStats {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[144B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestStats]
 //======================================================================
@@ -450,7 +462,13 @@ static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int n
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[53568B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[837]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestResults]
 //======================================================================
@@ -1052,7 +1070,13 @@ struct WalkForwardFoldResult {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[452B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[8]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[WalkForwardFoldResult]
 //======================================================================
@@ -1128,7 +1152,13 @@ struct HeldOutTrainEvalResult {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[28B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[HeldOutTrainEvalResult]
 //======================================================================
@@ -1219,7 +1249,13 @@ struct FullValidationResults {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[11552B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[181]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[FullValidationResults]
 //======================================================================
@@ -2583,7 +2619,13 @@ struct OptimizerRange {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[56B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OptimizerRange]
 //======================================================================

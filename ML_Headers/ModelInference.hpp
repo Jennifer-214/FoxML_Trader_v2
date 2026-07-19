@@ -219,7 +219,13 @@ struct FeatureLookback {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[24B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[FeatureLookback]
 //======================================================================
@@ -474,7 +480,9 @@ struct alignas(64) ModelHandle {
 //   COLD cluster — stamp-derived metadata (boot-WARN, GUI panel surfaces)
 //   COLD-2 cluster — runtime-only paths / fingerprint (not in registry)
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[6720B]
 // [ALIGN]_[64]
@@ -1493,7 +1501,9 @@ struct ModelStampResult {
 // Caller migration: `r.has_<X>` → `STAMP_HAS(r, <group_or_entry>)`;
 // field reads continue as `r.<canonical_name>`.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[5264B]
 // [ALIGN]_[16]
@@ -2017,7 +2027,13 @@ struct StampWriteResult {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[772B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[13]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[StampWriteResult]
 //======================================================================
@@ -2083,7 +2099,13 @@ struct StampInferenceCfgInputs {
 // additions auto-flow via the registry (extinguishes v5.9.5b production-
 // caller class for stamp body fields).
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[4944B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[78]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[StampInferenceCfgInputs]
 //======================================================================

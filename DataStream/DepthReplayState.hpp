@@ -87,7 +87,13 @@ struct DepthReplayState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[736B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[12]
+// [STRADDLE]_[symbol@444]
 //======================================================================
 // [END_STRUCT]_[DepthReplayState]
 //======================================================================

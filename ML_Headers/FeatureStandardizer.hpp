@@ -179,7 +179,9 @@ struct FeatureStandardizer {
 // has_scaler: 0 by default (no scaler loaded). Set to 1 after successful
 // FeatureStandardizer_Load. Apply path early-returns when 0 (identity).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[1320B]
 // [ALIGN]_[8]

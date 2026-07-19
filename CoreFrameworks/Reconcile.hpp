@@ -78,7 +78,9 @@ struct ReconcileOpenOrder {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[112B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[2]
@@ -109,7 +111,9 @@ struct ReconcileTrade {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[56B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
@@ -545,7 +549,9 @@ struct ReconcileResult {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[304B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[5]

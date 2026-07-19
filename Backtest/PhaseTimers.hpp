@@ -64,7 +64,13 @@ struct PhaseTimer {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[80B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PhaseTimer]
 //======================================================================
@@ -192,7 +198,13 @@ static inline void PhaseTimer_PopulateSnapshot(const PhaseTimer* pt,
 // mid-run read this pair was built to prevent. Wire the render to a
 // snapshot or delete the pair: TECH_DEBT-240.
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[80B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PhaseTimerSnapshot]
 //======================================================================

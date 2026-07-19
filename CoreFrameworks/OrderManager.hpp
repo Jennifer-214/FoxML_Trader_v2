@@ -152,7 +152,13 @@ struct Command {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[256B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[Command]
 //======================================================================
@@ -235,7 +241,9 @@ struct SubmitCommand {
 // Per orchestration-helper-with-pod-args-pattern.md (2nd canonical application after
 // Stamp_AssembleAndEmit) — POD args pattern promoted to CLAUDE.md item at ship close.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[128B]
 // [ALIGN]_[16]
@@ -747,7 +755,9 @@ struct OrderManagerState {
 // conversion) land in .C.3 where rdtsc-bracket bench instrumentation is
 // added with a runtime cfg toggle.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[260928B]
 // [ALIGN]_[64]

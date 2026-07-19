@@ -99,7 +99,9 @@ struct EventLoopAggregates {
 // FPN_Binary happens once here, in the adapter, instead of being scattered across
 // every panel. realized + unrealized = total_pnl. balance + unrealized = equity.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[88B]
 // [ALIGN]_[8]

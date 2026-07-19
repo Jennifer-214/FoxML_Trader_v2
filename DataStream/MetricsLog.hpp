@@ -94,7 +94,13 @@ static inline void _metrics_timestamp(char *buf, int bufsize) {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; header is ORPHANED (zero includers) so the struct is in no TU's layout dump — quartet lands if revived, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[16B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[MetricsLog]
 //======================================================================

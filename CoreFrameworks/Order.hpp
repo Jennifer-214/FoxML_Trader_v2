@@ -187,7 +187,9 @@ struct OrderPreResolved {
 // Future per-resolved fields extend HERE (single-line addition) + Order_BindPreResolved
 // extends concurrently. Consumer sites unchanged. Placed at end of Order<F> HOT cluster.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[48B]
 // [ALIGN]_[16]
@@ -281,7 +283,9 @@ struct Order {
 //   submission gets its own Order with a state machine, an idempotency
 //   key, fill tracking, and an audit trail (event log lands in phase 03).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[272B]
 // [ALIGN]_[16]

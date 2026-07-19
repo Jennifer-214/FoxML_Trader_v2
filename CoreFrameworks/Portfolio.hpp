@@ -107,7 +107,9 @@ template <unsigned F> struct alignas(64) Position {
 // capacity. Empty registry today; available for future fields that warrant Position-
 // locality co-access with PERSIST fields.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[128B]
 // [ALIGN]_[64]
@@ -213,7 +215,9 @@ template <unsigned F> struct Portfolio {
 // bitmap-based like OrderPool - same __builtin_ctz pattern, no array shifting on removal,
 // hot-path exit gate only walks set bits so cleared positions are skipped automatically
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[2112B]
 // [ALIGN]_[64]
@@ -252,7 +256,13 @@ template <unsigned F> struct ExitRecord {
 // ExitRecord snapshots all position data at exit time — slot may be reused by a
 // new fill before DrainExits runs, so nothing downstream should read from the slot
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[96B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ExitRecord]
 //======================================================================
@@ -274,7 +284,13 @@ template <unsigned F> struct ExitBuffer {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[1552B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[25]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ExitBuffer]
 //======================================================================
@@ -513,7 +529,9 @@ struct PositionEntryArgs {
 //     audit candidate when partial-exit replay needs leg-A/leg-B pairing
 //     preservation).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[96B]
 // [ALIGN]_[16]

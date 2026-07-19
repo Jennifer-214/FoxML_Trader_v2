@@ -95,7 +95,13 @@ struct BinanceConfig {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[316B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[5]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BinanceConfig]
 //======================================================================
@@ -129,7 +135,13 @@ struct BinanceStream {
 // read_buf accumulates partial SSL reads - websocket frames can arrive in fragments
 // connect_time tracks the 24-hour session lifecycle for proactive reconnect
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[8264B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[130]
+// [STRADDLE]_[pfds@8244]
 //======================================================================
 // [END_STRUCT]_[BinanceStream]
 //======================================================================

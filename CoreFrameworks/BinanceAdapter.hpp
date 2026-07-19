@@ -115,7 +115,9 @@ struct PendingSubmission {
 // One pending order awaiting submission to Binance. Fits in the SPSC
 // ring; trivially copyable as required by SPSCRing's static_assert.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[40B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
@@ -177,7 +179,9 @@ struct BinanceAdapterState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[12416B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[194]

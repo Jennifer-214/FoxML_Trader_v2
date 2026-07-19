@@ -107,7 +107,13 @@ struct SymbolFilters {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[80B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[SymbolFilters]
 //======================================================================
@@ -140,7 +146,13 @@ struct BinanceOrderAPI {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[496B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[8]
+// [STRADDLE]_[host@280]
 //======================================================================
 // [END_STRUCT]_[BinanceOrderAPI]
 //======================================================================

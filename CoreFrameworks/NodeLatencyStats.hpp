@@ -113,7 +113,9 @@ struct alignas(64) NodeLatencyStats {
 //     RECENT behavior, not lifetime behavior.
 //   - Lifetime min/max/avg are tracked separately and don't decay.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[1600B]
 // [ALIGN]_[64]
@@ -166,7 +168,9 @@ struct NodeLatencySnapshot {
 // converted to nanoseconds at the call site (the snapshot function takes the
 // TSC frequency in GHz so it can do the conversion in one place).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[144B]
 // [ALIGN]_[8]

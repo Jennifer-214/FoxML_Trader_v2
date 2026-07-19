@@ -159,7 +159,9 @@ struct RidgeWeights {
 // SoA layout: matrices flattened as 2D arrays for compiler vectorization
 // (Cholesky inner loops can SIMD-fuse on -O2 + AVX2/AVX-512 builds).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[2048B]
 // [ALIGN]_[64]

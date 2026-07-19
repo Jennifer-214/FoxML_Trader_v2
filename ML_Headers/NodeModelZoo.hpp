@@ -122,7 +122,9 @@ struct alignas(64) NodeModelZoo {
 // allocation via plain malloc gives only 16-byte alignment + AVX-512
 // vector-load fields inside ModelHandle could fault or run slow.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[26944B]
 // [ALIGN]_[64]
@@ -1054,7 +1056,9 @@ struct PerArmBarriers {
 // DOMINANT lookup). Pattern documented in
 // DESIGN_SPECS/per-horizon-barrier-blending-with-shadow-mode.md.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[8B]
 // [ALIGN]_[4]
@@ -1090,7 +1094,9 @@ struct PredictionRecord {
 // below). Each predict writes a record; slow-path lookback walks ring for
 // reward attribution.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[56B]
 // [ALIGN]_[8]
@@ -1119,7 +1125,9 @@ struct PerArmDrift {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[412B]
 // [ALIGN]_[4]
@@ -1284,7 +1292,9 @@ struct alignas(64) EnsembleModelZoo {
 //   - ThompsonBanditState (gained alignas/padding per v5.14.11.B.7)
 // Container struct also clusters cleanly at cache-line boundaries.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[258624B]
 // [ALIGN]_[64]

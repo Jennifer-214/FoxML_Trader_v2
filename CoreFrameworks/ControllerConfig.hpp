@@ -242,7 +242,13 @@ template <unsigned F> struct PerNodeOverrides {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[784B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[13]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PerNodeOverrides]
 //======================================================================
@@ -404,7 +410,9 @@ static_assert(sizeof(PerNodeCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
 // nodes[c] address cleanly to cache lines without cross-core false sharing.
 // Compiler auto-pads sizeof to a multiple of 64 for nodes[] array alignment.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[1344B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[21]
@@ -1393,7 +1401,9 @@ template <unsigned F> struct ControllerConfig {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[53056B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[829]

@@ -152,7 +152,13 @@ static void tui_signal_handler(int sig) {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[96B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[original_term@20]
 //======================================================================
 // [END_STRUCT]_[EngineTUI]
 //======================================================================
@@ -704,7 +710,13 @@ struct TUIPositionSnap {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[104B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TUIPositionSnap]
 //======================================================================
@@ -840,7 +852,13 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
 // FoxML display fields — populated once by MLSnapshot_Populate(), shared by
 // TUI_CopySnapshot and BacktestSnapshot_Copy.  add new ML fields here.
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[4800B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[75]
+// [STRADDLE]_[bandit_weights@32 · bandit_avg_reward@112]
 //======================================================================
 // [END_STRUCT]_[MLSnapshot]
 //======================================================================
@@ -1359,7 +1377,13 @@ struct TUISnapshot {
     //==================================================================
     // [END_CODE]
     //==================================================================
-    // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+    // [DERIVED]
+    // [ORIGIN]_[AUTO]
+    // [UPDATED]_[2026-07-18]
+    // [SIZE]_[1152B]
+    // [ALIGN]_[64]
+    // [CACHE_LINES]_[18]
+    // [STRADDLE]_[sp_breakdown_p50_ns@488 · ensemble_n_updates_per_regime@944 · thompson_precision_post@1020]
     //==================================================================
     // [END_STRUCT]_[PerNodeSnap]
     //==================================================================
@@ -1493,7 +1517,13 @@ struct TUISharedState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[62592B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[978]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TUISharedState]
 //======================================================================

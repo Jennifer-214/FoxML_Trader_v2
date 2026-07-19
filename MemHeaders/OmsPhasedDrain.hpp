@@ -110,7 +110,9 @@ struct OmsDrainBuckets {
 // quartet) — within the default 8 MB thread stack; per-cycle touch cost is
 // bounded by actual event count, not capacity.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[147480B]
 // [ALIGN]_[8]

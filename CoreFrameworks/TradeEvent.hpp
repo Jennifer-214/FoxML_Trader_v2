@@ -86,7 +86,9 @@ struct alignas(64) TradeEvent {
 //   - node_id identifies which execution core fired the event, used by the
 //     controller to look up the canonical Position slot for this trade.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[64B]
 // [ALIGN]_[64]

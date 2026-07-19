@@ -121,7 +121,9 @@ struct FeatureComputeCtx {
 // tools (the v5.8 audit's false-CRITICAL came from misreading
 // these fields as required).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[48B]
 // [ALIGN]_[8]

@@ -87,7 +87,13 @@ struct BuddyAllocatorState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; header has ZERO includers (not wired), so the struct is in no TU's layout dump — quartet lands when wired, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[1065088B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[16642]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BuddyAllocatorState]
 //======================================================================
@@ -333,7 +339,13 @@ struct BuddyDiagSnapshot {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[96B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BuddyDiagSnapshot]
 //======================================================================

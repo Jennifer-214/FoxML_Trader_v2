@@ -71,7 +71,13 @@ struct TradeLog {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[16B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TradeLog]
 //======================================================================
@@ -99,7 +105,13 @@ struct TradeLogRecord {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[152B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TradeLogRecord]
 //======================================================================
@@ -209,7 +221,13 @@ struct TradeLogBuffer {
 // NOTE: if engine crashes between fill and next slow-path drain, CSV entry is lost
 // (but position is preserved in binary snapshot).
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[9736B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[153]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TradeLogBuffer]
 //======================================================================

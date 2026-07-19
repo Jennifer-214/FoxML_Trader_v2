@@ -103,7 +103,9 @@ struct LatencyHistogram {
 // histogram (per the cross-thread cluster-isolation discipline:
 // SEPARATE histograms per writer-thread; no shared writes).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[576B]
 // [ALIGN]_[64]

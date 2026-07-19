@@ -105,7 +105,9 @@ struct ThompsonBanditState {
 // (8 arms × 8B mu_post + 8 arms × 8B precision_post + 8 arms × 4B total_pulls
 // + 4B n_arms + 3 × 8B hyperparams + 8B rng_state + ~8B padding).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[200B]
 // [ALIGN]_[8]

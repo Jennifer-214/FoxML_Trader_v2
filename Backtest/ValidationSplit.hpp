@@ -130,7 +130,13 @@ struct PurgedSplit {
 // each fold is a (train, test) pair with the purge gap enforced between them.
 // train window grows with each fold (expanding window, not sliding).
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[32B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PurgedSplit]
 //======================================================================

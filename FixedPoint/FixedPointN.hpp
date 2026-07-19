@@ -92,7 +92,9 @@ template <> struct FPN_Binary<64> {
 // to `.v`; the generic `FPN_*` OP-FAMILY bodies were NOT ported (they still carry `.w[]`/`.sign`) — that is
 // the vestigial reshape deferred to TECH_DEBT-242 (see the FILE-header carve-out).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[16B]
 // [ALIGN]_[16]

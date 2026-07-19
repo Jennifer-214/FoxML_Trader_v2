@@ -127,7 +127,9 @@ static inline void BanditDisplayMeta_SetArmName(BanditDisplayMeta *m, int arm, c
 // next to bandits[]). Functions that NEED arm names take a BanditDisplayMeta*
 // parameter (nullable; falls back to "arm_N" default when null).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[256B]
 // [ALIGN]_[1]
@@ -167,7 +169,9 @@ struct BanditState {
 // v5.15.5.A.3 — arm_names extracted to BanditDisplayMeta (above). Pure
 // math state; ~256B smaller than pre-v5.15.5.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[200B]
 // [ALIGN]_[8]

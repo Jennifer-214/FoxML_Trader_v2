@@ -63,7 +63,13 @@ struct DataPanelState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[526604B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[8229]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[DataPanelState]
 //======================================================================
@@ -196,7 +202,13 @@ struct SamplesSnapshot {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[108B]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[class_counts@28]
 //======================================================================
 // [END_STRUCT]_[SamplesSnapshot]
 //======================================================================
@@ -852,7 +864,13 @@ struct ComparisonState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[1768B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[28]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ComparisonState]
 //======================================================================
@@ -950,7 +968,13 @@ struct PastRun {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[6224B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[98]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRun]
 //======================================================================
@@ -992,7 +1016,13 @@ struct PastRunsState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[398640B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[6229]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRunsState]
 //======================================================================
@@ -3086,7 +3116,13 @@ struct TrainingPanelState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[500624B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[7823]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3298,7 +3334,13 @@ struct HyperparamSweepWorkerArgs {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[152B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[HyperparamSweepWorkerArgs]
 //======================================================================
@@ -3392,7 +3434,13 @@ struct FullValidationWorkerArgs {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[360B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[6]
+// [STRADDLE]_[snap_fv_auto_stamp_secret@272]
 //======================================================================
 // [END_STRUCT]_[FullValidationWorkerArgs]
 //======================================================================

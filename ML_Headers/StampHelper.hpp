@@ -149,7 +149,13 @@ struct StampArgs {
 // Per CLAUDE.local.md cohort-audit rule: cohort = function-arg struct;
 // stack-allocated; no cache concerns.
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[200B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[StampArgs]
 //======================================================================

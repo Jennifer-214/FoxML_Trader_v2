@@ -119,7 +119,9 @@ struct NotifyEvent {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[656B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[11]
@@ -173,7 +175,9 @@ inline NotifyState *g_notify = nullptr;
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[42256B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[661]
@@ -451,7 +455,9 @@ struct NotifyCommandState {
 // `timeout 10 ` to the cfg default. Worker thread is dedicated so this won't
 // affect the engine hot path.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[512B]
 // [ALIGN]_[1]
 // [CACHE_LINES]_[8]

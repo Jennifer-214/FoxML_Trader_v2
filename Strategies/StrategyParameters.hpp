@@ -244,7 +244,9 @@ struct MLBuildContext {
 //   out_confidence  — written with the conf used (so snapshot reads match the
 //                     value that drove the gate decision; no recomputation)
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[288B]
 // [ALIGN]_[8]

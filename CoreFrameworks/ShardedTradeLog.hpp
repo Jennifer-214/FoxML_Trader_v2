@@ -106,7 +106,9 @@ struct ShardedTradeLog {
 // are observability counters surfaced via the TUI / tests; they don't affect
 // behavior.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[184B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[3]

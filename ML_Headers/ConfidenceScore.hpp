@@ -129,7 +129,9 @@ struct RollingWindow {
 // Layout: 12B HOT + 4B pad + N×sizeof(T) samples; natural sizeof handles
 // trailing alignment based on T's alignment.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[528B]
 // [ALIGN]_[8]
@@ -227,7 +229,9 @@ struct alignas(64) RollingIC {
 // from `ic.predictions` to `ic.predictions.samples` etc.; wire bytes
 // remain identical (same data values + offsets).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[1088B]
 // [ALIGN]_[64]
@@ -402,7 +406,9 @@ struct alignas(64) RollingRMSE {
 // pattern). Bytewise parity test in tests/controller_test.cpp locks the
 // running-sum-vs-walked equivalence.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[576B]
 // [ALIGN]_[64]
@@ -578,7 +584,9 @@ struct RollingFreshness {
 // data_age_sec arg of the original Confidence_Freshness so the scorer
 // owns its own clock state — operator + tests can manipulate via Mark.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[16B]
 // [ALIGN]_[8]
@@ -645,7 +653,9 @@ struct RollingCapacity {
 // absorb without slippage degradation. target_dollars=0 = unbounded
 // (single-symbol small-account default; capacity always 1.0).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[24B]
 // [ALIGN]_[8]
@@ -763,7 +773,9 @@ struct alignas(64) ConfidenceScorer {
 // runtime layout can now evolve (snapshot v12 = field-by-field). Future
 // fields can be added via FOREACH_CONFIDENCE_PERSIST_FIELD registry.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[1792B]
 // [ALIGN]_[64]
@@ -1224,7 +1236,9 @@ struct DriftSample {
 // per iteration. Post-.E.B: each iteration touches 1 cache line (DriftSample
 // is 16B; samples[k] read pulls both .ic + .ts in one cache fill).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[16B]
 // [ALIGN]_[8]
@@ -1284,7 +1298,9 @@ struct alignas(64) DriftHistory {
 // (set at first-breach detection; never read; not in snapshot). Preserved
 // for future GUI consumption via DisplayMeta access.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[4160B]
 // [ALIGN]_[64]
@@ -1545,7 +1561,13 @@ struct RollingIC_LegacyV1 {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[1040B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[17]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RollingIC_LegacyV1]
 //======================================================================
@@ -1568,7 +1590,13 @@ struct RollingRMSE_LegacyV1 {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[528B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[9]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RollingRMSE_LegacyV1]
 //======================================================================
@@ -1589,7 +1617,13 @@ struct RollingFreshness_LegacyV1 {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[16B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RollingFreshness_LegacyV1]
 //======================================================================
@@ -1611,7 +1645,13 @@ struct RollingCapacity_LegacyV1 {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[24B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RollingCapacity_LegacyV1]
 //======================================================================
@@ -1637,7 +1677,13 @@ struct ConfidenceScorerLegacyV1 {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[1632B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[26]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ConfidenceScorerLegacyV1]
 //======================================================================

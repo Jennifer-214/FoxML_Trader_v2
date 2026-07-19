@@ -39,7 +39,13 @@ struct Candle {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[64B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[Candle]
 //======================================================================
@@ -68,7 +74,13 @@ struct CandleAccumulator {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[262288B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4099]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[CandleAccumulator]
 //======================================================================
@@ -228,7 +240,13 @@ struct CandleSnapshot {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[262224B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4098]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[CandleSnapshot]
 //======================================================================

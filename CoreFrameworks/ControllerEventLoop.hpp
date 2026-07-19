@@ -225,7 +225,9 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 // override of window size is a future enhancement requiring runtime-
 // sized buffers — currently every engine uses identical windows.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[199104B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[3111]
@@ -282,7 +284,9 @@ static_assert(sizeof(SlowPathTelemetry) == 64,
 // ~25 B used in 64 B cache line — generous padding kept intentional for
 // future flag additions + crosstalk prevention.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[64B]
 // [ALIGN]_[64]
@@ -669,7 +673,9 @@ static_assert(offsetof(NodeContext<64>, sp_telemetry) % 64 == 0,
 // determinism) explicitly NOT in scope — NodeContext is not in byte-
 // equivalence path.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[7168B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[112]
@@ -722,7 +728,9 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 //   bucket_last_sec[5] — second-tag of each rotating bucket (stale detection)
 //   bucket_count[5]    — tick count in each bucket
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[128B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[2]
@@ -843,7 +851,9 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 // helpers + alignas(64) discipline; shoehorning them into a uniform
 // registry shape would lose the type safety.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[9856B]
 // [ALIGN]_[64]

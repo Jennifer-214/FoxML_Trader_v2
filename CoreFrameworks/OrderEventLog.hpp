@@ -138,7 +138,9 @@ struct OrderEvent {
 // This makes the event log self-contained for replay — the fold doesn't
 // need to know what the controller's intended TP/SL was at the time.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[144B]
 // [ALIGN]_[16]
@@ -217,7 +219,9 @@ struct OrderEventLogFileHeader {
 // Phase 07 file header — written at the start of the event log file.
 // Carries the FPN_Binary width and entry size for forward compatibility.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[32B]
 // [ALIGN]_[8]
@@ -292,7 +296,9 @@ struct OrderEventLog {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 //----------------------------------------------------------------------
 // [SIZE]_[37376B]
 // [ALIGN]_[64]
@@ -951,7 +957,13 @@ struct FoldResult {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[2240B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[35]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[FoldResult]
 //======================================================================

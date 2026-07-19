@@ -77,7 +77,13 @@ template <unsigned F> inline BookSnapshot<F> BookSnapshot_Init() {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[416B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[7]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BookSnapshot]
 //======================================================================
@@ -101,7 +107,13 @@ struct DepthStream {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[40B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[DepthStream]
 //======================================================================
@@ -134,7 +146,13 @@ template <unsigned F> struct DepthSharedState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[1056B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[17]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[DepthSharedState]
 //======================================================================
