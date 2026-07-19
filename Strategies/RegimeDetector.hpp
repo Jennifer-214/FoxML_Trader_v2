@@ -7,7 +7,7 @@
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML] [SLOW_PATH]]
 // [SCOPE]_[NODE]
-// [SCHEMA]_[v1]
+// [SCHEMA]_[v1.0]
 // [OVERVIEW]_[classify market state (RANGING/TRENDING/VOLATILE/MILD_TREND) + switch the active strategy — score-based]
 // [DIAGRAM]
 //   slow_state{RollingStats x2, ROR, flow, depth} -> RegimeSignals -> Regime_Classify -> regime -> Regime_ToStrategy
@@ -72,7 +72,7 @@
 // [STRUCT]_[RegimeSignals]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML] [SLOW_PATH] [BINARY_FP]]
-// [SCHEMA]_[v1]
+// [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-slow-cycle signal vector — the ML extensibility point: add a signal = add a field + one Regime_Classify comparison]
 //======================================================================
 // [CODE]
@@ -139,10 +139,16 @@ template <unsigned F> struct RegimeSignals {
 // this is the extensibility point: adding a new signal = adding a field here
 // + one comparison in Regime_Classify.
 //======================================================================
-// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
-//----------------------------------------------------------------------
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[448B]
 // [ALIGN]_[16]
+// [CACHE_LINES]_[7]
+// [STRADDLE]_[none]
+//----------------------------------------------------------------------
+// [UPSTREAM]_[[FPN_Binary]]
+// [CONSUMERS]_[[Regime_ComputeSignals] [Regime_Classify] [BacktestSharded_Run] [EventLoop_RebuildOneCore] [FeatureComputeCtx] [ModelFeatures_Pack] [MLStrategy_BuySignal] [ML_BuildParameters]]
 //======================================================================
 // [END_STRUCT]_[RegimeSignals]
 //======================================================================
@@ -151,7 +157,7 @@ template <unsigned F> struct RegimeSignals {
 // [STRUCT]_[CumDeltaState]
 //----------------------------------------------------------------------
 // [TAG]_[[SLOW_PATH] [BINARY_FP]]
-// [SCHEMA]_[v1]
+// [SCHEMA]_[v1.0]
 // [OVERVIEW]_[rolling cumulative buyer-vs-seller aggression — a ring buffer of N signed-qty samples]
 //======================================================================
 // [CODE]
@@ -176,7 +182,11 @@ template <unsigned F> struct CumDeltaState {
 // taker → net delta -= qty. is_buyer_maker=0 → buyer was taker → +qty.
 // Ring buffer of recent N samples for windowed aggregation.
 //======================================================================
-// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [CACHE_LINES]_[257]
+// [STRADDLE]_[none]
 //----------------------------------------------------------------------
 // [SIZE]_[16416B]
 // [ALIGN]_[16]
@@ -190,7 +200,7 @@ template <unsigned F> struct CumDeltaState {
 // [FUNCTION]_[CumDelta_Init]
 //----------------------------------------------------------------------
 // [TAG]_[[SLOW_PATH] [BINARY_FP]]
-// [SCHEMA]_[v1]
+// [SCHEMA]_[v1.0]
 // [OVERVIEW]_[zero-init the CumDeltaState ring — sum / head / count + every sample]
 //======================================================================
 // [CODE]
@@ -232,11 +242,15 @@ inline void CumDelta_Push(CumDeltaState<F>* s, FPN_Binary<F> qty, int is_buyer_m
     }
 }
 
-//======================================================================================================
-// Tick arrival rate Z-score — current ticks/sec vs trailing baseline.
-// Maintains a rolling-stat estimate of inter-tick latency to compute mean
-// and stddev; current rate's z-score is informative for burst detection.
-//======================================================================================================
+//======================================================================
+// [STRUCT]_[TickRateState]
+//----------------------------------------------------------------------
+// [TAG]_[[SLOW_PATH] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[tick-arrival-rate z-score state — a rolling window of inter-tick timestamps + trailing rate mean/stddev for burst detection]
+//======================================================================
+// [CODE]
+//======================================================================
 #define TICKRATE_WINDOW 1024
 struct TickRateState {
     uint64_t recent_ts_us[TICKRATE_WINDOW];  // microsecond timestamps
@@ -245,6 +259,25 @@ struct TickRateState {
     double trailing_mean_rate;  // baseline ticks-per-second mean
     double trailing_stddev_rate; // baseline stddev
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Tick arrival rate Z-score — current ticks/sec vs trailing baseline. Maintains a
+// rolling-stat estimate of inter-tick latency to compute mean and stddev; the
+// current rate's z-score is informative for burst detection.
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
+// [SIZE]_[8216B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[129]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[TickRateState]
+//======================================================================
 
 static inline void TickRate_Init(TickRateState* s) {
     s->head = 0;
@@ -293,15 +326,17 @@ static inline double TickRate_CurrentZ(const TickRateState* s) {
     return (current_rate - s->trailing_mean_rate) / s->trailing_stddev_rate;
 }
 
-//======================================================================
-// [FUNCTION]_[Regime_ComputeSignals]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [ML] [SLOW_PATH] [BINARY_FP]]
-// [SCHEMA]_[v1]
-// [OVERVIEW]_[fill RegimeSignals from rolling stats + ROR + flow/depth — once per slow cycle, before Regime_Classify]
-//======================================================================
-// [CODE]
-//======================================================================
+//======================================================================================================
+// [COMPUTE SIGNALS]
+//======================================================================================================
+// fills RegimeSignals from current rolling stats, rolling_long, and ROR
+// called once per slow-path cycle before Regime_Classify
+//======================================================================================================
+// v4.3 — feature-pack expansion. Optional new state pointers populate the
+// new fields when non-null; when null, new fields stay zero-initialized so
+// older callers remain compatible at compile time. The FEAT_* indices in
+// the model still expect those features though — old v1 models will fail
+// the version check on load.
 template <unsigned F>
 inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const RollingStats<F> *rolling,
@@ -328,9 +363,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const void *spread_state = nullptr,
                                    double current_spread = 0.0,
                                    double current_mid_price = 0.0) {
-    //------------------------------------------------------------
-    // [SECTION]_[short window signals]
-    //------------------------------------------------------------
+    // short window signals
     sig->short_count    = rolling->count;
     sig->short_r2       = rolling->price_r_squared;
     sig->short_variance = rolling->price_variance;
@@ -342,9 +375,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     else
         sig->short_slope = FPN_Zero<F>();
 
-    //------------------------------------------------------------
-    // [SECTION]_[long window signals]
-    //------------------------------------------------------------
+    // long window signals
     sig->long_count    = rolling_long->count;
     sig->long_r2       = rolling_long->price_r_squared;
     sig->long_variance = rolling_long->price_variance;
@@ -354,10 +385,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     else
         sig->long_slope = FPN_Zero<F>();
 
-    //------------------------------------------------------------
-    // [SECTION]_[variance ratio]
-    //------------------------------------------------------------
-    // current volatility relative to baseline
+    // variance ratio: current volatility relative to baseline
     // > 1.0 means volatility is elevated vs longer-term average
     // self-adapting: $50 stddev in calm market (baseline $20) = 6.25x, same $50 in volatile ($45) = 1.23x
     if (rolling_long->count >= 64 && !FPN_IsZero(rolling_long->price_variance))
@@ -365,10 +393,8 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     else
         sig->vol_ratio = FPN_FromDouble<F>(1.0); // default: no spike detected
 
-    //------------------------------------------------------------
-    // [SECTION]_[ROR — trend acceleration]
-    //------------------------------------------------------------
-    // slope-of-slopes: positive = trend getting steeper, negative = trend flattening/reversing
+    // ROR: slope-of-slopes (trend acceleration)
+    // positive = trend getting steeper, negative = trend flattening/reversing
     sig->ror_ready = (ror->count >= MAX_WINDOW);
     if (sig->ror_ready) {
         // compute ROR regression on slope samples
@@ -386,10 +412,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     // if a regime enrichment model is loaded
     sig->model_score = FPN_Zero<F>();
 
-    //------------------------------------------------------------
-    // [SECTION]_[EMA/SMA crossover]
-    //------------------------------------------------------------
-    // (ema - sma) / sma
+    // EMA/SMA crossover: (ema - sma) / sma
     // normalized so threshold is asset-independent (same value works for BTC and ETH)
     // branchless: compute the spread always (FPN_DivNoAssert by zero safely saturates → deterministic), then
     // mask to 0 when either operand is zero. H20: branchless even if slower — a mispredict's variance cascades.
@@ -406,10 +429,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->ema_sma_spread_long = FPN_Zero<F>();
     }
 
-    //------------------------------------------------------------
-    // [SECTION]_[v4.3 medium-horizon features]
-    //------------------------------------------------------------
-    // each one zero-defaults if its required
+    // v4.3 — medium-horizon features. Each one zero-defaults if its required
     // state isn't supplied; train-serve parity is preserved as long as both
     // backtest and live populate the same state with the same cadence.
 
@@ -479,10 +499,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->dist_to_low = FPN_Zero<F>();
     }
 
-    //------------------------------------------------------------
-    // [SECTION]_[v4.5 Wave 1 — flow/depth features]
-    //------------------------------------------------------------
-    // D.1: book imbalance over time. Reads from
+    // v4.5 Wave 1 — D.1: book imbalance over time. Reads from
     // BookImbalanceHistory; mean_short over last 64 samples, mean_long
     // over full window, drift = current - mean_long. Zero-default when
     // state pointer is null OR count < 2 (cold start).
@@ -534,9 +551,7 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->large_trade_z = 0.0;
     }
 
-    //------------------------------------------------------------
-    // [SECTION]_[v4.6 Wave 2 — spread dynamics]
-    //------------------------------------------------------------
+    // v4.6 Wave 2 — D.3: spread dynamics.
     //   spread_bps   = current_spread / mid_price × 10000 (basis points).
     //                  Zero-default when mid_price is zero (cold start) or
     //                  current_spread is zero (no depth feed).
@@ -556,35 +571,13 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->spread_zscore = 0.0;
     }
 }
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [COMMENT]
-//----------------------------------------------------------------------
-// [[2026] [v4.3+]]
-//
-// fills RegimeSignals from current rolling stats, rolling_long, and ROR.
-// called once per slow-path cycle before Regime_Classify.
-//
-// v4.3 — feature-pack expansion. Optional new state pointers populate the
-// new fields when non-null; when null, new fields stay zero-initialized so
-// older callers remain compatible at compile time. The FEAT_* indices in
-// the model still expect those features though — old v1 models will fail
-// the version check on load.
-//======================================================================
-// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
-//----------------------------------------------------------------------
-// [UPSTREAM]_[<tool: :FoxSymdepsDerived!>]
-//======================================================================
-// [END_FUNCTION]_[Regime_ComputeSignals]
-//======================================================================
 
 //======================================================================
 // [STRUCT]_[RegimeState]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [SLOW_PATH] [PERSISTENCE]]
-// [SCHEMA]_[v1]
-// [OVERVIEW]_[the regime classifier's state — current/proposed regime + hysteresis + last scores; 7 fields wire-persisted (H21)]
+// [TAG]_[[SLOW_PATH] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-node regime-classifier state — current/proposed regime + hysteresis + start markers + the exposed classifier scores (D-305 wire-persisted subset)]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -607,10 +600,13 @@ template <unsigned F> struct RegimeState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
-//----------------------------------------------------------------------
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-07-18]
 // [SIZE]_[48B]
 // [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RegimeState]
 //======================================================================
@@ -627,6 +623,15 @@ template <unsigned F> struct RegimeState {
 // enrolled in CoreFrameworks/MetaRegistry.hpp. NEVER fwrite(&rs, sizeof(RegimeState)) — the
 // blob carries the 2 unpersisted ints + trailing pad (48B struct vs 36B wire): field-by-field only.
 //
+//======================================================================
+// [REGISTRY]_[FOREACH_REGIME_PERSIST_FIELD]
+//----------------------------------------------------------------------
+// [TAG]_[[SLOW_PATH] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 7-field wire-persist delegate for RegimeState<F> — fieldwise write/read/commit + a count-lock forcing a SHARDED_SNAPSHOT_VERSION bump on any row change (D-305, H21)]
+//======================================================================
+// [CODE]
+//======================================================================
 // 7 fields IN WIRE ORDER (int x5, then uint64_t, then time_t):
 #define FOREACH_REGIME_PERSIST_FIELD(X)   \
     X(current_regime,       int,      1)  \
@@ -678,13 +683,20 @@ static_assert(FOREACH_REGIME_PERSIST_FIELD_COUNT == 7,
     "RegimeState wire format = EXACTLY 7 persisted fields (current/proposed_regime, "
     "hysteresis_count/threshold, last_strategy_id, regime_start_tick/time); a change "
     "requires a SHARDED_SNAPSHOT_VERSION bump + loader migration (H21).");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_REGIME_PERSIST_FIELD]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[Regime_Init]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [SLOW_PATH]]
-// [SCHEMA]_[v1]
-// [OVERVIEW]_[zero-init a RegimeState — start conservative (RANGING / MR) with the given hysteresis threshold]
+// [TAG]_[[SLOW_PATH] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[zero-init a RegimeState<F> — RANGING start, hysteresis threshold, cleared scores + start markers]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -703,9 +715,7 @@ inline void Regime_Init(RegimeState<F> *state, int hysteresis_threshold) {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed by fox-symdeps; do NOT hand-edit)
-//----------------------------------------------------------------------
-// [UPSTREAM]_[<tool: :FoxSymdepsDerived!>]
+// [DERIVED]
 //======================================================================
 // [END_FUNCTION]_[Regime_Init]
 //======================================================================
