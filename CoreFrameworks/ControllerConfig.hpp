@@ -1403,11 +1403,11 @@ template <unsigned F> struct ControllerConfig {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[53056B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[829]
-// [STRADDLE]_[none]
+// [STRADDLE]_[horizon_list@4656 · node_time_exit_ticks@39824 · unverified: nodes node_risk_pct node_max_drawdown_pct node_overrides]
 //======================================================================
 // [END_STRUCT]_[ControllerConfig]
 //======================================================================

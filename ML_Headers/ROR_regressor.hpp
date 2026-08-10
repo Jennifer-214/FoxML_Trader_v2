@@ -47,11 +47,11 @@ struct RORRegressor {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[272B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[5]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: slope_samples r_squared_samples]
 //======================================================================
 // [END_STRUCT]_[RORRegressor]
 //======================================================================

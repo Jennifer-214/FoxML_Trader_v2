@@ -482,12 +482,12 @@ struct alignas(64) ModelHandle {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 //----------------------------------------------------------------------
 // [SIZE]_[6720B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[105]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: scaler_sha256 xgb_tree_method overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cuda_version environment_cpu_model]
 //======================================================================
 // [END_STRUCT]_[ModelHandle]
 //======================================================================
@@ -1503,12 +1503,12 @@ struct ModelStampResult {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 //----------------------------------------------------------------------
 // [SIZE]_[5264B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[83]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
 //======================================================================
 // [END_STRUCT]_[ModelStampResult]
 //======================================================================
@@ -2101,11 +2101,11 @@ struct StampInferenceCfgInputs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[4944B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[78]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
 //======================================================================
 // [END_STRUCT]_[StampInferenceCfgInputs]
 //======================================================================

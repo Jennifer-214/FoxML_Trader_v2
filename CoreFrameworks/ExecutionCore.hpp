@@ -225,7 +225,9 @@ struct alignas(64) ExecutionCore {
 //   - [INVARIANT]_[H6]
 //   - [PLAN]_[2026-05-06-latency-path-discipline]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-10]
 //----------------------------------------------------------------------
 // [SIZE]_[68352B]
 // [ALIGN]_[64]

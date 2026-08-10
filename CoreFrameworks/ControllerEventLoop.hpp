@@ -692,6 +692,7 @@ static_assert(offsetof(NodeContext<64>, sp_telemetry) % 64 == 0,
 // [SYNC]_[ATOMIC]
 // [REFERENCE]_[INVARIANT]_[H6]
 // [REFERENCE]_[DESIGN_SPEC]_[cross-thread-snapshot-publish-cluster-isolation]
+// [STRADDLE_EXEMPT]_[bucket_count]_[benign-by-design: single producer-writer on both lines; alignas(64) cluster isolation intact; 2-line footprint documented intentional — D-413/A-class C(a) 2026-08-10]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[WS heartbeat cluster on EventLoopState — producer-written tick liveness read by slow-path staleness gates + GUI; alignas(64) isolated]
 //======================================================================
@@ -730,11 +731,11 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[128B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[2]
-// [STRADDLE]_[none]
+// [STRADDLE]_[bucket_count@56]
 //======================================================================
 // [END_STRUCT]_[WsHeartbeatTelemetry]
 //======================================================================
@@ -853,12 +854,12 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 //----------------------------------------------------------------------
 // [SIZE]_[9856B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[154]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: slow_path_breakdown]
 //======================================================================
 // [END_STRUCT]_[NodeContextDisplayMeta]
 //======================================================================

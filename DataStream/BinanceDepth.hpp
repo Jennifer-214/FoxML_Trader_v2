@@ -79,11 +79,11 @@ template <unsigned F> inline BookSnapshot<F> BookSnapshot_Init() {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[416B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[7]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: bids asks]
 //======================================================================
 // [END_STRUCT]_[BookSnapshot]
 //======================================================================
@@ -148,11 +148,11 @@ template <unsigned F> struct DepthSharedState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[1056B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[17]
-// [STRADDLE]_[none]
+// [STRADDLE]_[symbol@880 · unverified: snapshots]
 //======================================================================
 // [END_STRUCT]_[DepthSharedState]
 //======================================================================

@@ -184,9 +184,9 @@ template <unsigned F> struct CumDeltaState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [CACHE_LINES]_[257]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: samples]
 //----------------------------------------------------------------------
 // [SIZE]_[16416B]
 // [ALIGN]_[16]

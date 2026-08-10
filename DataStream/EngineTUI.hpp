@@ -1519,11 +1519,11 @@ struct TUISharedState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[62592B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[978]
-// [STRADDLE]_[none]
+// [STRADDLE]_[swap_strategy_requested@58168 · kill_reset_per_node@58184 · manual_close_requested@58248]
 //======================================================================
 // [END_STRUCT]_[TUISharedState]
 //======================================================================

@@ -3118,11 +3118,11 @@ struct TrainingPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[500624B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[7823]
-// [STRADDLE]_[none]
+// [STRADDLE]_[run_name@13369 · tm_phase_msg@25568 · ui_horizon_list@406776 · ui_tp_pct_csv@406812 · ui_sl_pct_csv@406876 · ui_sl_per_horizon@406972 · mh_horizon_complete@499432 · ui_label_kind_csv@500524 · ui_label_kind_per_horizon@500588]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================

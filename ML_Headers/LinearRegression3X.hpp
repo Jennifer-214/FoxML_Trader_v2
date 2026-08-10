@@ -76,11 +76,11 @@ template <unsigned F> struct RegressionFeederX {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-10]
 // [SIZE]_[144B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[3]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: price_samples]
 //======================================================================
 // [END_STRUCT]_[RegressionFeederX]
 //======================================================================
