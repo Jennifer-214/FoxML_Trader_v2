@@ -161,7 +161,7 @@
 //----------------------------------------------------------------------
 // [ROW_COUNT]_[<tool: 4 (+1 EmaCross when private/ present)>]
 // [ENROLLED]_[MetaRegistry.hpp]
-// [CONSUMERS]_[[StrategyId] [strategy-name-table] [StrategyParameters_Dispatch]]
+// [CONSUMERS]_[[StrategyId] [STRATEGY_SHORT_NAMES] [STRATEGY_FULL_NAMES] [Strategy_InitPerCore] [Strategy_AdaptPerCore] [Strategy_ExitAdjustPerCore] [Strategy_FreePerCore]]
 //======================================================================
 // [END_REGISTRY]_[FOREACH_STRATEGY]
 //======================================================================

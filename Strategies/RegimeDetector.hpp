@@ -12,7 +12,7 @@
 // [DIAGRAM]
 //   slow_state{RollingStats x2, ROR, flow, depth} -> RegimeSignals -> Regime_Classify -> regime -> Regime_ToStrategy
 // [CONTAINS]_[[RegimeSignals] [CumDeltaState] [TickRateState] [RegimeState] [Regime_Classify] [Regime_ToStrategy]]
-// [CONSUMERS]_[[EventLoop_RebuildOneCore] [StrategyParameters_Dispatch]]
+// [CONSUMERS]_[[EventLoop_RebuildOneCore] [BacktestSharded_Run] [Strategy_InitPerCore] [Strategy_AdaptPerCore] [Strategy_ExitAdjustPerCore] [Strategy_FreePerCore] [ML_BuildParameters] [FeatureComputeCtx]]
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
@@ -148,7 +148,7 @@ template <unsigned F> struct RegimeSignals {
 // [STRADDLE]_[none]
 //----------------------------------------------------------------------
 // [UPSTREAM]_[[FPN_Binary]]
-// [CONSUMERS]_[[Regime_ComputeSignals] [Regime_Classify] [BacktestSharded_Run] [EventLoop_RebuildOneCore] [FeatureComputeCtx] [ModelFeatures_Pack] [MLStrategy_BuySignal] [ML_BuildParameters]]
+// [CONSUMERS]_[[Regime_ComputeSignals] [Regime_Classify] [BacktestSharded_Run] [EventLoop_RebuildOneCore] [FeatureComputeCtx] [ModelFeatures_Pack] [MLStrategy_BuySignal] [ML_BuildParameters] [PortfolioController] [PortfolioController_Tick]]
 //======================================================================
 // [END_STRUCT]_[RegimeSignals]
 //======================================================================
@@ -191,7 +191,7 @@ template <unsigned F> struct CumDeltaState {
 // [SIZE]_[16416B]
 // [ALIGN]_[16]
 // [UPSTREAM]_[[FPN_Binary]]
-// [CONSUMERS]_[[CumDelta_Init] [CumDelta_Push] [Regime_ComputeSignals] [BacktestSharded_Run] [NodeSlowState] [EventLoop_RebuildOneCore] [PortfolioController_Init] [ShardedBacktestDriver] [ML_BuildParameters]]
+// [CONSUMERS]_[[CumDelta_Init] [CumDelta_Push] [Regime_ComputeSignals] [BacktestSharded_Run] [NodeSlowState] [EventLoop_RebuildOneCore] [PortfolioController_Init] [PortfolioController] [ShardedBacktestDriver] [ML_BuildParameters]]
 //======================================================================
 // [END_STRUCT]_[CumDeltaState]
 //======================================================================
