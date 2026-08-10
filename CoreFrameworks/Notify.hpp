@@ -134,6 +134,8 @@ struct NotifyEvent {
 // [STRUCT]_[NotifyState]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [MONITORING_PLANE] [LIVE_TRADING]]
+// [THREAD]_[[ANY_THREAD_WRITER] [WORKER_READER]]
+// [STRADDLE_EXEMPT]_[cond]_[mutex-guarded cold MPSC — lock+cond intentionally adjacent, all access serialized by the lock; off every trading path per OVERVIEW — D-414 leaf-3 2026-08-10]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[mutex+condvar MPSC ring (any thread enqueues, one worker drains) + per-kind cooldown + backend hook; g_notify inline global — null in backtest/tests]
 //======================================================================

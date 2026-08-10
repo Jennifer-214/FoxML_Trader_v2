@@ -867,6 +867,9 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
 // [STRUCT]_[TUISnapshot]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [MONITORING_PLANE] [CONCURRENCY]]
+// [THREAD]_[[SLOW_PATH_WRITER] [TUI_READER]]
+// [STRADDLE_EXEMPT]_[strat_stats]_[seqlock-published bulk-copy record — writer publishes whole, readers copy whole (ReadInto); no per-field concurrent access, straddle affects copy bandwidth only — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[per_node]_[seqlock-published bulk-copy record — same rationale as strat_stats; element-uniform PerNodeSnap array — D-414 leaf-3 2026-08-10]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[THE engine->display data contract — full dashboard state incl. the PerNodeSnap inner struct (per-core panel; alignas(64) bandit telemetry cluster) + the cluster-boundary assert; copied whole under the seqlock]
 //======================================================================
@@ -1091,6 +1094,10 @@ struct TUISnapshot {
     // [STRUCT]_[PerNodeSnap]
     //------------------------------------------------------------------
     // [TAG]_[[ENGINE] [MONITORING_PLANE]]
+    // [THREAD]_[[SLOW_PATH_WRITER] [TUI_READER]]
+    // [STRADDLE_EXEMPT]_[sp_breakdown_p50_ns]_[field of a seqlock-published bulk-copy record — no per-field concurrent access (whole-record publish/copy) — D-414 leaf-3 2026-08-10]
+    // [STRADDLE_EXEMPT]_[ensemble_n_updates_per_regime]_[field of a seqlock-published bulk-copy record — same rationale — D-414 leaf-3 2026-08-10]
+    // [STRADDLE_EXEMPT]_[thompson_precision_post]_[field of a seqlock-published bulk-copy record — same rationale — D-414 leaf-3 2026-08-10]
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[the per-node TUI display record — hot/slow latency quartiles + strategy/halt reason + gate flags + gate diagnostics + ML observability; one per execution node, published tear-free via the seqlock]
     //==================================================================

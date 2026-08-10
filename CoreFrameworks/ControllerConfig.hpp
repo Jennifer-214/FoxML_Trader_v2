@@ -425,6 +425,13 @@ static_assert(sizeof(PerNodeCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
 // [STRUCT]_[ControllerConfig]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING] [DETERMINISM]]
+// [THREAD]_[[PRODUCER_RELOAD_WRITER] [DRAINER_READER] [SLOW_READER]]
+// [STRADDLE_EXEMPT]_[horizon_list]_[read-shared steady state — cfg written only at boot/hot-reload, no per-tick writes ⇒ no false-sharing ping-pong; the torn-READ hazard of the reload write is tracked separately (D-414 NEW-hole-6 → E.1.3) — 2026-08-10]
+// [STRADDLE_EXEMPT]_[node_time_exit_ticks]_[read-shared steady state — same rationale as horizon_list — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[nodes]_[read-shared steady state; element-uniform PerNodeCfg array (name-sugar unresolvable only) — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[node_risk_pct]_[read-shared steady state; 16B Money elements are 16-aligned and can never cross a 64B line — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[node_max_drawdown_pct]_[read-shared steady state; 16B Money elements are 16-aligned and can never cross a 64B line — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[node_overrides]_[read-shared steady state; element-uniform PerNodeOverrides array (name-sugar unresolvable only) — D-414 leaf-3 2026-08-10]
 // [REFERENCE]_[INVARIANT]_[[H12] [H9] [H17]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the flat cfg root — SHA-256 hashed RAW into model lineage (ctor zero-fills padding: identical VALUES must hash identically); nodes[] per-node slices + flat fields in shadow-window migration]

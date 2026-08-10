@@ -62,6 +62,7 @@ namespace tt {
 // [STRUCT]_[LatencyHistogram]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [MONITORING_PLANE] [CONCURRENCY]]
+// [THREAD]_[[HOT_WRITER] [PUBLISHER_READER]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[576B / 9 cache lines — 8 hot writer-side bucket lines + 1 cold cross-thread observability line (relaxed-atomic total_count, non-atomic extremes)]
 //======================================================================

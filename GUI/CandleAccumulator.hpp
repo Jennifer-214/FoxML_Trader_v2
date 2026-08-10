@@ -54,6 +54,9 @@ struct Candle {
 // [STRUCT]_[CandleAccumulator]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [CONCURRENCY]]
+// [THREAD]_[[PRODUCER_WRITER] [GUI_READER]]
+// [STRADDLE_EXEMPT]_[current]_[mutex-guarded GUI candle ring — all cross-thread access serialized by the adjacent lock; display plane — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[lock]_[the mutex itself — serializes every access to this struct; a straddling lock costs one extra line on lock/unlock only (display plane) — D-414 leaf-3 2026-08-10]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ring of completed candles + the in-progress candle + running VWAP, guarded by a mutex for the WS-writer / GUI-reader split]
 //======================================================================

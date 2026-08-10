@@ -217,6 +217,7 @@ struct SamplesSnapshot {
 // [STRUCT]_[RunControlState]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
+// [THREAD]_[[RUN_WORKER_WRITER] [GUI_READER]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[state for the Run Control panel — the worker thread, run config + results, snapshot, and candle feed]
 //======================================================================
@@ -2588,6 +2589,7 @@ static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestRe
 // [STRUCT]_[OptimizerPanelState]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
+// [THREAD]_[[OPT_WORKER_WRITER] [GUI_READER]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[state for the Optimizer panel — the two sweep ranges + the results grid + the worker]
 //======================================================================
@@ -2915,6 +2917,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 // [STRUCT]_[TrainingPanelState]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
+// [THREAD]_[[TRAIN_WORKER_WRITER] [GUI_READER]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[state for the Training panel — every training / validation / multi-horizon knob and worker handle]
 //======================================================================

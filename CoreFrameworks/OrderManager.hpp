@@ -260,6 +260,10 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [DATA_ORIENTED_DESIGN]]
 // [THREAD]_[[DRAINER_WRITER] [WORKER_PRODUCER] [GUI_READER] [SLOW_WRITER]]
+// [STRADDLE_EXEMPT]_[orders]_[element-uniform Order record pool (elements span >64B inherently — the >64B rule applies per element); name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[submit_queues]_[element-uniform SPSC ring array (elements span >64B inherently); name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[last_exit_fill_price]_[16B Money elements, 16-aligned — elements can never cross a 64B line; name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[last_exit_fee]_[16B Money elements, 16-aligned — elements can never cross a 64B line; name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
 // [SYNC]_[SPSC]
 // [SYNC]_[ATOMIC]
 // [REFERENCE]_[INVARIANT]_[[H3] [H6]]

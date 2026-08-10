@@ -130,6 +130,7 @@ struct PendingSubmission {
 // [STRUCT]_[BinanceAdapterState]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [OMS_DRAINER]]
+// [THREAD]_[[DRAINER_WRITER] [ADAPTER_WORKER_READER]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-thread BinanceOrderAPI slots (workers_api[i] owned by worker i — no locks, no sharing) + SPSC submission queue + shutdown/ws_active atomics]
 //======================================================================

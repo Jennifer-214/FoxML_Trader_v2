@@ -300,6 +300,7 @@ static_assert(sizeof(SlowPathTelemetry) == 64,
 // [STRUCT]_[NodeContext]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [DATA_ORIENTED_DESIGN]]
+// [THREAD]_[[SLOW_PATH_WRITER] [TUI_READER]]
 // [REGION]_[HOT cluster — every slow-path cycle; decision-first, gate_state at offset 0]
 // [REGION]_[WARM cluster — per-event/per-fill accounting; entries_processed anchors (64B-locked)]
 // [REGION]_[COLD cluster — display/cross-thread/lifetime; sp_telemetry anchors (64B-locked)]
@@ -745,6 +746,7 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [MONITORING_PLANE] [DATA_ORIENTED_DESIGN]]
 // [THREAD]_[[SLOW_WRITER] [PRODUCER_READER]]
+// [STRADDLE_EXEMPT]_[slow_path_breakdown]_[element-uniform NodeLatencyStats record array (display/diag plane; per-element layout governed by its own block); name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
 // [REFERENCE]_[DESIGN_SPEC]_[display-execution-invariant-registry-pattern]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[registry-generated display-only sibling of NodeContext (parallel array by index) — keeps ~9-10KB of cold display data out of the HOT working set]

@@ -122,6 +122,9 @@ struct DepthStream {
 // [STRUCT]_[DepthSharedState]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [THREAD]_[[DEPTH_WS_WRITER] [PRODUCER_READER]]
+// [STRADDLE_EXEMPT]_[symbol]_[init-only symbol string — written once at boot, read-shared thereafter — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[snapshots]_[double-buffered BookSnapshot pair — access mediated by the atomic active_idx publish protocol (writer touches only the inactive buffer); element-uniform — D-414 leaf-3 2026-08-10]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[engine reads / depth thread writes — double-buffered snapshots + atomic active_idx + quit flag + connection cfg + nullable recorder]
 // [INSTANTIATION]_[[64]]

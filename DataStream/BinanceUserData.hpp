@@ -82,6 +82,9 @@ namespace tt {
 // [STRUCT]_[BinanceUserDataState]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [THREAD]_[[UD_WS_WRITER] [ENGINE_READER]]
+// [STRADDLE_EXEMPT]_[ws_host]_[init-only host string — written once at boot, read-shared thereafter (no steady-state writes ⇒ no ping-pong) — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[rest_host]_[init-only host string — written once at boot, read-shared thereafter (no steady-state writes ⇒ no ping-pong) — D-414 leaf-3 2026-08-10]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[WS-thread-owned connection state + dedicated REST instance (listen key) + the OMS SPSC ring pointer + shutdown/keepalive flags + atomic TUI observability counters]
 //======================================================================
