@@ -8,6 +8,7 @@ build_suite_asan/
 build_tsan/
 build_asan/
 build_gui_asan/
+build_clangd/
 # v4.3 — symlinks to latest canonical binaries; build.sh maintains
 bin/
 vendor/
