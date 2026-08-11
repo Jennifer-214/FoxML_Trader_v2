@@ -184,6 +184,8 @@ inline NotifyState *g_notify = nullptr;
 // [ALIGN]_[8]
 // [CACHE_LINES]_[661]
 // [STRADDLE]_[cond@40]
+// [UPSTREAM]_[[NotifyBackendFn] [NotifyEvent]]
+// [CONSUMERS]_[[notify_worker_fn] [NotifyState_Init] [Notify_Send] [NotifyState_Shutdown] [EngineSharded_Run] [EngineSharded_OrphanRecovery] [EngineSharded_ForceCloseOnShutdown]]
 //======================================================================
 // [END_STRUCT]_[NotifyState]
 //======================================================================
