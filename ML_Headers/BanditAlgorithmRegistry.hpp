@@ -33,7 +33,7 @@
 // [COLUMN]_[drives]_[EXP3 | THOMPSON | BLENDED — which algo drives decisions; auto-derives slow-path gate predicates]
 // [COLUMN]_[doc_string]_[operator-facing description for cfg.example + GUI tooltip]
 // [REFERENCE]_[DESIGN_SPEC]_[curve-registry-pattern]
-// [REFERENCE]_[DESIGN_SPEC]_[multi-state-dispatch-with-per-state-update-metadata]
+// [REFERENCE]_[DESIGN_SPEC]_[[multi-state-dispatch-with-per-state-update-metadata] [curve-registry-pattern.md]]
 // [REFERENCE]_[INVARIANT]_[[H15] [H20] [H21]]
 // [REFERENCE]_[CLASS]_[[24] [27] [28]]
 //======================================================================

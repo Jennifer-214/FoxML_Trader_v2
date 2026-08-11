@@ -321,6 +321,7 @@ template <unsigned F> inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[quiesce-first init — stop any live writer, then mmap(MAP_POPULATE) the fixed-capacity entries buffer]
 // [REFERENCE]_[CLASS]_[50]
+// [REFERENCE]_[MEMORY]_[feedback_fix_toward_future_trajectory_not_static_state]
 //======================================================================
 // [CODE]
 //======================================================================

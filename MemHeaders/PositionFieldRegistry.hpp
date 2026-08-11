@@ -27,7 +27,7 @@
 // [COLUMN]_[init]_[Position_Init value]
 // [COLUMN]_[persist_kind]_[PERSIST = in the Portfolio wire format; SKIP_PERSIST = struct-only, cleared on Init]
 // [COLUMN]_[doc]_[cache-tier + semantics note]
-// [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
+// [REFERENCE]_[DESIGN_SPEC]_[[wire-format-byte-preservation-discipline] [hot-side-array-element-alignment-for-sparse-access.md] [persisted-struct-with-ephemeral-field-coexistence-pattern.md] [pre-post-cfg-registry-split-for-emit-order-preservation.md] [slot-state-foreach-registry-with-storage-routing.md]]
 // [REFERENCE]_[INVARIANT]_[H21]
 //======================================================================
 // [CODE]

@@ -22,7 +22,7 @@
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
 // [REFERENCE]_[DESIGN_SPEC]_[heterogeneous-registry-pattern]
-// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api] [cfg-flag-eligibility-criteria.md] [heterogeneous-registry-pattern.md]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-023] [TECH_DEBT-9]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[operational-mechanic boolean cfg flags — one row = enum bit + mask + parser route + GUI render]

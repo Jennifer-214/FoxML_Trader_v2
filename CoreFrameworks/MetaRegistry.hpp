@@ -17,7 +17,7 @@
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE]]
 // [REFERENCE]_[INVARIANT]_[[H15] [H19] [H18] [H21]]
-// [REFERENCE]_[DESIGN_SPEC]_[meta-registry-pattern-for-codebase-registry-discipline]
+// [REFERENCE]_[DESIGN_SPEC]_[[meta-registry-pattern-for-codebase-registry-discipline] [cfg-derived-consumer-framework.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ROOT registry of registries — enrollment (H15) + LEVEL/PARENT topology (H19), CI cross-checked]
 // [COLUMN]_[registry_name]_[the FOREACH_<X> macro identifier]

@@ -74,6 +74,7 @@ namespace tt {
 // [TAG]_[[ENGINE] [BACKTEST]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[convert a double-based HistoricalTick (Binance aggTrades) into a Tick<F> — once per tick on the single backtest thread, cost negligible vs the gate eval]
+// [REFERENCE]_[PLAN]_[parity-2026-05-06-full.md]
 //======================================================================
 // [CODE]
 //======================================================================

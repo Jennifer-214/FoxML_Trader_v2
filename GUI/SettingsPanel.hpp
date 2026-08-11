@@ -72,6 +72,7 @@ namespace tt {
 // [OVERVIEW]_[the type-erased per-field ImGui render dispatch — one template branch per cfg field-type family (FPN / decimal / float / int / array), widget chosen from the descriptor; the tt:: dispatch layer the render tables call with T deduced (Class-23 tt-dispatch)]
 // [REFERENCE]_[CLASS]_[24]
 // [REFERENCE]_[INVARIANT]_[[H13] [H14]]
+// [REFERENCE]_[DESIGN_SPEC]_[type-trait-dispatch-via-tt-namespace.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -790,6 +791,7 @@ static constexpr int MAX_GUI_NODES = 16;
 // [OVERVIEW]_[the Settings panel state — the loaded gui_engine_cfg, per-node strategy/model selections, the model-dir scan results, and dirty tracking]
 //======================================================================
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-63]
+// [REFERENCE]_[DESIGN_SPEC]_[universal-registry-bitmap-dispatcher-pattern.md]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -720,7 +720,7 @@ static inline double RollingCapacity_Compute(const RollingCapacity *c) {
 //   lines 18-26: rmse (RollingRMSE, 576B)
 //   lines 27:    freshness(16B) + capacity(24B) + rmse_baseline(8B) + pad(16B)
 // [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
-// [REFERENCE]_[DESIGN_SPEC]_[decision-first-cluster-layout-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[[decision-first-cluster-layout-pattern] [cache-layout-discipline-for-hot-side-structs.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1032,7 +1032,7 @@ static inline void ConfidenceScorer_MarkPredict(ConfidenceScorer *cs, uint64_t n
 // [COLUMN]_[compute_fn]_[the curve implementation wired into degradation_curve_fns[]]
 // [COLUMN]_[doc_string]_[operator-facing curve description]
 // [REFERENCE]_[DESIGN_SPEC]_[curve-registry-pattern]
-// [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+// [REFERENCE]_[DESIGN_SPEC]_[[x-macro-registry-with-presence-dispatch] [curve-registry-pattern.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1267,7 +1267,7 @@ static_assert(alignof(DriftSample) == 8, "DriftSample 8B aligned");
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[IC drift ring — HOT count/head/flags at line 0, COLD 4096B AoS sample ring at offset 16; bit-packed state flags (MASK_DRIFT_*)]
 // [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
-// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api] [cache-layout-discipline-for-hot-side-structs.md] [latency-vs-cache-decision-framework.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1406,7 +1406,7 @@ static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_
 // [COLUMN]_[type]_[element C type for sizeof in the fwrite/fread/memcpy expansion]
 // [COLUMN]_[count]_[element count — 1 for scalar, N for array]
 // [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth]
-// [REFERENCE]_[DESIGN_SPEC]_[autopopulate-pattern-for-production-caller-class]
+// [REFERENCE]_[DESIGN_SPEC]_[[autopopulate-pattern-for-production-caller-class] [postloadsetup-registry-pattern.md] [registry-tuple-as-single-source-of-truth.md] [sliding-window-online-statistics-pattern.md] [structural-fix-preferred-decision-framework.md]]
 // [REFERENCE]_[INVARIANT]_[H9]
 // [REFERENCE]_[CLASS]_[18]
 //======================================================================

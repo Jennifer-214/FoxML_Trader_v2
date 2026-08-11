@@ -50,6 +50,7 @@
 // [OVERVIEW]_[rolling-window stats state — read-heavy outputs clustered at struct head, write-side head/count isolated on a fresh line via alignas(64), ring buffers + monotonic deques behind]
 // [REFERENCE]_[INVARIANT]_[[H4] [H6]]
 // [REFERENCE]_[AUDIT]_[latency-optimization-part-2.4]
+// [REFERENCE]_[PLAN]_[2026-05-06-latency-path-discipline.md]
 //======================================================================
 // [CODE]
 //======================================================================

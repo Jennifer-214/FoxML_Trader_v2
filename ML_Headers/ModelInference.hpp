@@ -331,7 +331,7 @@ static inline int FeatureLookback_CountEnabled(void) {
 // [INSTANTIATION]_[[64]]
 // [REFERENCE]_[DESIGN_SPEC]_[per-snapshot-cluster-layout-pattern]
 // [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
-// [REFERENCE]_[DESIGN_SPEC]_[struct-padding-determinism-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[[struct-padding-determinism-pattern] [bitmap-flag-api.md]]
 // [REFERENCE]_[INVARIANT]_[[H12] [H18]]
 // [REFERENCE]_[CLASS]_[18]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-14]

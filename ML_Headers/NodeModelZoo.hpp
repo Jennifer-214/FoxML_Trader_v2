@@ -1147,7 +1147,7 @@ struct PerArmDrift {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the multi-horizon sidecar — 4 roles x 8 arms of handles + per-regime bandit/Thompson/Ridge state + reward ring + drift watchdogs, tiered HOT/WARM/COLD]
 // [INSTANTIATION]_[[64]]
-// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+// [REFERENCE]_[DESIGN_SPEC]_[[cache-layout-discipline-for-hot-side-structs] [sink-fn-pointer-for-optional-side-effect-pattern.md]]
 // [REFERENCE]_[CLASS]_[[24] [28]]
 //======================================================================
 // [CODE]
@@ -2084,6 +2084,7 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the multi-horizon loader — per horizon dir `<base>_horizon_<H>` try all 4 roles (horizon-mismatch refusal threaded), copy stamp barriers via the mask-coupled accessor, then pick the primary role]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-bitmap-set-discipline.md]
 //======================================================================
 // [CODE]
 //======================================================================

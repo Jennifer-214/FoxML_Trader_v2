@@ -73,13 +73,14 @@
 // [REGISTRY]_[FOREACH_CFG_DRIFT_CHECK]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
-// [REFERENCE]_[DESIGN_SPEC]_[dual-axis-y3-dispatch-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[[dual-axis-y3-dispatch-pattern] [wire-format-byte-preservation-discipline.md]]
 // [REFERENCE]_[CLASS]_[18]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[10-col tuple; Y3 axes: SEVERITY (WARN/TIER1/TIER2) x CATEGORY x COMPARE_KIND; 18 entries + count helper + test instrumentation]
 // [COLUMN]_[10-col tuple]_[see the entry-shape doc directly below]
 // [REFERENCE]_[PARITY]_[[PARITY-24] [PARITY-26]]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-9]
+// [REFERENCE]_[MEMORY]_[feedback_no_defer_for_effort]
 //======================================================================
 // [CODE]
 //======================================================================

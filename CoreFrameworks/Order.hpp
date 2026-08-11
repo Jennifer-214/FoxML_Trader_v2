@@ -210,7 +210,7 @@ static_assert(sizeof(OrderPreResolved<64>) == 48,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [DATA_ORIENTED_DESIGN]]
 // [THREAD]_[[DRAINER_WRITER]]
-// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+// [REFERENCE]_[DESIGN_SPEC]_[[cache-layout-discipline-for-hot-side-structs] [decision-first-cluster-layout-pattern.md] [decision-time-data-binding-pattern.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one in-flight exchange order — HOT cluster (ids/flags/money) + COLD exchange_id tail; size assert-locked]
 // [REFERENCE]_[CLASS]_[27]

@@ -111,6 +111,7 @@ enum RiskCategoryDefault   : uint16_t { RISK_CAT_ALL   = 0xFFFFu };
 // [OVERVIEW]_[the row descriptor — Kind is GUI-metadata ONLY (never drives storage, H13/H14 consolidated); MetadataFlag bits gate derived filters (H16); schema LOCKED at .F.4b]
 // [REFERENCE]_[CLASS]_[[21] [23]]
 // [REFERENCE]_[DECISION]_[[D-223] [D-254] [D-255]]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-overflow-protection-discipline.md] [categorical-tag-applicability-pattern.md] [cfg-scope-discipline.md] [latency-vs-cache-decision-framework.md] [metadata-bit-driven-derived-filter-framework.md] [type-trait-dispatch-via-tt-namespace.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -326,6 +327,8 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // [REFERENCE]_[CLASS]_[[21] [26]]
 // [REFERENCE]_[DECISION]_[[D-221] [D-256]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-68] [TECH_DEBT-93] [TECH_DEBT-237] [TECH_DEBT-238]]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth.md]
+// [REFERENCE]_[PLAN]_[2026-05-12-decoupling-endgoal-roadmap.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -570,6 +573,8 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // [COLUMN]_[tooltip + 4 applicability cats + lives_in_struct]_[GUI tooltip; categorical applicability; storage routing]
 // [REFERENCE]_[CLASS]_[[23] [24] [26] [32]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-68] [TECH_DEBT-82] [TECH_DEBT-93]]
+// [REFERENCE]_[DESIGN_SPEC]_[manual-fields-inventory-pattern.md]
+// [REFERENCE]_[MEMORY]_[feedback_cfg_field_categorization_at_registry_add_time]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1039,6 +1044,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // [OVERVIEW]_[sync sources for NO_FLAT_FIELD rows (no flat scalar exists) — legacy array -> nodes[c]; N=1 today (strategy <- node_strategies), applied per the future-easy multiplier]
 // [COLUMN]_[target_field]_[the NO_FLAT_FIELD-tagged row in FOREACH_PER_NODE_CFG_FIELD]
 // [COLUMN]_[source_array_field]_[the TRANSITIONAL parallel array on ControllerConfig]
+// [REFERENCE]_[MEMORY]_[feedback_overengineering_boundary_when_future_easier]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -119,6 +119,7 @@ inline LatencyHistogram g_engine_drainer_cycle_hist{};
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the producer per-tick body — fan a tick to every core's ring + telemetry + EMA + the slow-cadence services]
 // [REFERENCE]_[DECISION]_[[D-122] [D-130] [D-242] [D-256] [D-262] [D-270]]
+// [REFERENCE]_[PLAN]_[parity-2026-05-06-full.md]
 //======================================================================
 // [CODE]
 //======================================================================

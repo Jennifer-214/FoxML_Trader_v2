@@ -305,7 +305,7 @@ static_assert(sizeof(SlowPathTelemetry) == 64,
 // [REGION]_[WARM cluster — per-event/per-fill accounting; entries_processed anchors (64B-locked)]
 // [REGION]_[COLD cluster — display/cross-thread/lifetime; sp_telemetry anchors (64B-locked)]
 // [REFERENCE]_[INVARIANT]_[[H6] [H14]]
-// [REFERENCE]_[DESIGN_SPEC]_[[decision-first-cluster-layout-pattern] [cache-layout-discipline-for-hot-side-structs]]
+// [REFERENCE]_[DESIGN_SPEC]_[[decision-first-cluster-layout-pattern] [cache-layout-discipline-for-hot-side-structs] [cross-thread-snapshot-publish-cluster-isolation.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-node controller-side state — HOT/WARM/COLD clustered by access cadence; explicit alignas(64) + static_asserts lock the inter-slot false-sharing invariant locally]
 //======================================================================
@@ -747,7 +747,7 @@ static_assert(alignof(WsHeartbeatTelemetry) == 64,
 // [TAG]_[[ENGINE] [MONITORING_PLANE] [DATA_ORIENTED_DESIGN]]
 // [THREAD]_[[SLOW_WRITER] [PRODUCER_READER]]
 // [STRADDLE_EXEMPT]_[slow_path_breakdown]_[element-uniform NodeLatencyStats record array (display/diag plane; per-element layout governed by its own block); name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
-// [REFERENCE]_[DESIGN_SPEC]_[display-execution-invariant-registry-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[[display-execution-invariant-registry-pattern] [cache-layout-discipline-for-hot-side-structs.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[registry-generated display-only sibling of NodeContext (parallel array by index) — keeps ~9-10KB of cold display data out of the HOT working set]
 //======================================================================
@@ -874,6 +874,7 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the controller root — nodes[] + display_meta[] parallel arrays, event counters, the OMS back-pointer (ALL financial state routes through it), WS telemetry + engine-wide gate cache]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-13]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api.md] [cache-layout-discipline-for-hot-side-structs.md] [cross-thread-snapshot-publish-cluster-isolation.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -985,6 +986,7 @@ namespace tt {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[replay the OrderEventLog into per-node attribution (entries/exits/realized/fees/notional/W-L) — idempotent; closes the snapshot-vs-replay Class-18 mirror (.F.2 Budget -100% bug)]
 // [REFERENCE]_[DECISION]_[[D-190] [D-294]]
+// [REFERENCE]_[DESIGN_SPEC]_[[branchless-dispatch-discipline.md] [structural-fix-preferred-decision-framework.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1101,6 +1103,7 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
 // [TAG]_[[ENGINE] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[zero the dispatcher, install the OMS back-pointer, NODE_CTX_INIT_AUTOPOPULATE every slot, then reconstruct per-node attribution from any replayed event log; InitLegacy (tests) + Free share the section]
+// [REFERENCE]_[DESIGN_SPEC]_[structural-fix-preferred-decision-framework.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1298,6 +1301,7 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the slot<->node geometry family — Sharded_LegSlot / NodeSlotMask / SlotNode (THE canonical slot->node accessor, pre-commit Check O enforced) / ValidatePartialExitCfg share this section]
 // [REFERENCE]_[DECISION]_[[D-294] [D-295] [D-296]]
+// [REFERENCE]_[PLAN]_[partial-exits-sharded.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1599,6 +1603,7 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 // [REFERENCE]_[CLASS]_[[24] [25]]
 // [REFERENCE]_[DECISION]_[D-190]
 // [REFERENCE]_[PARITY]_[PARITY-2]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api.md] [decision-time-data-binding-pattern.md] [phase-separated-drainer-for-safe-cross-temporal-derives.md] [slot-state-foreach-registry-with-storage-routing.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2118,6 +2123,7 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one TradeEvent -> portfolio/balance/stats; combined-mask single-guard dispatch; mode-1 (production) routes through OMS_PushSubmit and returns early — the mode-0 body is legacy/test bookkeeping]
 // [REFERENCE]_[DECISION]_[D-202]
+// [REFERENCE]_[DESIGN_SPEC]_[adversarial-pessimistic-simulation-discipline.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2584,6 +2590,7 @@ inline void EventLoop_UpdateEmaPriceAllCores(
 // [REFERENCE]_[DECISION]_[[D-170] [D-190] [D-211] [D-221]]
 // [REFERENCE]_[PARITY]_[PARITY-1]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-40]
+// [REFERENCE]_[DESIGN_SPEC]_[representation-migration-completeness.md]
 //======================================================================
 // [CODE]
 //======================================================================

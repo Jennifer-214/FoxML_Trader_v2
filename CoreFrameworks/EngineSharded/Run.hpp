@@ -419,6 +419,7 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
 // [REFERENCE]_[DECISION]_[[D-103] [D-221]]
 // [REFERENCE]_[PARITY]_[[PARITY-9] [PARITY-12] [PARITY-23] [PARITY-26] [PARITY-27] [PARITY-28] [PARITY-29] [PARITY-30] [PARITY-32]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-2] [TECH_DEBT-119]]
+// [REFERENCE]_[DESIGN_SPEC]_[[cfg-scope-discipline.md] [decision-time-data-binding-pattern.md] [phase-separated-drainer-for-safe-cross-temporal-derives.md] [shadow-load-state-transition-pattern.md] [sink-fn-pointer-for-optional-side-effect-pattern.md]]
 //======================================================================
 // [CODE]
 //======================================================================

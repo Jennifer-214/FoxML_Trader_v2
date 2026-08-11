@@ -23,7 +23,7 @@ namespace tt {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
 // [REFERENCE]_[DESIGN_SPEC]_[cfg-flag-eligibility-criteria]
-// [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
+// [REFERENCE]_[DESIGN_SPEC]_[[x-macro-registry-with-presence-dispatch] [cfg-flag-eligibility-criteria.md]]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-040]
 // [REFERENCE]_[INVARIANT]_[H20]
 // [SCHEMA]_[v1.0]

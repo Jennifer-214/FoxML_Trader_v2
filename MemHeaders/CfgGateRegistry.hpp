@@ -500,6 +500,7 @@ namespace cfg_derived {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[stamp-vs-runtime drift check via the meta-walker — branchless mask-select trigger (H20) + first-failure-wins reason attribution; caller passes pre-extracted stamp_has + failure_mask]
 // [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[DESIGN_SPEC]_[failure-attribution-buffer-pattern.md]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -23,7 +23,7 @@
 // [TAG]_[[ENGINE] [CFG_FLOW] [BITMAP_PACKED]]
 // [REFERENCE]_[DESIGN_SPEC]_[heterogeneous-registry-pattern]
 // [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
-// [REFERENCE]_[DESIGN_SPEC]_[autopopulate-pattern-for-production-caller-class]
+// [REFERENCE]_[DESIGN_SPEC]_[[autopopulate-pattern-for-production-caller-class] [bitmap-flag-api.md] [heterogeneous-registry-pattern.md]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-023] [TECH_DEBT-024] [TECH_DEBT-13]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[position-exit-mechanic boolean cfg flags — one row = enum bit + mask + parser + cfg.example + GUI, all auto-flow]

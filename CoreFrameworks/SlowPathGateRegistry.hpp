@@ -27,7 +27,7 @@ namespace tt {
 // [TAG]_[[ENGINE] [SLOW_PATH] [CFG_FLOW] [BITMAP_PACKED]]
 // [REFERENCE]_[DESIGN_SPEC]_[slow-path-gate-registry-pattern]
 // [REFERENCE]_[DESIGN_SPEC]_[x-macro-registry-with-presence-dispatch]
-// [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api] [slow-path-gate-registry-pattern.md]]
 // [REFERENCE]_[INVARIANT]_[H20]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[cfg-toggleable slow-path gates — scope column dispatches PER_NODE (resolved cfg) vs ENGINE_WIDE (global cfg)]

@@ -75,6 +75,7 @@ namespace tt {
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[text -> typed cfg field; exact decimal Money parse (never via double), PCT scaling cfg-file-only (wire_context flag), malformed-money/feature fault capture, INT_ENUM label lookup]
     // [REFERENCE]_[DECISION]_[[D-102] [D-254] [D-256] [D-259] [D-261]]
+    // [REFERENCE]_[DESIGN_SPEC]_[type-trait-dispatch-via-tt-namespace.md]
     //======================================================================
     // [CODE]
     //======================================================================
@@ -259,6 +260,7 @@ namespace tt {
     // [REFERENCE]_[INVARIANT]_[[H13] [H9]]
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[typed -> operator-readable cfg-file text — exact decimal Money (never %.Nf), PCT x100 form, LC_NUMERIC=C pinned]
+    // [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline.md]
     //======================================================================
     // [CODE]
     //======================================================================
@@ -484,6 +486,7 @@ namespace tt {
     // [REFERENCE]_[INVARIANT]_[[H13] [H9]]
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[typed -> HMAC wire-format "name=value\n" — exact decimal Money string on the wire, %.17g lossless binary, LC_NUMERIC=C pinned]
+    // [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline.md]
     //======================================================================
     // [CODE]
     //======================================================================

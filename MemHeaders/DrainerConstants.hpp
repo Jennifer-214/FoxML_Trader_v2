@@ -70,6 +70,7 @@ namespace tt {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[16B size-descending POD — registered_count + derived drain_count + partial_on, 7B trailing slack; drainer-thread-local (deliberately NO alignas(64))]
 // [REFERENCE]_[CLASS]_[27]
+// [REFERENCE]_[DESIGN_SPEC]_[function-struct-alignment-for-single-mov-access.md]
 //======================================================================
 // [CODE]
 //======================================================================

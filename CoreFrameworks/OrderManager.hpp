@@ -267,7 +267,7 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // [SYNC]_[SPSC]
 // [SYNC]_[ATOMIC]
 // [REFERENCE]_[INVARIANT]_[[H3] [H6] [H20]]
-// [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+// [REFERENCE]_[DESIGN_SPEC]_[[cache-layout-discipline-for-hot-side-structs] [aggressive-memory-reduction-techniques.md] [bitmap-flag-api.md] [decision-time-data-binding-pattern.md] [hot-side-array-element-alignment-for-sparse-access.md] [multi-bit-state-encoding-pattern.md] [raii-destructor-with-cluster-reorg-interaction.md] [sink-fn-pointer-for-optional-side-effect-pattern.md] [slot-state-foreach-registry-with-storage-routing.md] [spsc-ring-embedded-in-hot-struct-cluster-discipline.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the OMS facade — order table + rings + the money books, HOT/WARM/COLD tier-clustered, assert-anchored]
 // [REGION]_[HOT cluster — drainer per-cycle]_[orders..event_log]
@@ -1048,7 +1048,7 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 // [FUNCTION]_[OrderManager_Submit]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
-// [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[[decision-time-data-binding-pattern] [adversarial-pessimistic-simulation-discipline.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[allocate slot + bind pre-resolved cfg + async adapter submit (or paper synth fill) — returns immediately]
 // [REFERENCE]_[CLASS]_[46]
@@ -1353,6 +1353,7 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
 // [REFERENCE]_[CLASS]_[18]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ONE fee-bookkeeping body — branchless maker/taker counters + fee buckets; Class-18 mirror close]
+// [REFERENCE]_[DESIGN_SPEC]_[branchless-dispatch-discipline.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1442,6 +1443,7 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[entry fill — open portfolio slot at the ACTUAL fill (per-fill TP anchor) + fee bookkeeping + entry emit]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-154]
+// [REFERENCE]_[DESIGN_SPEC]_[sink-fn-pointer-for-optional-side-effect-pattern.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1999,6 +2001,7 @@ inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[open the calibration CSV (v5.13.0.B) + wire the Pattern-5 calib sink to real; non-fatal on failure]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-10]
+// [REFERENCE]_[DESIGN_SPEC]_[sink-fn-pointer-for-optional-side-effect-pattern.md]
 //======================================================================
 // [CODE]
 //======================================================================

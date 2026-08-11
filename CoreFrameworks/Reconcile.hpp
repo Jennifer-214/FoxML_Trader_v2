@@ -238,7 +238,7 @@ inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
 // [FUNCTION]_[Reconcile_ApplyMissedFills]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
-// [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
+// [REFERENCE]_[DESIGN_SPEC]_[[decision-time-data-binding-pattern] [branchless-dispatch-discipline.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[replay trades newer than the watermark through the canonical HandleFill path — idempotent, branchless origin-node bitmap search, per-node fee pre-resolution]
 // [REFERENCE]_[CLASS]_[27]

@@ -314,7 +314,7 @@ template <unsigned F> struct PerNodeOverrides {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [DATA_ORIENTED_DESIGN]]
 // [REFERENCE]_[INVARIANT]_[[H17] [H22] [H4] [H15]]
-// [REFERENCE]_[DESIGN_SPEC]_[[manual-fields-inventory-pattern] [meta-registry-pattern-for-codebase-registry-discipline]]
+// [REFERENCE]_[DESIGN_SPEC]_[[manual-fields-inventory-pattern] [meta-registry-pattern-for-codebase-registry-discipline] [per-instance-registry-pattern.md] [per-snapshot-cluster-layout-pattern.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the per-node cfg slice (v5.15.5.F.4c.3 first canonical of the per-instance registry pattern) — body is X-macro ONLY (H17, CI-enforced) + size-bound static_asserts close the manual-field hole]
 //======================================================================
@@ -439,6 +439,7 @@ static_assert(sizeof(PerNodeCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
 // [REFERENCE]_[DECISION]_[[D-218] [D-254]]
 // [REFERENCE]_[PARITY]_[[PARITY-14] [PARITY-35]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-4] [TECH_DEBT-93]]
+// [REFERENCE]_[DESIGN_SPEC]_[[cfg-flag-eligibility-criteria.md] [cfg-scope-discipline.md] [heterogeneous-registry-pattern.md] [per-instance-registry-pattern.md] [universal-cfg-field-registry-pattern.md]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1431,6 +1432,7 @@ template <unsigned F> struct ControllerConfig {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the capital-fault family (D-254/D-256) — fingerprint size-pin, cfg_compile_ok predicate + cfg_capital_gate_ok report, value-range sweep with compile-time variant-coverage guards; refuse-never-clamp]
 // [REFERENCE]_[DECISION]_[[C-1] [C-5] [D-254] [D-255] [D-256] [D-260] [D-266] [D-269] [D-275] [D-276]]
+// [REFERENCE]_[MEMORY]_[project_no_live_models_dev_test_only]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1757,6 +1759,7 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[Step-2 shadow populate — resolved flat view copied into cfg->nodes[c] (X-macro walker + NO_FLAT_FIELD sync + legacy capital-array LAST-WINS merge); dissolves when the [core N] parser lands]
 // [REFERENCE]_[DECISION]_[D-273]
+// [REFERENCE]_[DESIGN_SPEC]_[autopopulate-pattern-for-production-caller-class.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1847,6 +1850,7 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
 // [OVERVIEW]_[the default cfg — registry auto-defaults (global + per-node mirrors) first, then the documented KEEP manual lines where registry defaults diverge on purpose]
 // [REFERENCE]_[DECISION]_[[D-203] [D-218]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-4] [TECH_DEBT-24] [TECH_DEBT-93] [TECH_DEBT-107]]
+// [REFERENCE]_[DESIGN_SPEC]_[adversarial-pessimistic-simulation-discipline.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2348,6 +2352,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 // [OVERVIEW]_[v5.15.4 mode-normalize — LIVE flips defaults stricter unless the operator set the key explicitly (cfg_keys_explicit bitmap); IsLiveCapital (THE capital-authority predicate, Class-47 close) shares the section]
 // [REFERENCE]_[CLASS]_[47]
 // [REFERENCE]_[INVARIANT]_[[H21] [H22]]
+// [REFERENCE]_[DESIGN_SPEC]_[single-authority-predicate-for-mode-gating.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2427,6 +2432,7 @@ inline bool ControllerConfig_IsLiveCapital(const ControllerConfig<F>& cfg) {
 // [REFERENCE]_[CLASS]_[23]
 // [REFERENCE]_[DECISION]_[[D-217] [D-218] [D-223] [D-253] [D-255]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-4] [TECH_DEBT-9] [TECH_DEBT-68] [TECH_DEBT-82] [TECH_DEBT-93]]
+// [REFERENCE]_[DESIGN_SPEC]_[type-trait-dispatch-via-tt-namespace.md]
 //======================================================================
 // [CODE]
 //======================================================================

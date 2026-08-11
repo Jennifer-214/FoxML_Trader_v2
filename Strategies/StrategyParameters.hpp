@@ -850,6 +850,7 @@ inline void EmaCross_BuildParameters(
 // [REFERENCE]_[CLASS]_[[18] [24] [25] [27] [28]]
 // [REFERENCE]_[DECISION]_[D-170]
 // [REFERENCE]_[PARITY]_[PARITY-1]
+// [REFERENCE]_[DESIGN_SPEC]_[[cfg-scope-discipline.md] [sliding-window-online-statistics-pattern.md]]
 //======================================================================
 // [CODE]
 //======================================================================

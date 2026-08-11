@@ -48,7 +48,7 @@
 // [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL] [PERSISTENCE]]
 // [THREAD]_[[SLOW_WRITER] [SLOW_READER]]
 // [REFERENCE]_[INVARIANT]_[[H9] [H12] [H21]]
-// [REFERENCE]_[DESIGN_SPEC]_[hot-side-array-element-alignment-for-sparse-access]
+// [REFERENCE]_[DESIGN_SPEC]_[[hot-side-array-element-alignment-for-sparse-access] [slot-state-foreach-registry-with-storage-routing.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the canonical position record — registry-generated fields, wire-persisted 128B prefix, layout-locked]
 // [REFERENCE]_[DECISION]_[D-295]
@@ -619,6 +619,7 @@ inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
 // [REFERENCE]_[INVARIANT]_[H4]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[THE canonical price-diff gross — 1-mul form, single-sourced so per-core/OMS/replay accounting cannot drift]
+// [REFERENCE]_[MEMORY]_[feedback_single_source_the_computation_not_just_the_mode]
 //======================================================================
 // [CODE]
 //======================================================================

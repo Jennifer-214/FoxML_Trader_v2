@@ -74,6 +74,7 @@
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-arm mu/precision posteriors + pull counts + the deterministic PRNG state]
+// [REFERENCE]_[DESIGN_SPEC]_[struct-padding-determinism-pattern.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -125,6 +126,7 @@ struct ThompsonBanditState {
 // [OVERVIEW]_[splitmix64 -> Box-Muller -> one posterior draw per arm -> argmax; Init/Update (closed-form Bayes) + Pattern-5 sink wrappers + probability/softmax read-outs share the section]
 // [REFERENCE]_[CLASS]_[[24] [28]]
 // [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[DESIGN_SPEC]_[[branchless-dispatch-discipline.md] [sink-fn-pointer-for-optional-side-effect-pattern.md]]
 //======================================================================
 // [CODE]
 //======================================================================

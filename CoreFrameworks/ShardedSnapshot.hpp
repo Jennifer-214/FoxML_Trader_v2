@@ -50,6 +50,7 @@
 // [REFERENCE]_[DECISION]_[D-221]
 // [REFERENCE]_[INVARIANT]_[H20]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-13] [TECH_DEBT-28]]
+// [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api.md] [latency-vs-cache-decision-framework.md]]
 //======================================================================
 // [CODE]
 //======================================================================

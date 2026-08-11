@@ -873,6 +873,7 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[THE engine->display data contract — full dashboard state incl. the PerNodeSnap inner struct (per-core panel; alignas(64) bandit telemetry cluster) + the cluster-boundary assert; copied whole under the seqlock]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-11]
+// [REFERENCE]_[DESIGN_SPEC]_[per-snapshot-cluster-layout-pattern.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1102,6 +1103,7 @@ struct TUISnapshot {
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[the per-node TUI display record — hot/slow latency quartiles + strategy/halt reason + gate flags + gate diagnostics + ML observability; one per execution node, published tear-free via the seqlock]
     // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-13] [TECH_DEBT-28]]
+    // [REFERENCE]_[DESIGN_SPEC]_[per-snapshot-cluster-layout-pattern.md]
     //==================================================================
     // [CODE]
     //==================================================================
@@ -1915,6 +1917,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
 // [TAG]_[[ENGINE] [MONITORING_PLANE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the sharded populator family (PerCoreSlowPathLatency / AdvancedTopology / Topology ride) — templated on CoresT/StateT/OmsT so this header stays free of engine-type includes]
+// [REFERENCE]_[DESIGN_SPEC]_[cross-thread-snapshot-publish-cluster-isolation.md]
 //======================================================================
 // [CODE]
 //======================================================================

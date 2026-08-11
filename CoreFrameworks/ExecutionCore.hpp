@@ -61,6 +61,7 @@ constexpr size_t EXECUTION_NODE_EVENT_RING_SIZE = 1024;
 // [THREAD]_[[SLOW_WRITER] [HOT_READER]]
 // [SYNC]_[ATOMIC]
 // [REFERENCE]_[INVARIANT]_[H6]
+// [REFERENCE]_[PLAN]_[2026-05-06-latency-path-discipline.md]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -398,6 +399,7 @@ static inline void ExecutionCore_SetPermission(ExecutionCore<F>* core, uint8_t v
 // [OVERVIEW]_[THE hot path — process one tick; branchless gates + state update; the only branch is the rare event push]
 // [REFERENCE]_[INVARIANT]_[[H7] [H8]]
 // [REFERENCE]_[AUDIT]_[latency-optimization-part-1.1]
+// [REFERENCE]_[PLAN]_[2026-05-06-latency-path-discipline.md]
 //======================================================================
 // [CODE]
 //======================================================================

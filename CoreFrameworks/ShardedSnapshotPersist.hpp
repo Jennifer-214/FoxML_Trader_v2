@@ -121,7 +121,7 @@ static_assert(MONEY_ENCODING_EPOCH == 0u || SHARDED_SNAPSHOT_VERSION >= 9u + MON
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [SLOW_PATH]]
 // [REFERENCE]_[INVARIANT]_[[H21] [H9]]
-// [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth]
+// [REFERENCE]_[DESIGN_SPEC]_[[registry-tuple-as-single-source-of-truth] [autopopulate-pattern-for-production-caller-class.md]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[atomic-rename snapshot write (.tmp + fsync + rename) — header, registry-driven OMS block, 16 positions, per-node blocks]
 // [REFERENCE]_[CLASS]_[4]
@@ -328,6 +328,7 @@ fail:
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[refuse-don't-migrate load — magic/version/node-count/partials-geometry gates, staged reads, all-or-nothing commit, ExecutionCore re-activation]
 // [REFERENCE]_[DECISION]_[D-305]
+// [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth.md]
 //======================================================================
 // [CODE]
 //======================================================================

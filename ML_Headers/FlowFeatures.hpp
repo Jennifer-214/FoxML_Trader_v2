@@ -154,6 +154,7 @@ static_assert(alignof(BookImbHistDefaultT) == 64,
 // [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[dual-window ring push — evicts long (W) + short (SHORT_K) sums before overwrite; Init/MeanLong/MeanShortFast/Last/MeanShort ride in this section]
+// [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern.md]
 //======================================================================
 // [CODE]
 //======================================================================

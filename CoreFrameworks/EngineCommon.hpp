@@ -519,6 +519,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 // [OVERVIEW]_[THE per-node slow-path body (LIVE per-thread; BACKTEST via the fan wrapper) — rolling update, rebuild, seqlock push, ML exit submit, time-exit/trail/breakeven, warmup permission; PARITY-031/032 closure]
 // [REFERENCE]_[CLASS]_[25]
 // [REFERENCE]_[PARITY]_[[PARITY-31] [PARITY-32]]
+// [REFERENCE]_[MEMORY]_[[feedback_audit_canonical_sister_before_new_infra] [feedback_motivated_collaborator_for_caramel]]
 //======================================================================
 // [CODE]
 //======================================================================
