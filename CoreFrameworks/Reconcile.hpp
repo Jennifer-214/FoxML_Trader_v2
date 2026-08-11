@@ -133,6 +133,8 @@ struct ReconcileTrade {
 // [COLUMN]_[name]_[uppercase token -> RECONCILE_<name> enum value]
 // [COLUMN]_[value]_[uint8_t numeric; STABLE (legacy operator cfgs carry numerics)]
 // [COLUMN]_[cfg_string]_[operator-friendly parser token ("strict"/"warn"/"auto_sync")]
+// [REFERENCE]_[CLASS]_[18]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-2]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -239,6 +241,9 @@ inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
 // [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[replay trades newer than the watermark through the canonical HandleFill path — idempotent, branchless origin-node bitmap search, per-node fee pre-resolution]
+// [REFERENCE]_[CLASS]_[27]
+// [REFERENCE]_[DECISION]_[D-103]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-2]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -417,6 +422,7 @@ inline uint64_t Reconcile_SeedWatermark(OrderManagerState<F>* oms,
 // [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[cancel engine-orphaned "tt-" zombies via injected CancelFn (logic-only, test-friendly); best-effort — non-engine orders never touched]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-2]
 //======================================================================
 // [CODE]
 //======================================================================

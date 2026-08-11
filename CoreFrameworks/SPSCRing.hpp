@@ -41,6 +41,7 @@ namespace tt {
 // [THREAD]_[[CONSUMER_WRITER] [PRODUCER_READER]]
 // [REGION]_[slots array]_[128..]
 // [THREAD]_[[PRODUCER_WRITER] [CONSUMER_READER]]
+// [REFERENCE]_[DECISION]_[D-318]
 //======================================================================
 // [CODE]
 //======================================================================

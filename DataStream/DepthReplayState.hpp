@@ -104,6 +104,7 @@ struct DepthReplayState {
 // [TAG]_[[ENGINE] [BACKTEST]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the replay family (DateInt / Init / Free / LoadDay / GetSnapshot ride) — O(1)-amortized cursor walk to the latest row <= target_us; implicit day-crossing LoadDay; missing file = graceful stale-snapshot degrade]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-144]
 //======================================================================
 // [CODE]
 //======================================================================

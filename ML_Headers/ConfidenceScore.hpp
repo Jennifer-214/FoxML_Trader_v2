@@ -825,6 +825,8 @@ static_assert(alignof(ConfidenceScorer) == 64,
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the scorer API family (Init / ComputeICVariant / InitComposite / BindCompositeCfg / Update / UpdateAndMark ride) — legacy 3-factor Compute is the terminus; composite path is the next block]
+// [REFERENCE]_[CLASS]_[4]
+// [REFERENCE]_[PARITY]_[PARITY-3]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1217,6 +1219,7 @@ constexpr uint8_t MASK_DRIFT_KILL_TRIPPED = BITMAP_BIT_U8(1);
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the AoS (ic, ts) pair — one CheckBreach iteration touches ONE cache line instead of the pre-.E.B two parallel arrays 2048B apart]
 // [REFERENCE]_[DESIGN_SPEC]_[latency-vs-cache-decision-framework]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-49]
 //======================================================================
 // [CODE]
 //======================================================================

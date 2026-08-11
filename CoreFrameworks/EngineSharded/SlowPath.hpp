@@ -59,6 +59,7 @@ namespace tt {
 // [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[drainer per-fill bookkeeping funnel — thin arg-binder into EventLoop_DrainPostFill]
+// [REFERENCE]_[CLASS]_[27]
 //======================================================================
 // [CODE]
 //======================================================================

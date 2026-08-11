@@ -40,6 +40,7 @@ constexpr size_t RECONCILE_QUEUE_SIZE = 64;
 // [SYNC]_[ATOMIC]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[reconciler thread state — own REST instance + read-only OMS view + observability atomics the TUI reads]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-192]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -120,7 +121,7 @@ struct ReconciliationLoopState {
 // [FUNCTION]_[ReconciliationLoop_Pass]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING] [LIVE_TRADING]]
-// [REFERENCE]_[DECISION]_[D-216]
+// [REFERENCE]_[DECISION]_[[D-216] [D-123]]
 // [REFERENCE]_[INVARIANT]_[H4]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one reconcile cycle — venue free-USDT vs OMS_ExpectedFreeCash (Money, H4); drift pushes a detect-only alert]

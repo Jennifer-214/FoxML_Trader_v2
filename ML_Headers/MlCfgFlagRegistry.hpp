@@ -56,6 +56,7 @@
 // [COLUMN]_[display_label/section]_[GUI]
 // [COLUMN]_[metadata_flags]_[derived-filter cohort bits (H16)]
 // [COLUMN]_[doc]_[audit string]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-100]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -266,7 +266,7 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // [STRADDLE_EXEMPT]_[last_exit_fee]_[16B Money elements, 16-aligned — elements can never cross a 64B line; name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
 // [SYNC]_[SPSC]
 // [SYNC]_[ATOMIC]
-// [REFERENCE]_[INVARIANT]_[[H3] [H6]]
+// [REFERENCE]_[INVARIANT]_[[H3] [H6] [H20]]
 // [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the OMS facade — order table + rings + the money books, HOT/WARM/COLD tier-clustered, assert-anchored]
@@ -282,6 +282,8 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // [REGION]_[safety CAS cluster]_[flatten_pending..recovery_until_us]
 // [THREAD]_[[SLOW_WRITER] [SLOW_READER]]
 // [SYNC]_[ATOMIC]
+// [REFERENCE]_[CLASS]_[[27] [30]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-12]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1049,6 +1051,9 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 // [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[allocate slot + bind pre-resolved cfg + async adapter submit (or paper synth fill) — returns immediately]
+// [REFERENCE]_[CLASS]_[46]
+// [REFERENCE]_[DECISION]_[[D-106] [D-202]]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1390,6 +1395,7 @@ inline void OrderManager_AccountMakerTakerFee(
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-154]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[dormant fee-desync tripwire — a maker fill on a TAKER-bound fee_rate fails LOUD, never silently]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1435,6 +1441,7 @@ inline void OMS_GuardTakerBoundFeeBasis(const Order<F>* o) {
 // [REFERENCE]_[DECISION]_[D-173]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[entry fill — open portfolio slot at the ACTUAL fill (per-fill TP anchor) + fee bookkeeping + entry emit]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-154]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1478,6 +1485,8 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
 // [REFERENCE]_[DECISION]_[[D-173] [D-190]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[exit fill — close slot, book net P&L into balance/realized, exit-side scratch arrays, calib + exit emits]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-154]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1593,6 +1602,7 @@ inline constexpr FillHandler<F> g_fill_dispatch[4] = {
 // [REFERENCE]_[INVARIANT]_[H20]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[fill entrypoint — fee booking rule SSoT (venue-USDT authoritative, computed fallback) + audit append + Pattern-1 dispatch]
+// [REFERENCE]_[CLASS]_[28]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1782,7 +1792,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 // [FUNCTION]_[OMS_OpenPositionCost]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING] [DECIMAL]]
-// [REFERENCE]_[DECISION]_[D-216]
+// [REFERENCE]_[DECISION]_[[D-216] [D-109]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[committed-cash SSoT — sum over open slots of entry notional + entry fee; shared by reconciler + .E.1 venue-net]
 //======================================================================
@@ -1868,6 +1878,7 @@ inline Money OMS_ExpectedFreeCash(const OrderManagerState<F>* oms) {
 // [REFERENCE]_[DECISION]_[D-216]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[reconcile command handler — DETECT-ONLY advisory alert + audit-trail append; NEVER mutates the ledger]
+// [REFERENCE]_[INVARIANT]_[H9]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1987,6 +1998,7 @@ inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
 // [TAG]_[[ENGINE] [BOOT_TIME] [ML]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[open the calibration CSV (v5.13.0.B) + wire the Pattern-5 calib sink to real; non-fatal on failure]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-10]
 //======================================================================
 // [CODE]
 //======================================================================

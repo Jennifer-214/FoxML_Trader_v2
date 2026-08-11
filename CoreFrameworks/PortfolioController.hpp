@@ -353,6 +353,8 @@ static_assert(!std::is_polymorphic<PortfolioController<64>>::value,
 // [TAG]_[[ENGINE] [BOOT_TIME] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[legacy boot — portfolio/balance/stats zero, strategy + regime init from cfg (core-0 per-node values via the walker propagation)]
+// [REFERENCE]_[PARITY]_[PARITY-3]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -611,6 +613,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[single-site state mutations — every kill/halt/exit path routes here (no scattered field assignments); KillSwitch_Reset / Buying_Halt / RecordExit share the family]
+// [REFERENCE]_[PARITY]_[PARITY-2]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1030,6 +1033,7 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the legacy main loop — per-tick fill consumption (zero unprotected exposure) + poll_interval slow-path regression/adjust; single_core + tests only]
+// [REFERENCE]_[DECISION]_[[D-122] [D-170]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2152,6 +2156,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
 // [REFERENCE]_[INVARIANT]_[[H21] [H9]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[legacy v14 snapshot (APPEND-ONLY version; v13 tombstoned) — LoadSnapshot (graceful multi-version load + legacy confidence shadow-load) shares the section]
+// [REFERENCE]_[DECISION]_[D-144]
 //======================================================================
 // [CODE]
 //======================================================================

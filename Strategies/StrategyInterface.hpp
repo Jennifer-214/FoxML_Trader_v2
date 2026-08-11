@@ -123,6 +123,7 @@
 // [COLUMN]_[short/full]_[display names -> STRATEGY_SHORT_NAMES / STRATEGY_FULL_NAMES tables]
 // [COLUMN]_[StateT]_[per-node strategy state struct — allocated by Strategy_InitPerCore]
 // [COLUMN]_[Init/BuildParameters/Adapt/ExitAdjustSharded]_[the 4 lifecycle fns wired into X-macro dispatch]
+// [REFERENCE]_[INVARIANT]_[[H15] [H21]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -286,6 +287,8 @@ static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == 
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[strategy-INTERNAL veto codes (v5.6.2) — set by _BuildParameters before zero-gate/BUY_BLOCKED; IDs append-only (trade logs persist the numerics)]
 // [COLUMN]_[id/short_name/description]_[SHALT_<id> constant + GUI name + audit doc]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-171]
 //======================================================================
 // [CODE]
 //======================================================================

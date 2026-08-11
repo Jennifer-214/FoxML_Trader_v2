@@ -160,6 +160,7 @@ static inline bool EngineSharded_OrphanRecovery(
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-192]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[0.2 force-close on shutdown — UNCALLED since v5.4.5 (persist-across-restart won) + body ROTTED vs the F.4c.3 Submit signature; rewrite gated on the .E.1 live-enable decision, TECH_DEBT-192]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================

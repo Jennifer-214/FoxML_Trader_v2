@@ -71,9 +71,10 @@ namespace tt {
     // [FUNCTION]_[cfg_parse_field]
     //----------------------------------------------------------------------
     // [TAG]_[[ENGINE] [CFG_FLOW] [DETERMINISM]]
-    // [REFERENCE]_[INVARIANT]_[H13]
+    // [REFERENCE]_[INVARIANT]_[[H13] [H14]]
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[text -> typed cfg field; exact decimal Money parse (never via double), PCT scaling cfg-file-only (wire_context flag), malformed-money/feature fault capture, INT_ENUM label lookup]
+    // [REFERENCE]_[DECISION]_[[D-102] [D-254] [D-256] [D-259] [D-261]]
     //======================================================================
     // [CODE]
     //======================================================================
@@ -348,6 +349,7 @@ namespace tt {
     // [REFERENCE]_[INVARIANT]_[H13]
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[descriptor default -> typed cfg field (reset-to-defaults + boot default-fill); PCT payload is PERCENT-space, scaled exactly like the file parser]
+    // [REFERENCE]_[PARITY]_[PARITY-37]
     //======================================================================
     // [CODE]
     //======================================================================
@@ -653,7 +655,7 @@ namespace tt {
     // [FUNCTION]_[cfg_drift_compare]
     //----------------------------------------------------------------------
     // [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE] [DETERMINISM]]
-    // [REFERENCE]_[INVARIANT]_[[H13] [H4]]
+    // [REFERENCE]_[INVARIANT]_[[H13] [H4] [H12]]
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[train-time stamp value vs serve-time cfg -> drift bool; exact .v / byte compares (never float math on money); exhaustive-else kills silent no-drift fall-through]
     //======================================================================

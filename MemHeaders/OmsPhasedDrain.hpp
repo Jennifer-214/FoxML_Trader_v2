@@ -174,6 +174,7 @@ inline bool OrderType_IsClose(uint8_t order_type) {
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[drain the 3 SPSC rings into per-direction buckets (the 3 drain-cmd handlers + 3 fn-pointer dispatch tables ride) — classify at drain time via the stable Order.type]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================

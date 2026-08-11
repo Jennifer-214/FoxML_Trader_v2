@@ -312,6 +312,7 @@ static inline int FeatureStandardizer_Apply(const FeatureStandardizer* sc,
 // [WIRE_FIELD]_[winsor_high]_[double x N — per-feature winsor ceiling]
 // [WIRE_FIELD]_[sha256]_[32-byte trailer — SHA-256 of the body, recomputed + compared at Load]
 // [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+// [REFERENCE]_[DECISION]_[D-345]
 //======================================================================
 // [CODE]
 //======================================================================

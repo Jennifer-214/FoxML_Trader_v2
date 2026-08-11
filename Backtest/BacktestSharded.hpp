@@ -107,6 +107,9 @@ static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uin
 // [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[sharded backtest entry point — loads tick files, drives the per-core architecture through the shared OMS, aggregates P&L/win-loss/drawdown + equity curve; signature matches the Backtest_Run wrapper]
+// [REFERENCE]_[DECISION]_[[C-1] [D-122] [D-170] [D-254] [D-255]]
+// [REFERENCE]_[PARITY]_[[PARITY-26] [PARITY-27] [PARITY-28] [PARITY-29] [PARITY-30] [PARITY-31]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-119]
 //======================================================================
 // [CODE]
 //======================================================================

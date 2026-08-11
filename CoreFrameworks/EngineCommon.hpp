@@ -155,6 +155,8 @@ constexpr int BACKTEST_REGIME_SAMPLE_CORE = 0;
 // [TAG]_[[ENGINE] [BOOT_TIME] [CFG_FLOW]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[THE one non-const-cfg helper — one-shot BNB 0.75x fee discount onto every per-node fee_rate_*; PARITY-030 closure]
+// [REFERENCE]_[DECISION]_[D-173]
+// [REFERENCE]_[PARITY]_[PARITY-30]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -200,6 +202,7 @@ inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
 // [TAG]_[[ENGINE] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one-shot global boot — EventLoopState_Init + kill-switch configure (PARITY-026) + per-node Regime_Init; statics stay in the caller (Decision G)]
+// [REFERENCE]_[PARITY]_[PARITY-26]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -254,6 +257,9 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 // [REFERENCE]_[INVARIANT]_[H22]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-node boot — ring/core init, register, strategy wire, full ML branch (zoo load + validate + confidence + turnover), Strategy_InitPerCore, permission=0; PARITY-027/028/029 closure]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[PARITY]_[[PARITY-3] [PARITY-12] [PARITY-27] [PARITY-28] [PARITY-29]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -511,6 +517,8 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 // [REFERENCE]_[INVARIANT]_[[H8] [H22]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[THE per-node slow-path body (LIVE per-thread; BACKTEST via the fan wrapper) — rolling update, rebuild, seqlock push, ML exit submit, time-exit/trail/breakeven, warmup permission; PARITY-031/032 closure]
+// [REFERENCE]_[CLASS]_[25]
+// [REFERENCE]_[PARITY]_[[PARITY-31] [PARITY-32]]
 //======================================================================
 // [CODE]
 //======================================================================

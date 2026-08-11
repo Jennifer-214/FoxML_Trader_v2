@@ -1464,6 +1464,7 @@ static inline const char* PastRun_MetricLabel(int expected_num_classes) {
 // &run_control->results.config_used) so Verify Stamp can use the
 // real cfg.auto_stamp_secret for HMAC-verification (not just devmode).
 // Pass NULL to keep pre-v5.11.57 behavior (devmode-only).
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2626,6 +2627,7 @@ struct OptimizerPanelState {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[init the Optimizer panel state with default sweep ranges]
 //======================================================================
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-123]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -3636,6 +3638,7 @@ struct TrainModelWorkerArgs {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[background thread: train + stamp one production model]
 //======================================================================
+// [REFERENCE]_[PARITY]_[PARITY-20]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -4219,6 +4222,7 @@ struct MultiHorizonWorkerArgs {
 //                   to drive Backtest_ComputeLabelsFromSamples. In SERIAL,
 //                   this is &run_control->run_config (shared mutate). In
 //                   PARALLEL, each thread passes its own local copy.
+// [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -4562,6 +4566,7 @@ static inline void mh_run_one_horizon_fv(
 // [TAG]_[[GUI] [BACKTEST]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one per-horizon parallel job — an isolated result copy + horizon index/barriers + WF/held-out/auto-stamp snapshots + local run cfg + grid-member identification (PARITY-021)]
+// [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -4604,6 +4609,7 @@ struct MultiHorizonParallelJob {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[parallel per-horizon worker for the multi-horizon sweep (caps libgomp to 1 thread)]
 //======================================================================
+// [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -4648,6 +4654,7 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[background thread: train a multi-horizon model grid, serial or parallel]
 //======================================================================
+// [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -4944,6 +4951,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[render the Training panel — collect features, WF, held-out, optimizer, multi-horizon, and model training/stamping]
 //======================================================================
+// [REFERENCE]_[INVARIANT]_[[H1] [H2]]
 //======================================================================
 // [CODE]
 //======================================================================

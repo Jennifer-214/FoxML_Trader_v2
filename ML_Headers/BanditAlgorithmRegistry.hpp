@@ -35,6 +35,7 @@
 // [REFERENCE]_[DESIGN_SPEC]_[curve-registry-pattern]
 // [REFERENCE]_[DESIGN_SPEC]_[multi-state-dispatch-with-per-state-update-metadata]
 // [REFERENCE]_[INVARIANT]_[[H15] [H20] [H21]]
+// [REFERENCE]_[CLASS]_[[24] [27] [28]]
 //======================================================================
 // [CODE]
 //======================================================================

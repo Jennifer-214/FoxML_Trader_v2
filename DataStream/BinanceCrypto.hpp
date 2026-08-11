@@ -800,6 +800,7 @@ static inline int BinanceStream_Poll(BinanceStream *bs, uint32_t timeout_ms) {
 // [TAG]_[[ENGINE] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[consume one frame -> DataStream<F> — transparent ping/pong; 1 on success, 0 on error/disconnect]
+// [REFERENCE]_[DECISION]_[D-102]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -957,6 +958,7 @@ static inline int BinanceStream_HasPending(BinanceStream *bs) {
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CFG_FLOW] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[boot cfg parse (venue-selector fault flag + selector + config_ok ride) — refuse-don't-coerce on malformed venue selectors (N1; a typo must NOT flip testnet->PROD)]
+// [REFERENCE]_[INVARIANT]_[H22]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -246,6 +246,7 @@ constexpr size_t ORDER_EVENT_LOG_ASYNC_RING_SIZE = 256;
 // [SYNC]_[ATOMIC]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the log state — mmap'd entries + disk write-through + the drainer->writer async SPSC seam]
+// [REFERENCE]_[CLASS]_[50]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -319,6 +320,7 @@ template <unsigned F> inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>
 // [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[quiesce-first init — stop any live writer, then mmap(MAP_POPULATE) the fixed-capacity entries buffer]
+// [REFERENCE]_[CLASS]_[50]
 //======================================================================
 // [CODE]
 //======================================================================

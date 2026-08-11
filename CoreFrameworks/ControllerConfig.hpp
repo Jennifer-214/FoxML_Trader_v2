@@ -84,6 +84,7 @@ constexpr uint16_t MASK_CFG_KEY_TRADING_MODE        = 1u << 2; // NEW-1 — alia
 // [COLUMN]_[RAW(name)]_[raw FPN_Binary field; parsed as-is]
 // [COLUMN]_[INT(name)]_[uint32_t; 0 = inherit global (sentinel)]
 // [COLUMN]_[BITMAP X(domain, DOMAIN, storage, FOREACH)]_[per-bit override pair: values + set-mask; branchless bit-select at resolve]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -312,7 +313,7 @@ template <unsigned F> struct PerNodeOverrides {
 // [STRUCT]_[PerNodeCfg]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [DATA_ORIENTED_DESIGN]]
-// [REFERENCE]_[INVARIANT]_[[H17] [H22]]
+// [REFERENCE]_[INVARIANT]_[[H17] [H22] [H4] [H15]]
 // [REFERENCE]_[DESIGN_SPEC]_[[manual-fields-inventory-pattern] [meta-registry-pattern-for-codebase-registry-discipline]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the per-node cfg slice (v5.15.5.F.4c.3 first canonical of the per-instance registry pattern) — body is X-macro ONLY (H17, CI-enforced) + size-bound static_asserts close the manual-field hole]
@@ -432,9 +433,12 @@ static_assert(sizeof(PerNodeCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPer
 // [STRADDLE_EXEMPT]_[node_risk_pct]_[read-shared steady state; 16B Money elements are 16-aligned and can never cross a 64B line — D-414 leaf-3 2026-08-10]
 // [STRADDLE_EXEMPT]_[node_max_drawdown_pct]_[read-shared steady state; 16B Money elements are 16-aligned and can never cross a 64B line — D-414 leaf-3 2026-08-10]
 // [STRADDLE_EXEMPT]_[node_overrides]_[read-shared steady state; element-uniform PerNodeOverrides array (name-sugar unresolvable only) — D-414 leaf-3 2026-08-10]
-// [REFERENCE]_[INVARIANT]_[[H12] [H9] [H17]]
+// [REFERENCE]_[INVARIANT]_[[H12] [H9] [H17] [H6] [H14] [H21]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the flat cfg root — SHA-256 hashed RAW into model lineage (ctor zero-fills padding: identical VALUES must hash identically); nodes[] per-node slices + flat fields in shadow-window migration]
+// [REFERENCE]_[DECISION]_[[D-218] [D-254]]
+// [REFERENCE]_[PARITY]_[[PARITY-14] [PARITY-35]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-4] [TECH_DEBT-93]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1423,9 +1427,10 @@ template <unsigned F> struct ControllerConfig {
 // [FUNCTION]_[ControllerConfig_CapitalRangeSweep]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING] [BOOT_TIME]]
-// [REFERENCE]_[INVARIANT]_[[H12] [H9]]
+// [REFERENCE]_[INVARIANT]_[[H12] [H9] [H7] [H20]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the capital-fault family (D-254/D-256) — fingerprint size-pin, cfg_compile_ok predicate + cfg_capital_gate_ok report, value-range sweep with compile-time variant-coverage guards; refuse-never-clamp]
+// [REFERENCE]_[DECISION]_[[C-1] [C-5] [D-254] [D-255] [D-256] [D-260] [D-266] [D-269] [D-275] [D-276]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1751,6 +1756,7 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 // [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[Step-2 shadow populate — resolved flat view copied into cfg->nodes[c] (X-macro walker + NO_FLAT_FIELD sync + legacy capital-array LAST-WINS merge); dissolves when the [core N] parser lands]
+// [REFERENCE]_[DECISION]_[D-273]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1839,6 +1845,8 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
 // [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the default cfg — registry auto-defaults (global + per-node mirrors) first, then the documented KEEP manual lines where registry defaults diverge on purpose]
+// [REFERENCE]_[DECISION]_[[D-203] [D-218]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-4] [TECH_DEBT-24] [TECH_DEBT-93] [TECH_DEBT-107]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2338,6 +2346,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 // [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[v5.15.4 mode-normalize — LIVE flips defaults stricter unless the operator set the key explicitly (cfg_keys_explicit bitmap); IsLiveCapital (THE capital-authority predicate, Class-47 close) shares the section]
+// [REFERENCE]_[CLASS]_[47]
+// [REFERENCE]_[INVARIANT]_[[H21] [H22]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2411,9 +2421,12 @@ inline bool ControllerConfig_IsLiveCapital(const ControllerConfig<F>& cfg) {
 // [FUNCTION]_[ControllerConfig_Load]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME] [PARSER]]
-// [REFERENCE]_[INVARIANT]_[H21]
+// [REFERENCE]_[INVARIANT]_[[H21] [H4]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[key=value parser (no JSON, no libs) — registry walker + legacy CFG_PARSE_* macros + per-node override channel + alias tombstones; ends with PopulateCoresFromFlat + the capital range sweep]
+// [REFERENCE]_[CLASS]_[23]
+// [REFERENCE]_[DECISION]_[[D-217] [D-218] [D-223] [D-253] [D-255]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-4] [TECH_DEBT-9] [TECH_DEBT-68] [TECH_DEBT-82] [TECH_DEBT-93]]
 //======================================================================
 // [CODE]
 //======================================================================

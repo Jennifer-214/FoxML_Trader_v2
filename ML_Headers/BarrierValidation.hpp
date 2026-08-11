@@ -40,6 +40,7 @@ namespace tt {
 // [TAG]_[[ENGINE] [ML_INFERENCE] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[corrupt = non-finite OR negative OR beyond the SANE caps (SL 100% / TP 1000%); raw stamp doubles by design (validation-only, H4-exempt)]
+// [REFERENCE]_[INVARIANT]_[H4]
 //======================================================================
 // [CODE]
 //======================================================================

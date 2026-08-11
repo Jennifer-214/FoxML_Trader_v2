@@ -70,6 +70,7 @@
 // [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[load a Binance aggTrades or TickRecorder CSV into HistoricalTick[] — BacktestData_DetectFormat rides; locale-immune float parse (H5), bogus-timestamp filter]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-144]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1177,6 +1178,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
 // [TAG]_[[ENGINE] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the full-validation result — WF CV on train+val, the locked held-out eval, and the generalization gap; carries the auto-stamp request/result fields + per-horizon stamp-body inputs]
+// [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1285,6 +1287,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 // [TAG]_[[ENGINE] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[orchestrate full validation — WF CV on a sliced train+val view, held-out train/eval, the generalization gap, and the optional auto-stamp emit; preserves caller-set request fields across the result memset]
+// [REFERENCE]_[PARITY]_[[PARITY-20] [PARITY-21]]
 //======================================================================
 // [CODE]
 //======================================================================

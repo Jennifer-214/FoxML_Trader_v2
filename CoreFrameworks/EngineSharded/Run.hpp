@@ -412,9 +412,13 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
 // [FUNCTION]_[EngineSharded_Run]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ENTRY_POINT] [LIVE_TRADING] [CONCURRENCY] [CAPITAL_BEARING]]
-// [REFERENCE]_[INVARIANT]_[[H3] [H8] [H22]]
+// [REFERENCE]_[INVARIANT]_[[H3] [H8] [H22] [H21]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the sharded main — TSC calibrate, boot (BNB discount -> BootGlobal -> per-node BootPerCore), spawn producer/drainer/per-node hot+slow threads, run to shutdown, join + latency dump]
+// [REFERENCE]_[CLASS]_[[9] [25] [27] [47]]
+// [REFERENCE]_[DECISION]_[[D-103] [D-221]]
+// [REFERENCE]_[PARITY]_[[PARITY-9] [PARITY-12] [PARITY-23] [PARITY-26] [PARITY-27] [PARITY-28] [PARITY-29] [PARITY-30] [PARITY-32]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-2] [TECH_DEBT-119]]
 //======================================================================
 // [CODE]
 //======================================================================

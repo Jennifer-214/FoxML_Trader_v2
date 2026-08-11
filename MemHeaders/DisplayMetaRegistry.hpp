@@ -109,6 +109,7 @@ namespace tt {
 // [COLUMN]_[NAME]_[field name (snake_case)]
 // [COLUMN]_[INIT_VALUE]_[default-initializer + reset-init value (v5.6.3+ EventLoopState_Init semantics)]
 // [COLUMN]_[DOC]_[human description]
+// [REFERENCE]_[CLASS]_[18]
 //======================================================================
 // [CODE]
 //======================================================================

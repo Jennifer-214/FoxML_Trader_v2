@@ -24,7 +24,7 @@
 // [REFERENCE]_[DESIGN_SPEC]_[heterogeneous-registry-pattern]
 // [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
 // [REFERENCE]_[DESIGN_SPEC]_[canonical-sister-extension-discipline]
-// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-023]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-023] [TECH_DEBT-13]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[entry/exit gate boolean cfg flags — one row = enum bit + mask + parser + GUI; metadata_flags routes stamp-binding]
 // [COLUMN]_[NAME]_[flag identifier -> GATE_CFG_<NAME> enum bit + MASK_GATE_CFG_<NAME>]   (6-col tuple, v5.15.5.F.4d.1.B.3+)
@@ -33,6 +33,7 @@
 // [COLUMN]_[section]_[GUI collapsing-header / section name]
 // [COLUMN]_[metadata_flags]_[CfgFieldDescriptor OR-flags]_[[STAMP_BOUND_CFG_DERIVED]]
 // [COLUMN]_[doc]_[operator-facing description]
+// [REFERENCE]_[CLASS]_[[18] [32]]
 //======================================================================
 // [CODE]
 //======================================================================

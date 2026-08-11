@@ -47,6 +47,9 @@
 // [REFERENCE]_[CLASS]_[26]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one EventLoopState walk per publish (producer slow-path cadence) -> full TUISnapshot; unified per-core loop (.B.8) consolidates 4 node walks into 1]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-13] [TECH_DEBT-28]]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -140,6 +140,7 @@ inline void log_drift_pair(LogFn& log_fn, const char* name, const T1& stamp_v, c
 // [REFERENCE]_[PARITY]_[PARITY-012]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the cross-zoo drift walk — FOREACH_CFG_DRIFT_CHECK over every handle; tier counters + strict REFUSE]
+// [REFERENCE]_[CLASS]_[18]
 //======================================================================
 // [CODE]
 //======================================================================

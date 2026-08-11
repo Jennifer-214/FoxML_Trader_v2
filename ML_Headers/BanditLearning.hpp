@@ -242,6 +242,7 @@ static inline void Bandit_InitDefault(BanditState *b, int n_arms) {
 // [DIAGRAM]_[formula]
 //   p_i = (1 - gamma) * (w_i / sum_w) + gamma / K
 // [REFERENCE]_[INVARIANT]_[H10]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-158]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -377,6 +378,7 @@ static inline int Bandit_Select(const BanditState *b, double uniform_rand) {
 //   w_arm *= exp(eta * r_hat)
 //   eta    = min(eta_max, sqrt(ln(K) / (K * T)))
 // [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[CLASS]_[28]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -565,6 +567,7 @@ static inline void Bandit_Print(const BanditState *b,
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-regime BanditState array -> JSON sidecar; atomic tmp+rename write; LC_NUMERIC=C pinned per-thread at emit]
 // [REFERENCE]_[INVARIANT]_[H21]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-27]
 //======================================================================
 // [CODE]
 //======================================================================

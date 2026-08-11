@@ -70,6 +70,8 @@ namespace tt {
 // [TAG]_[[GUI] [FRAMEWORK_DISCIPLINE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the type-erased per-field ImGui render dispatch — one template branch per cfg field-type family (FPN / decimal / float / int / array), widget chosen from the descriptor; the tt:: dispatch layer the render tables call with T deduced (Class-23 tt-dispatch)]
+// [REFERENCE]_[CLASS]_[24]
+// [REFERENCE]_[INVARIANT]_[[H13] [H14]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -787,6 +789,7 @@ static constexpr int MAX_GUI_NODES = 16;
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the Settings panel state — the loaded gui_engine_cfg, per-node strategy/model selections, the model-dir scan results, and dirty tracking]
 //======================================================================
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-63]
 //======================================================================
 // [CODE]
 //======================================================================

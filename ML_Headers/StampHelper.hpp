@@ -167,6 +167,9 @@ struct StampArgs {
 // [REFERENCE]_[INVARIANT]_[H9]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[assemble StampInferenceCfgInputs via the registry walk -> corrupt-barrier refuse -> emit the HMAC body; the single wire path]
+// [REFERENCE]_[CLASS]_[18]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[PARITY]_[[PARITY-20] [PARITY-21] [PARITY-22]]
 //======================================================================
 // [CODE]
 //======================================================================

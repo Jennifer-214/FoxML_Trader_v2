@@ -189,9 +189,11 @@ inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING] [CRITICAL]]
 // [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-203]
-// [REFERENCE]_[INVARIANT]_[H21]
+// [REFERENCE]_[INVARIANT]_[[H21] [H22]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the .E.0.10 BLANKET live-capital refusal — fail-safe until the .E rework lands; H21-tombstoned for removal at v5.16]
+// [REFERENCE]_[CLASS]_[47]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-203]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -229,6 +231,8 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
 // [COLUMN]_[fn_ptr]_[template fn returning bool (true = check PASSED)]
 // [COLUMN]_[severity]_[LR_SEV_REFUSE (blocks live boot) or LR_SEV_WARN (logs only)]
 // [COLUMN]_[fix_hint]_[operator-actionable guidance string (~80 chars)]
+// [REFERENCE]_[INVARIANT]_[H21]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-203]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -294,6 +298,8 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
 // [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME] [CRITICAL]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the boot-time pre-flight walk — 0 PASS / -1 live REFUSE / 1 WARN-only; compile-time table, no dispatch overhead]
+// [REFERENCE]_[CLASS]_[47]
+// [REFERENCE]_[INVARIANT]_[H22]
 //======================================================================
 // [CODE]
 //======================================================================

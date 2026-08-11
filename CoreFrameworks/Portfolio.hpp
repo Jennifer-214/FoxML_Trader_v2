@@ -51,6 +51,7 @@
 // [REFERENCE]_[DESIGN_SPEC]_[hot-side-array-element-alignment-for-sparse-access]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the canonical position record — registry-generated fields, wire-persisted 128B prefix, layout-locked]
+// [REFERENCE]_[DECISION]_[D-295]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -195,6 +196,7 @@ static_assert(sizeof(Position<64>) - POSITION_PERSIST_BYTES<64>() == 0,
 // [TAG]_[[ENGINE] [CAPITAL_BEARING] [BITMAP_PACKED]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[bitmap-slot portfolio — active_bitmap + Position[16]; ctz walks skip cleared slots automatically]
+// [REFERENCE]_[INVARIANT]_[H21]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -354,6 +356,7 @@ inline Money ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
 // [REFERENCE]_[DECISION]_[D-295]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the SINGLE source for clearing a slot to defaults — closes the subset-zeroing class (A19/A28)]
+// [REFERENCE]_[INVARIANT]_[[H12] [H21]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -824,6 +827,7 @@ static_assert(!is_fp_decimal_v<decltype(Position<64>::entry_price)>
 // [WIRE_FIELD]_[live_vol_mult]_[sizeof(Money)]
 // [WIRE_FIELD]_[live_stddev_mult]_[sizeof(Money)]
 // [WIRE_FIELD]_[balance]_[sizeof(Money)]
+// [REFERENCE]_[DECISION]_[D-144]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -69,6 +69,7 @@
 // [COLUMN]_[NAME]_[mode token -> MODE_BARRIER_BLEND_<NAME>]
 // [COLUMN]_[flags_expr]_[MODE_F_* bit-or encoding the dispatch semantics]
 // [COLUMN]_[doc]_[audit string]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-24]
 //======================================================================
 // [CODE]
 //======================================================================

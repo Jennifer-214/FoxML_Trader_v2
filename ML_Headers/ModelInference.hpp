@@ -333,6 +333,8 @@ static inline int FeatureLookback_CountEnabled(void) {
 // [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
 // [REFERENCE]_[DESIGN_SPEC]_[struct-padding-determinism-pattern]
 // [REFERENCE]_[INVARIANT]_[[H12] [H18]]
+// [REFERENCE]_[CLASS]_[18]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-14]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -517,6 +519,7 @@ static_assert(offsetof(ModelHandle<64>, target_classes) == 64,
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[brace-init zero-fill + the non-zero defaults (composite single-class, scaler identity) — the handle's clean-slate constructor]
+// [REFERENCE]_[INVARIANT]_[H12]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -968,6 +971,8 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[v5.10.0a.G.4 multi-horizon argmax-confidence selection — the most-confident member's raw prediction wins (|p-0.5| binary / |p| regression); H20 cmov argmax]
+// [REFERENCE]_[CLASS]_[28]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1054,6 +1059,8 @@ inline float Model_Predict_Ensemble(ModelHandle<F> *models,
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[v5.10.0a.G.7 Bandit-blend — NaN-skipped weighted average across arms, disabled-mask kill switch, agreement gate (split ensemble -> 0.5 no-edge sentinel), dominant-arm tracking]
+// [REFERENCE]_[CLASS]_[28]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1314,6 +1321,7 @@ inline int Model_IsLoaded(const ModelHandle<F> *m) {
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[DEPRECATED FROZEN packer — the equivalence-test reference for Features_PackAll (FeatureRegistry.hpp); NEVER change this body, change Features_PackAll + re-pin the hash]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-2]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1402,6 +1410,7 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
 // [OVERVIEW]_[the stamp PARSE side — runtime verdict fields + bit-packed has_flags + X-macro-generated architectural/cfg-derived/late-emit value fields]
 // [REFERENCE]_[INVARIANT]_[[H9] [H18]]
 // [REFERENCE]_[DESIGN_SPEC]_[registry-tuple-as-single-source-of-truth]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-6]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1571,8 +1580,11 @@ inline int stamp_parse_line(char* line, const char** key_out, const char** val_o
 // [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the stamp INGEST gate — parse key=value body, registry-driven field dispatch, drift checks (format/feature-hash/label-hash/feature-mask/gap), model-sha pin, H9 HMAC-SHA256 verify]
-// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+// [REFERENCE]_[INVARIANT]_[[H9] [H21] [H20]]
 // [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-237]
+// [REFERENCE]_[CLASS]_[18]
+// [REFERENCE]_[DECISION]_[D-174]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-3] [TECH_DEBT-237]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2117,6 +2129,7 @@ struct StampInferenceCfgInputs {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the stamp EMIT side — LC_NUMERIC=C-pinned canonical body (PRE_CFG -> cfg-derived -> POST_CFG registry order), H9 HMAC-SHA256 sign, atomic tmp+rename write; refuses on gap > threshold]
 // [REFERENCE]_[INVARIANT]_[[H9] [H21]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-6] [TECH_DEBT-237]]
 //======================================================================
 // [CODE]
 //======================================================================

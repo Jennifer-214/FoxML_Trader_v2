@@ -60,6 +60,7 @@ constexpr size_t EXECUTION_NODE_EVENT_RING_SIZE = 1024;
 // [REGION]_[permission — cross-thread isolate]_[128..191]
 // [THREAD]_[[SLOW_WRITER] [HOT_READER]]
 // [SYNC]_[ATOMIC]
+// [REFERENCE]_[INVARIANT]_[H6]
 //======================================================================
 // [CODE]
 //======================================================================

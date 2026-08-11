@@ -144,6 +144,7 @@
 // [TAG]_[[ENGINE] [CFG_FLOW]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the sidecar lookup pair (lookup_drift rides; namespace cfg_gate) — FIELD_IDX switch dispatch; no entry -> default (populate: true / drift: stamp_has_inference_cfg)]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -345,6 +346,7 @@ namespace cfg_derived {
 // [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[populate StampInferenceCfgInputs from runtime cfg via the 4-registry meta-walker — gate-looked-up scalars + bitmap-bit cohort walkers; sister to legacy INFERENCE_CFG_AUTOPOPULATE]
+// [REFERENCE]_[CLASS]_[21]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -410,6 +412,7 @@ namespace cfg_derived {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[emit canonical key=value body bytes for the HMAC chain via the meta-walker — gate-filtered; H9 wire preservation (X-macro bodies verbatim from pre-refactor)]
 // [REFERENCE]_[INVARIANT]_[H9]
+// [REFERENCE]_[CLASS]_[32]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -608,6 +611,7 @@ namespace cfg_derived {
 // [TAG]_[[ENGINE] [CFG_FLOW] [PERSISTENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[stamp parse-side: match one key=value against flagged rows across the 4 registries -> parse into struct field + set has_<name>; false = caller falls through to legacy handlers]
+// [REFERENCE]_[INVARIANT]_[H8]
 //======================================================================
 // [CODE]
 //======================================================================

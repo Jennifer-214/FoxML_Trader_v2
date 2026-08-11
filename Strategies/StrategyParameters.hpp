@@ -99,6 +99,7 @@ namespace tt {
 // [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ML rebuild parameter bag (Phase 6prep c13/c15) — model/ensemble handles, feature state pointers, confidence + gate-cache wiring, out_* result fields]
+// [REFERENCE]_[DECISION]_[D-221]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -262,6 +263,8 @@ struct MLBuildContext {
 // [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[v4.0.3 shared gates — entry spacing + Strategy_TpFloor (fee-floor TP ratchet) + GateEgress_MaxPct/FinalizeEmit (the A6 egress chokepoint) share the section]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-171]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -350,6 +353,8 @@ inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strateg
 // [TAG]_[[ENGINE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the full-port reference implementation — dip gate + TP/SL/qty pack; ResolvePerFillTpPct/SlPct (the per-strategy per-fill dispatch SSoT) share the section]
+// [REFERENCE]_[DECISION]_[D-170]
+// [REFERENCE]_[INVARIANT]_[[H7] [H20] [H22]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -501,6 +506,8 @@ inline void SimpleDip_BuildParameters(
 // [TAG]_[[ENGINE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[sharded MR pack build (labeled STUB-era; carries the adaptive-state port status in its banner)]
+// [REFERENCE]_[DECISION]_[D-170]
+// [REFERENCE]_[INVARIANT]_[H22]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -592,6 +599,8 @@ inline void MeanReversion_BuildParameters(
 // [TAG]_[[ENGINE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[sharded Momentum pack build — breakout gate + momentum-specific vetoes (tp-margin/flow/r2/last-win SHALTs)]
+// [REFERENCE]_[DECISION]_[D-170]
+// [REFERENCE]_[INVARIANT]_[H22]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -722,6 +731,8 @@ inline void Momentum_BuildParameters(
 // [TAG]_[[ENGINE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[sharded EmaCross pack build (guarded by the private/ include; absent build = registry row omitted)]
+// [REFERENCE]_[DECISION]_[D-170]
+// [REFERENCE]_[INVARIANT]_[[H16] [H22]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -833,9 +844,12 @@ inline void EmaCross_BuildParameters(
 // [FUNCTION]_[ML_BuildParameters]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [CAPITAL_BEARING]]
-// [REFERENCE]_[INVARIANT]_[[H5] [H20]]
+// [REFERENCE]_[INVARIANT]_[[H5] [H20] [H11]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ML rebuild body — features -> scaler -> (ensemble|single) inference -> threshold/confidence/ladder gates -> barrier TP/SL -> pack; the biggest _BuildParameters by far]
+// [REFERENCE]_[CLASS]_[[18] [24] [25] [27] [28]]
+// [REFERENCE]_[DECISION]_[D-170]
+// [REFERENCE]_[PARITY]_[PARITY-1]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1772,6 +1786,10 @@ inline void ML_BuildParameters(
 // [TAG]_[[ENGINE] [SLOW_PATH] [FRAMEWORK_DISCIPLINE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the strategy_id dispatcher — X-macro case dispatch to each _BuildParameters; ML's wider signature gets its case-block per the registry drift note]
+// [REFERENCE]_[CLASS]_[[8] [25]]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[PARITY]_[PARITY-1]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-171]
 //======================================================================
 // [CODE]
 //======================================================================

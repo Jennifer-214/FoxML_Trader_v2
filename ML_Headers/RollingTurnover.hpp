@@ -72,6 +72,8 @@ struct RollingTurnover {
 // [TAG]_[[ENGINE] [ML_INFERENCE] [MONITORING_PLANE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[popcount(prev XOR cur) / popcount-union ratio into the ring; Init/topk_mask_from_weights/Compute ride in this block]
+// [REFERENCE]_[CLASS]_[28]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================

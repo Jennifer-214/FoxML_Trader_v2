@@ -153,6 +153,7 @@ static inline void PhaseTimer_Summary(const PhaseTimer* pt, FILE* fp) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[stable copy of the timer for GUI display, PhaseTimer_PopulateSnapshot rides — UNWIRED at HEAD, zero consumers; the Panels phase render reads the live singleton directly]
 // [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-240]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-240]
 //======================================================================
 // [CODE]
 //======================================================================

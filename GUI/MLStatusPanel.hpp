@@ -30,6 +30,7 @@ namespace tt {
 // v5.10.0c — optional `shared` parameter exposes the pending hot-swap
 // state so the panel can show "swap pending" hints. Callers can pass
 // nullptr; the row is rendered only when a swap is actually pending.
+// [REFERENCE]_[DECISION]_[D-221]
 //======================================================================
 // [CODE]
 //======================================================================

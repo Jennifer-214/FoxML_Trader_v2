@@ -83,6 +83,8 @@
 // [COLUMN]_[format_str]_[printf-style label for panel display]
 // [COLUMN]_[tooltip_str]_[multi-line operator guidance (panel hover)]
 // [COLUMN]_[group_id]_[tt::GROUP_STANDALONE (0) or tt::GROUP_<X> combined-display row]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-15]
 //======================================================================
 // [CODE]
 //======================================================================

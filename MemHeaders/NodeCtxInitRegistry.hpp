@@ -90,6 +90,8 @@ namespace tt {
 // [COLUMN]_[type]_[C++ field type; cast applied at write site via (TYPE)(INIT_VALUE)]
 // [COLUMN]_[INIT_VALUE]_[boot value; Money_Zero() / numeric / nullptr / sentinel]
 // [COLUMN]_[RESET]_[RST = also cleared on operator paper-reset; NORST = boot-init only (load-bearing across reset)]
+// [REFERENCE]_[CLASS]_[5]
+// [REFERENCE]_[DECISION]_[D-297]
 //======================================================================
 // [CODE]
 //======================================================================

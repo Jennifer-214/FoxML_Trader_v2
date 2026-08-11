@@ -68,6 +68,7 @@ namespace tt {
 // [OVERVIEW]_[11 BIT_FLAG rows -> sequential STATE_FLAG_<name> enum bits + MASK_<name> uint16_t constants; 5 bits headroom (overflow assert at 16)]
 // [COLUMN]_[name]_[UPPERCASE token; produces the STATE_FLAG_<name> bit + MASK_<name> constant]
 // [COLUMN]_[doc_string]_[human-readable description for audits + cfg.example]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-28]
 //======================================================================
 // [CODE]
 //======================================================================

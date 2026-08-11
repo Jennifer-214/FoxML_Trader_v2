@@ -178,7 +178,10 @@ inline void NodeModelZoo_Init(NodeModelZoo<F> *zoo) {
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the per-role load gate — stamp verify (held-out gate + drift walkers) -> Model_Load -> stamp-derived handle copies -> scaler sidecar 3-tier verify -> the v5.15.1 drift chokepoint]
-// [REFERENCE]_[INVARIANT]_[H9]
+// [REFERENCE]_[INVARIANT]_[[H9] [H20]]
+// [REFERENCE]_[CLASS]_[18]
+// [REFERENCE]_[PARITY]_[[PARITY-4] [PARITY-5]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1145,6 +1148,7 @@ struct PerArmDrift {
 // [OVERVIEW]_[the multi-horizon sidecar — 4 roles x 8 arms of handles + per-regime bandit/Thompson/Ridge state + reward ring + drift watchdogs, tiered HOT/WARM/COLD]
 // [INSTANTIATION]_[[64]]
 // [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
+// [REFERENCE]_[CLASS]_[[24] [28]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1334,6 +1338,7 @@ static_assert(alignof(EnsembleModelZoo<64>) == 64,
 // [OVERVIEW]_[the A6 corrupt-barrier ingress pair (EnsembleZoo_FinalizeCorrupt rides) — data write coupled with the mask bit; corrupt arms withheld + counted toward the majority-SHALT verdict]
 // [REFERENCE]_[DESIGN_SPEC]_[registry-bitmap-set-discipline]
 // [REFERENCE]_[INVARIANT]_[H22]
+// [REFERENCE]_[DECISION]_[D-221]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1398,6 +1403,9 @@ inline bool EnsembleZoo_FinalizeCorrupt(EnsembleModelZoo<F>* ezoo, double shalt_
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[zero-state init family (EnsurePrimary backstop rides) — all 32 handles + bandit/Thompson/Ridge/ring/drift state cleared; sink-fn-pointers default to noop]
+// [REFERENCE]_[CLASS]_[28]
+// [REFERENCE]_[DECISION]_[D-221]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1535,6 +1543,7 @@ inline void EnsembleModelZoo_EnsurePrimary(EnsembleModelZoo<F>* ezoo) {
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the G.8 reward-attribution family (RecordPrediction ring write + UpdateDrift watchdog ride) — lookback walk rewards aged records via the per-algorithm dispatch table]
+// [REFERENCE]_[CLASS]_[[24] [25] [28]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1779,6 +1788,9 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the per-regime bandit init family — Exp3 buy/exit + Thompson buy/exit (4 fns); each sets its MASK_EZOO_*_READY gate; Thompson inits wire the Pattern-5 sink-fn-pointers to real]
+// [REFERENCE]_[CLASS]_[[24] [28]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-84]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2726,6 +2738,7 @@ inline int EnsembleModelZoo_LoadExitBanditState(
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the Thompson posterior persistence family (buy/exit save + load ride) — LC_NUMERIC=C-pinned %.17g JSON, format_version=1, bundle-id + n_arms gates, forward-compat-by-absence]
 // [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-84]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -3281,6 +3294,7 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
 // [COLUMN]_[call_expression]_[the invocation — (ezoo, cfg, node_id, base_run_path) in scope from the helper body]
 // [REFERENCE]_[DESIGN_SPEC]_[postloadsetup-registry-pattern]
 // [REFERENCE]_[CLASS]_[18]
+// [REFERENCE]_[PARITY]_[[PARITY-9] [PARITY-10] [PARITY-11] [PARITY-12]]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -161,6 +161,7 @@ static constexpr uint32_t MASK_ORDER_BANDIT_3BIT          = 0x7u;
 // [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[decision-time-bound cfg values riding the Order — fee/slippage/tp resolved at submit, read at fill]
+// [REFERENCE]_[CLASS]_[27]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -212,6 +213,8 @@ static_assert(sizeof(OrderPreResolved<64>) == 48,
 // [REFERENCE]_[DESIGN_SPEC]_[cache-layout-discipline-for-hot-side-structs]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one in-flight exchange order — HOT cluster (ids/flags/money) + COLD exchange_id tail; size assert-locked]
+// [REFERENCE]_[CLASS]_[27]
+// [REFERENCE]_[INVARIANT]_[H12]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -458,6 +461,7 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t node_id, OrderType type
 // [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the decision-time bind — resolve maker/taker fee + slippage from the node's cfg onto the Order at submit]
+// [REFERENCE]_[CLASS]_[27]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -499,6 +503,7 @@ inline void Order_BindPreResolved(Order<F>* o, const ::PerNodeCfg<F>& node_cfg) 
 // [TAG]_[[ENGINE] [OMS_DRAINER] [SUPPORTIVE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[bind-discipline tripwire at HandleFill — unbound pre_resolved warns LOUD, never silently zero-fees]
+// [REFERENCE]_[CLASS]_[27]
 //======================================================================
 // [CODE]
 //======================================================================

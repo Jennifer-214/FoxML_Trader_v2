@@ -90,7 +90,7 @@ template <unsigned F> struct RegressionFeederX {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE]]
 // [REFERENCE]_[INVARIANT]_[[H9] [H15] [H21]]
-// [REFERENCE]_[DECISION]_[D-305]
+// [REFERENCE]_[DECISION]_[[D-305] [D-302]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[RegressionFeederX<F> snapshot persistence delegate — 3 field rows drive fwrite/fread/commit AUTOPOPULATE + the count-lock]
 // [COLUMN]_[name]_[RegressionFeederX<F> field persisted]

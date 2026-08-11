@@ -74,6 +74,8 @@ struct TickRecorder {
 // [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the recorder family (MkdirP / DateInt / OpenFile / PruneOld / Init / Close ride) — per-tick to_chars row + daily rotation + rotation-time prune; flush every 1024 ticks]
+// [REFERENCE]_[PARITY]_[PARITY-36]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-160]
 //======================================================================
 // [CODE]
 //======================================================================

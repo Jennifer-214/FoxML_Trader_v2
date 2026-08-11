@@ -54,6 +54,7 @@
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the input bundle every registered compute fn reads — precomputed RegimeSignals + short rolling + hysteresed regime + the staleness-gate scaffold]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-15]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -147,6 +148,7 @@ struct FeatureComputeCtx {
 // [COLUMN]_[note]_[human description]
 // [COLUMN]_[max_staleness_minutes]_[0 = no check; >0 = zero-substitute when older (v5.14.9.E scaffold; NOT hash-folded)]
 // [REFERENCE]_[INVARIANT]_[[H15] [H21]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-7] [TECH_DEBT-13] [TECH_DEBT-15]]
 //======================================================================
 // [CODE]
 //======================================================================

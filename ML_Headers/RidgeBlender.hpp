@@ -533,6 +533,7 @@ inline void RidgeBlender_FinalizeCorrFromSums(double corr_out[MAX_RIDGE_MODELS][
 // [OVERVIEW]_[full-recompute correlation — single-pass sum-of-squares over K×N flat history, AVX-512 with byte-identical scalar baseline, shared finalize]
 // [REFERENCE]_[DESIGN_SPEC]_[avx512-byte-determinism-pattern]
 // [REFERENCE]_[INVARIANT]_[H10]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-158]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -638,6 +639,7 @@ inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_M
 // [OVERVIEW]_[sliding-window incremental sums — add-only while filling, fused drop-oldest+add when full (explicit 4-op form defeats FMA fusion for cross-build byte determinism)]
 // [REFERENCE]_[DESIGN_SPEC]_[sliding-window-online-statistics-pattern]
 // [REFERENCE]_[INVARIANT]_[H10]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-158]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -788,6 +790,7 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
 // [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ONE ring-walk-backwards-from-head helper — most-recent-first into a K×N flat buffer; replaced the buy/exit mirror loops (Class-18 close)]
+// [REFERENCE]_[CLASS]_[18]
 //======================================================================
 // [CODE]
 //======================================================================

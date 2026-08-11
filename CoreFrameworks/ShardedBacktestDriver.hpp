@@ -228,6 +228,7 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
 // [REFERENCE]_[INVARIANT]_[H22]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[one tick end-to-end — fixed-order core fan-out, drain, OMS tick + post-fill, slow-path cadence via EngineCommon_SlowPathCycleAllCores (M5 parity); ordering is load-bearing (P11.6)]
+// [REFERENCE]_[DECISION]_[D-122]
 //======================================================================
 // [CODE]
 //======================================================================

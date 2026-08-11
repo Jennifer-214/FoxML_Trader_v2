@@ -106,9 +106,11 @@ enum RiskCategoryDefault   : uint16_t { RISK_CAT_ALL   = 0xFFFFu };
 // [STRUCT]_[CfgFieldDescriptor]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
-// [REFERENCE]_[INVARIANT]_[[H13] [H14] [H16]]
+// [REFERENCE]_[INVARIANT]_[[H13] [H14] [H16] [H12]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the row descriptor — Kind is GUI-metadata ONLY (never drives storage, H13/H14 consolidated); MetadataFlag bits gate derived filters (H16); schema LOCKED at .F.4b]
+// [REFERENCE]_[CLASS]_[[21] [23]]
+// [REFERENCE]_[DECISION]_[[D-223] [D-254] [D-255]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -321,6 +323,9 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // [COLUMN]_[meta]_[MetadataFlag bits — derived-filter cohorts (H16)]
 // [COLUMN]_[payload]_[DBL/INT/BOOL/INT_ENUM (default, clamps)]
 // [COLUMN]_[tooltip + 4 applicability cats + lives_in_struct]_[GUI tooltip; categorical applicability; storage routing]
+// [REFERENCE]_[CLASS]_[[21] [26]]
+// [REFERENCE]_[DECISION]_[[D-221] [D-256]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-68] [TECH_DEBT-93] [TECH_DEBT-237] [TECH_DEBT-238]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -563,6 +568,8 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // [COLUMN]_[meta]_[MetadataFlag bits — derived-filter cohorts (H16)]
 // [COLUMN]_[payload]_[DBL/INT/BOOL/INT_ENUM (default, clamps)]
 // [COLUMN]_[tooltip + 4 applicability cats + lives_in_struct]_[GUI tooltip; categorical applicability; storage routing]
+// [REFERENCE]_[CLASS]_[[23] [24] [26] [32]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-68] [TECH_DEBT-82] [TECH_DEBT-93]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1080,6 +1087,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // [OVERVIEW]_[TRANSITIONAL capital-array -> nodes[c] LAST-WINS merge (D-273/B) — RAW copy preserves the 0=inherit sentinel; MUST run AFTER the copy walker; retires with the arrays at WIP2g/E.1.2]
 // [COLUMN]_[target_field]_[on PerNodeCfg<F>]
 // [COLUMN]_[source_array_field]_[the standalone capital array on ControllerConfig<F>]
+// [REFERENCE]_[DECISION]_[D-273]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1408,6 +1416,7 @@ constexpr size_t cfg_mask_overlap_count(const CfgMaskArray<N_WORDS>& a,
 // [OVERVIEW]_[the MetadataFlag bit roster — one row per derived-filter cohort bit; drives per-bit precomputed mask arrays per registry]
 // [COLUMN]_[lowercase_name]_[mask-array identifier stem -> g_<registry>_cfg_<name>_mask]
 // [COLUMN]_[UPPERCASE_BIT_NAME]_[CfgFieldDescriptor::MetadataFlag bit]
+// [REFERENCE]_[DECISION]_[D-254]
 //======================================================================
 // [CODE]
 //======================================================================

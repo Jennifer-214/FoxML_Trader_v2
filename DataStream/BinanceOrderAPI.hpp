@@ -61,6 +61,7 @@
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[venue-DEFINED trading constants as exact DECIMAL Money (D-106 source-authority; exchangeInfo strings <=8dp) — lot step/min/max + min_notional + derived qty_decimals (order-status codes + BinanceErrorCode ride)]
+// [REFERENCE]_[DECISION]_[D-106]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -577,6 +578,7 @@ static inline int binance_retry_request(BinanceOrderAPI *api,
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the public API family (Cleanup / MarketSell / CancelOrder / GetStatus / ServerTime / LoadFilters / GetBalance(s) / GetOpenOrders / GetMyTrades / SyncClock / Init ride) — market orders with step/min/max/notional clamps (D-175) + venue order_complete (A17); fills parse via the D-123 double bridge]
+// [REFERENCE]_[DECISION]_[[D-106] [D-175]]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -24,7 +24,7 @@
 // [REFERENCE]_[DESIGN_SPEC]_[heterogeneous-registry-pattern]
 // [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
 // [REFERENCE]_[DESIGN_SPEC]_[autopopulate-pattern-for-production-caller-class]
-// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-023] [TECH_DEBT-024]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-023] [TECH_DEBT-024] [TECH_DEBT-13]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[position-exit-mechanic boolean cfg flags — one row = enum bit + mask + parser + cfg.example + GUI, all auto-flow]
 // [COLUMN]_[NAME]_[UPPERCASE token -> MASK_LIFECYCLE_CFG_<NAME> + LIFECYCLE_CFG_<NAME> enum]   (5-col tuple, v5.14.9.F.5+)

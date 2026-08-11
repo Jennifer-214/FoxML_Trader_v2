@@ -69,6 +69,7 @@ namespace tt {
 // [TAG]_[[ENGINE] [OMS_DRAINER] [DATA_ORIENTED_DESIGN]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[16B size-descending POD — registered_count + derived drain_count + partial_on, 7B trailing slack; drainer-thread-local (deliberately NO alignas(64))]
+// [REFERENCE]_[CLASS]_[27]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -69,6 +69,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ONLY binary instantiation — 16B two's-complement __int128, value = v / 2^64; the feature-math core]
 // [REFERENCE]_[DECISION]_[[D-143] [D-163]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-242]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1831,7 +1832,7 @@ inline divmul_qr divmul_pow10(unsigned __int128 P) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[branchless divisor-generalized rounding from (q, r) — ONE body for the mul-reduce, the cast, and runtime-divisor Div (D-105 uniform-everywhere incl. replay)]
 // [ROUNDING]_[half-even to nearest; ties-to-even exist only for EVEN divisors]
-// [REFERENCE]_[DECISION]_[[D-105] [D-128] [D-174]]
+// [REFERENCE]_[DECISION]_[[D-105] [D-128] [D-174] [D-93]]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1909,7 +1910,7 @@ inline Money Money_Mul(Money a, Money b) {
 // [DOMAIN]_[in-domain a_mag*10^8 <= 2^90; defensively total to <= 2^154]
 // [ROUNDING]_[half-even on r in [0,b) (money_round_half_even, d = b)]
 // [OVERFLOW]_[saturate to ±(2^63-1); OVERFLOW bit on tiny divisors, distinct DIVZERO bit on b==0]
-// [REFERENCE]_[DECISION]_[[D-174] [D-176]]
+// [REFERENCE]_[DECISION]_[[D-174] [D-176] [D-93]]
 // [REFERENCE]_[INVARIANT]_[[H4] [H11]]
 //======================================================================
 // [CODE]

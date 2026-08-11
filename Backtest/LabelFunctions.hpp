@@ -75,6 +75,7 @@ struct HistoricalTick {
 // [COLUMN]_[fn]_[Label_<Name> compute leaf matching the LabelFn signature]
 // [COLUMN]_[num_classes]_[0 binary, 1 regression, 2-or-more multiclass; ":nc"+value folded into the hash]
 // [REFERENCE]_[INVARIANT]_[[H15] [H21]]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-241]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -67,6 +67,7 @@ namespace tt {
 // [OVERVIEW]_[6 BIT_FLAG rows -> sequential NODE_STATE_FLAG_<name> enum bits + MASK_NODE_STATE_<name> uint8_t constants; 2 bits headroom (overflow assert at 8)]
 // [COLUMN]_[name]_[UPPERCASE token; produces the NODE_STATE_FLAG_<name> bit + MASK_NODE_STATE_<name> constant]
 // [COLUMN]_[doc_string]_[human-readable description for audits + docs]
+// [REFERENCE]_[DECISION]_[D-221]
 //======================================================================
 // [CODE]
 //======================================================================

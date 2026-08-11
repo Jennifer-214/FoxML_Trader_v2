@@ -123,6 +123,8 @@ struct ThompsonBanditState {
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[splitmix64 -> Box-Muller -> one posterior draw per arm -> argmax; Init/Update (closed-form Bayes) + Pattern-5 sink wrappers + probability/softmax read-outs share the section]
+// [REFERENCE]_[CLASS]_[[24] [28]]
+// [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================
 // [CODE]
 //======================================================================

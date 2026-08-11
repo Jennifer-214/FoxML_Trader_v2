@@ -35,6 +35,8 @@ namespace tt {
 // [COLUMN]_[name]_[UPPERCASE token; produces GATE_<name> bit + MASK_<name> constant]
 // [COLUMN]_[predicate_expr]_[bool expression over the AUTOPOPULATE-bound _gate_cfg; PER_NODE gets resolved_cfg, ENGINE_WIDE gets global cfg]
 // [COLUMN]_[doc_string]_[human-readable description for audits + cfg.example]
+// [REFERENCE]_[CLASS]_[[18] [28]]
+// [REFERENCE]_[PARITY]_[PARITY-32]
 //======================================================================
 // [CODE]
 //======================================================================

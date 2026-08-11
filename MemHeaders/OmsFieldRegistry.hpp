@@ -218,6 +218,8 @@ struct OmsResetCtx {
 // [COLUMN]_[STORAGE_KIND]_[DIRECT | BIT | MULTI_BIT | ATOMIC]
 // [COLUMN]_[PERSIST_KIND]_[PERSIST | SKIP_PERSIST]
 // [COLUMN]_[STORAGE_MASK]_[MASK_OMS_STATE_* for BIT/MULTI_BIT; 0 otherwise]
+// [REFERENCE]_[CLASS]_[[5] [27]]
+// [REFERENCE]_[INVARIANT]_[H9]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -361,6 +363,7 @@ struct OmsResetCtx {
 // [COLUMN]_[type]_[C++ type for the cast at write site]
 // [COLUMN]_[INIT]_[per-slot boot init value]
 // [COLUMN]_[RESET]_[per-slot value at DrainPostFill post-attribution clear]
+// [REFERENCE]_[CLASS]_[[27] [30]]
 //======================================================================
 // [CODE]
 //======================================================================

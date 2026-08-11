@@ -354,6 +354,8 @@ static inline int ud_keepalive_listen_key(BinanceUserDataState* s) {
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[extract one x=="TRADE" fill into a Command — price/qty/maker/status/commission; CARRIES the open .E.0.10 parser findings (A2 "z" unparsed, A4 commission non-authoritative, A5 side uncrosschecked — see the findings block below)]
+// [REFERENCE]_[DECISION]_[D-123]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-169] [TECH_DEBT-171]]
 //======================================================================
 // [CODE]
 //======================================================================

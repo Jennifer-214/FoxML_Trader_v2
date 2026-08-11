@@ -29,6 +29,7 @@ namespace tt {
 // [COLUMN]_[col_name]_[bare identifier; used for CSV header AND row writers]
 // [COLUMN]_[printf_fmt]_[per-column printf format string (e.g. "%lu", "%.8f", "%c")]
 // [COLUMN]_[value_expr]_[expression read at row-build time; MUST be valid in caller scope]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-31]
 //======================================================================
 // [CODE]
 //======================================================================

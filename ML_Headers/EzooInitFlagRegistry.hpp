@@ -69,6 +69,7 @@
 // [OVERVIEW]_[X(NAME, doc) rows -> enum + MASK_EZOO_* + ToString + overflow assert; 4/8 bits used]
 // [COLUMN]_[NAME]_[uppercase token -> MASK_EZOO_<NAME>]
 // [COLUMN]_[doc]_[audit string]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-84]
 //======================================================================
 // [CODE]
 //======================================================================================================

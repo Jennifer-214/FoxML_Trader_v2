@@ -65,9 +65,11 @@
 // [COLUMN]_[emit_when]_[boolean gate at emit time — literal 1 = always; guard expr = optional field]
 // [COLUMN]_[doc_comment]_[purpose string for errors + doc tooling]
 // [REFERENCE]_[DESIGN_SPEC]_[wire-format-byte-preservation-discipline]
-// [REFERENCE]_[PARITY]_[PARITY-022]
+// [REFERENCE]_[PARITY]_[[PARITY-022] [PARITY-24] [PARITY-26]]
 // [REFERENCE]_[INVARIANT]_[[H9] [H15] [H21]]
 // [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-036]
+// [REFERENCE]_[CLASS]_[[18] [24]]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-4] [TECH_DEBT-6] [TECH_DEBT-36] [TECH_DEBT-37] [TECH_DEBT-237] [TECH_DEBT-238]]
 //======================================================================
 // [CODE]
 //======================================================================

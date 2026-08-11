@@ -16,7 +16,7 @@
 // [REGISTRY]_[FOREACH_REGISTRY]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE]]
-// [REFERENCE]_[INVARIANT]_[[H15] [H19]]
+// [REFERENCE]_[INVARIANT]_[[H15] [H19] [H18] [H21]]
 // [REFERENCE]_[DESIGN_SPEC]_[meta-registry-pattern-for-codebase-registry-discipline]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ROOT registry of registries — enrollment (H15) + LEVEL/PARENT topology (H19), CI cross-checked]
@@ -24,6 +24,8 @@
 // [COLUMN]_[LEVEL]_[0 = ROOT (this registry itself); 1 = direct registry; 2 = child of a Level-1 meta-registry]
 // [COLUMN]_[PARENT_NAME]_[for LEVEL > 0, the meta-registry managing this registry's discipline; ROOT_NONE at LEVEL 0]
 // [COLUMN]_[description]_[one-line operator-facing description of the registry's purpose]
+// [REFERENCE]_[DECISION]_[D-297]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-84] [TECH_DEBT-237] [TECH_DEBT-238]]
 //======================================================================
 // [CODE]
 //======================================================================

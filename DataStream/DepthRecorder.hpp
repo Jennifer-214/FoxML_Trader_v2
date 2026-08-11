@@ -95,6 +95,8 @@ struct DepthRecorder {
 // [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the recorder family (MkdirP / DateInt / OpenFile / PruneOld / Init / LogGap / Close ride) — ~10Hz allocation-free row emit + internal gap detection (id backward / >2s silence)]
+// [REFERENCE]_[PARITY]_[PARITY-36]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-160]
 //======================================================================
 // [CODE]
 //======================================================================

@@ -62,6 +62,9 @@
 // [REFERENCE]_[DESIGN_SPEC]_[multi-state-dispatch-with-per-state-update-metadata]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the buy + exit reward dispatch tables — FOREACH_BANDIT_SIDE meta-macro mirrors both; leaf fns templated on Side; bit-width invariants pin Order::flags_packed bits 17-25]
+// [REFERENCE]_[CLASS]_[[18] [24] [25] [28]]
+// [REFERENCE]_[INVARIANT]_[H20]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-84]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -72,6 +75,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[meta-X-macro for buy/exit symmetry — 2 rows mirror every side-split consumer surface; adding a side = 1 row]
 // [COLUMN]_[side]_[lowercase token (buy | exit) — stamped into every mirrored identifier]
+// [REFERENCE]_[CLASS]_[18]
 //======================================================================
 // [CODE]
 //======================================================================

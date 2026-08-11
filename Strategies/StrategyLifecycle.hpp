@@ -284,6 +284,7 @@ inline void Strategy_AdaptPerCore(
 // [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[THE ratchet-SL chokepoint — fee-floor cap (entry x (1 - 3x per-node fee_taker)) uniform across all 5 callers; max-only + DIRTY on advance; WriteRatchetTP (no floor needed) shares the section]
+// [REFERENCE]_[CLASS]_[26]
 //======================================================================
 // [CODE]
 //======================================================================

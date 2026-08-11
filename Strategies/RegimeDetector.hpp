@@ -629,6 +629,8 @@ template <unsigned F> struct RegimeState {
 // [TAG]_[[SLOW_PATH] [PERSISTENCE]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the 7-field wire-persist delegate for RegimeState<F> — fieldwise write/read/commit + a count-lock forcing a SHARDED_SNAPSHOT_VERSION bump on any row change (D-305, H21)]
+// [REFERENCE]_[DECISION]_[D-302]
+// [REFERENCE]_[INVARIANT]_[H21]
 //======================================================================
 // [CODE]
 //======================================================================
