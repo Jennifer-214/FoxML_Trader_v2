@@ -268,6 +268,13 @@ run_tests() {
     build_engine
     echo "--- running controller_test ---"
     ./build/controller_test
+    # Compile-time latency REPORT (operator ask 2026-08-14): counts-vs-budgets printed at every
+    # test pass. Deliberately NON-FATAL here — the GATE is pre-commit Check N; acceptance of new
+    # numbers stays at the operator's TTY (--update-budgets, D-394). SKIP_LATCHECK=1 skips.
+    if [[ "${SKIP_LATCHECK:-0}" != "1" ]]; then
+        echo "--- latency-path conformance (report; the gate runs pre-commit) ---"
+        python3 tools/check_latency_path_conformance.py || true
+    fi
 }
 
 # v5.15.5.F.4d.1.E.1.2.B 0.5 — 1:1 asm sidecars from the SHIPPED binaries (ideas §2 / TD-257).
