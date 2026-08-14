@@ -153,8 +153,8 @@ struct NodeLatencySnapshot {
     // Sample window depth used for percentile calc (min(total_count, 256))
     int      window_size;
     // v4.7.36: lifetime percentiles from log-bucket histogram (all samples,
-    // not just last 256). Bucket precision is power-of-2, so values are
-    // approximate — reported as the upper bound of the bucket.
+    // not just last 256). Power-of-2 buckets with within-bucket linear
+    // interpolation (v5.15.5) — an estimate, typically within a few %.
     double   lifetime_p50_ns;
     double   lifetime_p95_ns;
     double   lifetime_p99_ns;
@@ -336,19 +336,26 @@ inline NodeLatencySnapshot NodeLatencyStats_Snapshot(const NodeLatencyStats* s, 
 
     // v4.7.36: lifetime percentiles from log-bucket histogram. Walk
     // buckets accumulating count until we cross each percentile threshold.
-    // Bucket i covers [2^i, 2^(i+1)) cycles — report upper bound as the
-    // percentile estimate (conservative). Power-of-2 precision means
-    // reported values are within ~2x of true percentile.
+    // v5.15.5: interpolate linearly WITHIN the crossing bucket (uniform-
+    // within-bucket assumption) instead of reporting the raw 2^(b+1) upper
+    // bound — power-of-2 quantization made the value step in 2x jumps,
+    // useless for trend monitoring. Still an estimate (true value lies
+    // somewhere in the bucket) but typically within a few % instead of 2x.
     auto lifetime_pct = [&](double pct) -> double {
         uint64_t target = (uint64_t)((double)s->total_count * pct);
         if (target == 0) target = 1;
         uint64_t accum = 0;
         for (int b = 0; b < NodeLatencyStats::HIST_BUCKETS; ++b) {
-            accum += s->lifetime_buckets[b];
+            uint64_t bc = s->lifetime_buckets[b];
+            accum += bc;
             if (accum >= target) {
-                // Upper bound of bucket b is 2^(b+1) cycles.
-                uint64_t cycles_upper = (b >= 63) ? UINT64_MAX : (1ULL << (b + 1));
-                return cyc_to_ns((double)cycles_upper);
+                // Bucket b spans [2^b, 2^(b+1)) — width == 2^b. Scale the
+                // target's rank position inside this bucket across the span.
+                double lower = (double)(1ULL << b);
+                double frac  = bc > 0
+                    ? (double)(target - (accum - bc)) / (double)bc
+                    : 1.0;
+                return cyc_to_ns(lower + lower * frac);
             }
         }
         return cyc_to_ns((double)s->max_cycles);

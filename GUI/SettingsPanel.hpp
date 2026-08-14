@@ -774,8 +774,10 @@ static const PerNodeFieldDef per_node_fields[] = {
         "Z-score clipping for vol scaler on this node. 0 = inherit."},
     {"bandit_blend_ratio",        "Bandit Blend",   "ML",  "%.2f",
         "Max bandit influence fraction for this node (0.30 = 30%). 0 = inherit."},
-    {"confidence_freshness_tau",  "Conf Tau (s)",   "ML",  "%.0f",
-        "Freshness decay constant in seconds for this node. 0 = inherit."},
+    // confidence_freshness_tau ROW DELETED 2026-08-14: the per-node override was
+    // retired at v5.14.9.D — the parser HARD-REFUSES node_N_confidence_freshness_tau
+    // (CFG_FAULT_UNKNOWN_KEY), so this widget wrote a key that bricked the next boot
+    // (TECH_DEBT-208; the GUI-writer↔parser parity guard rides the EV-2 leaf).
     {"confidence_threshold_scale","Conf Scale",     "ML",  "%.2f",
         "Confidence gate scale: effective_thr = base * (this - conf). 0 = inherit."},
 };
@@ -857,10 +859,25 @@ struct SettingsState {
 static inline void cfg_write_field(const char *path, const char *key, const char *value) {
     FILE *f = fopen(path, "r");
     if (!f) return;
-    char buf[16384];
+    // v5.15.5 (2026-08-14): 16KB → 64KB + REFUSE-don't-truncate. The operator's
+    // engine.cfg crossed 16KB (16,962B): the old cap silently dropped the tail at
+    // read, then the edit-in-place path below REWROTE the file from the truncated
+    // buffer — silent cfg-tail loss on any settings edit. 64KB covers the 88-row
+    // per-node × 16-node future; static is safe (GUI render thread is the sole
+    // caller) and keeps the frame stack small. An over-sized file now refuses the
+    // edit loudly instead of eating the tail.
+    static char buf[65536];
     size_t len = fread(buf, 1, sizeof(buf) - 1, f);
+    int cfg_overflows_buf = (fgetc(f) != EOF);
     buf[len] = '\0';
     fclose(f);
+    if (cfg_overflows_buf) {
+        fprintf(stderr,
+            "[settings] cfg_write_field: %s exceeds %zu bytes — REFUSING edit "
+            "(a rewrite would truncate the file tail). Raise the buffer cap.\n",
+            path, sizeof(buf) - 1);
+        return;
+    }
 
     char search[128];
     snprintf(search, sizeof(search), "%s=", key);
@@ -903,16 +920,26 @@ static inline void cfg_write_field(const char *path, const char *key, const char
     char *eol = pos;
     while (*eol && *eol != '\n' && *eol != '\r') eol++;
 
-    char newbuf[16384];
+    // +256 slack: a replacement value longer than the line it replaces grows the
+    // total. Bounds-checked below — the old code memcpy'd the suffix unbounded
+    // (latent stack smash when near the cap with a longer value).
+    static char newbuf[65536 + 256];
     size_t prefix_len = pos - buf;
     memcpy(newbuf, buf, prefix_len);
     int written = snprintf(newbuf + prefix_len, sizeof(newbuf) - prefix_len, "%s=%s", key, value);
     size_t suffix_start = eol - buf;
+    size_t total = prefix_len + (size_t)written + (len - suffix_start);
+    if (total >= sizeof(newbuf)) {
+        fprintf(stderr,
+            "[settings] cfg_write_field: rewrite of %s would exceed %zu bytes — "
+            "REFUSING edit.\n", path, sizeof(newbuf));
+        return;
+    }
     memcpy(newbuf + prefix_len + written, buf + suffix_start, len - suffix_start);
 
     f = fopen(path, "w");
     if (f) {
-        fwrite(newbuf, 1, prefix_len + written + (len - suffix_start), f);
+        fwrite(newbuf, 1, total, f);
         fclose(f);
     }
 }

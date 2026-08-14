@@ -1100,6 +1100,7 @@ struct TUISnapshot {
     // [STRADDLE_EXEMPT]_[sp_breakdown_p50_ns]_[field of a seqlock-published bulk-copy record — no per-field concurrent access (whole-record publish/copy) — D-414 leaf-3 2026-08-10]
     // [STRADDLE_EXEMPT]_[ensemble_n_updates_per_regime]_[field of a seqlock-published bulk-copy record — same rationale — D-414 leaf-3 2026-08-10]
     // [STRADDLE_EXEMPT]_[thompson_precision_post]_[field of a seqlock-published bulk-copy record — same rationale — D-414 leaf-3 2026-08-10]
+    // [STRADDLE_EXEMPT]_[sp_breakdown_p99_ns]_[same seqlock-published bulk-copy rationale as its p50 sibling — shifted onto the 64B boundary by the v5.15.5 lifetime_p99 field append 2026-08-14]
     // [SCHEMA]_[v1.0]
     // [OVERVIEW]_[the per-node TUI display record — hot/slow latency quartiles + strategy/halt reason + gate flags + gate diagnostics + ML observability; one per execution node, published tear-free via the seqlock]
     // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-13] [TECH_DEBT-28]]
@@ -1116,6 +1117,11 @@ struct TUISnapshot {
         double   p99_ns;
         double   max_ns;
         double   avg_ns;
+        // v5.15.5: lifetime p99 from the NodeLatencyStats log2-bucket
+        // histogram (ALL samples since boot, not the 256-window) — the
+        // long-horizon tail for overnight monitoring. Within-bucket
+        // interpolated estimate; see NodeLatencyStats_Snapshot.
+        double   lifetime_p99_ns;
         // v5.0.1 (Phase H): slow-path latency (per-cycle work in
         // per-core slow-path thread).
         uint64_t sp_samples;
@@ -1125,6 +1131,7 @@ struct TUISnapshot {
         double   sp_p99_ns;
         double   sp_max_ns;
         double   sp_avg_ns;
+        double   sp_lifetime_p99_ns;   // v5.15.5: slow-path lifetime p99 (histogram; see above)
         uint8_t  strategy_id_display;  // STRATEGY_* constant for this core
         uint8_t  resolved_strategy_id; // v4.0.4: when strategy=AUTO, the regime-resolved
                                         // concrete strategy. Equals strategy_id_display for
@@ -1390,11 +1397,11 @@ struct TUISnapshot {
     //==================================================================
     // [DERIVED]
     // [ORIGIN]_[AUTO]
-    // [UPDATED]_[2026-07-18]
-    // [SIZE]_[1152B]
+    // [UPDATED]_[2026-08-14]
+    // [SIZE]_[1216B]
     // [ALIGN]_[64]
-    // [CACHE_LINES]_[18]
-    // [STRADDLE]_[sp_breakdown_p50_ns@488 · ensemble_n_updates_per_regime@944 · thompson_precision_post@1020]
+    // [CACHE_LINES]_[19]
+    // [STRADDLE]_[sp_breakdown_p50_ns@504 · sp_breakdown_p99_ns@544 · ensemble_n_updates_per_regime@1008 · thompson_precision_post@1084]
     //==================================================================
     // [END_STRUCT]_[PerNodeSnap]
     //==================================================================
@@ -1530,11 +1537,11 @@ struct TUISharedState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
-// [SIZE]_[62592B]
+// [UPDATED]_[2026-08-14]
+// [SIZE]_[64640B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[978]
-// [STRADDLE]_[swap_strategy_requested@58168 · kill_reset_per_node@58184 · manual_close_requested@58248]
+// [CACHE_LINES]_[1010]
+// [STRADDLE]_[swap_strategy_requested@60216 · kill_reset_per_node@60232 · manual_close_requested@60296]
 //======================================================================
 // [END_STRUCT]_[TUISharedState]
 //======================================================================
@@ -1943,6 +1950,7 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         snap->per_node[i].p99_ns  = ls.p99_ns;
         snap->per_node[i].max_ns  = ls.max_ns;
         snap->per_node[i].avg_ns  = ls.avg_ns;
+        snap->per_node[i].lifetime_p99_ns = ls.lifetime_p99_ns;
     }
     // Zero unused slots so renderer doesn't show stale data from a previous
     // tick when num_nodes changes
@@ -1954,6 +1962,7 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         snap->per_node[i].p99_ns  = 0;
         snap->per_node[i].max_ns  = 0;
         snap->per_node[i].avg_ns  = 0;
+        snap->per_node[i].lifetime_p99_ns = 0;
         // v5.0.1 (Phase H): slow-path latency too
         snap->per_node[i].sp_samples = 0;
         snap->per_node[i].sp_min_ns  = 0;
@@ -1962,6 +1971,7 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         snap->per_node[i].sp_p99_ns  = 0;
         snap->per_node[i].sp_max_ns  = 0;
         snap->per_node[i].sp_avg_ns  = 0;
+        snap->per_node[i].sp_lifetime_p99_ns = 0;
     }
 }
 
@@ -1988,6 +1998,7 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
         snap->per_node[i].sp_p99_ns  = ls.p99_ns;
         snap->per_node[i].sp_max_ns  = ls.max_ns;
         snap->per_node[i].sp_avg_ns  = ls.avg_ns;
+        snap->per_node[i].sp_lifetime_p99_ns = ls.lifetime_p99_ns;
         // v5.1.1: per-section breakdown.
         for (int s = 0; s < 5; ++s) {
             tt::NodeLatencySnapshot ss = tt::NodeLatencyStats_Snapshot(
