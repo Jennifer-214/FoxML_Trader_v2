@@ -105,6 +105,7 @@ build_engine() {
     cmake -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build -j"$JOBS"
     link_cfg build
+    emit_asm_for_dir build
     update_bin_links
 }
 
@@ -146,6 +147,7 @@ build_pgo() {
           -DPGO_PROFILE_DIR="$PROFILE_DIR" \
     cmake --build build_pgo -j"$JOBS"
     link_cfg build_pgo
+    emit_asm_for_dir build_pgo
     update_bin_links
     echo "[pgo] OK — optimized engine binary at build_pgo/engine"
 }
@@ -160,6 +162,7 @@ build_gui() {
     cmake -B build_gui -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_gui -j"$JOBS"
     link_cfg build_gui
+    emit_asm_for_dir build_gui
     update_bin_links
 }
 
@@ -171,6 +174,7 @@ build_gui_lite() {
     cmake -B build_gui_lite -DUSE_IMGUI_GUI=ON
     cmake --build build_gui_lite -j"$JOBS"
     link_cfg build_gui_lite
+    emit_asm_for_dir build_gui_lite
     update_bin_links
 }
 
@@ -209,6 +213,7 @@ build_suite() {
     cmake -B build_suite -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_suite -j"$JOBS" --target foxml_suite
     link_cfg build_suite
+    emit_asm_for_dir build_suite
     update_bin_links
 }
 
@@ -217,6 +222,7 @@ build_latency() {
     cmake -B build_lat -DLATENCY_PROFILING=ON
     cmake --build build_lat -j"$JOBS"
     link_cfg build_lat
+    emit_asm_for_dir build_lat
     update_bin_links
 }
 
@@ -272,27 +278,42 @@ run_tests() {
 # re-compile. Sanitizer/debug dirs are deliberately excluded (instrumented code is not the
 # shipped shape). Each sidecar carries a provenance header (binary sha + mtime + git HEAD at
 # emit) so a consumer can DETECT binary-newer-than-sidecar staleness instead of trusting it.
-emit_asm_sidecars() {
-    local head found=0
+# Per-dir emitter — CHAINED into every build (operator ask 2026-08-13: the sidecars regenerate
+# alongside the binaries, so they are always 1:1 with what you just built; ./build.sh asm stays
+# as the manual full-sweep). `-l` interleaves DWARF line info from the binary (the -g flag in
+# CMakeLists) — the source↔shipped-asm sync's substrate.
+emit_asm_for_dir() {
+    local dir="$1" head emitted=0
+    [[ -d "$dir" ]] || return 0
     head=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    for bin_name in engine engine_gui foxml_suite controller_test; do
+        local b="$dir/$bin_name"
+        [[ -f "$b" && -x "$b" ]] || continue
+        mkdir -p "$dir/asm"
+        local out="$dir/asm/$bin_name.asm"
+        local sha
+        sha=$(sha256sum "$b" | cut -c1-16)
+        {
+            echo "# 1:1 disassembly of $b — the SHIPPED artifact, never a re-compile"
+            echo "# binary-sha256-16: $sha  binary-mtime: $(stat -c %Y "$b")  emitted-at-HEAD: $head"
+            echo "# stale-test: compare sha above vs \`sha256sum $b | cut -c1-16\`; regen: ./build.sh asm"
+            objdump -d -C -l --no-show-raw-insn "$b"
+        } > "$out"
+        echo "[asm] $out  ($(du -h "$out" | cut -f1), binary $sha)"
+        emitted=1
+    done
+    return 0
+}
+
+emit_asm_sidecars() {
+    local found=0
     for dir in build build_gui build_gui_lite build_suite build_lat build_pgo; do
         [[ -d "$dir" ]] || continue
-        for bin_name in engine engine_gui foxml_suite controller_test; do
-            local b="$dir/$bin_name"
-            [[ -f "$b" && -x "$b" ]] || continue
-            mkdir -p "$dir/asm"
-            local out="$dir/asm/$bin_name.asm"
-            local sha
-            sha=$(sha256sum "$b" | cut -c1-16)
-            {
-                echo "# 1:1 disassembly of $b — the SHIPPED artifact, never a re-compile"
-                echo "# binary-sha256-16: $sha  binary-mtime: $(stat -c %Y "$b")  emitted-at-HEAD: $head"
-                echo "# stale-test: compare sha above vs \`sha256sum $b | cut -c1-16\`; regen: ./build.sh asm"
-                objdump -d -C --no-show-raw-insn "$b"
-            } > "$out"
-            echo "[asm] $out  ($(du -h "$out" | cut -f1), binary $sha)"
-            found=1
-        done
+        local before after
+        before=$(ls "$dir"/asm/*.asm 2>/dev/null | wc -l)
+        emit_asm_for_dir "$dir"
+        after=$(ls "$dir"/asm/*.asm 2>/dev/null | wc -l)
+        (( after > 0 )) && found=1
     done
     if [[ $found == 0 ]]; then
         echo "[asm] no binaries found — build something first (./build.sh test|gui)" >&2
