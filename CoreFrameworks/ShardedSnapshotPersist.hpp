@@ -45,6 +45,9 @@
 #include "OrderManager.hpp"
 #include "Portfolio.hpp"
 #include "../FixedPoint/FixedPointN.hpp"
+// E.1.2 D-305 — the ordered per-node persist wire spec (29 rows; SAVE/READ/COMMIT
+// projections). MUST come after NodeContext + the delegate walkers are visible.
+#include "../MemHeaders/NodeCtxPersistRegistry.hpp"
 // v5.15.5.C.3 Phase 3b — canonical FOREACH_OMS_FIELD + OMS_PROJECT_PERSIST_*
 // dispatch is included transitively via OrderManager.hpp:71. The legacy
 // OmsPersistFieldRegistry.hpp was deleted in this phase; consumers now walk
@@ -185,91 +188,18 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     if (fwrite(state->oms->portfolio.positions, sizeof(Position<F>), 16, f) != 16) goto fail;
 
     // ---- PER-CORE BLOCKS ----
+    // E.1.2 D-305 — registry-driven wire walk. The ordered FOREACH_NODE_PERSIST_FIELD
+    // (MemHeaders/NodeCtxPersistRegistry.hpp) IS the per-node wire spec: 29 rows,
+    // 1944B/node, row order == emission order, byte-identical to the retired
+    // hand-loop (frozen golden: tests/sharded_snapshot_v10_golden.hpp). Per-field
+    // history (v5.4.3 Class-4 gross-drop, the v5.11.15 kind-leak NO_COMMITs, the
+    // .B.3 kill-bit byte format, the Step-2c delegates + the D-110 interleave)
+    // rides the registry rows. Dropping a wire op ⟺ dropping a row ⟺ caught by
+    // the ==29 count-lock. `confidence.window` stays deliberately OFF the wire
+    // (cfg-owned at Init; persisting would carry stale cfg across restarts).
     for (uint32_t i = 0; i < num_nodes; ++i) {
         const NodeContext<F>& ctx = state->nodes[i];
-
-        // Identity / sizing
-        if (fwrite(&ctx.strategy_id,         1, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.resolved_strategy_id,1, 1, f) != 1) goto fail;
-        // v5.4.0 (snapshot v4): persist strategy_state_kind so the load
-        // path can call Strategy_InitPerCore with the right kind to
-        // reallocate state. The void* strategy_state pointer itself is
-        // NOT persisted (pointers don't survive restart).
-        if (fwrite(&ctx.strategy_state_kind, 1, 1, f) != 1) goto fail;
-        {
-            uint8_t pad8 = 0;  // was uint16_t pad16 in v3; one byte stolen for state_kind
-            if (fwrite(&pad8, 1, 1, f) != 1) goto fail;
-        }
-        if (fwrite(&ctx.allocated_balance,   sizeof(Money), 1, f) != 1) goto fail;
-
-        // Counters
-        if (fwrite(&ctx.entries_processed,   8, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.exits_processed,     8, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.node_realized,       sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.node_fees,           sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.node_open_notional,  sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.node_wins,           4, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.node_losses,         4, 1, f) != 1) goto fail;
-        // v5.4.3 (recurring-bugs Class 4): node_gross_wins/losses were
-        // added in v4.7.25 but never persisted, so Stats panel avg_win,
-        // avg_loss, profit_factor, expectancy all read $0.00 after
-        // restart until the next post-restart trade. idle_cycles is
-        // the death-spiral counter — also persisted for continuity.
-        if (fwrite(&ctx.node_gross_wins,     sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.node_gross_losses,   sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.idle_cycles,         4, 1, f) != 1) goto fail;
-
-        // Spacing state
-        if (fwrite(&ctx.last_entry_price,    sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.last_entry_tick,     8, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.sl_cooldown_remaining, 4, 1, f) != 1) goto fail;
-
-        // Kill switch
-        if (fwrite(&ctx.node_peak_balance,   sizeof(Money), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.node_dd_pct,         sizeof(Money), 1, f) != 1) goto fail;
-        // v5.15.5.B.3 — node_kill_tripped migrated to node_state_flags bitmap
-        // bit. Format preservation: write as 1-byte 0/1 the same way pre-.B.3
-        // saved the uint8_t field. Bytewise-identical wire format (no
-        // SHARDED_SNAPSHOT_VERSION bump needed).
-        {
-            uint8_t kill_byte =
-                NODE_STATE_FLAG_IS_SET(ctx, KILL_TRIPPED) ? (uint8_t)1 : (uint8_t)0;
-            if (fwrite(&kill_byte, 1, 1, f) != 1) goto fail;
-        }
-        {
-            uint8_t pad8[3] = {0,0,0};
-            if (fwrite(pad8, 3, 1, f) != 1) goto fail;
-        }
-        if (fwrite(&ctx.node_ks_trips_total, 4, 1, f) != 1) goto fail;
-
-        // Regime hysteresis — registry-driven delegate (E.1.2 Step-2): 5 ints + uint64 + time_t,
-        // byte-identical to the pre-registry hand-loop. FOREACH_REGIME_PERSIST_FIELD (RegimeDetector.hpp).
-        if (RegimeState_FieldwiseWrite(&ctx.regime_state, f) != 0) goto fail;
-
-        // pnl_feeder ring buffer — registry-driven delegate (E.1.2 Step-2): price_samples
-        // [FPN_Binary<F> x MAX_WINDOW] + head + count. FOREACH_FEEDER_PERSIST_FIELD. The retype
-        // Money->FPN_Binary<F> is byte-identical (both 16B) + type-honest (R1).
-        if (RegressionFeederX_FieldwiseWrite(&ctx.pnl_feeder, f) != 0) goto fail;
-
-        // Confidence scorer prediction snapshots (doubles)
-        if (fwrite(&ctx.staged_prediction, 8, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.active_prediction, 8, 1, f) != 1) goto fail;
-        if (fwrite(&ctx.last_confidence,   8, 1, f) != 1) goto fail;
-
-        // v5.15.5.E.0 — ConfidenceScorer fieldwise persistence via shared
-        // FOREACH_CONFIDENCE_PERSIST_FIELD registry. Byte-identical to pre-.E
-        // sharded wire format (predictions + actuals + count + head + rmse
-        // arrays + count + head). Closes Class-18 mirror with the legacy
-        // PortfolioController snapshot save (its ConfidenceScorer_FieldwiseWrite
-        // call) — both persistence sites now call the
-        // same helper. Adding a new persisted field = 1 row in the registry.
-        // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md +
-        // DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md.
-        //
-        // `window` field intentionally NOT in the registry: comes from cfg at
-        // Init; persisting would carry stale config across restarts if the
-        // user changed confidence_window between sessions.
-        if (ConfidenceScorer_FieldwiseWrite(&ctx.confidence, f) != 0) goto fail;
+        FOREACH_NODE_PERSIST_FIELD(NPF_PROJECT_SAVE)
     }
     // v3 NOTE: ExecutionCore leg-B mirrors (active_b, entry_price_b,
     // live_tp_b, live_sl_b) are NOT persisted as separate fields —
@@ -419,10 +349,14 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
 
     // ---- PER-CORE BLOCKS ----
     // Read all cores into temporary storage first; only commit if all reads succeed.
+    // E.1.2 D-305: NodeSnap IS the registry's DECLARE view, hand-kept (nested staging
+    // landed at Step 2c) — field names MATCH the FOREACH_NODE_PERSIST_FIELD row NAMEs
+    // so the READ/COMMIT projections address `s.<NAME>` and `ctx.<NAME>` uniformly.
+    // PAD rows use walk-local scratch (no staging field).
     struct NodeSnap {
         uint8_t  strategy_id;
         uint8_t  resolved_strategy_id;
-        uint8_t  strategy_state_kind;  // v5.4.0 — used by load to dispatch Strategy_InitPerCore
+        uint8_t  strategy_state_kind;  // v5.4.0 — read off the wire; NO_COMMIT (v5.11.15 leak — see commit site)
         Money   allocated_balance;
         uint64_t entries_processed;
         uint64_t exits_processed;
@@ -439,11 +373,11 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         uint32_t node_ks_trips_total;
         // regime — nested staging (E.1.2 Step-2, D-305): FieldwiseRead populates the 7
         // persisted fields; the 2 unpersisted score ints stay default-init + uncommitted.
-        RegimeState<F> staging_regime;
+        RegimeState<F> regime_state;
         // feeder — nested staging (E.1.2 Step-2, D-305): FieldwiseRead populates all 3 fields.
-        RegressionFeederX<F> staging_feeder;
-        // confidence (v1)
-        double   staged, active, last_confidence;
+        RegressionFeederX<F> pnl_feeder;
+        // confidence prediction snapshots (v1; the D-110 interleave doubles)
+        double   staged_prediction, active_prediction, last_confidence;
         // v5.15.5.E.0 — staging ConfidenceScorer instance replaces the prior
         // flat staging fields (ic_predictions / ic_actuals / ic_count / etc).
         // FieldwiseRead populates only the persisted subset (ic + rmse
@@ -451,54 +385,16 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // default-initialization (they're re-init from cfg via
         // ConfidenceScorer_BindCompositeCfg at boot, NOT restored from snapshot).
         // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
-        ConfidenceScorer staging_confidence;
+        ConfidenceScorer confidence;
     };
     NodeSnap snaps[MAX_EXECUTION_NODES];
 
+    // E.1.2 D-305 — registry-driven read walk (same 29 ordered rows as the save
+    // walk; STORAGE_KIND dispatch ONLY, so NO_COMMIT rows still consume their
+    // wire bytes and every later offset stays correct — the A2 invariant).
     for (uint32_t i = 0; i < file_num_nodes; ++i) {
         NodeSnap& s = snaps[i];
-        // v5.4.0: pad16_2 (2-byte pad after resolved_strategy_id) was
-        // replaced by strategy_state_kind (1 byte) + 1-byte pad.
-        uint8_t  pad8[3];
-        if (fread(&s.strategy_id, 1, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.resolved_strategy_id, 1, 1, f) != 1) { fclose(f); return 0; }
-        // v5.4.0 (snapshot v4): read strategy_state_kind. Used by load to
-        // call Strategy_InitPerCore(kind) — see end of load function.
-        if (fread(&s.strategy_state_kind, 1, 1, f) != 1) { fclose(f); return 0; }
-        {
-            uint8_t pad8_kind = 0;
-            if (fread(&pad8_kind, 1, 1, f) != 1) { fclose(f); return 0; }
-        }
-        if (fread(&s.allocated_balance, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.entries_processed, 8, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.exits_processed,   8, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_realized,     sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_fees,         sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_open_notional,sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_wins,         4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_losses,       4, 1, f) != 1) { fclose(f); return 0; }
-        // v5.4.3 (snapshot v5): gross accumulators + idle_cycles.
-        if (fread(&s.node_gross_wins,   sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_gross_losses, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.idle_cycles,       4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.last_entry_price,  sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.last_entry_tick,   8, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.sl_cooldown_remaining, 4, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_peak_balance, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_dd_pct,       sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_kill_tripped, 1, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(pad8,                 3, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.node_ks_trips_total, 4, 1, f) != 1) { fclose(f); return 0; }
-        if (RegimeState_FieldwiseRead(&s.staging_regime, f) != 0) { fclose(f); return 0; }
-        if (RegressionFeederX_FieldwiseRead(&s.staging_feeder, f) != 0) { fclose(f); return 0; }
-        if (fread(&s.staged,         8, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.active,         8, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.last_confidence,8, 1, f) != 1) { fclose(f); return 0; }
-        // v5.15.5.E.0 — ConfidenceScorer fieldwise read into staging instance.
-        // FOREACH_CONFIDENCE_PERSIST_FIELD drives the read; same wire format
-        // as ShardedSnapshotPersist save. Atomicity preserved by reading into
-        // staging (commit happens later after all per-core reads validate).
-        if (ConfidenceScorer_FieldwiseRead(&s.staging_confidence, f) != 0) { fclose(f); return 0; }
+        FOREACH_NODE_PERSIST_FIELD(NPF_PROJECT_READ)
     }
     fclose(f);
 
@@ -510,88 +406,62 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     state->oms->portfolio.active_bitmap = bitmap;
     memcpy(state->oms->portfolio.positions, positions, sizeof(positions));
 
+    // E.1.2 D-305 — registry-driven commit walk (COMMIT_KIND × STORAGE_KIND
+    // dispatch). The two NO_COMMIT rows are DELIBERATE — history below stays
+    // load-bearing (the registry rows cross-reference it):
+    //
+    // `strategy_id` intentionally NOT restored — it comes from cfg.
+    // `resolved_strategy_id` IS restored (per-tick output; display continuity —
+    // the next rebuild overwrites anyway).
+    //
+    // v5.4.0: persisted `strategy_state_kind` was originally intended
+    // to drive Strategy_InitPerCore at boot (the comment said "engine's
+    // init path checks strategy_state_kind and dispatches"). In
+    // practice, the boot path (EngineCommon_BootPerCore, called from
+    // EngineSharded/Run.hpp) dispatches Strategy_InitPerCore on
+    // `state.nodes[i].strategy_id` (cfg-derived), NOT the loaded kind.
+    // The persisted field is therefore dead weight — and worse,
+    // restoring it corrupts the invariant that `strategy_state_kind`
+    // describes the C++ type of the allocated `strategy_state` pointer.
+    //
+    // Concrete repro of the kind/state mismatch the restore introduced:
+    //
+    //   Run 1 cfg: node_0_strategy=auto         → state=nullptr, kind=AUTO
+    //              snapshot saves kind=AUTO.
+    //   Run 2 cfg: node_0_strategy=mean_reversion
+    //              Strategy_InitPerCore(MR) → state=non-null MR, kind=MR.
+    //              Snapshot Load (this site) → kind = AUTO (from snap).
+    //              Net: state=non-null + kind=AUTO. Mismatch.
+    //
+    // At shutdown Strategy_FreePerCore can't dispatch the type-correct
+    // `delete` — pre-v5.11.11 it hit the `default:` branch and WARN'd
+    // ("unknown kind ..."), post-v5.11.11 it quietly took the AUTO/NONE
+    // branch and leaked the state pointer (~1-4 KB; arena cleanup at
+    // shutdown reclaims either way).
+    //
+    // v5.11.15 (2026-05-07) — root-cause fix. Stop restoring kind from
+    // snapshot. The persisted byte stays in the format (snapshot v4+
+    // back-compat — the read walk above still READS it into
+    // s.strategy_state_kind per the A2 invariant, the NO_COMMIT kind just
+    // never APPLIES it). Future snapshot versions can drop the field
+    // entirely without breaking older saves.
+    //
+    // The kind invariant is now: set ONLY by Strategy_InitPerCore at
+    // boot and Strategy_FreePerCore on teardown (both in
+    // Strategies/StrategyLifecycle.hpp). No other site mutates it.
+    //
+    // The `window` field is NOT in the confidence sub-registry: it stays at
+    // the value set by ConfidenceScorer_Init (current cfg), so the runtime
+    // composite-mode + window stay valid even when restoring from an older
+    // config's snapshot.
     for (uint32_t i = 0; i < file_num_nodes; ++i) {
         NodeSnap& s = snaps[i];
         NodeContext<F>& ctx = state->nodes[i];
-        // Strategy id intentionally NOT restored — it comes from cfg.
-        // resolved_strategy_id is per-tick output; restore it for display
-        // continuity but the next rebuild will overwrite anyway.
-        ctx.resolved_strategy_id = s.resolved_strategy_id;
-        // v5.4.0: persisted `strategy_state_kind` was originally intended
-        // to drive Strategy_InitPerCore at boot (the comment said "engine's
-        // init path checks strategy_state_kind and dispatches"). In
-        // practice, the boot path (EngineCommon_BootPerCore, called from
-        // EngineSharded/Run.hpp) dispatches Strategy_InitPerCore on
-        // `state.nodes[i].strategy_id` (cfg-derived), NOT the loaded kind.
-        // The persisted field is therefore dead weight — and worse,
-        // restoring it here corrupts the invariant that `strategy_state_kind`
-        // describes the C++ type of the allocated `strategy_state` pointer.
-        //
-        // Concrete repro of the kind/state mismatch the restore introduced:
-        //
-        //   Run 1 cfg: node_0_strategy=auto         → state=nullptr, kind=AUTO
-        //              snapshot saves kind=AUTO.
-        //   Run 2 cfg: node_0_strategy=mean_reversion
-        //              Strategy_InitPerCore(MR) → state=non-null MR, kind=MR.
-        //              Snapshot Load (this site) → kind = AUTO (from snap).
-        //              Net: state=non-null + kind=AUTO. Mismatch.
-        //
-        // At shutdown Strategy_FreePerCore can't dispatch the type-correct
-        // `delete` — pre-v5.11.11 it hit the `default:` branch and WARN'd
-        // ("unknown kind ..."), post-v5.11.11 it quietly took the AUTO/NONE
-        // branch and leaked the state pointer (~1-4 KB; arena cleanup at
-        // shutdown reclaims either way).
-        //
-        // v5.11.15 (2026-05-07) — root-cause fix. Stop restoring kind from
-        // snapshot. The persisted byte stays in the format (snapshot v4+
-        // back-compat — the per-core read loop above still READS it into
-        // s.strategy_state_kind, just don't APPLY it here). Future snapshot
-        // versions can drop the field entirely without breaking older saves.
-        //
-        // The kind invariant is now: set ONLY by Strategy_InitPerCore at
-        // boot and Strategy_FreePerCore on teardown (both in
-        // Strategies/StrategyLifecycle.hpp). No other site mutates it.
-        (void)s.strategy_state_kind;  // intentionally unused; see comment.
-        ctx.allocated_balance    = s.allocated_balance;
-        ctx.entries_processed    = s.entries_processed;
-        ctx.exits_processed      = s.exits_processed;
-        ctx.node_realized        = s.node_realized;
-        ctx.node_fees            = s.node_fees;
-        ctx.node_open_notional   = s.node_open_notional;
-        ctx.node_wins            = s.node_wins;
-        ctx.node_losses          = s.node_losses;
-        // v5.4.3 (snapshot v5): apply gross accumulators + idle counter.
-        ctx.node_gross_wins      = s.node_gross_wins;
-        ctx.node_gross_losses    = s.node_gross_losses;
-        ctx.idle_cycles          = s.idle_cycles;
-        ctx.last_entry_price     = s.last_entry_price;
-        ctx.last_entry_tick      = s.last_entry_tick;
-        ctx.sl_cooldown_remaining= s.sl_cooldown_remaining;
-        ctx.node_peak_balance    = s.node_peak_balance;
-        ctx.node_dd_pct          = s.node_dd_pct;
-        // v5.15.5.B.3 — kill bit packed in node_state_flags; load 1 byte
-        // into a temp + set/clear bit accordingly.
-        if (s.node_kill_tripped) {
-            NODE_STATE_FLAG_SET(ctx, KILL_TRIPPED);
-        } else {
-            NODE_STATE_FLAG_CLR(ctx, KILL_TRIPPED);
-        }
-        ctx.node_ks_trips_total  = s.node_ks_trips_total;
-        RegimeState_CommitPersistedFields(&ctx.regime_state, &s.staging_regime);
-        RegressionFeederX_CommitPersistedFields(&ctx.pnl_feeder, &s.staging_feeder);
-        ctx.staged_prediction = s.staged;
-        ctx.active_prediction = s.active;
-        ctx.last_confidence   = s.last_confidence;
-        // v5.15.5.E.0 — Commit ConfidenceScorer persisted subset via shared
-        // helper. FOREACH_CONFIDENCE_PERSIST_FIELD drives both the read into
-        // staging AND this commit copy → adding a new persisted field is ONE
-        // registry row; both paths auto-update. The `window` field is NOT in
-        // the registry: it stays at the value set by ConfidenceScorer_Init
-        // (current cfg), so the runtime composite-mode + window stay valid
-        // even when restoring from an older config's snapshot.
-        ConfidenceScorer_CommitPersistedFields(&ctx.confidence, &s.staging_confidence);
-        // v5.15.5.E.D — Recompute running sum_squared_errors after commit
-        // (not in wire format; cheap O(N=32) recompute keeps wire minimal).
+        FOREACH_NODE_PERSIST_FIELD(NPF_PROJECT_COMMIT)
+        // v5.15.5.E.D — Recompute running sum_squared_errors after the
+        // confidence delegate commit (not in wire format; cheap O(N=32)
+        // recompute keeps wire minimal). REC-A (fold into the delegate's
+        // _PersistCommit tail) is the NEXT tail item — do not fold here.
         ConfidenceScorer_RecomputeRunningSums(&ctx.confidence);
     }
 

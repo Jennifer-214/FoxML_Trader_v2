@@ -1458,6 +1458,21 @@ static inline void ConfidenceScorer_CommitPersistedFields(ConfidenceScorer* dst,
 #undef CONFIDENCE_FREAD_FIELD_
 #undef CONFIDENCE_COMMIT_FIELD_
 
+// Count-lock (E.1.2 D-305 — the missing sibling of the regime ==7 / feeder ==3
+// pins; primary forcing function per D-302 Option B): EXACTLY 7 persisted fields.
+// A row add/drop trips this at compile time → forces a SHARDED_SNAPSHOT_VERSION
+// bump (H21). The parent-level lock is FOREACH_NODE_PERSIST_FIELD_COUNT == 29
+// (MemHeaders/NodeCtxPersistRegistry.hpp) — this local tripwire catches a
+// delegate-INTERNAL drop the parent row count cannot see.
+#define CONFIDENCE_PERSIST_COUNT_ONE_(name, type, n) +1
+constexpr int FOREACH_CONFIDENCE_PERSIST_FIELD_COUNT =
+    0 FOREACH_CONFIDENCE_PERSIST_FIELD(CONFIDENCE_PERSIST_COUNT_ONE_);
+#undef CONFIDENCE_PERSIST_COUNT_ONE_
+static_assert(FOREACH_CONFIDENCE_PERSIST_FIELD_COUNT == 7,
+    "ConfidenceScorer wire format = EXACTLY 7 persisted fields (ic predictions/actuals "
+    "sample arrays + count + head, rmse window samples + count + head; 1552B/node); a "
+    "change requires a SHARDED_SNAPSHOT_VERSION bump + loader migration (H21).");
+
 // v5.15.5.E.D — RollingRMSE.sum_squared_errors is intentionally NOT in
 // FOREACH_CONFIDENCE_PERSIST_FIELD: adding it would grow the wire format +
 // require a SHARDED_SNAPSHOT_VERSION bump for a derivable field. Instead,
