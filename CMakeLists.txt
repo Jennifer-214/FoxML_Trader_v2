@@ -4,6 +4,11 @@ project(tick_trader CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Every build dir emits its REAL compile_commands.json at configure time (TD-257: the 1:1 flag
+# source — tools/compile_command.py + the plugin's asm/layout surfaces resolve invocations from
+# the db of the build actually being shipped, never from editor-supplied or hand-assembled flags).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 #===============================================================================
 # engine binary — ANSI TUI (zero deps, diff-based rendering)
 #===============================================================================

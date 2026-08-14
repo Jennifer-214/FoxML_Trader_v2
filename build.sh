@@ -20,6 +20,11 @@
 #   pgo         3-step profile-guided optimization build (v5.11.0.D):
 #               instrument → train run on data/pgo_train.csv → profile-use
 #               rebuild (build_pgo/). 2-8% latency improvement. GCC-only.
+#   asm         1:1 asm sidecars — objdump the EXISTING binaries into
+#               build*/asm/<binary>.asm (no rebuild, post-hoc + idempotent).
+#               Under -flto this is the ONLY honest per-function asm: the
+#               real codegen happens at link, so disassembling the shipped
+#               artifact is 1:1 BY CONSTRUCTION (compiler -S is not).
 #   clean       wipe all build directories
 #
 # Examples:
@@ -28,6 +33,7 @@
 #   ./build.sh gui            # full GUI with all panels visible
 #   ./build.sh gui-lite       # minimal GUI (no Latency / no XGBoost)
 #   ./build.sh latency        # pure-ANSI latency bench
+#   ./build.sh asm            # refresh 1:1 asm sidecars from built binaries
 #   ./build.sh clean          # remove all build dirs
 #   ./build.sh engine --clean # clean rebuild of engine
 
@@ -258,6 +264,42 @@ run_tests() {
     ./build/controller_test
 }
 
+# v5.15.5.F.4d.1.E.1.2.B 0.5 — 1:1 asm sidecars from the SHIPPED binaries (ideas §2 / TD-257).
+# The four main targets build -flto, so per-TU compiler asm (-S / --save-temps) describes
+# intermediate code the LTO link step then rewrites — a "1:1" view built that way is the exact
+# fact-source divergence TD-257 exists to kill. Disassembling the linked artifact is 1:1 by
+# construction; the asm viewer + terminal + the register-pressure scan all read THIS, never a
+# re-compile. Sanitizer/debug dirs are deliberately excluded (instrumented code is not the
+# shipped shape). Each sidecar carries a provenance header (binary sha + mtime + git HEAD at
+# emit) so a consumer can DETECT binary-newer-than-sidecar staleness instead of trusting it.
+emit_asm_sidecars() {
+    local head found=0
+    head=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    for dir in build build_gui build_gui_lite build_suite build_lat build_pgo; do
+        [[ -d "$dir" ]] || continue
+        for bin_name in engine engine_gui foxml_suite controller_test; do
+            local b="$dir/$bin_name"
+            [[ -f "$b" && -x "$b" ]] || continue
+            mkdir -p "$dir/asm"
+            local out="$dir/asm/$bin_name.asm"
+            local sha
+            sha=$(sha256sum "$b" | cut -c1-16)
+            {
+                echo "# 1:1 disassembly of $b — the SHIPPED artifact, never a re-compile"
+                echo "# binary-sha256-16: $sha  binary-mtime: $(stat -c %Y "$b")  emitted-at-HEAD: $head"
+                echo "# stale-test: compare sha above vs \`sha256sum $b | cut -c1-16\`; regen: ./build.sh asm"
+                objdump -d -C --no-show-raw-insn "$b"
+            } > "$out"
+            echo "[asm] $out  ($(du -h "$out" | cut -f1), binary $sha)"
+            found=1
+        done
+    done
+    if [[ $found == 0 ]]; then
+        echo "[asm] no binaries found — build something first (./build.sh test|gui)" >&2
+        exit 1
+    fi
+}
+
 # v5.15.5.F.4c.3 WIP2d-0 — per-core cfg registry integrity check (H17 STRONG enforcement).
 # Runs BEFORE any build to catch structural drift in:
 #   - FOREACH_PER_NODE_CFG_FIELD ↔ FOREACH_PER_NODE_FIELD_TYPE bidirectional sync
@@ -321,6 +363,9 @@ case "$TARGET" in
     debug)
         build_debug
         ;;
+    asm)
+        emit_asm_sidecars
+        ;;
     clean)
         rm -rf build build_gui build_gui_lite build_suite build_lat \
                build_pgo_gen build_pgo pgo_profile \
@@ -329,7 +374,7 @@ case "$TARGET" in
         ;;
     *)
         echo "unknown target: $TARGET" >&2
-        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|pgo|tsan|asan|ubsan|debug|clean} [--clean]" >&2
+        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|pgo|tsan|asan|ubsan|debug|asm|clean} [--clean]" >&2
         exit 1
         ;;
 esac
