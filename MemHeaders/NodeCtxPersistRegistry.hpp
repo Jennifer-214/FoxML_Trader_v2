@@ -45,7 +45,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[29 wire rows, 1944B per node block at snapshot v10 — 20 SCALAR + 1 BIT + 2 PAD + 3 DELEGATE + the 3 interleave doubles; tuple X(NAME, TYPE, STORAGE_KIND, STORAGE_MASK, COMMIT_KIND)]
 // [COLUMN]_[NAME]_[NodeContext field name == NodeSnap staging field name (unified; PAD rows use scratch, no staging field)]
-// [COLUMN]_[TYPE]_[C++ element type — sizeof() drives the fwrite/fread width]
+// [COLUMN]_[type]_[C++ element type — sizeof() drives the fwrite/fread width]
 // [COLUMN]_[STORAGE_KIND]_[SCALAR = plain field · BIT = node_state_flags bit as a 1-byte 0/1 wire byte · PAD = zero-written alignment bytes · DELEGATE = field-by-field sub-registry walker at this wire position]
 // [COLUMN]_[STORAGE_MASK]_[BIT: the NODE_STATE_FLAG_* token · PAD: byte width · DELEGATE: the walker fn-family prefix (<PREFIX>_FieldwiseWrite/Read + _CommitPersistedFields) · SCALAR: 0]
 // [COLUMN]_[COMMIT_KIND]_[COMMIT = applied to NodeContext at load-commit · NO_COMMIT = read off the wire (offset correctness) but deliberately NOT applied]
@@ -215,8 +215,5 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
     static_assert(false, "NO_COMMIT + DELEGATE not yet designed — a read-but-unapplied "   \
                          "sub-block wants an explicit design (offset-consume semantics "   \
                          "are the delegate's own). See the OMS static_assert precedent.");
-//======================================================================
-// [END_MACRO]_[NPF_PROJECT_SAVE]
-//======================================================================
 
 #endif  // NODE_CTX_PERSIST_REGISTRY_HPP
