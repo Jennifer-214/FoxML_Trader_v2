@@ -91,8 +91,14 @@
     X(last_entry_tick,        uint64_t,             SCALAR,   0,                  COMMIT)             \
     X(sl_cooldown_remaining,  uint32_t,             SCALAR,   0,                  COMMIT)             \
     /* kill switch — kill bit wire-encoded as a 1-byte 0/1 (pre-.B.3 format preserved).       */     \
-    /* node_dd_pct DROPPED at v11 (D-420): eval-transient display field, recomputed from      */     \
-    /* node_peak_balance before every read in the same kill-eval pass — dead wire weight.     */     \
+    /* node_dd_pct DROPPED at v11 (D-420): eval-transient. NARROWED at D-421 after the reads  */     \
+    /* were enumerated — the old wording said "recomputed before EVERY read", and it covers   */     \
+    /* 2 of the 4. Both CAPITAL reads (the kill-trip eval + its log) ARE dominated by the      */    \
+    /* recompute from the persisted node_peak_balance, in the same pass, both branches         */    \
+    /* assigning — so no capital decision ever sees a stale drawdown, which is the property    */    \
+    /* the drop rests on. The other two reads (the TUI publish + the paper-reset summary emit) */     \
+    /* are OUT of pass and display 0 for one slow-path cycle after a warm restart. Accepted,   */    \
+    /* display-only, and now stated rather than implied.                                       */    \
     X(node_peak_balance,      Money,                SCALAR,   0,                  COMMIT)             \
     X(node_kill_tripped,      uint8_t,              BIT,      KILL_TRIPPED,       COMMIT)             \
     X(_pad_kill,              uint8_t,              PAD,      3,                  NO_COMMIT)          \

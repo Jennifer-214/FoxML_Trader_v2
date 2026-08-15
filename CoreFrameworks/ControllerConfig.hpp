@@ -1192,7 +1192,9 @@ template <unsigned F> struct ControllerConfig {
   // write. mode 1 is what the head-to-head test exercises and what
   // production runs after the soak. default 0 so existing tests stay
   // green during the migration window.
-  uint32_t oms_event_log_mode; // 0 = legacy (default), 1 = event log
+  uint32_t oms_event_log_mode; // 0 = legacy, 1 = event log (DEFAULT — see ControllerConfig_Default;
+                               // the comment previously said "0 = legacy (default)", which inverted
+                               // the actual shipping default. Corrected at D-421.)
 
   // v5.15.5.C.3 Phase 7.A — Runtime bench gate substrate flag.
   //

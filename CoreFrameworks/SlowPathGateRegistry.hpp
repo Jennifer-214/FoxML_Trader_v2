@@ -182,13 +182,30 @@ static_assert(GATE_SLOW_PATH_TOTAL_COUNT <= 16,
 // called per-core after ControllerConfig_ResolveForCore (so cfg has
 // per-core overrides merged).
 struct SlowPathGateState {
-    uint16_t flags;
+    // `= 0` is load-bearing, not style. NodeContext lives in a bare `EventLoopState<F> state;`
+    // function-local (EngineSharded/Run.hpp + BacktestSharded.hpp) — default-init, no `{}`, no
+    // memset anywhere — and NODE_CTX_INIT_AUTOPOPULATE's five layers never touched this field.
+    // Without the initializer the flags word is INDETERMINATE until the owning slow thread's
+    // first rebuild, while the producer thread already reads it (ShardedSnapshot.hpp). Probed
+    // at E.1.2/D-421: a fresh stack happens to read 0x0000 (zero-filled pages) and a dirtied
+    // one keeps whatever the previous callee left — so it can look correct for a year and flip
+    // when someone adds a local to a boot function. Fixing it HERE rather than in the init
+    // macro closes it at every construction site, including ones not written yet.
+    // Costs nothing structural: the type is never memcpy'd, wire-emitted or byte-compared, and
+    // an NSDMI affects trivially-DEFAULT-CONSTRUCTIBLE, not trivially-COPYABLE.
+    uint16_t flags = 0;
 };
 
 // Engine-wide gate cache. Lives on EventLoopState.global_gate_state.
 // AUTOPOPULATE called once per slow-path entry with the global cfg.
 struct GlobalGateState {
-    uint16_t flags;
+    // Same `= 0`, same reason, and fixed in the SAME commit deliberately: this is the byte-identical
+    // sibling of SlowPathGateState, lives on the same default-initialized EventLoopState, is written
+    // only by SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE, and is read for MASK_LAZY_REBUILD_ACTIVE /
+    // MASK_WS_FLATTEN_ACTIVE. Sibling asymmetry is what caught the ic.actuals desync at D-421 step 1
+    // — two structurally identical things treated differently — so fixing one of a matched pair and
+    // leaving the other would be reintroducing the exact shape this ship exists to close.
+    uint16_t flags = 0;
 };
 
 //------------------------------------------------------------------------------
@@ -260,10 +277,22 @@ struct GlobalGateState {
 // Adding a new SCOPE: 1 dispatch macro variant (~5 lines) + 1 AUTOPOPULATE
 // variant (~10 lines). Existing registry entries untouched.
 //
-// Concurrency: per-core slow-path thread is the single writer + reader for
-// SlowPathGateState; engine-wide slow-path thread for GlobalGateState. No
-// atomics needed (matches v5.14.8.B FailureModeRegistry's failure_flags).
-// GUI display reads PerNodeSnap, not gate_state directly.
+// Concurrency (CORRECTED at E.1.2 D-421 — the previous wording was false, and its
+// falseness is very likely WHY the missing initializer survived: it told every later
+// reader the field was single-threaded, so nobody asked what the producer sees):
+//   WRITER  — the owning per-core slow-path thread, once per rebuild
+//             (SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE); engine-wide slow path for
+//             GlobalGateState. Still a SINGLE writer, and that half was always true.
+//   READERS — the same thread in-band (via mctx->gate_state in the ML dispatch), PLUS
+//             the snapshot publisher on the PRODUCER thread (ShardedSnapshot.hpp reads
+//             gate_state.flags for MASK_LADDER_ACTIVE). It is NOT single-reader, and
+//             "GUI display reads PerNodeSnap, not gate_state directly" was wrong — the
+//             publisher reads gate_state to BUILD the PerNodeSnap bit.
+// The cross-thread read is unsynchronized and accepted as benign-racy for display: a
+// uint16_t, single-writer, and a torn/stale read only mis-renders one badge for one
+// publish cycle. That is a deliberate accepted race, NOT an absence of one — the
+// distinction the old wording erased.
+// No atomics needed (matches v5.14.8.B FailureModeRegistry's failure_flags).
 //
 // Established: v5.14.9.B.0 (2026-05-10)
 //======================================================================

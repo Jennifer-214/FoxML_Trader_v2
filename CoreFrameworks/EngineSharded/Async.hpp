@@ -393,6 +393,23 @@ inline bool EngineSharded_Async_FanOut(
                     NODE_STATE_FLAG_CLR(state.nodes[c], KILL_TRIPPED);
                     state.nodes[c].node_peak_balance = Money_Zero();
                     state.nodes[c].node_dd_pct = Money_Zero();
+                    // E.1.2 D-421 — RE-ARM the drift auto-kill. MASK_DRIFT_KILL_TRIPPED is
+                    // the latch that stops EventLoop_DrainPostFillOneCore from tripping the
+                    // node twice for the same drift episode; before this line, NOTHING cleared
+                    // it but DriftHistory_Init. So clearing a drift kill here resumed the node
+                    // with its drift auto-kill DISARMED for the rest of the process — the
+                    // capital control silently did not exist on the second breach. (Restart
+                    // re-armed it, which is why this never surfaced: being unpersisted was
+                    // load-bearing by accident.)
+                    //
+                    // Deliberately NOT DriftHistory_Init here: this is "resume THIS node",
+                    // not a new session, so the IC samples stay. Only the latch is released,
+                    // and MASK_DRIFT_BREACHED is left alone because it is edge-managed by the
+                    // drain path itself (set :1897 / cleared :1919) and re-derives next trade.
+                    // The paper-reset path wants the opposite — full Init — and does that in
+                    // NODE_CTX_RESET_AUTOPOPULATE. Same-looking fix, two different answers.
+                    BITMAP_CLR(state.nodes[c].drift_history.drift_state_flags,
+                               MASK_DRIFT_KILL_TRIPPED);
                     fprintf(stderr, "[sharded] node %d kill switch RESET\n", c);
                 }
             }
@@ -877,7 +894,8 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // single deref shared with the tp2_mult read at line ~2386
                 // below (was two separate `const auto&` declarations).
                 // F-096: ONE read of intended_qty feeds BOTH legs. Load-bearing —
-                // the slow path writes this field (ControllerEventLoop.hpp:3461)
+                // the slow path writes this field (ControllerEventLoop.hpp:3486 —
+                // corrected at D-421; the old cite :3461 had drifted)
                 // while the drainer reads it bare, so two separate reads could
                 // straddle a rebuild and see different values. Conservation is
                 // then only guaranteed per-READ-PAIR, which is exactly what this

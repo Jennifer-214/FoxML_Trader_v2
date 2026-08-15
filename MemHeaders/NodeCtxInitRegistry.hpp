@@ -334,6 +334,15 @@ static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
         /* Layer 2 — selective bitmap operations (Phase 3 KILL_TRIPPED + v5.14.9.G partner) */      \
         NODE_STATE_FLAG_CLR(_autop_ctx, KILL_TRIPPED);                                              \
         BITMAP_CLR(_autop_s.partner_pending_bitmap, BITMAP_BIT_U16(_autop_c2));                     \
+        /* E.1.2 D-421 — drift_history is NOT a FOREACH_NODE_CTX_FIELD row (it is a 4160B      */   \
+        /* accumulator, not a value-init scalar), so Layer 1's registry walk cannot reach it   */   \
+        /* and a paper reset used to leave BOTH the IC ring and the drift latch standing.      */   \
+        /* MASK_DRIFT_KILL_TRIPPED surviving is the sharp end: the node resumed with its drift */   \
+        /* auto-kill permanently disarmed. Paper reset IS a new session (it zeroes entries,    */   \
+        /* trips and balances), so the honest action is a FULL Init — flags and samples both.  */   \
+        /* The operator's manual kill-reset (EngineSharded/Async.hpp) deliberately does the    */   \
+        /* opposite: clear only the latch, keep the history. Do not unify them.                */   \
+        DriftHistory_Init(&_autop_ctx.drift_history);                                               \
     } while (0)
 
 #endif  // NODE_CTX_INIT_REGISTRY_HPP

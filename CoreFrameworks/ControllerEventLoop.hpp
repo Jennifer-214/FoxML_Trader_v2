@@ -3045,6 +3045,25 @@ inline void EventLoop_RebuildOneCore(
         // v5.4.0 Phase 2.4 — also pass ema_price (per-tick replicated by
         // producer) so EmaCross's Adapt branch can update its prev_ema +
         // last_ema_slope tracking.
+        // v5.6.2 / MOVED HERE at E.1.2 D-421: reset strategy_halt_reason every rebuild.
+        // Strategies set this to a SHALT_* code when zero-gating for strategy-internal
+        // reasons; SHALT_OK = no veto.
+        //
+        // WHY IT MOVED: this line used to sit ~59 lines BELOW the Strategy_BuildParameters
+        // call that writes the field — unconditionally, same straight-line block, no
+        // intervening control flow — so it clobbered the dispatcher's own output on every
+        // pass. 17 of the 20 FOREACH_SHALT codes could therefore never be observed; only
+        // SHALT_RECOVERY and SHALT_EXIT_PREDICTED (both written after the old reset point)
+        // ever survived, which is why the panel showed something and the hole went unnoticed
+        // from bc37c62 (2026-04-30) until now. StrategyInterface.hpp already specified the
+        // correct placement — "reset to SHALT_OK at the top of each rebuild" — and the code
+        // contradicted its own contract.
+        //
+        // NOTE the asymmetry with its former neighbour: halt_reason's reset stays where it
+        // is, BELOW, because ITS only producers (zero_gate) are below it. The two lines look
+        // interchangeable and have opposite correct placements — do not re-merge them.
+        state->nodes[slot].strategy_halt_reason = SHALT_OK;
+
         Strategy_AdaptPerCore(
             state, slot, effective_strategy_id,
             rolling->price_avg,         // current_price proxy (slow-path doesn't see live tick)
@@ -3113,11 +3132,11 @@ inline void EventLoop_RebuildOneCore(
         //
         // v5.8.3: halt_reason is now a HALT_* enum from FOREACH_HALT_REASON
         // (StrategyInterface.hpp). See registry there for code semantics.
+        // Correct HERE (unlike its former neighbour): halt_reason's only producers are the
+        // zero_gate lambda + the imbalance check, both BELOW this line. strategy_halt_reason's
+        // reset moved ABOVE the dispatch block at E.1.2 D-421 — see the comment there for why
+        // the two are not interchangeable.
         state->nodes[slot].halt_reason = HALT_OK;
-        // v5.6.2: reset strategy_halt_reason every rebuild. Strategies
-        // set this to a SHALT_* code when zero-gating for strategy-
-        // internal reasons. SHALT_OK = no veto.
-        state->nodes[slot].strategy_halt_reason = SHALT_OK;
 
         // v5.12.1.A.3 — post-flatten recovery refusal. Gated on
         // recovery_until_us > 0 so the common case (no recovery active)

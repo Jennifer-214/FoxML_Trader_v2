@@ -382,8 +382,16 @@ struct OmsResetCtx {
     /* v5.15.5.F.4d Step 7 (§ N.2 of merged plan body) — last_exit_fee[_i] enrollment closes \
      * Class 30 latent drift (field has existed on OmsState since .F.4c.3 r-4 WIP2d-1.B.1     \
      * but was never enrolled in this registry; per-slot reset/init was hand-maintained).     \
-     * NEW CI Check 8 enforces all `\w+[MAX_PORTFOLIO_POSITIONS]` arrays on OmsState are     \
-     * either enrolled here OR exempted per manual-fields-inventory-pattern.md Section C.     */ \
+     * ⚠ CORRECTED at E.1.2 D-421 — this comment used to promise: "NEW CI Check 8 enforces  \
+     * all `\w+[MAX_PORTFOLIO_POSITIONS]` arrays on OmsState are either enrolled here OR     \
+     * exempted." THAT TOOL WAS NEVER WRITTEN. There is no CI check on this registry.        \
+     * NOTHING stops the 7th per-slot array being added without a row, which is exactly the  \
+     * Class 30 drift the row above was added to close. Enrolment here is CONVENTION today.  \
+     * The set happens to be complete (6 arrays: 5 enrolled + last_exit_predicted_meta       \
+     * exempted via OMS_META_CLEAR) — verified, not assumed — but that is nobody-added-one,  \
+     * not enforcement. Tracked TECH_DEBT-274; the real close is the D-421 DOMAIN column,    \
+     * which generalises this check to all enrolled registries instead of adding a 9th       \
+     * bespoke guard. If you are adding an array HERE: add the row by hand and mean it.      */ \
     X(last_exit_fee[_i],                Money,            Money_Zero(),   Money_Zero())              \
     /* v5.15.5.F.4d Step 7 (§ N.2) — NEW bandit_reward_bps[_i] sibling. Bandit reward         \
      * attribution: HandleFill SELL writes per-slot reward_bps for downstream DrainPostFill   \
