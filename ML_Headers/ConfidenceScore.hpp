@@ -1449,9 +1449,18 @@ static inline int ConfidenceScorer_FieldwiseRead(ConfidenceScorer* cs, FILE* f) 
 #define CONFIDENCE_COMMIT_FIELD_(name, type, n)             \
     memcpy(&dst->name, &src->name, sizeof(type) * (size_t)(n));
 
+static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs);
+
 static inline void ConfidenceScorer_CommitPersistedFields(ConfidenceScorer* dst,
                                                             const ConfidenceScorer* src) {
     FOREACH_CONFIDENCE_PERSIST_FIELD(CONFIDENCE_COMMIT_FIELD_)
+    // E.1.2 REC-A (D-305 tail; A3-guardrailed): recompute the derived
+    // rmse.sum_squared_errors as the commit's OWN tail — every registry-commit
+    // path is now self-contained (an implementer modeling confidence as a
+    // uniform DELEGATE gets the recompute for free; dropping a caller-side
+    // recompute can no longer silently break sum_squared_errors). Recomputes
+    // DST (the runtime target). Idempotent.
+    ConfidenceScorer_RecomputeRunningSums(dst);
 }
 
 #undef CONFIDENCE_FWRITE_FIELD_
@@ -1483,10 +1492,14 @@ static_assert(FOREACH_CONFIDENCE_PERSIST_FIELD_COUNT == 7,
 // load) + sliding-window-online-statistics-pattern.md (the running-aggregate
 // invariant restored post-load).
 //
-// Call site contract: after any load path that writes rmse.window.samples
-// (PortfolioController_LoadSnapshot, ShardedSnapshot_Load post-commit,
-// ConfidenceScorer_ShadowLoadLegacyV1). Built into ConfidenceScorer_
-// CommitPersistedFields tail; PortfolioController calls it explicitly.
+// Call site contract (E.1.2 REC-A — the 2026-07-04 I3 finding: this comment
+// previously CLAIMED the embed while the body lacked it, the ship-endangering
+// doc-lie): NOW genuinely embedded in ConfidenceScorer_CommitPersistedFields'
+// tail, so every registry-commit path recomputes automatically. The ONE path
+// that still needs an EXPLICIT caller-side recompute is ShadowLoadLegacyV1
+// (it populates the scorer directly, bypassing CommitPersistedFields) — its
+// caller PortfolioController.hpp keeps the post-load call, which is also
+// harmlessly idempotent after a registry commit.
 static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
     double sum = 0.0;
     for (int i = 0; i < cs->rmse.window.count; i++) {

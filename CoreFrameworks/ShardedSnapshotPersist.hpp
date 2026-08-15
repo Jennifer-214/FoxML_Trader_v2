@@ -458,11 +458,9 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         NodeSnap& s = snaps[i];
         NodeContext<F>& ctx = state->nodes[i];
         FOREACH_NODE_PERSIST_FIELD(NPF_PROJECT_COMMIT)
-        // v5.15.5.E.D — Recompute running sum_squared_errors after the
-        // confidence delegate commit (not in wire format; cheap O(N=32)
-        // recompute keeps wire minimal). REC-A (fold into the delegate's
-        // _PersistCommit tail) is the NEXT tail item — do not fold here.
-        ConfidenceScorer_RecomputeRunningSums(&ctx.confidence);
+        // E.1.2 REC-A: the derived rmse.sum_squared_errors recompute is now
+        // EMBEDDED in ConfidenceScorer_CommitPersistedFields' tail (the
+        // confidence DELEGATE row's commit) — no caller-side call to forget.
     }
 
     // Bug fix (2026-04-27): re-activate ExecutionCore<F> hot-path state from
