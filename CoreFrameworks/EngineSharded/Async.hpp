@@ -850,14 +850,21 @@ inline int EngineSharded_Async_DrainWithSubmit(
             }
 
             // snapshot exit qty BEFORE OnEvent because CloseSlot clears it
-            double order_qty_d = 0.0;
+            // F-096 (TD-167/H4): Money end-to-end. This whole block used to run
+            // Money -> double -> arithmetic -> money_from_double_payload, which
+            // put TWO inexact conversions and a half-away-from-zero llround on a
+            // capital path, and used the payload bridge outside its documented
+            // contract (FixedPointN.hpp:2302 — cfg literals only, not computed
+            // products). No double survives here.
+            Money order_qty = Money_Zero();
             if (is_exit) {
                 // Exit qty: read from the LEG's portfolio slot (leg A's
                 // qty for leg A exit, leg B's for leg B exit). With
                 // partials disabled, portfolio_slot == slot == node_id
                 // and behavior is identical to pre-P.3.
-                order_qty_d = Money_ToDouble(
-                    state.oms->portfolio.positions[portfolio_slot].quantity);
+                // Carried VERBATIM — the slot already holds Money, so the old
+                // round-trip was pure loss with nothing to gain.
+                order_qty = state.oms->portfolio.positions[portfolio_slot].quantity;
             } else if (is_entry) {
                 // Entry qty: split intended_qty between legs by
                 // partial_exit_pct. Leg A gets partial_pct, leg B gets
@@ -869,23 +876,58 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // v5.15.5.C.4 Phase T1: hoisted node_overrides[slot] ref —
                 // single deref shared with the tp2_mult read at line ~2386
                 // below (was two separate `const auto&` declarations).
-                double full_qty = Money_ToDouble(state.nodes[slot].intended_qty);
+                // F-096: ONE read of intended_qty feeds BOTH legs. Load-bearing —
+                // the slow path writes this field (ControllerEventLoop.hpp:3461)
+                // while the drainer reads it bare, so two separate reads could
+                // straddle a rebuild and see different values. Conservation is
+                // then only guaranteed per-READ-PAIR, which is exactly what this
+                // single `intended` local pins.
+                const Money intended = state.nodes[slot].intended_qty;
                 const auto& ov_slot = cfg.node_overrides[slot];
                 Money partial_pct = !Money_IsZero(ov_slot.partial_exit_pct)
                     ? ov_slot.partial_exit_pct : cfg.nodes[slot].partial_exit_pct;
+                // Leg A = intended x pct (ONE half-even reduce inside Money_Mul).
+                // Leg B = the exact REMAINDER — never intended x (1 - pct).
+                //
+                // The remainder form makes `legA + legB == intended` a THEOREM,
+                // not a hope: Money_Sub is exact by domain, so the identity holds
+                // by construction and no runtime check can fail. That is why there
+                // is no assert here — there is nothing left to doubt. (The old
+                // form computed each leg independently in double and conserved
+                // only to within +-1 unit / 1e-8.)
+                //
+                // ⚠ NEVER rewrite leg B as Money_Mul(intended, Money_Sub(one, pct)).
+                // That reintroduces the two-independent-roundings leak this fix
+                // exists to close. tests/controller_test.cpp pins the identity so
+                // the revert is caught, not just discouraged.
+                const Money leg_a = Money_Mul(intended, partial_pct);
                 if (partial_on && event.leg == PARTIAL_LEG_A) {
-                    order_qty_d = full_qty * Money_ToDouble(partial_pct);
+                    order_qty = leg_a;
                 } else if (partial_on && event.leg == PARTIAL_LEG_B) {
-                    order_qty_d = full_qty * (1.0 - Money_ToDouble(partial_pct));
+                    order_qty = Money_Sub(intended, leg_a);
                 } else {
-                    order_qty_d = full_qty;
+                    order_qty = intended;
                 }
             }
 
             EventLoop_OnEvent(&state, event);
             ++total_drained;
 
-            if ((is_entry || is_exit) && order_qty_d > 0.0) {
+            // F-096 (HIGH-2): the guard now tests the ACTUAL SUBMITTED value.
+            // Pre-fix it tested the double while the submitted qty was llround-ed
+            // separately, so a leg whose true qty landed in (0, 0.5e-8) passed the
+            // guard and submitted a ZERO-qty order. OrderManager has no zero-qty
+            // defense (:1123 books requested_qty verbatim), so paper opened a 0-qty
+            // position; on its exit the slot qty read back 0.0, this same guard then
+            // skipped the SELL forever, and the hot mirror cleared while
+            // portfolio.active_bitmap never did => an un-closeable zombie slot +
+            // permanent bitmap drift + the partner XOR stuck at 1. Testing the Money
+            // value closes that class: a sub-unit leg now SKIPS instead of zombifying.
+            // Money_Gt (not !Money_IsZero) is deliberate — it also fail-safes a
+            // negative leg, which an out-of-clamp partial_exit_pct could produce.
+            // The skip must stay AHEAD of this whole block so the prediction/entry
+            // stamps below do not fire for a leg that was never submitted.
+            if ((is_entry || is_exit) && Money_Gt(order_qty, Money_Zero())) {
                 // v4.7.2: leg B's intended_tp must be TP2, not TP1.
                 // intended_tp on the core is leg A's absolute TP. For
                 // leg B, scale the TP-distance by cfg.tp2_mult — same
@@ -923,7 +965,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // ctor: (node_id, type, qty, leg, node_cfg); optional intended_tp/intended_sl/strategy_id/event_price.
                 SubmitCommand<F> cmd((int16_t)portfolio_slot,                                       // P.3: actual slot, not node_id
                                       is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
-                                      Money{ money_from_double_payload(order_qty_d) },  // partial-qty exact split rides P3
+                                      order_qty,                                        // F-096: Money end-to-end; the payload bridge is gone
                                       event.leg,                                                    // P.3: leg propagated to Order
                                       &cfg.nodes[slot]);                                            // per-node cfg (sharded: node_id == slot)
                 cmd.intended_tp = leg_tp;
