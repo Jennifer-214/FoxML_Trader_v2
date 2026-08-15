@@ -830,7 +830,7 @@ static_assert(!is_fp_decimal_v<decltype(Position<64>::entry_price)>
               "stay at or above 7 (versions 1-7 burned, H21; format retired at D-289). Lowering it "
               "would un-burn a version number that old on-disk snapshots still carry.");
 
-// [TOMBSTONE]_[Portfolio_Save / Portfolio_Load — DELETED at E.1.2/D-289]
+// [COMMENT]_[TOMBSTONE — Portfolio_Save / Portfolio_Load DELETED at E.1.2/D-289]
 //----------------------------------------------------------------------
 // Both serializers (and the byte layout they defined: magic + version + active_bitmap + 16 x
 // POSITION_PERSIST_BYTES + the realized_pnl/live_offset_pct/live_vol_mult/live_stddev_mult/balance
