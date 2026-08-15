@@ -24,8 +24,6 @@
 //   - [REGISTRY]_[FOREACH_DEGRADATION_CURVE]           (enum + dispatch table + string helpers + the 4 curve fns + bounds-checked wrapper share the block)
 //   - [STRUCT]_[DriftSample] / [STRUCT]_[DriftHistory] (+ [FUNCTION]_[DriftHistory_CheckBreach] family: Init/Push)
 //   - [REGISTRY]_[FOREACH_CONFIDENCE_PERSIST_FIELD]    (fieldwise write/read/commit + RecomputeRunningSums share the block)
-//   - [STRUCT]_[RollingIC_LegacyV1] / [STRUCT]_[RollingRMSE_LegacyV1] / [STRUCT]_[RollingFreshness_LegacyV1] / [STRUCT]_[RollingCapacity_LegacyV1] / [STRUCT]_[ConfidenceScorerLegacyV1]   ([DEPRECATED] v11 wire-read targets — read-only, never written)
-//   - [FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1]   (reads the LegacyV1 targets; one-shot v11 migration)
 // [REFERENCE]_[SOURCE]_[FoxML/private LIVE_TRADING/prediction/confidence.py]
 //======================================================================================================
 // port of FoxML/private LIVE_TRADING/prediction/confidence.py.
@@ -766,8 +764,8 @@ struct alignas(64) ConfidenceScorer {
 //
 // Wire format decoupled from runtime layout per .E.0 (FOREACH_CONFIDENCE_
 // PERSIST_FIELD registry handles serialization independent of field offsets).
-// Pre-.E.A frozen layout preserved in ConfidenceScorerLegacyV1 for shadow-
-// load migration of v11 snapshots.
+// (The pre-.E.A LegacyV1 shadow-load scaffolding died with its sole caller
+// at E.1.2/D-289 — the controller snapshot format retired.)
 //
 // Pre-.E.A design note about active variant + sizeof freeze is RESOLVED:
 // runtime layout can now evolve (snapshot v12 = field-by-field). Future
@@ -1422,9 +1420,9 @@ static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_
     X(rmse.window.head,          int,    1)
 
 // AUTOPOPULATE fwrite — field-by-field write. Returns -1 on any fwrite failure.
-// Wire byte sequence: exactly the same as pre-.E sharded path (lines 247-256
-// of ShardedSnapshotPersist.hpp). PortfolioController.hpp gains this format
-// via the .E.0 version bump (CONTROLLER_SNAPSHOT_VERSION 11 → 12).
+// Wire byte sequence: identical to the pre-.E sharded hand-loop (historical;
+// the sole LIVE consumer is the sharded DELEGATE row in NodeCtxPersistRegistry —
+// the legacy controller consumer retired at E.1.2/D-289).
 #define CONFIDENCE_FWRITE_FIELD_(name, type, n)             \
     if (fwrite(&cs->name, sizeof(type), (size_t)(n), f) != (size_t)(n)) return -1;
 
@@ -1492,14 +1490,14 @@ static_assert(FOREACH_CONFIDENCE_PERSIST_FIELD_COUNT == 7,
 // load) + sliding-window-online-statistics-pattern.md (the running-aggregate
 // invariant restored post-load).
 //
-// Call site contract (E.1.2 REC-A — the 2026-07-04 I3 finding: this comment
-// previously CLAIMED the embed while the body lacked it, the ship-endangering
-// doc-lie): NOW genuinely embedded in ConfidenceScorer_CommitPersistedFields'
-// tail, so every registry-commit path recomputes automatically. The ONE path
-// that still needs an EXPLICIT caller-side recompute is ShadowLoadLegacyV1
-// (it populates the scorer directly, bypassing CommitPersistedFields) — its
-// caller PortfolioController.hpp keeps the post-load call, which is also
-// harmlessly idempotent after a registry commit.
+// Call site contract (E.1.2 REC-A + D-289 — this comment's history: it once
+// CLAIMED the embed while the body lacked it, the 2026-07-04 I3 ship-
+// endangering doc-lie; then it named a ShadowLoadLegacyV1 exception, which
+// died with its sole caller at D-289): the recompute is genuinely embedded
+// in ConfidenceScorer_CommitPersistedFields' tail, EVERY live load path
+// routes through that commit walk, and NO caller-side recompute call exists
+// anywhere. A future direct-populate path (bypassing CommitPersistedFields)
+// must call this itself — that is the contract, not an exception list.
 static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
     double sum = 0.0;
     for (int i = 0; i < cs->rmse.window.count; i++) {
@@ -1517,10 +1515,11 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
 // and ShardedSnapshotPersist.hpp:247-256 (field-by-field) per
 // structural-fix-preferred-decision-framework.md.
 //
-// FOREACH registry IS the wire format spec. Both persistence sites use the
-// same fieldwise helpers — adding a new persisted field = ONE row in the
-// registry; both fwrite + fread bodies + commit path auto-generated via
-// macro expansion (autopopulate-pattern-for-production-caller-class.md).
+// FOREACH registry IS the wire format spec. ONE persistence site consumes it
+// (the sharded per-node DELEGATE row; the legacy controller site retired at
+// E.1.2/D-289) — adding a new persisted field = ONE row in the registry;
+// fwrite + fread bodies + commit path auto-generated via macro expansion
+// (autopopulate-pattern-for-production-caller-class.md).
 //
 // Subset matches sharded path's pre-.E behavior: only ic + rmse internals
 // persist. Composite-mode fields (freshness/capacity/rmse_baseline) are
@@ -1552,232 +1551,5 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
 // [END_REGISTRY]_[FOREACH_CONFIDENCE_PERSIST_FIELD]
 //======================================================================
 
-//----------------------------------------------------------------------
-// [SECTION]_[v5.15.5.E.0 — LEGACY V1 WIRE STRUCT + SHADOW-LOAD MIGRATION]
-//----------------------------------------------------------------------
-// ConfidenceScorerLegacyV1 + sub-structs: FROZEN byte-format matching pre-.E
-// PortfolioController raw fwrite (CONTROLLER_SNAPSHOT_VERSION=11). Used ONLY
-// by ConfidenceScorer_ShadowLoadLegacyV1 during one-shot migration of v11
-// snapshots → v12 runtime layout. Operator data preserved across the wire-
-// format break (no re-warm required).
-//
-// THESE STRUCTS ARE NEVER WRITTEN. Pure read-side wire-format target. After
-// TECH_DEBT-002 closes (legacy PortfolioController removal), they can be
-// deleted entirely + the shadow-load helper goes with them.
-//
-// Layout cloned from pre-.E.A ConfidenceScorer + sub-structs. Field order +
-// types match exactly. Compiler-generated padding matches because the struct
-// definitions are identical (same alignof, same field types).
-//
-// Pattern: DESIGN_SPECS/shadow-load-state-transition-pattern.md +
-// DESIGN_SPECS/wire-format-byte-preservation-discipline.md +
-// DESIGN_SPECS/struct-padding-determinism-pattern.md.
-
-//======================================================================
-// [STRUCT]_[RollingIC_LegacyV1]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingIC layout (predictions/actuals rings + count/head/window); read-only, deletable when TECH_DEBT-002 closes]
-//======================================================================
-// [CODE]
-//======================================================================
-struct RollingIC_LegacyV1 {
-    double predictions[ROLLING_IC_MAX_WINDOW];
-    double actuals[ROLLING_IC_MAX_WINDOW];
-    int count;
-    int head;
-    int window;
-};
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [DERIVED]
-// [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[1040B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[17]
-// [STRADDLE]_[none]
-//======================================================================
-// [END_STRUCT]_[RollingIC_LegacyV1]
-//======================================================================
-
-//======================================================================
-// [STRUCT]_[RollingRMSE_LegacyV1]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingRMSE layout (squared-error ring + count/head/window); read-only, deletable when TECH_DEBT-002 closes]
-//======================================================================
-// [CODE]
-//======================================================================
-struct RollingRMSE_LegacyV1 {
-    double squared_errors[ROLLING_IC_MAX_WINDOW];
-    int count;
-    int head;
-    int window;
-};
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [DERIVED]
-// [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[528B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[9]
-// [STRADDLE]_[none]
-//======================================================================
-// [END_STRUCT]_[RollingRMSE_LegacyV1]
-//======================================================================
-
-//======================================================================
-// [STRUCT]_[RollingFreshness_LegacyV1]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingFreshness layout (last-predict-us + tau-secs); read-only, deletable when TECH_DEBT-002 closes]
-//======================================================================
-// [CODE]
-//======================================================================
-struct RollingFreshness_LegacyV1 {
-    uint64_t last_predict_us;
-    double   tau_secs;
-};
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [DERIVED]
-// [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[16B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[1]
-// [STRADDLE]_[none]
-//======================================================================
-// [END_STRUCT]_[RollingFreshness_LegacyV1]
-//======================================================================
-
-//======================================================================
-// [STRUCT]_[RollingCapacity_LegacyV1]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[FROZEN v11 wire-read target — the pre-.E.A RollingCapacity layout (current-adv / target-dollars / kappa); read-only, deletable when TECH_DEBT-002 closes]
-//======================================================================
-// [CODE]
-//======================================================================
-struct RollingCapacity_LegacyV1 {
-    double current_adv;
-    double target_dollars;
-    double kappa;
-};
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [DERIVED]
-// [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[24B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[1]
-// [STRADDLE]_[none]
-//======================================================================
-// [END_STRUCT]_[RollingCapacity_LegacyV1]
-//======================================================================
-
-//======================================================================
-// [STRUCT]_[ConfidenceScorerLegacyV1]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE] [DEPRECATED]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[FROZEN v11 wire-read target — the composite pre-.E.A ConfidenceScorer (ic/rmse/freshness/capacity sub-structs + tau/confidence/baseline); the shadow-load reader's fread target; read-only, deletable when TECH_DEBT-002 closes]
-//======================================================================
-// [CODE]
-//======================================================================
-struct ConfidenceScorerLegacyV1 {
-    RollingIC_LegacyV1   ic;
-    RollingRMSE_LegacyV1 rmse;
-    double               freshness_tau;
-    double               last_confidence;
-    RollingFreshness_LegacyV1 freshness;
-    RollingCapacity_LegacyV1  capacity;
-    double               rmse_baseline;
-};
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [DERIVED]
-// [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[1632B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[26]
-// [STRADDLE]_[none]
-//======================================================================
-// [END_STRUCT]_[ConfidenceScorerLegacyV1]
-//======================================================================
-
-//======================================================================
-// [FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one-shot v11 -> v12 migration read — raw LegacyV1 bytes into the runtime layout; stale wall-clock/EWMA/cfg-owned fields INTENTIONALLY DROPPED (re-init from cfg)]
-// [REFERENCE]_[DESIGN_SPEC]_[shadow-load-state-transition-pattern]
-//======================================================================
-// [CODE]
-//======================================================================
-static inline int ConfidenceScorer_ShadowLoadLegacyV1(ConfidenceScorer* cs, FILE* f) {
-    ConfidenceScorerLegacyV1 wire;
-    if (fread(&wire, sizeof(wire), 1, f) != 1) return -1;
-
-    // Re-init runtime struct to defaults (clean slate; preserves window
-    // semantics from current cfg). Window restored from legacy if it's
-    // a sensible value; else default.
-    int restore_window = wire.ic.window;
-    double restore_tau = wire.freshness_tau;
-    ConfidenceScorer_Init(cs, restore_window, restore_tau);
-
-    // Copy persisted IC + RMSE history from wire to runtime. v5.15.5.E.C
-    // updated for RollingWindow composition (paths gained .samples / .count
-    // / .head intermediate via the embedded RollingWindow). Wire format
-    // bytes unchanged (frozen LegacyV1 still uses flat arrays + scalars).
-    memcpy(cs->ic.predictions.samples, wire.ic.predictions,
-           sizeof(wire.ic.predictions));
-    memcpy(cs->ic.actuals.samples,     wire.ic.actuals,
-           sizeof(wire.ic.actuals));
-    cs->ic.predictions.count = wire.ic.count;
-    cs->ic.predictions.head  = wire.ic.head;
-    cs->ic.actuals.count     = wire.ic.count;   // keep parallel ring in sync
-    cs->ic.actuals.head      = wire.ic.head;
-    memcpy(cs->rmse.window.samples, wire.rmse.squared_errors,
-           sizeof(wire.rmse.squared_errors));
-    cs->rmse.window.count = wire.rmse.count;
-    cs->rmse.window.head  = wire.rmse.head;
-
-    // Restore last_confidence cache (next Compute will overwrite anyway).
-    cs->last_confidence = wire.last_confidence;
-    // INTENTIONALLY DROPPED: wire.freshness.last_predict_us (wall-clock; stale)
-    // INTENTIONALLY DROPPED: wire.freshness.tau_secs (re-init from cfg)
-    // INTENTIONALLY DROPPED: wire.capacity.* (EWMA state stale; re-warm)
-    // INTENTIONALLY DROPPED: wire.rmse_baseline (re-init from cfg)
-    // INTENTIONALLY DROPPED: wire.ic.window / rmse.window (template constant)
-
-    return 0;
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [COMMENT]
-//----------------------------------------------------------------------
-// Shadow-load: read v11 raw-fwrite bytes, populate runtime ConfidenceScorer
-// via field-by-field copy. Composite-mode fields RE-INIT from cfg via
-// ConfidenceScorer_Init (wall-clock + EWMA stale on reload; re-warm correct).
-// Returns 0 on success; -1 on fread failure.
-//======================================================================
-// [END_FUNCTION]_[ConfidenceScorer_ShadowLoadLegacyV1]
-//======================================================================
 
 #endif // CONFIDENCE_SCORE_HPP
