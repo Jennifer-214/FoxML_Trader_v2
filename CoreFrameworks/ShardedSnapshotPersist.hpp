@@ -29,7 +29,7 @@
 //   - Periodic save every N slow-path cycles (configurable via cfg).
 //
 // On load:
-//   - Refuse if magic doesn't match (legacy v11, corruption, wrong file).
+//   - Refuse if magic doesn't match (legacy PortfolioController-format "TICK" file, corruption, wrong file).
 //   - Refuse if version != current (no migration logic — Phase 4 is v1).
 //   - Refuse if num_nodes stored != num_nodes configured (cfg changed
 //     post-snapshot; safer to start fresh than guess at slot mapping).
@@ -63,8 +63,10 @@ namespace tt {
 // [OVERVIEW]_[wire magic + APPEND-ONLY snapshot version (v1->v10 history inline) + Ship-B money-epoch compile guard]
 //----------------------------------------------------------------------
 // 0x53484430 = "SHD0" little-endian. Distinct from PORTFOLIO_SNAPSHOT_MAGIC
-// (0x4B434954 "TICK") so a legacy v11 file produces a clean refuse-load
-// rather than parsing as garbage.
+// (0x4B434954 "TICK") so a legacy PortfolioController-format file produces a
+// clean refuse-load rather than parsing as garbage. ("legacy v11" here meant
+// the CONTROLLER format's version — an active name-collision once SHARDED
+// itself reached 11; reworded at the E.1.2 bump.)
 #define SHARDED_SNAPSHOT_MAGIC    0x53484430u
 // v1: initial layout (Phase 4)
 // v2: + per-core RollingIC + RollingRMSE buffer contents (Phase 4.1).
@@ -109,7 +111,7 @@ namespace tt {
 // rejected on load with version-mismatch — paper-mode data only;
 // operator restarts a fresh paper session. No live data is lost
 // (live mode never persists via this path; reconciles from exchange).
-#define SHARDED_SNAPSHOT_VERSION  10u  // Ship-B DECIMAL epoch: per-core money re-encoded; v9 (16B binary, H21 tombstone) rejected. Was: // Ship-A 16B FPN_Binary: embedded Position/FPN_Binary-struct byte layouts changed; v8 version-rejected (H21/D-144)
+#define SHARDED_SNAPSHOT_VERSION  11u  // E.1.2 v11: per-node wire row swap — node_dd_pct DROPPED (recompute) + partner_pending_pnl ADDED (AM-4/TD-227/D-420); net-0 bytes, name-listing golden is the catcher; v10 (Ship-B DECIMAL epoch, H21 tombstone) rejected. Was: // Ship-B DECIMAL: money re-encoded; v9 (16B binary) rejected
 
 // Ship-B P2 epoch guard (S-4): this file raw-fwrites per-core money (allocated_balance /
 // node_realized / fees / notional / pnl_feeder / 16x Position). Encoding-keyed (the 16B->16B
@@ -117,7 +119,8 @@ namespace tt {
 // [ASSERT]_[EPOCH_TRIPWIRE]_[SHARDED_SNAPSHOT_VERSION >= 9 + MONEY_ENCODING_EPOCH — encoding flip forces a version bump]
 static_assert(MONEY_ENCODING_EPOCH == 0u || SHARDED_SNAPSHOT_VERSION >= 9u + MONEY_ENCODING_EPOCH,
               "Ship-B epoch: the engine money type flipped to decimal — bump "
-              "SHARDED_SNAPSHOT_VERSION to 10u (H21 tombstone 9u) in THIS commit.");
+              "SHARDED_SNAPSHOT_VERSION past the epoch floor (H21 tombstone the "
+              "old version) in THIS commit.");
 
 //======================================================================
 // [FUNCTION]_[ShardedSnapshot_Save]
@@ -191,7 +194,7 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     // E.1.2 D-305 — registry-driven wire walk. The ordered FOREACH_NODE_PERSIST_FIELD
     // (MemHeaders/NodeCtxPersistRegistry.hpp) IS the per-node wire spec: 29 rows,
     // 1944B/node, row order == emission order, byte-identical to the retired
-    // hand-loop (frozen golden: tests/sharded_snapshot_v10_golden.hpp). Per-field
+    // hand-loop (frozen golden: tests/sharded_snapshot_v11_golden.hpp). Per-field
     // history (v5.4.3 Class-4 gross-drop, the v5.11.15 kind-leak NO_COMMITs, the
     // .B.3 kill-bit byte format, the Step-2c delegates + the D-110 interleave)
     // rides the registry rows. Dropping a wire op ⟺ dropping a row ⟺ caught by
@@ -279,9 +282,10 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         fprintf(stderr, "[snapshot] %s truncated at magic — refusing load\n", filepath);
         fclose(f); return 0;
     }
-    // Refuse legacy v11 PortfolioController snapshots cleanly.
+    // Refuse legacy PortfolioController-format snapshots cleanly (any TICK-era
+    // file — controller v4-v14 AND the old Portfolio_Save v<=7 both stamped it).
     if (magic == 0x4B434954u) {  // PORTFOLIO_SNAPSHOT_MAGIC
-        fprintf(stderr, "[snapshot] %s is a LEGACY snapshot (PortfolioController v11). "
+        fprintf(stderr, "[snapshot] %s is a LEGACY snapshot (PortfolioController-format, TICK magic). "
                         "Sharded does not migrate legacy snapshots — starting fresh.\n",
                 filepath);
         fclose(f); return 0;
@@ -364,11 +368,16 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         uint32_t node_wins, node_losses;
         // v5.4.3 (snapshot v5): gross accumulators + idle counter
         Money   node_gross_wins, node_gross_losses;
+        // E.1.2 v11 (D-420/AM-4): the W/L pairing park joins the wire; its
+        // bitmap is EventLoopState-level and RE-DERIVED post-walk, never staged.
+        Money   partner_pending_pnl;
         uint32_t idle_cycles;
         Money   last_entry_price;
         uint64_t last_entry_tick;
         uint32_t sl_cooldown_remaining;
-        Money   node_peak_balance, node_dd_pct;
+        // node_dd_pct DROPPED at v11 (D-420): eval-transient, recomputed from
+        // node_peak_balance before every read in the same kill-eval pass.
+        Money   node_peak_balance;
         uint8_t  node_kill_tripped;
         uint32_t node_ks_trips_total;
         // regime — nested staging (E.1.2 Step-2, D-305): FieldwiseRead populates the 7
@@ -559,6 +568,27 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
             "[snapshot] re-activated %d ExecutionCore(s) from restored "
             "positions — hot-path SG/TP/SL gates armed\n",
             restored_count);
+    }
+
+    // E.1.2 v11 (D-420/AM-4) — re-derive partner_pending_bitmap from slot parity.
+    // The bitmap is EventLoopState-level, NOT a per-node wire row: under partials,
+    // exactly-one-leg-active ⟺ a first-leg exit parked its net in the node's
+    // partner_pending_pnl (committed by the registry walk above) OR a rare orphan
+    // leg (ring-full leg-B push, pnl==0 — its exit then merges-with-zero into ONE
+    // correct W/L stat; the D-420 state table shows re-derive ties-or-wins every
+    // reachable state, so the bitmap never rides the wire). Whole-value ASSIGN,
+    // never OR. Gated on the partials geometry: with partials OFF every slot is
+    // its own node and a lone active slot MUST NOT set a partner bit; the
+    // partials-mismatch refuse-load above guarantees file⟷cfg geometry agreement,
+    // so this gate is total. Boot-time-only (H20 boot exception).
+    state->partner_pending_bitmap = 0;
+    if (partial_exit_enabled) {
+        const uint16_t am4_bm = state->oms->portfolio.active_bitmap;
+        for (int n = 0; n < (int)state->registered_count; ++n) {
+            const uint16_t leg_parity =
+                (uint16_t)(((am4_bm >> (2 * n)) ^ (am4_bm >> (2 * n + 1))) & 1u);
+            state->partner_pending_bitmap |= (uint16_t)(leg_parity << n);
+        }
     }
 
     fprintf(stderr, "[snapshot] loaded sharded snapshot from %s (%u nodes, ts=%llu)\n",

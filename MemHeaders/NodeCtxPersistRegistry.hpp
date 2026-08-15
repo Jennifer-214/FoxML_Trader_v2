@@ -20,7 +20,7 @@
 // forcing-function architecture locked by D-302): ONE ordered registry replaces the
 // hand-written per-node fwrite/fread/commit loops in ShardedSnapshotPersist.hpp.
 // Dropping a wire op is now dropping a ROW — caught by the count-lock + the frozen
-// v10 byte-golden (tests/sharded_snapshot_v10_golden.hpp), closing the
+// byte-golden (tests/sharded_snapshot_v11_golden.hpp), closing the
 // node_gross_wins→$0.00 silent-field-drop class (TECH_DEBT-196 mechanism).
 //
 // ROW ORDER IS THE WIRE ORDER. Emission order == row order == the retired hand-loop
@@ -43,7 +43,7 @@
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[29 wire rows, 1944B per node block at snapshot v10 — 20 SCALAR + 1 BIT + 2 PAD + 3 DELEGATE + the 3 interleave doubles; tuple X(NAME, TYPE, STORAGE_KIND, STORAGE_MASK, COMMIT_KIND)]
+// [OVERVIEW]_[29 wire rows, 1944B per node block at snapshot v11 — 20 SCALAR + 1 BIT + 2 PAD + 3 DELEGATE + the 3 interleave doubles; tuple X(NAME, TYPE, STORAGE_KIND, STORAGE_MASK, COMMIT_KIND)]
 // [COLUMN]_[NAME]_[NodeContext field name == NodeSnap staging field name (unified; PAD rows use scratch, no staging field)]
 // [COLUMN]_[type]_[C++ element type — sizeof() drives the fwrite/fread width]
 // [COLUMN]_[STORAGE_KIND]_[SCALAR = plain field · BIT = node_state_flags bit as a 1-byte 0/1 wire byte · PAD = zero-written alignment bytes · DELEGATE = field-by-field sub-registry walker at this wire position]
@@ -57,21 +57,24 @@
 // NO_COMMIT rows (the v5.11.15 leak class — see ShardedSnapshotPersist.hpp commit
 // site for the full history): strategy_id comes from cfg at boot, never the snapshot;
 // strategy_state_kind restored from a snapshot desyncs kind-vs-allocated-state and
-// leaked the strategy_state pointer. Both STAY on the wire (v10 byte layout) — they
-// READ (consuming their bytes keeps every later offset correct) and no-op at commit.
+// leaked the strategy_state pointer. Both STAY on the wire — they READ (consuming
+// their bytes keeps every later offset correct) and no-op at commit.
 //
 // v5.4.3 (snapshot v5) history rides node_gross_wins/losses + idle_cycles (Class 4:
 // added v4.7.25, silently never persisted — Stats avg_win/avg_loss/profit_factor read
 // $0.00 after restart). THE founding instance of the silent-field-drop class this
 // registry structurally closes.
 #define FOREACH_NODE_PERSIST_FIELD(X)                                                                \
-    /* identity / sizing (wire rows 1-5) */                                                          \
+    /* identity / sizing */                                                                          \
     X(strategy_id,            uint8_t,              SCALAR,   0,                  NO_COMMIT)          \
     X(resolved_strategy_id,   uint8_t,              SCALAR,   0,                  COMMIT)             \
     X(strategy_state_kind,    uint8_t,              SCALAR,   0,                  NO_COMMIT)          \
     X(_pad_ids,               uint8_t,              PAD,      1,                  NO_COMMIT)          \
     X(allocated_balance,      Money,                SCALAR,   0,                  COMMIT)             \
-    /* counters (rows 6-15) */                                                                       \
+    /* counters + W/L stats (partner_pending_pnl = the AM-4/TD-227 pairing park: first-leg    */     \
+    /* net parked here until the partner exits, then merged into ONE W/L stat. Persisted at   */     \
+    /* v11 (D-420); its partner_pending_bitmap is EventLoopState-level and RE-DERIVED on load */     \
+    /* via slot parity — never a wire row.)                                                   */     \
     X(entries_processed,      uint64_t,             SCALAR,   0,                  COMMIT)             \
     X(exits_processed,        uint64_t,             SCALAR,   0,                  COMMIT)             \
     X(node_realized,          Money,                SCALAR,   0,                  COMMIT)             \
@@ -81,33 +84,38 @@
     X(node_losses,            uint32_t,             SCALAR,   0,                  COMMIT)             \
     X(node_gross_wins,        Money,                SCALAR,   0,                  COMMIT)             \
     X(node_gross_losses,      Money,                SCALAR,   0,                  COMMIT)             \
+    X(partner_pending_pnl,    Money,                SCALAR,   0,                  COMMIT)             \
     X(idle_cycles,            uint32_t,             SCALAR,   0,                  COMMIT)             \
-    /* spacing state (rows 16-18) */                                                                 \
+    /* spacing state */                                                                              \
     X(last_entry_price,       Money,                SCALAR,   0,                  COMMIT)             \
     X(last_entry_tick,        uint64_t,             SCALAR,   0,                  COMMIT)             \
     X(sl_cooldown_remaining,  uint32_t,             SCALAR,   0,                  COMMIT)             \
-    /* kill switch (rows 19-23) — kill bit wire-encoded as a 1-byte 0/1 (pre-.B.3 format preserved) */ \
+    /* kill switch — kill bit wire-encoded as a 1-byte 0/1 (pre-.B.3 format preserved).       */     \
+    /* node_dd_pct DROPPED at v11 (D-420): eval-transient display field, recomputed from      */     \
+    /* node_peak_balance before every read in the same kill-eval pass — dead wire weight.     */     \
     X(node_peak_balance,      Money,                SCALAR,   0,                  COMMIT)             \
-    X(node_dd_pct,            Money,                SCALAR,   0,                  COMMIT)             \
     X(node_kill_tripped,      uint8_t,              BIT,      KILL_TRIPPED,       COMMIT)             \
     X(_pad_kill,              uint8_t,              PAD,      3,                  NO_COMMIT)          \
     X(node_ks_trips_total,    uint32_t,             SCALAR,   0,                  COMMIT)             \
-    /* sub-struct delegates at their wire positions (rows 24-25; E.1.2 Step-2c, D-304) */            \
+    /* sub-struct delegates at their wire positions (E.1.2 Step-2c, D-304) */                        \
     X(regime_state,           RegimeState<F>,       DELEGATE, RegimeState,        COMMIT)             \
     X(pnl_feeder,             RegressionFeederX<F>, DELEGATE, RegressionFeederX,  COMMIT)             \
-    /* the D-110 interleave: 3 confidence doubles BETWEEN feeder and confidence (rows 26-28) */      \
+    /* the D-110 interleave: 3 confidence doubles BETWEEN feeder and confidence */                    \
     X(staged_prediction,      double,               SCALAR,   0,                  COMMIT)             \
     X(active_prediction,      double,               SCALAR,   0,                  COMMIT)             \
     X(last_confidence,        double,               SCALAR,   0,                  COMMIT)             \
-    /* confidence delegate (row 29; FOREACH_CONFIDENCE_PERSIST_FIELD, 1552B) */                      \
+    /* confidence delegate (FOREACH_CONFIDENCE_PERSIST_FIELD, 1552B) */                              \
     X(confidence,             ConfidenceScorer,     DELEGATE, ConfidenceScorer,   COMMIT)
 
 //------------------------------------------------------------------
 // [SECTION]_[COMPILE-TIME COUNT SENTINEL — the parent count-lock]
 //------------------------------------------------------------------
-// Wire pin: EXACTLY 29 rows at snapshot v10. Adding/removing/reordering a row
-// CHANGES the per-node wire → SHARDED_SNAPSHOT_VERSION bump + golden regen
-// (regen/RENAME tests/sharded_snapshot_v10_golden.hpp) ride the SAME commit (H21).
+// Wire pin: EXACTLY 29 rows at snapshot v11 (the v10→v11 delta was the net-0 row
+// swap node_dd_pct → partner_pending_pnl — the count-lock is VACUOUS against
+// exactly that class; the name-listing golden is the layer that catches it).
+// Adding/removing/reordering a row CHANGES the per-node wire →
+// SHARDED_SNAPSHOT_VERSION bump + golden regen (regen/RENAME
+// tests/sharded_snapshot_v11_golden.hpp) ride the SAME commit (H21).
 // Sub-registry tripwires (regime ==7 · feeder ==3 · confidence ==7) live beside
 // their registries — a delegate-internal drop is caught THERE; this lock catches
 // parent-level row motion.
@@ -117,10 +125,10 @@ constexpr int FOREACH_NODE_PERSIST_FIELD_COUNT =
 #undef _NPF_COUNT_ONE
 // [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_NODE_PERSIST_FIELD_COUNT == 29 — the per-node wire row pin]
 static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
-              "Snapshot v10 per-node wire = EXACTLY 29 ordered rows (1944B/node). "
+              "Snapshot v11 per-node wire = EXACTLY 29 ordered rows (1944B/node). "
               "Adding/removing/reordering a row changes the wire format: bump "
               "SHARDED_SNAPSHOT_VERSION + regen/RENAME the version-named golden "
-              "(tests/sharded_snapshot_v10_golden.hpp) in the SAME commit. See "
+              "(tests/sharded_snapshot_v11_golden.hpp) in the SAME commit. See "
               "DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md.");
 //======================================================================
 // [END_CODE]
