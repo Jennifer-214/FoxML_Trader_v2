@@ -278,6 +278,31 @@ static inline void RollingIC_Push(RollingIC *ric, double prediction, double actu
     RollingWindow_Push(&ric->predictions, prediction);
     RollingWindow_Push(&ric->actuals,     actual);
 }
+
+// E.1.2 D-421 — RESTORE the lockstep invariant after a partial-field load.
+//
+// The invariant above ("same count + head + window after every Push") holds for
+// every LIVE path, and that is exactly why it was trusted: the persist registry
+// carries `ic.actuals.samples` but only `ic.predictions.{count,head}`, on the
+// stated reasoning that the two rings stay in lockstep. That reasoning is true of
+// Push and true of Compute — and FALSE across the persist boundary, because the
+// load is the one operation that sets one ring's cursor without the other's.
+//
+// The consequence was not cosmetic. Post-commit `actuals.head` was 0 while
+// `predictions.head` was H, so every subsequent Push wrote the two rings a fixed
+// `H mod window` apart, permanently and with no self-heal: the pairs the IC
+// correlates were mismatched. A perfectly-correlated predictor measured IC = 1.0000
+// live and -0.5238 after a restart + 6 trades — and that IC feeds
+// DriftHistory_CheckBreach, so a correctly-performing node could auto-kill itself
+// on resume. It reads CORRECT immediately post-load and only diverges on the first
+// new Push, which is why a load-then-assert test cannot see it.
+//
+// `window` needs no restore: ConfidenceScorer_Init runs before the load and sets
+// both rings from cfg, so they are already equal (and equal is all lockstep needs).
+static inline void RollingIC_RestoreLockstep(RollingIC *ric) {
+    ric->actuals.count = ric->predictions.count;
+    ric->actuals.head  = ric->predictions.head;
+}
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -1452,6 +1477,12 @@ static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs);
 static inline void ConfidenceScorer_CommitPersistedFields(ConfidenceScorer* dst,
                                                             const ConfidenceScorer* src) {
     FOREACH_CONFIDENCE_PERSIST_FIELD(CONFIDENCE_COMMIT_FIELD_)
+    // E.1.2 D-421: restore the predictions/actuals lockstep the partial field set
+    // breaks. Same shape as the REC-A recompute below — derived state rebuilt in
+    // the commit's own tail, so it cannot be forgotten by a caller — and it is why
+    // this fix needs NO wire change: the cursor is DERIVABLE from the ring that is
+    // already persisted, so persisting it would be storing a redundancy.
+    RollingIC_RestoreLockstep(&dst->ic);
     // E.1.2 REC-A (D-305 tail; A3-guardrailed): recompute the derived
     // rmse.sum_squared_errors as the commit's OWN tail — every registry-commit
     // path is now self-contained (an implementer modeling confidence as a
