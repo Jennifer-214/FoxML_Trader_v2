@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [PERSISTENCE] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the Position<F> field SSoT — PERSIST_KIND column drives Portfolio_Save/Load wire participation; append-only under PORTFOLIO_SNAPSHOT_VERSION=5]
+// [OVERVIEW]_[the Position<F> field SSoT — declaration order IS the wire order of the SHARDED snapshot's Position blob; append-only under SHARDED_SNAPSHOT_VERSION]
 // [CONTAINS]
 //   - [REGISTRY]_[FOREACH_POSITION_FIELD]   (+ the SKIP_PERSIST placeholder macro + PERSIST_KIND dispatch share the block)
 // [REFERENCE]_[INVARIANT]_[[H9] [H21]]
@@ -21,11 +21,11 @@
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [FRAMEWORK_DISCIPLINE] [PERSISTENCE] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[9 PERSIST rows in wire order (DO NOT REORDER — PORTFOLIO_SNAPSHOT_VERSION=5 locked) + the empty SKIP_PERSIST future-extension macro + the PERSIST_KIND token-paste dispatch]
+// [OVERVIEW]_[9 PERSIST rows in wire order (DO NOT REORDER — SHARDED_SNAPSHOT_VERSION locked) + the empty SKIP_PERSIST future-extension macro + the PERSIST_KIND token-paste dispatch]
 // [COLUMN]_[name]_[Position<F> member identifier]
 // [COLUMN]_[type]_[C storage type (Money / uint64_t / int8_t)]
 // [COLUMN]_[init]_[Position_Init value]
-// [COLUMN]_[persist_kind]_[PERSIST = in the Portfolio wire format; SKIP_PERSIST = struct-only, cleared on Init]
+// [COLUMN]_[persist_kind]_[PERSIST = intended for the wire; SKIP_PERSIST = struct-only, cleared on Init. NOTE (E.1.2/D-289): the live sharded wire dumps Position WHOLE and does NOT read this column — see the dispatch section note]
 // [COLUMN]_[doc]_[cache-tier + semantics note]
 // [REFERENCE]_[DESIGN_SPEC]_[[wire-format-byte-preservation-discipline] [hot-side-array-element-alignment-for-sparse-access.md] [persisted-struct-with-ephemeral-field-coexistence-pattern.md] [pre-post-cfg-registry-split-for-emit-order-preservation.md] [slot-state-foreach-registry-with-storage-routing.md]]
 // [REFERENCE]_[INVARIANT]_[H21]
@@ -51,16 +51,25 @@
 // here. v5.15.5.C.5 REVERTED those fields to OMS sibling arrays per the
 // `slot-state-foreach-registry-with-storage-routing.md` decision tree:
 // sparse-access per-slot ephemeral state goes to OMS sibling SoA arrays;
-// Position holds only PERSIST state. The revert allows Position to be 184B
-// (PERSIST-only) + alignas(64) → 192B = 3 cache lines exact, eliminating
-// hot-path cache-line straddle (per
+// Position holds only PERSIST state. The revert allows Position to be
+// PERSIST-only + alignas(64); at Ship-A's 16B Money that is 128B = 2 cache
+// lines exact, eliminating hot-path cache-line straddle (per
 // `hot-side-array-element-alignment-for-sparse-access.md` first canonical
-// application).
+// application). (It was 184B/192B/3 lines in the 24B-Money era.)
 //
 // This empty macro is RETAINED as future-extension infrastructure. If a
 // future field genuinely benefits from Position-locality (e.g., a transient
 // flag co-accessed with PERSIST fields in slow-path), it can be added here.
-// The PERSIST_KIND filter machinery (Portfolio_Save/Load) remains intact.
+//
+// ⚠️ E.1.2/D-289 — READ BEFORE ADDING A SKIP_PERSIST FIELD: the PERSIST_KIND
+// filter's only consumers were Portfolio_Save/Load, which are DELETED. The
+// live sharded serializer dumps `sizeof(Position<F>)` WHOLE and never
+// consults this column, so a SKIP_PERSIST field added today would silently
+// reach the wire anyway. The `sizeof(Position) - POSITION_PERSIST_BYTES == 0`
+// static_assert in Portfolio.hpp is the tripwire that red-builds on that,
+// forcing an explicit wire decision (a SHARDED_SNAPSHOT_VERSION bump, H21).
+// Adding a SKIP_PERSIST field means EITHER re-teaching the sharded serializer
+// to filter, OR accepting it on the wire and bumping the version.
 //
 // Pattern remains composable with `pre-post-cfg-registry-split-for-emit-order-preservation.md`
 // (the manual `_pad_pos` plays the role of a "sister registry boundary"
@@ -70,9 +79,12 @@
 //------------------------------------------------------------------
 // [SECTION]_[PERSIST_KIND token-paste dispatch]
 //------------------------------------------------------------------
-// Used by Portfolio_Save / Portfolio_Load (POS.2) to filter PERSIST fields
-// from SKIP_PERSIST. POS.1 doesn't need filtering (all fields PERSIST), but
-// dispatch is defined here for POS.2 + future use.
+// Originally used by Portfolio_Save / Portfolio_Load (POS.2) to filter PERSIST
+// fields from SKIP_PERSIST. Those two serializers were DELETED at E.1.2/D-289,
+// so this dispatch has NO live consumer today — it is retained as the ready-made
+// filter for whenever a SKIP_PERSIST field is actually introduced (see the
+// warning in the SKIP_PERSIST section above). All 9 rows are PERSIST, so the
+// filter is a no-op on the current registry either way.
 //
 // Pattern mirrors FOREACH_OMS_FIELD's STORAGE_KIND dispatch shipped in
 // v5.15.5.C.3 Phase 3b — same X-macro discipline.
@@ -86,33 +98,40 @@
 // FOREACH_POSITION_FIELD(X) — tuple shape:
 //   X(name, type, init, persist_kind, doc)
 //
-// FIELD ORDER MATTERS: PORTFOLIO_SNAPSHOT_VERSION=5 wire format is locked to
-// the current declaration order. New PERSIST fields are APPENDED only (per
-// `DESIGN_SPECS/wire-format-byte-preservation-discipline.md`).
+// FIELD ORDER MATTERS: the SHARDED_SNAPSHOT_VERSION wire format is locked to
+// the current declaration order — the sharded serializer blob-dumps Position,
+// so declaration order IS byte order. New PERSIST fields are APPENDED only (per
+// `DESIGN_SPECS/wire-format-byte-preservation-discipline.md`), and any append
+// changes sizeof → trips the layout locks → forces the H21 version bump.
 //
 // Order also matches the original Portfolio.hpp manual struct's cache-layout
 // intent (hot-path fields first → warm fields → cold fields).
 //
 // X-macro registry for Position<F> struct generation per
 // `DESIGN_SPECS/persisted-struct-with-ephemeral-field-coexistence-pattern.md`.
-// PERSIST_KIND column drives wire-format participation:
+// PERSIST_KIND column DECLARES intended wire-format participation:
 //
-//   PERSIST       — field is part of Portfolio_Save / Portfolio_Load wire format
-//                   (PORTFOLIO_SNAPSHOT_VERSION=5 byte layout)
-//   SKIP_PERSIST  — field lives in Position struct but NOT in wire format
-//                   (cleared on Init; never persisted; never restored from snapshot)
+//   PERSIST       — field is intended for the wire (today: reaches disk via the
+//                   sharded snapshot's whole-Position blob dump, under
+//                   SHARDED_SNAPSHOT_VERSION)
+//   SKIP_PERSIST  — field lives in Position struct but is NOT intended for the wire
+//                   (cleared on Init; never restored from snapshot). NONE today —
+//                   and see the D-289 warning above before adding one.
 //
 // POS.1: all 9 existing fields registered as PERSIST in their
 // CURRENT declaration order — preserves cache-layout discipline (hot fields
-// first, warm middle, cold last) AND wire-format byte layout
-// (PORTFOLIO_SNAPSHOT_VERSION=5 byte-identical). Static_asserts on
+// first, warm middle, cold last) AND wire-format byte layout. Static_asserts on
 // sizeof(Position) + offsetof(...) lock the layout.
 //
 // POS.2: added the SKIP_PERSIST machinery for Phase G's exit-side derive
 // cascade; the 2 fields later REVERTED to OMS sibling arrays at v5.15.5.C.5
-// (see the SKIP_PERSIST section note). Wire format byte-identical via
-// Save/Load filter walking only PERSIST fields. No
-// PORTFOLIO_SNAPSHOT_VERSION bump.
+// (see the SKIP_PERSIST section note), leaving the registry all-PERSIST and the
+// wire byte-identical.
+//
+// E.1.2/D-289: the standalone PORTFOLIO snapshot format (and its Save/Load
+// serializers, which this column originally fed) is RETIRED. Position's bytes now
+// ride ONLY the sharded wire. The column and its dispatch survive as declaration +
+// ready-made filter, not as a live consumer.
 //
 // FUTURE FIELD ADDITIONS:
 // 1 row in FOREACH_POSITION_FIELD with explicit PERSIST_KIND. Future field

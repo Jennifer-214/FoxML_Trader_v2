@@ -9,7 +9,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING] [PERSISTENCE] [BITMAP_PACKED]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[position tracking core — registry-generated Position + bitmap Portfolio + slot lifecycle + snapshot persistence]
+// [OVERVIEW]_[position tracking core — registry-generated Position + bitmap Portfolio + slot lifecycle; Position bytes ride the SHARDED wire (its own PORTFOLIO snapshot format retired at E.1.2/D-289)]
 // [CONTAINS]
 //   - [STRUCT]_[Position]
 //   - [STRUCT]_[Portfolio]
@@ -23,8 +23,6 @@
 //   - [FUNCTION]_[Portfolio_CloseSlot]
 //   - [FUNCTION]_[Portfolio_ComputePnL]
 //   - [FUNCTION]_[PositionExitGate]
-//   - [FUNCTION]_[Portfolio_Save]
-//   - [FUNCTION]_[Portfolio_Load]
 //======================================================================================================
 // this is basically just gonna track positions and stuff and be the core portfolio managment system, im not sure if ill actually add the rebaalncing logic and stuff here, but it should eventually just serve as the API call to get position deltas and stuff, it will be more robust that just the simple pool allocator i was attempting earlier
 //======================================================================================================
@@ -71,7 +69,8 @@ template <unsigned F> struct alignas(64) Position {
     #undef POSITION_EMIT_FIELD
 
     // Manual padding to align Position to 8 bytes after int8_t pair_index.
-    // Part of wire format (PORTFOLIO_SNAPSHOT_VERSION byte layout; Ship-A 16B FPN_Binary).
+    // Part of wire format — the SHARDED snapshot dumps `Position<F>` whole
+    // (ShardedSnapshotPersist.hpp), so every byte here reaches disk under SHARDED_SNAPSHOT_VERSION.
     // POSITION_PERSIST_BYTES = offsetof(_pad_pos) + sizeof(_pad_pos) = 128 (was 184).
     uint8_t _pad_pos[7] = {0};   // H12: reaches the wire via the 128B blob dump → MUST be zero-init (D-295)
 
@@ -104,9 +103,14 @@ template <unsigned F> struct alignas(64) Position {
 //     hot-path cache misses at sparse-iteration access patterns
 //
 // POS.2's SKIP_PERSIST infrastructure (FOREACH_POSITION_FIELD_SKIP_PERSIST registry +
-// PERSIST_KIND filter dispatch in Portfolio_Save/Load) RETAINED as future-extension
-// capacity. Empty registry today; available for future fields that warrant Position-
-// locality co-access with PERSIST fields.
+// its PERSIST_KIND filter dispatch) RETAINED as future-extension capacity. Empty registry
+// today; available for future fields that warrant Position-locality co-access with PERSIST
+// fields. NOTE (E.1.2/D-289): the filter's original consumers were Portfolio_Save/Load, now
+// DELETED. The live sharded wire dumps `Position<F>` WHOLE — it does not filter by
+// PERSIST_KIND — so a future SKIP_PERSIST field would reach disk anyway. That is what the
+// `sizeof(Position) - POSITION_PERSIST_BYTES == 0` assert below exists to catch: adding one
+// red-builds and forces the wire decision (a SHARDED version bump) rather than silently
+// widening the snapshot.
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
@@ -123,9 +127,10 @@ template <unsigned F> struct alignas(64) Position {
 // v5.15.5.C.4 Phase POS — static_assert layout locks per the design spec
 // `function-struct-alignment-for-single-mov-access.md` + wire-format byte
 // preservation discipline. Catches accidental field-reorder that would
-// invalidate PORTFOLIO_SNAPSHOT_VERSION=6 wire format.
+// invalidate the SHARDED_SNAPSHOT_VERSION wire format (the live one — Position rides the
+// sharded blob dump; the standalone PORTFOLIO format retired at E.1.2/D-289).
 //
-// Reference layout (Ship-A 16B Money; PORTFOLIO_SNAPSHOT_VERSION=6; was 24B/v5):
+// Reference layout (Ship-A 16B Money; live under SHARDED_SNAPSHOT_VERSION):
 //   offset 0:   take_profit_price   (16B)
 //   offset 16:  stop_loss_price     (16B)
 //   offset 32:  quantity            (16B)
@@ -138,7 +143,8 @@ template <unsigned F> struct alignas(64) Position {
 //   offset 121: _pad_pos            (7B)
 //   total:      128 bytes
 // Ship-A 16B FPN_Binary — sizeof locked at 128B (= 2 cache lines exact; NO alignas trailing pad).
-// PERSIST prefix = 128 bytes; v5 (184B/position) snapshots version-rejected (H21/D-144).
+// PERSIST prefix = 128 bytes. (Historical: the retired PORTFOLIO format version-rejected its own
+// v5 184B/position snapshots at H21/D-144 — that format is gone; the size lock now guards SHARDED.)
 //
 // Per DESIGN_SPECS/hot-side-array-element-alignment-for-sparse-access.md:
 // - sizeof(Position) % 64 == 0 → each Position[N] starts on cache-line boundary
@@ -148,7 +154,7 @@ template <unsigned F> struct alignas(64) Position {
 // Ship A (16B FPN_Binary): Position re-derived 192B→128B. HOT fields (TP@0, SL@16) still share cache-line 0;
 // COLD (original_tp@80, original_sl@96) in line 1. 128B = 2 cache lines exact, no trailing pad.
 // [ASSERT]_[LAYOUT_LOCK]_[sizeof(Position<64>) == 128]
-// [WHY]_[wire format (PORTFOLIO_SNAPSHOT_VERSION) + 2-cache-lines-exact hot-slot access — a silent grow/reorder is a snapshot break, H21]
+// [WHY]_[wire format (SHARDED_SNAPSHOT_VERSION — the live blob dump) + 2-cache-lines-exact hot-slot access; a silent grow/reorder is a snapshot break, H21]
 static_assert(sizeof(Position<64>) == 128,
               "Position<64> size must be 128B (Ship A 16B FPN_Binary: 2 cache lines exact, no trailing pad; was 192B at 24B FPN_Binary); "
               "see DESIGN_SPECS/hot-side-array-element-alignment-for-sparse-access.md");
@@ -176,17 +182,20 @@ static_assert(offsetof(Position<64>, entry_timestamp_us) == 112, "Position layou
 static_assert(offsetof(Position<64>, pair_index)         == 120, "Position layout: pair_index offset");
 
 // PERSIST byte count — first 128 bytes of Position go to wire format (Ship A 16B FPN_Binary; was 184B).
-// Save/Load writes exactly POSITION_PERSIST_BYTES per position (16 positions × 128 = 2048 bytes payload).
-// PORTFOLIO_SNAPSHOT_VERSION bumped 5→6 (D-144) — old 184B-per-Position snapshots are version-rejected.
+// ASSERT-ONLY SURVIVOR (E.1.2/D-289, OQ-3): its two code consumers were Portfolio_Save/Load, now
+// deleted. It is retained purely as the SKIP_PERSIST tripwire — the live sharded wire dumps
+// `sizeof(Position<F>)` whole, so the `sizeof - POSITION_PERSIST_BYTES == 0` assert below is what
+// red-builds if a future SKIP_PERSIST field is added, forcing the wire decision instead of a silent
+// snapshot widening. Do not delete it as "unused"; the assert IS the consumer.
 // At 16B the PERSIST data fills the 2 cache lines exactly → NO trailing alignas pad.
 template <unsigned F>
 constexpr size_t POSITION_PERSIST_BYTES() {
     // 9 PERSIST value fields (112B FPN_Binary + 8B uint64 + 1B int8) + 7B _pad_pos = 128B (Ship A 16B FPN_Binary)
     return offsetof(Position<F>, _pad_pos) + 7;
 }
-// [ASSERT]_[LAYOUT_LOCK]_[POSITION_PERSIST_BYTES<64>() == 128 — the v6 wire prefix]
+// [ASSERT]_[LAYOUT_LOCK]_[POSITION_PERSIST_BYTES<64>() == 128 — the sharded wire prefix]
 static_assert(POSITION_PERSIST_BYTES<64>() == 128,
-              "Position PERSIST byte count must equal 128 — wire format (PORTFOLIO_SNAPSHOT_VERSION=6, Ship A 16B) byte-identical");
+              "Position PERSIST byte count must equal 128 — wire format (SHARDED_SNAPSHOT_VERSION, Ship A 16B) byte-identical");
 // [ASSERT]_[LAYOUT_LOCK]_[sizeof(Position<64>) == POSITION_PERSIST_BYTES — no trailing non-wire bytes]
 static_assert(sizeof(Position<64>) - POSITION_PERSIST_BYTES<64>() == 0,
               "16B FPN_Binary: PERSIST fills 128B = 2 cache lines exact, NO trailing alignas pad (was 8B at 24B FPN_Binary)");
@@ -380,7 +389,7 @@ template <unsigned F> inline void Position_Reset(Position<F>* p) {
 // The subset-zeroing class recurs when each clear site hand-lists fields (A19 = ratchet_tp never cleared;
 // A28 = original_tp/original_sl/pair_index/entry_timestamp_us never cleared → stale trail anchor + mis-paired
 // legs on slot reuse). Every reset site (Init/ClearPositions) calls this. pair_index defaults to -1 (unpaired),
-// NOT 0. Sets values only — no Position layout change, so no PORTFOLIO_SNAPSHOT_VERSION/H21 concern.
+// NOT 0. Sets values only — no Position layout change, so no SHARDED_SNAPSHOT_VERSION/H21 concern.
 //======================================================================
 // [END_FUNCTION]_[Position_Reset]
 //======================================================================
@@ -790,160 +799,43 @@ inline void PositionExitGate(Portfolio<F> *portfolio, Money current_price, ExitB
 //======================================================================
 
 //------------------------------------------------------------------------------------------------------
-// [SECTION]_[persistence]
+// [SECTION]_[persistence — RETIRED FORMAT (H21 tombstone)]
 //------------------------------------------------------------------------------------------------------
-// binary snapshot of portfolio state - written on slow path, read once at startup
-// includes a magic number and version so we dont load garbage or stale formats
-// also saves realized P&L and adaptive filter state alongside the portfolio
+// The standalone PORTFOLIO snapshot format is RETIRED at E.1.2/D-289. Its two serializers
+// (Portfolio_Save / Portfolio_Load) were dead — zero callers anywhere in the tree — and were
+// DELETED rather than left compiled-in (H21 Rule 1 + Rule 3: a dead capital-path serializer is
+// the Power Peg shape). Position bytes still reach disk, but via the LIVE sharded wire:
+// ShardedSnapshotPersist.hpp dumps the whole `Position<F>` blob under SHARDED_SNAPSHOT_VERSION.
+//
+// The two macros below STAY LIVE and are NOT reassignable (H21 Rule 2 — tombstone the slot,
+// never recycle it). Versions 1-7 are BURNED. Any file still carrying the TICK magic — written
+// by either retired format — is refused cleanly by the live loader's magic gate
+// (ShardedSnapshotPersist.hpp, the `magic == 0x4B434954u` branch), which keeps the raw literal
+// deliberately so it survives this retirement; the macro name here is its tombstone record.
 //------------------------------------------------------------------------------------------------------
-#define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian
-#define PORTFOLIO_SNAPSHOT_VERSION 7   // Ship-B DECIMAL epoch: money re-encoded 2^64->10^8 at identical 16B layout; v6 (16B binary, H21 tombstone) + earlier version-rejected. Was: // Ship-A 16B FPN_Binary: Position PERSIST 184->128 B; v5 snapshots version-rejected (H21/D-144)
+#define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian — RETIRED format's magic; the live sharded loader refuses it by raw literal
+#define PORTFOLIO_SNAPSHOT_VERSION 7   // RETIRED at E.1.2/D-289 (no live serializer). Versions 1-7 BURNED — never reuse (H21). Was: Ship-B DECIMAL epoch, money re-encoded 2^64->10^8 at identical 16B layout; v6 (16B binary) + earlier version-rejected
 
-// Ship-B P2 epoch guard (S-4/D-174 #14): Position persists money fields RAW — a 16B->16B decimal
-// re-encoding changes the VALUE SEMANTICS at identical layout, so no sizeof/offset assert can see
-// it. This trait-keyed tripwire red-builds the flip commit until the version bumps past the
-// binary-era 6 (-> 7) in the SAME commit (old snapshots must version-reject, never load misscaled).
+// Ship-B P2 epoch guard (S-4/D-174 #14), RETAINED post-D-289 as an assert-only tripwire: Position
+// persists money fields RAW — a 16B->16B decimal re-encoding changes the VALUE SEMANTICS at
+// identical layout, so no sizeof/offset assert can see it. The format this once guarded is retired,
+// but the guard still pins the encoding-epoch floor against the burned version numbers, so a future
+// re-encoding cannot quietly land under a stale epoch. Its live sibling is the identical tripwire on
+// SHARDED_SNAPSHOT_VERSION (ShardedSnapshotPersist.hpp), which guards the format that is still read.
 // [ASSERT]_[EPOCH_TRIPWIRE]_[is_fp_decimal_v<Position money> => PORTFOLIO_SNAPSHOT_VERSION >= 7]
-// [WHY]_[a 16B-to-16B encoding flip is invisible to sizeof/offset asserts — the trait-keyed guard forces the H21 version bump in the same commit]
+// [WHY]_[a 16B-to-16B encoding flip is invisible to sizeof/offset asserts — the trait-keyed guard pins the burned-version floor (H21)]
 static_assert(!is_fp_decimal_v<decltype(Position<64>::entry_price)>
                   || PORTFOLIO_SNAPSHOT_VERSION >= 7,
-              "Ship-B epoch: Position money fields flipped to decimal — bump "
-              "PORTFOLIO_SNAPSHOT_VERSION to 7 (H21 tombstone v6) in THIS commit, or pre-epoch "
-              "snapshots load with money misread x1.8e11.");
+              "Ship-B epoch: Position money fields are decimal — PORTFOLIO_SNAPSHOT_VERSION must "
+              "stay at or above 7 (versions 1-7 burned, H21; format retired at D-289). Lowering it "
+              "would un-burn a version number that old on-disk snapshots still carry.");
 
-//======================================================================
-// [FUNCTION]_[Portfolio_Save]
+// [TOMBSTONE]_[Portfolio_Save / Portfolio_Load — DELETED at E.1.2/D-289]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE] [CAPITAL_BEARING] [SLOW_PATH]]
-// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[binary portfolio snapshot write — magic + version + bitmap + 128B-per-position PERSIST prefix + money tail]
-// ---- the snapshot byte layout (matches the fwrite sequence below) ----
-// [WIRE_FIELD]_[magic]_[4 bytes — "TICK" little-endian]
-// [WIRE_FIELD]_[version]_[4 bytes — PORTFOLIO_SNAPSHOT_VERSION; mismatch = reject-and-ignore]
-// [WIRE_FIELD]_[active_bitmap]_[2 bytes + 2 bytes padding]
-// [WIRE_FIELD]_[positions]_[16 x POSITION_PERSIST_BYTES (128B PERSIST prefix per position)]
-// [WIRE_FIELD]_[realized_pnl]_[sizeof(Money)]
-// [WIRE_FIELD]_[live_offset_pct]_[sizeof(Money)]
-// [WIRE_FIELD]_[live_vol_mult]_[sizeof(Money)]
-// [WIRE_FIELD]_[live_stddev_mult]_[sizeof(Money)]
-// [WIRE_FIELD]_[balance]_[sizeof(Money)]
-// [REFERENCE]_[DECISION]_[D-144]
-//======================================================================
-// [CODE]
-//======================================================================
-template <unsigned F>
-static inline int Portfolio_Save(const Portfolio<F> *portfolio, Money realized_pnl,
-                                  Money live_offset_pct, Money live_vol_mult,
-                                  Money live_stddev_mult, Money balance,
-                                  const char *filepath) {
-    FILE *f = fopen(filepath, "wb");
-    if (!f) {
-        fprintf(stderr, "[SNAPSHOT] failed to open %s for writing\n", filepath);
-        return 0;
-    }
-
-    uint32_t magic   = PORTFOLIO_SNAPSHOT_MAGIC;
-    uint32_t version = PORTFOLIO_SNAPSHOT_VERSION;
-
-    fwrite(&magic, 4, 1, f);
-    fwrite(&version, 4, 1, f);
-    fwrite(&portfolio->active_bitmap, 2, 1, f);
-    uint16_t pad = 0;
-    fwrite(&pad, 2, 1, f);
-    // v5.15.5.C.4 Phase POS.2 — write only PERSIST prefix (128 bytes per position; Ship-A 16B FPN_Binary, was 184).
-    // SKIP_PERSIST fields (exit_fill_price, is_maker) live in the Position struct
-    // for cache locality but are NOT in the wire format. Per-position loop with
-    // explicit POSITION_PERSIST_BYTES() count defines the PORTFOLIO_SNAPSHOT_VERSION
-    // wire layout (v5 184B-per-position snapshots are version-rejected, H21/D-144).
-    constexpr size_t pos_persist_bytes = POSITION_PERSIST_BYTES<F>();
-    for (int i = 0; i < 16; i++) {
-        fwrite(&portfolio->positions[i], pos_persist_bytes, 1, f);
-    }
-    fwrite(&realized_pnl, sizeof(Money), 1, f);
-    fwrite(&live_offset_pct, sizeof(Money), 1, f);
-    fwrite(&live_vol_mult, sizeof(Money), 1, f);
-    fwrite(&live_stddev_mult, sizeof(Money), 1, f);
-    fwrite(&balance, sizeof(Money), 1, f);
-
-    fflush(f);
-    fclose(f);
-    return 1;
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [END_FUNCTION]_[Portfolio_Save]
-//======================================================================
-
-//======================================================================
-// [FUNCTION]_[Portfolio_Load]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [PERSISTENCE] [CAPITAL_BEARING] [BOOT_TIME]]
-// [REFERENCE]_[INVARIANT]_[[H9] [H21]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[snapshot read at startup — magic/version gates reject garbage + stale formats; mirrors Save's byte layout]
-//======================================================================
-// [CODE]
-//======================================================================
-template <unsigned F>
-static inline int Portfolio_Load(Portfolio<F> *portfolio, Money *realized_pnl,
-                                  Money *live_offset_pct, Money *live_vol_mult,
-                                  Money *live_stddev_mult, Money *balance,
-                                  const char *filepath) {
-    FILE *f = fopen(filepath, "rb");
-    if (!f) {
-        // no snapshot file is normal on first run
-        return 0;
-    }
-
-    uint32_t magic, version;
-    if (fread(&magic, 4, 1, f) != 1 || magic != PORTFOLIO_SNAPSHOT_MAGIC) {
-        fprintf(stderr, "[SNAPSHOT] bad magic in %s - ignoring\n", filepath);
-        fclose(f);
-        return 0;
-    }
-    if (fread(&version, 4, 1, f) != 1 || version != PORTFOLIO_SNAPSHOT_VERSION) {
-        fprintf(stderr, "[SNAPSHOT] version mismatch in %s - ignoring\n", filepath);
-        fclose(f);
-        return 0;
-    }
-
-    uint16_t bitmap;
-    uint16_t pad;
-    if (fread(&bitmap, 2, 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&pad, 2, 1, f) != 1) { fclose(f); return 0; }
-    // v5.15.5.C.4 Phase POS.2 — read only PERSIST prefix (POSITION_PERSIST_BYTES per position).
-    // SKIP_PERSIST fields (exit_fill_price, is_maker) are NOT in wire format;
-    // they stay at default-init (zero) after load. Per-position loop matches
-    // Save's PERSIST-filtered write; legacy snapshots load byte-identical.
-    constexpr size_t pos_persist_bytes = POSITION_PERSIST_BYTES<F>();
-    for (int i = 0; i < 16; i++) {
-        if (fread(&portfolio->positions[i], pos_persist_bytes, 1, f) != 1) {
-            fclose(f);
-            return 0;
-        }
-    }
-
-    portfolio->active_bitmap = bitmap;
-
-    if (fread(realized_pnl, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(live_offset_pct, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(live_vol_mult, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(live_stddev_mult, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(balance, sizeof(Money), 1, f) != 1) { fclose(f); return 0; }
-
-    fclose(f);
-
-    int count = __builtin_popcount(bitmap);
-    fprintf(stderr, "[SNAPSHOT] loaded %d positions from %s\n", count, filepath);
-    return 1;
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [END_FUNCTION]_[Portfolio_Load]
-//======================================================================
-
+// Both serializers (and the byte layout they defined: magic + version + active_bitmap + 16 x
+// POSITION_PERSIST_BYTES + the realized_pnl/live_offset_pct/live_vol_mult/live_stddev_mult/balance
+// tail) are GONE. They had zero callers tree-wide; the compiler is the oracle that keeps them gone.
+// Recovering the old wire layout is a git-history exercise, not a re-add — the version numbers it
+// used are burned (see PORTFOLIO_SNAPSHOT_VERSION above).
 //======================================================================================================
 #endif
