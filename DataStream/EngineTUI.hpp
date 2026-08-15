@@ -1476,7 +1476,16 @@ struct TUISharedState {
     // TUISnapshot_ReadInto on the reader side — direct seq mutation is
     // forbidden outside those helpers.
     std::atomic<uint64_t> seq;
-    volatile sig_atomic_t quit_requested;
+    // v5.15.5.F.4d.1.E.1.2 — alignas(64): seq is the publish-hot seqlock word
+    // (engine stores twice per slow-path publish; GUI acquire-polls at 60 Hz).
+    // It was sharing its cache line with the GUI-written request flags below,
+    // so every control write invalidated the publisher's line (H6). This
+    // anchor gives seq a line of its own; the request cluster below (7 flags
+    // + drag trio + swap_strategy_requested[16] = 64B exactly) fills the next
+    // line whole. Writer-group note: the request line is human-cadence
+    // bidirectional (GUI sets, engine clears) — benign; the per-publish seq
+    // is the word that needed isolation.
+    alignas(64) volatile sig_atomic_t quit_requested;
     volatile sig_atomic_t pause_requested;
     volatile sig_atomic_t reload_requested;
     volatile sig_atomic_t regime_cycle_requested;
@@ -1502,7 +1511,12 @@ struct TUISharedState {
     // for that specific core. Controller resets the flag back to 0 after
     // clearing node_kill_tripped + refreshing node_peak_balance to current.
     // Independent per core — resetting core 0 doesn't touch core 3.
-    volatile sig_atomic_t kill_reset_per_node[16];
+    // v5.15.5.F.4d.1.E.1.2 — alignas(64): the two 64B request arrays were
+    // straddling lines 941→943 (H6, D-414 register). Anchoring this one
+    // gives each a whole line (manual_close_requested lands 64-aligned
+    // immediately after; the trailing paused_mask/swap_model_path pair
+    // shares the following line — same GUI-writer plane, benign).
+    alignas(64) volatile sig_atomic_t kill_reset_per_node[16];
     // v4.7.8: manual close per portfolio slot. GUI writes 1 to force-close
     // the position at that slot (bypasses hot-path SG; emits a synthetic
     // exit event from the drainer). Drainer reads + acts + clears the
@@ -1532,16 +1546,22 @@ struct TUISharedState {
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)
 };
+// v5.15.5.F.4d.1.E.1.2 — lock the alignment the seq/control-cluster isolation
+// relies on (alignas members guarantee absolute line boundaries only if the
+// struct itself is 64-aligned; g_shared is static storage, which honors this).
+static_assert(alignof(TUISharedState) == 64,
+              "TUISharedState must be 64-aligned: seq + the GUI request "
+              "cluster are cache-line-isolated by member alignas anchors");
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-14]
-// [SIZE]_[64640B]
+// [SIZE]_[64704B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[1010]
-// [STRADDLE]_[swap_strategy_requested@60216 · kill_reset_per_node@60232 · manual_close_requested@60296]
+// [CACHE_LINES]_[1011]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TUISharedState]
 //======================================================================

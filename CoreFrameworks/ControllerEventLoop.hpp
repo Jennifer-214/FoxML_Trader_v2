@@ -369,7 +369,11 @@ struct alignas(64) NodeContext {
     // regime + hysteresis so the auto-mode core's strategy choice doesn't
     // flap on noise. Each AUTO core has its own state — different cores
     // can detect different regimes if their cfg differs.
-    RegimeState<F> regime_state;
+    // v5.15.5.F.4d.1.E.1.2 — alignas(64): was straddling L0→L1 @off 56 on a
+    // [THREAD]-tagged struct (H6 false-sharing finding, D-414 register). The
+    // anchor also keeps HOT line 0 pure decision-first dispatch (gate_state
+    // → handles → strategy ids), with the 48B regime block whole on line 1.
+    alignas(64) RegimeState<F> regime_state;
 
     // Phase 6prep (sharded c12-c14): per-core ML confidence loop. The scorer
     // is fed (prediction, realized_return) pairs at exit fill time and read
@@ -676,11 +680,11 @@ static_assert(offsetof(NodeContext<64>, sp_telemetry) % 64 == 0,
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-14]
 // [SIZE]_[7168B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[112]
-// [STRADDLE]_[regime_state@56]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[NodeContext]
 //======================================================================
@@ -952,11 +956,13 @@ struct alignas(64) EventLoopState {
 // total_events_processed is a heartbeat / liveness counter useful for
 // detecting a stalled controller (TUI shows it growing each frame).
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-14]
 // [SIZE]_[272640B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[4260]
-// [STRADDLE]_[none]
+// [STRADDLE]_[unverified: nodes display_meta]
 //======================================================================
 // [END_STRUCT]_[EventLoopState]
 //======================================================================

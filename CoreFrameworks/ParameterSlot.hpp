@@ -138,7 +138,9 @@ struct alignas(64) ParameterSlot {
 //   ParameterSlot_Read(&slot, &params);
 //   bool fire = BG_Evaluate(tick, &params);
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-14]
 //----------------------------------------------------------------------
 // [SIZE]_[448B]
 // [ALIGN]_[64]
