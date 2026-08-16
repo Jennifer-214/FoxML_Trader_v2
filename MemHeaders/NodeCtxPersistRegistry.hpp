@@ -14,7 +14,7 @@
 //   - [MACRO]_[NPF_PROJECT_SAVE]   (+ READ + COMMIT projections)
 // [REFERENCE]_[DECISION]_[[D-291] [D-302] [D-305] [D-421]]
 // [REFERENCE]_[INVARIANT]_[[H9] [H15] [H21]]
-// [REFERENCE]_[CLASS]_[18]
+// [REFERENCE]_[CLASS]_[[18] [58]]
 // [REFERENCE]_[DESIGN_SPEC]_[[registry-tuple-as-single-source-of-truth] [wire-format-byte-preservation-discipline] [autopopulate-pattern-for-production-caller-class]]
 //======================================================================================================
 // E.1.2 D-305 tail (the hybrid flat-registry + delegates shape locked by D-291/BLK-1,
@@ -154,14 +154,13 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
 // [COLUMN]_[rationale]_[what a reviewer should go VERIFY; must be falsifiable from code, never "it is transient"]
 // [REFERENCE]_[DECISION]_[[D-305] [D-421]]
 // [REFERENCE]_[INVARIANT]_[[H15] [H21] [H22]]
-// [REFERENCE]_[CLASS]_[[4] [30]]
+// [REFERENCE]_[CLASS]_[[4] [30] [58]]
 //======================================================================
-// WHY THIS EXISTS — producer-side COMPLEMENT BLINDNESS, the class D-421 codifies.
-// (Deliberately NOT tagged with a catalog Class id: that entry does not exist yet — it
-// lands at D-421 step 4, WITH this guard, so it can be written from three instances and
-// a sharpened signature instead of one anecdote. Referencing an id before it exists is
-// the phantom-reference shape TECH_DEBT-274 tracks, and the tag validator RED-ed on
-// exactly that when this row first cited it. Add the [CLASS] tag here at step 4.)
+// WHY THIS EXISTS — producer-side COMPLEMENT BLINDNESS (Class 58 sub-shape A), codified
+// at D-421 step 4 WITH this guard rather than before it. The tag above was deliberately
+// ABSENT until the catalog entry existed: citing an id before it exists is the
+// phantom-reference shape TECH_DEBT-274 tracks, and check_code_tag_blocks RED-ed on
+// exactly that when this block first carried it. Restored now that Class 58 is real.
 // FOREACH_NODE_PERSIST_FIELD is a COVERAGE registry over a HAND-declared struct
 // (NodeContext<F>, ControllerEventLoop.hpp:315). Every guard around it points the rows
 // FORWARD — the ==29 count-lock, the 46-row flattened layout golden, the frozen byte
