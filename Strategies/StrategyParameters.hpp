@@ -1125,7 +1125,25 @@ inline void ML_BuildParameters(
             // Why nothing caught it: Bandit_GetProbabilities carries no_sanitize("address"), and
             // ASan does not detect uninitialized STACK reads regardless — that is MSan, which the
             // sanitizer suite does not run.
+            // `bandit_enabled` gates the BUY-side select, mirroring how
+            // `exit_bandit_enabled` gates the exit side. Added 2026-08-16: this flag
+            // previously had NO behavioural reader anywhere on the sharded path — the
+            // ensemble bandit ran regardless, so setting it did nothing in either
+            // direction while its registry description (the GUI tooltip source) claimed
+            // it "controls bandit selection wiring". Default flipped 0 -> 1 in the same
+            // commit, because gating on a 0-default would have silently disabled a
+            // working bandit on every existing config.
+            //
+            // NOTE it gates SELECT only, not the reward UPDATE. That is deliberate:
+            // with the flag off the pools keep learning from real outcomes but do not
+            // drive decisions, so flipping it on later starts from warm posteriors
+            // rather than uniform. That is precisely the "shadow learning" idea the
+            // codebase already names in MASK_BANDIT_SHADOW_LEARNING
+            // (SlowPathGateRegistry.hpp:80) — a gate that currently has zero readers
+            // and is a candidate to either express this behaviour explicitly or be
+            // tombstoned.
             if (use_weighted && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
+                BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED) &&
                 ezoo->primary_count >= 2) {
                 // G.7 path: per-regime bandit weights drive blend.
                 int regime_id = mctx ? mctx->current_regime_id : 0;

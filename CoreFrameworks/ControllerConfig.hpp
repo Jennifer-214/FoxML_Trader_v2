@@ -2001,7 +2001,15 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   ML_CFG_FLAG_AUTOPOPULATE_FROM_SEPTUPLE(cfg.ml_cfg_flags,
       /*confidence_enabled*/           0,
       /*confidence_composite_enabled*/ 0,
-      /*bandit_enabled*/               0,
+      // 2026-08-16 — bandit_enabled DEFAULT 0 -> 1. It was 0 while the sharded
+      // ensemble bandit ran REGARDLESS of it: the flag had no behavioral reader,
+      // so setting it changed nothing in either direction. Now that it gates the
+      // buy-side select (StrategyParameters.hpp), leaving the default at 0 would
+      // have SILENTLY DISABLED a working, learning bandit on every existing config.
+      // Defaulting to 1 preserves today's behaviour exactly while making the flag
+      // an operator control for the first time. Operator decision: "wire it and
+      // re-default to 1, that way its optionable."
+      /*bandit_enabled*/               1,
       /*exit_bandit_enabled*/          0,
       /*use_exit_model*/               0,
       /*foxml_vol_scaling_enabled*/    0,

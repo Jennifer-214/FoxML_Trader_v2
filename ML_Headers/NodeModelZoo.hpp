@@ -3289,6 +3289,34 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
                         "(disk full?); next attempt at +%llu updates\n",
                 ezoo->bandit_save_path, (unsigned long long)threshold);
     }
+
+    // 2026-08-16 — the periodic path saved ONLY buy-side Exp3. The other three pools
+    // (exit Exp3, buy Thompson, exit Thompson) were shutdown-save only, so a hard kill
+    // -- SIGKILL, OOM, power loss -- discarded everything they had learned since boot,
+    // while buy-Exp3 survived. An asymmetry no operator would predict from the cfg,
+    // since `ensemble_bandit_save_interval` reads as "the bandit save cadence".
+    //
+    // base_dir is DERIVED, not stored: bandit_save_path is constructed exactly as
+    // "<base_dir>/bandit_state.json" at :2694 in this same file, so truncating at the
+    // final '/' is an invariant of its construction rather than a guess about paths.
+    // That is why this needs no new ezoo field -- and adding one would have moved a
+    // 400-byte array into a struct whose layout is cache-tuned.
+    //
+    // All three savers self-guard on their own READY flag and return 0 when their side
+    // was never initialized, so an ensemble without exit models or without Thompson
+    // simply skips them.
+    {
+        char base_dir[sizeof(ezoo->bandit_save_path)];
+        strncpy(base_dir, ezoo->bandit_save_path, sizeof(base_dir) - 1);
+        base_dir[sizeof(base_dir) - 1] = '\0';
+        char* last_slash = strrchr(base_dir, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            EnsembleModelZoo_SaveExitBanditState(ezoo, base_dir, nullptr);
+            EnsembleModelZoo_SaveThompsonState(ezoo, base_dir, nullptr);
+            EnsembleModelZoo_SaveExitThompsonState(ezoo, base_dir, nullptr);
+        }
+    }
 }
 //======================================================================
 // [END_CODE]

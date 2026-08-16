@@ -265,6 +265,33 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     STAMP_SET(inf, training_poll_interval);
     inf.training_poll_interval = cfg.poll_interval;
 
+    // feature_mask — the feature subset this model was TRAINED on.
+    //
+    // 2026-08-16 — this had no producer, so no stamp ever carried the key, so the
+    // parity gate at ModelInference.hpp:1880-1893 always took its WARN arm and the
+    // `r.valid = 0` REFUSE had never fired. That WARN text blames "pre-v5.11.18a"
+    // stamps, pointing every reader at stamp age rather than at the missing emit.
+    //
+    // The value is NOT ambiguous, despite the mask being a per-NODE runtime cfg:
+    // the stamp is a MODEL document, so the field means "what this model was trained
+    // with", and the trainer has no feature-subset concept at all (`rg feature_mask
+    // Backtest/` is empty) — it always trains on the full registered set. So the
+    // truthful value is the all-features sentinel, matching the convention cfg uses
+    // for the same idea (ControllerConfig.hpp:2202). Reading it as "which node's
+    // mask?" is a category error: that is the RUNTIME half of the comparison, which
+    // the loading node supplies as expected_feature_mask.
+    //
+    // Blast radius today: ZERO. A node with no mask resolves expected_feature_mask
+    // to 0 (EngineCommon.hpp:312-313 maps the all-on sentinel to 0) and the consumer
+    // is gated `if (expected_feature_mask != 0)`, so it is skipped entirely — and no
+    // cfg on disk sets a mask. The change matters the first time someone DOES mask a
+    // node: stamp(all) vs expected(subset) mismatches and REFUSES, which is correct.
+    // A model trained on the full feature set must not be served a subset — the
+    // registry pins input shape (FeatureRegistry.hpp), so a masked feed is drift, not
+    // a smaller model. Previously that operator got a WARN and an unverified load.
+    STAMP_SET(inf, feature_mask);
+    inf.feature_mask = 0xFFFFFFFFFFFFFFFFULL;  // NB: the registry row's get_value says `inf->feature_mask_train`, a member that does NOT exist — a dead column that only compiles because AUTOPOPULATE is quarantined (PARITY-022)
+
     // Training wall-clock (μs since unix epoch).
     //
     // 2026-08-16 — this producer DID NOT EXIST, and its absence made a LIVE-READINESS BOOT GATE
