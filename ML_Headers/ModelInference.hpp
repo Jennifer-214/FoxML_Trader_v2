@@ -484,12 +484,12 @@ struct alignas(64) ModelHandle {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
+// [UPDATED]_[2026-08-16]
 //----------------------------------------------------------------------
-// [SIZE]_[6720B]
+// [SIZE]_[6656B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[105]
-// [STRADDLE]_[unverified: scaler_sha256 xgb_tree_method overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cuda_version environment_cpu_model]
+// [CACHE_LINES]_[104]
+// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cpu_model environment_libgomp_version]
 //======================================================================
 // [END_STRUCT]_[ModelHandle]
 //======================================================================
@@ -1512,12 +1512,12 @@ struct ModelStampResult {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
+// [UPDATED]_[2026-08-16]
 //----------------------------------------------------------------------
-// [SIZE]_[5264B]
+// [SIZE]_[5248B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[83]
-// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
+// [CACHE_LINES]_[82]
+// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
 //======================================================================
 // [END_STRUCT]_[ModelStampResult]
 //======================================================================
@@ -2113,11 +2113,11 @@ struct StampInferenceCfgInputs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
-// [SIZE]_[4944B]
+// [UPDATED]_[2026-08-16]
+// [SIZE]_[4928B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[78]
-// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
+// [CACHE_LINES]_[77]
+// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
 //======================================================================
 // [END_STRUCT]_[StampInferenceCfgInputs]
 //======================================================================
