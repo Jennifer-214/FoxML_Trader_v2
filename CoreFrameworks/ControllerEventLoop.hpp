@@ -3072,6 +3072,13 @@ inline void EventLoop_RebuildOneCore(
         // NOTE the asymmetry with its former neighbour: halt_reason's reset stays where it
         // is, BELOW, because ITS only producers (zero_gate) are below it. The two lines look
         // interchangeable and have opposite correct placements — do not re-merge them.
+        //
+        // ENFORCED since D-421: tools/check_reset_before_producer.py pins BOTH resets against
+        // their producers (pre-commit Check M2 on this file + a HARD doc-sweep row). A comment
+        // is the weakest guard for an ordering property; that is why this one has a tool behind
+        // it now. Careful reading the note above: "stays BELOW" is about position relative to the
+        // OTHER reset, not to its producers — both resets are reset-FIRST. I mis-encoded exactly
+        // that when writing the rule, and the tool's first run caught it.
         state->nodes[slot].strategy_halt_reason = SHALT_OK;
 
         Strategy_AdaptPerCore(
