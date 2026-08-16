@@ -177,7 +177,10 @@ struct alignas(64) ExecutionCore {
 // One ExecutionCore<F> instance per pinned CPU core. Each instance owns:
 //   - permission   (1 bit)   — controller-granted authorization to take new entries
 //   - active       (1 bit)   — currently in a trade
-//   - entry_price  (Money)  — price of the current trade entry, used by SG check
+//   - entry_price  (Money)  — price of the current trade entry. WRITE-ONLY: nothing
+//                             reads it (verified 2026-08-16 — the SG check reads
+//                             live_tp/live_sl, and the controller learns the entry
+//                             price from the TradeEvent it drains, never from here)
 //   - gate_params  (struct)  — buy/sell gate parameter pack pushed by controller
 //   - event_ring   (SPSC)    — outgoing trade events the controller drains on its slow path
 //   - tick_ring*   (SPSC*)   — incoming tick stream from the market reader
@@ -195,7 +198,9 @@ struct alignas(64) ExecutionCore {
 //                        can_exit  = active & sg_fires
 //   3. If either fires, push a trade event to the event ring (rare branch,
 //      predictable, almost always not-taken in steady state).
-//   4. Update entry_price (CMOV) and active flag (mask op) branchlessly.
+//   4. Update the active flags branchlessly (mask op). entry_price/live_tp/live_sl
+//      are plain stores INSIDE the rare push branch, not CMOVs — only the flag
+//      update is branchless, because only it runs every tick.
 //
 // The hot path is ALMOST entirely branchless. The only branch is the event push,
 // which fires < 1% of ticks in normal operation and predicts perfectly. The gate
@@ -221,7 +226,7 @@ struct alignas(64) ExecutionCore {
 // steady state when leg B is inactive (the common case).
 //
 // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 1.5 (permission isolation)
-//      + plans/2026-05-06-latency-path-discipline.md Rule 1 (Finding A)
+//      + plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 1 (Finding A)
 // [SUPPORTING_DOCS]
 //   - [DESIGN_SPEC]_[cache-line-discipline]
 //   - [INVARIANT]_[H6]
@@ -246,7 +251,7 @@ static_assert(!std::is_polymorphic<ExecutionCore<64>>::value,
 
 // v5.11.1.5 — Cache layout invariants. Future field reorders must preserve
 // these to avoid regressing the hot-path single-cache-line load.
-// See plans/2026-05-06-latency-path-discipline.md Rule 1.
+// See plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 1.
 // [ASSERT]_[LAYOUT_LOCK]_[offsetof(live_sl) + sizeof(Money) <= 64]
 static_assert(offsetof(ExecutionCore<64>, live_sl) + sizeof(Money) <= 64,
               "live_sl must fit entirely in cache line 0 — see latency-path-discipline.md Rule 1");
@@ -710,9 +715,20 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
         // Pre-fix this was an inline fprintf(stderr) — libc stdio mutex
         // acquisition during a ring-full condition (drainer already stalled)
         // could cascade-stall the hot path further. Now: single store to a
-        // per-core counter; slow path picks it up via TUISnapshot for surfacing
-        // (slow-path log/render landing in v5.11.3's async log thread).
-        // See plans/2026-05-06-latency-path-discipline.md Rule 2.
+        // per-core counter.
+        //
+        // 2026-08-16 — this counter has NO READER. Written here, zeroed in _Init,
+        // read nowhere: not the TUI, not the GUI, not a test, not a tool. This
+        // comment used to claim the slow path picked it up via TUISnapshot; that
+        // never landed. v5.11.3/.4.B surfaced the ORDER EVENT LOG ring's health
+        // (oms_log_ring_full_spins / oms_log_full_drops) and the hot-path event
+        // ring was never included — the sibling's presence is exactly what made
+        // the gap read as covered. Consequence: a ring-full drop is INVISIBLE to
+        // the operator. The v4.7.3 retry above keeps it CORRECT; nothing makes it
+        // OBSERVABLE. Wiring homed at TECH_DEBT-283 (zero-wire, mirrors the
+        // sibling: PerNodeSnap field + TUI_CopySnapshotSharded populator + the
+        // Async.hpp health-log line).
+        // See plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 2.
         if (__builtin_expect(!(exit_a_pushed & exit_b_pushed &
                                 entry_a_pushed & entry_b_pushed), 0)) {
             core->ring_push_failures++;

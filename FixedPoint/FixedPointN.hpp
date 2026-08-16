@@ -679,7 +679,7 @@ template <unsigned F> inline FPN_Binary<F> FPN_FromString(const char *str) {
 // Branchless mask-blend selection. Picks if_true when mask = all-1s, if_false when mask = 0.
 // Caller forms mask as `-(uint64_t)cond` where cond is 0 or 1 → no branches anywhere.
 //
-// Audit: plans/2026-05-06-latency-path-discipline.md Rule 8.
+// Audit: plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 8.
 // Used by slow-path running-sum maintenance (v5.11.2.C) where the "warmup vs
 // full-window" eviction term is data-dependent on count >= W.
 //

@@ -16,7 +16,7 @@
 // where recip[n] = 1/n precomputed at engine boot.
 //
 // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 2.3.
-// Discipline: plans/2026-05-06-latency-path-discipline.md Rule 8 (mask-blend
+// Discipline: plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 8 (mask-blend
 // over data-dependent branches; this LUT is the canonical "always do work,
 // no branch" version of conditional division).
 //

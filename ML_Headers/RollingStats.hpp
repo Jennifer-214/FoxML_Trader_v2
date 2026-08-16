@@ -69,7 +69,7 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     // the GUI's L1d copy of outputs.
     //
     // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 2.4
-    // Discipline: plans/2026-05-06-latency-path-discipline.md Rule 1 + Rule 7
+    // Discipline: plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 1 + Rule 7
     FPN_Binary<F> price_avg;          // mean price over window
     FPN_Binary<F> price_slope;        // least-squares regression slope (positive = rising)
     FPN_Binary<F> price_r_squared;    // regression R² (0-1, trend consistency)
@@ -172,7 +172,7 @@ namespace detail { using RollingStats_64_128 = RollingStats<64, 128>; }
 // [ASSERT]_[LAYOUT_LOCK]_[offsetof(head) % 64 == 0]
 static_assert((offsetof(detail::RollingStats_64_128, head) % 64) == 0,
               "head must be cache-line-aligned (alignas(64) on field) — "
-              "see plans/2026-05-06-latency-path-discipline.md Rule 1");
+              "see plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 1");
 // [ASSERT]_[LAYOUT_LOCK]_[offsetof(head) >= 64*4 — head starts AFTER the output cluster]
 static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 4,
               "head must come AFTER the 4-cache-line output cluster (Ship-A 16B FPN_Binary; was 5 lines) — "
