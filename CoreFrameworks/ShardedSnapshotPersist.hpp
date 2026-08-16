@@ -375,8 +375,16 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         Money   last_entry_price;
         uint64_t last_entry_tick;
         uint32_t sl_cooldown_remaining;
-        // node_dd_pct DROPPED at v11 (D-420): eval-transient, recomputed from
-        // node_peak_balance before every read in the same kill-eval pass.
+        // node_dd_pct DROPPED at v11 (D-420): eval-transient. NARROWED at D-421 —
+        // "recomputed before EVERY read" was the wording here and in the registry,
+        // and it covers 2 of the 4 reads. Both CAPITAL reads (the kill-trip eval +
+        // its log) ARE dominated by the recompute from the persisted
+        // node_peak_balance, both branches assigning, so no capital decision ever
+        // sees a stale drawdown — that is the property the drop rests on. The TUI
+        // publish and the paper-reset summary emit read it OUT of pass and show 0
+        // for one slow-path cycle after a warm restart: display-only, accepted.
+        // (SECOND copy of the claim — the D-421 sweep corrected the registry one
+        // and missed this one; found by the close's independent review, not a guard.)
         Money   node_peak_balance;
         uint8_t  node_kill_tripped;
         uint32_t node_ks_trips_total;

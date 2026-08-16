@@ -1190,8 +1190,10 @@ template <unsigned F> struct ControllerConfig {
   // total_events_processed and routes to OMS, the OMS callback does the
   // portfolio mutation + balance update + kill switch peak + trade log
   // write. mode 1 is what the head-to-head test exercises and what
-  // production runs after the soak. default 0 so existing tests stay
-  // green during the migration window.
+  // production runs after the soak. ⚠ CORRECTED at D-421: this said "default 0
+  // so existing tests stay green during the migration window" — the migration
+  // window has CLOSED and ControllerConfig_Default sets 1. The trailing inline
+  // comment below was fixed in the same sweep that missed this one, two lines up.
   uint32_t oms_event_log_mode; // 0 = legacy, 1 = event log (DEFAULT — see ControllerConfig_Default;
                                // the comment previously said "0 = legacy (default)", which inverted
                                // the actual shipping default. Corrected at D-421.)

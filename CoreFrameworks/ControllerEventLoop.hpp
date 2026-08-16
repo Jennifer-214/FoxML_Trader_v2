@@ -324,9 +324,19 @@ struct alignas(64) NodeContext {
     // PER_NODE entries). Populated by SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE
     // at slow-path entry per core (after ControllerConfig_ResolveForCore).
     // Read via BITMAP_IS_SET(gate_state.flags, MASK_<NAME>) at use sites
-    // in ML_BuildParameters body (mctx->gate_state pointer). Single-
-    // threaded per-core access; no atomics needed. At offset 0 of HOT
-    // cluster so decision-first bail-out per ND3.
+    // in ML_BuildParameters body (mctx->gate_state pointer). At offset 0 of
+    // HOT cluster so decision-first bail-out per ND3.
+    //
+    // ⚠ CORRECTED at E.1.2/D-421 — this comment used to say "single-threaded
+    // per-core access; no atomics needed". That is FALSE, and its falseness is
+    // very likely why this field went uninitialized for so long: it told every
+    // reader there was nothing to ask about. The snapshot publisher reads
+    // gate_state.flags from the PRODUCER thread (ShardedSnapshot.hpp) to build
+    // the PerNodeSnap ladder bit. Single WRITER (the owning slow thread), NOT
+    // single reader; the cross-thread read is a deliberately accepted
+    // benign-race for display, not an absence of one. Full discussion at the
+    // struct definition in SlowPathGateRegistry.hpp — and note the initializer
+    // there is load-bearing, not style.
     SlowPathGateState gate_state;
     ExecutionCore<F>* core;             // registered execution core pointer
     // v5.1.0 (per-core data-plane decoupling): each engine OWNS its
