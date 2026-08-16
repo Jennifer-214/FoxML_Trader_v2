@@ -23,7 +23,7 @@
 // [COLUMN]_[registry_name]_[the FOREACH_<X> macro identifier]
 // [COLUMN]_[LEVEL]_[0 = ROOT (this registry itself); 1 = direct registry; 2 = child of a Level-1 meta-registry]
 // [COLUMN]_[PARENT_NAME]_[for LEVEL > 0, the meta-registry managing this registry's discipline; ROOT_NONE at LEVEL 0]
-// [COLUMN]_[domain]_[quoted; what the rows are the COMPLETE SET OF, so a checker can ask "are these ALL the rows?" — SSOT / ENUM:<Name> / STRUCT:<Type> / COUNT:<Macro> / RANGE:<lo,hi> / FORMAT:<golden> / PROSE:<reason> / UNCLASSIFIED (baseline-gated migration marker only). Label is lower-case DELIBERATELY — an upper-case DOMAIN label collides with the grammar category of the same name (the numeric-domain row: OVERFLOW / ROUNDING / DOMAIN / PRECISION) and trips the one-category-per-line rule. Matches the existing lower-case position labels registry_name / description]
+// [COLUMN]_[domain]_[quoted; what the rows are the COMPLETE SET OF, so a checker can ask "are these ALL the rows?". Closed vocabulary DERIVED from the registry-domain-vocab fence in the meta-registry DESIGN_SPEC — not listed here, so this comment cannot go stale against it. Label is lower-case DELIBERATELY: an upper-case one collides with the grammar category of the same name (the numeric-domain row) and trips the one-category-per-line rule; matches the existing lower-case position labels registry_name / description]
 // [COLUMN]_[description]_[one-line operator-facing description of the registry's purpose]
 // [REFERENCE]_[DECISION]_[[D-297] [D-421]]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-84] [TECH_DEBT-237] [TECH_DEBT-238]]
@@ -42,32 +42,28 @@
 // sibling was (D-421 step 1), 22 NodeContext members with no declared status at all until step 2.
 //
 // The DOMAIN column makes that question mechanical and UNIFORM, so check_meta_registry.py grows
-// ONE dispatching check rather than ~8 bespoke per-registry guards:
+// ONE dispatching check rather than ~8 bespoke per-registry guards.
 //
-//   SSOT           the registry IS the source of truth; no external set exists to diff against.
-//                  Legitimate and common — but it must be CLAIMED, not defaulted into.
-//   ENUM:<Name>    rows must cover every enumerator of <Name>.
-//   STRUCT:<Type>  rows must cover every member of <Type>. The proven shape:
-//                  check_node_ctx_partition.py IS this check, hand-built for one registry.
-//   COUNT:<Macro>  row count must equal <Macro>.
-//   RANGE:<lo,hi>  rows must cover the integer range (quoted, because it contains a comma).
-//   FORMAT:<golden> rows must match a frozen golden listing.
-//   PROSE:<reason> the domain is NOT computable, and here is why. LOAD-BEARING, NOT AN ESCAPE
-//                  HATCH: a registry either declares a computable domain or states why it cannot,
-//                  and declaring NOTHING fails. That single rule would have caught
-//                  FOREACH_HALT_REASON, FOREACH_BACKTEST_METRIC and FOREACH_LIVES_IN_STRUCT at
-//                  introduction.
-//   UNCLASSIFIED   migration marker ONLY. Permitted exclusively for names in
-//                  tools/lib/meta_registry_domain_baseline.txt, which shrinks to empty. A NEW row
-//                  carrying it REDs. It exists as a distinct token rather than as PROSE:"TODO"
-//                  precisely so the escape hatch cannot masquerade as a stated reason — an
-//                  untriaged registry must be COUNTABLE, not disguised as a decision.
+// THE VOCABULARY IS NOT LISTED HERE — ON PURPOSE. It lives in ONE place, the
+// ```registry-domain-vocab``` fence in
+//   DESIGN_SPECS/framework-patterns/meta-registry-pattern-for-codebase-registry-discipline.md
+// and check_meta_registry.py DERIVES the closed set from that fence (the same discipline
+// check_code_tag_blocks.py uses for its category set). Folding a new domain kind is ONE token there
+// and ZERO edits to the tool — and ZERO edits here. An enumerated copy in this comment would be a
+// THIRD home for the same vocabulary and would go stale the first time a token is folded, which is
+// the Class-18 mirror shape this registry exists to police. Read the fence; do not mirror it.
+//
+// The one rule worth repeating, because it is the rule and not the taxonomy: DECLARING NOTHING
+// FAILS. A registry either names a computable domain or states why it cannot. That single property
+// would have caught FOREACH_HALT_REASON, FOREACH_BACKTEST_METRIC and FOREACH_LIVES_IN_STRUCT at
+// introduction. `UNCLASSIFIED` is a baseline-gated migration marker, not a domain — a NEW row
+// carrying it REDs (tools/lib/meta_registry_domain_baseline.txt, shrinking to empty).
 //
 // Deliberately a COLUMN, not an H18 sidecar: H18's sidecar pattern is for SPARSE custom semantics,
 // and a sidecar makes "declared nothing" the silent default — the exact case that must fail.
 #define FOREACH_REGISTRY(X)                                                                                                                              \
     /* registry_name,                       LEVEL,  PARENT_NAME,                       DOMAIN,       description */                                       \
-    X(FOREACH_REGISTRY,                     0,      ROOT_NONE,                         "UNCLASSIFIED",              "Codebase-wide meta-registry of X-macro registries (this one).") \
+    X(FOREACH_REGISTRY,                     0,      ROOT_NONE,                         "CHECK:tools/check_meta_registry.py::Check 1",              "Codebase-wide meta-registry of X-macro registries (this one).") \
     /* === Per-core cfg surface (.F.4c.3 framework — WIP2d-0 + WIP2d-0.B) === */                                                                          \
     X(FOREACH_GLOBAL_CFG_FIELD,             1,      FOREACH_REGISTRY,                  "UNCLASSIFIED",              "Global cfg fields on ControllerConfig<F> (47 rows; system/training/mode/ack/etc.)") \
     X(FOREACH_PER_NODE_CFG_FIELD,           1,      FOREACH_REGISTRY,                  "UNCLASSIFIED",              "Per-core cfg surface (93 rows; X-macro struct gen + tt:: dispatch).") \
