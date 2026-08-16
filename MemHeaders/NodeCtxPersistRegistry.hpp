@@ -7,11 +7,12 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ordered per-node persist WIRE SPEC — 29 rows in exact fwrite-call order (SCALAR/BIT/PAD/DELEGATE x COMMIT/NO_COMMIT); SAVE/READ/COMMIT projections auto-generate the serializer walk]
+// [OVERVIEW]_[the ordered per-node persist WIRE SPEC — 29 rows in exact fwrite-call order (SCALAR/BIT/PAD/DELEGATE x COMMIT/NO_COMMIT); SAVE/READ/COMMIT projections auto-generate the serializer walk; plus the COMPLEMENT registry naming the 22 deliberately-unpersisted members]
 // [CONTAINS]
 //   - [REGISTRY]_[FOREACH_NODE_PERSIST_FIELD]
+//   - [REGISTRY]_[FOREACH_NODE_CTX_PERSIST_EXEMPT]
 //   - [MACRO]_[NPF_PROJECT_SAVE]   (+ READ + COMMIT projections)
-// [REFERENCE]_[DECISION]_[[D-291] [D-302] [D-305]]
+// [REFERENCE]_[DECISION]_[[D-291] [D-302] [D-305] [D-421]]
 // [REFERENCE]_[INVARIANT]_[[H9] [H15] [H21]]
 // [REFERENCE]_[CLASS]_[18]
 // [REFERENCE]_[DESIGN_SPEC]_[[registry-tuple-as-single-source-of-truth] [wire-format-byte-preservation-discipline] [autopopulate-pattern-for-production-caller-class]]
@@ -140,6 +141,228 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
 // [END_CODE]
 //======================================================================
 // [END_REGISTRY]_[FOREACH_NODE_PERSIST_FIELD]
+//======================================================================
+
+//======================================================================
+// [REGISTRY]_[FOREACH_NODE_CTX_PERSIST_EXEMPT]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [FRAMEWORK_DISCIPLINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the COMPLEMENT half of the NodeContext partition — the 22 members deliberately NOT on the wire, each with a falsifiable category + a rationale a reviewer can refute; tuple X(NAME, CATEGORY, "rationale")]
+// [COLUMN]_[NAME]_[NodeContext<F> member name, exactly as clang reports it — a name that stops being a member is STALE-EXEMPT, not silently ignored]
+// [COLUMN]_[CATEGORY]_[a closed set declared in tools/check_node_ctx_partition.py CATEGORIES; the token is matched EXACTLY (no parentheses, no arguments — cites belong in the rationale)]
+// [COLUMN]_[rationale]_[what a reviewer should go VERIFY; must be falsifiable from code, never "it is transient"]
+// [REFERENCE]_[DECISION]_[[D-305] [D-421]]
+// [REFERENCE]_[INVARIANT]_[[H15] [H21] [H22]]
+// [REFERENCE]_[CLASS]_[[4] [30]]
+//======================================================================
+// WHY THIS EXISTS — producer-side COMPLEMENT BLINDNESS, the class D-421 codifies.
+// (Deliberately NOT tagged with a catalog Class id: that entry does not exist yet — it
+// lands at D-421 step 4, WITH this guard, so it can be written from three instances and
+// a sharpened signature instead of one anecdote. Referencing an id before it exists is
+// the phantom-reference shape TECH_DEBT-274 tracks, and the tag validator RED-ed on
+// exactly that when this row first cited it. Add the [CLASS] tag here at step 4.)
+// FOREACH_NODE_PERSIST_FIELD is a COVERAGE registry over a HAND-declared struct
+// (NodeContext<F>, ControllerEventLoop.hpp:315). Every guard around it points the rows
+// FORWARD — the ==29 count-lock, the 46-row flattened layout golden, the frozen byte
+// golden, the paired-bump rule — so all four answer "are the rows we have right?" and
+// NONE answers "are these ALL the rows there should be?". A member added and never
+// enrolled is invisible to every one of them. That is not hypothetical:
+//
+//   - node_gross_wins / node_losses / idle_cycles (v4.7.25): added, never persisted.
+//     Stats read $0.00 after every restart until v5.4.3. TECH_DEBT-196.
+//   - ic.actuals.{count,head} (2026-08-15): unpersisted while its SIBLING
+//     ic.predictions.{count,head} was persisted. A perfectly-correlated predictor read
+//     IC = -0.5238 after a warm restart, and that IC drives an auto-kill capital
+//     control. It carried a STATED reason — "the two rings advance in lockstep" — that
+//     was true of the push path and FALSE across the persist boundary. Fixed at 564f099.
+//
+// That second one is why a row is a CATEGORY and not a checkbox: a reason merely written
+// down is a hypothesis. The categories are phrased so a reviewer knows what evidence
+// would refute each ("DERIVED_EACH_PASS" says: find me the unconditional write, and tell
+// me what reads it before the first one). The guard checks membership + staleness +
+// contradiction; it deliberately does NOT judge whether a rationale is TRUE, because
+// mechanizing that would manufacture exactly the false confidence ic.actuals is made of.
+//
+// SUBTRACTION IS THE POINT: clang's real member list MINUS the persist rows MINUS these
+// rows must be EMPTY. Adding a NodeContext member with neither row = UNACCOUNTED = RED.
+// Guard: tools/check_node_ctx_partition.py (rc 0/1/2; --selftest, 17 teeth).
+//
+// EVERY ROW BELOW WAS VERIFIED FIELD-BY-FIELD, not assigned by inspection — the P1/P2/P3
+// i-class pass of 2026-08-15 (frozen at plans/<sprint>/reports/2026-08-15-nodectx-
+// exemption-verification/). That pass found THREE live engine defects and REFUTED two
+// categories that had sounded reasonable, which is the whole argument for the exercise.
+//======================================================================
+// [CODE]
+//======================================================================
+#define FOREACH_NODE_CTX_PERSIST_EXEMPT(X)                                                           \
+    /* --- handles + lifecycle (P1) ------------------------------------------------------ */       \
+    /* The pointers are re-established at boot BEFORE the producer spawns (Run.hpp:1358),   */       \
+    /* so the whole family is safe for the same structural reason. RUNTIME_POINTER carries  */       \
+    /* the re-establishment SITE because "it is a pointer" is a property of the declaration,*/       \
+    /* not evidence about the runtime.                                                      */       \
+    X(gate_state,        DERIVED_EACH_PASS,                                                          \
+      "Assigned WHOLE (flags = _new_flags, SlowPathGateRegistry.hpp:234) by "                        \
+      "SLOW_PATH_GATE_AUTOPOPULATE_PER_NODE at ControllerEventLoop.hpp:2695 every rebuild, "         \
+      "guarded only on slot bounds. What reads it before the FIRST derive: the producer "            \
+      "thread at ShardedSnapshot.hpp:597 (MASK_LADDER_ACTIVE -> a PerNodeSnap bit) -- an "           \
+      "unsynchronized cross-thread read. That read was INDETERMINATE until the NSDMI at "            \
+      "SlowPathGateRegistry.hpp:196 (D-421); it now yields a defined 0, i.e. ladder-inactive, "      \
+      "which is the correct pre-first-pass projection. Refute by removing the NSDMI, or by "         \
+      "finding a reader of gate_state.flags that is NOT ShardedSnapshot.hpp:597 or one of the "      \
+      "six same-pass ML dispatch reads in StrategyParameters.hpp (:1203 :1218 :1436 :1445 "          \
+      ":1605 :1614), all of which run AFTER :2695 in the same rebuild.")                             \
+    X(core,              RUNTIME_POINTER,                                                            \
+      "ExecutionCore<F>* re-established at NodeCtxInitRegistry.hpp:100 (nullptr) then "              \
+      "ControllerEventLoop.hpp:1285 (inside EventLoopState_RegisterCore, :1269), both before the "   \
+      "producer spawn at EngineSharded/Run.hpp:1358. Pointee is the hot-path core, itself "          \
+      "boot-constructed.")                                                                           \
+    X(slow_state,        RUNTIME_POINTER,                                                            \
+      "NodeSlowState<F>* arena-allocated at NodeCtxInitRegistry.hpp:322 (Layer 4, "                  \
+      "_alloc_and_init_slow_state) before the producer spawn. The rolling/regime state behind "      \
+      "it is warm-up-rebuilt by the owning slow thread, not restored.")                              \
+    X(model_handle,      RUNTIME_POINTER,                                                            \
+      "void* re-established at NodeCtxInitRegistry.hpp:101 (nullptr) then EngineCommon.hpp:343 "     \
+      "(per-node model load from cfg core_N_model_path/_dir). A restored pointer value would "       \
+      "be a dangling address from the previous process -- restoring it would be WRONG.")             \
+    X(ensemble_handle,   RUNTIME_POINTER,                                                            \
+      "void* re-established at NodeCtxInitRegistry.hpp:102 (nullptr) then EngineCommon.hpp:394 "     \
+      "(zoo load). Same dangling-address argument as model_handle.")                                 \
+    X(strategy_state,    POINTEE_STATE_REDERIVED,                                                    \
+      "RUNTIME_POINTER alone is TRUE BUT INSUFFICIENT here and the distinction is the point: "       \
+      "the pointer is re-established at NodeCtxInitRegistry.hpp:103 + EngineCommon.hpp (per-node "   \
+      "Strategy_InitPerCore), but ~720B of ACCUMULATED strategy adaptation lives BEHIND it. That "   \
+      "pointee state is re-derived by warm-up, not restored -- which is the claim to verify, and "   \
+      "the near-miss of the ic.actuals shape (P1 4.6). Refute by finding pointee state that "        \
+      "neither warm-up nor cfg re-establishes.")                                                     \
+    X(pending_params,    DERIVED_EACH_PASS,                                                          \
+      "GateParameters<F> boot-initialized at NodeCtxInitRegistry.hpp:308 (Layer 2, "                 \
+      "GateParameters_Init) and rewritten every rebuild. What reads it before the first derive: "    \
+      "nothing can -- a DIRTY gate structurally prevents pre-derive consumption, which is why "      \
+      "this is the strongest case of the seven (P1 4.5) and gate_state above is not.")               \
+    /* --- eval-cycle transients + display sinks (P2) -------------------------------------- */      \
+    /* The three intended_* are DERIVED_BEFORE_ARM, not DERIVED_EACH_PASS: their capital     */      \
+    /* consumer is unreachable until an INDEPENDENT arming flag opens, and that flag cannot  */      \
+    /* open before the first rebuild. Named flag + init + sole grant site, per the category. */      \
+    X(intended_tp,       DERIVED_BEFORE_ARM,                                                         \
+      "Written ControllerEventLoop.hpp:3501 every full rebuild. The arming flag is the core's "      \
+      "PERMISSION bit: the only capital consumer (handle_buy_fill) is unreachable until it is 1, "   \
+      "and its ONLY grant site is ExecutionCore_SetPermission(.., 1) at EngineCommon.hpp:809, "      \
+      "which runs after the boot rebuild. The two other writers are boot/plumbing, not competing "   \
+      "derives: :1286 seeds it inside EventLoopState_RegisterCore and :1608 is the "                 \
+      "EventLoopState_SetIntendedParams setter. Note TECH_DEBT-276: these three are also "           \
+      "unenumerated cross-thread multi-word reads -- a separate concern from persistence, "          \
+      "tracked, not silently folded in here.")                                                       \
+    X(intended_sl,       DERIVED_BEFORE_ARM,                                                         \
+      "Written ControllerEventLoop.hpp:3502 every full rebuild; same permission arming flag "        \
+      "(EngineCommon.hpp:809) and same two boot/setter writers (:1287, :1609) as intended_tp. "      \
+      "TECH_DEBT-276 applies.")                                                                      \
+    X(intended_qty,      DERIVED_BEFORE_ARM,                                                         \
+      "Written ControllerEventLoop.hpp:3503 every full rebuild; same permission arming flag "        \
+      "(EngineCommon.hpp:809) and same two boot/setter writers (:1288, :1610) as intended_tp. "      \
+      "TECH_DEBT-276 applies.")                                                                      \
+    X(halt_reason,       DERIVED_EACH_PASS,                                                          \
+      "Unconditional = HALT_OK at ControllerEventLoop.hpp:3156, DOMINATING the first-reason-wins "   \
+      "reads at :3218/:3219 and :3232/:3233 and the log read at :3519. Its reset deliberately "      \
+      "sits ABOVE those consumers but BELOW strategy_halt_reason's -- the two look "                 \
+      "interchangeable and are NOT, which is why tools/check_reset_before_producer.py pins each "    \
+      "direction separately rather than asserting one rule for both.")                               \
+    X(strategy_halt_reason, DERIVED_EACH_PASS,                                                       \
+      "Unconditional = SHALT_OK at ControllerEventLoop.hpp:3082. This became TRUE only at "          \
+      "D-421: the reset had sat 59 lines BELOW its producer since bc37c62 (2026-04-30), so 17 of "   \
+      "20 SHALT codes were clobbered before anyone could observe them -- derived-each-pass into a "  \
+      "value nobody could read. The hoist is why :3082 now sits ABOVE halt_reason's :3156; "         \
+      "tools/check_reset_before_producer.py pins the ordering (Class 44 sub-B).")                    \
+    X(last_confidence_factor, DISPLAY_SINK_ONLY,                                                     \
+      "EVERY reader enumerated: ShardedSnapshot.hpp:591 and :598, and nowhere else tree-wide. "      \
+      "Written StrategyParameters.hpp:1717. Explicitly NOT an execution input -- ML sizing uses "    \
+      "the function-local factor at StrategyParameters.hpp:1743; the NodeContext field is never "    \
+      "read back into an execution path (P2 refuted the sister report's claim that it was).")        \
+    X(last_exit_prediction, DERIVED_EACH_PASS,                                                       \
+      "Reset = 0.0 at ControllerEventLoop.hpp:3029, before the read at EngineCommon.hpp:669 in "     \
+      "the same slow-path body. Deliberately NOT DISPLAY_SINK_ONLY: it LOOKS like an ML "            \
+      "observability field and rides PerNodeSnap.ml_last_exit_prediction, but :669 reads it as "     \
+      "the predicate that fires a real OMS_PushExitForSlot MARKET_SELL. 'It is just for display' "   \
+      "is the sentence that hides a live one.")                                                      \
+    X(last_exit_dominant_horizon, DERIVED_EACH_PASS,                                                 \
+      "Reset = -1 at ControllerEventLoop.hpp:3030, ahead of any consumer in the same pass.")         \
+    X(last_buy_dominant_horizon, DERIVED_EACH_PASS,                                                  \
+      "Reset = -1 at ControllerEventLoop.hpp:3036, ahead of any consumer in the same pass.")         \
+    X(last_barrier_mode_used, DERIVED_EACH_PASS,                                                     \
+      "Reset = 0 at ControllerEventLoop.hpp:3037, ahead of any consumer in the same pass.")          \
+    X(last_entry_wall_us, SUPERSEDED_BY_PERSISTED_SIBLING,                                           \
+      "The sibling is Position::entry_timestamp_us, which IS persisted (raw Position dump, "         \
+      "ShardedSnapshotPersist.hpp:191); the fallback site is ShardedSnapshot.hpp:286-291. "          \
+      "NOT a wall-clock-is-meaningless argument -- that reading is exactly BACKWARDS here and "      \
+      "the codebase proves it: losing this value WAS a real bug (Hold column read '0m' forever "     \
+      "for restored positions) and v5.11.65 fixed it by persisting the SIBLING, not by "             \
+      "declaring the field transient.")                                                              \
+    X(node_dd_pct,       DERIVED_EACH_PASS,                                                          \
+      "Written at ControllerEventLoop.hpp:3320 and :3323 (BOTH arms of the drop test), read at "     \
+      ":3334 and :3338 in the same block with no control flow between -- so the KILL-SWITCH "        \
+      "evaluation is sample-fresh. Scope honestly bounded: the 'recomputed before every read' "      \
+      "claim covers 2 of 4 readers; the DISPLAY read is stale for one slow-path cycle after a "      \
+      "warm restart, which is accepted and stated rather than implied (P2 B.1 corrects D-420's "     \
+      "wording, and the quantifier is the exact shape M9 exists to catch).")                         \
+    /* --- unpersisted sub-structs (P3) ---------------------------------------------------- */     \
+    X(turnover,          DISPLAY_SINK_ONLY,                                                          \
+      "EVERY consumer enumerated: the single projection at ShardedSnapshot.hpp:622 into "            \
+      "PerNodeSnap.ml_portfolio_turnover (declared EngineTUI.hpp:1208), which has NO renderer "      \
+      "tree-wide -- the diagnostic chain is dead below the snapshot (P3 B-2). Enumerated rather "    \
+      "than asserted precisely so this ROTS LOUDLY: adding a render row makes the claim false and "  \
+      "the exemption re-earnable, instead of quietly wrong.")                                        \
+    X(drift_history,     ACCEPTED_RESET,                                                             \
+      "Operator-accepted 2026-08-15 (option (a), with the option (d) honest-abstain queued). "       \
+      "WHAT DEGRADES AND FOR HOW LONG: DriftHistory_CheckBreach returns 0 for the first 4 closed "   \
+      "ML trades after a restart (ConfidenceScore.hpp:1397/:1410 both require >= 5 samples), and "   \
+      "returns the SAME 0 it returns for healthy. Bounded by four VERIFIED mechanisms: (1) the "     \
+      "capital OUTPUT persists -- node_kill_tripped is wire row 020, so a drift-killed node stays "  \
+      "killed; (2) breach => kill is same-call (ControllerEventLoop.hpp:1903 -> :1916), so no "      \
+      "durable breaching-but-not-killed state exists to lose; (3) the detector INPUT is warm -- "    \
+      "RollingIC persists at wire rows 039-042 and is lockstep-restored at ConfidenceScore.hpp:1485 "\
+      "(the D-421 step-1 fix), so the FIRST post-restart sample carries the full pre-restart IC; "   \
+      "(4) the verdict is a MEAN, so halving the sample count does not move it (probed: continuous " \
+      "avg=-0.3000 n=40 vs restarted avg=-0.3000 n=20). Under the shipping default "                 \
+      "auto_kill_on_drift=0 (ControllerConfig.hpp:2127) the cost is 4 trades of a missing log line " \
+      "and badge. NOTE the inversion this row used to rest on is GONE: being unpersisted was once "  \
+      "the ONLY thing re-arming the drift auto-kill, and D-421 replaced that accident with explicit "\
+      "clears at Async.hpp:412 (manual reset, latch only) and NodeCtxInitRegistry.hpp:345 (paper "   \
+      "reset, full Init). Persisting the ring is still REJECTED, now on cost alone: +4160B/node "    \
+      "takes the per-node wire 1944 -> 6104B (3.1x) to buy 4 trades.")                               \
+    X(sp_telemetry,      DISPLAY_SINK_ONLY,                                                          \
+      "EVERY reader enumerated: EngineTUI.hpp:2060 (last_tick_us), :2062 (cycles_total), :2064 "     \
+      "(yield_count), :2066 (state) -- four relaxed loads in the TUI render, and nothing else "      \
+      "tree-wide. Writers are the slow-path threads (EngineCommon.hpp:825/:827, "                    \
+      "EngineSharded/Run.hpp:1747-1769) and Init (NodeCtxInitRegistry.hpp:317-320). Persisting "     \
+      "would be ACTIVELY HARMFUL, not merely useless: a restored live thread-state byte renders a "  \
+      "running node as PAUSED and a restored cycle counter renders a fresh node as stalled.")
+
+//------------------------------------------------------------------
+// [SECTION]_[COMPILE-TIME COUNT SENTINEL — the complement count-lock]
+//------------------------------------------------------------------
+// 22 = sizeof(NodeContext<64>) member count (49, clang-derived) MINUS the 27 members the
+// persist registry covers. This lock is a TRIPWIRE, not the guard: it catches a row
+// deleted by hand, and is BLIND by construction to the case that matters (a NEW struct
+// member with no row anywhere) — that one is only visible by subtracting from clang's
+// real member list, which is what check_node_ctx_partition.py does. Stated explicitly
+// because a count-lock reads like coverage and is not (the ==29 sibling above is vacuous
+// against exactly the net-0 row swap that shipped at v11).
+#define _NPE_COUNT_ONE(NAME, CATEGORY, WHY) +1
+constexpr int FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT =
+    0 FOREACH_NODE_CTX_PERSIST_EXEMPT(_NPE_COUNT_ONE);
+#undef _NPE_COUNT_ONE
+// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 22 — the complement pin]
+static_assert(FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 22,
+              "NodeContext<64> has 49 members; 27 are covered by FOREACH_NODE_PERSIST_FIELD, so "
+              "EXACTLY 22 are declared-unpersisted here. Adding a NodeContext member means adding "
+              "it to ONE of the two registries — run tools/check_node_ctx_partition.py, which "
+              "subtracts both from clang's real member list and REDs on UNACCOUNTED / STALE-EXEMPT "
+              "/ CONTRADICTION. See DESIGN_SPECS/framework-patterns/"
+              "registry-coverage-ci-check-pattern.md.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_REGISTRY]_[FOREACH_NODE_CTX_PERSIST_EXEMPT]
 //======================================================================
 
 //----------------------------------------------------------------------
