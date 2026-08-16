@@ -249,9 +249,12 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
         STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
     }
-    if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
-        STAMP_SET(inf, fees);
-    }
+    // 2026-08-16 — the `fees` group-bit set was REMOVED with the group. It set a bit
+    // gating two rows whose producer had gone away at the .B.3 migration, so enabling
+    // the cost gate emitted `inference_cfg_fee_rate_maker=0` / `_taker=0` into the
+    // signed body alongside the TRUE `fee_rate_maker`/`fee_rate_taker` that the
+    // cfg-derived half already emits. Nothing is lost by removing it: the real fee
+    // rates are still stamped, by the half that actually reads cfg.
 
     // ────────────────────────────────────────────────────────────────────
     // (2b) Per-call model-const fields — manually populated from StampArgs.

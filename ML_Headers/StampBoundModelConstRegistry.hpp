@@ -241,7 +241,6 @@ namespace tt {
 #define FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS(X)                                                   \
     X(inference_cfg,    "inference cfg fields (4): confidence_threshold_scale, barrier_gate_enabled, confidence_hard_block_threshold, held_out_fraction (freshness_tau DELETED v5.14.9.D — TECH_DEBT-004 close)") \
     X(scaler,           "scaler fields (2): feature_scaler_present, scaler_sha256")                 \
-    X(fees,             "fee rate fields (2): fee_rate_maker, fee_rate_taker")                      \
     X(xgb_hyperparams,  "xgb hyperparams (9): max_depth, learning_rate, n_estimators, subsample, colsample_bytree, min_child_weight, seed, tree_method, train_nthread (since v5.14.8.A.merged)") \
     X(grid_member,      "grid member metadata (2): grid_member_count, grid_member_idx — renamed from grid_member v5.14.8.A.merged for dispatcher cleanliness") \
     X(label_params,     "label params (3): lookahead_ticks, tp_pct, sl_pct")
@@ -301,11 +300,24 @@ namespace tt {
     /* === bandit (standalone) — emitted at line 2189 === */                                        \
     X(inference_cfg_bandit_blend_ratio,         _, INCLUDE, double, "%g", 0.0,                      \
       inf->bandit_blend_ratio, inf->has_bandit, "bandit blend ratio (Exp3 vs ridge)")               \
-    /* === fees group (2 fields) — emitted at line 2195 === */                                      \
-    X(inference_cfg_fee_rate_maker,             fees, INCLUDE, double, "%g", 0.0,                   \
-      inf->fee_rate_maker, inf->has_fees, "maker fee rate at training time")                        \
-    X(inference_cfg_fee_rate_taker,             fees, INCLUDE, double, "%g", 0.0,                   \
-      inf->fee_rate_taker, inf->has_fees, "taker fee rate at training time")                        \
+    /* === fees group — REMOVED 2026-08-16 (E.1.2). RETIRED WIRE KEYS, DO NOT REUSE THE NAMES:  */ \
+    /*     `inference_cfg_fee_rate_maker` / `inference_cfg_fee_rate_taker`.                     */ \
+    /* WHY: the .B.3 prefix migration moved fee rates onto the cfg-derived emit half            */ \
+    /* (`fee_rate_maker`/`fee_rate_taker` carry STAMP_BOUND_CFG_DERIVED at                      */ \
+    /* CfgFieldRegistry.hpp:788-789 and emit the TRUE configured values). These model-const     */ \
+    /* rows were left behind and their producer went with the migration — nothing wrote         */ \
+    /* `inf.inference_cfg_fee_rate_*`, and `StampInferenceCfgInputs inf = {}` zero-inits. But   */ \
+    /* the emit walk gates per-GROUP, not per-row, so once the `fees` bit was set (whenever the */ \
+    /* cost gate was enabled) both rows printed their zero DEFAULT. One HMAC-signed model       */ \
+    /* identity document carried two contradictory fee claims — the canonical keys with the     */ \
+    /* real rates, and these with 0 — and the zeros propagated to the handle and were shown to  */ \
+    /* the operator as the model's training-time fees.                                          */ \
+    /* This is H21 spec Rule 1a: a row retired from its PRODUCER but left in its EMITTER does   */ \
+    /* not go dead, it goes LYING. Deleted rather than tombstoned-in-place because every H21    */ \
+    /* condition is absent: the key names were never enrolled in the identifier ledger, the     */ \
+    /* epoch floor (STAMP_FORMAT_VERSION_EPOCH_FLOOR=3) already hard-refuses every stamp that   */ \
+    /* could carry them, the parser ignores unknown keys, and no live models exist. The NAMES   */ \
+    /* stay retired via this comment — new meaning MUST get a new identifier.                   */ \
     /* === training_poll_interval (standalone) — emitted at line 2203 === */                        \
     X(training_poll_interval,                   _, INCLUDE, uint32_t, "%u", 0,                      \
       (unsigned)inf->training_poll_interval, inf->has_training_poll_interval,                       \
@@ -538,7 +550,10 @@ enum StampHasFlagBit : uint64_t {
     // === Group bits (one per group; gates ALL fields in group) ===
     STAMP_BIT_inference_cfg = 0,
     STAMP_BIT_scaler,
-    STAMP_BIT_fees,
+    /* STAMP_BIT_fees REMOVED 2026-08-16 — the fees group is gone (see the registry comment).
+       Renumbering the bits below is H21-SAFE here: has_flags is never persisted, hashed or
+       memcmp'd (verified — it appears only in three struct decls + an offsetof assert), so no
+       artifact encodes a bit POSITION. The retired NAMES are what stay protected. */
     STAMP_BIT_xgb_hyperparams,
     STAMP_BIT_grid_member,
     STAMP_BIT_label_params,
@@ -579,7 +594,6 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 // BITMAP_ANY(s.has_flags, MASK_X | MASK_Y).
 #define MASK_inference_cfg                          (1ULL << tt::STAMP_BIT_inference_cfg)
 #define MASK_scaler                                 (1ULL << tt::STAMP_BIT_scaler)
-#define MASK_fees                                   (1ULL << tt::STAMP_BIT_fees)
 #define MASK_xgb_hyperparams                        (1ULL << tt::STAMP_BIT_xgb_hyperparams)
 #define MASK_grid_member                            (1ULL << tt::STAMP_BIT_grid_member)
 #define MASK_label_params                           (1ULL << tt::STAMP_BIT_label_params)
@@ -714,7 +728,6 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define STAMP_AUTOPOPULATE_SET_HAS__(name)                  STAMP_SET((inf), name)
 #define STAMP_AUTOPOPULATE_SET_HAS_inference_cfg(name)      STAMP_SET((inf), inference_cfg)
 #define STAMP_AUTOPOPULATE_SET_HAS_scaler(name)             STAMP_SET((inf), scaler)
-#define STAMP_AUTOPOPULATE_SET_HAS_fees(name)               STAMP_SET((inf), fees)
 #define STAMP_AUTOPOPULATE_SET_HAS_xgb_hyperparams(name)    STAMP_SET((inf), xgb_hyperparams)
 #define STAMP_AUTOPOPULATE_SET_HAS_grid_member(name)        STAMP_SET((inf), grid_member)
 #define STAMP_AUTOPOPULATE_SET_HAS_label_params(name)       STAMP_SET((inf), label_params)
@@ -729,7 +742,6 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define STAMP_EMIT_CHECK_HAS__(name)                  STAMP_HAS(*inf, name)
 #define STAMP_EMIT_CHECK_HAS_inference_cfg(name)      STAMP_HAS(*inf, inference_cfg)
 #define STAMP_EMIT_CHECK_HAS_scaler(name)             STAMP_HAS(*inf, scaler)
-#define STAMP_EMIT_CHECK_HAS_fees(name)               STAMP_HAS(*inf, fees)
 #define STAMP_EMIT_CHECK_HAS_xgb_hyperparams(name)    STAMP_HAS(*inf, xgb_hyperparams)
 #define STAMP_EMIT_CHECK_HAS_grid_member(name)        STAMP_HAS(*inf, grid_member)
 #define STAMP_EMIT_CHECK_HAS_label_params(name)       STAMP_HAS(*inf, label_params)
@@ -746,7 +758,6 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define STAMP_PARSER_SET_HAS__(name)                  STAMP_SET(r, name)
 #define STAMP_PARSER_SET_HAS_inference_cfg(name)      STAMP_SET(r, inference_cfg)
 #define STAMP_PARSER_SET_HAS_scaler(name)             STAMP_SET(r, scaler)
-#define STAMP_PARSER_SET_HAS_fees(name)               STAMP_SET(r, fees)
 #define STAMP_PARSER_SET_HAS_xgb_hyperparams(name)    STAMP_SET(r, xgb_hyperparams)
 #define STAMP_PARSER_SET_HAS_grid_member(name)        STAMP_SET(r, grid_member)
 #define STAMP_PARSER_SET_HAS_label_params(name)       STAMP_SET(r, label_params)

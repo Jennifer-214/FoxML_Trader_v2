@@ -2310,11 +2310,11 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                             ImGui::Text("  bandit_blend_ratio:               %.4g",
                                         v.inference_cfg_bandit_blend_ratio);
                         }
-                        if (STAMP_HAS(v, fees)) {
-                            ImGui::Text("  fee_rate_maker / taker:           %.5f / %.5f",
-                                        v.inference_cfg_fee_rate_maker,
-                                        v.inference_cfg_fee_rate_taker);
-                        }
+                        // 2026-08-16 — the fee-rate display was REMOVED with the `fees`
+                        // group. It rendered two permanently-zero fields as the model's
+                        // training-time fees; the panel showed 0.00000 / 0.00000 while the
+                        // same stamp body carried the real rates under the canonical
+                        // cfg-derived keys. Showing nothing beats showing a confident zero.
                     }
                     // v5.9.5h — XGBoost hyperparameter group. Renders when
                     // stamp had has_xgb_hyperparams=1 (post-v5.9.5h stamps).

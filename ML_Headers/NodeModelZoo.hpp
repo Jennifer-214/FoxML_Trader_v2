@@ -471,13 +471,9 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             handle->inference_cfg_bandit_blend_ratio =
                 sr.inference_cfg_bandit_blend_ratio;
         }
-        if (STAMP_HAS(sr, fees)) {
-            STAMP_SET(*handle, fees);
-            handle->inference_cfg_fee_rate_maker =
-                sr.inference_cfg_fee_rate_maker;
-            handle->inference_cfg_fee_rate_taker =
-                sr.inference_cfg_fee_rate_taker;
-        }
+        // 2026-08-16 — the `fees` sr→handle copy was REMOVED with the group. It copied
+        // two permanently-zero fields onto the handle, where they had NO readers except
+        // the operator panel that displayed them as the model's training-time fees.
         if (STAMP_HAS(sr, model_num_outputs)) {
             STAMP_SET(*handle, model_num_outputs);
             handle->model_num_outputs = sr.model_num_outputs;
