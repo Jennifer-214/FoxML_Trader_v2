@@ -224,13 +224,27 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // (production walker is single source of truth via framework).
     //
     // BITMAP_IS_SET STAMP_SET checks below preserve wire-byte-relevant has-flag
-    // semantics. The bandit_blend_ratio prefixed has-flag controls legacy emit
-    // walker's `inference_cfg_bandit_blend_ratio=X` wire key emission at
-    // ModelInference.hpp:1817 FOREACH_STAMP_BOUND_CFG walker — REQUIRED at
-    // Step 1.5 (Phase F trio NOT YET LANDED; legacy walker still active +
-    // wire format must stay byte-preserved until SOFT bump). Removed at Step 2
-    // when legacy POST_CFG entry + prefixed struct field deleted atomically.
-    // The fees group has-flag is similarly wire-byte-relevant for fees emit.
+    // semantics. The bandit_blend_ratio prefixed has-flag controls the emission of
+    // the `inference_cfg_bandit_blend_ratio=X` wire key; the fees group has-flag is
+    // similarly wire-byte-relevant for fees emit.
+    //
+    // ⚠ CORRECTED at E.1.2/D-421 (2026-08-15). This comment used to say that key was
+    // emitted "at ModelInference.hpp:1817 FOREACH_STAMP_BOUND_CFG walker — REQUIRED at
+    // Step 1.5 (Phase F trio NOT YET LANDED; legacy walker still active)". ALL OF THAT
+    // IS DEAD: `FOREACH_STAMP_BOUND_CFG` and its whole file were DELETED at `.B.3`
+    // Step 2 on 2026-05-24 (Version.hpp:697; tombstoned in FOREACH_REGISTRY at
+    // CoreFrameworks/MetaRegistry.hpp), the successor is
+    // `cfg_derived::populate_stamp_cfg_from_derived<F>` (see ModelInference.hpp's
+    // include-removal note), and ModelInference.hpp:1817 is now `r.valid = 0;` inside
+    // an unrelated early return.
+    //
+    // Kept as a correction rather than a silent delete because this exact comment was
+    // READ AND TRUSTED at D-421 and propagated verbatim into a session handoff, where
+    // it told a fresh session to go "verify" a walker that has not existed for three
+    // months — and would have led to RETIRING a live CRITICAL. That is meta-anti-pattern
+    // AR-17 (inherited file:line cites consumed into new durable content) with this line
+    // as its founding instance. A stale comment naming a deleted symbol is not inert; it
+    // is an active instruction to the next reader.
     // ────────────────────────────────────────────────────────────────────
     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
         STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
