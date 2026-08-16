@@ -64,7 +64,7 @@
 #define FOREACH_ML_CFG_FLAG(X)                                                                                                                                                                          \
     X(CONFIDENCE_ENABLED,           confidence_enabled,           "Confidence",            "FoxML",       0,                                                "scale entry threshold by confidence score")                                                  \
     X(CONFIDENCE_COMPOSITE_ENABLED, confidence_composite_enabled, "Composite Confidence",  "FoxML",       CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED,      "use 4-factor composite confidence (vs legacy 3-factor); stamp-bound")                         \
-    X(BANDIT_ENABLED,               bandit_enabled,               "Bandit",                "FoxML",       0,                                                "Exp3-IX bandit for buy-signal arm selection (default; cfg.bandit_algorithm=1 swaps to Thompson)") \
+    X(BANDIT_ENABLED,               bandit_enabled,               "Bandit",                "FoxML",       0,                                                "⚠ INERT on the sharded path (2026-08-16) — this flag gates NOTHING behavioral; the sharded ensemble bandit runs regardless of it. Algorithm choice is cfg.bandit_algorithm (0=Exp3, !=0=Thompson). Disposition pending: wire / retire / re-default") \
     X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Exit Bandit",           "FoxML",       0,                                                "Exp3-IX bandit for exit-side arm selection (sell-side; v5.13.4)")                              \
     X(USE_EXIT_MODEL,               use_exit_model,               "Use Exit Model",        "FoxML",       0,                                                "use dedicated exit-side ML model (vs entry model fallback)")                                 \
     X(FOXML_VOL_SCALING_ENABLED,    foxml_vol_scaling_enabled,    "Vol Scaling",           "FoxML",       0,                                                "scale trade size by recent volatility (FoxML VolScaler)")                                    \
@@ -115,8 +115,16 @@ FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 // Semantics match legacy FOREACH_STAMP_BOUND_CFG emit_when (the wire-emit source of
 // truth pre-.B.2). Names BANDIT_THOMPSON / BANDIT_BLEND_STATE_4 reflect actual
 // semantics (not just "BANDIT_ENABLED"; legacy gate uses cfg.bandit_algorithm != 0
-// which means "Thompson-class algorithm active" — distinct from MASK_ML_CFG_BANDIT_ENABLED
-// flag which controls bandit selection wiring).
+// which means "Thompson-class algorithm active" — distinct from MASK_ML_CFG_BANDIT_ENABLED).
+//
+// ⚠ CORRECTED 2026-08-16 — this comment used to end "…MASK_ML_CFG_BANDIT_ENABLED flag
+// which controls bandit selection wiring". FALSE. That flag controls nothing on the
+// sharded path: its complete production reader set is the legacy PortfolioController +
+// legacy EngineTUI (both dead files), the stamp-emit gate in StampHelper.hpp, and the
+// cfg-drift rows here — not one behavioral reader. The sharded ensemble bandit runs on
+// structural preconditions (a node_model_dir, >=2 loaded arms, blend_mode=weighted),
+// never on this flag. Recorded because the false claim is very likely WHY nobody looked:
+// it told every later reader the wiring existed.
 
 #define COHORT_GATE_BANDIT_THOMPSON       (cfg.bandit_algorithm != 0)
 #define COHORT_GATE_BANDIT_BLEND_STATE_4  (cfg.bandit_algorithm == 4)

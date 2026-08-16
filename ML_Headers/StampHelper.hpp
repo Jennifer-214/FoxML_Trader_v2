@@ -265,6 +265,31 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     STAMP_SET(inf, training_poll_interval);
     inf.training_poll_interval = cfg.poll_interval;
 
+    // Training wall-clock (μs since unix epoch).
+    //
+    // 2026-08-16 — this producer DID NOT EXIST, and its absence made a LIVE-READINESS BOOT GATE
+    // vacuously green. The chain: no emit ⇒ no stamp carries the key ⇒ the age-warn block at
+    // NodeModelZoo.hpp:623-635 is gated on STAMP_HAS(sr, training_timestamp_us) and never runs ⇒
+    // FAILURE_MASK_model_age_warn never sets ⇒ LiveReadiness::check_model_max_age_set (:124-137)
+    // returns TRUE unconditionally. So opting IN to age gating (model_max_age_hours != 0) produced
+    // a green that a model of ANY age passed. Leaving it off was the more honest state, which is
+    // the tell: a safety feature whose activation weakens the signal.
+    //
+    // EMIT-TIME is the correct value, not a caller arg: neither production caller
+    // (BacktestEngine.hpp:1440, BacktestPanels.hpp:4047) holds a training-start time, and this
+    // funnel runs at training COMPLETION — so emit-time is the only truthful value in scope, and
+    // it needs no caller change. CLOCK_REALTIME (not a monotonic timer) is REQUIRED: the consumer
+    // computes `now_us - training_timestamp_us` against its own CLOCK_REALTIME read
+    // (NodeModelZoo.hpp:625-627), and the registry row documents the contract as "μs since unix
+    // epoch". A monotonic source would silently produce garbage ages across reboots.
+    {
+        struct timespec ts_train;
+        clock_gettime(CLOCK_REALTIME, &ts_train);
+        inf.training_timestamp_us = (uint64_t)ts_train.tv_sec * 1000000ULL
+                                  + (uint64_t)ts_train.tv_nsec / 1000ULL;
+        STAMP_SET(inf, training_timestamp_us);
+    }
+
     // Model output count (from label_kind, or caller override)
     {
         STAMP_SET(inf, model_num_outputs);

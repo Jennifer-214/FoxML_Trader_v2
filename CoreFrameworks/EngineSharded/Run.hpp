@@ -2341,6 +2341,35 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 "state to %s/exit_bandit_state.json\n",
                         i, cfg.node_model_dir[i]);
             }
+            // 2026-08-16 — Thompson shutdown saves. These were MISSING while their
+            // LOADERS ran on every boot (FOREACH_ENSEMBLE_POST_LOAD rows in
+            // NodeModelZoo.hpp), so the engine looked for buy_thompson_state.json /
+            // exit_thompson_state.json that nothing in the tree ever wrote. Net effect:
+            // Thompson posteriors learned all session and were silently discarded at
+            // every restart — a load-without-save asymmetry that reads as working
+            // persistence. EnsembleModelZoo_SaveThompsonState had ZERO production
+            // callers (its only tree-wide reference was a test); SaveExitThompsonState
+            // had zero references anywhere at all, test included.
+            //
+            // Both self-guard on their own READY flag and return 0 when the side was
+            // never initialized, exactly like SaveExitBanditState above — so they skip
+            // silently rather than needing a second outer condition.
+            int saved_thompson = EnsembleModelZoo_SaveThompsonState(
+                ezoo, cfg.node_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved_thompson) {
+                fprintf(stderr, "[sharded] node %d: saved buy_thompson "
+                                "state to %s/buy_thompson_state.json\n",
+                        i, cfg.node_model_dir[i]);
+            }
+            int saved_exit_thompson = EnsembleModelZoo_SaveExitThompsonState(
+                ezoo, cfg.node_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved_exit_thompson) {
+                fprintf(stderr, "[sharded] node %d: saved exit_thompson "
+                                "state to %s/exit_thompson_state.json\n",
+                        i, cfg.node_model_dir[i]);
+            }
         }
     }
 

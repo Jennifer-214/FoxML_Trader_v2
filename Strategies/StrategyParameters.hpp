@@ -1104,7 +1104,29 @@ inline void ML_BuildParameters(
             float per_arm_preds[ENSEMBLE_HORIZON_MAX];
             for (int a = 0; a < ENSEMBLE_HORIZON_MAX; ++a)
                 per_arm_preds[a] = 0.5f;
-            if (use_weighted && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
+            // 2026-08-16 — `primary_count >= 2` is LOAD-BEARING, not belt-and-suspenders.
+            //
+            // MASK_EZOO_BANDITS_READY means "the init PASS ran", NOT "the bandits are usable".
+            // EnsembleModelZoo_InitBandits sets it and RETURNS EARLY without calling Bandit_Init
+            // when n_arms < 2 (NodeModelZoo.hpp:1810-1815), leaving ezoo->bandits[r] at its memset
+            // zero with n_arms == 0. Bandit_GetProbabilities then writes NOTHING — both its main
+            // loop and its sum_w<=0 uniform fallback iterate `i < b->n_arms` == 0
+            // (BanditLearning.hpp:254-268) — so `weights_buf` below stayed UNINITIALIZED STACK and
+            // flowed into blend_tp_d / blend_sl_d / blend_dominant_h, i.e. straight out to
+            // tp_pct / sl_pct. Uninitialized memory setting take-profit and stop-loss.
+            //
+            // This was the ONLY BANDITS_READY consumer not paired with a second condition; the
+            // other eight all require MASK_EZOO_ACTIVE as well. ACTIVE would NOT have saved it
+            // (it needs only total_loaded > 0, which a single-arm ensemble satisfies) — the real
+            // precondition is primary_count >= 2, which is exactly what InitBandits itself tests,
+            // and which EnsembleModelZoo_IsReadyForInference already encodes at NodeModelZoo.hpp:3427.
+            // Guarding on it here makes the read condition identical to the init condition.
+            //
+            // Why nothing caught it: Bandit_GetProbabilities carries no_sanitize("address"), and
+            // ASan does not detect uninitialized STACK reads regardless — that is MSan, which the
+            // sanitizer suite does not run.
+            if (use_weighted && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
+                ezoo->primary_count >= 2) {
                 // G.7 path: per-regime bandit weights drive blend.
                 int regime_id = mctx ? mctx->current_regime_id : 0;
                 if (regime_id < 0 || regime_id >= NUM_REGIMES) regime_id = 0;
@@ -1429,6 +1451,72 @@ inline void ML_BuildParameters(
             double weights[ENSEMBLE_HORIZON_MAX];
             for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
                 weights[i] = 1.0 / (double)n_loaded;  // uniform default
+            }
+
+            // ── 2026-08-16 — EXIT-BANDIT SELECT. This was the missing half of the loop.
+            //
+            // The exit bandit was initialized, fed reward on every qualifying fill, persisted
+            // and reloaded — and NOTHING read it. Its learned weights had never influenced a
+            // single exit decision; the blend was uniform unless Ridge overrode it. Operator
+            // intent (2026-08-16): the exit side must learn, to find optimal sell points. So
+            // the missing link is a READ here, at the same fork Ridge already overrides.
+            //
+            // Gated on MASK_ML_CFG_EXIT_BANDIT_ENABLED — the SAME flag that already gates the
+            // reward UPDATE (EngineSharded/SlowPath.hpp:78 → ControllerEventLoop.hpp). Wiring
+            // select behind the update's own flag is what makes the flag coherent: previously
+            // it turned on learning that could never be acted on. Default is 0, so this changes
+            // NOTHING unless the operator opts in.
+            //
+            // `exit_predictor_count >= 2` is LOAD-BEARING, not defensive — it is the same
+            // precondition whose absence on the BUY side let a zeroed BanditState reach
+            // Bandit_GetProbabilities, which writes nothing and left uninitialized stack driving
+            // tp_pct/sl_pct (fixed same day). InitExitBandits has the identical n_arms<2 early
+            // return, so the identical trap exists here. Ridge's own guard below already uses
+            // this bound; matching it keeps the read condition equal to the init condition.
+            //
+            // Placed BEFORE the Ridge block deliberately: Ridge supersedes bandit weights, which
+            // mirrors the buy-side ordering.
+            int exit_chosen_arm = -1;
+            if (BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED) &&
+                BITMAP_IS_SET(ezoo_ex->init_flags, MASK_EZOO_EXIT_BANDITS_READY) &&
+                ezoo_ex->exit_predictor_count >= 2) {
+                int exit_regime_id = mctx ? mctx->current_regime_id : 0;
+                if (exit_regime_id < 0 || exit_regime_id >= NUM_REGIMES) exit_regime_id = 0;
+                BanditAlgorithm_Apply(
+                    node_cfg->bandit_algorithm,
+                    &ezoo_ex->exit_bandits[exit_regime_id],
+                    BITMAP_IS_SET(ezoo_ex->init_flags, MASK_EZOO_EXIT_THOMPSON_READY)
+                        ? &ezoo_ex->exit_thompson_bandits[exit_regime_id] : nullptr,
+                    ezoo_ex->exit_predictor_count,
+                    /*blend_alpha=*/FPN_ToDouble(node_cfg->thompson_exp3_blend_alpha),
+                    weights,
+                    &exit_chosen_arm);
+
+                // Re-point `dominant` at the arm the BANDIT acted on.
+                //
+                // Without this the loop stays incoherent even with select wired: reward is
+                // attributed to `last_exit_dominant_horizon` (EngineCommon.hpp:707), which was
+                // argmax of the RAW per-handle prediction — i.e. the bandit was rewarded for an
+                // arm it did not choose, so its own weights carried no information about the
+                // outcome it was scored on. A learner scored on someone else's decision cannot
+                // converge.
+                //
+                // Mirrors the buy side, which already attributes to argmax of the bandit's
+                // weights (the blend_dominant_h computation in the G.7 block above). Thompson
+                // returns an EXPLICIT chosen_arm, which is strictly better than an argmax of a
+                // distribution — prefer it when present, fall back to argmax(weights) for Exp3.
+                //
+                // Scoped INSIDE the bandit branch on purpose: when the operator has not opted in,
+                // `dominant` keeps its existing argmax-of-prediction meaning and the default path
+                // is unchanged.
+                if (exit_chosen_arm >= 0 && exit_chosen_arm < ezoo_ex->exit_predictor_count) {
+                    dominant = exit_chosen_arm;              // Thompson — explicit pull
+                } else {
+                    double best_w = -1.0;
+                    for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
+                        if (weights[i] > best_w) { best_w = weights[i]; dominant = i; }
+                    }
+                }
             }
             // v5.14.9.B.0 — read exit_blender gate from cached state when wired
             // v5.14.11.C — cfg.exit_blender_mode migrated to ml_cfg_flags bitmap

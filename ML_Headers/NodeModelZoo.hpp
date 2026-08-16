@@ -1808,9 +1808,20 @@ inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
     // never initialized → predictions stayed uniform forever.
     int n_arms = ezoo->primary_count;
     if (n_arms < 2) {
-        // Single-arm or empty ensemble — no point in bandits. Mark
-        // initialized so dispatch doesn't loop forever, but bandits won't
-        // be used (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) gates that anyway).
+        // Single-arm or empty ensemble — no point in bandits. Mark the init PASS
+        // as run so dispatch doesn't loop forever.
+        //
+        // ⚠ 2026-08-16 — this comment used to claim "bandits won't be used
+        // (MASK_EZOO_ACTIVE gates that anyway)". BOTH HALVES WERE FALSE, and the
+        // false belief is why the bug existed: the G.7 select path gates on
+        // MASK_EZOO_BANDITS_READY — the flag set two lines below — NOT on ACTIVE,
+        // and ACTIVE would not have helped anyway since it needs only
+        // total_loaded > 0, which a single-arm ensemble satisfies. So this early
+        // return handed the select path a zeroed BanditState with n_arms == 0, and
+        // Bandit_GetProbabilities left its output buffer untouched → uninitialized
+        // stack reached tp_pct / sl_pct. Fixed by guarding the select path on
+        // primary_count >= 2 (StrategyParameters.hpp), so the READ condition now
+        // matches this WRITE condition exactly. Do not re-widen one without the other.
         BITMAP_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY);
         return;
     }
