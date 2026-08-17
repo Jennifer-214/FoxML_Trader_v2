@@ -2127,11 +2127,28 @@ struct StampInferenceCfgInputs {
 // template is already visible); specialized here because that header precedes
 // this type's definition.
 //
-// Effect: `STAMP_SET(inf, <row>)` no longer compiles. The emit side must use
-// STAMP_PUT, which cannot express a bit without a value. This is the ONLY
-// struct that opts in — the parse-side ModelStampResult and the runtime
-// ModelHandle both set presence bits whose values arrive from a sibling
-// statement in the same macro expansion, which is structural pairing, not the
+// ⚠️ EFFECT TODAY: **NONE.** This specialization is INERT — nothing reads it.
+// It is the opt-in half of a `STAMP_SET` refusal that was built, PROVEN, and
+// then REVERTED the same session for being too broad (a GROUP bit has no field
+// of its own, so refusing it was wrong). At HEAD, `StampHelper.hpp` still
+// contains live `STAMP_SET(inf, …)` calls and they compile — including the
+// `inference_cfg_bandit_blend_ratio` bit-without-value at `:250`. See the ⚠️
+// block on `STAMP_SET` in StampBoundModelConstRegistry.hpp for the correct
+// narrower rule and the C++17 blocker that stalls it.
+//
+// An earlier draft of THIS comment claimed the refusal was live ("STAMP_SET(inf,
+// <row>) no longer compiles"). It was written while the guard was armed and not
+// swept when the guard came out — false at HEAD, and caught by the close-out's
+// independent review, not by its author. Recorded rather than quietly deleted
+// because it is a verbatim instance of the defect this whole arc is about: a
+// comment asserting a guard that is not there is exactly why the `fees` sibling
+// survived its own sweep (`StampHelper.hpp:227-229`). Class 58 sub-shape A′,
+// authored by the commit whose subject is Class 58 sub-shape A′.
+//
+// When the guard lands, this becomes the opt-in marker it was written to be:
+// the ONLY struct that opts in, because the parse-side ModelStampResult and the
+// runtime ModelHandle both set presence bits whose values arrive from a sibling
+// statement in the same macro expansion — structural pairing, not the
 // hand-written kind that drifted twice.
 namespace tt {
     template <>

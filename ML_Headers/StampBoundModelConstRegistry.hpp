@@ -175,8 +175,15 @@ namespace tt {
 
     // is_stamp_emit_inputs_v — declared here, SPECIALIZED at the definition of
     // StampInferenceCfgInputs (ModelInference.hpp), which this header precedes.
-    // Sole consumer: the STAMP_SET guard below. Primary template is false, so a
-    // struct that never opts in keeps STAMP_SET's old unrestricted behaviour —
+    // ⚠️ CONSUMERS AT HEAD: **ZERO.** An earlier draft of this line said "Sole
+    // consumer: the STAMP_SET guard below" — there is no such guard; `STAMP_SET`
+    // below is unmodified. The guard was built, proven, and reverted the same
+    // session (see its ⚠️ block). This trait is landed-INERT pending that guard,
+    // and saying so is the point: the previous phrasing asserted a mechanism that
+    // does not exist, which is the precise defect this file's own arc is about.
+    //
+    // INTENDED consumer, once the guard lands: the primary template stays false,
+    // so a struct that never opts in keeps STAMP_SET's unrestricted behaviour —
     // the parse side (`r`) and the handle-copy side (`*handle`) legitimately set
     // a presence bit whose value arrives by another statement in the same macro
     // expansion, and neither is the surface where the defect lives.
