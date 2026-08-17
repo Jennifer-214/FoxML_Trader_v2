@@ -776,8 +776,19 @@ static inline void TUI_CopySnapshotSharded(
                 es.ensemble_disabled_horizon_mask = ezoo->disabled_horizon_mask;
                 // Per-regime probability matrix (preferred over raw weights —
                 // probabilities are normalized so the heatmap is interpretable).
-                for (int r = 0; r < 5; ++r) {  // NUM_REGIMES = 5
-                    if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
+                for (int r = 0; r < 5; ++r) {
+                    // `primary_count >= 2` is load-bearing and must accompany BANDITS_READY at EVERY
+                    // weight read — READY means "the init pass ran", NOT "the bandits are usable".
+                    // InitBandits (NodeModelZoo.hpp:1805-1822) sets READY and returns EARLY without
+                    // Bandit_Init when n_arms < 2, leaving bandits[r].n_arms == 0; Bandit_GetProbabilities
+                    // then writes NOTHING (its loops are `i < n_arms`), so `probs` would reach the copy
+                    // below uninitialized — here for all 5 regimes at once. Sibling of the buy-side
+                    // (StrategyParameters.hpp:1145) and exit-side (:1500) guards; this site was MISSED
+                    // when those landed and an independent review caught it (D-425). The enclosing
+                    // MASK_EZOO_ACTIVE gate does not help: it needs only total_loaded > 0, which a
+                    // single-arm ensemble satisfies.
+                    if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
+                        ezoo->primary_count >= 2) {
                         double probs[8];
                         Bandit_GetProbabilities(&ezoo->bandits[r], probs);
                         for (int h = 0; h < n_h; ++h) {
