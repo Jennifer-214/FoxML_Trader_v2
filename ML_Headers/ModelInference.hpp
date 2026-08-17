@@ -2122,6 +2122,22 @@ struct StampInferenceCfgInputs {
 // [END_STRUCT]_[StampInferenceCfgInputs]
 //======================================================================
 
+// D-426 — opt this struct INTO the STAMP_SET refusal. Declared in
+// StampBoundModelConstRegistry.hpp (which this file includes, so the primary
+// template is already visible); specialized here because that header precedes
+// this type's definition.
+//
+// Effect: `STAMP_SET(inf, <row>)` no longer compiles. The emit side must use
+// STAMP_PUT, which cannot express a bit without a value. This is the ONLY
+// struct that opts in — the parse-side ModelStampResult and the runtime
+// ModelHandle both set presence bits whose values arrive from a sibling
+// statement in the same macro expansion, which is structural pairing, not the
+// hand-written kind that drifted twice.
+namespace tt {
+    template <>
+    inline constexpr bool is_stamp_emit_inputs_v<StampInferenceCfgInputs> = true;
+}
+
 //======================================================================
 // [FUNCTION]_[stamp_write_for_model]
 //----------------------------------------------------------------------

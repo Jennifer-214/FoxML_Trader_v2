@@ -134,6 +134,54 @@ namespace tt {
             dst = static_cast<T>(atoi(val));
         }
     }
+
+    // ------------------------------------------------------------------
+    // stamp_put_field — the EMIT-side sister of stamp_parse_field (D-426).
+    //
+    // Assigns a value into a stamp struct field, dispatching on T with the
+    // SAME `if constexpr` shape as stamp_parse_field above (and the same
+    // reason it must be a template: a non-taken branch containing
+    // `dst = static_cast<char[16]>(...)` is a hard error outside template
+    // instantiation — see the note at the top of stamp_parse_field).
+    //
+    // WHY THIS EXISTS AT ALL: it is half of STAMP_PUT, and STAMP_PUT exists
+    // because setting a presence bit and writing its value were TWO separate
+    // statements, which is a category error C++ cannot catch. Deleting the
+    // value line while leaving the bit line compiles clean and emits the
+    // field's zero-initialised default into an HMAC-signed body. That is not
+    // hypothetical: it shipped twice — the `fees` group (deleted 2026-08-16)
+    // and `inference_cfg_bandit_blend_ratio` (found 2026-08-17, three lines
+    // above the fees deletion, armed by the bandit_enabled 0->1 default flip).
+    // Both were migrations that moved a producer to the cfg-derived half and
+    // left the bit-set behind. See D-426.
+    //
+    // The char-array arm is a BOUNDED copy, not strncpy-and-hope: it mirrors
+    // the hand-written producers it replaces (strnlen + memcpy + explicit NUL)
+    // so the emitted bytes are unchanged. A null src is treated as empty
+    // rather than crashing — boot path, and a caller that guards `if (p && p[0])`
+    // outside the macro should not also have to trust us not to deref.
+    template <typename T, typename S>
+    inline void stamp_put_field(T& dst, const S& src) {
+        if constexpr (std::is_array_v<T>) {
+            const char* s = src;
+            if (!s) s = "";
+            const size_t n = strnlen(s, std::extent_v<T> - 1);
+            memcpy(dst, s, n);
+            dst[n] = '\0';
+        } else {
+            dst = static_cast<T>(src);
+        }
+    }
+
+    // is_stamp_emit_inputs_v — declared here, SPECIALIZED at the definition of
+    // StampInferenceCfgInputs (ModelInference.hpp), which this header precedes.
+    // Sole consumer: the STAMP_SET guard below. Primary template is false, so a
+    // struct that never opts in keeps STAMP_SET's old unrestricted behaviour —
+    // the parse side (`r`) and the handle-copy side (`*handle`) legitimately set
+    // a presence bit whose value arrives by another statement in the same macro
+    // expansion, and neither is the surface where the defect lives.
+    template <typename T>
+    inline constexpr bool is_stamp_emit_inputs_v = false;
 }
 
 //----------------------------------------------------------------------
@@ -635,7 +683,49 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 // read by display thread).
 //----------------------------------------------------------------------
 #define STAMP_HAS(s, name)  BITMAP_IS_SET((s).has_flags, MASK_##name)
+
+// STAMP_PUT — write the value AND set its presence bit in ONE expression (D-426).
+//
+// This is the emit-side setter. It exists because the two halves used to be two
+// statements, and C++ cannot see that deleting one orphans the other: the bit
+// stays set, `StampInferenceCfgInputs inf = {}` zero-inits the field, and the
+// field's DEFAULT lands in an HMAC-signed model-identity document as though it
+// were a measurement. Shipped twice (`fees`; `inference_cfg_bandit_blend_ratio`),
+// both times as the tail of a migration that moved the producer elsewhere.
+//
+// Value first, bit second — deliberately. The bit is a CLAIM that the value is
+// present, so it is written only after the value actually is.
+#define STAMP_PUT(s, name, value)                                              \
+    do {                                                                       \
+        tt::stamp_put_field((s).name, (value));                                \
+        BITMAP_SET((s).has_flags, MASK_##name);                                \
+    } while (0)
+
+// STAMP_SET — presence bit ONLY.
+//
+// ⚠️ D-426, DESIGN INCOMPLETE — READ BEFORE "FINISHING" THIS.
+// A static_assert refusing STAMP_SET on the emit-side struct was built here and
+// REVERTED the same session, because it was measurably too broad. It correctly
+// rejected all 17 emit sites (including the live `inference_cfg_bandit_blend_ratio`
+// bit-without-value at StampHelper.hpp:250 — proof the idea works), but a GROUP
+// bit such as `xgb_hyperparams` has NO field of its own, so setting it without a
+// value is legitimate and the assert refused that too.
+//
+// The correct discrimination is: refuse STAMP_SET only when a same-named MEMBER
+// exists (a field's presence bit); allow it when none does (a group bit). In
+// C++20 that is `requires { (s).name; }` inline. THIS BUILD IS C++17
+// (CMakeLists.txt:4), so it needs a void_t trait generated per name — which
+// requires choosing a name-universe, and the obvious one is unusable as-is:
+// `FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS` is DRIFTED from `enum StampHasFlagBit`
+// (missing `environment_meta`), so generating from it would leave a hole exactly
+// where a future caller would land. Resolve that drift first, or generate from
+// the enum, or move the build to C++20 — an operator call, not a cleanup.
+//
+// Until then the co-location property is carried by STAMP_PUT being AVAILABLE
+// and used, which is convention, not enforcement. Do not read the absence of a
+// red as coverage: `STAMP_SET(inf, X); /* no inf.X = ... */` still compiles.
 #define STAMP_SET(s, name)  BITMAP_SET((s).has_flags, MASK_##name)
+
 #define STAMP_CLR(s, name)  BITMAP_CLR((s).has_flags, MASK_##name)
 #define STAMP_ANY(s, mask_set) BITMAP_ANY((s).has_flags, (mask_set))
 
