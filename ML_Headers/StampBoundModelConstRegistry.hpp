@@ -179,10 +179,11 @@ namespace tt {
     //
     // SOLE CONSUMER: the STAMP_SET guard below (landed D-426). The primary
     // template stays false, so a struct that never opts in keeps STAMP_SET's
-    // unrestricted behaviour — the parse side (`r`) and the handle-copy side
-    // (`*handle`) legitimately set a presence bit whose value arrives by another
-    // statement in the same macro expansion, and neither is the surface where the
-    // defect lives. Opting a struct in is therefore a deliberate declaration that
+    // unrestricted behaviour. That is SAFE-BY-SHAPE for the parse side (`r`), whose bits
+    // are set inside the parser's macro walk. It is merely UNGUARDED for the handle side
+    // (`*handle`), whose sr->handle pairs are hand-written and often bit-before-value —
+    // see the ⚠ scope note at STAMP_SET below; an earlier draft of THIS line claimed both
+    // were structural, which was measured false. Opting a struct in is therefore a deliberate declaration that
     // "on THIS struct, a presence bit for a field must not be set without its
     // value" — not a property the guard infers.
     //
@@ -411,7 +412,7 @@ namespace tt {
     /* DO NOT REUSE THE NAME: `inference_cfg_bandit_blend_ratio` (burned in RETIRED_NAMES).      */ \
     /* WHY — the `fees` twin, three lines below, and the SAME cause: the .B.3 migration moved    */ \
     /* the producer to the cfg-derived half (`bandit_blend_ratio` carries STAMP_BOUND_CFG_DERIVED */ \
-    /* at CfgFieldRegistry.hpp:669 and emits the TRUE configured value) and left the bit-set     */ \
+    /* in CfgFieldRegistry.hpp — re-derive by name — and emits the TRUE configured value) and left the bit-set     */ \
     /* behind at StampHelper.hpp. Nothing ever assigned this field, so `StampInferenceCfgInputs  */ \
     /* inf = {}` zero-init meant the signed body carried `inference_cfg_bandit_blend_ratio=0`    */ \
     /* beside the truthful cfg-derived line — ONE model-identity document making TWO             */ \
@@ -649,7 +650,8 @@ namespace tt {
 // uint64_t has_flags field that lives on ModelStampResult /
 // StampInferenceCfgInputs / ModelHandle (post-Option-1 unification).
 //
-// Allocation: groups first (6 bits), then standalones (7 bits) = 13
+// Allocation: groups first, then standalones (counts deliberately NOT stated — they have
+// moved twice in two days; STAMP_BIT_COUNT below is the SSoT)
 // total. uint64_t has 51 bits headroom for future fields. Hand-allocated
 // so debug output reads cleanly; build-time test asserts STAMP_BIT_COUNT
 // matches FOREACH_STAMP_BOUND_MODEL_CONST_GROUP_COUNT + standalone count.
@@ -662,7 +664,7 @@ namespace tt {
 //
 // Standalone has_* names use the entry's full canonical name (mechanical
 // derivation; no STANDALONE list dispatch). Verbose for some entries
-// (has_inference_cfg_bandit_blend_ratio) but unambiguous + IDE auto-
+// (has_expected_feature_format_version) but unambiguous + IDE auto-
 // completes. Eliminates 2-site STANDALONE dispatch maintenance.
 //----------------------------------------------------------------------
 namespace tt {
@@ -784,9 +786,16 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 // present, so the value must be written in the same breath — use STAMP_PUT.
 // Setting a bit whose name is NOT a member stays legal, because that is a GROUP
 // bit (`xgb_hyperparams` gates nine fields and has none of its own). Structs
-// that do not opt in — the parse side `r`, the handle-copy side `*handle` — are
-// unrestricted, because there the value legitimately arrives from another
-// statement in the same macro expansion.
+// that do not opt in are unrestricted — but for TWO DIFFERENT reasons, and an earlier
+// draft of this comment wrongly gave them the same one. The PARSE side `r` is genuinely
+// structural: its bits are set inside the parser's macro walk, paired with the value by
+// construction. The HANDLE side `*handle` is NOT — `ML_Headers/NodeModelZoo.hpp`'s
+// sr->handle block is HAND-WRITTEN `STAMP_SET(*handle, X); handle->X = sr.X;` pairs, many
+// bit-BEFORE-value, and the companion macro its own comment names
+// (`STAMP_HANDLE_COPY_FROM_RESULT`) does not exist. **Site #4 of the D-426 pattern lived
+// there.** It is unguarded because it is not opted in, NOT because it is safe; extending
+// the opt-in there is tracked follow-up. Do not restore the "same macro expansion"
+// phrasing for `*handle` — it was measured FALSE at the D-426 close.
 //
 // ⚠ D-426 — DO NOT "SIMPLIFY" THIS TO REFUSE EVERY STAMP_SET ON THE EMIT STRUCT.
 // That version was built and reverted the same session. It correctly rejected
@@ -797,7 +806,8 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 //
 // WHY THIS SHAPE and not a generated trait per name: the emit struct's members
 // come from TWO independent generators (FOREACH_STAMP_BOUND_MODEL_CONST at
-// ModelInference.hpp:2071 and STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN at :2084,
+// ModelInference.hpp and STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN, both expanded in that struct's body
+// (re-derive by symbol — these line numbers drifted within one session of being written),
 // which expands a different meta-registry). A trait list generated from either
 // one is blind to the other's fields and would silently ALLOW exactly the defect
 // this guard exists to catch — Class 58-A rebuilt inside the guard. Asking the

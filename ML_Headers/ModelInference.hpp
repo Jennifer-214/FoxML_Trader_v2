@@ -1444,11 +1444,14 @@ struct ModelStampResult {
     int      inference_cfg_drift_count;  // v5.9.2b runtime: 0 if all match; >0 = mismatched fields
     uint8_t  cross_major_engine;     // v5.9.2b runtime: stamp's engine_version differs by major
 
-    // === Bit-packed has_* flags (v5.14.8.A.merged.1; 13 bits used today) ===
-    // 6 group bits (inference_cfg, scaler, fees, xgb_hyperparams, grid_member, label_params)
-    // + 7 standalone bits (inference_cfg_bandit_blend_ratio, training_poll_interval,
-    // model_num_outputs, build_flags_hash, label_registry_hash, feature_mask, xgb_train_nthread).
-    // 51 bits headroom in uint64_t for future fields.
+    // === Bit-packed has_* flags (v5.14.8.A.merged.1) ===
+    // ⚠ NO INVENTORY HERE ON PURPOSE. This comment used to enumerate "13 bits — 6 group +
+    // 7 standalone" and name them. By 2026-08-17 every part of that was false: `fees` was
+    // deleted (2026-08-16), `inference_cfg_bandit_blend_ratio` was deleted (D-426),
+    // `environment_meta` was never listed, and the real total had moved. It survived BOTH
+    // deletions' sweeps because a prose inventory is invisible to every guard.
+    // Re-derive from the SSoT instead — `enum StampHasFlagBit` in
+    // StampBoundModelConstRegistry.hpp, whose terminal `STAMP_BIT_COUNT` is the count.
     uint64_t has_flags;
 
     // === Architectural value fields — auto-generated from FOREACH_STAMP_BOUND_MODEL_CONST ===
@@ -2127,29 +2130,33 @@ struct StampInferenceCfgInputs {
 // template is already visible); specialized here because that header precedes
 // this type's definition.
 //
-// ⚠️ EFFECT TODAY: **NONE.** This specialization is INERT — nothing reads it.
-// It is the opt-in half of a `STAMP_SET` refusal that was built, PROVEN, and
-// then REVERTED the same session for being too broad (a GROUP bit has no field
-// of its own, so refusing it was wrong). At HEAD, `StampHelper.hpp` still
-// contains live `STAMP_SET(inf, …)` calls and they compile — including the
-// `inference_cfg_bandit_blend_ratio` bit-without-value at `:250`. See the ⚠️
-// block on `STAMP_SET` in StampBoundModelConstRegistry.hpp for the correct
-// narrower rule and the C++17 blocker that stalls it.
+// EFFECT TODAY: **LIVE.** This is the opt-in marker for the `STAMP_SET` guard,
+// read at the `static_assert` in StampBoundModelConstRegistry.hpp's STAMP_SET.
+// `StampInferenceCfgInputs` is the ONLY struct that opts in, so `STAMP_SET` on a
+// name that IS a member of THIS struct is a compile error (use `STAMP_PUT`),
+// while a GROUP bit — which has no field of its own — stays legal.
 //
-// An earlier draft of THIS comment claimed the refusal was live ("STAMP_SET(inf,
-// <row>) no longer compiles"). It was written while the guard was armed and not
-// swept when the guard came out — false at HEAD, and caught by the close-out's
-// independent review, not by its author. Recorded rather than quietly deleted
-// because it is a verbatim instance of the defect this whole arc is about: a
-// comment asserting a guard that is not there is exactly why the `fees` sibling
-// survived its own sweep (`StampHelper.hpp:227-229`). Class 58 sub-shape A′,
-// authored by the commit whose subject is Class 58 sub-shape A′.
+// ⚠️ THIS COMMENT HAS NOW BEEN FALSE IN BOTH DIRECTIONS ON CONSECUTIVE DAYS, which
+// is why it is worth reading slowly. Draft 1 claimed the refusal was live while the
+// guard had been reverted. That was corrected to "EFFECT TODAY: NONE — this
+// specialization is INERT, nothing reads it", which was true for a few hours and
+// then became false when the guard landed — and it was NOT swept, because the
+// commit that armed the guard touched exactly one file. Both errors were caught by
+// an independent close-out review, neither by the author.
 //
-// When the guard lands, this becomes the opt-in marker it was written to be:
-// the ONLY struct that opts in, because the parse-side ModelStampResult and the
-// runtime ModelHandle both set presence bits whose values arrive from a sibling
-// statement in the same macro expansion — structural pairing, not the
-// hand-written kind that drifted twice.
+// That is the whole lesson of this arc, reproduced twice on its own opt-in marker:
+// a comment asserting the presence or absence of a guard is exactly why the `fees`
+// sibling survived its own sweep. Class 58 sub-shape A′. **If you change the guard,
+// sweep THIS comment in the same commit — it has a 2-for-2 record of being missed.**
+//
+// ⚠️ SCOPE — and do NOT repeat the too-broad claim the earlier drafts made here.
+// The parse-side `ModelStampResult` legitimately stays out: its presence bits are
+// set inside the parser's macro walk, structurally paired with the value. The
+// runtime `ModelHandle` is a DIFFERENT case and the earlier phrasing lumped them
+// together wrongly: its sr->handle copies are HAND-WRITTEN pairs, many of them
+// bit-before-value, and site #4 of this arc's four-site pattern lived in exactly
+// that block. It is unguarded because it is not opted in — not because it is safe.
+// Extending the opt-in there is tracked follow-up, not a settled exemption.
 namespace tt {
     template <>
     inline constexpr bool is_stamp_emit_inputs_v<StampInferenceCfgInputs> = true;
