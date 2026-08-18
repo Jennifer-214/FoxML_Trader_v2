@@ -273,8 +273,7 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // ────────────────────────────────────────────────────────────────────
 
     // Training poll interval (from cfg; same on all callers)
-    STAMP_SET(inf, training_poll_interval);
-    inf.training_poll_interval = cfg.poll_interval;
+    STAMP_PUT(inf, training_poll_interval, cfg.poll_interval);
 
     // feature_mask — the feature subset this model was TRAINED on.
     //
@@ -300,8 +299,7 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // A model trained on the full feature set must not be served a subset — the
     // registry pins input shape (FeatureRegistry.hpp), so a masked feed is drift, not
     // a smaller model. Previously that operator got a WARN and an unverified load.
-    STAMP_SET(inf, feature_mask);
-    inf.feature_mask = 0xFFFFFFFFFFFFFFFFULL;  // NB: the registry row's get_value says `inf->feature_mask_train`, a member that does NOT exist — a dead column that only compiles because AUTOPOPULATE is quarantined (PARITY-022)
+    STAMP_PUT(inf, feature_mask, 0xFFFFFFFFFFFFFFFFULL);  // NB: the registry row's get_value says `inf->feature_mask_train`, a member that does NOT exist — a dead column that only compiles because AUTOPOPULATE is quarantined (PARITY-022)
 
     // Training wall-clock (μs since unix epoch).
     //
@@ -323,18 +321,17 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     {
         struct timespec ts_train;
         clock_gettime(CLOCK_REALTIME, &ts_train);
-        inf.training_timestamp_us = (uint64_t)ts_train.tv_sec * 1000000ULL
-                                  + (uint64_t)ts_train.tv_nsec / 1000ULL;
-        STAMP_SET(inf, training_timestamp_us);
+        STAMP_PUT(inf, training_timestamp_us,
+                  (uint64_t)ts_train.tv_sec * 1000000ULL
+                + (uint64_t)ts_train.tv_nsec / 1000ULL);
     }
 
     // Model output count (from label_kind, or caller override)
     {
-        STAMP_SET(inf, model_num_outputs);
         int K = (args.req_num_outputs > 0)
               ? args.req_num_outputs
               : LabelType_NumClasses(args.label_kind);
-        inf.model_num_outputs = (K >= 2) ? K : 1;
+        STAMP_PUT(inf, model_num_outputs, (K >= 2) ? K : 1);
     }
 
     // XGBoost hyperparams (operator-tunable per caller)
@@ -355,14 +352,12 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     }
 
     // XGBoost training thread count (forensic; v5.11.41 CRITICAL-2 close)
-    STAMP_SET(inf, xgb_train_nthread);
-    inf.xgb_train_nthread = args.snap_train_nthread > 0 ? args.snap_train_nthread : 1;
+    STAMP_PUT(inf, xgb_train_nthread,
+              args.snap_train_nthread > 0 ? args.snap_train_nthread : 1);
 
     // Build flags + label registry hashes (build-time identity)
-    STAMP_SET(inf, build_flags_hash);
-    inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
-    STAMP_SET(inf, label_registry_hash);
-    inf.label_registry_hash = LABEL_REGISTRY_HASH();
+    STAMP_PUT(inf, build_flags_hash,    tt::BUILD_FLAGS_HASH());
+    STAMP_PUT(inf, label_registry_hash, LABEL_REGISTRY_HASH());
 
     // Label params (only if caller provides horizon_ticks > 0; v5.11.41 CRITICAL-1 close)
     if (args.horizon_ticks > 0) {
@@ -406,28 +401,19 @@ inline StampWriteResult Stamp_AssembleAndEmit(
 
     // Run identification (only if caller provides run_name)
     if (args.run_name && args.run_name[0]) {
-        STAMP_SET(inf, run_name);
-        size_t rnln = strnlen(args.run_name, sizeof(inf.run_name) - 1);
-        memcpy(inf.run_name, args.run_name, rnln);
-        inf.run_name[rnln] = '\0';
+        STAMP_PUT(inf, run_name, args.run_name);
     }
 
     // Architectural fields (training-time identity)
     if (args.req_num_outputs > 0) {
-        STAMP_SET(inf, expected_num_classes);
-        inf.expected_num_classes = args.req_num_outputs;
+        STAMP_PUT(inf, expected_num_classes, args.req_num_outputs);
     }
     if (args.req_role && args.req_role[0]) {
-        STAMP_SET(inf, expected_role);
-        size_t rln = strnlen(args.req_role, sizeof(inf.expected_role) - 1);
-        memcpy(inf.expected_role, args.req_role, rln);
-        inf.expected_role[rln] = '\0';
+        STAMP_PUT(inf, expected_role, args.req_role);
     }
     // Build constants — always emit (training-time = build-time identity)
-    STAMP_SET(inf, expected_num_features);
-    inf.expected_num_features = (int)MODEL_NUM_FEATURES;
-    STAMP_SET(inf, expected_feature_format_version);
-    inf.expected_feature_format_version = (int)MODEL_FORMAT_VERSION;
+    STAMP_PUT(inf, expected_num_features,            (int)MODEL_NUM_FEATURES);
+    STAMP_PUT(inf, expected_feature_format_version, (int)MODEL_FORMAT_VERSION);
 
     // ────────────────────────────────────────────────────────────────────
     // (3) Resolve caller-default fallbacks for stamp_write_for_model args.
