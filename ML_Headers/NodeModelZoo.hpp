@@ -466,11 +466,13 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             // v5.14.9.D — DELETED inference_cfg_freshness_tau population
             // (TECH_DEBT-004 close); registry entry + ModelHandle field deleted.
         }
-        if (STAMP_HAS(sr, inference_cfg_bandit_blend_ratio)) {
-            STAMP_SET(*handle, inference_cfg_bandit_blend_ratio);
-            handle->inference_cfg_bandit_blend_ratio =
-                sr.inference_cfg_bandit_blend_ratio;
-        }
+        // 2026-08-17 (D-426) — the `inference_cfg_bandit_blend_ratio` sr→handle copy was REMOVED
+        // with its row, for the identical reason as the `fees` copy described immediately below:
+        // it copied a permanently-zero field onto the handle. This is the FOURTH site of one
+        // pattern (fees emit → bandit emit → bandit panel display → this copy), and each time the
+        // `fees` twin was removed the `bandit` sibling three lines away survived, because the
+        // sweeps were scoped by what the previous sweep had touched rather than by tracing the
+        // key. The lesson is in the sweep's SHAPE, not in any of the four sites.
         // 2026-08-16 — the `fees` sr→handle copy was REMOVED with the group. It copied
         // two permanently-zero fields onto the handle, where they had NO readers except
         // the operator panel that displayed them as the model's training-time fees.

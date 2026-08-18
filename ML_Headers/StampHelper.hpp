@@ -223,10 +223,15 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // Closes Class 18 mirror at inf-struct surface for cfg-derived cohort
     // (production walker is single source of truth via framework).
     //
-    // BITMAP_IS_SET STAMP_SET checks below preserve wire-byte-relevant has-flag
-    // semantics. The bandit_blend_ratio prefixed has-flag controls the emission of
-    // the `inference_cfg_bandit_blend_ratio=X` wire key; the fees group has-flag is
-    // similarly wire-byte-relevant for fees emit.
+    // ⚠ CORRECTED AGAIN at E.1.2/D-426 (2026-08-17). This paragraph used to read: "BITMAP_IS_SET
+    // STAMP_SET checks below preserve wire-byte-relevant has-flag semantics. The bandit_blend_ratio
+    // prefixed has-flag controls the emission of the `inference_cfg_bandit_blend_ratio=X` wire key;
+    // the fees group has-flag is similarly wire-byte-relevant for fees emit." BOTH clauses were
+    // false, and the first one is WHY the defect below survived: there was no `=X`. Nothing ever
+    // assigned that field, so the bit-set emitted the zero-init default into an HMAC-signed body.
+    // The comment asserting a value existed is what let the row pass the very sweep that killed its
+    // `fees` twin three lines down — Class 58 sub-shape A′, with this line as the instance. Both
+    // rows are now deleted and their wire keys burned in RETIRED_NAMES.
     //
     // ⚠ CORRECTED at E.1.2/D-421 (2026-08-15). This comment used to say that key was
     // emitted "at ModelInference.hpp:1817 FOREACH_STAMP_BOUND_CFG walker — REQUIRED at
@@ -246,9 +251,12 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // as its founding instance. A stale comment naming a deleted symbol is not inert; it
     // is an active instruction to the next reader.
     // ────────────────────────────────────────────────────────────────────
-    if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
-        STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
-    }
+    // 2026-08-17 (D-426) — the `inference_cfg_bandit_blend_ratio` bit-set was REMOVED with its
+    // row, on the `fees` precedent immediately below and for the identical reason. It set a
+    // presence bit for a field NOTHING assigned, so every model stamped with bandit_enabled=1
+    // carried `inference_cfg_bandit_blend_ratio=0` in its signed body next to the truthful
+    // cfg-derived `bandit_blend_ratio`. Deliberate wire-byte change; the real ratio is still
+    // stamped by the cfg-derived half that actually reads cfg.
     // 2026-08-16 — the `fees` group-bit set was REMOVED with the group. It set a bit
     // gating two rows whose producer had gone away at the .B.3 migration, so enabling
     // the cost gate emitted `inference_cfg_fee_rate_maker=0` / `_taker=0` into the

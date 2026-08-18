@@ -2306,10 +2306,15 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                         // v5.14.9.D — DELETED freshness_tau display
                         // (TECH_DEBT-004 close); registry entry + struct field
                         // deleted; stamp body line no longer emitted.
-                        if (STAMP_HAS(v, inference_cfg_bandit_blend_ratio)) {
-                            ImGui::Text("  bandit_blend_ratio:               %.4g",
-                                        v.inference_cfg_bandit_blend_ratio);
-                        }
+                        // 2026-08-17 (D-426) — the bandit_blend_ratio display was REMOVED with its
+                        // wire key, for the SAME reason the fee-rate display below it was: it
+                        // rendered a permanently-zero field as the model's training-time setting.
+                        // Every model stamped with bandit_enabled=1 showed `bandit_blend_ratio: 0`
+                        // here while the truthful cfg-derived value said otherwise. Found while
+                        // SCOPING the row deletion, not by the sweep that removed the fee-rate
+                        // twin — the third repeat of one pattern on this surface (fees emit ->
+                        // bandit emit -> bandit DISPLAY), which is why the display half now gets
+                        // enumerated with the emit half rather than after it.
                         // 2026-08-16 — the fee-rate display was REMOVED with the `fees`
                         // group. It rendered two permanently-zero fields as the model's
                         // training-time fees; the panel showed 0.00000 / 0.00000 while the

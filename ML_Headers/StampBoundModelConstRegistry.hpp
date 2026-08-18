@@ -303,16 +303,27 @@ namespace tt {
 //----------------------------------------------------------------------
 // [SECTION]_[STANDALONE has_* DECLARATIONS]
 //----------------------------------------------------------------------
-// Lists standalone entries (group="_" in main FOREACH). Each gets its
-// own has_<name> declaration. Adding a new standalone field requires:
-//   1. Add line to this STANDALONE macro (declares has_<name>)
-//   2. Add line to main FOREACH_STAMP_BOUND_MODEL_CONST (declares typed value)
-// Two places per addition; vs current ~5 sites. Alternative would
-// require preprocessor magic to detect group="_" in main FOREACH;
-// not worth the complexity for this gain.
+// Lists standalone entries (group="_" in main FOREACH).
+//
+// ⚠ WHAT THIS REGISTRY ACTUALLY DOES, corrected 2026-08-17 (D-426). The text here used to
+// read "Each gets its own has_<name> declaration … 1. Add line to this STANDALONE macro
+// (declares has_<name>)". It declares NOTHING. MEASURED: the macro's only expansion
+// anywhere in the tree is a COUNT ASSERTION in tests/controller_test.cpp (`standalone_count
+// >= 7`); there is no production expansion, and `has_bandit` — the declaration this row was
+// said to generate — never existed as a member. Its sole appearance was the dead `emit_when`
+// column of the very row that named it, so the two dead things referenced each other and
+// neither existed. The presence bits are declared by `enum StampHasFlagBit` instead, keyed by
+// the FULL wire-key name, not by this macro's short name (`bandit` vs
+// `STAMP_BIT_inference_cfg_bandit_blend_ratio`) — which is why the two never met.
+//
+// So: this is a DOCUMENTATION registry with a count-test consumer, not a generator. Adding a
+// standalone field means adding it to the main FOREACH (which declares the typed value) and to
+// `enum StampHasFlagBit` (which declares the bit); the row here keeps the count honest and
+// nothing else. Left in place rather than deleted because the count test is a real (if weak)
+// complement check on the main registry — but do not believe it generates anything.
 
 #define FOREACH_STAMP_BOUND_MODEL_CONST_STANDALONE(X)                                               \
-    X(bandit,                       "bandit blend ratio set (1 field)")                             \
+    /* `bandit` REMOVED 2026-08-17 (D-426) with its wire key — see the PRE_CFG registry comment. */ \
     X(training_poll_interval,       "training poll cadence set (1 field)")                          \
     X(model_num_outputs,            "model output dimension set (1 field)")                         \
     X(build_flags_hash,             "build flags hash set (1 field)")                               \
@@ -352,9 +363,19 @@ namespace tt {
     /* the legacy-key dispatch layer was retired with it (TECH_DEBT-238, H21). `has_inference_cfg`*/ \
     /* group bit + group declaration at line 231 retained as dead infra; future ship cleans up.   */ \
     /* v5.14.9.D PRECEDENT: freshness_tau DELETED via same pattern (TECH_DEBT-004 close).         */ \
-    /* === bandit (standalone) — emitted at line 2189 === */                                        \
-    X(inference_cfg_bandit_blend_ratio,         _, INCLUDE, double, "%g", 0.0,                      \
-      inf->bandit_blend_ratio, inf->has_bandit, "bandit blend ratio (Exp3 vs ridge)")               \
+    /* === bandit (standalone) — REMOVED 2026-08-17 (E.1.2 D-426). RETIRED WIRE KEY,             */ \
+    /* DO NOT REUSE THE NAME: `inference_cfg_bandit_blend_ratio` (burned in RETIRED_NAMES).      */ \
+    /* WHY — the `fees` twin, three lines below, and the SAME cause: the .B.3 migration moved    */ \
+    /* the producer to the cfg-derived half (`bandit_blend_ratio` carries STAMP_BOUND_CFG_DERIVED */ \
+    /* at CfgFieldRegistry.hpp:669 and emits the TRUE configured value) and left the bit-set     */ \
+    /* behind at StampHelper.hpp. Nothing ever assigned this field, so `StampInferenceCfgInputs  */ \
+    /* inf = {}` zero-init meant the signed body carried `inference_cfg_bandit_blend_ratio=0`    */ \
+    /* beside the truthful cfg-derived line — ONE model-identity document making TWO             */ \
+    /* contradictory claims about one quantity. Dormant until this sprint's `bandit_enabled`     */ \
+    /* 0->1 default flip at 5d45ecc ARMED it. Per H21 Rule 1a a retired EMITTING row does not go */ \
+    /* dead, it goes LYING, so the row is DELETED (not tombstoned in place) and the NAME is what */ \
+    /* stays protected. Nothing is lost: the real ratio is still stamped, by the half that       */ \
+    /* actually reads cfg. Its `has_bandit` STANDALONE row went with it — see that macro.        */ \
     /* === fees group — REMOVED 2026-08-16 (E.1.2). RETIRED WIRE KEYS, DO NOT REUSE THE NAMES:  */ \
     /*     `inference_cfg_fee_rate_maker` / `inference_cfg_fee_rate_taker`.                     */ \
     /* WHY: the .B.3 prefix migration moved fee rates onto the cfg-derived emit half            */ \
@@ -615,7 +636,11 @@ enum StampHasFlagBit : uint64_t {
     STAMP_BIT_environment_meta,    // v5.14.8.D — 5-field environment_meta group
 
     // === Standalone bits — PRE_CFG section (emitted before FOREACH_STAMP_BOUND_CFG) ===
-    STAMP_BIT_inference_cfg_bandit_blend_ratio,
+    /* STAMP_BIT_inference_cfg_bandit_blend_ratio REMOVED 2026-08-17 (D-426) — its wire key is
+       gone (see the registry comment). Renumbering the bits below is H21-SAFE for the same
+       reason the STAMP_BIT_fees removal above was: has_flags is never persisted, hashed or
+       memcmp'd, so no artifact encodes a bit POSITION. The retired NAMES are what stay
+       protected, and both this bit's name and the wire key are burned in RETIRED_NAMES. */
     STAMP_BIT_training_poll_interval,
     STAMP_BIT_model_num_outputs,
     STAMP_BIT_build_flags_hash,
@@ -652,7 +677,7 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define MASK_xgb_hyperparams                        (1ULL << tt::STAMP_BIT_xgb_hyperparams)
 #define MASK_grid_member                            (1ULL << tt::STAMP_BIT_grid_member)
 #define MASK_label_params                           (1ULL << tt::STAMP_BIT_label_params)
-#define MASK_inference_cfg_bandit_blend_ratio       (1ULL << tt::STAMP_BIT_inference_cfg_bandit_blend_ratio)
+/* MASK_inference_cfg_bandit_blend_ratio REMOVED 2026-08-17 (D-426) with its bit + wire key. */
 #define MASK_training_poll_interval                 (1ULL << tt::STAMP_BIT_training_poll_interval)
 #define MASK_model_num_outputs                      (1ULL << tt::STAMP_BIT_model_num_outputs)
 #define MASK_build_flags_hash                       (1ULL << tt::STAMP_BIT_build_flags_hash)
