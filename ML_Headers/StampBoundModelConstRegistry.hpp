@@ -47,6 +47,7 @@
 #include <string.h>   // strncpy, strncmp
 #include <cstdint>    // v5.15.5.F.4d — uint64_t used in expansion of FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG bandit/thompson rows; explicit per IWYU discipline (sister to TECH_DEBT-083 IWYU sweep)
 #include <type_traits>  // v5.14.8.A.merged.4 — std::is_array_v / extent_v / is_floating_point_v / is_unsigned_v for tt::stamp_parse_field<T>
+#include <utility>      // D-426 — std::declval for tt::is_valid (the STAMP_SET member-existence guard); explicit per IWYU discipline
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_* primitives (v5.14.8.A.0.b.1) backing STAMP_HAS / SET / CLR aliases
 
 //======================================================================
@@ -175,21 +176,64 @@ namespace tt {
 
     // is_stamp_emit_inputs_v — declared here, SPECIALIZED at the definition of
     // StampInferenceCfgInputs (ModelInference.hpp), which this header precedes.
-    // ⚠️ CONSUMERS AT HEAD: **ZERO.** An earlier draft of this line said "Sole
-    // consumer: the STAMP_SET guard below" — there is no such guard; `STAMP_SET`
-    // below is unmodified. The guard was built, proven, and reverted the same
-    // session (see its ⚠️ block). This trait is landed-INERT pending that guard,
-    // and saying so is the point: the previous phrasing asserted a mechanism that
-    // does not exist, which is the precise defect this file's own arc is about.
     //
-    // INTENDED consumer, once the guard lands: the primary template stays false,
-    // so a struct that never opts in keeps STAMP_SET's unrestricted behaviour —
-    // the parse side (`r`) and the handle-copy side (`*handle`) legitimately set
-    // a presence bit whose value arrives by another statement in the same macro
-    // expansion, and neither is the surface where the defect lives.
+    // SOLE CONSUMER: the STAMP_SET guard below (landed D-426). The primary
+    // template stays false, so a struct that never opts in keeps STAMP_SET's
+    // unrestricted behaviour — the parse side (`r`) and the handle-copy side
+    // (`*handle`) legitimately set a presence bit whose value arrives by another
+    // statement in the same macro expansion, and neither is the surface where the
+    // defect lives. Opting a struct in is therefore a deliberate declaration that
+    // "on THIS struct, a presence bit for a field must not be set without its
+    // value" — not a property the guard infers.
+    //
+    // ⚠ HISTORY, kept because it is the reason this comment is worded carefully:
+    // an earlier draft asserted "Sole consumer: the STAMP_SET guard below" while
+    // no such guard existed (the guard had been built, proven, and reverted the
+    // same session). It was corrected to "ZERO consumers", and is now accurate
+    // again in the other direction. A comment asserting a mechanism that does not
+    // exist is the precise defect this file's own arc is about — so the claim is
+    // true at HEAD, and re-checkable in one grep: `rg is_stamp_emit_inputs_v`.
     template <typename T>
     inline constexpr bool is_stamp_emit_inputs_v = false;
+
+    // ------------------------------------------------------------------
+    // is_valid — compile-time "is this expression well-formed?" (D-426).
+    //
+    // This is the pre-C++20 spelling of `requires { expr; }`. THIS BUILD IS
+    // C++17 (CMakeLists.txt:4), where a lambda may not appear in an unevaluated
+    // operand — so the lambda is passed as an ARGUMENT (an evaluated context)
+    // and only its TYPE is used. That is the whole trick, and it is why this
+    // compiles under C++17 while the obvious `decltype([]{...})` spelling does
+    // not. At C++20 adoption this collapses to `requires` and the helper dies.
+    //
+    // WHY A DETECTION IDIOM AND NOT AN if-constexpr CHAIN (the house style):
+    // `type-trait-dispatch-via-tt-namespace.md` prefers a direct if-constexpr
+    // chain over metaprogramming, and rejects Boost.Hana. That preference is
+    // honoured everywhere it CAN be — but it does not reach this question. An
+    // if-constexpr chain dispatches on a TYPE you already name; here the
+    // question is "does a member spelled `name` exist on this struct?", which
+    // no chain can ask. The only alternatives were a generated trait per name
+    // (needs a name-universe, and the emit struct is fed by TWO independent
+    // generators — FOREACH_STAMP_BOUND_MODEL_CONST *and*
+    // STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN — so any single-registry universe is
+    // blind to the other's fields, which is Class 58-A rebuilt inside the guard)
+    // or moving to C++20. The spec's rejection of Hana was about taking a
+    // DEPENDENCY; this is ~10 in-tree lines and adds none.
+    // ------------------------------------------------------------------
+    template <typename F, typename... Args>
+    constexpr auto is_valid_impl(int) -> decltype(std::declval<F>()(std::declval<Args>()...), bool{}) { return true; }
+    template <typename F, typename... Args>
+    constexpr bool is_valid_impl(...) { return false; }
+
+    template <typename... Args, typename F>
+    constexpr bool is_valid(F&&) { return is_valid_impl<F, Args...>(0); }
 }
+
+// TT_HAS_MEMBER(s, name) — does the expression `s` have a member spelled `name`?
+// Expression form (not type form) so it mirrors STAMP_SET's own `(s)` argument,
+// which may be `inf`, `r`, or `*handle`.
+#define TT_HAS_MEMBER(s, name) \
+    (tt::is_valid<decltype((s))>([](auto&& _x) -> decltype(void(_x.name)) {}))
 
 //----------------------------------------------------------------------
 // [SECTION]_[REGISTRY ENTRY SHAPE]
@@ -733,30 +777,42 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
         BITMAP_SET((s).has_flags, MASK_##name);                                \
     } while (0)
 
-// STAMP_SET — presence bit ONLY.
+// STAMP_SET — presence bit ONLY, and only where that is legitimate.
 //
-// ⚠️ D-426, DESIGN INCOMPLETE — READ BEFORE "FINISHING" THIS.
-// A static_assert refusing STAMP_SET on the emit-side struct was built here and
-// REVERTED the same session, because it was measurably too broad. It correctly
-// rejected all 17 emit sites (including the live `inference_cfg_bandit_blend_ratio`
-// bit-without-value at StampHelper.hpp:250 — proof the idea works), but a GROUP
-// bit such as `xgb_hyperparams` has NO field of its own, so setting it without a
-// value is legitimate and the assert refused that too.
+// On a struct that opts into `tt::is_stamp_emit_inputs_v`, setting a presence
+// bit for a name that IS a member is a compile error: the bit claims a value is
+// present, so the value must be written in the same breath — use STAMP_PUT.
+// Setting a bit whose name is NOT a member stays legal, because that is a GROUP
+// bit (`xgb_hyperparams` gates nine fields and has none of its own). Structs
+// that do not opt in — the parse side `r`, the handle-copy side `*handle` — are
+// unrestricted, because there the value legitimately arrives from another
+// statement in the same macro expansion.
 //
-// The correct discrimination is: refuse STAMP_SET only when a same-named MEMBER
-// exists (a field's presence bit); allow it when none does (a group bit). In
-// C++20 that is `requires { (s).name; }` inline. THIS BUILD IS C++17
-// (CMakeLists.txt:4), so it needs a void_t trait generated per name — which
-// requires choosing a name-universe, and the obvious one is unusable as-is:
-// `FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS` is DRIFTED from `enum StampHasFlagBit`
-// (missing `environment_meta`), so generating from it would leave a hole exactly
-// where a future caller would land. Resolve that drift first, or generate from
-// the enum, or move the build to C++20 — an operator call, not a cleanup.
+// ⚠ D-426 — DO NOT "SIMPLIFY" THIS TO REFUSE EVERY STAMP_SET ON THE EMIT STRUCT.
+// That version was built and reverted the same session. It correctly rejected
+// the live `inference_cfg_bandit_blend_ratio` bit-without-value — proof the idea
+// works — but it also rejected the legitimate group bits, because it asked "is
+// this the emit struct?" instead of "does this name have a field?". The member
+// test is the whole discrimination; deleting it re-breaks the group bits.
 //
-// Until then the co-location property is carried by STAMP_PUT being AVAILABLE
-// and used, which is convention, not enforcement. Do not read the absence of a
-// red as coverage: `STAMP_SET(inf, X); /* no inf.X = ... */` still compiles.
-#define STAMP_SET(s, name)  BITMAP_SET((s).has_flags, MASK_##name)
+// WHY THIS SHAPE and not a generated trait per name: the emit struct's members
+// come from TWO independent generators (FOREACH_STAMP_BOUND_MODEL_CONST at
+// ModelInference.hpp:2071 and STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN at :2084,
+// which expands a different meta-registry). A trait list generated from either
+// one is blind to the other's fields and would silently ALLOW exactly the defect
+// this guard exists to catch — Class 58-A rebuilt inside the guard. Asking the
+// compiler sees the assembled struct, whichever generator contributed the member.
+// See tt::is_valid above for the C++17 mechanics + the spec reconciliation.
+#define STAMP_SET(s, name)                                                        \
+    do {                                                                          \
+        static_assert(!tt::is_stamp_emit_inputs_v<std::decay_t<decltype(s)>>      \
+                          || !TT_HAS_MEMBER(s, name),                             \
+                      "STAMP_SET sets a presence bit for a field WITHOUT its "    \
+                      "value — the bit claims the value is present and it is "    \
+                      "not, so a zero-initialised default lands in the "          \
+                      "HMAC-signed body. Use STAMP_PUT(s, name, value).");        \
+        BITMAP_SET((s).has_flags, MASK_##name);                                   \
+    } while (0)
 
 #define STAMP_CLR(s, name)  BITMAP_CLR((s).has_flags, MASK_##name)
 #define STAMP_ANY(s, mask_set) BITMAP_ANY((s).has_flags, (mask_set))
