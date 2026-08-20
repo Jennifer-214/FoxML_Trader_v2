@@ -38,6 +38,9 @@
 
 #include <sys/stat.h>  // mkdir
 #include <stdlib.h>    // v5.15.3.C — setenv("OMP_NUM_THREADS", ...) at main entry
+#include <unistd.h>    // 2026-08-20 — readlink()/chdir() for the repo-root cwd anchor
+#include <string.h>    // strrchr (cwd anchor)
+#include <errno.h>     // strerror on chdir failure (cwd anchor)
 
 //======================================================================================================
 // [SUITE DOCK LAYOUT]
@@ -115,6 +118,40 @@ int main(int argc, char *argv[]) {
     // standardizer, label binning, walk-forward scoring). Match engine's
     // MXCSR state so trained models score identically at serve time.
     tt::engine_set_mxcsr_ftz_daz();
+
+    // 2026-08-20 — anchor cwd to the repo root BEFORE any relative file I/O.
+    // Every suite path is repo-root-relative (logging/, data/, models/,
+    // backtest.cfg, foxml_suite.ini, data/foxml_gui_state.txt). Launched from a
+    // desktop entry or any other directory, the suite found no data, disabled
+    // Collect Features ("Select data files first"), and wrote its log into the
+    // launch cwd — indistinguishable from a broken trainer at the operator seat.
+    // Same anchoring the data scripts use (scripts/download_data.sh: cd to
+    // `readlink -f $0`/..). Root = parent of the dir holding this binary — all
+    // build dirs (build_gui/, build_suite/, build_debug/, ...) sit one level
+    // below the repo root, and /proc/self/exe resolves the bin/foxml_suite
+    // symlink to the real build dir. FOXML_ROOT env overrides for a relocated
+    // install; on readlink AND override both unavailable, behaves as before
+    // (launch-cwd-relative).
+    {
+        const char *root = getenv("FOXML_ROOT");
+        char exe_dir[512];
+        if (!root) {
+            ssize_t n = readlink("/proc/self/exe", exe_dir, sizeof(exe_dir) - 1);
+            if (n > 0) {
+                exe_dir[n] = '\0';
+                char *slash = strrchr(exe_dir, '/');
+                if (slash) {
+                    *slash = '\0';  // strip binary name → the build dir
+                    size_t len = strlen(exe_dir);
+                    snprintf(exe_dir + len, sizeof(exe_dir) - len, "/..");
+                    root = exe_dir;
+                }
+            }
+        }
+        if (root && chdir(root) != 0)
+            fprintf(stderr, "[suite] WARN: chdir(%s) failed (%s) — relative paths "
+                            "resolve against the launch cwd\n", root, strerror(errno));
+    }
 
     fprintf(stderr, "foxml suite — backtesting + ML training workstation\n");
     fprintf(stderr, "Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n\n");

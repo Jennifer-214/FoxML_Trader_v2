@@ -570,6 +570,13 @@ static inline void GUI_Panel_DataBrowser(DataPanelState *state) {
 
     if (state->file_count == 0) {
         ImGui::TextDisabled("No CSV files found in %s", state->data_dir);
+        // a relative dir resolves against the process cwd — show it so a
+        // wrong-launch-directory (or a mistyped absolute path) is
+        // self-diagnosing instead of reading as a broken trainer
+        // (2026-08-20 operator report: scan of /data/BTCUSDT at fs root).
+        char cwd[512];
+        if (state->data_dir[0] != '/' && getcwd(cwd, sizeof(cwd)))
+            ImGui::TextDisabled("(relative to cwd: %s)", cwd);
         ImGui::TextDisabled("Place Binance aggTrades CSVs or TickRecorder output here.");
         ImGui::End();
         return;
