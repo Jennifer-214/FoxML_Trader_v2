@@ -1796,11 +1796,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
                                 : (uint16_t)(1u << c);
                             if ((state.oms->portfolio.active_bitmap & open_mask) == 0) {
+                                // E.1.2.C leg 3 — ensemble-aware (was
+                                // single-zoo-blind; shares the LiveReadiness
+                                // node_has_serving_model predicate).
                                 if (pending == STRATEGY_ML &&
-                                    state.nodes[c].model_handle == NULL) {
+                                    !tt::node_has_serving_model(state.nodes[c])) {
                                     fprintf(stderr,
                                         "[slow-path-%d] refusing swap to ML — "
-                                        "no model loaded\n", c);
+                                        "no single-zoo model and no ready ensemble\n", c);
                                     __atomic_store_n(
                                         &g_shared.swap_strategy_requested[c],
                                         STRATEGY_NONE, __ATOMIC_RELEASE);

@@ -65,6 +65,36 @@ inline uint16_t aggregate_zoo_drift(const NodeModelZoo<F>* zoo) {
                       zoo->regime.drift_flags_at_load     |
                       zoo->exit.drift_flags_at_load);
 }
+
+// E.1.2.C leg 3 (2026-08-20, R1 cascade #2) — ensemble sister. Before this,
+// the live-readiness drift checks aggregated ONLY the single-zoo handles, so
+// an ensemble-only deployment (the trainer's native layout) passed them
+// VACUOUSLY — the ensemble's drift bits never fed the live gate. Mirrors the
+// ShardedSnapshot dual-walk fix (single-zoo + ensemble arrays, exit incl.).
+template <unsigned F>
+inline uint16_t aggregate_ezoo_drift(const void* ezoo_handle) {
+    const EnsembleModelZoo<F>* ez = (const EnsembleModelZoo<F>*)ezoo_handle;
+    if (!ez) return 0;
+    uint16_t acc = 0;
+    for (int h = 0; h < ez->barrier_count        && h < ENSEMBLE_HORIZON_MAX; ++h) acc |= (uint16_t)ez->barrier[h].drift_flags_at_load;
+    for (int h = 0; h < ez->regime_count         && h < ENSEMBLE_HORIZON_MAX; ++h) acc |= (uint16_t)ez->regime[h].drift_flags_at_load;
+    for (int h = 0; h < ez->buy_signal_count     && h < ENSEMBLE_HORIZON_MAX; ++h) acc |= (uint16_t)ez->buy_signal[h].drift_flags_at_load;
+    for (int h = 0; h < ez->exit_predictor_count && h < ENSEMBLE_HORIZON_MAX; ++h) acc |= (uint16_t)ez->exit_predictor[h].drift_flags_at_load;
+    return acc;
+}
+
+// E.1.2.C leg 3 — "this ML node has a serving model": single zoo OR a ready
+// ensemble. The three single-zoo-blind gates below share this predicate
+// (Run.hpp's swap-to-ML refusal carries the same logic inline).
+template <unsigned F>
+inline bool node_has_serving_model(const NodeContext<F>& node) {
+    if (node.model_handle != nullptr) return true;
+    const EnsembleModelZoo<F>* ez = (const EnsembleModelZoo<F>*)node.ensemble_handle;
+    return ez != nullptr
+        && BITMAP_IS_SET(ez->init_flags, MASK_EZOO_ACTIVE)
+        && ez->primary_count > 0
+        && ez->primary_handles != nullptr;
+}
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -113,8 +143,11 @@ template <unsigned F>
 inline bool check_all_ml_cores_have_model(const ControllerConfig<F>& cfg,
                                           const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        // E.1.2.C leg 3 — ensemble-aware (was single-zoo-blind: an ML node
+        // serving a VERIFIED ensemble was refused at live boot with a
+        // misleading "no model" hint — R1's narrowing).
         if (cfg.node_strategies[i] == STRATEGY_ML &&
-            state.nodes[i].model_handle == nullptr) {
+            !node_has_serving_model(state.nodes[i])) {
             return false;
         }
     }
@@ -129,7 +162,11 @@ inline bool check_model_max_age_set(const ControllerConfig<F>& cfg,
     // (b) no core has MODEL_AGE_WARN drift bit set
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
         const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
-        if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_model_age_warn)) {
+        // E.1.2.C leg 3 — ensemble drift bits feed the gate too (was vacuous
+        // for ensemble-only nodes).
+        uint16_t drift = (uint16_t)(aggregate_zoo_drift(zoo) |
+                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+        if (BITMAP_IS_SET(drift, FAILURE_MASK_model_age_warn)) {
             return false;
         }
     }
@@ -141,7 +178,9 @@ inline bool check_no_feature_hash_drift(const ControllerConfig<F>& cfg,
                                         const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
         const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
-        if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_feature_hash_drift)) {
+        uint16_t drift = (uint16_t)(aggregate_zoo_drift(zoo) |
+                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+        if (BITMAP_IS_SET(drift, FAILURE_MASK_feature_hash_drift)) {
             return false;
         }
     }
@@ -153,7 +192,9 @@ inline bool check_no_label_hash_drift(const ControllerConfig<F>& cfg,
                                       const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
         const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
-        if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_label_hash_drift)) {
+        uint16_t drift_label_hash_drift = (uint16_t)(aggregate_zoo_drift(zoo) |
+                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+        if (BITMAP_IS_SET(drift_label_hash_drift, FAILURE_MASK_label_hash_drift)) {
             return false;
         }
     }
@@ -165,7 +206,9 @@ inline bool check_no_build_flags_drift(const ControllerConfig<F>& cfg,
                                        const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
         const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
-        if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_build_flags_drift)) {
+        uint16_t drift_build_flags_drift = (uint16_t)(aggregate_zoo_drift(zoo) |
+                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+        if (BITMAP_IS_SET(drift_build_flags_drift, FAILURE_MASK_build_flags_drift)) {
             return false;
         }
     }
@@ -177,7 +220,9 @@ inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
                                            const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
         const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
-        if (BITMAP_IS_SET(aggregate_zoo_drift(zoo), FAILURE_MASK_stamp_hmac_not_verified)) {
+        uint16_t drift_stamp_hmac_not_verified = (uint16_t)(aggregate_zoo_drift(zoo) |
+                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+        if (BITMAP_IS_SET(drift_stamp_hmac_not_verified, FAILURE_MASK_stamp_hmac_not_verified)) {
             return false;
         }
     }

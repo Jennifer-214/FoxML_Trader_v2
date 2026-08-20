@@ -2252,7 +2252,9 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     // class 1 (peak) probability as "exit imminent" signal.
     //
     // CRITICAL: without this aliasing, exit_predictor handles default to
-    // buy_class_idx=0 (VALLEY class) → Model_Predict_Normalized returns
+    // buy_class_idx=0 (STABLE class — E.1.2.C comment-truth fix; index 0
+    // is stable per LabelFunctions 3-class order, the hazard direction the
+    // original text described survives) → Model_Predict_Normalized returns
     // valley probability instead of peak probability → exits would fire
     // at WRONG MOMENT (during dips instead of at peaks). Silent semantic
     // inversion that the /plan-check + /merge-scan audits caught before
@@ -2357,7 +2359,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
 //
 // Operator workflow:
 //   1. Train Multi-Horizon (G.1) → models/<run>/<run>_horizon_<H>/role.json
-//   2. Cfg: core_N_model_dir=models/<run>  (NOTE: base path WITHOUT _horizon_<H>)
+//   2. Cfg: node_N_model_dir=models/<run>  (NOTE: base path WITHOUT _horizon_<H>)
 //   3. Engine boot calls AutoDetectFromDir(ezoo, "models/<run>", ...)
 //   4. Function discovers all _horizon_* siblings + populates ezoo
 //

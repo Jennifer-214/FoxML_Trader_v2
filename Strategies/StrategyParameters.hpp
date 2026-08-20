@@ -170,8 +170,13 @@ struct MLBuildContext {
     // single-model path (NodeModelZoo via model_handle, existing); when
     // engine boot auto-detects N horizon siblings on disk, populates this
     // pointer to the per-core EnsembleModelZoo. ML_BuildParameters checks
-    // ensemble_zoo first; if active, dispatches through Model_Predict_Ensemble;
-    // else falls through to single-zoo path bytewise-identical to pre-G.5.
+    // ensemble_zoo first; if active, dispatches through the primary_handles
+    // blend; else falls through to the single-zoo path.
+    // ⚠ HISTORY (E.1.2.C leg 3, 2026-08-20): from G.5 until R1's fix this
+    // paragraph was FALSE — the single-zoo gate ran FIRST, so a NULL/empty
+    // single zoo SimpleDipped even with this pointer active, and the blend
+    // was nested under the single-zoo BUY_SIGNAL arm. The comment described
+    // the intent; the code now matches it.
     void*               ensemble_zoo;        // EnsembleModelZoo<F>*  (nullptr = inactive)
     // v5.10.0a.G.7 — current regime classification. Used by ensemble
     // weighted-blend dispatch to select the correct per-regime bandit's
@@ -909,8 +914,21 @@ inline void ML_BuildParameters(
         gate_state = (const SlowPathGateState*)mctx->gate_state;
     }
 
-    // if no zoo or no models loaded, fall back to SimpleDip
-    if (!zoo || !NodeModelZoo_HasAny(zoo)) {
+    // E.1.2.C leg 3 (2026-08-20, R1 CONFIRMED) — hoist the ensemble handle so
+    // the gate below can see it. From G.5 until this fix the gate was single-
+    // zoo-blind: a pure `<base>_horizon_*` deployment — the ONLY layout the
+    // trainer produces — left model_handle NULL, so the whole ML path (blend,
+    // bandits, exit block) SimpleDipped in paper/backtest and REFUSED in live
+    // while a VERIFIED ensemble sat attached. The MLBuildContext doc's
+    // "checks ensemble_zoo first" was always the intent; it is now the code.
+    EnsembleModelZoo<F>* ezoo_pre = (EnsembleModelZoo<F>*)(mctx ? mctx->ensemble_zoo : nullptr);
+    const int ensemble_ready = (ezoo_pre != nullptr)
+        && BITMAP_IS_SET(ezoo_pre->init_flags, MASK_EZOO_ACTIVE)
+        && ezoo_pre->primary_count > 0
+        && ezoo_pre->primary_handles != nullptr;
+
+    // if no single-zoo models AND no ready ensemble, fall back to SimpleDip
+    if ((!zoo || !NodeModelZoo_HasAny(zoo)) && !ensemble_ready) {
         // v5.9.0b — emit rate-limited CRITICAL log so the operator sees
         // ML→SimpleDip fall-through (V5_9_AUDIT-#2). Pre-v5.9.0b this
         // was silent; now visible in health log.
@@ -923,7 +941,7 @@ inline void ML_BuildParameters(
                 /*gate_us=*/60000000ULL,  // 60s per-core gate
                 /*core=*/-1,  // ML_BuildParameters doesn't have node_id; -1 = unknown
                 "ml",
-                "ML→SimpleDip fall-through: %s (zoo=%s)",
+                "ML→SimpleDip fall-through: %s (zoo=%s, ensemble=inactive)",
                 load_failed ? "model load failed" : "no model configured",
                 zoo ? "empty" : "null");
         }
@@ -1026,7 +1044,11 @@ inline void ML_BuildParameters(
     double p_valley   = 0.5;
     int have_signal   = 0;
 
-    if (zoo->loaded_mask & NODE_MODEL_BARRIER) {
+    // E.1.2.C leg 3 — ensemble takes PRECEDENCE when ready (the role-agnostic
+    // primary_handles blend below serves barrier-primary ensembles too, which
+    // the old nesting made unreachable — R1 layer-b). Single-zoo barrier is
+    // the no-ensemble path.
+    if (!ensemble_ready && zoo && (zoo->loaded_mask & NODE_MODEL_BARRIER)) {
         // v5.9.3b — apply scaler associated with barrier role. Identity
         // no-op when zoo->barrier.scaler.has_scaler=0 (legacy or absent).
         if (tt::FeatureStandardizer_Apply(&zoo->barrier.scaler, features, n) < 0) {
@@ -1066,9 +1088,17 @@ inline void ML_BuildParameters(
                 have_signal = 1;
             }
         }
-    } else if (zoo->loaded_mask & NODE_MODEL_BUY_SIGNAL) {
-        // v5.9.3b — apply scaler associated with buy_signal role.
-        if (tt::FeatureStandardizer_Apply(&zoo->buy_signal.scaler, features, n) < 0) {
+    } else if (ensemble_ready || (zoo && (zoo->loaded_mask & NODE_MODEL_BUY_SIGNAL))) {
+        // v5.9.3b — apply scaler associated with the serving handles.
+        // E.1.2.C leg 3 (R2 seam) — ensemble-first standardization: an
+        // ensemble-only deployment has NO single-zoo buy_signal handle; use
+        // the primary handle's scaler instead (G.3 invariant: every member
+        // of a training run shares ONE scaler, so [0] standardizes for all
+        // arms). Identity no-op when has_scaler=0.
+        tt::FeatureStandardizer* eff_scaler = ensemble_ready
+            ? &ezoo_pre->primary_handles[0].scaler
+            : &zoo->buy_signal.scaler;
+        if (tt::FeatureStandardizer_Apply(eff_scaler, features, n) < 0) {
             fprintf(stderr, "[ML] dispatch: NaN/Inf post-scaler (buy_signal) — no signal\n");
             if (mctx && mctx->nan_feature_events_total) {
                 (*mctx->nan_feature_events_total)++;
@@ -1394,9 +1424,14 @@ inline void ML_BuildParameters(
                     /*ic_floor=*/0.02,
                     node_cfg);             // v5.15.5.F.4d — per-core bandit_algorithm source
             }
-        } else {
+        } else if (zoo && (zoo->loaded_mask & NODE_MODEL_BUY_SIGNAL)) {
             // Single-zoo path (existing; bytewise unchanged from pre-G.5)
             pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
+        } else {
+            // Unreachable by construction (this arm is entered only when
+            // ensemble_ready — handled above — or the single-zoo buy_signal
+            // exists). Defensive: route to the no-signal branch below.
+            pred_raw = std::nan("");
         }
         if (std::isnan(pred_raw) || std::isinf(pred_raw)) {
             fprintf(stderr, "[ML] dispatch: buy_signal prediction NaN/Inf — no signal\n");
