@@ -371,12 +371,17 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                 cfg.held_out_gate_strict,
                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
             if (n_loaded > 0 && BITMAP_IS_SET(ezoo_ptr->init_flags, MASK_EZOO_ACTIVE)) {
+                // E.1.2.C leg-4 Stage-1 evidence — the exit-predictor count is
+                // the boot-time oracle for "exit models actually loaded"
+                // (co-located exit.json arms; 0 = buy-only deployment).
                 fprintf(stderr, "[sharded] node %d: ensemble active "
-                                "(primary=%s, %d horizons; %d total models)\n",
+                                "(primary=%s, %d horizons; %d total models, "
+                                "%d exit predictors)\n",
                         c,
                         ezoo_ptr->primary_role_name[0]
                             ? ezoo_ptr->primary_role_name : "(none)",
-                        ezoo_ptr->primary_count, n_loaded);
+                        ezoo_ptr->primary_count, n_loaded,
+                        ezoo_ptr->exit_predictor_count);
                 EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, c,
                                                    cfg.node_model_dir[c]);
                 // v5.15.5.E.0.10 A6 ingress (D-221) — post-load corrupt finalize: union corrupt

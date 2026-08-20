@@ -471,17 +471,31 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
         Backtest_ComputeLabelsFromSamples(&rc->results, &rc->run_config);
 
         int n_valid = 0, n_pos = 0, n_neg = 0;
+        int n_stable = 0, n_peak = 0, n_valley = 0;   // 3-class (PVS) view
         for (int s = 0; s < rc->results.sample_count; ++s) {
             float lab = rc->results.labels[s];
             if (isnan(lab) || isinf(lab)) continue;
             n_valid++;
             if (lab > 0.5f) n_pos++;
             else if (lab < 0.5f) n_neg++;
+            if      (lab < 0.5f) n_stable++;
+            else if (lab < 1.5f) n_peak++;
+            else                 n_valley++;
         }
-        fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
-                        "%d valid samples (%d pos, %d neg, %d neutral) of %d total\n",
-                horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_pos, n_neg,
-                n_valid - n_pos - n_neg, rc->results.sample_count);
+        // E.1.2.C GUI polish (c) — the binary pos/neg split lumped peak(1)
+        // + valley(2) together as "pos" and printed stable as "neg" for the
+        // 3-class PVS label; print per-class counts for that kind instead.
+        if (rc->run_config.label_type == LABEL_PEAK_VALLEY_STABLE) {
+            fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
+                            "%d valid samples (%d stable, %d peak, %d valley) of %d total\n",
+                    horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_stable,
+                    n_peak, n_valley, rc->results.sample_count);
+        } else {
+            fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
+                            "%d valid samples (%d pos, %d neg, %d neutral) of %d total\n",
+                    horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_pos, n_neg,
+                    n_valid - n_pos - n_neg, rc->results.sample_count);
+        }
     }
     rc->run_config.label_forward_ticks = saved_forward_ticks;
     rc->run_config.label_tp_pct = saved_tp;
@@ -2944,6 +2958,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [THREAD]_[[TRAIN_WORKER_WRITER] [GUI_READER]]
+// [STRADDLE_EXEMPT]_[mh_horizon_ticks]_[GUI-thread-only display snapshot (click-write + render-read; the train worker never touches it) on cold per-frame UI cadence — E.1.2.C GUI polish (a) 2026-08-20]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[state for the Training panel — every training / validation / multi-horizon knob and worker handle]
 //======================================================================
@@ -3119,6 +3134,13 @@ struct TrainingPanelState {
     volatile int           mh_horizon_complete[8];
     volatile int           mh_horizon_progress[8];
     char                   mh_horizon_status[8][128];
+    // E.1.2.C GUI polish (a) — click-time snapshot of the run's horizon
+    // ticks for the per-horizon results table. The live ui_horizon_list
+    // re-parses ui_horizon_csv EVERY frame, so reading it from the table
+    // relabeled rows whenever the operator edited the CSV mid/post-run
+    // (and showed nothing on the cfg.horizon_list fallback path). GUI
+    // thread writes at click + reads at render — no volatile needed.
+    int                    mh_horizon_ticks[8];
 
     // v5.13.1.A — sell-side training. Routes Multi-Horizon output to a
     // side-specific subdirectory: side=0 (buy) leaves the existing
@@ -3146,11 +3168,11 @@ struct TrainingPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
-// [SIZE]_[500624B]
+// [UPDATED]_[2026-08-20]
+// [SIZE]_[500656B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[7823]
-// [STRADDLE]_[run_name@13369 · tm_phase_msg@25568 · ui_horizon_list@406776 · ui_tp_pct_csv@406812 · ui_sl_pct_csv@406876 · ui_sl_per_horizon@406972 · mh_horizon_complete@499432 · ui_label_kind_csv@500524 · ui_label_kind_per_horizon@500588]
+// [STRADDLE]_[run_name@13369 · tm_phase_msg@25568 · ui_horizon_list@406776 · ui_tp_pct_csv@406812 · ui_sl_pct_csv@406876 · ui_sl_per_horizon@406972 · mh_horizon_complete@499432 · mh_horizon_ticks@500520 · ui_label_kind_csv@500556]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3274,6 +3296,7 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->mh_current_horizon = 0;
     state->mh_cancel          = 0;
     state->mh_complete        = 0;
+    memset(state->mh_horizon_ticks, 0, sizeof(state->mh_horizon_ticks));
     // v5.10.0a-bugfix2 — UI horizon list defaults empty; operator types
     // CSV (or leaves blank to fall back to cfg.horizon_list). Pre-fill
     // with a sensible suggestion that matches the original Idea #4 spec
@@ -5101,7 +5124,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
         ImGui::InputText("TP Barrier %",
                          state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv));
-        ImGui::SetItemTooltip("Take-profit barrier as %% of price\n"
+        ImGui::SetItemTooltip("UNIT: percent of price — 0.5 = 0.5%% (= 50 bps).\n"
+                              "Take-profit barrier as %% of price\n"
                               "label = 1 (or VALLEY for 3-class) if price moves up this much before SL is hit\n"
                               "wider = fewer but higher-confidence labels\n"
                               "tip: 0.050 = 5 bps. For short horizons (~1k ticks) at BTC scale,\n"
@@ -5111,7 +5135,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "A single value (e.g. '0.030') broadcasts to all horizons.");
         ImGui::InputText("SL Barrier %",
                          state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv));
-        ImGui::SetItemTooltip("Stop-loss barrier as %% of price\n"
+        ImGui::SetItemTooltip("UNIT: percent of price — 0.5 = 0.5%% (= 50 bps).\n"
+                              "Stop-loss barrier as %% of price\n"
                               "label = 0 (or PEAK for 3-class) if price drops this much before TP is hit\n"
                               "wider = fewer but higher-confidence labels\n\n"
                               "v5.11.40 multi-horizon: same CSV format as TP — single value\n"
@@ -5860,6 +5885,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             float single_sl = (state->ui_sl_per_horizon_count > 0)
                             ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
 
+            // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
+            // per-horizon results table (the render must never read the
+            // live-reparsed ui_horizon_list).
+            state->mh_horizon_ticks[0] = single_h;
+            for (int i = 1; i < 8; ++i) state->mh_horizon_ticks[i] = 0;
+
             MultiHorizonWorkerArgs *mh_args =
                 (MultiHorizonWorkerArgs *)malloc(sizeof(MultiHorizonWorkerArgs));
             mh_args->state = state;
@@ -6097,6 +6128,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                      && i < state->ui_label_kind_per_horizon_count)
                         ? state->ui_label_kind_per_horizon[i] : bcast_lk;
             }
+            // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
+            // per-horizon results table (state arrays are [8]; self-bounded
+            // regardless of HORIZON_LIST_MAX).
+            for (int i = 0; i < 8; ++i)
+                state->mh_horizon_ticks[i] =
+                    (i < eff_horizon_count) ? eff_horizons[i] : 0;
             // v5.13.1.A — snapshot side at click time (race-free).
             mh_args->snap_training_side = state->ui_training_side;
             // v5.11.41 — snap FV/auto-stamp params at click time. Closes
@@ -6189,7 +6226,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 for (int h = 0; h < n_show; ++h) {
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", state->ui_horizon_list[h]);
+                    // E.1.2.C GUI polish (a) — the click-time snapshot, never
+                    // the live-reparsed ui_horizon_list (editing the CSV
+                    // mid/post-run relabeled these rows).
+                    ImGui::Text("%d", state->mh_horizon_ticks[h]);
 
                     ImGui::TableNextColumn();
                     int prog = state->mh_horizon_progress[h];
