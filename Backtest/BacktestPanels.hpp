@@ -4240,29 +4240,6 @@ struct MultiHorizonWorkerArgs {
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[Training_ResolveRole]
-//----------------------------------------------------------------------
-// [TAG]_[[GUI] [ML] [BACKTEST]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ONE role-file derivation — side selects the ROLE (side=1 => "exit", co-located); label kind picks among the buy roles otherwise; extracted pure so tests pin it and the two former hand-copies cannot drift (E.1.2.C 3-role)]
-//======================================================================
-// [CODE]
-//======================================================================
-static inline const char* Training_ResolveRole(int label_type, int training_side) {
-    if (training_side == 1) return "exit";   // E.1.2.C — the exit role file,
-                                             // CO-LOCATED; the ensemble loader
-                                             // already walks <dir>/exit.json.
-    if (label_type == LABEL_PEAK_VALLEY_STABLE) return "barrier";
-    if (label_type == LABEL_REGIME)             return "regime";
-    return "buy_signal";
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [END_FUNCTION]_[Training_ResolveRole]
-//======================================================================
-
-//======================================================================
 // [FUNCTION]_[mh_run_one_horizon_fv]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]

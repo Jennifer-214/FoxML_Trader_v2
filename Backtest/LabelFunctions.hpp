@@ -446,7 +446,8 @@ static const LabelDef label_table[] = {
 #undef X
 
 // Preserve the existing LABEL_COUNT name for call-site compatibility.
-// LABEL_COUNT_AUTO comes from the enum; equals LABEL_PEAK_VALLEY_STABLE+1.
+// LABEL_COUNT_AUTO comes from the enum; one past the LAST registry row
+// (append-only, so it grows with FOREACH_TARGET — do not name a member here).
 static const int LABEL_COUNT = LABEL_COUNT_AUTO;
 
 // v5.10.0d — FNV-1a registry hash over the X-macro's stable identifiers
@@ -545,6 +546,29 @@ static inline const char *LabelType_KindName(int label_type) {
 // [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-241]
 //======================================================================
 // [END_REGISTRY]_[FOREACH_TARGET]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Training_ResolveRole]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE role-file derivation — side selects the ROLE (side=1 => "exit", co-located); label kind picks among the buy roles otherwise; extracted pure so tests pin it and the two former hand-copies cannot drift (E.1.2.C 3-role)]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline const char* Training_ResolveRole(int label_type, int training_side) {
+    if (training_side == 1) return "exit";   // E.1.2.C — the exit role file,
+                                             // CO-LOCATED; the ensemble loader
+                                             // already walks <dir>/exit.json.
+    if (label_type == LABEL_PEAK_VALLEY_STABLE) return "barrier";
+    if (label_type == LABEL_REGIME)             return "regime";
+    return "buy_signal";
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_ResolveRole]
 //======================================================================
 
 #endif // LABEL_FUNCTIONS_HPP
