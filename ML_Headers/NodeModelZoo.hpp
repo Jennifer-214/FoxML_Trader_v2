@@ -46,7 +46,7 @@
 //     barrier.json       # 3-class softmax: stable/peak/valley
 //     buy_signal.json    # legacy single-binary (backward compat)
 //     regime.json        # multi-class regime classifier (future)
-//     exit.json          # exit timing (future)
+//     exit.json          # exit timing (REAL since E.1.2.C 3-role — the trainer emits it at side=1)
 //
 // missing files = role disabled (silently no-op). bundle deployment is atomic.
 //======================================================================================================
@@ -185,6 +185,25 @@ inline void NodeModelZoo_Init(NodeModelZoo<F> *zoo) {
 //======================================================================
 // [CODE]
 //======================================================================
+// E.1.2.C 3-role (F2) — the role-check decision, extracted PURE so the full
+// slot x key-state x strict table is table-tested (the D2 verdict's pinned
+// table). slot semantics: exit slot <=> role_name "exit"; buy slots keep
+// legacy (keyless) tolerance; exit slots have ZERO legacy population so a
+// keyless stamp there REFUSES in strict. strict==-1 never parses a stamp,
+// so callers never reach this with it — kept in the table for totality.
+enum RoleCheckDecision { ROLE_CHECK_PASS = 0, ROLE_CHECK_WARN = 1, ROLE_CHECK_REFUSE = 2 };
+static inline int Model_RoleCheckDecide(const char* slot_role, const char* stamp_role,
+                                        int has_role, int strict) {
+    if (strict == -1) return ROLE_CHECK_PASS;
+    const int exit_slot = (strcmp(slot_role, "exit") == 0);
+    if (!has_role) {
+        if (!exit_slot) return ROLE_CHECK_PASS;
+        return (strict == 1) ? ROLE_CHECK_REFUSE : ROLE_CHECK_WARN;
+    }
+    if (strcmp(stamp_role, slot_role) == 0) return ROLE_CHECK_PASS;
+    return (strict == 1) ? ROLE_CHECK_REFUSE : ROLE_CHECK_WARN;
+}
+
 template <unsigned F>
 inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     const char *role_name, int backend,
@@ -510,6 +529,37 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // load never carries copied state. One chokepoint covers boot,
         // both hot-swap paths, and backtest (all route through TryLoadRole).
         COPY_RESULT_TO_HANDLE_FROM_DERIVED(*handle, sr);
+        // E.1.2.C 3-role (F2, per the D2 verdict: O1-only) — enforce the
+        // EXISTING expected_role key (emitted since v5.15.3, checked by
+        // NOTHING until now). The stamp's recorded role must match the slot
+        // being loaded — a renamed buy model in an exit slot REFUSES instead
+        // of silently trading inverted. Decision table: Model_RoleCheckDecide
+        // above (pure, table-tested). WARN arm flags ml_role_mismatch on
+        // drift_flags_at_load — rides the fixed dual-walk aggregation.
+        {
+            const int rc_role = Model_RoleCheckDecide(
+                role_name, sr.expected_role,
+                STAMP_HAS(sr, expected_role) ? 1 : 0, held_out_gate_strict);
+            if (rc_role == ROLE_CHECK_REFUSE) {
+                fprintf(stderr,
+                    "[model] REFUSING %s — stamp expected_role='%s' vs slot '%s'%s (strict mode)\n",
+                    found_path,
+                    STAMP_HAS(sr, expected_role) ? sr.expected_role : "(absent)",
+                    role_name,
+                    STAMP_HAS(sr, expected_role) ? "" : " — keyless stamp in an exit slot");
+                Model_Free(handle);
+                Model_Init(handle);
+                return 0;
+            }
+            if (rc_role == ROLE_CHECK_WARN) {
+                fprintf(stderr,
+                    "[model] WARN: %s stamp expected_role='%s' vs slot '%s' (strict=0, loading anyway)\n",
+                    found_path,
+                    STAMP_HAS(sr, expected_role) ? sr.expected_role : "(absent)",
+                    role_name);
+                BITMAP_SET(handle->drift_flags_at_load, FAILURE_MASK_ml_role_mismatch);
+            }
+        }
         // v5.11.42 D.2 — horizon-mismatch refusal at ensemble load.
         // EnsembleModelZoo_LoadFromCfg parses horizon_ticks from dir
         // name `_horizon_<N>` and passes it as expected_horizon_ticks.

@@ -143,6 +143,12 @@ enum FailureModeGroupId : int {
       "Check sidecar file exists at stamp's claimed path + scaler_sha256\n"                             \
       "matches. Engine falls back to identity scaler (predictions degraded).",                          \
       tt::GROUP_STANDALONE)                                                                            \
+    X(ml_role_mismatch,         BIT_FLAG,    SEV_RED,    "role: MISMATCH",                              \
+      "Stamp expected_role does not match the slot this model loaded into\n"                            \
+      "(or an exit-slot stamp has no role key). A buy-trained model serving\n"                          \
+      "as an exit signal is semantically INVERTED. Retrain with the correct\n"                          \
+      "Training Side or restore the right file (E.1.2.C, PARITY-044).",                                 \
+      tt::GROUP_STANDALONE)                                                                            \
     X(warmup_progress_pct,      PERCENT_U8,  SEV_SAND,   "warmup: %u%%",                                \
       "Per-node slow path is still gathering rolling samples.\n"                                        \
       "Model + features won't fire predictions until rolling\n"                                         \

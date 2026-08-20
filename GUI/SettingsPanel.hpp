@@ -976,9 +976,9 @@ static inline void Settings_RescanModels(SettingsState *s) {
     DIR *dir = opendir("models");
     if (!dir) return;
     static const char* role_files[] = {
-        "barrier.json", "buy_signal.json", "regime.json",
-        "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
-        "barrier.bin",  "buy_signal.bin",  "regime.bin",
+        "barrier.json", "buy_signal.json", "regime.json", "exit.json",  /* E.1.2.C */
+        "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",  "exit.xgb",
+        "barrier.bin",  "buy_signal.bin",  "regime.bin",  "exit.bin",
         nullptr
     };
     struct dirent *de;

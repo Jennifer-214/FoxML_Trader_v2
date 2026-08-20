@@ -1166,7 +1166,7 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         char model_path[400];
         const char *src_ext = ".json";  // most common; verifier checks .bin path with .stamp suffix
         // Try role-specific filenames in priority order
-        const char *role_files[] = {"barrier.json", "buy_signal.json", "regime.json",
+        const char *role_files[] = {"barrier.json", "buy_signal.json", "regime.json", "exit.json", "exit.xgb",  /* E.1.2.C — exit-blindness fix */
                                      "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
                                      NULL};
         for (int i = 0; role_files[i]; ++i) {
@@ -2168,8 +2168,8 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                 // failed with "no model file found in models/<dir>/" for
                 // any kind-organized run.
                 const char *role_files[] = {
-                    "barrier.json", "buy_signal.json", "regime.json",
-                    "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
+                    "barrier.json", "buy_signal.json", "regime.json", "exit.json",  /* E.1.2.C */
+                    "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",  "exit.xgb",
                     NULL
                 };
                 char model_path[640];
@@ -3531,6 +3531,23 @@ static inline void *fullvalidation_worker_fn(void *arg) {
         if (n >= sizeof(state->fv_results.auto_stamp_path))
             n = sizeof(state->fv_results.auto_stamp_path) - 1;
         memcpy(state->fv_results.auto_stamp_path, model_path_snap, n);
+        // E.1.2.C 3-role (F1, per the D2 verdict) — the FV re-stamp was the ONE
+        // production emit path that omitted expected_role (fv_results is memset
+        // above, req_role stayed ""). Derive it from the model basename stem
+        // when it exactly names a role file; otherwise leave empty (legacy).
+        {
+            const char* base = strrchr(model_path_snap, '/');
+            base = base ? base + 1 : model_path_snap;
+            static const char* kRoles[4] = {"barrier", "regime", "exit", "buy_signal"};
+            for (int ri = 0; ri < 4; ++ri) {
+                size_t rl = strlen(kRoles[ri]);
+                if (strncmp(base, kRoles[ri], rl) == 0 && base[rl] == '.') {
+                    snprintf(state->fv_results.req_role,
+                             sizeof(state->fv_results.req_role), "%s", kRoles[ri]);
+                    break;
+                }
+            }
+        }
         state->fv_results.auto_stamp_path[n] = '\0';
     }
     {
@@ -4211,6 +4228,29 @@ struct MultiHorizonWorkerArgs {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Training_ResolveRole]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE role-file derivation — side selects the ROLE (side=1 => "exit", co-located); label kind picks among the buy roles otherwise; extracted pure so tests pin it and the two former hand-copies cannot drift (E.1.2.C 3-role)]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline const char* Training_ResolveRole(int label_type, int training_side) {
+    if (training_side == 1) return "exit";   // E.1.2.C — the exit role file,
+                                             // CO-LOCATED; the ensemble loader
+                                             // already walks <dir>/exit.json.
+    if (label_type == LABEL_PEAK_VALLEY_STABLE) return "barrier";
+    if (label_type == LABEL_REGIME)             return "regime";
+    return "buy_signal";
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_ResolveRole]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[mh_run_one_horizon_fv]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
@@ -4287,9 +4327,9 @@ static inline void mh_run_one_horizon_fv(
                       ? label_table[label_type].num_classes : 0;
     int is_multiclass = (num_classes >= 2);
     int is_regression = (num_classes == 1);
-    const char* role = "buy_signal";
-    if (label_type == LABEL_PEAK_VALLEY_STABLE) role = "barrier";
-    else if (label_type == LABEL_REGIME)        role = "regime";
+    // E.1.2.C 3-role — side selects the ROLE FILE via the extracted helper
+    // (side=1 => "exit", saved CO-LOCATED; label kind stays free per (b)).
+    const char* role = Training_ResolveRole(label_type, training_side);
     const char* run_subdir = (label_type == LABEL_PEAK_VALLEY_STABLE
                               || label_type == LABEL_REGIME
                               || is_multiclass)
@@ -4976,7 +5016,42 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // side=1 emits exit.json CO-LOCATED with the buy roles (next commit),
     // where the engine's ensemble loader already looks. No cfg pointing step.
     static const char* side_names[2] = {"Buy (entry signals)", "Exit (sell signals)"};
+    int prev_training_side = state->ui_training_side;
     ImGui::Combo("Training Side", &state->ui_training_side, side_names, 2);
+    // E.1.2.C 3-role (b) — flipping to the exit side defaults the label to
+    // WILL_PEAK (P(peak) is exactly what the exit_threshold consumer wants);
+    // the operator can still override to PVS etc. below. Mirrors the
+    // label-combo retarget pattern; broadcast flows at click time.
+    if (state->ui_training_side != prev_training_side) {
+        if (state->ui_training_side == 1) state->label_type = LABEL_WILL_PEAK;
+        snprintf(state->model_path, sizeof(state->model_path), "models/%s.json",
+                 Training_ResolveRole(state->label_type, state->ui_training_side));
+    }
+    // E.1.2.C 3-role (F3) — the side x label gate, enforced at the PRODUCER
+    // where label truth lives (no wire key can see it): side=1 with an
+    // entry-goodness label would train a semantically INVERTED exit model.
+    //   0 = REFUSE (buttons disabled)   1 = WARN (allowed, yellow hint)   2 = OK
+    auto side_label_gate = [&]() -> int {
+        if (state->ui_training_side != 1) return 2;
+        switch (state->label_type) {
+            case LABEL_WILL_PEAK:
+            case LABEL_PEAK_VALLEY_STABLE: return 2;
+            case LABEL_WILL_VALLEY:
+            case LABEL_VOL_BARRIER:        return 1;  // contested — operator triage pending
+            default:                       return 0;  // WIN_LOSS / FORWARD_PNL / REGIME / CS_*
+        }
+    };
+    const int side_gate = side_label_gate();
+    if (side_gate == 0) {
+        ImGui::TextColored(FoxmlColors::red,
+            "exit side: label '%s' trains an ENTRY-goodness objective — inverted as an exit "
+            "signal. Use Will Peak (default) or Peak/Valley/Stable.",
+            label_table[state->label_type].display_name);
+    } else if (side_gate == 1) {
+        ImGui::TextColored(FoxmlColors::yellow,
+            "exit side: label '%s' is untriaged for exit semantics — proceed deliberately.",
+            label_table[state->label_type].display_name);
+    }
     ImGui::SetItemTooltip(
         "Buy: trains entry-signal models (default). Output:\n"
         "  models/<run_subdir>/<run>_horizon_<N>/<role>.json\n\n"
@@ -4995,9 +5070,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // (Save Run still rewrote it to barrier.json on bundle, but the in-progress
     // training output had the wrong filename). Now the field tracks the role.
     if (state->label_type != prev_label_type) {
-        const char* role = "buy_signal";  // legacy / binary default
-        if (state->label_type == LABEL_PEAK_VALLEY_STABLE) role = "barrier";
-        else if (state->label_type == LABEL_REGIME)       role = "regime";
+        const char* role = Training_ResolveRole(state->label_type,
+                                                 state->ui_training_side);  // E.1.2.C 3-role
         snprintf(state->model_path, sizeof(state->model_path), "models/%s.json", role);
     }
     ImGui::SetItemTooltip("How to label each sample for ML training:\n"
@@ -5188,7 +5262,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // "Collect Features" (single-mode worker). >1 = "Collect Multi-Horizon"
     // (multi-horizon worker). Both still write to results->feature_matrix.
     bool has_data = data->selected_count > 0;
-    bool can_collect = has_data && !run_control->running;
+    bool can_collect = has_data && !run_control->running && side_gate != 0;  // E.1.2.C F3
     // v5.11.43 — uses panel_eff_horizon_count (UI takes priority, falls back
     // to cfg.horizon_list). 0 or 1 = single mode; >1 = multi-horizon mode.
     bool single_horizon_mode = (panel_eff_horizon_count <= 1);
@@ -5275,7 +5349,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     bool sl_aligned = (sl_n <= 1) || (sl_n == mh_collect_horizon_count);
     bool mh_can_collect = has_data && !run_control->running
                           && mh_collect_horizon_count > 0
-                          && tp_aligned && sl_aligned;
+                          && tp_aligned && sl_aligned
+                          && side_gate != 0;  // E.1.2.C F3
     if (!single_horizon_mode) {
     if (!mh_can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Multi-Horizon")) {
