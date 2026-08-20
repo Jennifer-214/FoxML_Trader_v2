@@ -900,6 +900,40 @@ done:
                                 "%s/bandit_state.json\n",
                         i, cfg.node_model_dir[i]);
             }
+            // E.1.2.C leg 0 (2026-08-20) — mirror the LIVE shutdown save set
+            // (EngineSharded/Run.hpp): exit-bandit + both Thompson pools were
+            // saved at live shutdown but DROPPED at backtest completion, so a
+            // backtest's learned exit/Thompson state evaporated at run end
+            // (only escaping at 5000-update periodic boundaries). All three
+            // self-guard on their own READY bits and return 0 when their side
+            // never initialized — no outer condition needed. NOTE: this makes
+            // buy_thompson_state.json land for any ensemble backtest with
+            // primary_count>=2; state files in the model dir carry across
+            // runs BY DESIGN (delete them between A/B arms for a fresh arm).
+            int saved_exit = EnsembleModelZoo_SaveExitBanditState(
+                &ml_ensemble_zoos[i], cfg.node_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved_exit) {
+                fprintf(stderr, "[backtest sharded] node %d: saved exit_bandit "
+                                "state to %s/exit_bandit_state.json\n",
+                        i, cfg.node_model_dir[i]);
+            }
+            int saved_thompson = EnsembleModelZoo_SaveThompsonState(
+                &ml_ensemble_zoos[i], cfg.node_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved_thompson) {
+                fprintf(stderr, "[backtest sharded] node %d: saved buy_thompson "
+                                "state to %s/buy_thompson_state.json\n",
+                        i, cfg.node_model_dir[i]);
+            }
+            int saved_exit_thompson = EnsembleModelZoo_SaveExitThompsonState(
+                &ml_ensemble_zoos[i], cfg.node_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved_exit_thompson) {
+                fprintf(stderr, "[backtest sharded] node %d: saved exit_thompson "
+                                "state to %s/exit_thompson_state.json\n",
+                        i, cfg.node_model_dir[i]);
+            }
         }
     }
 

@@ -61,7 +61,7 @@
 //     EngineSharded_SignalHandler. Both globals are C++17 `inline` (single
 //     shared storage across TUs) per NEW DESIGN_SPEC
 //     cpp17-inline-variable-for-header-shared-state.md.
-//   - SlowPath.hpp: EngineSharded_SlowPath_DrainPostFill (hoist of
+//   - SlowPath.hpp: EngineSharded_SlowPath_DrainManualCloses (DrainPostFill binder moved to EngineCommon_DrainPostFill at E.1.2.C; hoist of
 //     drain_post_fill lambda) + EngineSharded_SlowPath_DrainManualCloses
 //     (MERGED hoist of drain_manual_closes LIVE+NO-OP variants per Decision H).
 //   - Async.hpp: g_engine_drainer_cycle_hist inline global +

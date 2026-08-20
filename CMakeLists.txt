@@ -17,7 +17,7 @@ add_executable(engine main.cpp)
 # 1:1 asm sidecars' line interleave (objdump -l reads DWARF from the SHIPPED binary — the
 # source↔shipped-asm sync + inline attribution + per-line cost the plugin renders). Strippable
 # for deploy; never affects -O3/-flto output.
-target_compile_options(engine PRIVATE -O3 -march=native -funroll-loops -flto -g)
+target_compile_options(engine PRIVATE -O3 -march=native -funroll-loops -flto -g -Werror=float-conversion)  # E.1.2.C leg 0 — PARTIAL guard for the fan-shift class (type-crossing positional re-maps; arity de-defaulting is the full closure). Measured 0 pre-existing hits.
 target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_ANSI_TUI LICENSE_BYPASS)
 target_link_libraries(engine PRIVATE ssl crypto pthread)
 
@@ -220,7 +220,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 # before this line; they use no "../" engine includes). See DOCS/LANDMINES.md.
 include_directories(${CMAKE_SOURCE_DIR}/CoreFrameworks)
 add_executable(controller_test tests/controller_test.cpp)
-target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto -g)
+target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto -g -Werror=float-conversion)  # E.1.2.C leg 0 — same class guard; measured 0 hits
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 # Phase 5d regression tests pull in Backtest/BacktestEngine.hpp for BacktestResults
 # helpers, XGBoost weight helpers, and LabelType_* helpers. BacktestEngine.hpp

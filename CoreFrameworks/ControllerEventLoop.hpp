@@ -101,6 +101,7 @@
 #include "TradeEvent.hpp"
 
 #include <cstdint>
+#include <type_traits>  // E.1.2.C leg 0 — std::common_type non-deduced wrapper below
 #include <ctime>
 #include <chrono>      // v5.12.1.A.2 — system_clock for WS staleness math
 
@@ -1623,35 +1624,55 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 //======================================================================
 // [CODE]
 //======================================================================
+// E.1.2.C leg 0 (2026-08-20) — signature SHRUNK + FULLY DE-DEFAULTED.
+// The v5.14.1.F mid-signature insert of confidence_ic_variant silently
+// re-mapped every later positional binding at the fan (the cfg exit flag
+// landed in the IC-variant slot; the 0.001 fee literal truncated into the
+// int enable flag = permanently 0) — the exit-bandit reward update was
+// unreachable on every production path from f973b5c until this fix, and
+// enabling exit_bandit_enabled=1 in live would have poisoned the drift-IC
+// channel instead. Closure is structural: NO defaulted parameters remain,
+// so any future arity change is a compile error at every caller; and the
+// two per-node facts (exit-bandit enable, counterfactual fee) are no
+// longer parameters at all — they derive from node_cfg AT POINT OF USE
+// (decision-time binding; completes the WIP2d-1.B.1 fee-param deletion
+// this file's SlowPath binder comment recorded but never executed).
 template <unsigned F>
 inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              OrderManagerState<F>* oms,
                                              uint32_t sl_cooldown_cycles,
                                              int node_id,
-                                             double ensemble_trade_reward_mult = 4.0,
+                                             double ensemble_trade_reward_mult,
                                              // v5.10.0e — runtime IC drift detection.
-                                             // Defaults preserve pre-v5.10.0e behavior:
                                              // floor=0 → DriftHistory_CheckBreach skip
                                              // (avg < 0 floor never fires).
-                                             double drift_floor                = 0.0,
-                                             uint32_t drift_window_seconds     = 86400u,
-                                             int      drift_auto_kill          = 0,
-                                             // v5.14.1.F — IC variant selector
-                                             // for drift detection. Default 0 =
-                                             // Spearman (back-compat with pre-
-                                             // v5.14.1.F callers; existing
-                                             // RollingIC behavior bytewise).
-                                             int      confidence_ic_variant    = 0,
-                                             // v5.13.4 — sell-side bandit reward
-                                             // attribution. Default 0 = disabled
-                                             // (preserves pre-v5.13.4 behavior; legacy
-                                             // test callers using 3-arg form unaffected).
-                                             int      exit_bandit_enabled      = 0,
-                                             double   fee_rate_taker_for_cf    = 0.001,
-                                             // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg slice (nullptr fallback).
+                                             double drift_floor,
+                                             uint32_t drift_window_seconds,
+                                             int      drift_auto_kill,
+                                             // v5.14.1.F — IC variant selector for
+                                             // drift detection (0 = Spearman).
+                                             int      confidence_ic_variant,
+                                             // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg slice.
                                              // Per cfg-scope-discipline § "consumer function signatures over per-core slices"
                                              // — single-slice form (this fn is single-core-scoped via the `node_id` param).
-                                             const PerNodeCfg<F>* node_cfg     = nullptr) {
+                                             // nullptr = per-node ML extras OFF (test callers): exit-bandit
+                                             // attribution derives from node_cfg below, so nullptr disables it.
+                                             // common_type wrapper = NON-DEDUCED context so a bare `nullptr`
+                                             // argument compiles (F deduces from state/oms alone).
+                                             const typename std::common_type<PerNodeCfg<F>>::type* node_cfg) {
+    // E.1.2.C A-2 — belt behind the registry clamp: an out-of-range variant
+    // would make ConfidenceScorer_ComputeICVariant return constant 0.0 and
+    // poison the drift-breach channel (spurious auto-kill). Cfg parse already
+    // WARN_ON_CLAMPs to the registry max; this line keeps raw callers safe
+    // without a log (boot already surfaced any clamp).
+    if ((unsigned)confidence_ic_variant >= (unsigned)(FOREACH_IC_VARIANT_COUNT))
+        confidence_ic_variant = 0;
+    // E.1.2.C leg 0 — derived at point of use, not a parameter (see header
+    // comment). node_cfg==nullptr ⇒ disabled, which also guarantees node_cfg
+    // is NON-NULL anywhere below that is gated on exit_bandit_enabled.
+    const int exit_bandit_enabled =
+        (node_cfg != nullptr) &&
+        BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED);
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
@@ -2010,8 +2031,14 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 double orig_tp_d = Money_ToDouble(orig_tp);
                 if (entry_d > 0.0 && orig_tp_d > entry_d) {
                     double tp_pct = (orig_tp_d - entry_d) / entry_d;
+                    // E.1.2.C leg 0 — counterfactual fee reads the NODE's taker
+                    // rate at point of use (fraction-scaled Money, e.g. 0.00100 =
+                    // 0.1%; default equals the retired 0.001 literal bytewise).
+                    // node_cfg is non-null here by construction: this block is
+                    // gated on exit_bandit_enabled, which derives from node_cfg.
+                    double fee_taker_cf = Money_ToDouble(node_cfg->fee_rate_taker);
                     double hypothetical_pnl_bps =
-                        (tp_pct - 2.0 * fee_rate_taker_for_cf) * 10000.0;
+                        (tp_pct - 2.0 * fee_taker_cf) * 10000.0;
                     double notional_d = Money_ToDouble(exit_entry_notional);  // v5.15.5.C.4 Phase G — derived
                     double actual_pnl_bps = (notional_d > 0.0)
                         ? Money_ToDouble(exit_net_pnl) / notional_d * 10000.0  // v5.15.5.C.4 Phase G — derived
@@ -2051,31 +2078,33 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
     oms->last_closed_mask &= (uint16_t)~my_mask;  // clear only my bits
 }
 
-// Wrapper: iterate registered cores. Centralized + backtest paths use this.
+// Wrapper: iterate registered cores. ALL production paths reach OneCore
+// through this fan (live drainer via EngineCommon_DrainPostFill; backtest
+// driver likewise). E.1.2.C leg 0 — FULLY DE-DEFAULTED (arity is the class
+// guard; see OneCore header comment for the v5.14.1.F positional-shift bug
+// this closes) and the two per-node facts are no longer parameters: the fan
+// passes the per-node cfg slice and OneCore derives them at point of use.
+// cfg == nullptr (test callers) ⇒ node_cfg == nullptr per core ⇒ per-node
+// ML extras off — identical to the retired defaults.
 template <unsigned F>
 inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
                                      OrderManagerState<F>* oms,
                                      uint32_t sl_cooldown_cycles,
-                                     double ensemble_trade_reward_mult = 4.0,
-                                     // v5.10.0e — drift detection params (forwarded
-                                     // to OneCore; defaults preserve pre-v5.10.0e
-                                     // behavior).
-                                     double drift_floor                = 0.0,
-                                     uint32_t drift_window_seconds     = 86400u,
-                                     int      drift_auto_kill          = 0,
-                                     // v5.13.4 — sell-side bandit forwarded to
-                                     // OneCore. Default 0/0.001 = disabled +
-                                     // typical taker rate (defensive when cfg
-                                     // unwired in legacy callers).
-                                     int      exit_bandit_enabled      = 0,
-                                     double   fee_rate_taker_for_cf    = 0.001) {
+                                     double ensemble_trade_reward_mult,
+                                     double drift_floor,
+                                     uint32_t drift_window_seconds,
+                                     int      drift_auto_kill,
+                                     int      confidence_ic_variant,
+                                     // common_type wrapper = NON-DEDUCED context (bare nullptr OK).
+                                     const typename std::common_type<ControllerConfig<F>>::type* cfg) {
     for (int c = 0; c < state->registered_count; ++c) {
         EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c,
                                          ensemble_trade_reward_mult,
                                          drift_floor, drift_window_seconds,
                                          drift_auto_kill,
-                                         exit_bandit_enabled,
-                                         fee_rate_taker_for_cf);
+                                         confidence_ic_variant,
+                                         cfg ? &cfg->nodes[c]
+                                             : (const PerNodeCfg<F>*)nullptr);
     }
 }
 //======================================================================

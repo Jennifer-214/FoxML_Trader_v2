@@ -9,7 +9,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[drainer slow-path hoisted helpers — post-fill bookkeeping + GUI manual-close funnel]
 // [CONTAINS]
-//   - [FUNCTION]_[EngineSharded_SlowPath_DrainPostFill]
+//   - (EngineSharded_SlowPath_DrainPostFill DELETED E.1.2.C leg 0 -> tt::EngineCommon_DrainPostFill)
 //   - [FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
@@ -52,52 +52,13 @@ struct TUISharedState;
 
 namespace tt {
 
-//======================================================================
-// [FUNCTION]_[EngineSharded_SlowPath_DrainPostFill]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
-// [REFERENCE]_[DESIGN_SPEC]_[decision-time-data-binding-pattern]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[drainer per-fill bookkeeping funnel — thin arg-binder into EventLoop_DrainPostFill]
-// [REFERENCE]_[CLASS]_[27]
-//======================================================================
-// [CODE]
-//======================================================================
-template<unsigned F>
-inline void EngineSharded_SlowPath_DrainPostFill(
-    EventLoopState<F>& state,
-    OrderManagerState<F>& oms,
-    const ControllerConfig<F>& cfg
-) {
-    EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles,
-                             cfg.ensemble_trade_reward_mult,
-                             cfg.confidence_ic_floor,
-                             cfg.confidence_ic_floor_window,
-                             cfg.auto_kill_on_drift,
-                             // v5.13.4 — sell-side bandit attribution
-                             BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED));
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [COMMENT]
-//----------------------------------------------------------------------
-// Per-fill bookkeeping that runs on the drainer thread after order fills come
-// back from the exchange (Binance user-data WS → drainer reads → calls this).
-//
-// Originally a lambda inside EngineSharded_Run; hoisted to named function at
-// v5.15.5.F.4d.1.B.6 per Decision B (Option a; captures → explicit args).
-// Body unchanged from lambda body modulo capture → arg translation.
-//
-// v5.15.5.F.4c.3 WIP2d-1.B.1 — static const fee_rate_taker_d cache DELETED (Class 27
-// fn-local variant; froze first-cfg-value globally). fee_rate_taker_for_cf scalar
-// param chain DELETED from EventLoop_DrainPostFill / DrainPostFillOneCore signatures —
-// OneCore reads per-core fee from o->pre_resolved.fee_rate (Order carries pre-resolved
-// value via Order_BindPreResolved at submit time). See decision-time-data-binding-
-// pattern.md + RECURRING_BUG_PATTERNS Class 27.
-//======================================================================
-// [END_FUNCTION]_[EngineSharded_SlowPath_DrainPostFill]
-//======================================================================
+// E.1.2.C leg 0 (2026-08-20) — EngineSharded_SlowPath_DrainPostFill DELETED.
+// Its binding role moved to the SHARED tt::EngineCommon_DrainPostFill
+// (EngineCommon.hpp; called by the live drainer AND both backtest driver
+// sites — M5 execution-layer parity by construction). That binder's comment
+// carries the fan-shift history: this wrapper's 8-arg call was landing the
+// exit-bandit enable flag in OneCore's confidence_ic_variant slot after the
+// v5.14.1.F mid-signature insert, so the flag never reached its gate.
 
 //======================================================================
 // [FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]

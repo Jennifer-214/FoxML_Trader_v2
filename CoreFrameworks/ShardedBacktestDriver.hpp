@@ -282,9 +282,10 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     if (drv->oms &&
         BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
         drv->config) {
-        EventLoop_DrainPostFill(drv->state, drv->oms,
-                                 drv->config->sl_cooldown_cycles,
-                                 drv->config->ensemble_trade_reward_mult);
+        // E.1.2.C leg 0 — through the SHARED binder (was a hand-rolled 4-arg
+        // call that silently defaulted drift/ic_variant/node_cfg; live-parity
+        // by construction now, incl. the exit-bandit flag + per-node fee).
+        EngineCommon_DrainPostFill(*drv->state, *drv->oms, *drv->config);
     }
 
     // 3. Slow path on cadence. tick_index is 0-based so we fire every
@@ -482,9 +483,10 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     if (drv->oms &&
         BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
         drv->config) {
-        EventLoop_DrainPostFill(drv->state, drv->oms,
-                                 drv->config->sl_cooldown_cycles,
-                                 drv->config->ensemble_trade_reward_mult);
+        // E.1.2.C leg 0 — through the SHARED binder (was a hand-rolled 4-arg
+        // call that silently defaulted drift/ic_variant/node_cfg; live-parity
+        // by construction now, incl. the exit-bandit flag + per-node fee).
+        EngineCommon_DrainPostFill(*drv->state, *drv->oms, *drv->config);
     }
 }
 //======================================================================

@@ -1403,8 +1403,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // subset). Pull from config_used.
         {
             tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-            hp.subsample        = FPN_ToDouble(data->config_used.xgb_subsample);
-            hp.colsample_bytree = FPN_ToDouble(data->config_used.xgb_colsample_bytree);
+            hp.subsample        = (float)FPN_ToDouble(data->config_used.xgb_subsample);   // explicit narrow: XGBHyperparams stores float
+            hp.colsample_bytree = (float)FPN_ToDouble(data->config_used.xgb_colsample_bytree);
             hp.min_child_weight = data->config_used.xgb_min_child_weight;
             hp.seed             = data->config_used.xgb_seed;
             args.snap_max_depth        = hp.max_depth;

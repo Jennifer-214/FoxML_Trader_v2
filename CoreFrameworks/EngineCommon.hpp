@@ -950,4 +950,57 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
 // [END_FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
 //======================================================================
 
+//======================================================================
+// [FUNCTION]_[EngineCommon_DrainPostFill]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE cfg→args binder for post-fill drain — LIVE drainer + BACKTEST driver both call this; fans EventLoop_DrainPostFill with per-node cfg threading]
+// [REFERENCE]_[CLASS]_[27]
+// [REFERENCE]_[DESIGN_SPEC]_[[decision-time-data-binding-pattern.md] [train-serve-execution-layer-parity.md]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void EngineCommon_DrainPostFill(EventLoopState<F>& state,
+                                        OrderManagerState<F>& oms,
+                                        const ControllerConfig<F>& cfg) {
+    EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles,
+                             cfg.ensemble_trade_reward_mult,
+                             cfg.confidence_ic_floor,
+                             cfg.confidence_ic_floor_window,
+                             cfg.auto_kill_on_drift,
+                             cfg.confidence_ic_variant,
+                             &cfg);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// E.1.2.C leg 0 (2026-08-20) — replaces EngineSharded_SlowPath_DrainPostFill
+// (deleted from EngineSharded/SlowPath.hpp) and the backtest driver's two
+// hand-rolled 4-arg calls: ONE binder shared by construction (M5 execution-
+// layer parity), so live and backtest can never diverge on which cfg facts
+// reach the drain again.
+//
+// History this closes: v5.14.1.F inserted confidence_ic_variant mid-signature
+// in OneCore and the fan was never updated — every production call shifted
+// its tail bindings one slot (the exit-bandit enable flag selected the IC
+// variant; the fee literal truncated into the enable = 0), so the exit-bandit
+// reward update was dead everywhere and enabling it in live would have
+// poisoned drift-IC. The fan + OneCore are now FULLY de-defaulted (arity =
+// compile-time guard) and the per-node facts (exit-bandit enable, counter-
+// factual taker fee) derive from the threaded per-node cfg slice at point of
+// use — which also COMPLETES the WIP2d-1.B.1 decision that deleted the fee
+// ARG from the live call but left the parameter chain in both signatures.
+//
+// Backtest note: drift-floor/window/auto-kill + ic_variant now forward in
+// backtest too (previously silently defaulted). At default cfg (floor=0)
+// this is byte-inert; an operator who sets a drift floor in backtest.cfg
+// gets LIVE-parity drift behavior in replay — parity by construction.
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_DrainPostFill]
+//======================================================================
+
 }  // namespace tt

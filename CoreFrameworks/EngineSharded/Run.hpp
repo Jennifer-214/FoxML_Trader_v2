@@ -134,7 +134,7 @@
 // Parent shim (EngineSharded.hpp) includes all 4 sub-files; this redundancy
 // keeps Run.hpp self-contained for IDE navigation + future reuse.
 #include "Boot.hpp"     // g_engine_sharded_shutdown / g_engine_sharded_gui_quit_ptr / EngineSharded_SignalHandler
-#include "SlowPath.hpp" // EngineSharded_SlowPath_DrainPostFill / _DrainManualCloses
+#include "SlowPath.hpp" // EngineSharded_SlowPath_DrainManualCloses (DrainPostFill binder -> EngineCommon_DrainPostFill, E.1.2.C)
 #include "Async.hpp"    // g_engine_drainer_cycle_hist / EngineSharded_Async_FanOut / _DrainWithSubmit
 
 // parent_index: CoreFrameworks/EngineSharded.hpp
@@ -1520,7 +1520,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     // drain_post_fill + drain_manual_closes lambdas hoisted to
     // EngineSharded/SlowPath.hpp at v5.15.5.F.4d.1.B.6 (Phase B Step B.3).
-    //   - EngineSharded_SlowPath_DrainPostFill: thin wrapper around EventLoop_DrainPostFill
+    //   - EngineCommon_DrainPostFill: the SHARED cfg->args binder into EventLoop_DrainPostFill (E.1.2.C leg 0)
     //   - EngineSharded_SlowPath_DrainManualCloses: MERGED LIVE+NO-OP variants per
     //     Decision H. #ifdef USE_IMGUI_GUI gate moved INSIDE function body. Single source
     //     of truth + sister to .B.4 EngineCommon_BootPerCore dual-cfg shape.
@@ -1585,7 +1585,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
             tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
             tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);  // Phase A
-            EngineSharded_SlowPath_DrainPostFill(state, oms, cfg);                                              // Phase A.5
+            EngineCommon_DrainPostFill(state, oms, cfg);  // E.1.2.C leg 0 — the shared binder (was EngineSharded_SlowPath_DrainPostFill)                                              // Phase A.5
             tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);   // Phase B
             tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);  // Phase C
 
@@ -1624,7 +1624,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // thread-local bucket array declared at lambda entry.
                     tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
                     tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);
-                    EngineSharded_SlowPath_DrainPostFill(state, oms, cfg);
+                    EngineCommon_DrainPostFill(state, oms, cfg);  // E.1.2.C leg 0 — the shared binder (was EngineSharded_SlowPath_DrainPostFill)
                     tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);
                     tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);
                 }
