@@ -853,7 +853,9 @@ template <unsigned F> struct ControllerConfig {
   // Hot path UNTOUCHED.
   // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
   FPN_Binary<F> exit_threshold;                     // default 0.6 (60% blended exit prob)
-  char exit_signal_model_dir[256];           // optional explicit dir; empty = auto-detect
+  // exit_signal_model_dir RETIRED (E.1.2.C 3-retire, 2026-08-20; H21 tombstone) —
+  // parsed-never-read since v5.13.0 (PARITY-044); the live exit discovery is the
+  // co-located exit.json walk under node_N_model_dir. Name BURNED in RETIRED_NAMES.
   // v5.13.0.B — calibration log: every exit fill records the predicted
   // exit prob + realized PnL bps + flag indicating whether v5.13.0 exit-
   // model fired. Operator post-processes the CSV to assess prediction
@@ -1449,7 +1451,10 @@ template <unsigned F> struct ControllerConfig {
 // NOTE: Check-K (check_struct_alignment.py) can't enforce this — Fingerprint_Compute takes a
 // void* (generic byte-hasher), so sizeof(ControllerConfig) isn't visible at the SHA256_Update
 // site. THIS static_assert is the drift guard, not the CI tool.
-static_assert(sizeof(ControllerConfig<64>) == 53056,
+// E.1.2.C 3-retire (2026-08-20): 53056 -> 52800 — exit_signal_model_dir[256]
+// deleted (PARITY-044). Fingerprint epoch shifts; no committed cfg-fingerprint
+// golden exists (s7 precedent) — determinism gate is the verification.
+static_assert(sizeof(ControllerConfig<64>) == 52800,
               "ControllerConfig<F> layout changed -> the RAW model-fingerprint shifts. Bump N to "
               "the new sizeof AND regen the backtest golden (no live models; free). H9/H12 "
               "byte-equivalence size-pin for the fingerprinted cfg struct (D-254).");
@@ -2297,7 +2302,6 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.13.0 — sell-side ML defaults: disabled; opt-in for paper-test.
   // use_exit_model migrated to ml_cfg_flags (default 0)
   // v5.15.5.F.4d.1.B.4 Cx-E.3: exit_threshold (0.6) manual init DELETED; auto-populated via FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR) walker (registry DBL(0.6, 0.0, 1.0) MATCH).
-  cfg.exit_signal_model_dir[0] = '\0';
   cfg.calibration_log_path[0] = '\0';
   for (int i = 0; i < 16; ++i) cfg.node_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.node_model_dir[i][0] = '\0';     // empty = use model_path or shared
@@ -2811,12 +2815,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.13.0 — sell-side ML opt-in (Path 3 architecture)
     // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
     // v5.15.5.F.4d TECH_DEBT-082 — exit_threshold migrated to FOREACH_PER_NODE_CFG_FIELD (KIND_DOUBLE; FPN_Binary<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
-    if (strcmp(key, "exit_signal_model_dir") == 0) {
-      strncpy(cfg.exit_signal_model_dir, val,
-              sizeof(cfg.exit_signal_model_dir) - 1);
-      cfg.exit_signal_model_dir[sizeof(cfg.exit_signal_model_dir) - 1] = '\0';
-      continue;
-    }
+    // (exit_signal_model_dir parse RETIRED here — E.1.2.C 3-retire; old cfgs
+    //  carrying the key fall to the global-unknown tail, silently ignored.)
     if (strcmp(key, "calibration_log_path") == 0) {
       strncpy(cfg.calibration_log_path, val,
               sizeof(cfg.calibration_log_path) - 1);

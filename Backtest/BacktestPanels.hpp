@@ -3110,11 +3110,10 @@ struct TrainingPanelState {
 
     // v5.13.1.A — sell-side training. Routes Multi-Horizon output to a
     // side-specific subdirectory: side=0 (buy) leaves the existing
-    // models/<run_subdir>/<run>_horizon_<N>/ path; side=1 (exit) writes
-    // to models/exit/<run_subdir>/<run>_horizon_<N>/. Engine cfg's
-    // exit_signal_model_dir then points at models/exit/<run_subdir>/<run>
-    // for auto-detection of horizon siblings. Default 0 preserves
-    // pre-v5.13.1 behavior.
+    // models/<run_subdir>/<run>_horizon_<N>/ path; side=1 (exit) emits the
+    // CO-LOCATED exit role file in the SAME per-horizon dirs (E.1.2.C — the
+    // retired models/exit/ tree was never walked by any loader; the engine
+    // auto-discovers exit.json siblings under node_N_model_dir).
     int             ui_training_side;  // 0=buy (default), 1=exit
 
     // v5.13.1.B — per-horizon label_kind CSV (operator-flagged 2026-05-08).
@@ -4295,26 +4294,17 @@ static inline void mh_run_one_horizon_fv(
                               || label_type == LABEL_REGIME
                               || is_multiclass)
         ? "classification" : (is_regression ? "regression" : "classification");
-    // v5.13.1.A — sell-side routing. side=0 (buy) leaves the existing
-    // "models/<run_subdir>/<run>_horizon_<N>/" path bytewise. side=1 (exit)
-    // prepends "exit/" so operator's cfg.exit_signal_model_dir can directly
-    // point at "models/exit/<run_subdir>/<run>" for engine auto-detection
-    // of horizon siblings (Path 3 architecture).
-    const char* side_prefix = (training_side == 1) ? "exit/" : "";
+    // E.1.2.C 3-retire (2026-08-20) — the models/exit/ SIDE TREE is RETIRED:
+    // no loader ever walked it (PARITY-044); exit models land CO-LOCATED in
+    // the same per-horizon dirs (side flips the ROLE FILE, next commit).
     char horizon_dir[320];
     snprintf(horizon_dir, sizeof(horizon_dir),
-             "models/%s%s/%s_horizon_%d",
-             side_prefix, run_subdir, run_name, horizon_ticks);
+             "models/%s/%s_horizon_%d",
+             run_subdir, run_name, horizon_ticks);
     mkdir("models", 0755);
-    if (training_side == 1) {
-        // models/exit/ must exist before models/exit/<run_subdir>/.
-        char exit_root[64];
-        snprintf(exit_root, sizeof(exit_root), "models/exit");
-        mkdir(exit_root, 0755);
-    }
     char parent_dir[340];
-    snprintf(parent_dir, sizeof(parent_dir), "models/%s%s",
-             side_prefix, run_subdir);
+    snprintf(parent_dir, sizeof(parent_dir), "models/%s",
+             run_subdir);
     mkdir(parent_dir, 0755);
     mkdir(horizon_dir, 0755);
 
@@ -4982,22 +4972,19 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
         label_names_built = true;
     }
-    // v5.13.1.A — sell-side training output routing. Operator selects buy
-    // (default; existing path) vs exit (Path 3 sell-side; routes to
-    // models/exit/<run_subdir>/<run>_horizon_<N>/). Engine's
-    // cfg.exit_signal_model_dir then points at the exit subtree for
-    // auto-detection of horizon siblings.
+    // E.1.2.C — sell-side training selects the ROLE FILE, not a side tree:
+    // side=1 emits exit.json CO-LOCATED with the buy roles (next commit),
+    // where the engine's ensemble loader already looks. No cfg pointing step.
     static const char* side_names[2] = {"Buy (entry signals)", "Exit (sell signals)"};
     ImGui::Combo("Training Side", &state->ui_training_side, side_names, 2);
     ImGui::SetItemTooltip(
-        "Buy: trains entry-signal models (existing default). Output:\n"
-        "  models/<run_subdir>/<run>_horizon_<N>/role.json\n\n"
-        "Exit: trains sell-signal models for v5.13.0 exit_predictor.\n"
-        "Output:\n"
-        "  models/exit/<run_subdir>/<run>_horizon_<N>/role.json\n\n"
-        "Operator must point cfg.exit_signal_model_dir at the\n"
-        "models/exit/<run_subdir>/<run> directory after training to\n"
-        "enable engine-side sell-side ML inference (Path 3 architecture).");
+        "Buy: trains entry-signal models (default). Output:\n"
+        "  models/<run_subdir>/<run>_horizon_<N>/<role>.json\n\n"
+        "Exit: trains sell-point models for the exit_predictor slots.\n"
+        "Output (CO-LOCATED, auto-discovered by the engine):\n"
+        "  models/<run_subdir>/<run>_horizon_<N>/exit.json\n\n"
+        "No cfg step needed: the engine walks exit.json siblings under\n"
+        "node_N_model_dir automatically (E.1.2.C).");
 
     int prev_label_type = state->label_type;
     ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
@@ -5970,12 +5957,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "Trains heterogeneous mixed-output ensembles in ONE click;\n"
             "v5.12.3.B+E mixed-output normalizer blends them at inference.\n"
             "\n"
-            "v5.13.5 — Training Side combo at top of panel routes output\n"
-            "to side-specific subdir:\n"
-            "  Buy:  models/<run_subdir>/<run>_horizon_<N>/role.json\n"
-            "  Exit: models/exit/<run_subdir>/<run>_horizon_<N>/role.json\n"
-            "After training, point cfg.exit_signal_model_dir at the exit\n"
-            "subtree to enable v5.13.0 sell-side ML inference.\n"
+            "Training Side combo at top of panel selects the ROLE FILE\n"
+            "(co-located; E.1.2.C):\n"
+            "  Buy:  models/<run_subdir>/<run>_horizon_<N>/<role>.json\n"
+            "  Exit: models/<run_subdir>/<run>_horizon_<N>/exit.json\n"
+            "No cfg step: the engine auto-discovers exit.json siblings\n"
+            "under node_N_model_dir automatically (E.1.2.C).\n"
             "\n"
             "Each model gets full WF + held-out + auto-stamp. Per-horizon\n"
             "results table renders below.");
