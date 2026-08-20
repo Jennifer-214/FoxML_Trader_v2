@@ -38,6 +38,9 @@
 #include "../CoreFrameworks/ControllerConfig.hpp"
 // v5.15.5.F.4c — tt::cfg_parse/save/assign/diff_field for use in render table
 #include "../CoreFrameworks/CfgFieldDispatch.hpp"
+// v5.15.5.E.1.2.C 3G-i — ImGui-free section-grouped layout (one header per
+// canonical section; kills the duplicate-CollapsingHeader class)
+#include "SettingsSectionIndex.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -206,13 +209,13 @@ namespace tt {
 // Templated on F so per-precision instantiations share the table; F=64 is the
 // canonical engine precision. Static-storage-duration constexpr array → .rodata.
 //
-// Consumer (the bitmap walker in SettingsTab below):
-//   CFG_FIELD_FOR_EACH_SET_BIT(g_global_cfg_render_mask.words, idx, {
-//       GlobalCfgRenderTable<64>::fns[idx](cfg, g_global_cfg_field_descriptors[idx], cfg_path);
-//   });
-//   CFG_FIELD_FOR_EACH_SET_BIT(g_per_node_cfg_render_mask.words, idx, {
-//       PerNodeCfgRenderTable<64>::fns[idx](cfg, g_per_node_cfg_field_descriptors[idx], cfg_path);
-//   });
+// Consumer (3G-i, E.1.2.C): Settings_RenderGlobalTab's grouped loop — the
+// render masks are BAKED into the one-time SectionLayout at build (the
+// adapters in SettingsSectionIndex.hpp return NULL for mask-cleared rows),
+// then per-section spans dispatch:
+//   fns[L->perm[src][...]](s->gui_engine_cfg, g_*_cfg_field_descriptors[idx], s->cfg_path)
+// (was: two raw CFG_FIELD_FOR_EACH_SET_BIT walks emitting a CollapsingHeader
+// per section-CHANGE — the duplicate-header class 3G-i closed.)
 //
 // .F.4c.3 — split into GlobalCfgRenderTable + PerNodeCfgRenderTable per the
 // two-registry architecture. Each table's `fns[]` sized to its registry's
@@ -1270,6 +1273,129 @@ static inline bool any_node_uses_strategy(const SettingsState *s, int strat) {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Settings_RenderFieldDefRow]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[render ONE legacy field_defs[] row (type-dispatched widget + per-edit cfg persistence + tooltip) — extracted verbatim from the old Global-tab walk so the 3G-i grouped render iterates the layout while the row body stays byte-identical]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline bool Settings_RenderFieldDefRow(SettingsState *s, int i) {
+    const CfgFieldDef *fd = &field_defs[i];
+    bool changed = false;
+
+    // v5.15.5.F.4c.1 — ImGui widget-ID uniqueness via fd->key for legacy
+    // field_defs[] path (sister fix to tt::cfg_render_field<T>'s PushID
+    // wrapper above). Closes label-collision class for the residual
+    // hardcoded field_defs[] rows that have not yet migrated to
+    // FOREACH_CFG_FIELD (KIND_STRING / KIND_FILE_PATH cohort — .F.4e scope).
+    ImGui::PushID(fd->key);
+
+    if (fd->type == CFG_FLOAT) {
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputFloat(fd->label, &s->float_vals[i], 0, 0, fd->fmt);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            char v[32];
+            snprintf(v, 32, fd->fmt, s->float_vals[i]);
+            cfg_write_field(s->cfg_path, fd->key, v);
+            changed = true;
+        }
+    } else if (fd->type == CFG_INT) {
+        int iv = (int)s->float_vals[i];
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputInt(fd->label, &iv, 0, 0);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s->float_vals[i] = (float)iv;
+            char v[16];
+            snprintf(v, 16, "%d", iv);
+            cfg_write_field(s->cfg_path, fd->key, v);
+            changed = true;
+        }
+    } else if (fd->type == CFG_BOOL) {
+        bool bv = s->bool_vals[i] != 0;
+        if (ImGui::Checkbox(fd->label, &bv)) {
+            s->bool_vals[i] = bv ? 1 : 0;
+            cfg_write_field(s->cfg_path, fd->key, bv ? "1" : "0");
+            changed = true;
+        }
+        // warning label for dangerous toggles
+        // NEW-1 — use_real_money toggle REMOVED (see field_defs); trading_mode is the
+        // capital-authority field (registry-rendered). No separate REAL MONEY toggle.
+        if (bv && strcmp(fd->key, "gate_ema_enabled") == 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(FoxmlColors::green_b, "ACTIVE");
+        }
+    } else if (fd->type == CFG_PATH) {
+        ImGui::SetNextItemWidth(200);
+        ImGui::InputText(fd->label, s->path_vals[i], 256);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            cfg_write_field(s->cfg_path, fd->key, s->path_vals[i]);
+            changed = true;
+        }
+    }
+
+    // hover tooltip from field_defs — inline, no separate lookup chain
+    if (fd->tooltip)
+        ImGui::SetItemTooltip("%s", fd->tooltip);
+    ImGui::PopID();
+    return changed;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Settings_RenderFieldDefRow]
+//======================================================================
+
+//======================================================================
+// [SECTION]_[3G-i — section-grouped Settings layouts (E.1.2.C)]
+//----------------------------------------------------------------------
+// One-time SectionLayout per tab (SettingsSectionIndex.hpp): merges the
+// three Global-tab sources under ONE header per canonical section and
+// kills the duplicate-CollapsingHeader class (72 header emissions -> one
+// per distinct section at HEAD; duplicates also collided ImGui header IDs,
+// which keyed collapse state by label). NO registry reorder — FOREACH_*
+// row order is wire-load-bearing (stamp-key ordinals; H21) — grouping
+// lives entirely in this index layer. GUI-thread build + read; cold.
+//======================================================================
+static const char* settings_fielddefs_section_of(int row, const void*) {
+    return field_defs[row].section;
+}
+static const char* settings_pernode_table_section_of(int row, const void*) {
+    return per_node_fields[row].section;
+}
+
+static SectionLayout g_settings_global_layout;
+static SectionLayout g_settings_per_node_layout;
+
+static_assert(NUM_FIELDS <= SectionLayout::MAX_ROWS,
+              "SectionLayout::MAX_ROWS must cover field_defs[]");
+static_assert(NUM_PER_NODE_FIELDS <= SectionLayout::MAX_ROWS,
+              "SectionLayout::MAX_ROWS must cover per_node_fields[]");
+
+static inline void Settings_BuildGlobalTabLayout() {
+    if (g_settings_global_layout.built) return;
+    const SectionSource srcs[3] = {
+        { NUM_FIELDS,             settings_fielddefs_section_of,            NULL },
+        { FIELD_IDX_GLOBAL_END,   SettingsSection_GlobalRegistrySectionOf,  NULL },
+        { FIELD_IDX_PER_NODE_END, SettingsSection_PerNodeRegistrySectionOf, NULL },
+    };
+    SectionLayout_Build(&g_settings_global_layout, srcs, 3,
+                        SETTINGS_GLOBAL_SECTION_ORDER,
+                        SETTINGS_GLOBAL_SECTION_ORDER_COUNT);
+}
+
+static inline void Settings_BuildPerNodeTabLayout() {
+    if (g_settings_per_node_layout.built) return;
+    const SectionSource srcs[1] = {
+        { NUM_PER_NODE_FIELDS, settings_pernode_table_section_of, NULL },
+    };
+    SectionLayout_Build(&g_settings_per_node_layout, srcs, 1,
+                        SETTINGS_PER_NODE_SECTION_ORDER,
+                        SETTINGS_PER_NODE_SECTION_ORDER_COUNT);
+}
+
+//======================================================================
 // [FUNCTION]_[Settings_RenderGlobalTab]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI]]
@@ -1281,176 +1407,50 @@ static inline bool any_node_uses_strategy(const SettingsState *s, int strat) {
 //======================================================================
 static inline bool Settings_RenderGlobalTab(SettingsState *s) {
     bool changed = false;
-    const char *current_section = NULL;
+    Settings_BuildGlobalTabLayout();
+    const SectionLayout *L = &g_settings_global_layout;
 
-    for (int i = 0; i < NUM_FIELDS; i++) {
-        const CfgFieldDef *fd = &field_defs[i];
+    for (int k = 0; k < L->n_sections; ++k) {
+        const char *sec = L->names[k];
 
-        // auto collapsing headers by section name
-        if (!current_section || strcmp(current_section, fd->section) != 0) {
-            current_section = fd->section;
-            // v4.7.23: hide strategy-specific sections when no configured
-            // core uses that strategy. AUTO cores match all strategies.
-            int sec_strat = global_section_strategy(current_section);
-            if (sec_strat >= 0 && !any_node_uses_strategy(s, sec_strat)) {
-                while (i + 1 < NUM_FIELDS &&
-                       strcmp(field_defs[i + 1].section, current_section) == 0)
-                    i++;
-                continue;
-            }
-            bool default_open = (strcmp(fd->section, "Trading") == 0 ||
-                                strcmp(fd->section, "Entry Filters") == 0 ||
-                                strcmp(fd->section, "EMA Gate") == 0);
-            if (!ImGui::CollapsingHeader(fd->section,
-                    default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0))
-            {
-                // skip all fields in this collapsed section
-                while (i + 1 < NUM_FIELDS && strcmp(field_defs[i + 1].section, fd->section) == 0)
-                    i++;
-                continue;
-            }
-        }
+        // v4.7.23 semantics preserved: hide strategy-specific sections when
+        // no configured node uses that strategy (AUTO matches all but ML).
+        int sec_strat = global_section_strategy(sec);
+        if (sec_strat >= 0 && !any_node_uses_strategy(s, sec_strat)) continue;
 
-        // v5.15.5.F.4c.1 — ImGui widget-ID uniqueness via fd->key for legacy
-        // field_defs[] path (sister fix to tt::cfg_render_field<T>'s PushID
-        // wrapper above). Closes label-collision class for the residual
-        // hardcoded field_defs[] rows that have not yet migrated to
-        // FOREACH_CFG_FIELD (KIND_STRING / KIND_FILE_PATH cohort — .F.4e scope).
-        ImGui::PushID(fd->key);
+        bool default_open = (strcmp(sec, "Trading") == 0 ||
+                             strcmp(sec, "Entry Filters") == 0 ||
+                             strcmp(sec, "EMA Gate") == 0);
+        if (!ImGui::CollapsingHeader(sec,
+                default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+            continue;
 
-        if (fd->type == CFG_FLOAT) {
-            ImGui::SetNextItemWidth(80);
-            ImGui::InputFloat(fd->label, &s->float_vals[i], 0, 0, fd->fmt);
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                char v[32];
-                snprintf(v, 32, fd->fmt, s->float_vals[i]);
-                cfg_write_field(s->cfg_path, fd->key, v);
+        // Source 0 — legacy field_defs[] rows (KIND_STRING / KIND_FILE_PATH
+        // cohort not yet migrated to FOREACH_CFG_FIELD; .F.4e scope).
+        for (int t = 0; t < L->span_count[0][k]; ++t)
+            if (Settings_RenderFieldDefRow(s, L->perm[0][L->span_start[0][k] + t]))
                 changed = true;
-            }
-        } else if (fd->type == CFG_INT) {
-            int iv = (int)s->float_vals[i];
-            ImGui::SetNextItemWidth(80);
-            ImGui::InputInt(fd->label, &iv, 0, 0);
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                s->float_vals[i] = (float)iv;
-                char v[16];
-                snprintf(v, 16, "%d", iv);
-                cfg_write_field(s->cfg_path, fd->key, v);
-                changed = true;
-            }
-        } else if (fd->type == CFG_BOOL) {
-            bool bv = s->bool_vals[i] != 0;
-            if (ImGui::Checkbox(fd->label, &bv)) {
-                s->bool_vals[i] = bv ? 1 : 0;
-                cfg_write_field(s->cfg_path, fd->key, bv ? "1" : "0");
-                changed = true;
-            }
-            // warning label for dangerous toggles
-            // NEW-1 — use_real_money toggle REMOVED (see field_defs); trading_mode is the
-            // capital-authority field (registry-rendered). No separate REAL MONEY toggle.
-            if (bv && strcmp(fd->key, "gate_ema_enabled") == 0) {
-                ImGui::SameLine();
-                ImGui::TextColored(FoxmlColors::green_b, "ACTIVE");
-            }
-        } else if (fd->type == CFG_PATH) {
-            ImGui::SetNextItemWidth(200);
-            ImGui::InputText(fd->label, s->path_vals[i], 256);
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                cfg_write_field(s->cfg_path, fd->key, s->path_vals[i]);
-                changed = true;
-            }
-        }
 
-        // hover tooltip from field_defs — inline, no separate lookup chain
-        if (fd->tooltip)
-            ImGui::SetItemTooltip("%s", fd->tooltip);
-        ImGui::PopID();
-    }
-
-    //==========================================================================
-    // v5.15.5.F.4c.3 — Bitmap-dispatch walker for two-registry architecture
-    //==========================================================================
-    // Two walks: first FOREACH_GLOBAL_CFG_FIELD rows, then FOREACH_PER_NODE_CFG_FIELD.
-    // Today both render into `gui_engine_cfg` (flat ControllerConfig<F> instance);
-    // Step 2 of .F.4c.3 will restructure per-core rows to render against
-    // cfg.nodes[c] in dedicated per-core tabs.
-    //
-    // Section-grouping mirrors the field_defs[] loop above; per-section
-    // CollapsingHeader; strategy filter via global_section_strategy +
-    // any_node_uses_strategy; default_open whitelist for Trading / Entry Filters /
-    // EMA Gate. Rows are declared section-grouped within each registry, so
-    // iteration in FIELD_IDX_* order = section-grouped order.
-    //==========================================================================
-    {
-        const char *cfg_walker_section = NULL;
-        bool cfg_walker_skip_section = false;
-
-        // === Global registry walk ===
-        CFG_FIELD_FOR_EACH_SET_BIT(g_global_cfg_render_mask.words, idx, {
+        // Source 1 — FOREACH_GLOBAL_CFG_FIELD rows (render mask baked into
+        // the layout at build; mask is inline constexpr).
+        for (int t = 0; t < L->span_count[1][k]; ++t) {
+            const int idx = L->perm[1][L->span_start[1][k] + t];
             const CfgFieldDescriptor &desc = g_global_cfg_field_descriptors[idx];
-
-            if (!cfg_walker_section || strcmp(cfg_walker_section, desc.section) != 0) {
-                cfg_walker_section = desc.section;
-                cfg_walker_skip_section = false;
-
-                int sec_strat = global_section_strategy(cfg_walker_section);
-                if (sec_strat >= 0 && !any_node_uses_strategy(s, sec_strat)) {
-                    cfg_walker_skip_section = true;
-                    continue;
-                }
-
-                bool default_open = (strcmp(desc.section, "Trading") == 0 ||
-                                      strcmp(desc.section, "Entry Filters") == 0 ||
-                                      strcmp(desc.section, "EMA Gate") == 0);
-                if (!ImGui::CollapsingHeader(desc.section,
-                        default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
-                    cfg_walker_skip_section = true;
-                    continue;
-                }
-            }
-            if (cfg_walker_skip_section) continue;
-
             ImGui::SetNextItemWidth(80);
-            if (GlobalCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
+            if (GlobalCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path))
                 changed = true;
-            }
-        });
+        }
 
-        // === Per-core registry walk ===
-        // .F.4c.3 Step 1: per-core rows still render against `gui_engine_cfg`
-        // flat fields. Step 2 will move these into per-core tabs against
-        // `gui_engine_cfg.nodes[c]`.
-        cfg_walker_section = NULL;
-        cfg_walker_skip_section = false;
-        CFG_FIELD_FOR_EACH_SET_BIT(g_per_node_cfg_render_mask.words, idx, {
+        // Source 2 — FOREACH_PER_NODE_CFG_FIELD rows (.F.4c.3 Step 1: still
+        // rendered flat against gui_engine_cfg; Step 2 moves them into the
+        // per-node tabs — this loop is the ONE place to lift when it lands).
+        for (int t = 0; t < L->span_count[2][k]; ++t) {
+            const int idx = L->perm[2][L->span_start[2][k] + t];
             const CfgFieldDescriptor &desc = g_per_node_cfg_field_descriptors[idx];
-
-            if (!cfg_walker_section || strcmp(cfg_walker_section, desc.section) != 0) {
-                cfg_walker_section = desc.section;
-                cfg_walker_skip_section = false;
-
-                int sec_strat = global_section_strategy(cfg_walker_section);
-                if (sec_strat >= 0 && !any_node_uses_strategy(s, sec_strat)) {
-                    cfg_walker_skip_section = true;
-                    continue;
-                }
-
-                bool default_open = (strcmp(desc.section, "Trading") == 0 ||
-                                      strcmp(desc.section, "Entry Filters") == 0 ||
-                                      strcmp(desc.section, "EMA Gate") == 0);
-                if (!ImGui::CollapsingHeader(desc.section,
-                        default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
-                    cfg_walker_skip_section = true;
-                    continue;
-                }
-            }
-            if (cfg_walker_skip_section) continue;
-
             ImGui::SetNextItemWidth(80);
-            if (PerNodeCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
+            if (PerNodeCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path))
                 changed = true;
-            }
-        });
+        }
     }
 
     return changed;
@@ -1927,54 +1927,44 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         }
     }
 
-    const char *current_section = NULL;
-    bool current_section_open = false;
-    for (int j = 0; j < NUM_PER_NODE_FIELDS; ++j) {
-        const PerNodeFieldDef *pcf = &per_node_fields[j];
-        if (!current_section || strcmp(current_section, pcf->section) != 0) {
-            current_section = pcf->section;
-            // v4.7.23: pre-scan section for any visible field. If none match
-            // the core's strategy, skip the whole section silently.
-            bool any_visible = false;
-            for (int k = j; k < NUM_PER_NODE_FIELDS &&
-                            strcmp(per_node_fields[k].section, current_section) == 0; ++k) {
-                if (per_node_field_visible(per_node_fields[k].key_suffix, node_strategy)) {
-                    any_visible = true;
-                    break;
-                }
-            }
-            if (!any_visible) {
-                while (j + 1 < NUM_PER_NODE_FIELDS &&
-                       strcmp(per_node_fields[j + 1].section, current_section) == 0)
-                    ++j;
-                continue;
-            }
-            ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_DefaultOpen;
-            current_section_open = ImGui::CollapsingHeader(current_section, fl);
-            if (!current_section_open) {
-                while (j + 1 < NUM_PER_NODE_FIELDS &&
-                       strcmp(per_node_fields[j + 1].section, current_section) == 0)
-                    ++j;
-                continue;
-            }
+    // 3G-i (E.1.2.C) — grouped render via the one-time per-node layout:
+    // one header per section regardless of future row interleaving in
+    // per_node_fields[] (the Global tab's duplicate-header class, closed
+    // at the same layer here before it can recur on this tab).
+    Settings_BuildPerNodeTabLayout();
+    const SectionLayout *L = &g_settings_per_node_layout;
+    for (int k = 0; k < L->n_sections; ++k) {
+        // v4.7.23 semantics preserved: pre-scan the section for any field
+        // visible under this node's strategy; skip the whole header if none.
+        bool any_visible = false;
+        for (int t = 0; t < L->span_count[0][k] && !any_visible; ++t) {
+            const int j = L->perm[0][L->span_start[0][k] + t];
+            if (per_node_field_visible(per_node_fields[j].key_suffix, node_strategy))
+                any_visible = true;
         }
-        if (!current_section_open) continue;
-        // v4.7.23: skip individual fields that don't match this core's strategy.
-        if (!per_node_field_visible(pcf->key_suffix, node_strategy)) continue;
-        ImGui::PushID(j);  // disambiguate same-named labels across the 18 rows
-        ImGui::SetNextItemWidth(80);
-        ImGui::InputFloat(pcf->label, &s->per_node_vals[node_id][j], 0, 0, pcf->fmt);
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            char key[64];
-            snprintf(key, sizeof(key), "node_%d_%s", node_id, pcf->key_suffix);
-            char val[32];
-            snprintf(val, sizeof(val), pcf->fmt, s->per_node_vals[node_id][j]);
-            cfg_write_field(s->cfg_path, key, val);
-            changed = true;
+        if (!any_visible) continue;
+        if (!ImGui::CollapsingHeader(L->names[k], ImGuiTreeNodeFlags_DefaultOpen))
+            continue;
+        for (int t = 0; t < L->span_count[0][k]; ++t) {
+            const int j = L->perm[0][L->span_start[0][k] + t];
+            const PerNodeFieldDef *pcf = &per_node_fields[j];
+            // v4.7.23: skip individual fields that don't match this core's strategy.
+            if (!per_node_field_visible(pcf->key_suffix, node_strategy)) continue;
+            ImGui::PushID(j);  // ORIGINAL row index — ImGui ID stable across regroups
+            ImGui::SetNextItemWidth(80);
+            ImGui::InputFloat(pcf->label, &s->per_node_vals[node_id][j], 0, 0, pcf->fmt);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                char key[64];
+                snprintf(key, sizeof(key), "node_%d_%s", node_id, pcf->key_suffix);
+                char val[32];
+                snprintf(val, sizeof(val), pcf->fmt, s->per_node_vals[node_id][j]);
+                cfg_write_field(s->cfg_path, key, val);
+                changed = true;
+            }
+            if (pcf->tooltip)
+                ImGui::SetItemTooltip("%s", pcf->tooltip);
+            ImGui::PopID();
         }
-        if (pcf->tooltip)
-            ImGui::SetItemTooltip("%s", pcf->tooltip);
-        ImGui::PopID();
     }
     return changed;
 }
