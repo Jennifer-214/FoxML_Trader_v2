@@ -240,7 +240,13 @@ struct RunControlState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-20]
+// [SIZE]_[631616B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[9869]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
 //======================================================================
@@ -2627,7 +2633,13 @@ struct OptimizerPanelState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-20]
+// [SIZE]_[959104B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[14986]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OptimizerPanelState]
 //======================================================================

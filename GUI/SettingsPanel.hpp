@@ -841,7 +841,13 @@ struct SettingsState {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — layout emitter cannot probe this block yet; quartet lands when the emitter covers it, D-327)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-20]
+// [SIZE]_[106560B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[1665]
+// [STRADDLE]_[per_node_strategy@86688 · per_node_risk_pct@86752]
 //======================================================================
 // [END_STRUCT]_[SettingsState]
 //======================================================================

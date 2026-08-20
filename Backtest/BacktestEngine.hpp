@@ -254,10 +254,10 @@ struct BacktestRunConfig {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[578112B]
+// [UPDATED]_[2026-08-20]
+// [SIZE]_[577856B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9033]
+// [CACHE_LINES]_[9029]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestRunConfig]
@@ -465,10 +465,10 @@ static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int n
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[53568B]
+// [UPDATED]_[2026-08-20]
+// [SIZE]_[53312B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[837]
+// [CACHE_LINES]_[833]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestResults]

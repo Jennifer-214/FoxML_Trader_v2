@@ -1518,12 +1518,12 @@ struct ModelStampResult {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-16]
+// [UPDATED]_[2026-08-20]
 //----------------------------------------------------------------------
 // [SIZE]_[5248B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[82]
-// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
+// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cuda_version environment_cpu_model]
 //======================================================================
 // [END_STRUCT]_[ModelStampResult]
 //======================================================================
@@ -2119,11 +2119,11 @@ struct StampInferenceCfgInputs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-16]
+// [UPDATED]_[2026-08-20]
 // [SIZE]_[4928B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[77]
-// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash scaler_fit_data_hash removal_reasons_csv environment_pytorch_version environment_cpu_model]
+// [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cuda_version environment_cpu_model]
 //======================================================================
 // [END_STRUCT]_[StampInferenceCfgInputs]
 //======================================================================
