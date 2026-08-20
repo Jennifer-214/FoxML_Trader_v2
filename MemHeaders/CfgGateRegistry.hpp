@@ -691,6 +691,65 @@ namespace cfg_derived {
 // [END_FUNCTION]_[parse_stamp_cfg_to_derived]
 //======================================================================
 
+//======================================================================
+// [FUNCTION]_[copy_stamp_result_to_handle]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the FIFTH walker — copy the parsed cfg-derived cohort sr -> handle at load; per-field has_-gated; closes PARITY-043 (33 of 36 cohort fields were parsed into sr and never copied, so drift rows compared a permanent 0)]
+// [REFERENCE]_[CLASS]_[18]
+//======================================================================
+// [CODE]
+//======================================================================
+    // E.1.2.C leg 2 (2026-08-20) — the walker family had 4 of its 5 legs
+    // (parse / inf-populate / emit / drift); the sr->handle COPY was never
+    // built, so every cfg-derived field the stamp carried died in the local
+    // `sr` and the FOREACH_CFG_DRIFT_CHECK rows compared handle-side zeros
+    // against live cfg (two REFUSE_STRICT rows false-firing on EVERY load at
+    // a default cfg once bandit_enabled defaulted ON). Per-field `has_`
+    // gating preserves Surface-G semantics: an absent key leaves has_=0 and
+    // the drift rows' cfg-cohort-on gate still fires — the INTENDED
+    // "trained-without-feature" catch (CfgDriftCheckRegistry.hpp § gates).
+    // The FOREACH_STAMP_RESULT_FIELD_EXCLUSION names are safe by the same
+    // mechanism: their master-cfg has_ twins are never set (the MODEL_CONST
+    // parse consumes those keys first), so this walker never copies them.
+    template <typename HandleT, typename ResultT>
+    inline void copy_stamp_result_to_handle(HandleT& h, const ResultT& r) {
+        (void)h; (void)r;
+
+        #define X_HANDLE_COPY_PER_NODE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+            if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (r.has_##name) { h.name = r.name; h.has_##name = 1; } \
+            }
+
+        #define X_HANDLE_COPY_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+            if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (r.has_##name) { h.name = r.name; h.has_##name = 1; } \
+            }
+
+        #define X_HANDLE_COPY_ML_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (r.has_##legacy_field) { h.legacy_field = r.legacy_field; h.has_##legacy_field = 1; } \
+            }
+
+        #define X_HANDLE_COPY_GATE_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                if (r.has_##legacy_field) { h.legacy_field = r.legacy_field; h.has_##legacy_field = 1; } \
+            }
+
+        FOREACH_STAMP_BOUND_DERIVED_COHORT(X_HANDLE_COPY)
+
+        #undef X_HANDLE_COPY_PER_NODE
+        #undef X_HANDLE_COPY_GLOBAL
+        #undef X_HANDLE_COPY_ML_CFG_FLAG
+        #undef X_HANDLE_COPY_GATE_CFG_FLAG
+    }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[copy_stamp_result_to_handle]
+//======================================================================
+
 }  // namespace cfg_derived
 
 //----------------------------------------------------------------------
@@ -783,6 +842,13 @@ namespace cfg_derived {
 // When ModelStampResult templated in future ship, change to `decltype((r))::F`.
 #define PARSE_STAMP_CFG_TO_DERIVED(r, key, val) \
     cfg_derived::parse_stamp_cfg_to_derived<64>((r), (key), (val))
+
+// COPY_RESULT_TO_HANDLE_FROM_DERIVED: the load-time sr->handle copy for the
+// cfg-derived cohort (E.1.2.C leg 2 — the fifth walker; PARITY-043 close).
+// Type-generic (both structs carry the AUTO_GEN fields); call after Model_Load
+// success so a refused load never carries copied state.
+#define COPY_RESULT_TO_HANDLE_FROM_DERIVED(handle, sr) \
+    cfg_derived::copy_stamp_result_to_handle((handle), (sr))
 
 //----------------------------------------------------------------------
 // [MACRO]_[*_FROM_DERIVED wrappers]

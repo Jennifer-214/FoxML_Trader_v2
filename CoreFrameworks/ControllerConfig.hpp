@@ -1997,7 +1997,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       /*cost_gate_enabled*/            0,
       /*barrier_gate_enabled*/         0,
       /*param_staleness_gate_enabled*/ 0);
-  // v5.14.9.F.2 — ml_cfg_flags defaults: all 7 flags off (backward compat)
+  // v5.14.9.F.2 — ml_cfg_flags defaults. ⚠ NOT all-off since 2026-08-16: bandit_enabled defaults ON (5d45ecc); the rest default 0. Re-derive from the septuple below, not this line (E.1.2.C leg 2 comment-truth fix).
   ML_CFG_FLAG_AUTOPOPULATE_FROM_SEPTUPLE(cfg.ml_cfg_flags,
       /*confidence_enabled*/           0,
       /*confidence_composite_enabled*/ 0,

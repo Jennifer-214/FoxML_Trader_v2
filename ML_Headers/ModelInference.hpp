@@ -432,8 +432,11 @@ struct alignas(64) ModelHandle {
     // sites below). Same STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() macro; F=64 brought into struct
     // scope (same F-into-scope pattern at both sister sites). After Phase F HIGH-1 (b) row deletion at Step 2:
     // handle.<name> auto-gen IS the sole source for cfg-derived field storage at runtime; NodeModelZoo
-    // load-time copy `handle.<name> = sr.<name>` flows sr (cfg-derived auto-gen on ModelStampResult)
-    // → handle (cfg-derived auto-gen here). Drift check via cfg_derived::drift_check_from_derived
+    // load-time copy flows sr (cfg-derived auto-gen on ModelStampResult) → handle via
+    // COPY_RESULT_TO_HANDLE_FROM_DERIVED (the fifth walker). ⚠ HISTORY: this comment claimed that
+    // copy existed from .B.3 — it did NOT (the walker was never built; fields died in the local sr
+    // and drift rows compared handle-side zeros — PARITY-043). Made TRUE at E.1.2.C leg 2
+    // (2026-08-20). Drift check via cfg_derived::drift_check_from_derived
     // reads handle.<name> (cfg-derived) + cfg.<name> (cfg-derived) — same source-of-truth surface.
     // EXCLUSION REDIRECT: 3 xgb_* names redirect to dead-prefixed per H18 sidecar (sister to
     // the ModelStampResult exclusion below + FOREACH_STAMP_RESULT_FIELD_EXCLUSION sidecar).

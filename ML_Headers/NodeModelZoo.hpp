@@ -499,6 +499,17 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                     found_path, sr.model_num_outputs, handle->num_outputs);
             }
         }
+        // E.1.2.C leg 2 (2026-08-20) — PARITY-043 close: copy the parsed
+        // cfg-derived cohort sr -> handle (the fifth walker; per-field
+        // has_-gated). Before this, 33 of 36 cohort fields were parsed into
+        // the local `sr` and DISCARDED, so NodeModelZoo_ValidateAgainstCfg's
+        // drift rows compared handle-side zeros against live cfg — two
+        // REFUSE_STRICT rows (thompson_precision_prior/_obs) false-fired on
+        // every load at a default cfg. Placed after Model_Load success +
+        // the MODEL_CONST copies, before the horizon refusal, so a refused
+        // load never carries copied state. One chokepoint covers boot,
+        // both hot-swap paths, and backtest (all route through TryLoadRole).
+        COPY_RESULT_TO_HANDLE_FROM_DERIVED(*handle, sr);
         // v5.11.42 D.2 — horizon-mismatch refusal at ensemble load.
         // EnsembleModelZoo_LoadFromCfg parses horizon_ticks from dir
         // name `_horizon_<N>` and passes it as expected_horizon_ticks.
