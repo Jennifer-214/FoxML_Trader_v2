@@ -90,10 +90,23 @@ struct SectionLayout {
     int span_count[MAX_SOURCES][MAX_SECTIONS];       // 0 = section absent in source
     int perm[MAX_SOURCES][MAX_ROWS];                 // original row indices, grouped
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+//======================================================================
+// [END_STRUCT]_[SectionLayout]
+//======================================================================
 
-// One render source: row_count rows; sec_of(row, ctx) returns the RAW
-// section string for a row, or NULL to exclude the row (e.g. render-mask
-// cleared). Function pointer + ctx — no std::function (H1).
+//======================================================================
+// [STRUCT]_[SectionSource]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one render source for SectionLayout_Build — row_count rows; sec_of(row, ctx) returns the RAW section string for a row, or NULL to exclude it (e.g. render-mask cleared); function pointer + ctx, no std::function (H1)]
+//======================================================================
+// [CODE]
+//======================================================================
 typedef const char* (*SectionOfFn)(int row, const void* ctx);
 struct SectionSource {
     int row_count;
@@ -103,7 +116,9 @@ struct SectionSource {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [END_STRUCT]_[SectionLayout]
+// [DERIVED]
+//======================================================================
+// [END_STRUCT]_[SectionSource]
 //======================================================================
 
 //======================================================================
