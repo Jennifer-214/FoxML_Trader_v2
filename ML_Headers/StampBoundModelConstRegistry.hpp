@@ -527,9 +527,13 @@ namespace tt {
 // pattern).
 #define FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)                                                 \
     /* === v5.14.2.E.2.B model-architectural fields — emitted at line ~2069 === */                  \
-    X(expected_num_classes,                     _, SKIP_HANDLE, int, "%d", 0,                       \
-      inf->expected_num_classes, inf->has_expected_num_classes,                                     \
-      "model output dimension at training time (binary/regression=1, multiclass=K)")                \
+    /* E.1.2.C (2026-08-21) — `expected_num_classes` ROW DELETED; name burned NAMESPACE-SCOPED as  */ \
+    /* `stamp-key:expected_num_classes` (a bare burn was impossible — the LIVE `expected.cfg`      */ \
+    /* sidecar key shares the spelling). It was a DEAD DUPLICATE on BOTH ends, not a zero-emit:    */ \
+    /* its only producer `req_num_outputs` had no writer tree-wide, and the parsed field had no    */ \
+    /* reader (SKIP_HANDLE; no `sr.expected_num_classes` access existed). `model_num_outputs`      */ \
+    /* already carries the identical documented quantity, emitted UNCONDITIONALLY and REFUSING on  */ \
+    /* mismatch at NodeModelZoo.hpp:505-508. DO NOT REUSE THE NAME ON THIS WIRE.                   */ \
     X(expected_role,                            _, SKIP_HANDLE, tt::stamp_str_16, "%s", "",         \
       inf->expected_role, inf->has_expected_role,                                                   \
       "operator's training-time role choice (buy_signal | barrier | regime | exit)")                \
@@ -696,9 +700,10 @@ enum StampHasFlagBit : uint64_t {
 
     // === Standalone bits — POST_CFG section (emitted after FOREACH_STAMP_BOUND_CFG; v5.14.8.A.merged.4) ===
     // Late-emit architectural fields. Order matches canonical wire format:
-    // expected_num_classes → expected_role → expected_num_features →
+    // expected_role → expected_num_features →
     // expected_feature_format_version → overlay_hash → effective_hash.
-    STAMP_BIT_expected_num_classes,
+    // (E.1.2.C — `expected_num_classes` led this list until its row was deleted as a dead
+    //  duplicate of `model_num_outputs`; survivors shift down one. Name burned scoped.)
     STAMP_BIT_expected_role,
     STAMP_BIT_expected_num_features,
     STAMP_BIT_expected_feature_format_version,
@@ -731,7 +736,6 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define MASK_feature_mask                           (1ULL << tt::STAMP_BIT_feature_mask)
 #define MASK_xgb_train_nthread                      (1ULL << tt::STAMP_BIT_xgb_train_nthread)
 // POST_CFG late-emit standalone masks (v5.14.8.A.merged.4):
-#define MASK_expected_num_classes                   (1ULL << tt::STAMP_BIT_expected_num_classes)
 #define MASK_expected_role                          (1ULL << tt::STAMP_BIT_expected_role)
 #define MASK_expected_num_features                  (1ULL << tt::STAMP_BIT_expected_num_features)
 #define MASK_expected_feature_format_version        (1ULL << tt::STAMP_BIT_expected_feature_format_version)

@@ -1229,7 +1229,6 @@ struct FullValidationResults {
     // calling Backtest_RunFullValidation. Zero-default = skip emit (legacy
     // behavior preserved for callers that don't care; engine falls back to
     // expected.cfg sidecar via VerifyExpected).
-    int       req_num_outputs;       // 1=binary/regression, ≥2=multiclass
     char      req_role[16];          // "buy_signal" | "barrier" | "regime" | "exit"
 
     // v5.15.3.B.2 — Multi-horizon grid identification (PARITY-021 close).
@@ -1432,7 +1431,6 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         args.horizon_count     = out->req_horizon_count;
 
         // Architectural fields (training-time identity)
-        args.req_num_outputs = out->req_num_outputs;
         args.req_role        = out->req_role;
 
         // v5.10.0 Item A — stamp_emit phase timer (kept; wraps helper call).

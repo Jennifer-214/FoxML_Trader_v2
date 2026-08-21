@@ -128,7 +128,6 @@ struct StampArgs {
 
     // === Architectural fields (training-time identity) ===
     // Defaults zero = helper falls back to derive from label_kind / MODEL_NUM_FEATURES
-    int         req_num_outputs   = 0;    // 0 = helper derives from label_kind
     const char* req_role          = "";   // "" = no expected_role emit
 };
 
@@ -328,9 +327,9 @@ inline StampWriteResult Stamp_AssembleAndEmit(
 
     // Model output count (from label_kind, or caller override)
     {
-        int K = (args.req_num_outputs > 0)
-              ? args.req_num_outputs
-              : LabelType_NumClasses(args.label_kind);
+        // E.1.2.C — the `req_num_outputs` caller-override arm went with the field: it had
+        // no writer, so this ternary always took the else branch. Byte-identical.
+        int K = LabelType_NumClasses(args.label_kind);
         STAMP_PUT(inf, model_num_outputs, (K >= 2) ? K : 1);
     }
 
@@ -405,9 +404,9 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     }
 
     // Architectural fields (training-time identity)
-    if (args.req_num_outputs > 0) {
-        STAMP_PUT(inf, expected_num_classes, args.req_num_outputs);
-    }
+    // E.1.2.C — the `expected_num_classes` emit sat here behind a presence gate nothing
+    // could ever open (`req_num_outputs` had no writer), for a key nothing read. Row
+    // deleted, name burned scoped; `model_num_outputs` above is the live carrier.
     if (args.req_role && args.req_role[0]) {
         STAMP_PUT(inf, expected_role, args.req_role);
     }
