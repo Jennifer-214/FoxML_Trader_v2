@@ -856,9 +856,9 @@ struct SettingsState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-20]
-// [SIZE]_[106560B]
+// [SIZE]_[118080B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[1665]
+// [CACHE_LINES]_[1845]
 // [STRADDLE]_[per_node_strategy@86688 · per_node_risk_pct@86752]
 //======================================================================
 // [END_STRUCT]_[SettingsState]
