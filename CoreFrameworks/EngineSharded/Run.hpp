@@ -1873,9 +1873,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                     } else if (state.nodes[c].ensemble_handle != nullptr) {
                                         // v5.15.4 — ENSEMBLE SHADOW-LOAD HOT-SWAP.
                                         // Replaces v5.14.2's in-place Free+Init+Load
-                                        // pattern (now legacy in EnsembleHotSwap.hpp;
-                                        // kept compiled but not called from this
-                                        // production path). PARITY-023's broken
+                                        // pattern (its EnsembleHotSwap.hpp was
+                                        // DELETED at E.1.2.C — zero production
+                                        // callers, H21). PARITY-023's broken
                                         // capture-pointer Revert design replaced by
                                         // shadow-load discipline per
                                         // DESIGN_SPECS/shadow-load-state-transition-pattern.md.
