@@ -5061,18 +5061,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // E.1.2.C 3-role (F3) — the side x label gate, enforced at the PRODUCER
     // where label truth lives (no wire key can see it): side=1 with an
     // entry-goodness label would train a semantically INVERTED exit model.
-    //   0 = REFUSE (buttons disabled)   1 = WARN (allowed, yellow hint)   2 = OK
-    auto side_label_gate = [&]() -> int {
-        if (state->ui_training_side != 1) return 2;
-        switch (state->label_type) {
-            case LABEL_WILL_PEAK:
-            case LABEL_PEAK_VALLEY_STABLE: return 2;
-            case LABEL_WILL_VALLEY:
-            case LABEL_VOL_BARRIER:        return 1;  // contested — operator triage pending
-            default:                       return 0;  // WIN_LOSS / FORWARD_PNL / REGIME / CS_*
-        }
-    };
-    const int side_gate = side_label_gate();
+    //   0 = REFUSE   1 = WARN (allowed, yellow hint)   2 = OK
+    //
+    // The tier rule itself now lives in Training_SideLabelGate (LabelFunctions.hpp),
+    // extracted from the lambda that used to sit here so the ANSI test TU can drive
+    // the REAL function — this was the one leg of the D2 verdict without a pin, and
+    // an inline replica is the Class-51 shape the plan's OUT-list replica died of.
+    //
+    // AGGREGATION over the EFFECTIVE label set (E.1.2.C): the gate used to read
+    // state->label_type alone, so the per-horizon "Label Kind CSV" walked straight
+    // past it — an OK combo selection could carry a REFUSE-tier horizon in behind
+    // it. That hole widened the moment the CSV started reaching the labels the model
+    // actually trains on. Worst (numerically lowest) tier across the set wins.
+    int side_gate = Training_SideLabelGate(state->label_type, state->ui_training_side);
+    for (int lk = 0; lk < state->ui_label_kind_per_horizon_count && lk < 8; ++lk) {
+        int t = Training_SideLabelGate(state->ui_label_kind_per_horizon[lk],
+                                       state->ui_training_side);
+        if (t < side_gate) side_gate = t;
+    }
     if (side_gate == 0) {
         ImGui::TextColored(FoxmlColors::red,
             "exit side: label '%s' trains an ENTRY-goodness objective — inverted as an exit "
@@ -5818,7 +5824,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         state->fv_running ||
         state->hp_running ||
         state->mh_running;
-    bool can_train = results->sample_count >= 10 && !any_worker_running;
+    // E.1.2.C — `&& side_gate != 0` is the half F3 was missing. The tier's own
+    // comment claimed "buttons disabled", but side_gate reached only the two
+    // COLLECT predicates, so a REFUSE-tier label could still be TRAINED from
+    // samples a previous collect had left behind: collect at side=Buy, flip to
+    // Exit, pick any label, Train. The gate rendered red and stopped nothing.
+    bool can_train = results->sample_count >= 10 && !any_worker_running
+                     && side_gate != 0;
 #ifndef USE_XGBOOST
     can_train = false;
 #endif

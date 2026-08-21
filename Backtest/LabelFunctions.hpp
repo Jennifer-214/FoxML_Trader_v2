@@ -571,4 +571,51 @@ static inline const char* Training_ResolveRole(int label_type, int training_side
 // [END_FUNCTION]_[Training_ResolveRole]
 //======================================================================
 
+//======================================================================
+// [FUNCTION]_[Training_SideLabelGate]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the side x label tier — 0 REFUSE / 1 WARN / 2 OK; extracted pure from the ImGui TU so this is drivable by a table test, tiers byte-unchanged]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Training_SideLabelGate(int label_type, int training_side) {
+    if (training_side != 1) return 2;
+    switch (label_type) {
+        case LABEL_WILL_PEAK:
+        case LABEL_PEAK_VALLEY_STABLE: return 2;
+        case LABEL_WILL_VALLEY:
+        case LABEL_VOL_BARRIER:        return 1;  // contested — operator triage pending
+        default:                       return 0;  // WIN_LOSS / BARRIER / FORWARD_PNL / REGIME / CS_*
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// The PRODUCER is the only place this can be enforced: label truth reaches
+// no wire key (measured — the stamp carries label_params, label_registry_hash
+// and model_num_outputs, none of which identifies the target row), so a
+// WIN_LOSS model trained at side=1 stamps role="exit" honestly and PASSES the
+// load-side role check. Training at side=1 on an entry-goodness label yields a
+// semantically INVERTED exit model.
+//
+// Extracted from a lambda in BacktestPanels.hpp at E.1.2.C for the same reason
+// Training_ResolveRole moved here one commit earlier: that header is included
+// by exactly one ImGui TU, so a gate living there is unreachable from the ANSI
+// test TU and cannot be pinned. It was the one leg of the D2 verdict without a
+// table test. TIERS ARE BYTE-UNCHANGED by the move — the WARN pair stays WARN.
+// A /decision-check REFUTED flipping them to REFUSE (the refutation: this tier
+// gates only the COLLECT buttons, so retiering an unenforced tier buys nothing;
+// that is fixed separately by wiring the train predicates to it).
+//
+// The caller aggregates: when a per-horizon label set is in play, the gate is
+// evaluated per member and the WORST (numerically lowest) tier wins, so a
+// single bad horizon cannot ride in behind a benign combo selection.
+//======================================================================
+// [END_FUNCTION]_[Training_SideLabelGate]
+//======================================================================
+
 #endif // LABEL_FUNCTIONS_HPP
