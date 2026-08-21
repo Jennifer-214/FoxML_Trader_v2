@@ -2390,6 +2390,32 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Model_ParseHorizonSibling]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE `_horizon_<N>` sibling-name matcher — prefix match + all-digits suffix + (0, 1000000] bounds; returns the horizon ticks or -1. Extracted (E.1.2.C 3G-ii) so the boot auto-detect and the Settings bundle picker resolve families by IDENTICAL rules — a picker with its own matcher would preview a different family than the loader loads]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline long Model_ParseHorizonSibling(const char* entry_name,
+                                             const char* prefix,
+                                             int prefix_len) {
+    if (strncmp(entry_name, prefix, (size_t)prefix_len) != 0) return -1;
+    const char* suffix = entry_name + prefix_len;
+    char* end = nullptr;
+    long h = strtol(suffix, &end, 10);
+    if (end == suffix || *end != '\0') return -1;  // non-numeric suffix
+    if (h <= 0 || h > 1000000) return -1;          // sanity bounds
+    return h;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Model_ParseHorizonSibling]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EnsembleModelZoo_AutoDetectFromDir]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
@@ -2579,14 +2605,10 @@ inline int EnsembleModelZoo_AutoDetectFromDir(
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
         if (n_discovered >= ENSEMBLE_HORIZON_MAX) break;
-        // Match prefix
-        if (strncmp(entry->d_name, prefix, prefix_len) != 0) continue;
-        // Parse trailing number
-        char *suffix = entry->d_name + prefix_len;
-        char *end = nullptr;
-        long h = strtol(suffix, &end, 10);
-        if (end == suffix || *end != '\0') continue;  // non-numeric suffix
-        if (h <= 0 || h > 1000000) continue;          // sanity bounds
+        // E.1.2.C 3G-ii — the shared matcher (prefix + digits + bounds);
+        // the Settings bundle picker resolves families with the SAME fn.
+        long h = Model_ParseHorizonSibling(entry->d_name, prefix, prefix_len);
+        if (h < 0) continue;
         discovered_horizons[n_discovered++] = (int)h;
     }
     closedir(dir);

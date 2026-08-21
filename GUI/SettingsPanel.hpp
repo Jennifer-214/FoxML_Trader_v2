@@ -41,6 +41,9 @@
 // v5.15.5.E.1.2.C 3G-i — ImGui-free section-grouped layout (one header per
 // canonical section; kills the duplicate-CollapsingHeader class)
 #include "SettingsSectionIndex.hpp"
+// v5.15.5.E.1.2.C 3G-ii — ImGui-free bundle scanner for the Model Dir picker
+// (families via the loader's own sibling matcher + resolution preview)
+#include "ModelBundleScan.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -835,11 +838,17 @@ struct SettingsState {
     // detects subdirs containing a recognizable role file. Reuses the same
     // file-detection logic as PastRuns_LoadOne (BacktestPanels.hpp).
     // Capped at 32 model dirs — enough for any realistic deployment.
-    static constexpr int MODEL_SCAN_MAX = 32;
-    int   model_scan_count;
-    char  model_scan_dirs[MODEL_SCAN_MAX][96];   // subdir name only (e.g. "aggressive")
-    char  model_scan_paths[MODEL_SCAN_MAX][256]; // full path "models/aggressive"
+    // E.1.2.C 3G-ii — the bundle picker scan: `_horizon_` FAMILIES (one
+    // selectable entry each, selection writes the BASE path) + single-zoo
+    // dirs, at models/ depth 1 AND 2 (the trainer's models/<class>/<run>
+    // layout was invisible to the old flat scan). ModelBundleScan.hpp.
+    ModelBundleScanState model_bundles;
     bool  model_scan_done;                        // 1 after first scan
+    // Resolution preview for the selected bundle (one shared buffer,
+    // rebuilt on selection change; verdicts filled by Verify stamps).
+    int   bundle_preview_entry;                   // index into model_bundles; -1 = none
+    char  bundle_preview[1408];
+    char  bundle_stamp_verdicts[1024];
 };
 //======================================================================
 // [END_CODE]
@@ -963,67 +972,89 @@ static inline void cfg_write_field(const char *path, const char *key, const char
 //----------------------------------------------------------------------
 // [TAG]_[[GUI]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[walk models/ and collect subdirs with a recognizable role file into the Model Dir dropdown source (capped at 32)]
-//======================================================================
-// Map cfg strategy name (e.g. "simple_dip") to STRATEGY_* index. Returns -1
-// on unknown. Mirror of the parser block in ControllerConfig_Load.
-// Walk `models/` and collect subdirectories that contain a recognizable
-// role file. Reuses the same role-detection list as PastRuns_LoadOne
-// and Verify Stamp (both in BacktestPanels.hpp).
-// Result populates SettingsState.model_scan_* — feeds the Model Dir
-// Combo dropdown in per-core tabs.
-//
-// Refresh-button-driven (no per-frame I/O): operator clicks "Refresh
-// Models" or panel auto-rescans on first appearing. ImGui render thread
-// stays free of opendir/stat (per /readiness check 17 hardening).
+// [OVERVIEW]_[run the bundle scan (ModelBundleScan.hpp): `_horizon_` sibling FAMILIES as one entry each + single-zoo role dirs, models/ depth 1+2 — the trainer's models/<class>/<run> layout included; resets the resolution-preview state. Refresh-button-driven (no per-frame I/O)]
 //======================================================================
 // [CODE]
 //======================================================================
 static inline void Settings_RescanModels(SettingsState *s) {
-    s->model_scan_count = 0;
+    ModelBundleScan_Run(&s->model_bundles);
     s->model_scan_done = true;
-    DIR *dir = opendir("models");
-    if (!dir) return;
-    static const char* role_files[] = {
-        "barrier.json", "buy_signal.json", "regime.json", "exit.json",  /* E.1.2.C */
-        "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",  "exit.xgb",
-        "barrier.bin",  "buy_signal.bin",  "regime.bin",  "exit.bin",
-        nullptr
-    };
-    struct dirent *de;
-    while ((de = readdir(dir)) != nullptr) {
-        if (de->d_name[0] == '.') continue;
-        char dir_path[256];
-        snprintf(dir_path, sizeof(dir_path), "models/%s", de->d_name);
-        struct stat st;
-        if (stat(dir_path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        // Detect at least one role file inside
-        bool has_role = false;
-        for (int i = 0; role_files[i]; ++i) {
-            char full[400];
-            snprintf(full, sizeof(full), "%s/%s", dir_path, role_files[i]);
-            struct stat fst;
-            if (stat(full, &fst) == 0 && S_ISREG(fst.st_mode)) {
-                has_role = true;
-                break;
-            }
-        }
-        if (!has_role) continue;
-        if (s->model_scan_count >= SettingsState::MODEL_SCAN_MAX) break;
-        size_t n = strnlen(de->d_name, sizeof(s->model_scan_dirs[0]) - 1);
-        memcpy(s->model_scan_dirs[s->model_scan_count], de->d_name, n);
-        s->model_scan_dirs[s->model_scan_count][n] = '\0';
-        size_t pn = strnlen(dir_path, sizeof(s->model_scan_paths[0]) - 1);
-        memcpy(s->model_scan_paths[s->model_scan_count], dir_path, pn);
-        s->model_scan_paths[s->model_scan_count][pn] = '\0';
-        s->model_scan_count++;
-    }
-    closedir(dir);
+    s->bundle_preview_entry = -1;
+    s->bundle_preview[0] = '\0';
+    s->bundle_stamp_verdicts[0] = '\0';
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[Settings_RescanModels]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Settings_VerifyBundleStamps]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[on-click stamp verification for every role file the selected bundle carries — verify_model_stamp vs THIS build's registry hashes + engine.cfg's held_out_stamp_secret (empty = devmode, signature unchecked); verdict lines into bundle_stamp_verdicts. The PastRuns Verify-Stamp pattern applied to the picker]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void Settings_VerifyBundleStamps(SettingsState* s,
+                                               const ModelBundleEntry* e) {
+    char* out = s->bundle_stamp_verdicts;
+    const size_t sz = sizeof(s->bundle_stamp_verdicts);
+    size_t n = 0;
+    const char* secret = s->gui_engine_cfg.held_out_stamp_secret[0]
+                       ? s->gui_engine_cfg.held_out_stamp_secret : nullptr;
+    const int nh = e->is_family ? e->horizon_count : 1;
+    for (int i = 0; i < nh; ++i) {
+        for (int r = 0; r < 4; ++r) {
+            if (!(e->roles[i] & (1u << r))) continue;
+            if (n + 96 >= sz) { snprintf(out + n, sz - n, "(truncated)\n"); n = sz; break; }
+            char mp[420];
+            if (e->is_family)
+                snprintf(mp, sizeof(mp), "%s_horizon_%d/%s.json",
+                         e->cfg_path, e->horizons[i], MODEL_BUNDLE_ROLE_NAMES[r]);
+            else
+                snprintf(mp, sizeof(mp), "%s/%s.json",
+                         e->cfg_path, MODEL_BUNDLE_ROLE_NAMES[r]);
+            struct stat stt;
+            if (stat(mp, &stt) != 0) {
+                // role detected via .xgb/.bin — stamps ride the .json convention
+                n += (size_t)snprintf(out + n, sz - n, "%s%s%s: non-json role, skipped\n",
+                                      e->is_family ? "" : "", MODEL_BUNDLE_ROLE_NAMES[r],
+                                      e->is_family ? "" : "");
+                continue;
+            }
+            ModelStampResult sr = verify_model_stamp(
+                mp, secret,
+                FPN_ToDouble(s->gui_engine_cfg.gap_acceptable_threshold),
+                MODEL_FORMAT_VERSION,
+                FEATURE_REGISTRY_HASH(), LABEL_REGISTRY_HASH());
+            if (e->is_family)
+                n += (size_t)snprintf(out + n, sz - n, "%d/%s: %s%s%s\n",
+                                      e->horizons[i], MODEL_BUNDLE_ROLE_NAMES[r],
+                                      sr.valid == 1 ? (secret ? "ok (signature verified)"
+                                                             : "ok (devmode, sig unchecked)")
+                                                    : "FAIL — ",
+                                      sr.valid == 1 ? "" : sr.reason,
+                                      "");
+            else
+                n += (size_t)snprintf(out + n, sz - n, "%s: %s%s\n",
+                                      MODEL_BUNDLE_ROLE_NAMES[r],
+                                      sr.valid == 1 ? (secret ? "ok (signature verified)"
+                                                             : "ok (devmode, sig unchecked)")
+                                                    : "FAIL — ",
+                                      sr.valid == 1 ? "" : sr.reason);
+        }
+        if (n >= sz) break;
+    }
+    if (n == 0) snprintf(out, sz, "(no role files to verify)\n");
+    out[sz - 1] = '\0';
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Settings_VerifyBundleStamps]
 //======================================================================
 
 //======================================================================
@@ -1660,27 +1691,25 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         ImGui::SetItemTooltip("Single model file. Used by STRATEGY_ML nodes. "
                               "Use Model Dir below for a NodeModelZoo with role auto-discovery.");
 
-        // v5.9.5f — Model Dir is now a Combo populated from a scan of
-        // `models/` (operator no longer types paths). Falls back to
-        // InputText if scan found nothing (so operator isn't blocked).
-        // Auto-rescans on first render; refresh button below for explicit.
+        // E.1.2.C 3G-ii — the Model Dir picker over the BUNDLE scan:
+        // `_horizon_` families are ONE entry each (selection writes the
+        // BASE path = Shape A auto-detect), single-zoo dirs list as-is.
+        // Falls back to InputText if the scan found nothing.
         if (!s->model_scan_done) Settings_RescanModels(s);
         ImGui::SetNextItemWidth(360);
         ImGui::PushID("mdir");
-        if (s->model_scan_count > 0) {
-            // Find current selection (match by dir name OR full path)
-            int cur_sel = -1;  // -1 = "(none)" entry
-            for (int i = 0; i < s->model_scan_count; ++i) {
+        ModelBundleScanState* mb = &s->model_bundles;
+        if (mb->count > 0) {
+            int cur_sel = -1;  // -1 = "(none)" / custom typed path
+            for (int i = 0; i < mb->count; ++i) {
                 if (strcmp(s->per_node_model_dir[node_id],
-                            s->model_scan_paths[i]) == 0 ||
-                    strcmp(s->per_node_model_dir[node_id],
-                            s->model_scan_dirs[i]) == 0) {
+                            mb->entries[i].cfg_path) == 0) {
                     cur_sel = i;
                     break;
                 }
             }
             const char *preview = (cur_sel >= 0)
-                ? s->model_scan_dirs[cur_sel]
+                ? mb->entries[cur_sel].label
                 : (s->per_node_model_dir[node_id][0]
                     ? s->per_node_model_dir[node_id] : "(none)");
             if (ImGui::BeginCombo("Model Dir", preview)) {
@@ -1691,26 +1720,38 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                     char key[64];
                     snprintf(key, sizeof(key), "node_%d_model_dir", node_id);
                     cfg_write_field(s->cfg_path, key, "");
+                    s->bundle_preview_entry = -1;
                     changed = true;
                 }
-                for (int i = 0; i < s->model_scan_count; ++i) {
+                for (int i = 0; i < mb->count; ++i) {
                     bool is_selected = (i == cur_sel);
-                    if (ImGui::Selectable(s->model_scan_dirs[i], is_selected)) {
-                        size_t n = strnlen(s->model_scan_paths[i],
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(mb->entries[i].label, is_selected)) {
+                        size_t n = strnlen(mb->entries[i].cfg_path,
                                             sizeof(s->per_node_model_dir[node_id]) - 1);
                         memcpy(s->per_node_model_dir[node_id],
-                                s->model_scan_paths[i], n);
+                                mb->entries[i].cfg_path, n);
                         s->per_node_model_dir[node_id][n] = '\0';
                         char key[64];
                         snprintf(key, sizeof(key), "node_%d_model_dir", node_id);
                         cfg_write_field(s->cfg_path, key,
                                         s->per_node_model_dir[node_id]);
+                        // Build the resolution preview for this selection.
+                        s->bundle_preview_entry = i;
+                        ModelBundle_FormatPreview(&mb->entries[i],
+                                                  s->bundle_preview,
+                                                  sizeof(s->bundle_preview));
+                        s->bundle_stamp_verdicts[0] = '\0';
                         changed = true;
                     }
+                    ImGui::PopID();
                     if (is_selected) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
             }
+            if (mb->truncated)
+                ImGui::TextDisabled("(scan truncated at %d entries)",
+                                     ModelBundleScanState::MAX_ENTRIES);
         } else {
             // No models found — fall back to InputText so operator can
             // type a path manually if needed.
@@ -1723,11 +1764,13 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
             }
         }
         ImGui::PopID();
-        ImGui::SetItemTooltip("Directory containing barrier/buy_signal/regime/exit roles. "
-                              "Takes precedence over Model Path when set.\n\n"
-                              "v5.9.5f: dropdown populated from `models/` scan.\n"
-                              "Click '↻ Rescan models/' below if you've added models\n"
-                              "since the panel opened.");
+        ImGui::SetItemTooltip("Model bundle for this node. Takes precedence over Model Path.\n\n"
+                              "[ensemble] entries are _horizon_ FAMILIES — selecting one\n"
+                              "writes the BASE path; the engine auto-detects every sibling\n"
+                              "(buy roles + exit.json per horizon) at boot. [single] entries\n"
+                              "are one-dir zoos (no cross-horizon ensemble/bandit).\n"
+                              "A resolution preview renders below on selection.\n\n"
+                              "Click '↻' if you've trained/added models since the panel opened.");
         ImGui::SameLine();
         ImGui::PushID("mdir_refresh");
         if (ImGui::SmallButton("↻")) {
@@ -1787,7 +1830,37 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                 "  acknowledge_hot_swap_with_open_positions=0 (default):\n"
                 "    swap is deferred until position closes (safer)\n"
                 "  acknowledge_hot_swap_with_open_positions=1:\n"
-                "    swap proceeds immediately, position exits on new model");
+                "    swap proceeds immediately, position exits on new model\n\n"
+                "CONSTRAINT (E.1.2.C): hot-swap reuses the horizon grid cached\n"
+                "at BOOT — swapping to a family with a DIFFERENT horizon set\n"
+                "needs an engine restart, not a live swap.");
+        }
+
+        // E.1.2.C 3G-ii — resolution preview for the selected bundle: what
+        // the LOADER would resolve (shape / per-horizon roles / exit count /
+        // primary / warnings), plus on-click stamp verification.
+        {
+            ModelBundleScanState* mbp = &s->model_bundles;
+            int pe = s->bundle_preview_entry;
+            if (pe >= 0 && pe < mbp->count &&
+                strcmp(mbp->entries[pe].cfg_path,
+                       s->per_node_model_dir[node_id]) == 0) {
+                ImGui::Indent();
+                ImGui::TextDisabled("resolution preview:");
+                ImGui::TextWrapped("%s", s->bundle_preview);
+                ImGui::PushID("bundle_verify");
+                if (ImGui::SmallButton("Verify stamps")) {
+                    Settings_VerifyBundleStamps(s, &mbp->entries[pe]);
+                }
+                ImGui::PopID();
+                ImGui::SetItemTooltip(
+                    "verify_model_stamp per role file vs THIS build's registry\n"
+                    "hashes + engine.cfg's held_out_stamp_secret\n"
+                    "(empty secret = devmode: contents check, signature unchecked).");
+                if (s->bundle_stamp_verdicts[0])
+                    ImGui::TextWrapped("%s", s->bundle_stamp_verdicts);
+                ImGui::Unindent();
+            }
         }
     }
 
