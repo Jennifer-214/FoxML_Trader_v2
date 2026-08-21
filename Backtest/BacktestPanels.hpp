@@ -4318,6 +4318,25 @@ static inline void mh_run_one_horizon_fv(
     local_run_cfg->label_forward_ticks = horizon_ticks;
     local_run_cfg->label_tp_pct        = (double)tp_pct;
     local_run_cfg->label_sl_pct        = (double)sl_pct;
+    // E.1.2.C — the label KIND belongs in this per-horizon mutation set too,
+    // and its absence was not cosmetic. Backtest_ComputeLabelsFromSamples
+    // picks the label leaf from local_run_cfg->label_type
+    // (BacktestEngine.hpp:904), which nothing here wrote — so every horizon
+    // recomputed labels from whatever the last COLLECT click left behind,
+    // while `label_type` (the parameter) drove num_classes, the XGB
+    // objective, the role file, the run_subdir and the stamp. Same run,
+    // two different labels.
+    //
+    // That silently voided the "Label Kind CSV" feature outright: :4885
+    // writes the per-horizon kind into job->label_type, so it reached the
+    // objective and the stamp but NEVER the labels the model actually
+    // trained on. Every horizon trained on the collect-time label and was
+    // then stamped as something else.
+    //
+    // Safe to mutate: local_run_cfg is a per-JOB copy of saved_run_cfg
+    // (:4907), documented at :4284 as "mutated per horizon" — this is
+    // exactly the mutation set it exists for.
+    local_run_cfg->label_type          = label_type;
     Backtest_ComputeLabelsFromSamples(results, local_run_cfg);
 
     int n_valid = 0;
