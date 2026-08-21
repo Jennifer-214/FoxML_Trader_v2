@@ -33,11 +33,12 @@
 //     (boundary-stable refactor); callers pass `BITMAP_IS_SET(...)` at the
 //     call sites (mechanical migration; existing callers updated v5.15.5.A.7).
 //
-// CALLERS (4 production sites — all signature-compatible post-refactor):
-//   1. CoreFrameworks/EngineSharded.hpp boot loop
-//   2. CoreFrameworks/HotSwap.hpp single-zoo hot-swap
-//   3. CoreFrameworks/EnsembleHotSwap.hpp ensemble hot-swap
-//   4. Backtest/BacktestSharded.hpp validate path (PARITY-012)
+// CALLERS (3 production sites at HEAD — re-derived E.1.2.C; the old list
+// named EngineSharded.hpp / EnsembleHotSwap.hpp / BacktestSharded.hpp,
+// all since consolidated or retired):
+//   1. CoreFrameworks/EngineCommon.hpp shared boot (LIVE + BACKTEST by
+//      construction — the M5 helper; PARITY-012's backtest path rides it)
+//   2-3. CoreFrameworks/EngineSharded/Run.hpp hot-swap branches (x2)
 //
 // PATTERNS (DESIGN_SPECS cross-refs):
 //   - x-macro-registry-with-presence-dispatch.md (Y3 token-paste dispatch)

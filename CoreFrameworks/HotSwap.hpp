@@ -51,7 +51,6 @@
 #include "ControllerConfig.hpp"
 #include "ControllerEventLoop.hpp"   // EventLoopState<F> struct
 #include "../ML_Headers/NodeModelZoo.hpp"
-#include "EnsembleHotSwap.hpp"   // legacy in-place helper (kept as thin wrapper)
 
 namespace tt {
 

@@ -123,7 +123,6 @@
 #endif
 #include <unistd.h>  // sysconf(_SC_NPROCESSORS_ONLN) — POSIX, also available on macOS
 
-#include "../EnsembleHotSwap.hpp"   // v5.14.2 — EngineSharded_HotSwapEnsemble template (legacy in-place; superseded v5.15.4 by HotSwap.hpp)
 #include "../HotSwap.hpp"           // v5.15.4 — HotSwap_ShadowLoad_{Ensemble,SingleZoo}
 #include "../ModelValidation.hpp"   // v5.14.2.E.1 — NodeModelZoo_ValidateAgainstCfg (extracted; PARITY-012)
 #include "../../ML_Headers/FeatureRegistryOverlay.hpp"  // v5.14.3.B — FeatureOverlay_PostLoadVerify
@@ -449,12 +448,11 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
 // v5.14.2.E.1 extracted the function to ModelValidation.hpp). See git
 // history pre-v5.15.5.C.2 if archeological reference needed.
 
-
-// v5.14.2 — EngineSharded_HotSwapEnsemble template lives in its own
-// header (CoreFrameworks/EnsembleHotSwap.hpp) so tests can exercise it
-// without dragging in the full sharded engine. Definition is included
-// once at the top of this file (above namespace tt opening); the call
-// site is in EngineSharded_Run below.
+// E.1.2.C — the v5.14.2 EngineSharded_HotSwapEnsemble legacy in-place
+// helper (EnsembleHotSwap.hpp) is DELETED: superseded v5.15.4 by the
+// HotSwap_ShadowLoad_* path, zero production callers at HEAD (its old
+// call site here was removed with the v5.15.4 cutover; a stale comment
+// claiming "the call site is in EngineSharded_Run below" survived it).
 
 //------------------------------------------------------------------------------
 // [SECTION]_[Phase 7.B — drainer-cycle bench gate histogram]

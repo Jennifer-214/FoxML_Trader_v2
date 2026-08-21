@@ -3428,7 +3428,7 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
 // Why: pre-v5.14.2.E, the boot ensemble setup (EngineSharded boot site)
 // was inlined as sequential calls. Backtest (BacktestSharded.hpp) had a
 // near-mirror that drifted (missed v5.13.4 InitExitBandits + LoadExitBanditState
-// = PARITY-010). Hot-swap (EnsembleHotSwap.hpp from v5.14.2.A) had a different
+// = PARITY-010). Hot-swap (the v5.14.2.A EnsembleHotSwap helper — retired E.1.2.C) had a different
 // near-mirror that drifted MORE (missed 6 steps = PARITY-009). Single-zoo
 // hot-swap missed VerifyExpected (PARITY-011); backtest single-zoo missed
 // ValidateAgainstCfg (PARITY-012).
