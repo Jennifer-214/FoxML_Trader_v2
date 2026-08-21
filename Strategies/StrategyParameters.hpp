@@ -1436,6 +1436,20 @@ inline void ML_BuildParameters(
         if (std::isnan(pred_raw) || std::isinf(pred_raw)) {
             fprintf(stderr, "[ML] dispatch: buy_signal prediction NaN/Inf — no signal\n");
         } else {
+            // pred_raw is the BUY probability for whichever primary role
+            // loaded: binary buy_signal/barrier = P(up-first), 3-class
+            // barrier = P(valley) via buy_class_idx=2 (NodeModelZoo :2275).
+            //
+            // E.1.2.C RESIDUAL — p_peak here is 1-P(valley), which on a
+            // 3-class model is P(peak)+P(stable), NOT P(peak). It is the
+            // right SIGN (the pre-fix code had this inverted) but it charges
+            // the stable mass as peak risk, so BarrierGate over-blocks on a
+            // quiet tape: at P(stable)=.5/P(peak)=.2/P(valley)=.3 the true
+            // p_peak is .2 (gate ~.61) but this yields .7 (hard block, :81).
+            // Conservative, never unsafe — but it discards exactly the third
+            // class PVS was built to break out. Exact fix = one
+            // Model_PredictMulti per handle (same inference count) blended
+            // per-class; homed in the E.1.2.C register, NOT done here.
             prediction = pred_raw;
             p_peak     = 1.0 - prediction;
             p_valley   = prediction;

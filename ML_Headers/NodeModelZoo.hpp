@@ -779,7 +779,16 @@ inline int NodeModelZoo_LoadFromDir(NodeModelZoo<F> *zoo, const char *dir, int b
     // role slot. Loader picks the first available role in priority
     // order: buy_signal > barrier > regime. For multiclass barrier
     // (PEAK_VALLEY_STABLE 3-class), buy_class_idx is set on the handle
-    // so Model_Predict returns P(peak) as buy probability.
+    // so Model_Predict returns P(valley) as buy probability.
+    //
+    // E.1.2.C — class 2, NOT class 1. Per LabelFunctions.hpp:305-306 the
+    // 3-class order is 0=stable / 1=peak (down-barrier first = we were at a
+    // HIGH = bad entry) / 2=valley (up-barrier first = we were at a LOW =
+    // good entry). The old text said "P(peak) as buy probability", which is
+    // the entry signal INVERTED — it names the class that means *don't* buy.
+    // The single-zoo 3-class path never read this (it goes through
+    // Model_PredictMulti), but the ENSEMBLE path does, and leg 3 made that
+    // path take precedence — so the same wrong constant became live there.
     zoo->primary_handle = nullptr;
     zoo->primary_target_class = 0;
     zoo->primary_role_name[0] = '\0';
@@ -790,7 +799,7 @@ inline int NodeModelZoo_LoadFromDir(NodeModelZoo<F> *zoo, const char *dir, int b
                 sizeof(zoo->primary_role_name) - 1);
     } else if (zoo->loaded_mask & NODE_MODEL_BARRIER) {
         zoo->primary_handle = &zoo->barrier;
-        zoo->barrier.buy_class_idx = (zoo->barrier.num_outputs >= 2) ? 1 : 0;
+        zoo->barrier.buy_class_idx = Model_PrimaryBuyClassIdx(zoo->barrier.num_outputs);
         zoo->primary_target_class = zoo->barrier.buy_class_idx;
         strncpy(zoo->primary_role_name, "barrier",
                 sizeof(zoo->primary_role_name) - 1);
@@ -1574,11 +1583,14 @@ inline void EnsembleModelZoo_EnsurePrimary(EnsembleModelZoo<F>* ezoo) {
     } else if (ezoo->barrier_count > 0) {
         ezoo->primary_handles = ezoo->barrier;
         ezoo->primary_count = ezoo->barrier_count;
+        // E.1.2.C — was the THIRD hand-copy of the primary-class rule and
+        // carried the same inverted constant as the other two. Routed
+        // through the named rule so a future edit cannot desync them.
         ezoo->primary_target_class =
-            (ezoo->barrier[0].num_outputs >= 2) ? 1 : 0;
+            Model_PrimaryBuyClassIdx(ezoo->barrier[0].num_outputs);
         for (int i = 0; i < ezoo->barrier_count; ++i) {
             ezoo->barrier[i].buy_class_idx =
-                (ezoo->barrier[i].num_outputs >= 2) ? 1 : 0;
+                Model_PrimaryBuyClassIdx(ezoo->barrier[i].num_outputs);
         }
         strncpy(ezoo->primary_role_name, "barrier",
                 sizeof(ezoo->primary_role_name) - 1);
@@ -2256,8 +2268,19 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     // available role and point ezoo->primary_handles at its array.
     // Priority: buy_signal > barrier > regime. Set per-handle
     // buy_class_idx so Model_Predict returns the right class probability
-    // (class 1 = peak for PEAK_VALLEY_STABLE 3-class barrier; class 0
+    // (class 2 = VALLEY for PEAK_VALLEY_STABLE 3-class barrier; class 0
     // for binary). Strategy + bandit code reads primary_*, not buy_signal_*.
+    //
+    // E.1.2.C — this said "class 1 = peak" and set 1, which fed the BUY
+    // threshold P(peak) = P(bad entry): a model calling an imminent top
+    // scored as a strong buy, while BarrierGate got 1-P(peak) and so was
+    // LEAST likely to block exactly when a peak was most likely. Latent
+    // until leg 3 gave the ensemble branch precedence over the (correct)
+    // single-zoo 3-class path at StrategyParameters.hpp:1050 — and every
+    // model the trainer emits for a buy side is `barrier.json` (PVS), so
+    // barrier-primary is the ONLY ensemble shape this produces, not a
+    // corner case. The exit side keeps class 1 (peak) on purpose: you SELL
+    // at a peak. Same rule, opposite correct answer — see :2297.
     ezoo->primary_handles = nullptr;
     ezoo->primary_count = 0;
     ezoo->primary_target_class = 0;
@@ -2274,11 +2297,11 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     } else if (ezoo->barrier_count > 0) {
         ezoo->primary_handles = ezoo->barrier;
         ezoo->primary_count = ezoo->barrier_count;
-        int class_idx = (ezoo->barrier[0].num_outputs >= 2) ? 1 : 0;
+        int class_idx = Model_PrimaryBuyClassIdx(ezoo->barrier[0].num_outputs);
         ezoo->primary_target_class = class_idx;
         for (int i = 0; i < ezoo->barrier_count; ++i) {
             ezoo->barrier[i].buy_class_idx =
-                (ezoo->barrier[i].num_outputs >= 2) ? 1 : 0;
+                Model_PrimaryBuyClassIdx(ezoo->barrier[i].num_outputs);
         }
         strncpy(ezoo->primary_role_name, "barrier",
                 sizeof(ezoo->primary_role_name) - 1);
@@ -2314,7 +2337,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     // exit_predictor independently.
     for (int i = 0; i < ezoo->exit_predictor_count; ++i) {
         ezoo->exit_predictor[i].buy_class_idx =
-            (ezoo->exit_predictor[i].num_outputs >= 2) ? 1 : 0;
+            Model_ExitClassIdx(ezoo->exit_predictor[i].num_outputs);
     }
 
     if (total_loaded > 0) {

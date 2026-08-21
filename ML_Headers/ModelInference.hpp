@@ -827,6 +827,67 @@ inline float Model_Predict_AtClass(ModelHandle<F>* m,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Model_PrimaryBuyClassIdx]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[buy-side class index for a primary-role handle — class 2 (valley = good entry) on a 3-class PVS model, class 0 on a binary one]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Model_PrimaryBuyClassIdx(int num_outputs) {
+    return (num_outputs >= 2) ? 2 : 0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// PEAK_VALLEY_STABLE order (LabelFunctions.hpp:305-306): 0=stable,
+// 1=peak (down barrier first => we sampled at a HIGH => bad entry),
+// 2=valley (up barrier first => we sampled at a LOW => good entry).
+// So the ENTRY signal is class 2. Binary roles carry one output and the
+// raw sigmoid already IS P(good entry), hence 0.
+//
+// This exists as a named function, and not as the inline ternary it
+// replaces, because its exit-side sister below computes a DIFFERENT
+// answer from the SAME input. The two ternaries previously sat 40 lines
+// apart, looked identical, and one of them was wrong for 14 months —
+// unspottable by reading either site alone.
+//======================================================================
+// [END_FUNCTION]_[Model_PrimaryBuyClassIdx]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Model_ExitClassIdx]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[exit-side class index for an exit_predictor handle — class 1 (peak = good exit) on a 3-class PVS model, class 0 on a binary one]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Model_ExitClassIdx(int num_outputs) {
+    return (num_outputs >= 2) ? 1 : 0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// Class 1 (peak) is CORRECT here and the asymmetry with the buy sister
+// is deliberate, not an oversight: you ENTER at a valley and you EXIT at
+// a peak, so the same 3-class model answers two opposite questions. A
+// binary exit model (WILL_PEAK, the leg-3 default) has one output that
+// already IS P(peak), hence 0 — which is why a binary arm and a 3-class
+// arm can share exit_predictor[] and still blend coherently.
+//
+// If these two ever return the same value, one of them is wrong.
+//======================================================================
+// [END_FUNCTION]_[Model_ExitClassIdx]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[Model_LoadAOT]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
