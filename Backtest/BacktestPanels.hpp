@@ -3178,6 +3178,39 @@ struct TrainingPanelState {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Training_AnyWorkerRunning]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE "is a suite worker live" predicate — hoisted so the COLLECT gates can consult it, not just the train gates]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
+    return st && (st->tm_running || st->wf_running ||
+                  st->fv_running || st->hp_running || st->mh_running);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// The predicate already existed, but INLINE and computed AFTER the collect
+// gates, so `can_collect` / `mh_can_collect` could not see it — they consulted
+// only `run_control->running`. That left a real hazard: Collect Features runs
+// Backtest_Run, which REALLOCs results->feature_matrix and results->labels, and
+// a realloc MOVES those buffers. A training worker holding a shallow copy of
+// `results` then reads freed memory. The 2026-04-25 segfault this file's
+// comments describe was mitigated for the DISPLAY path only; the worker path
+// stayed open.
+//
+// Hoisted to a named function so a future gate cannot silently re-derive a
+// different answer — the same reason Training_ResolveRole was extracted.
+//======================================================================
+// [END_FUNCTION]_[Training_AnyWorkerRunning]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingPanel_Init]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
@@ -3481,16 +3514,34 @@ struct FullValidationWorkerArgs {
     int     snap_label_forward_ticks;
     double  snap_label_tp_pct;
     double  snap_label_sl_pct;
+    // E.1.2.C — the remaining fields RFV was reading LIVE off `state->` from the
+    // worker thread. `snap_label_type` is deliberately sourced from
+    // run_control->run_config (the field that actually produced results->labels[]),
+    // NOT from state->label_type: the combo can be changed BETWEEN the Collect
+    // click and the Run-Full-Validation click, with no race required, and the
+    // worker then trained WF/held-out on one objective while stamping another.
+    // When the class counts differ the engine REFUSES at load
+    // (NodeModelZoo.hpp: "stamp claims model_num_outputs=N but handle=M"); when
+    // they match — WIN_LOSS / BARRIER / VOL_BARRIER / WILL_PEAK are all binary —
+    // nothing catches it and the stamp simply records a label the model never
+    // trained on. Sourcing from run_config makes the stamp describe the labels.
+    int     snap_label_type;
+    int     snap_wf_n_splits;
+    int     snap_wf_horizon_ticks;
+    int     snap_wf_buffer_ticks;
+    int     snap_wf_min_train;
+    float   snap_fv_gap_threshold;
+    float   snap_fv_held_out_fraction;
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[360B]
+// [UPDATED]_[2026-08-21]
+// [SIZE]_[392B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[6]
+// [CACHE_LINES]_[7]
 // [STRADDLE]_[snap_fv_auto_stamp_secret@272]
 //======================================================================
 // [END_STRUCT]_[FullValidationWorkerArgs]
@@ -3519,6 +3570,15 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     // which is operator-mutable; capture at click time avoids race).
     int    snap_label_forward_ticks = args->snap_label_forward_ticks;
     double snap_label_tp_pct        = args->snap_label_tp_pct;
+    // E.1.2.C — capture the rest of the click-time snapshot before free(args).
+    // Every one of these was a live `state->` read further down.
+    int    snap_label_type          = args->snap_label_type;
+    int    snap_wf_n_splits         = args->snap_wf_n_splits;
+    int    snap_wf_horizon_ticks    = args->snap_wf_horizon_ticks;
+    int    snap_wf_buffer_ticks     = args->snap_wf_buffer_ticks;
+    int    snap_wf_min_train        = args->snap_wf_min_train;
+    float  snap_fv_gap_threshold    = args->snap_fv_gap_threshold;
+    float  snap_fv_held_out_fraction = args->snap_fv_held_out_fraction;
     double snap_label_sl_pct        = args->snap_label_sl_pct;
     {
         size_t n = strnlen(args->snap_model_path,
@@ -3541,8 +3601,11 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     // exists to make held-out access a deliberate operator action; the
     // suite UI's Run Full Validation button is exactly that deliberate
     // action, so unlocking here is correct.
+    // E.1.2.C — the click-time fraction. This determined the held-out split size,
+    // hence held_out_metric, hence the generalization gap that gates auto-stamp —
+    // off a live slider read from a worker thread.
     HeldOutSplit split = HeldOutSplit_Make(data->sample_count,
-                                            (double)state->fv_held_out_fraction);
+                                            (double)snap_fv_held_out_fraction);
     char unlock_token[33];
     memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
     HeldOutSplit_Unlock(&split, unlock_token);
@@ -3605,11 +3668,14 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     state->fv_results.req_label_tp_pct = snap_label_tp_pct;
     state->fv_results.req_label_sl_pct = snap_label_sl_pct;
 
+    // E.1.2.C — every argument here is now the CLICK-TIME snapshot. These were
+    // live `state->` reads from a worker thread; the label_type one needed no
+    // race at all (change the combo between Collect and this click).
     Backtest_RunFullValidation(&state->fv_results, data, &split,
-                                state->wf_n_splits, state->wf_horizon_ticks,
-                                state->wf_buffer_ticks, state->wf_min_train,
+                                snap_wf_n_splits, snap_wf_horizon_ticks,
+                                snap_wf_buffer_ticks, snap_wf_min_train,
                                 &state->fv_progress, &state->fv_cancel,
-                                state->label_type, state->fv_gap_threshold);
+                                snap_label_type, snap_fv_gap_threshold);
 
     // Build a one-line status summary the UI can render in fv_status_msg.
     if (state->fv_results.auto_stamp_attempted) {
@@ -5357,7 +5423,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // "Collect Features" (single-mode worker). >1 = "Collect Multi-Horizon"
     // (multi-horizon worker). Both still write to results->feature_matrix.
     bool has_data = data->selected_count > 0;
-    bool can_collect = has_data && !run_control->running && side_gate != 0;  // E.1.2.C F3
+    // E.1.2.C — `&& !Training_AnyWorkerRunning(state)` closes the realloc-under-worker
+    // hazard: Collect runs Backtest_Run, which reallocs (and therefore MOVES)
+    // feature_matrix/labels while a training worker holds a shallow copy.
+    bool can_collect = has_data && !run_control->running && side_gate != 0
+                       && !Training_AnyWorkerRunning(state);  // E.1.2.C F3
     // v5.11.43 — uses panel_eff_horizon_count (UI takes priority, falls back
     // to cfg.horizon_list). 0 or 1 = single mode; >1 = multi-horizon mode.
     bool single_horizon_mode = (panel_eff_horizon_count <= 1);
@@ -5443,6 +5513,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     bool tp_aligned = (tp_n <= 1) || (tp_n == mh_collect_horizon_count);
     bool sl_aligned = (sl_n <= 1) || (sl_n == mh_collect_horizon_count);
     bool mh_can_collect = has_data && !run_control->running
+                          && !Training_AnyWorkerRunning(state)   // E.1.2.C — see can_collect
                           && mh_collect_horizon_count > 0
                           && tp_aligned && sl_aligned
                           && side_gate != 0;  // E.1.2.C F3
@@ -5847,13 +5918,22 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "a unique name per experiment (e.g. btc_5min_v1, btc_5min_v2, ...).");
     // Live preview of what dirs will be created
     if (state->run_name[0] != '\0' && state->ui_horizon_count > 0) {
-        const char* role_preview = "buy_signal";
-        if (state->label_type == LABEL_PEAK_VALLEY_STABLE) role_preview = "barrier";
-        else if (state->label_type == LABEL_REGIME)        role_preview = "regime";
-        const char* class_preview =
-            (state->label_type == LABEL_PEAK_VALLEY_STABLE
-             || state->label_type == LABEL_REGIME)
-            ? "classification" : "classification";  // simplified
+        // E.1.2.C — this was the FOURTH and last hand-copy of the label->role rule,
+        // and the only operator-FACING one, so it was the one that lied to a human.
+        // It ignored ui_training_side, so with Training Side = Exit it advertised
+        // "barrier.json" / "buy_signal.json" while the worker wrote exit.json. Now
+        // calls the ONE extracted rule, same as the trainer, Save Run and the boot
+        // walk. (Its three siblings were closed earlier in E.1.2.C; this completes
+        // the class rather than leaving the visible one wrong.)
+        const char* role_preview =
+            Training_ResolveRole(state->label_type, state->ui_training_side);
+        // ...and this ternary returned "classification" in BOTH arms, so a
+        // regression label advertised the classification tree while :4364-4367
+        // routed the write to models/regression/. Derive it the same way the
+        // writer does: num_classes == 1 means regression.
+        const int nclass_preview = (state->label_type >= 0 && state->label_type < LABEL_COUNT)
+                                 ? label_table[state->label_type].num_classes : 0;
+        const char* class_preview = (nclass_preview == 1) ? "regression" : "classification";
         ImGui::TextDisabled("Will write to: models/%s/%s_horizon_<%s>/%s.json",
                             class_preview, state->run_name,
                             state->ui_horizon_count == 1 ? "H" : "H1,H2,...",
@@ -5874,12 +5954,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // on a single "any_worker_running" predicate so only ONE worker runs
     // at a time. Operator-friendly: button is disabled with a tooltip
     // "(another training task is running)" rather than crashing.
-    bool any_worker_running =
-        state->tm_running ||
-        state->wf_running ||
-        state->fv_running ||
-        state->hp_running ||
-        state->mh_running;
+    // E.1.2.C — the one predicate, hoisted; see Training_AnyWorkerRunning.
+    bool any_worker_running = Training_AnyWorkerRunning(state);
     // E.1.2.C — `&& side_gate != 0` is the half F3 was missing. The tier's own
     // comment claimed "buttons disabled", but side_gate reached only the two
     // COLLECT predicates, so a REFUSE-tier label could still be TRAINED from
@@ -7269,6 +7345,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fv_args->snap_label_forward_ticks = run_control->run_config.label_forward_ticks;
                 fv_args->snap_label_tp_pct        = run_control->run_config.label_tp_pct;
                 fv_args->snap_label_sl_pct        = run_control->run_config.label_sl_pct;
+                // E.1.2.C — label_type from run_config (the labels' own source), the
+                // rest from the panel at click time. See the struct comment.
+                fv_args->snap_label_type          = run_control->run_config.label_type;
+                fv_args->snap_wf_n_splits         = state->wf_n_splits;
+                fv_args->snap_wf_horizon_ticks    = state->wf_horizon_ticks;
+                fv_args->snap_wf_buffer_ticks     = state->wf_buffer_ticks;
+                fv_args->snap_wf_min_train        = state->wf_min_train;
+                fv_args->snap_fv_gap_threshold    = state->fv_gap_threshold;
+                fv_args->snap_fv_held_out_fraction = state->fv_held_out_fraction;
                 pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
                 pthread_detach(state->fv_tid);
             }
