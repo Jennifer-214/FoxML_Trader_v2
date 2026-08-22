@@ -2468,6 +2468,15 @@ static inline long Model_ParseHorizonSibling(const char* entry_name,
     long h = strtol(suffix, &end, 10);
     if (end == suffix || *end != '\0') return -1;  // non-numeric suffix
     if (h <= 0 || h > 1000000) return -1;          // sanity bounds
+    // E.1.2.D leaf 8 (S2-F5) — canonical-form round-trip. strtol accepts
+    // "07500" / "+7500" / " 7500" / "00000007500" as 7500, and every loader
+    // REBUILDS the path FROM the int ("%s_horizon_%ld" → the canonical dir),
+    // so an aliased spelling loaded the ONE canonical dir a SECOND time as a
+    // second ensemble arm (measured, scan-2 re-derivation § 2). Only the
+    // spelling the path builders themselves emit is a family member.
+    char canon[24];
+    snprintf(canon, sizeof(canon), "%ld", h);
+    if (strcmp(canon, suffix) != 0) return -1;     // aliased spelling — reject
     return h;
 }
 //======================================================================
