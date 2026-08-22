@@ -1035,14 +1035,20 @@ struct PastRun {
     // column in both classification + regression tables; lets operator
     // gauge training data scale at a glance.
     int    n_train_samples;
+    // E.1.2.D D-e — which side's record this row displays (0 = entry /
+    // legacy summary.txt, 1 = exit), and whether the OTHER side's summary
+    // also exists in the dir (rendered as a [+exit]/[+entry] tag so
+    // neither record is invisible).
+    int    summary_side;
+    int    has_other_side;
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-21]
-// [SIZE]_[6192B]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[6208B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[97]
 // [STRADDLE]_[none]
@@ -1089,10 +1095,10 @@ struct PastRunsState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-21]
-// [SIZE]_[396592B]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[397616B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[6197]
+// [CACHE_LINES]_[6213]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRunsState]
@@ -1189,10 +1195,35 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
     char path[400];
     char line[512];
 
-    // summary.txt
-    snprintf(path, sizeof(path), "%s/summary.txt", run_dir);
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;  // no summary = not a Save Run bundle
+    // E.1.2.D D-e — side-suffixed summaries (writer above). Preference:
+    // entry > legacy summary.txt > exit, so a dir carrying both sides
+    // shows its ENTRY record by default; the other side's presence is
+    // flagged (has_other_side) so neither record is invisible. This is
+    // also the listing gate: PastRuns_ScanOneDir lists a dir iff this
+    // returns 1, so any of the three names qualifies a run dir.
+    static const char* summary_names[] = {
+        "summary_entry.txt", "summary.txt", "summary_exit.txt" };
+    FILE *f = NULL;
+    int summary_idx = -1;
+    for (int si = 0; si < 3 && !f; ++si) {
+        snprintf(path, sizeof(path), "%s/%s", run_dir, summary_names[si]);
+        f = fopen(path, "r");
+        if (f) summary_idx = si;
+    }
+    if (!f) return 0;  // no summary of any side = not a run bundle
+    r->summary_side = (summary_idx == 2) ? 1 : 0;   // 1 = the row shows the EXIT record
+    {
+        struct stat ost;
+        char opath[400];
+        snprintf(opath, sizeof(opath), "%s/%s", run_dir,
+                 (summary_idx == 2) ? "summary_entry.txt" : "summary_exit.txt");
+        r->has_other_side = (stat(opath, &ost) == 0) ? 1 : 0;
+        if (!r->has_other_side && summary_idx == 2) {
+            // an exit row whose dir also carries a LEGACY entry summary
+            snprintf(opath, sizeof(opath), "%s/summary.txt", run_dir);
+            r->has_other_side = (stat(opath, &ost) == 0) ? 1 : 0;
+        }
+    }
     while (fgets(line, sizeof(line), f)) {
         char k[64], v[256];
         if (!parse_kv_line(line, k, sizeof(k), v, sizeof(v))) continue;
@@ -1229,19 +1260,38 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         char model_path[400];
         const char *src_ext = ".json";  // most common; verifier checks .bin path with .stamp suffix
         // Try role-specific filenames in priority order
-        const char *role_files[] = {"barrier.json", "buy_signal.json", "regime.json", "exit.json", "exit.xgb",  /* E.1.2.C — exit-blindness fix */
-                                     "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
-                                     NULL};
-        for (int i = 0; role_files[i]; ++i) {
-            snprintf(model_path, sizeof(model_path), "%s/%s", run_dir, role_files[i]);
-            struct stat mst;
-            if (stat(model_path, &mst) != 0) continue;
+        // E.1.2.D D-e — the badge follows the RECORD the row displays: when
+        // the summary declares its role, ONLY that role's stamp counts. The
+        // old any-role loop let an exit row wear the buy model's badge —
+        // measured on run_1: rows read "[stamped] exit" off barrier.json.stamp
+        // while zero exit stamps existed on disk.
+        if (r->role[0]) {
             char stamp_path[420];
-            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+            snprintf(stamp_path, sizeof(stamp_path), "%s/%s.json.stamp",
+                     run_dir, r->role);
             struct stat sst;
-            if (stat(stamp_path, &sst) == 0) {
-                r->has_stamp = 1;
-                break;
+            r->has_stamp = (stat(stamp_path, &sst) == 0) ? 1 : 0;
+            if (!r->has_stamp) {  // stamps ride .json; .xgb roles verified via .xgb.stamp
+                snprintf(stamp_path, sizeof(stamp_path), "%s/%s.xgb.stamp",
+                         run_dir, r->role);
+                r->has_stamp = (stat(stamp_path, &sst) == 0) ? 1 : 0;
+            }
+        } else {
+            // Legacy summary with no role: field — the old any-role probe.
+            const char *role_files[] = {"barrier.json", "buy_signal.json", "regime.json", "exit.json", "exit.xgb",  /* E.1.2.C — exit-blindness fix */
+                                         "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
+                                         NULL};
+            for (int i = 0; role_files[i]; ++i) {
+                snprintf(model_path, sizeof(model_path), "%s/%s", run_dir, role_files[i]);
+                struct stat mst;
+                if (stat(model_path, &mst) != 0) continue;
+                char stamp_path[420];
+                snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                struct stat sst;
+                if (stat(stamp_path, &sst) == 0) {
+                    r->has_stamp = 1;
+                    break;
+                }
             }
         }
         (void)src_ext;
@@ -1767,6 +1817,15 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
         ImGui::TableSetColumnIndex(0);
         char rowid[200];
         const char *stamp_tag = r->has_stamp ? "[stamped] " : "";
+        // E.1.2.D D-e — a dir carrying BOTH sides' summaries shows which
+        // record this row is and that the other exists (the exit run used
+        // to silently eclipse the buy record entirely).
+        const char *side_tag = r->has_other_side
+            ? (r->summary_side ? "[exit·+entry] " : "[+exit] ")
+            : (r->summary_side ? "[exit] " : "");
+        char tag_buf[40];
+        snprintf(tag_buf, sizeof(tag_buf), "%s%s", stamp_tag, side_tag);
+        stamp_tag = tag_buf;
         if (r->group_size > 1 && r->group_idx == 0) {
             // Group header — show prefix + count badge
             snprintf(rowid, sizeof(rowid),
@@ -4860,7 +4919,15 @@ static inline void mh_run_one_horizon_fv(
     }
 
     char dst_summary[400];
-    snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", horizon_dir);
+    // E.1.2.D D-e (operator-decided) — SIDE-SUFFIXED summaries end the
+    // buy/exit collision: the exit run used to OVERWRITE summary.txt,
+    // destroying the buy record (measured twice — twins and run_1 both
+    // lost their entry metrics to it; D4's accept+document disposition
+    // failed in practice). Entry runs write summary_entry.txt, exit runs
+    // summary_exit.txt; legacy summary.txt on old dirs stays readable via
+    // the PastRuns_LoadOne preference chain.
+    snprintf(dst_summary, sizeof(dst_summary), "%s/%s", horizon_dir,
+             training_side == 1 ? "summary_exit.txt" : "summary_entry.txt");
     FILE *sf = fopen(dst_summary, "w");
     if (sf) {
         // v5.11.50 — use CANONICAL summary.txt field names that past_runs
