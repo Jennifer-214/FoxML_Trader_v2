@@ -2230,66 +2230,96 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                 // v5.11.41.A Multi-Horizon use, so Verify Stamp always
                 // failed with "no model file found in models/<dir>/" for
                 // any kind-organized run.
-                const char *role_files[] = {
-                    "barrier.json", "buy_signal.json", "regime.json", "exit.json",  /* E.1.2.C */
-                    "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",  "exit.xgb",
-                    NULL
-                };
+                // E.1.2.D leaf 11 (S2-F7) — verify EVERY role present, not the
+                // first found. Post-E.1.2.C exit models land CO-LOCATED, so a
+                // buy+exit dir is the norm; the old first-match `break`
+                // verified barrier.json and never looked at exit.json's
+                // stamp, while the picker's Settings_VerifyBundleStamps loops
+                // ALL roles — the two verify surfaces disagreed on the very
+                // same dir. Rules now match the picker's: .json roles verify;
+                // an .xgb-only role is counted-skipped (stamps ride the .json
+                // convention); the row verdict AGGREGATES across roles, and
+                // the details expansion carries the first valid role's stamp.
+                static const char *vs_json_roles[] = {
+                    "barrier.json", "buy_signal.json", "regime.json", "exit.json" };
+                static const char *vs_xgb_roles[] = {
+                    "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",  "exit.xgb" };
+                // v5.11.57 — use cfg.auto_stamp_secret if available
+                // (caller passed cfg_for_verify). Empty fallback =
+                // devmode (accepts any signature). Operator's engine
+                // load uses the same secret; matching path here means
+                // suite-side verify reflects what the engine will do.
+                const char *verify_secret =
+                    (cfg_for_verify && cfg_for_verify->auto_stamp_secret[0])
+                        ? cfg_for_verify->auto_stamp_secret
+                        : "";
                 char model_path[640];
-                const char *found = NULL;
-                for (int i = 0; role_files[i]; ++i) {
+                int n_checked = 0, n_ok = 0, n_xgb_only = 0;
+                char fail_role[20] = {0};
+                char fail_reason[80] = {0};
+                ModelStampResult first_ok_vr{};
+                int have_first_ok = 0;
+                for (int i = 0; i < 4; ++i) {
                     snprintf(model_path, sizeof(model_path), "%s/%s",
-                             r->full_path, role_files[i]);
+                             r->full_path, vs_json_roles[i]);
                     struct stat mst;
-                    if (stat(model_path, &mst) == 0) {
-                        found = model_path;
-                        break;
+                    if (stat(model_path, &mst) != 0) {
+                        snprintf(model_path, sizeof(model_path), "%s/%s",
+                                 r->full_path, vs_xgb_roles[i]);
+                        if (stat(model_path, &mst) == 0) n_xgb_only++;
+                        continue;
                     }
-                }
-                if (!found) {
-                    snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
-                        "no model file found in %s/", r->full_path);
-                    r->stamp_verify_state = -1;
-                } else {
-                    // v5.11.57 — use cfg.auto_stamp_secret if available
-                    // (caller passed cfg_for_verify). Empty fallback =
-                    // devmode (accepts any signature). Operator's engine
-                    // load uses the same secret; matching path here means
-                    // suite-side verify reflects what the engine will do.
-                    const char *verify_secret =
-                        (cfg_for_verify && cfg_for_verify->auto_stamp_secret[0])
-                            ? cfg_for_verify->auto_stamp_secret
-                            : "";
                     ModelStampResult vr = verify_model_stamp(
-                        found, /*secret=*/verify_secret,
+                        model_path, /*secret=*/verify_secret,
                         /*gap_threshold=*/(double)r->gap_acceptable_threshold > 0.0
                             ? (double)r->gap_acceptable_threshold : 0.05,
                         /*expected_format_version=*/MODEL_FORMAT_VERSION,
                         /*expected_feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
                         /*expected_label_registry_hash=*/LABEL_REGISTRY_HASH());  // v5.10.1.A — close Finding #1 consume side (UI Verify Stamp)
-                    r->stamp_verify_state = vr.valid;
-                    // v5.9.5d — capture full result for "Stamp details"
-                    // expansion below. Operator audits recorded vs runtime
-                    // cfg without leaving the suite.
-                    r->stamp_verify_full = vr;
-                    r->stamp_verify_has_full = (vr.valid == 1) ? 1 : 0;
+                    n_checked++;
                     if (vr.valid == 1) {
-                        // v5.11.57 — secret-aware OK message. When verify
-                        // ran with a real secret, "OK — signature verified".
-                        // When devmode (empty secret), surface the caveat
-                        // so operator knows engine load is the real gate.
-                        const char *mode_str = verify_secret[0]
-                            ? "signature verified"
-                            : "devmode, signature UNVERIFIED — set auto_stamp_secret in engine.cfg";
+                        n_ok++;
+                        // v5.9.5d — details expansion payload (first valid
+                        // role; barrier/buy probe first, so this is the
+                        // primary in practice).
+                        if (!have_first_ok) { first_ok_vr = vr; have_first_ok = 1; }
+                    } else if (!fail_role[0]) {
+                        snprintf(fail_role, sizeof(fail_role), "%s", vs_json_roles[i]);
+                        snprintf(fail_reason, sizeof(fail_reason), "%s", vr.reason);
+                    }
+                }
+                if (n_checked == 0) {
+                    if (n_xgb_only) {
                         snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
-                            "OK (%s) — engine=%s registry=%016lx",
-                            mode_str,
-                            vr.engine_version[0] ? vr.engine_version : "unknown",
-                            (unsigned long)vr.feature_registry_hash);
+                            "no verifiable .json role in %s/ (%d .xgb-only)",
+                            r->full_path, n_xgb_only);
                     } else {
                         snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
-                            "FAIL — %s", vr.reason);
+                            "no model file found in %s/", r->full_path);
                     }
+                    r->stamp_verify_state = -1;
+                    r->stamp_verify_has_full = 0;
+                } else if (n_ok == n_checked) {
+                    r->stamp_verify_state = 1;
+                    r->stamp_verify_full = first_ok_vr;
+                    r->stamp_verify_has_full = 1;
+                    // v5.11.57 — secret-aware OK message; devmode caveat so
+                    // operator knows engine load is the real gate.
+                    const char *mode_str = verify_secret[0]
+                        ? "signature verified"
+                        : "devmode, signature UNVERIFIED — set auto_stamp_secret in engine.cfg";
+                    snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                        "OK %d/%d roles (%s) — engine=%s registry=%016lx",
+                        n_ok, n_checked, mode_str,
+                        first_ok_vr.engine_version[0] ? first_ok_vr.engine_version
+                                                      : "unknown",
+                        (unsigned long)first_ok_vr.feature_registry_hash);
+                } else {
+                    r->stamp_verify_state = 0;
+                    r->stamp_verify_has_full = 0;  // FAIL reason IS the message
+                    snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                        "%d/%d roles OK; %s FAIL — %s",
+                        n_ok, n_checked, fail_role, fail_reason);
                 }
             }
         }
@@ -3148,7 +3178,12 @@ struct TrainingPanelState {
     volatile int    mh_complete;
     pthread_t       mh_tid;
     char            ui_horizon_csv[128];    // operator-typed; parsed → ui_horizon_*
-    int             ui_horizon_list[8];     // ENSEMBLE_HORIZON_MAX
+    // E.1.2.D leaf 13 (S3-F10) — the panel's per-horizon arrays were literal
+    // [8]; bind them to the cfg grid cap so a future HORIZON_LIST_MAX bump
+    // cannot silently shear the panel arrays off the grid.
+    static constexpr int PANEL_HORIZON_MAX =
+        ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX;
+    int             ui_horizon_list[PANEL_HORIZON_MAX];
     int             ui_horizon_count;
     // v5.11.40 — per-horizon TP/SL CSV (operator-flagged 2026-05-07).
     // Broadcast-or-match rule: 1 value applies to all horizons; N values
@@ -3162,28 +3197,28 @@ struct TrainingPanelState {
     // the multi-horizon worker only.
     char            ui_tp_pct_csv[64];   // e.g. "0.030" or "0.020,0.030,0.040"
     char            ui_sl_pct_csv[64];
-    float           ui_tp_per_horizon[8];   // parsed values (broadcast or positional)
-    float           ui_sl_per_horizon[8];
+    float           ui_tp_per_horizon[PANEL_HORIZON_MAX];   // parsed values (broadcast or positional)
+    float           ui_sl_per_horizon[PANEL_HORIZON_MAX];
     int             ui_tp_per_horizon_count;  // 0 = empty/use single field; 1 = broadcast; N = positional
     int             ui_sl_per_horizon_count;
-    // v5.11.41 — per-horizon FullValidationResults (one per horizon, max 8).
+    // v5.11.41 — per-horizon FullValidationResults (one per horizon, max PANEL_HORIZON_MAX).
     // Multi-horizon worker writes mh_horizon_fv[h] for each h in [0..N-1)
     // by calling Backtest_RunFullValidation per horizon (replacing the
     // previous "train+save only" inline XGBoost path). GUI reads
     // mh_horizon_status[h] for live render. mh_horizon_progress[h] is
     // the current horizon's WF + held-out % (0..100). mh_horizon_complete[h]
     // = 1 when that horizon's FV pipeline finished (or failed).
-    FullValidationResults  mh_horizon_fv[8];
-    volatile int           mh_horizon_complete[8];
-    volatile int           mh_horizon_progress[8];
-    char                   mh_horizon_status[8][128];
+    FullValidationResults  mh_horizon_fv[PANEL_HORIZON_MAX];
+    volatile int           mh_horizon_complete[PANEL_HORIZON_MAX];
+    volatile int           mh_horizon_progress[PANEL_HORIZON_MAX];
+    char                   mh_horizon_status[PANEL_HORIZON_MAX][128];
     // E.1.2.C GUI polish (a) — click-time snapshot of the run's horizon
     // ticks for the per-horizon results table. The live ui_horizon_list
     // re-parses ui_horizon_csv EVERY frame, so reading it from the table
     // relabeled rows whenever the operator edited the CSV mid/post-run
     // (and showed nothing on the cfg.horizon_list fallback path). GUI
     // thread writes at click + reads at render — no volatile needed.
-    int                    mh_horizon_ticks[8];
+    int                    mh_horizon_ticks[PANEL_HORIZON_MAX];
 
     // v5.13.1.A — sell-side training. Routes Multi-Horizon output to a
     // side-specific subdirectory: side=0 (buy) leaves the existing
@@ -3203,7 +3238,7 @@ struct TrainingPanelState {
     // Operator types e.g. "0,2,1" → horizon_0=binary, horizon_1=multi,
     // horizon_2=regression.
     char            ui_label_kind_csv[64];
-    int             ui_label_kind_per_horizon[8];   // parsed (broadcast or positional)
+    int             ui_label_kind_per_horizon[PANEL_HORIZON_MAX];   // parsed (broadcast or positional)
     int             ui_label_kind_per_horizon_count; // 0=empty; 1=broadcast; N=positional
 };
 //======================================================================
@@ -3337,9 +3372,12 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->ui_training_side               = 0;  // 0 = buy
     state->ui_label_kind_csv[0]           = '\0';
     state->ui_label_kind_per_horizon_count = 0;
-    for (int i = 0; i < 8; ++i) state->ui_label_kind_per_horizon[i] = LABEL_WIN_LOSS;
-    for (int i = 0; i < 8; ++i) state->ui_tp_per_horizon[i] = 0.0f;
-    for (int i = 0; i < 8; ++i) state->ui_sl_per_horizon[i] = 0.0f;
+    for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+        state->ui_label_kind_per_horizon[i] = LABEL_WIN_LOSS;
+    for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+        state->ui_tp_per_horizon[i] = 0.0f;
+    for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+        state->ui_sl_per_horizon[i] = 0.0f;
     state->ui_tp_per_horizon_count = 0;
     state->ui_sl_per_horizon_count = 0;
     // v5.11.48 — default "run" instead of "run_01". Operator typically
@@ -3430,7 +3468,8 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     strncpy(state->ui_horizon_csv, "100,500,1000",
             sizeof(state->ui_horizon_csv) - 1);
     state->ui_horizon_csv[sizeof(state->ui_horizon_csv) - 1] = '\0';
-    for (int i = 0; i < 8; ++i) state->ui_horizon_list[i] = 0;
+    for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+        state->ui_horizon_list[i] = 0;
     state->ui_horizon_count = 0;
 }
 //======================================================================
@@ -4556,7 +4595,8 @@ static inline void mh_run_one_horizon_fv(
     // E.1.2.C — the label KIND belongs in this per-horizon mutation set too,
     // and its absence was not cosmetic. Backtest_ComputeLabelsFromSamples
     // picks the label leaf from local_run_cfg->label_type
-    // (BacktestEngine.hpp:904), which nothing here wrote — so every horizon
+    // (the label pass reads local_run_cfg->label_type), which nothing here
+    // wrote — so every horizon
     // recomputed labels from whatever the last COLLECT click left behind,
     // while `label_type` (the parameter) drove num_classes, the XGB
     // objective, the role file, the run_subdir and the stamp. Same run,
@@ -5117,7 +5157,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     // v5.11.41 — clear per-horizon state arrays before the loop. operator
     // may have run Multi-Horizon previously; stale mh_horizon_* arrays
     // would confuse the GUI panel.
-    for (int h = 0; h < 8; ++h) {
+    for (int h = 0; h < TrainingPanelState::PANEL_HORIZON_MAX; ++h) {
         memset(&state->mh_horizon_fv[h], 0, sizeof(FullValidationResults));
         state->mh_horizon_complete[h] = 0;
         state->mh_horizon_progress[h] = 0;
@@ -6327,7 +6367,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             // per-horizon results table (the render must never read the
             // live-reparsed ui_horizon_list).
             state->mh_horizon_ticks[0] = single_h;
-            for (int i = 1; i < 8; ++i) state->mh_horizon_ticks[i] = 0;
+            for (int i = 1; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+                state->mh_horizon_ticks[i] = 0;
 
             MultiHorizonWorkerArgs *mh_args =
                 (MultiHorizonWorkerArgs *)malloc(sizeof(MultiHorizonWorkerArgs));
@@ -6567,9 +6608,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                         ? state->ui_label_kind_per_horizon[i] : bcast_lk;
             }
             // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
-            // per-horizon results table (state arrays are [8]; self-bounded
-            // regardless of HORIZON_LIST_MAX).
-            for (int i = 0; i < 8; ++i)
+            // per-horizon results table (arrays sized PANEL_HORIZON_MAX =
+            // HORIZON_LIST_MAX since E.1.2.D leaf 13, so they track the grid).
+            for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
                 state->mh_horizon_ticks[i] =
                     (i < eff_horizon_count) ? eff_horizons[i] : 0;
             // v5.13.1.A — snapshot side at click time (race-free).

@@ -27,6 +27,9 @@
 #define LABEL_FUNCTIONS_HPP
 
 #include <stdint.h>
+#include <math.h>   // NAN/isnan — the forward-scan leaves return NAN for
+                     // not-enough-history (E.1.2.D leaf 13 / S3-F8: this rode a
+                     // transitive include before; now explicit)
 
 //======================================================================
 // [STRUCT]_[HistoricalTick]

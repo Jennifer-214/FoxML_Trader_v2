@@ -1755,6 +1755,10 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         } else {
             // No models found — fall back to InputText so operator can
             // type a path manually if needed.
+            // E.1.2.D — SAY why it's a text box: with no hint, the empty
+            // fallback is indistinguishable from "no picker exists" (the
+            // operator concluded exactly that; Class-24-adjacent).
+            ImGui::TextDisabled("(scan found no bundles under models/ — click ↻ after training, or type a path)");
             ImGui::InputText("Model Dir", s->per_node_model_dir[node_id], 256);
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 char key[64];

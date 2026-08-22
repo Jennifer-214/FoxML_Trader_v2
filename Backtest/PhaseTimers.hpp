@@ -22,7 +22,11 @@
 //   held_out_eval   — HeldOutSplit_TrainEval total
 //   stamp_emit      — stamp_write_for_model
 //
-// Backtest is single-threaded; one global PhaseTimer instance is fine.
+// E.1.2.D leaf 13 (S3-F5) — the old "Backtest is single-threaded" claim
+// is FALSE at HEAD: parallel multi-horizon workers and sweep workers all
+// `+=` this one global concurrently, non-atomically. The counters are
+// ADVISORY DIAGNOSTICS (a lost update under contention skews a phase
+// total slightly) — never accounting; nothing gates on them.
 // Reset at run start via PhaseTimer_Reset (in BacktestSharded_Run); dump
 // at run end via PhaseTimer_Summary (Backtest_Run + Backtest_RunFullValidation).
 //
@@ -30,8 +34,8 @@
 // BacktestSharded_Run + Backtest_ComputeLabelsFromSamples + WF + HeldOut
 // + stamp emit live in 2-3 files with deep call chains. Plumbing a
 // PhaseTimer* through every signature would touch ~15 files for an
-// instrumentation-only change. Single-threaded backtest semantics
-// make the global safe.
+// instrumentation-only change. Advisory-diagnostic semantics (above)
+// are what make the non-atomic global tolerable.
 //======================================================================================================
 
 #include <stdint.h>
@@ -84,10 +88,11 @@ struct PhaseTimer {
 //======================================================================
 // [CODE]
 //======================================================================
-// Process-wide instance via function-local static. Single-threaded
-// backtest path; suite reuses across runs (Reset at start of each
-// Backtest_Run / RunFullValidation). Function-local-static keeps the
-// header inline-only (no separate .cpp).
+// Process-wide instance via function-local static. Written from multiple
+// worker threads non-atomically — advisory diagnostics only (S3-F5 note
+// at top). Suite reuses across runs (Reset at start of each Backtest_Run
+// / RunFullValidation). Function-local-static keeps the header
+// inline-only (no separate .cpp).
 static inline PhaseTimer& PhaseTimer_Global() {
     static PhaseTimer g{};
     return g;
