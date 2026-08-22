@@ -72,6 +72,7 @@
 #include "../MemHeaders/NodeCtxSummaryFieldRegistry.hpp"  // Summary_EmitPerCoreEntry + Summary_EmitPerStrategy + json_emit_*
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"         // MASK_OMS_STATE_KILL_SWITCH_TRIPPED
 #include "../MemHeaders/BitmapMacros.hpp"                 // BITMAP_IS_SET
+#include "../MemHeaders/DirCreate.hpp"                    // FoxDir_CreateParents (the mkdir -p SSoT; extracted from here at E.1.2.D D-a)
 
 // Forward declarations — PaperResetArchive.hpp is included by EngineSharded.hpp
 // AFTER EventLoopState<F> + ControllerConfig<F> + NodeContext<F> are defined.
@@ -128,30 +129,11 @@ inline void PaperResetArchive_FormatDirname(uint64_t start_us, uint64_t end_us,
 // Path must be <= 512 chars. Recurses by null-terminating at each '/' and
 // calling mkdir() incrementally.
 inline int PaperResetArchive_CreateDirectories(const char* path) {
-    if (!path || !path[0]) return 0;
-    char buf[512];
-    std::snprintf(buf, sizeof(buf), "%s", path);
-    size_t len = std::strlen(buf);
-    if (len == 0 || len >= sizeof(buf) - 1) return 0;
-    // Walk path; whenever we hit '/', temporarily null-terminate + mkdir up to that point
-    for (size_t i = 1; i < len; ++i) {
-        if (buf[i] == '/') {
-            buf[i] = '\0';
-            int rc = ::mkdir(buf, 0755);
-            if (rc != 0 && errno != EEXIST) {
-                std::fprintf(stderr, "[archive] mkdir(%s) failed: %s\n", buf, std::strerror(errno));
-                return 0;
-            }
-            buf[i] = '/';
-        }
-    }
-    // mkdir the final component (no trailing /)
-    int rc = ::mkdir(buf, 0755);
-    if (rc != 0 && errno != EEXIST) {
-        std::fprintf(stderr, "[archive] mkdir(%s) failed: %s\n", buf, std::strerror(errno));
-        return 0;
-    }
-    return 1;
+    // E.1.2.D D-a — body extracted VERBATIM to MemHeaders/DirCreate.hpp
+    // (FoxDir_CreateParents) so the model-state savers share the ONE
+    // mkdir -p walker; this name survives as the forwarder for its
+    // existing callers. Log prefix moved "[archive]" -> "[mkdir]".
+    return FoxDir_CreateParents(path);
 }
 
 //======================================================================

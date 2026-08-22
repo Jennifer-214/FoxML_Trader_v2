@@ -62,6 +62,13 @@ link_cfg() {
         echo "[build] seeded engine.cfg from engine.cfg.example (edit + restart engine)"
     fi
     [[ -d "$dir" ]] && [[ -f engine.cfg ]] && ln -sfn ../engine.cfg "$dir/engine.cfg"
+    # E.1.2.D D-a (2026-08-22) — models/ gets the SAME treatment as engine.cfg:
+    # the picker scan, the ensemble walker, the trainer and the state savers all
+    # resolve "models/" relative to cwd, so a binary launched FROM its build dir
+    # (cwd = build_gui/) silently saw an empty tree — the Settings picker showed
+    # "no bundles" while eight existed (measured live on the operator's box).
+    # Everything now resolves THROUGH the symlink into the one real tree.
+    [[ -d "$dir" ]] && [[ -d models ]] && ln -sfn ../models "$dir/models"
 }
 
 # v4.3 — maintain bin/ symlinks to the canonical "latest" binary of each

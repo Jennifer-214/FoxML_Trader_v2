@@ -65,6 +65,7 @@
 #include "BarrierValidation.hpp"      // v5.15.5.E.0.10 A6 (D-221) — tt::barrier_is_corrupt SSoT predicate + SANE bounds
 #include "EzooInitFlagRegistry.hpp"   // v5.15.5.A.2.c — FOREACH_EZOO_INIT_FLAG bit-pack for init state
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
+#include "../MemHeaders/DirCreate.hpp"  // E.1.2.D D-a — FoxDir_CreateParents (save-side dir provisioning for the four state writers)
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include "../MemHeaders/HealthLog.hpp"  // v5.14.8.E: Health_LogCriticalRateLimited for stale-model log
 #include "BuildFlags.hpp"  // v5.15.1: tt::BUILD_FLAGS_HASH() for FOREACH_ARCH_FIELD_DRIFT
@@ -2798,6 +2799,15 @@ inline int EnsembleModelZoo_SaveBanditState(
     const char* const* regime_names) {
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (!base_dir || base_dir[0] == '\0') return 0;
+    // E.1.2.D D-a no-regret (both /decision-check halves prescribed this):
+    // the WRITER that needs the dir provisions it. The trainer creates only
+    // horizon dirs, so the family base dir never existed for a new family
+    // and all four state savers failed SILENTLY at fopen — a treadmill
+    // measured eating its own manual-mkdir stopgap twice in one day
+    // (twins 08-21, prod_0 08-22). EEXIST is a no-op; the walker logs its
+    // own hard failures. The LOADERS deliberately do NOT mkdir (read
+    // paths never provision — rejected placement (c)).
+    FoxDir_CreateParents(base_dir);
     char path[512];
     snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
     char bundle_id[65];
@@ -2821,6 +2831,7 @@ inline int EnsembleModelZoo_SaveExitBanditState(
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
     if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: nothing to save
     if (!base_dir || base_dir[0] == '\0') return 0;
+    FoxDir_CreateParents(base_dir);  // E.1.2.D D-a — see _SaveBanditState
     char path[512];
     snprintf(path, sizeof(path), "%s/exit_bandit_state.json", base_dir);
     char bundle_id[65];
@@ -2934,12 +2945,19 @@ inline int EnsembleModelZoo_SaveThompsonState(
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) return 0;
     if (ezoo->primary_count < 2) return 0;  // single-arm: nothing to save
     if (!base_dir || base_dir[0] == '\0') return 0;
+    FoxDir_CreateParents(base_dir);  // E.1.2.D D-a — see _SaveBanditState
     char path[512];
     snprintf(path, sizeof(path), "%s/buy_thompson_state.json", base_dir);
     char tmp_path[520];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     FILE* f = fopen(tmp_path, "w");
-    if (!f) return 0;
+    if (!f) {
+        // E.1.2.D D-a — loud-fail: the old bare `return 0` was the silence
+        // that let unwritable state hide for a whole family lifetime.
+        fprintf(stderr, "[thompson] SAVE FAILED: fopen(%s): %s\n",
+                tmp_path, strerror(errno));
+        return 0;
+    }
 
     // v5.14.10.C — Locale pin per wire-format-byte-preservation-discipline.md Layer 2.
     locale_t pinned_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
@@ -3023,13 +3041,18 @@ inline int EnsembleModelZoo_SaveExitThompsonState(
     if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: nothing to save
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
+    FoxDir_CreateParents(base_dir);  // E.1.2.D D-a — see _SaveBanditState
     // v5.15.5.F.4d TECH_DEBT-084 — rename thompson_exit_state.json → exit_thompson_state.json
     // for symmetric naming with buy_thompson_state.json. Load-side back-compat alias falls back.
     snprintf(path, sizeof(path), "%s/exit_thompson_state.json", base_dir);
     char tmp_path[520];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     FILE* f = fopen(tmp_path, "w");
-    if (!f) return 0;
+    if (!f) {
+        fprintf(stderr, "[thompson] SAVE FAILED: fopen(%s): %s\n",
+                tmp_path, strerror(errno));  // E.1.2.D D-a loud-fail
+        return 0;
+    }
 
     // Locale pin per wire-format-byte-preservation-discipline.md Layer 2.
     locale_t pinned_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);

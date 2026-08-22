@@ -580,7 +580,14 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
     char tmp_path[512];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     FILE* f = fopen(tmp_path, "w");
-    if (!f) return 0;
+    if (!f) {
+        // E.1.2.D D-a — loud-fail: the bare `return 0` here was the silence
+        // that let an unwritable state path hide for a family's whole
+        // lifetime (every caller is `if (saved) {log}` with no else).
+        fprintf(stderr, "[bandit] SAVE FAILED: fopen(%s): %s\n",
+                tmp_path, strerror(errno));
+        return 0;
+    }
 
     // v5.14.10.C — TECH_DEBT-027 close. Pin LC_NUMERIC=C (per-thread via
     // uselocale) so %.17g emits ASCII decimal point regardless of process
