@@ -4779,11 +4779,15 @@ static inline void mh_run_one_horizon_fv(
 
     state->mh_horizon_complete[h] = 1;
 
-    int label_kind = fv->label_kind;
-    double wf_metric = (label_kind == 2)
+    // E.1.2.D (scan-1 NEW-6) — `label_kind == 2` was the wrong discriminant:
+    // FullValidationResults.label_kind IS num_classes (0=binary, 1=regression,
+    // >=2=multiclass) and no FOREACH_TARGET row has num_classes==2, so that
+    // branch was unreachable and every REGRESSION horizon displayed/recorded
+    // accuracy 0.00 instead of its correlation. Route through the kind SSoT.
+    double wf_metric = LabelType_IsRegression(label_type)
         ? fv->walkforward.mean_val_correlation
         : fv->walkforward.mean_val_accuracy;
-    double ho_metric = (label_kind == 2)
+    double ho_metric = LabelType_IsRegression(label_type)
         ? fv->held_out_correlation : fv->held_out_metric;
 
     if (fv->auto_stamp_attempted && fv->auto_stamp_ok) {
@@ -4845,7 +4849,7 @@ static inline void mh_run_one_horizon_fv(
         fprintf(sf, "valid_folds: %d\n", fv->walkforward.valid_folds);
         // val_accuracy / val_correlation: pick whichever fits the kind.
         // past_runs reader sets has_wf_results=1 when EITHER is read.
-        if (fv->label_kind == 2) {  // regression
+        if (LabelType_IsRegression(label_type)) {  // regression (E.1.2.D NEW-6 — was the unreachable == 2)
             fprintf(sf, "val_correlation: %.4f\n",
                     (double)fv->walkforward.mean_val_correlation);
             fprintf(sf, "val_mse: %.6f\n",
@@ -6226,7 +6230,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // COLLECT predicates, so a REFUSE-tier label could still be TRAINED from
     // samples a previous collect had left behind: collect at side=Buy, flip to
     // Exit, pick any label, Train. The gate rendered red and stopped nothing.
+    // E.1.2.D (scan-1 NEW-5) — `!run_control->running` closes the REVERSE
+    // direction of the leaf-6 exclusion: a collect/backtest reallocs + MOVES
+    // (or Reset()s) the shared results buffers, so no trainer may start while
+    // Run Control is live. Leaf 6 gated collect-during-train; this gates
+    // train-during-collect. mh_can_train derives from can_train and inherits.
     bool can_train = results->sample_count >= 10 && !any_worker_running
+                     && !run_control->running
                      && side_gate != 0;
 #ifndef USE_XGBOOST
     can_train = false;
@@ -7037,7 +7047,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->fv_running ||
             state->hp_running ||
             state->mh_running;  // intentionally exclude wf_running so WF can show its own cancel button
-        bool can_wf = results->sample_count >= 50 && !any_worker_running_wf;
+        bool can_wf = results->sample_count >= 50 && !any_worker_running_wf
+                      && !run_control->running;  // E.1.2.D NEW-5 — no train-during-collect
 #ifndef USE_XGBOOST
         can_wf = false;
 #endif
@@ -7418,7 +7429,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         bool can_hp =
 #ifdef USE_XGBOOST
             hp_data->sample_count >= 100 && hp_total_cells > 0
-            && hp_total_cells <= OPT_MAX_GRID && !any_worker_running_hp;
+            && hp_total_cells <= OPT_MAX_GRID && !any_worker_running_hp
+            && !run_control->running;  // E.1.2.D NEW-5 — no train-during-collect
 #else
             false;
 #endif
@@ -7449,7 +7461,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 hp_args->data = hp_data;
                 memcpy(hp_args->snap_ranges, state->hp_ranges, sizeof(hp_args->snap_ranges));
                 hp_args->snap_num_params = state->hp_num_params;
-                hp_args->snap_label_type = state->label_type;
+                // E.1.2.D (scan-1 NEW-4) — the labels' own producer, not the
+                // combo (leaf 7's rule at the third sibling): the sweep must
+                // rank cells against the kind the samples were actually
+                // labeled with, or a post-collect combo flip silently trains
+                // every cell on mismatched label semantics.
+                hp_args->snap_label_type = run_control->run_config.label_type;
                 hp_args->snap_wf_n_splits = state->wf_n_splits;
                 hp_args->snap_wf_horizon_ticks = state->wf_horizon_ticks;
                 hp_args->snap_wf_buffer_ticks = state->wf_buffer_ticks;
@@ -7568,7 +7585,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         bool can_fv =
 #ifdef USE_XGBOOST
             fv_data->sample_count >= 50 && state->model_path[0] != '\0'
-            && !any_worker_running_fv;
+            && !any_worker_running_fv
+            && !run_control->running;  // E.1.2.D NEW-5 — no train-during-collect
 #else
             false;
 #endif

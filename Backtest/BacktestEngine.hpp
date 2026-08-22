@@ -2134,7 +2134,12 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         fflush(stderr);
 
         // train (no early stopping yet — full n_rounds always)
-        int n_rounds = 200;
+        // E.1.2.D (scan-1 NEW-1) — the snapshot's round count, not the v5.9.5g
+        // hardcode. With `200` here, the shipped model trained hp.n_estimators
+        // trees while WF/held-out measured 200-tree models — leaf 4's defect
+        // class surviving on one axis, bytewise invisible at defaults because
+        // Defaults().n_estimators == 200.
+        int n_rounds = hp.n_estimators;
         // v5.10.0 Item A — xgboost_train phase timer (per-fold).
         uint64_t xgb_start_ns = tt::PhaseTimer_NowNs();
         // v5.11.31/.32 — track first failing iter + last successful iter.
@@ -2617,7 +2622,12 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
             }
         }
 
-        int n_rounds = 200;
+        // E.1.2.D (scan-1 NEW-1) — the snapshot's round count, not the v5.9.5g
+        // hardcode. With `200` here, the shipped model trained hp.n_estimators
+        // trees while WF/held-out measured 200-tree models — leaf 4's defect
+        // class surviving on one axis, bytewise invisible at defaults because
+        // Defaults().n_estimators == 200.
+        int n_rounds = hp.n_estimators;
         int train_aborted = 0;
         // v5.10.0 Item A — xgboost_train phase timer (held-out training).
         uint64_t xgb_ho_start_ns = tt::PhaseTimer_NowNs();

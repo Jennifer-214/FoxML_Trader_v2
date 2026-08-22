@@ -59,7 +59,7 @@ struct XGBHyperparams {
     // Tree shape + learning rate
     int    max_depth         = 6;        // tree depth (1-20 typical; >12 overfits)
     float  learning_rate     = 0.1f;     // shrinkage (0.01-0.3); aka "eta"
-    int    n_estimators      = 200;      // boosting rounds; iter cap (matches v5.9.5g WF/HeldOut hardcoded n_rounds)
+    int    n_estimators      = 200;      // boosting rounds; iter cap (WF/HeldOut consume hp.n_estimators too since E.1.2.D NEW-1 — no hardcoded 200 remains)
     // Regularization (subsample fractions; lower = more variance reduction)
     float  subsample         = 0.8f;     // row subsample per tree (0.5-1.0)
     float  colsample_bytree  = 0.8f;     // column subsample per tree (0.5-1.0)
