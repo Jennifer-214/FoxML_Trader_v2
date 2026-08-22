@@ -5055,6 +5055,27 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // label-combo retarget pattern; broadcast flows at click time.
     if (state->ui_training_side != prev_training_side) {
         if (state->ui_training_side == 1) state->label_type = LABEL_WILL_PEAK;
+        // E.1.2.C — CLEAR the per-horizon Label-Kind CSV on a side flip, or the
+        // retarget above is a lie on the multi-horizon path. The MH click reads
+        // `bcast_lk = (ui_label_kind_per_horizon_count > 0)
+        //             ? ui_label_kind_per_horizon[0] : state->label_type`
+        // (see the snap block below), so a NON-EMPTY CSV makes `state->label_type`
+        // unreachable — the combo would display "Will Peak" while every horizon
+        // trained on the buy-side kind the CSV still held. The single-horizon
+        // click reads the combo directly and was never affected, which is why
+        // this only bit the multi-horizon path.
+        //
+        // Clearing (rather than retargeting) is the honest choice: a per-horizon
+        // label set typed for the ENTRY side carries no meaning on the exit side,
+        // and an emptied CSV makes the visible combo authoritative again. It also
+        // keeps the CSV consistent with its own render gate, which hides the input
+        // entirely for WILL_PEAK — a retarget would leave a populated, invisible,
+        // un-editable CSV driving training.
+        //
+        // Only fires on an actual side CHANGE, so a deliberately-typed exit-side
+        // CSV survives every subsequent click.
+        state->ui_label_kind_csv[0] = '\0';
+        state->ui_label_kind_per_horizon_count = 0;
         snprintf(state->model_path, sizeof(state->model_path), "models/%s.json",
                  Training_ResolveRole(state->label_type, state->ui_training_side));
     }
