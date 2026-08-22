@@ -225,6 +225,27 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
     for (int i = 0; i < MAX_EXECUTION_NODES; ++i) {
         Regime_Init(&state.nodes[i].regime_state, (int)cfg.nodes[i].regime_hysteresis);
     }
+
+    // 4. E.1.2.D (scan-2 NEW-3) — duplicate node_model_dir across ML nodes.
+    //    All four bandit/Thompson state savers key ONLY by path, so two nodes
+    //    sharing one dir silently overwrite each other's learning state (last
+    //    writer wins; on reload BOTH nodes then run the survivor's posteriors)
+    //    — H22 coupling through the filesystem, invisible until the state
+    //    files disagree with the trades. Boot-time WARN (cold path; O(N²)
+    //    over MAX_EXECUTION_NODES is trivial); the layout decision (D-a)
+    //    owns the structural close.
+    for (int i = 0; i < MAX_EXECUTION_NODES; ++i) {
+        if (cfg.node_strategies[i] != STRATEGY_ML || !cfg.node_model_dir[i][0]) continue;
+        for (int j = i + 1; j < MAX_EXECUTION_NODES; ++j) {
+            if (cfg.node_strategies[j] != STRATEGY_ML || !cfg.node_model_dir[j][0]) continue;
+            if (strcmp(cfg.node_model_dir[i], cfg.node_model_dir[j]) == 0) {
+                fprintf(stderr, "[boot] WARN: nodes %d and %d share node_model_dir "
+                        "'%s' — their bandit/Thompson state files will OVERWRITE "
+                        "each other (last writer wins)\n",
+                        i, j, cfg.node_model_dir[i]);
+            }
+        }
+    }
 }
 //======================================================================
 // [END_CODE]

@@ -629,6 +629,21 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
                 return 0;
             }
         }
+        // E.1.2.D (scan-2 NEW-1 back-stop) — a ZERO-TREE model is valid,
+        // loadable JSON that can only predict base_score (the cancelled-train
+        // husk shape; the trainer's save is now guarded, this catches
+        // pre-guard artifacts and any other producer). WARN loud; refusal is
+        // queued as an operator decision (strict-mode candidate) because
+        // refusing here changes load semantics for husks already on disk.
+        {
+            int boosted_rounds = 0;
+            if (XGBoosterBoostedRounds(booster, &boosted_rounds) == 0 &&
+                boosted_rounds == 0) {
+                fprintf(stderr, "[ML] WARN: %s loaded with ZERO trees — it can "
+                        "only predict base_score (cancelled-train husk shape); "
+                        "this arm's outputs are meaningless\n", path);
+            }
+        }
         // read training fingerprint (if embedded)
         const char *fp = NULL;
         int got_fp = XGBoosterGetAttr(booster, "foxml_fingerprint", &fp, (int[]){0});

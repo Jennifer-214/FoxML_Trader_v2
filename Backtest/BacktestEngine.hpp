@@ -2924,9 +2924,20 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
     // to silently skip). Two endpoint probes cover each field's lo+hi regardless of sweep direction.
     for (int ep = 0; ep < 2; ++ep) {
         ControllerConfig<BACKTEST_FP> probe = base;
-        ConfigField_Set(&probe, ranges[0].key, opt->param_vals[0][ep ? opt->dims[0] - 1 : 0]);
-        if (num_params > 1)
-            ConfigField_Set(&probe, ranges[1].key, opt->param_vals[1][ep ? opt->dims[1] - 1 : 0]);
+        // E.1.2.D (scan-1 NEW-7, optimizer sibling) — the probe already calls
+        // ConfigField_Set; CHECKING its return closes the typo'd-key silent
+        // no-op (all cells identical, best_idx=0, no diagnostic) for free.
+        if (!ConfigField_Set(&probe, ranges[0].key, opt->param_vals[0][ep ? opt->dims[0] - 1 : 0])) {
+            fprintf(stderr, "[optimizer] REFUSED: unknown sweep key '%s' — every "
+                    "run would silently use the base cfg\n", ranges[0].key);
+            return;
+        }
+        if (num_params > 1 &&
+            !ConfigField_Set(&probe, ranges[1].key, opt->param_vals[1][ep ? opt->dims[1] - 1 : 0])) {
+            fprintf(stderr, "[optimizer] REFUSED: unknown sweep key '%s' — every "
+                    "run would silently use the base cfg\n", ranges[1].key);
+            return;
+        }
         ControllerConfig_CapitalRangeSweep(probe);
         if (!cfg_capital_gate_ok(probe, "backtest optimizer sweep range")) return;
     }
@@ -3051,6 +3062,27 @@ static inline void Backtest_RunHyperparamTrainSweep(
     int n_workers = base_cfg.xgb_train_nthread > 0
                   ? base_cfg.xgb_train_nthread : 1;
     if (n_workers > opt->total_runs) n_workers = opt->total_runs;
+
+    // E.1.2.D (scan-1 NEW-7) — validate the swept KEYS once, up front. A
+    // typo'd key made ConfigField_Set a silent no-op for EVERY cell: all
+    // cells trained the base cfg, all metrics came out identical, and
+    // best_idx=0 was reported with no diagnostic (Class 51/52 at the sweep
+    // surface). ConfigField_Set returns 0 ONLY for an unknown key, so one
+    // probe per key at any value settles it for the whole grid.
+    {
+        ControllerConfig<BACKTEST_FP> key_probe = base_cfg;
+        if (!ConfigField_Set(&key_probe, ranges[0].key, opt->param_vals[0][0])) {
+            fprintf(stderr, "[hpsweep] REFUSED: unknown sweep key '%s' — every "
+                    "cell would silently train the base cfg\n", ranges[0].key);
+            return;
+        }
+        if (num_params > 1 &&
+            !ConfigField_Set(&key_probe, ranges[1].key, opt->param_vals[1][0])) {
+            fprintf(stderr, "[hpsweep] REFUSED: unknown sweep key '%s' — every "
+                    "cell would silently train the base cfg\n", ranges[1].key);
+            return;
+        }
+    }
 
     fprintf(stderr, "[hpsweep] starting %d-cell sweep (sample_count=%d, n_workers=%d)\n",
             opt->total_runs, feature_data->sample_count, n_workers);
