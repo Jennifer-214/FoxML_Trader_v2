@@ -403,9 +403,13 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     X(int,                  KIND_INT,        xgb_eval_nthread,            "Eval Threads",         "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
         "XGBoost evaluation thread count (OpenMP). Default 4; clamp [1, 256].",                                                                                                                                     \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(int,                  KIND_INT,        csv_load_workers,            "CSV Load Workers",     "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
-        "Worker thread count for parallel CSV tick load during training. Default 4.",                                                                                                                               \
-        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* E.1.2.D leaf 12 (2026-08-22, operator-decided) — `csv_load_workers` ROW DELETED;      */ \
+    /* name BURNED in RETIRED_NAMES (H21 — the exit_signal_model_dir precedent for cfg name  */ \
+    /* keys). Class 12+24: an advertised knob whose only consumer was a stub printing "worth */ \
+    /* wiring?" — and scan-3's measurements answered NO: O5's binary tick sidecar supersedes */ \
+    /* the CSV parse path entirely, and leaf 5 already killed the per-horizon re-read        */ \
+    /* multiplier the knob was imagined for. cfg-fingerprint shift free per                  */ \
+    /* project_no_live_models. DO NOT REUSE THE NAME.                                        */ \
     X(int,                  KIND_INT,        multi_horizon_max_threads,   "Multi-Horizon Threads","Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
         "Max parallel threads for multi-horizon training. Default 4.",                                                                                                                                              \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \

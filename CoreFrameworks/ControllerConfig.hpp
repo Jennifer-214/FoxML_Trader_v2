@@ -2158,15 +2158,17 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.15.5.F.4d.1.B.3 Step 8.6: xgb_train_nthread MATCH — registry INT(4) == manual 4; DELETED.
   // xgb_eval_nthread DIFFER — registry INT(4); manual=1 (determinism for validation parity).
   cfg.xgb_eval_nthread        = 1;   // KEEP — registry INT(4) breaks per-fold determinism; manual=1 matches the WF + HeldOut sites in BacktestEngine.hpp pre-v5.10
-  // csv_load_workers DIFFER — registry INT(4); manual=1 (serial CSV load for back-compat).
-  cfg.csv_load_workers        = 1;   // KEEP — registry INT(4) would parallelize CSV load; manual=1 matches pre-v5.10 serial behavior
-  // multi_horizon_max_threads DIFFER — registry INT(4); manual=1 (CRITICAL: v5.11.45 segfault avoidance).
-  cfg.multi_horizon_max_threads = 1; // KEEP — registry INT(4) would re-enable v5.11.45 segfault class; XGBoost+libgomp+pthread interaction fragile. 1 = forced serial (DEFAULT; stable). v5.11.45:
-                                      // changed from 0 (auto) -> 1 after segfault reports.
-                                      // XGBoost + libgomp + pthread interaction is fragile;
-                                      // even with per-pthread omp_set_num_threads(1), libgomp
-                                      // state can race across pthreads. Set >1 to opt into
-                                      // experimental parallel mode (may segfault).
+  // (csv_load_workers manual default DELETED with its retired cfg row — E.1.2.D leaf 12.)
+  //
+  // multi_horizon_max_threads manual=1 override DELETED (E.1.2.D 2026-08-22):
+  // the registry default (4 → parallel horizon training, per-worker
+  // xgb nthread pinned to 1 for parity) now applies. The override's stated
+  // reason — the v5.11.45 XGBoost+libgomp+pthread segfault class — was
+  // CLOSED at v5.15.3.C (process-entry setenv("OMP_NUM_THREADS","1") in
+  // foxml_suite main, before any libgomp init; the per-pthread omp_set
+  // calls remain as defensive belt). The hold was a stale safety clamp:
+  // the operator's multi-horizon trains ran SERIAL the whole time while
+  // the parallel path's own comments described it as the honored default.
   // v5.15.5.F.4d.1.B.3 Step 8.6: feature_collect_max_gb DIFFER — registry INT(8); manual=12 (operator-favored ceiling).
   cfg.feature_collect_max_gb  = 12;  // KEEP — registry INT(8) too restrictive; advisory cap; WARN-only
   // wf_split_max_gb MATCH — registry INT(8) == manual; DELETED.
@@ -3027,8 +3029,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // currently implemented; reserved for future). Setting nthread or
     // workers > 1 emits a one-shot WARN at boot (handled in engine boot
     // path, not parser).
-    // v5.15.5.F.4c — xgb_*_nthread + csv_load_workers + multi_horizon_max_threads +
-    // feature_collect_max_gb + wf_split_max_gb + held_out_max_gb all migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY).
+    // v5.15.5.F.4c — xgb_*_nthread + multi_horizon_max_threads +
+    // feature_collect_max_gb + wf_split_max_gb + held_out_max_gb all migrated to FOREACH_CFG_FIELD
+    // (KIND_INT; IS_BOOT_ONLY). (csv_load_workers was in this cohort; row RETIRED at E.1.2.D leaf 12.)
     // v5.10.0a.G.6 — global ensemble cfg parsers (string + numeric).
     if (strcmp(key, "ensemble_blend_mode") == 0) {
         // Validate against known modes; reject unknown with WARN.

@@ -145,18 +145,11 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     fprintf(stderr, "[backtest sharded] mode=sharded nodes=%u default_strategy=%d\n",
             (unsigned)cfg.num_execution_nodes, cfg.default_strategy);
 
-    // v5.10.0 Item C-stub — csv_load_workers cfg field is wired in v5.10.0D
-    // but not yet consumed. Pipeline parallelism (load file f+1 while
-    // engine processes file f) deferred to v5.10.0a after we have
-    // phase-timer (Item A) data showing parse_ns is significant relative
-    // to fan_out_hot_ns. If parse << processing, parallel ingest is 0%
-    // speedup and not worth the thread-coordination complexity.
-    if (cfg.csv_load_workers > 1) {
-        fprintf(stderr, "[backtest sharded] NOTE: csv_load_workers=%d set but "
-                "parallel CSV ingest is reserved for v5.10.0a (this ship "
-                "loads serial). Use Item A phase timer output to decide if "
-                "parallel ingest is worth wiring.\n", cfg.csv_load_workers);
-    }
+    // E.1.2.D leaf 12 (2026-08-22) — the csv_load_workers stub that lived here
+    // is RETIRED with its cfg row (name burned, H21). Its own deferral
+    // question ("is parallel ingest worth wiring?") was answered by scan-3's
+    // measurements: NO — O5's binary tick sidecar supersedes the CSV parse
+    // path, and leaf 5's batched label pass killed the re-read multiplier.
 
     // Partial exits P.1 — validate cfg before allocating cores. When
     // partial_exit_enabled=1, refuses to run if num_execution_nodes*2
