@@ -3382,21 +3382,13 @@ static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
 // [CODE]
 //======================================================================
 static inline tt::XGBHyperparams Training_SnapshotHyperparams(const TrainingPanelState *st) {
-    tt::XGBHyperparams h = tt::XGBHyperparams_Defaults();
-    if (!st) return h;
-    h.max_depth        = st->max_depth;
-    h.learning_rate    = st->learning_rate;
-    h.n_estimators     = st->n_estimators;
-    h.subsample        = st->ui_subsample;
-    h.colsample_bytree = st->ui_colsample_bytree;
-    h.min_child_weight = st->ui_min_child_weight;
-    h.seed             = st->ui_seed;
-    static const char* tm[] = {"hist","exact","approx","auto"};
-    int ti = st->ui_tree_method_idx;
-    if (ti < 0 || ti >= 4) ti = 0;
-    strncpy(h.tree_method, tm[ti], sizeof(h.tree_method) - 1);
-    h.tree_method[sizeof(h.tree_method) - 1] = '\0';
-    return h;
+    if (!st) return tt::XGBHyperparams_Defaults();
+    // E.1.2.D leaf 14 — the ONE value-mapper (was a hand-copy of the mapping)
+    return tt::XGBHyperparams_FromRaw(st->max_depth, st->learning_rate,
+                                      st->n_estimators, st->ui_subsample,
+                                      st->ui_colsample_bytree,
+                                      st->ui_min_child_weight, st->ui_seed,
+                                      st->ui_tree_method_idx);
 }
 //======================================================================
 // [END_CODE]
@@ -4758,21 +4750,12 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     // block do the job it was written for, and gives us ONE value to hand to both
     // the booster and the validation trainers so they cannot describe different
     // architectures. Class 13, "snap block complete, consumer bypasses it".
-    tt::XGBHyperparams snap_hp = tt::XGBHyperparams_Defaults();
-    snap_hp.max_depth        = args->snap_max_depth;
-    snap_hp.learning_rate    = (float)args->snap_learning_rate;
-    snap_hp.n_estimators     = args->snap_n_estimators;
-    snap_hp.subsample        = args->snap_subsample;
-    snap_hp.colsample_bytree = args->snap_colsample_bytree;
-    snap_hp.min_child_weight = args->snap_min_child_weight;
-    snap_hp.seed             = args->snap_seed;
-    {
-        static const char* tm_choices[] = {"hist","exact","approx","auto"};
-        int tmi = args->snap_tree_method_idx;
-        if (tmi < 0 || tmi >= 4) tmi = 0;
-        strncpy(snap_hp.tree_method, tm_choices[tmi], sizeof(snap_hp.tree_method) - 1);
-        snap_hp.tree_method[sizeof(snap_hp.tree_method) - 1] = '\0';
-    }
+    // E.1.2.D leaf 14 — the ONE value-mapper (was the second hand-copy)
+    tt::XGBHyperparams snap_hp = tt::XGBHyperparams_FromRaw(
+        args->snap_max_depth, (float)args->snap_learning_rate,
+        args->snap_n_estimators, args->snap_subsample,
+        args->snap_colsample_bytree, args->snap_min_child_weight,
+        args->snap_seed, args->snap_tree_method_idx);
     // v5.13.5.B (parity-check audit gap-close 2026-05-08) — copy NEW
     // v5.13.5 snap fields to stack BEFORE free(args). Without this,
     // subsequent reads at the parallel-job populate +
@@ -5846,8 +5829,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::SetItemTooltip("RNG seed for reproducible runs\n"
                               "Same seed + same data + same hyperparams = same model\n"
                               "Default 42 (matches pre-v5.9.5h hardcoded)");
-        static const char* tree_method_names[] = {"hist", "exact", "approx", "auto"};
-        ImGui::Combo("Tree Method", &state->ui_tree_method_idx, tree_method_names, 4);
+        // E.1.2.D leaf 14 — render the SHARED table (was the fourth hand-copy)
+        ImGui::Combo("Tree Method", &state->ui_tree_method_idx,
+                     const_cast<const char**>(tt::XGB_TREE_METHOD_NAMES),
+                     tt::XGB_TREE_METHOD_COUNT);
         ImGui::SetItemTooltip("XGBoost tree construction algorithm\n"
                               "hist (default): fast histogram, recommended\n"
                               "exact: slow but precise (small datasets only)\n"

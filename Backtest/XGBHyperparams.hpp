@@ -83,6 +83,55 @@ struct XGBHyperparams {
 //======================================================================
 
 //======================================================================
+// [SECTION]_[tree-method name table — the ONE index→string mapping]
+//----------------------------------------------------------------------
+// E.1.2.D leaf 14 — this table existed as FOUR hand-copies (the panel
+// combo, the state adapter, the worker capture, and the deleted dead
+// worker). An 8th tree method added to three of four copies fails exactly
+// as silently as the entry-point miss did (leaf 4b). One table; the combo
+// renders it, the mapper consumes it.
+//======================================================================
+static const char* const XGB_TREE_METHOD_NAMES[4] = {"hist", "exact", "approx", "auto"};
+enum { XGB_TREE_METHOD_COUNT = 4 };
+
+inline XGBHyperparams XGBHyperparams_Defaults();  // defined below (rides Apply's section)
+
+//======================================================================
+// [FUNCTION]_[XGBHyperparams_FromRaw]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE panel-values → XGBHyperparams value-mapper (E.1.2.D leaf 14) — Defaults() base, 7 field overwrites, tree-method index clamped through the shared table; pure, memcmp-pinned against both former hand-copies]
+//======================================================================
+// [CODE]
+//======================================================================
+inline XGBHyperparams XGBHyperparams_FromRaw(int max_depth, float learning_rate,
+                                             int n_estimators, float subsample,
+                                             float colsample_bytree,
+                                             int min_child_weight, int seed,
+                                             int tree_method_idx) {
+    XGBHyperparams h = XGBHyperparams_Defaults();
+    h.max_depth        = max_depth;
+    h.learning_rate    = learning_rate;
+    h.n_estimators     = n_estimators;
+    h.subsample        = subsample;
+    h.colsample_bytree = colsample_bytree;
+    h.min_child_weight = min_child_weight;
+    h.seed             = seed;
+    if (tree_method_idx < 0 || tree_method_idx >= XGB_TREE_METHOD_COUNT)
+        tree_method_idx = 0;  // clamp → "hist" (both former copies' rule)
+    strncpy(h.tree_method, XGB_TREE_METHOD_NAMES[tree_method_idx],
+            sizeof(h.tree_method) - 1);
+    h.tree_method[sizeof(h.tree_method) - 1] = '\0';
+    return h;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[XGBHyperparams_FromRaw]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[XGBHyperparams_Apply]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML]]

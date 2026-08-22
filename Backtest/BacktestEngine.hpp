@@ -1601,7 +1601,12 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             args.snap_colsample_bytree = hp.colsample_bytree;
             args.snap_min_child_weight = hp.min_child_weight;
             args.snap_seed             = hp.seed;
-            args.snap_tree_method      = data->config_used.xgb_tree_method;
+            // E.1.2.D leaf 14 (the M1 tree_method split-brain) — the stamp
+            // records what TRAINED: with an override, the caller's snapshot
+            // (hp_override's storage outlives this call — NEVER point at the
+            // block-local `hp`); without, the cfg the fallback trainers read.
+            args.snap_tree_method      = hp_override ? hp_override->tree_method
+                                                     : data->config_used.xgb_tree_method;
         }
         args.snap_train_nthread = data->config_used.xgb_train_nthread > 0
                                 ? data->config_used.xgb_train_nthread : 1;
