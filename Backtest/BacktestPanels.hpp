@@ -4723,15 +4723,34 @@ static inline void mh_run_one_horizon_fv(
                 } else {
                     XGBoosterSetParam(booster, "objective", "binary:logistic");
                 }
+                int it_completed = 0;   // E.1.2.D (scan-2 NEW-1) — real rounds only
                 for (int it = 0; it < hp.n_estimators; ++it) {
                     if (state->mh_cancel) break;
                     if (XGBoosterUpdateOneIter(booster, it, dtrain) != 0) break;
+                    it_completed++;
                 }
-                int save_rc = XGBoosterSaveModel(booster, fv->auto_stamp_path);
-                if (save_rc != 0) {
-                    fprintf(stderr, "[mh-train] horizon %d: SaveModel(%s) failed: %s\n",
-                            horizon_ticks, fv->auto_stamp_path,
-                            XGBGetLastError() ? XGBGetLastError() : "(null)");
+                // E.1.2.D (scan-2 NEW-1) — NEVER save a zero-tree husk over a
+                // real artifact. A cancel at round 0 / a first-round failure /
+                // n_estimators==0 fell through to an unconditional save,
+                // writing a valid-but-empty XGBoost JSON ("num_trees":"0")
+                // that silently REPLACED the previous model at this path and
+                // predicted base_score forever — unstamped, so every load-time
+                // check was vacuous on it (S2-F6). The 516-byte
+                // twins_horizon_7500/exit.json husk is the live instance.
+                if (it_completed > 0) {
+                    int save_rc = XGBoosterSaveModel(booster, fv->auto_stamp_path);
+                    if (save_rc != 0) {
+                        fprintf(stderr, "[mh-train] horizon %d: SaveModel(%s) failed: %s\n",
+                                horizon_ticks, fv->auto_stamp_path,
+                                XGBGetLastError() ? XGBGetLastError() : "(null)");
+                    }
+                } else {
+                    fprintf(stderr, "[mh-train] horizon %d: 0 boosting rounds "
+                            "completed (%s) — NOT saving over %s\n",
+                            horizon_ticks,
+                            state->mh_cancel ? "cancelled"
+                                             : "first round failed or n_estimators==0",
+                            fv->auto_stamp_path);
                 }
                 XGBoosterFree(booster);
                 XGDMatrixFree(dtrain);
