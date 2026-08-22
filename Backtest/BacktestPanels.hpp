@@ -22,6 +22,8 @@
 #include "imgui.h"
 #include "BacktestEngine.hpp"
 #include "BacktestSharded.hpp"  // phase 13: per-core sharded backtest path
+#include "../ML_Headers/ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT
+#include "../MemHeaders/DirCreate.hpp"        // D-431 — FoxDir_CreateParents (family+horizon chain)
 #include "Fingerprint.hpp"
 #include <dirent.h>
 #include <sys/stat.h>
@@ -1452,11 +1454,38 @@ static inline void PastRuns_ScanOneDir(PastRunsState *s, const char *path) {
         if (stat(sub, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
         if (PastRuns_LoadOne(&s->runs[s->count], sub)) {
             // v5.11.51 — capture mtime + parse multi-horizon prefix
+            // (the RETIRED flat form keeps listing here pre-migration —
+            // old dirs stay visible, never silently vanish; D-431).
             PastRun *r = &s->runs[s->count];
             r->mtime_sec = st.st_mtime;
             PastRun_ParseHorizon(entry->d_name, r->prefix, sizeof(r->prefix),
                                    &r->horizon_ticks);
             s->count++;
+        } else {
+            // D-431 NESTED — a summary-less dir may be a FAMILY node whose
+            // horizon_<N> children hold the run records one level down.
+            // Family name comes from the PARENT dir; the horizon from the
+            // child (schema matcher); the existing sort+adjacency grouping
+            // then renders them as one family block.
+            DIR *fd = opendir(sub);
+            if (!fd) continue;
+            struct dirent *ce;
+            while ((ce = readdir(fd)) != NULL && s->count < PAST_RUNS_MAX) {
+                long h = ModelPath_ParseHorizonChild(ce->d_name);
+                if (h < 0) continue;
+                char hsub[440];
+                snprintf(hsub, sizeof(hsub), "%s/%s", sub, ce->d_name);
+                struct stat hst;
+                if (stat(hsub, &hst) != 0 || !S_ISDIR(hst.st_mode)) continue;
+                if (PastRuns_LoadOne(&s->runs[s->count], hsub)) {
+                    PastRun *r = &s->runs[s->count];
+                    r->mtime_sec = hst.st_mtime;
+                    snprintf(r->prefix, sizeof(r->prefix), "%s", entry->d_name);
+                    r->horizon_ticks = (int)h;
+                    s->count++;
+                }
+            }
+            closedir(fd);
         }
     }
     closedir(d);
@@ -3281,7 +3310,7 @@ struct TrainingPanelState {
 
     // v5.13.1.A — sell-side training. Routes Multi-Horizon output to a
     // side-specific subdirectory: side=0 (buy) leaves the existing
-    // models/<run_subdir>/<run>_horizon_<N>/ path; side=1 (exit) emits the
+    // models/<run_subdir>/<run>/horizon_<N>/ path; side=1 (exit) emits the
     // CO-LOCATED exit role file in the SAME per-horizon dirs (E.1.2.C — the
     // retired models/exit/ tree was never walked by any loader; the engine
     // auto-discovers exit.json siblings under node_N_model_dir).
@@ -4628,6 +4657,13 @@ static inline void mh_run_one_horizon_fv(
     int snap_auto_stamp_enabled,
     const char *snap_auto_stamp_secret,
     BacktestRunConfig *local_run_cfg,
+    // D-431 nested layout (S2-F4 close) — the RUN's primary label kind
+    // decides the class tree ONCE for the whole family, so a mixed
+    // Label-Kind CSV can no longer fragment one family across
+    // classification/ + regression/ as two same-named trees. Per-horizon
+    // label_type still drives role file, objective, labels and stamp.
+    // NO default (AR-20 — every caller states it).
+    int primary_label_type,
     // E.1.2.D leaf 5 — 1 = results->labels already filled by the caller's
     // Backtest_ComputeLabelsBatch (ONE corpus walk covers every horizon);
     // 0 = do the single-target walk here (legacy per-horizon behavior).
@@ -4701,23 +4737,30 @@ static inline void mh_run_one_horizon_fv(
     // E.1.2.C 3-role — side selects the ROLE FILE via the extracted helper
     // (side=1 => "exit", saved CO-LOCATED; label kind stays free per (b)).
     const char* role = Training_ResolveRole(label_type, training_side);
-    const char* run_subdir = (label_type == LABEL_PEAK_VALLEY_STABLE
-                              || label_type == LABEL_REGIME
-                              || is_multiclass)
-        ? "classification" : (is_regression ? "regression" : "classification");
+    // D-431 nested layout — run_subdir derives from the RUN's PRIMARY kind
+    // (S2-F4 close: one family = one class tree; the old per-horizon
+    // derivation fragmented a mixed-CSV family across two trees).
+    int primary_nc = (primary_label_type >= 0 && primary_label_type < LABEL_COUNT)
+                     ? label_table[primary_label_type].num_classes : 0;
+    const char* run_subdir = (primary_label_type == LABEL_PEAK_VALLEY_STABLE
+                              || primary_label_type == LABEL_REGIME
+                              || primary_nc >= 2)
+        ? "classification" : (primary_nc == 1 ? "regression" : "classification");
     // E.1.2.C 3-retire (2026-08-20) — the models/exit/ SIDE TREE is RETIRED:
     // no loader ever walked it (PARITY-044); exit models land CO-LOCATED in
     // the same per-horizon dirs (side flips the ROLE FILE, next commit).
-    char horizon_dir[320];
-    snprintf(horizon_dir, sizeof(horizon_dir),
-             "models/%s/%s_horizon_%d",
-             run_subdir, run_name, horizon_ticks);
-    mkdir("models", 0755);
-    char parent_dir[340];
-    snprintf(parent_dir, sizeof(parent_dir), "models/%s",
-             run_subdir);
-    mkdir(parent_dir, 0755);
-    mkdir(horizon_dir, 0755);
+    //
+    // D-431 — the FAMILY node is the unit: models/<class>/<family>/ holds
+    // horizon_<N> children + the bundle-scoped state files. Every future
+    // family is born with its bundle node (the treadmill's structural end);
+    // FoxDir_CreateParents builds the whole chain.
+    char family_dir[340];
+    snprintf(family_dir, sizeof(family_dir), "models/%s/%s",
+             run_subdir, run_name);
+    char horizon_dir[360];
+    ModelPath_HorizonDir(horizon_dir, sizeof(horizon_dir),
+                         family_dir, (long)horizon_ticks);
+    FoxDir_CreateParents(horizon_dir);
 
     HeldOutSplit split = HeldOutSplit_Make(results->sample_count,
                                             (double)snap_held_out_fraction);
@@ -4936,7 +4979,7 @@ static inline void mh_run_one_horizon_fv(
         // columns blank. NOW uses the same names Save Run uses so
         // multi-horizon runs render the same as single-horizon Save Run
         // bundles. Plus expected_num_classes (v5.11.49) for Classes col.
-        fprintf(sf, "run: %s_horizon_%d\n", run_name, horizon_ticks);
+        fprintf(sf, "run: %s/horizon_%d\n", run_name, horizon_ticks);  // D-431 nested (display-only; verified unparsed)
         fprintf(sf, "role: %s\n", role);
         fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
         fprintf(sf, "label_type: %d\n", label_type);
@@ -5046,6 +5089,10 @@ struct MultiHorizonParallelJob {
     // batch fell back (buffer alloc failure) and the worker does the legacy
     // per-horizon walk itself.
     int labels_precomputed;
+    // D-431 — the RUN's primary label kind (class-tree derivation is
+    // once-per-family, S2-F4; per-horizon label_type above still drives
+    // role/objective/labels/stamp).
+    int primary_label_type;
 };
 //======================================================================
 // [END_CODE]
@@ -5089,6 +5136,7 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
         job->snap_gap_threshold, job->snap_held_out_fraction,
         job->snap_auto_stamp_enabled, job->snap_auto_stamp_secret,
         &job->local_run_cfg,
+        job->primary_label_type,   // D-431 — class tree from the RUN's primary kind
         job->labels_precomputed,   // E.1.2.D leaf 5 — batch filled labels pre-spawn
         job->training_side,
         job->horizon_count);  // v5.15.3.B.2 PARITY-021
@@ -5366,6 +5414,9 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             // v5.13.5.B (parity-check gap-close 2026-05-08) — read from
             // stack-local snap (post-free(args)), not args->* (freed).
             job->label_type = snap_label_kind_per_horizon[h];
+            // D-431 — the RUN's primary kind rides the job so the class tree
+            // derives once per family (S2-F4), not per horizon.
+            job->primary_label_type = label_type;
             // v5.13.1.A — per-job training_side (stack-local copy)
             job->training_side = snap_training_side;
             {
@@ -5450,6 +5501,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 snap_gap_threshold, snap_held_out_fraction,
                 snap_auto_stamp_enabled, snap_auto_stamp_secret,
                 &run_control->run_config,
+                label_type,        // primary_label_type (D-431 — the run's snap primary)
                 mh_batch_ok,       // labels_precomputed (E.1.2.D leaf 5)
                 snap_training_side,
                 horizon_count);  // v5.15.3.B.2 PARITY-021
@@ -5589,10 +5641,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     }
     ImGui::SetItemTooltip(
         "Buy: trains entry-signal models (default). Output:\n"
-        "  models/<run_subdir>/<run>_horizon_<N>/<role>.json\n\n"
+        "  models/<run_subdir>/<run>/horizon_<N>/<role>.json\n\n"
         "Exit: trains sell-point models for the exit_predictor slots.\n"
         "Output (CO-LOCATED, auto-discovered by the engine):\n"
-        "  models/<run_subdir>/<run>_horizon_<N>/exit.json\n\n"
+        "  models/<run_subdir>/<run>/horizon_<N>/exit.json\n\n"
         "No cfg step needed: the engine walks exit.json siblings under\n"
         "node_N_model_dir automatically (E.1.2.C).");
 
@@ -6600,8 +6652,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "\n"
             "Training Side combo at top of panel selects the ROLE FILE\n"
             "(co-located; E.1.2.C):\n"
-            "  Buy:  models/<run_subdir>/<run>_horizon_<N>/<role>.json\n"
-            "  Exit: models/<run_subdir>/<run>_horizon_<N>/exit.json\n"
+            "  Buy:  models/<run_subdir>/<run>/horizon_<N>/<role>.json\n"
+            "  Exit: models/<run_subdir>/<run>/horizon_<N>/exit.json\n"
             "No cfg step: the engine auto-discovers exit.json siblings\n"
             "under node_N_model_dir automatically (E.1.2.C).\n"
             "\n"

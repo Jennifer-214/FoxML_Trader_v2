@@ -66,6 +66,7 @@
 #include "EzooInitFlagRegistry.hpp"   // v5.15.5.A.2.c — FOREACH_EZOO_INIT_FLAG bit-pack for init state
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../MemHeaders/DirCreate.hpp"  // E.1.2.D D-a — FoxDir_CreateParents (save-side dir provisioning for the four state writers)
+#include "ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT (Model_ParseHorizonSibling lives there now)
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include "../MemHeaders/HealthLog.hpp"  // v5.14.8.E: Health_LogCriticalRateLimited for stale-model log
 #include "BuildFlags.hpp"  // v5.15.1: tt::BUILD_FLAGS_HASH() for FOREACH_ARCH_FIELD_DRIFT
@@ -2204,7 +2205,7 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the multi-horizon loader — per horizon dir `<base>_horizon_<H>` try all 4 roles (horizon-mismatch refusal threaded), copy stamp barriers via the mask-coupled accessor, then pick the primary role]
+// [OVERVIEW]_[the multi-horizon loader — per horizon CHILD dir `<base>/horizon_<H>` (nested, D-431) try all 4 roles (horizon-mismatch refusal threaded), copy stamp barriers via the mask-coupled accessor, then pick the primary role]
 // [REFERENCE]_[DESIGN_SPEC]_[registry-bitmap-set-discipline.md]
 //======================================================================
 // [CODE]
@@ -2229,8 +2230,12 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     for (int h = 0; h < horizon_count; ++h) {
         int H = horizon_list[h];
         if (H <= 0) continue;
-        snprintf(per_horizon_dir, sizeof(per_horizon_dir),
-                 "%s_horizon_%d", base_run_path, H);
+        // D-431 nested layout — horizon dirs are CHILDREN of the family
+        // node ("<base>/horizon_<H>"), built by the schema SSoT. The old
+        // flat sibling form ("<base>_horizon_<H>") is RETIRED; the walker
+        // below detects it LOUDLY and prints the migration commands.
+        ModelPath_HorizonDir(per_horizon_dir, sizeof(per_horizon_dir),
+                             base_run_path, (long)H);
 
         // Try each role at this horizon's dir.
         // v5.11.42 D.2 — pass H as expected_horizon_ticks so TryLoadRole
@@ -2451,64 +2456,38 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
 // [END_FUNCTION]_[EnsembleModelZoo_LoadFromCfg]
 //======================================================================
 
-//======================================================================
-// [FUNCTION]_[Model_ParseHorizonSibling]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [ML_INFERENCE] [GUI]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ONE `_horizon_<N>` sibling-name matcher — prefix match + all-digits suffix + (0, 1000000] bounds; returns the horizon ticks or -1. Extracted (E.1.2.C 3G-ii) so the boot auto-detect and the Settings bundle picker resolve families by IDENTICAL rules — a picker with its own matcher would preview a different family than the loader loads]
-//======================================================================
-// [CODE]
-//======================================================================
-static inline long Model_ParseHorizonSibling(const char* entry_name,
-                                             const char* prefix,
-                                             int prefix_len) {
-    if (strncmp(entry_name, prefix, (size_t)prefix_len) != 0) return -1;
-    const char* suffix = entry_name + prefix_len;
-    char* end = nullptr;
-    long h = strtol(suffix, &end, 10);
-    if (end == suffix || *end != '\0') return -1;  // non-numeric suffix
-    if (h <= 0 || h > 1000000) return -1;          // sanity bounds
-    // E.1.2.D leaf 8 (S2-F5) — canonical-form round-trip. strtol accepts
-    // "07500" / "+7500" / " 7500" / "00000007500" as 7500, and every loader
-    // REBUILDS the path FROM the int ("%s_horizon_%ld" → the canonical dir),
-    // so an aliased spelling loaded the ONE canonical dir a SECOND time as a
-    // second ensemble arm (measured, scan-2 re-derivation § 2). Only the
-    // spelling the path builders themselves emit is a family member.
-    char canon[24];
-    snprintf(canon, sizeof(canon), "%ld", h);
-    if (strcmp(canon, suffix) != 0) return -1;     // aliased spelling — reject
-    return h;
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [END_FUNCTION]_[Model_ParseHorizonSibling]
-//======================================================================
+// (Model_ParseHorizonSibling RELOCATED to ML_Headers/ModelPathSchema.hpp at
+//  the nested-layout ship (D-431) — the schema header owns the grammar so
+//  builders and parsers cannot diverge. Semantics byte-unchanged; the 3G-ii
+//  + L8 test cells pin it there through this include.)
 
 //======================================================================
 // [FUNCTION]_[EnsembleModelZoo_AutoDetectFromDir]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[disk discovery of `_horizon_*` siblings -> sorted load via LoadFromCfg -> grid_member_count consistency verdict (VerifyGridMemberConsistency rides; mismatch unwinds the whole ensemble)]
+// [OVERVIEW]_[disk discovery of a family's `horizon_<N>` CHILD dirs (nested, D-431) -> sorted load via LoadFromCfg -> grid_member_count consistency verdict (VerifyGridMemberConsistency rides; mismatch unwinds the whole ensemble); carries the LOUD retired-flat-form detector]
 //======================================================================
 // [CODE]
 //======================================================================
 //------------------------------------------------------------------
-// [SECTION]_[v5.10.0a.G.5 — AUTO-DETECT ENSEMBLE FROM DISK]
+// [SECTION]_[v5.10.0a.G.5 — AUTO-DETECT ENSEMBLE FROM DISK (nested since D-431)]
 //------------------------------------------------------------------
-// Scans <base_dir>_horizon_* siblings on disk. For each sibling found:
+// Scans <base_dir>/horizon_* CHILDREN on disk. For each child found:
 //   - Verify load via NodeModelZoo_TryLoadRole
 //   - Read stamp body's grid_member_count + grid_member_idx (v5.10.0a.G.2)
 //   - Validate consistency: all loaded siblings must agree on grid_member_count
 //   - Place each model at its grid_member_idx slot in the ensemble
 //
-// Operator workflow:
-//   1. Train Multi-Horizon (G.1) → models/<run>/<run>_horizon_<H>/role.json
-//   2. Cfg: node_N_model_dir=models/<run>  (NOTE: base path WITHOUT _horizon_<H>)
-//   3. Engine boot calls AutoDetectFromDir(ezoo, "models/<run>", ...)
-//   4. Function discovers all _horizon_* siblings + populates ezoo
+// Operator workflow (nested layout, D-431 — corrected here; the previous
+// comment described a models/<run>/<run>_horizon_<H> shape the code never
+// implemented, a-class incidental finding 2026-08-22):
+//   1. Train Multi-Horizon → models/<class>/<run>/horizon_<H>/<role>.json
+//   2. Cfg: node_N_model_dir=models/<class>/<run>   (the FAMILY node)
+//   3. Engine boot calls AutoDetectFromDir(ezoo, "models/<class>/<run>", ...)
+//   4. Function discovers all horizon_* children + populates ezoo
+//   5. An un-migrated FLAT family triggers the loud detector (exact `mv`
+//      commands printed) instead of silent invisibility
 //
 // Returns total models loaded across all roles + horizons. Sets
 // BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)=1 if any role got at least one horizon loaded; logs
@@ -2618,7 +2597,7 @@ inline int EnsembleZoo_VerifyGridMemberConsistency(
 template <unsigned F>
 inline int EnsembleModelZoo_AutoDetectFromDir(
     EnsembleModelZoo<F> *ezoo,
-    const char *base_dir,             // e.g. "models/test_case3" (no _horizon_<H> suffix)
+    const char *base_dir,             // the FAMILY node, e.g. "models/classification/twins" (horizon_* dirs are its children — D-431)
     int backend,
     const char* held_out_stamp_secret = nullptr,
     double gap_threshold = 0.05,
@@ -2626,66 +2605,84 @@ inline int EnsembleModelZoo_AutoDetectFromDir(
     int acknowledge_cross_binary_drift = 0) {
     if (!ezoo || !base_dir || base_dir[0] == '\0') return 0;
 
-    // Step 1: scan filesystem for <base_dir>_horizon_<N> siblings.
-    // We need parent dir + base name to enumerate.
-    char parent_path[400];
-    char base_name[200];
+    // Step 1 (D-431 NESTED layout): the family base dir IS the bundle node —
+    // scan ITS CHILDREN for `horizon_<digits>` dirs (schema-SSoT matcher; the
+    // Settings bundle picker resolves families with the SAME fn). No
+    // parent/basename surgery: family-ness stopped being a name property.
+    char scan_base[400];
     {
-        size_t dlen = strnlen(base_dir, 400);
-        if (dlen == 0 || dlen >= 400) return 0;
-        // Strip trailing slash if any
-        char b[400];
-        memcpy(b, base_dir, dlen);
-        b[dlen] = '\0';
-        if (b[dlen - 1] == '/') { b[dlen - 1] = '\0'; dlen--; }
-        // Find last slash
-        const char *last_slash = strrchr(b, '/');
-        if (last_slash) {
-            size_t plen = (size_t)(last_slash - b);
-            if (plen >= sizeof(parent_path)) plen = sizeof(parent_path) - 1;
-            memcpy(parent_path, b, plen);
-            parent_path[plen] = '\0';
-            size_t blen = strnlen(last_slash + 1, sizeof(base_name) - 1);
-            memcpy(base_name, last_slash + 1, blen);
-            base_name[blen] = '\0';
-        } else {
-            // No slash: cwd-relative
-            parent_path[0] = '.';
-            parent_path[1] = '\0';
-            size_t blen = strnlen(b, sizeof(base_name) - 1);
-            memcpy(base_name, b, blen);
-            base_name[blen] = '\0';
-        }
+        size_t dlen = strnlen(base_dir, sizeof(scan_base));
+        if (dlen == 0 || dlen >= sizeof(scan_base)) return 0;
+        memcpy(scan_base, base_dir, dlen);
+        scan_base[dlen] = '\0';
+        if (scan_base[dlen - 1] == '/') scan_base[dlen - 1] = '\0';  // strip trailing slash
     }
 
-    DIR *dir = opendir(parent_path);
-    if (!dir) {
-        // Parent dir not readable (operator's base_dir doesn't exist) — silent
-        // fail. Caller falls back to single-zoo path.
-        return 0;
-    }
-
-    // Pattern to match: <base_name>_horizon_<digits>
-    char prefix[256];
-    int prefix_len = snprintf(prefix, sizeof(prefix), "%s_horizon_", base_name);
-
-    // Collect candidate horizon ticks (sorted ascending so dispatch is
-    // deterministic regardless of filesystem readdir order).
     int discovered_horizons[ENSEMBLE_HORIZON_MAX] = {0};
     int n_discovered = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (n_discovered >= ENSEMBLE_HORIZON_MAX) break;
-        // E.1.2.C 3G-ii — the shared matcher (prefix + digits + bounds);
-        // the Settings bundle picker resolves families with the SAME fn.
-        long h = Model_ParseHorizonSibling(entry->d_name, prefix, prefix_len);
-        if (h < 0) continue;
-        discovered_horizons[n_discovered++] = (int)h;
+    DIR *dir = opendir(scan_base);
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (n_discovered >= ENSEMBLE_HORIZON_MAX) break;
+            long h = ModelPath_ParseHorizonChild(entry->d_name);
+            if (h < 0) continue;
+            discovered_horizons[n_discovered++] = (int)h;
+        }
+        closedir(dir);
     }
-    closedir(dir);
+    // (an unreadable/absent base dir falls through with 0 discovered — the
+    //  old-form detector below still gets its chance to explain WHY.)
 
     if (n_discovered == 0) {
-        // No siblings found; ezoo stays inactive
+        // D-431 old-form detector, LOUD (the transitional-invisibility
+        // killer + the H21 tombstone for the retired path form): an
+        // un-migrated flat family (`<base>_horizon_<N>` SIBLINGS of the
+        // base) would otherwise be silently invisible — the exact
+        // silent-failure shape this ship exists to kill. Backups and
+        // hand-restores keep re-introducing flat names, so this probe is
+        // a standing tombstone, not first-week scaffolding.
+        char parent_path[400];
+        char base_name[200];
+        {
+            const char *last_slash = strrchr(scan_base, '/');
+            if (last_slash) {
+                size_t plen = (size_t)(last_slash - scan_base);
+                if (plen >= sizeof(parent_path)) plen = sizeof(parent_path) - 1;
+                memcpy(parent_path, scan_base, plen);
+                parent_path[plen] = '\0';
+                snprintf(base_name, sizeof(base_name), "%s", last_slash + 1);
+            } else {
+                parent_path[0] = '.'; parent_path[1] = '\0';
+                snprintf(base_name, sizeof(base_name), "%s", scan_base);
+            }
+        }
+        int n_old = 0;
+        DIR *pdir = opendir(parent_path);
+        if (pdir) {
+            int base_len = (int)strnlen(base_name, sizeof(base_name));
+            struct dirent *entry;
+            while ((entry = readdir(pdir)) != nullptr) {
+                long h = ModelPath_ParseOldFlatSibling(entry->d_name,
+                                                       base_name, base_len);
+                if (h < 0) continue;
+                if (n_old == 0) {
+                    fprintf(stderr,
+                        "[ensemble] RETIRED LAYOUT under '%s': flat "
+                        "`%s_horizon_<N>` siblings found but the nested form "
+                        "is `%s/horizon_<N>` (D-431). MIGRATE:\n",
+                        parent_path, base_name, scan_base);
+                }
+                fprintf(stderr, "[ensemble]   mkdir -p %s && mv %s/%s %s/horizon_%ld\n",
+                        scan_base, parent_path, entry->d_name, scan_base, h);
+                n_old++;
+            }
+            closedir(pdir);
+        }
+        if (n_old > 0) {
+            fprintf(stderr, "[ensemble] (or run: tools/migrate_model_layout.sh)\n");
+        }
+        // Either way: no nested horizons → ezoo stays inactive.
         return 0;
     }
 

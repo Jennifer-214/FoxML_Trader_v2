@@ -1012,7 +1012,8 @@ static inline void Settings_VerifyBundleStamps(SettingsState* s,
             if (n + 96 >= sz) { snprintf(out + n, sz - n, "(truncated)\n"); n = sz; break; }
             char mp[420];
             if (e->is_family)
-                snprintf(mp, sizeof(mp), "%s_horizon_%d/%s.json",
+                // D-431 nested — horizon dirs are CHILDREN of the family node
+                snprintf(mp, sizeof(mp), "%s/horizon_%d/%s.json",
                          e->cfg_path, e->horizons[i], MODEL_BUNDLE_ROLE_NAMES[r]);
             else
                 snprintf(mp, sizeof(mp), "%s/%s.json",
@@ -1769,8 +1770,8 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         }
         ImGui::PopID();
         ImGui::SetItemTooltip("Model bundle for this node. Takes precedence over Model Path.\n\n"
-                              "[ensemble] entries are _horizon_ FAMILIES — selecting one\n"
-                              "writes the BASE path; the engine auto-detects every sibling\n"
+                              "[ensemble] entries are horizon_<N>-CHILD FAMILIES — selecting one\n"
+                              "writes the BASE path; the engine auto-detects every horizon child\n"
                               "(buy roles + exit.json per horizon) at boot. [single] entries\n"
                               "are one-dir zoos (no cross-horizon ensemble/bandit).\n"
                               "A resolution preview renders below on selection.\n\n"
@@ -1994,13 +1995,15 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         // ML core but no ensemble active — surface why
         if (ImGui::CollapsingHeader("ML Ensemble", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextColored(FoxmlColors::comment,
-                "Ensemble not active — single-zoo path or no _horizon_<N> "
-                "siblings detected at base path.");
+                "Ensemble not active — single-zoo path or no horizon_<N> "
+                "children detected under the family dir (nested layout, D-431).");
             ImGui::TextColored(FoxmlColors::comment,
                 "If you trained multi-horizon models, check that "
-                "node_%d_model_dir points at the BASE path "
-                "(without _horizon_<H> suffix) and engine.log shows "
-                "[sharded] node %d: ensemble active.", node_id, node_id);
+                "node_%d_model_dir points at the FAMILY dir "
+                "(models/<class>/<family> — horizon_<N> dirs are its children); "
+                "an un-migrated FLAT family prints its exact `mv` fix in the "
+                "engine log. Success shows [sharded] node %d: ensemble active.",
+                node_id, node_id);
         }
     }
 

@@ -331,14 +331,22 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         if (cfg.node_model_dir[c][0]) {
             const char* bn = strrchr(cfg.node_model_dir[c], '/');
             bn = bn ? bn + 1 : cfg.node_model_dir[c];
-            const char* hz = strstr(bn, "_horizon_");
-            while (hz) {  // LAST occurrence (mirrors the picker's split rule)
-                const char* nx = strstr(hz + 1, "_horizon_");
-                if (!nx) break;
-                hz = nx;
+            // Nested grammar (D-431): a mistaken horizon-dir deploy has
+            // basename `horizon_<digits>`. The retired flat grammar
+            // (`<fam>_horizon_<digits>`) warns identically — either way the
+            // operator pointed BELOW/BESIDE the family node.
+            int looks_like_horizon = (ModelPath_ParseHorizonChild(bn) > 0);
+            if (!looks_like_horizon) {
+                const char* hz = strstr(bn, "_horizon_");
+                while (hz) {  // LAST occurrence (mirrors the old split rule)
+                    const char* nx = strstr(hz + 1, "_horizon_");
+                    if (!nx) break;
+                    hz = nx;
+                }
+                looks_like_horizon = (hz && Model_ParseHorizonSibling(bn, bn,
+                              (int)(hz - bn) + 9 /* strlen("_horizon_") */) > 0);
             }
-            if (hz && Model_ParseHorizonSibling(bn, bn,
-                          (int)(hz - bn) + 9 /* strlen("_horizon_") */) > 0) {
+            if (looks_like_horizon) {
                 fprintf(stderr, "[boot] WARN: node %d node_model_dir '%s' looks "
                         "like a HORIZON dir — this loads a single-zoo WITHOUT "
                         "the ensemble/bandits; you probably meant the family "

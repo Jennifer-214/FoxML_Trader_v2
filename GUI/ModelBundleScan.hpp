@@ -125,7 +125,7 @@ static inline uint8_t ModelBundle_ScanRoles(const char* dir_path) {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[scan ONE parent dir: entries whose name splits at the LAST `_horizon_` and validates through the loader's Model_ParseHorizonSibling fold into families; role-bearing dirs list as singles; role-less depth-0 dirs (models/classification etc.) recurse ONE level. Families then get per-horizon role probes + sorted horizons + a summary label]
+// [OVERVIEW]_[scan ONE parent dir (D-431 NESTED): a dir whose CHILDREN include valid `horizon_<N>` dirs is a FAMILY (child-set probe via the schema matcher — family-ness stopped being a name property); role-bearing dirs list as singles (a RETIRED flat-form name gets a migrate marker); role-less depth-0 dirs recurse ONE level. Families get per-horizon role probes + sorted horizons + a summary label]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -133,13 +133,6 @@ static inline void ModelBundle_ScanParent(ModelBundleScanState* st,
                                           const char* parent, int depth) {
     DIR* dir = opendir(parent);
     if (!dir) return;
-
-    static constexpr int MAX_FAM = 32;
-    char fam_base[MAX_FAM][96];
-    int  fam_h[MAX_FAM][ENSEMBLE_HORIZON_MAX];
-    int  fam_hcount[MAX_FAM];
-    int  fam_trunc[MAX_FAM];
-    int  nfam = 0;
 
     struct dirent* de;
     while ((de = readdir(dir)) != nullptr) {
@@ -149,42 +142,87 @@ static inline void ModelBundle_ScanParent(ModelBundleScanState* st,
         struct stat stt;
         if (stat(dir_path, &stt) != 0 || !S_ISDIR(stt.st_mode)) continue;
 
-        // Sibling test — split at the LAST `_horizon_` occurrence, then
-        // validate the suffix through the LOADER'S matcher so picker
-        // grouping and boot auto-detect can never disagree on a name.
-        const char* last = nullptr;
-        for (const char* p = de->d_name; (p = strstr(p, "_horizon_")) != nullptr; ++p)
-            last = p;
-        long h = -1;
-        if (last && last != de->d_name) {
-            const int prefix_len = (int)(last - de->d_name) + 9; // + "_horizon_"
-            h = Model_ParseHorizonSibling(de->d_name, de->d_name, prefix_len);
-        }
-        if (h > 0) {
-            const int base_len = (int)(last - de->d_name);
-            int f = -1;
-            for (int i = 0; i < nfam; ++i)
-                if ((int)strlen(fam_base[i]) == base_len &&
-                    strncmp(fam_base[i], de->d_name, (size_t)base_len) == 0) { f = i; break; }
-            if (f < 0) {
-                if (nfam >= MAX_FAM) { st->truncated = 1; continue; }
-                f = nfam++;
-                int n = base_len < (int)sizeof(fam_base[0]) - 1
-                      ? base_len : (int)sizeof(fam_base[0]) - 1;
-                memcpy(fam_base[f], de->d_name, (size_t)n);
-                fam_base[f][n] = '\0';
-                fam_hcount[f] = 0;
-                fam_trunc[f] = 0;
+        // D-431 NESTED — family test is a CHILD-SET probe: valid
+        // `horizon_<N>` child DIRS (schema matcher — the loader's walker
+        // uses the SAME fn, so picker grouping and boot auto-detect cannot
+        // disagree). The old LAST-`_horizon_`-split name surgery is gone;
+        // the whole cross-entry family-accumulation machinery died with it.
+        int hs[ENSEMBLE_HORIZON_MAX];
+        int nh = 0, htrunc = 0;
+        {
+            DIR* cd = opendir(dir_path);
+            if (cd) {
+                struct dirent* ce;
+                while ((ce = readdir(cd)) != nullptr) {
+                    long h = ModelPath_ParseHorizonChild(ce->d_name);
+                    if (h < 0) continue;
+                    char hp[420];
+                    snprintf(hp, sizeof(hp), "%s/%s", dir_path, ce->d_name);
+                    struct stat hstt;
+                    if (stat(hp, &hstt) != 0 || !S_ISDIR(hstt.st_mode)) continue;
+                    if (nh >= ENSEMBLE_HORIZON_MAX) { htrunc = 1; break; }
+                    hs[nh++] = (int)h;
+                }
+                closedir(cd);
             }
-            if (fam_hcount[f] >= ENSEMBLE_HORIZON_MAX) { fam_trunc[f] = 1; continue; }
-            fam_h[f][fam_hcount[f]++] = (int)h;
+        }
+        if (nh > 0) {
+            // FAMILY entry. Precedence rule (new edge under nested): a dir
+            // carrying BOTH role files AND horizon children reads as a
+            // FAMILY — matching the loader, whose ensemble walk runs
+            // regardless of the single-zoo result; the per-horizon role
+            // probes below surface whatever the operator actually put there.
+            if (st->count >= ModelBundleScanState::MAX_ENTRIES) { st->truncated = 1; continue; }
+            ModelBundleEntry* e = &st->entries[st->count++];
+            memset(e, 0, sizeof(*e));
+            e->is_family = 1;
+            e->truncated_horizons = htrunc;
+            // insertion-sort ascending (deterministic dispatch order, like the loader)
+            for (int i = 0; i < nh; ++i) {
+                int v = hs[i], j = i;
+                while (j > 0 && hs[j - 1] > v) { hs[j] = hs[j - 1]; --j; }
+                hs[j] = v;
+            }
+            e->horizon_count = nh;
+            int any_buy = 0;
+            for (int i = 0; i < nh; ++i) {
+                e->horizons[i] = hs[i];
+                char hdir[420];
+                ModelPath_HorizonDir(hdir, sizeof(hdir), dir_path, (long)hs[i]);
+                e->roles[i] = ModelBundle_ScanRoles(hdir);
+                if (e->roles[i] & (MB_ROLE_BARRIER | MB_ROLE_BUY_SIGNAL | MB_ROLE_REGIME))
+                    any_buy = 1;
+                if (e->roles[i] & MB_ROLE_EXIT) e->exit_count++;
+            }
+            snprintf(e->cfg_path, sizeof(e->cfg_path), "%s", dir_path);
+            const char* rel = (strncmp(e->cfg_path, "models/", 7) == 0)
+                            ? e->cfg_path + 7 : e->cfg_path;
+            const char* rsum = (any_buy && e->exit_count) ? "buy+exit"
+                             : (any_buy ? "buy" : (e->exit_count ? "exit" : "none"));
+            snprintf(e->label, sizeof(e->label), "%s  [ensemble · %dh · %s]",
+                     rel, e->horizon_count, rsum);
             continue;
         }
 
-        // Not a sibling: role-bearing dir = single-zoo entry.
+        // Not a family: role-bearing dir = single-zoo entry. A name that
+        // parses as the RETIRED flat form (`<fam>_horizon_<N>`) is an
+        // un-migrated family's horizon dir masquerading as a single —
+        // marked so the operator sees the migration owing instead of a
+        // plausible-looking entry (H21 tombstone visibility).
         uint8_t roles = ModelBundle_ScanRoles(dir_path);
         if (roles) {
             if (st->count >= ModelBundleScanState::MAX_ENTRIES) { st->truncated = 1; continue; }
+            int old_flat = 0;
+            {
+                const char* last = nullptr;
+                for (const char* p = de->d_name; (p = strstr(p, "_horizon_")) != nullptr; ++p)
+                    last = p;
+                if (last && last != de->d_name) {
+                    const int prefix_len = (int)(last - de->d_name) + 9;
+                    old_flat = (Model_ParseHorizonSibling(de->d_name, de->d_name,
+                                                          prefix_len) > 0) ? 1 : 0;
+                }
+            }
             ModelBundleEntry* e = &st->entries[st->count++];
             memset(e, 0, sizeof(*e));
             e->is_family = 0;
@@ -193,8 +231,9 @@ static inline void ModelBundle_ScanParent(ModelBundleScanState* st,
             snprintf(e->cfg_path, sizeof(e->cfg_path), "%s", dir_path);
             const char* rel = (strncmp(dir_path, "models/", 7) == 0)
                             ? dir_path + 7 : dir_path;
-            snprintf(e->label, sizeof(e->label), "%s  [single%s]",
-                     rel, (roles & MB_ROLE_EXIT) ? " · exit" : "");
+            snprintf(e->label, sizeof(e->label), "%s  [single%s%s]",
+                     rel, (roles & MB_ROLE_EXIT) ? " · exit" : "",
+                     old_flat ? " · FLAT-FORM: migrate (D-431)" : "");
             continue;
         }
 
@@ -203,40 +242,6 @@ static inline void ModelBundle_ScanParent(ModelBundleScanState* st,
         if (depth == 0) ModelBundle_ScanParent(st, dir_path, 1);
     }
     closedir(dir);
-
-    // Materialize family entries: sorted horizons + per-horizon role probes.
-    for (int f = 0; f < nfam; ++f) {
-        if (st->count >= ModelBundleScanState::MAX_ENTRIES) { st->truncated = 1; break; }
-        ModelBundleEntry* e = &st->entries[st->count++];
-        memset(e, 0, sizeof(*e));
-        e->is_family = 1;
-        e->truncated_horizons = fam_trunc[f];
-        // insertion-sort ascending (deterministic dispatch order, like the loader)
-        for (int i = 0; i < fam_hcount[f]; ++i) {
-            int v = fam_h[f][i], j = i;
-            while (j > 0 && fam_h[f][j - 1] > v) { fam_h[f][j] = fam_h[f][j - 1]; --j; }
-            fam_h[f][j] = v;
-        }
-        e->horizon_count = fam_hcount[f];
-        int any_buy = 0;
-        for (int i = 0; i < fam_hcount[f]; ++i) {
-            e->horizons[i] = fam_h[f][i];
-            char hdir[420];
-            snprintf(hdir, sizeof(hdir), "%s/%s_horizon_%d",
-                     parent, fam_base[f], fam_h[f][i]);
-            e->roles[i] = ModelBundle_ScanRoles(hdir);
-            if (e->roles[i] & (MB_ROLE_BARRIER | MB_ROLE_BUY_SIGNAL | MB_ROLE_REGIME))
-                any_buy = 1;
-            if (e->roles[i] & MB_ROLE_EXIT) e->exit_count++;
-        }
-        snprintf(e->cfg_path, sizeof(e->cfg_path), "%s/%s", parent, fam_base[f]);
-        const char* rel = (strncmp(e->cfg_path, "models/", 7) == 0)
-                        ? e->cfg_path + 7 : e->cfg_path;
-        const char* rsum = (any_buy && e->exit_count) ? "buy+exit"
-                         : (any_buy ? "buy" : (e->exit_count ? "exit" : "none"));
-        snprintf(e->label, sizeof(e->label), "%s  [ensemble · %dh · %s]",
-                 rel, e->horizon_count, rsum);
-    }
 }
 //======================================================================
 // [END_CODE]
