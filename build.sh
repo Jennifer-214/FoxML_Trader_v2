@@ -69,6 +69,18 @@ link_cfg() {
     # "no bundles" while eight existed (measured live on the operator's box).
     # Everything now resolves THROUGH the symlink into the one real tree.
     [[ -d "$dir" ]] && [[ -d models ]] && ln -sfn ../models "$dir/models"
+    # E.1.2.D consolidation (2026-08-22, operator-flagged) — EVERY cwd-relative
+    # persistent surface gets the engine.cfg treatment, so launch-cwd stops
+    # forking the operator's world. Measured pre-fix: THREE divergent
+    # data/sharded_snapshot.dat files (root + build_gui + build), two
+    # divergent backtest.cfg (348 lines apart), forked logging/ and GUI
+    # layout .ini per cwd. cfg_write_field is an in-place fopen(path,"w"),
+    # so writes flow THROUGH these links to the one real file.
+    [[ -d "$dir" ]] && [[ -d data ]]    && [[ ! -d "$dir/data"    || -L "$dir/data"    ]] && ln -sfn ../data "$dir/data"
+    [[ -d "$dir" ]] && [[ -d logging ]] && [[ ! -d "$dir/logging" || -L "$dir/logging" ]] && ln -sfn ../logging "$dir/logging"
+    [[ -d "$dir" ]] && [[ -f backtest.cfg ]]    && ln -sfn ../backtest.cfg "$dir/backtest.cfg"
+    [[ -d "$dir" ]] && [[ -f foxml_gui.ini ]]   && ln -sfn ../foxml_gui.ini "$dir/foxml_gui.ini"
+    [[ -d "$dir" ]] && [[ -f foxml_suite.ini ]] && ln -sfn ../foxml_suite.ini "$dir/foxml_suite.ini"
 }
 
 # v4.3 — maintain bin/ symlinks to the canonical "latest" binary of each
