@@ -6350,18 +6350,25 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::InputText("Run Name", state->run_name, sizeof(state->run_name));
         if (ImGui::Button("Save Run")) {
             // pick role-specific filename so NodeModelZoo auto-discovers it.
-            // role is derived from label_type: 3-class softmax → "barrier",
-            // regime classifier → "regime", everything else → "buy_signal".
-            const char *role_name = "buy_signal";
+            //
+            // E.1.2.C — this was the THIRD hand-rolled copy of the label→role
+            // rule, and the only one that never learned about the exit side: it
+            // switched on label_type alone, so with Training Side = Exit it
+            // mis-filed models/exit.json as <run_dir>/buy_signal.json, stamp and
+            // all. The landed role guard catches the result at load, so it
+            // degraded to a confusing REFUSE rather than a silent inversion —
+            // but it also meant expected.cfg could never record role "exit",
+            // which is what made a load-side label check unreachable.
+            // Now calls the ONE extracted rule (Training_ResolveRole), same as
+            // the trainer and the boot walk.
+            const char *role_name =
+                Training_ResolveRole(state->label_type, state->ui_training_side);
             int expected_num_classes = 0;  // 0 = binary
             if (state->label_type == LABEL_PEAK_VALLEY_STABLE) {
-                role_name = "barrier";
                 expected_num_classes = 3;
             } else if (state->label_type == LABEL_REGIME) {
-                role_name = "regime";
                 expected_num_classes = 4;
             } else if (state->label_type == LABEL_FORWARD_PNL) {
-                role_name = "buy_signal";  // regression treated as binary slot
                 expected_num_classes = 1;  // 1 = regression
             }
 

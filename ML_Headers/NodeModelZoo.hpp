@@ -936,6 +936,10 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
     int expected_poll_interval        = -1;
     int expected_feature_format_ver   = -1;
     int expected_num_features         = -1;
+    // E.1.2.C — the operator's training-time LABEL row. -1 = absent (older
+    // expected.cfg, or a producer that never wrote it) and absent means NO
+    // OPINION: this must never refuse a model for a key it does not carry.
+    int expected_label_type           = -1;
     int mismatches = 0;
 
     char line[512];
@@ -973,6 +977,7 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
         else if (strcmp(key, "expected_poll_interval") == 0)         expected_poll_interval = atoi(val);
         else if (strcmp(key, "expected_feature_format_version") == 0) expected_feature_format_ver = atoi(val);
         else if (strcmp(key, "expected_num_features") == 0)          expected_num_features = atoi(val);
+        else if (strcmp(key, "expected_label_type") == 0)            expected_label_type = atoi(val);
     }
     fclose(f);
 
@@ -1027,6 +1032,32 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
         fprintf(stderr, "[ML] node %d: MISMATCH — expected.cfg says %d classes, "
                         "loaded model has %d outputs\n",
                 node_id, expected_num_classes, zoo->barrier.num_outputs);
+        mismatches++;
+    }
+
+    // E.1.2.C — EXIT-SIDE LABEL DIRECTION. The only load-side check that can see
+    // label semantics at all: no stamp key identifies the target row (the signed
+    // body carries label_params / label_registry_hash / model_num_outputs, none
+    // of which separates WILL_PEAK from WIN_LOSS), so a WIN_LOSS model trained at
+    // side=1 stamps role="exit" honestly and PASSES the role check. The sidecar
+    // is the one artifact that records which label produced the model.
+    //
+    // Drives the SAME extracted rule the trainer's producer-side gate uses
+    // (Training_SideLabelGate, LabelFunctions.hpp) rather than a fourth copy —
+    // one rule, both ends, so they cannot drift apart.
+    //
+    // DELIBERATELY WEAK, and the weakness is the point: expected.cfg is UNSIGNED
+    // and operator-editable, so this is a courtesy check, not a security control.
+    // It counts a mismatch (WARN in non-strict, REFUSE in strict, same as its
+    // siblings) rather than hard-failing on its own. An absent key is NO OPINION.
+    if (expected_label_type >= 0 && strcmp(expected_role, "exit") == 0 &&
+        Training_SideLabelGate(expected_label_type, /*training_side=*/1) == 0) {
+        fprintf(stderr,
+                "[ML] node %d: expected.cfg says this EXIT model was trained on label "
+                "kind %d, which is an ENTRY-goodness objective — inverted as an exit "
+                "signal (high output would fire a SELL exactly when entry looks good). "
+                "Retrain the exit side on Will Peak or Peak/Valley/Stable.\n",
+                node_id, expected_label_type);
         mismatches++;
     }
 
