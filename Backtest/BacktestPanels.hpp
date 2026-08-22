@@ -415,7 +415,13 @@ struct CollectMultiHorizonWorkerArgs {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[112B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[snap_tp_pct@44]
 //======================================================================
 // [END_STRUCT]_[CollectMultiHorizonWorkerArgs]
 //======================================================================
@@ -449,57 +455,94 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
                   &rc->progress_pct, &rc->cancel_flag,
                   rc->candle_acc, rc->snapshot);
 
-    // 2. Per-horizon label recompute + diagnostic. Iterate horizons,
-    //    count valid (non-NaN) labels, log to stderr.
-    // v5.11.40 — also rotate label_tp_pct + label_sl_pct per horizon
-    //            (broadcast or per-horizon CSV from operator).
-    int saved_forward_ticks = rc->run_config.label_forward_ticks;
-    double saved_tp = rc->run_config.label_tp_pct;
-    double saved_sl = rc->run_config.label_sl_pct;
-    for (int h = 0; h < horizon_count; ++h) {
-        if (rc->cancel_flag) {
-            fprintf(stderr, "[collect-mh] cancelled at horizon %d/%d\n",
-                    h, horizon_count);
-            break;
+    // 2. Per-horizon label diagnostic — ONE batched walk (E.1.2.D leaf 5),
+    //    was one full-corpus walk PER horizon. All targets share the
+    //    collect-time label_type (exactly what the old loop did — it only
+    //    rotated fwd/tp/sl); the LAST target writes rc->results.labels
+    //    directly so the post-loop state (SamplesSnapshot below reads it)
+    //    is bytewise what the old last iteration left behind. rc->run_config
+    //    label fields are no longer mutated, so the old save/restore is gone
+    //    with the mutation itself.
+    // v5.11.40 — label_tp_pct/label_sl_pct rotate per horizon (broadcast or
+    //            per-horizon CSV from operator); double-typed, percent
+    //            pass-through without /100.
+    if (!rc->cancel_flag && horizon_count > 0) {
+        LabelBatchTarget bt[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+        float *tmp_bufs[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
+        int bt_ok = 1;
+        for (int h = 0; h < horizon_count; ++h) {
+            bt[h] = LabelBatchTarget{};
+            bt[h].label_type    = rc->run_config.label_type;
+            bt[h].tp_pct        = (double)tp_pcts[h];
+            bt[h].sl_pct        = (double)sl_pcts[h];
+            bt[h].forward_ticks = horizons[h];
+            if (h == horizon_count - 1) {
+                bt[h].out_labels = rc->results.labels;   // post-state = last horizon
+            } else {
+                tmp_bufs[h] = (float *)malloc(
+                    (size_t)rc->results.sample_count * sizeof(float));
+                if (!tmp_bufs[h]) { bt_ok = 0; break; }
+                bt[h].out_labels = tmp_bufs[h];
+            }
         }
-        rc->run_config.label_forward_ticks = horizons[h];
-        // BacktestRunConfig::label_tp_pct is double-typed (not FPN_Binary);
-        // operator's CSV value is a percent (e.g. 0.030 = 0.03%) so
-        // pass through directly without /100.
-        rc->run_config.label_tp_pct = (double)tp_pcts[h];
-        rc->run_config.label_sl_pct = (double)sl_pcts[h];
-        Backtest_ComputeLabelsFromSamples(&rc->results, &rc->run_config);
-
-        int n_valid = 0, n_pos = 0, n_neg = 0;
-        int n_stable = 0, n_peak = 0, n_valley = 0;   // 3-class (PVS) view
-        for (int s = 0; s < rc->results.sample_count; ++s) {
-            float lab = rc->results.labels[s];
-            if (isnan(lab) || isinf(lab)) continue;
-            n_valid++;
-            if (lab > 0.5f) n_pos++;
-            else if (lab < 0.5f) n_neg++;
-            if      (lab < 0.5f) n_stable++;
-            else if (lab < 1.5f) n_peak++;
-            else                 n_valley++;
-        }
-        // E.1.2.C GUI polish (c) — the binary pos/neg split lumped peak(1)
-        // + valley(2) together as "pos" and printed stable as "neg" for the
-        // 3-class PVS label; print per-class counts for that kind instead.
-        if (rc->run_config.label_type == LABEL_PEAK_VALLEY_STABLE) {
-            fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
-                            "%d valid samples (%d stable, %d peak, %d valley) of %d total\n",
-                    horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_stable,
-                    n_peak, n_valley, rc->results.sample_count);
+        if (!bt_ok) {
+            // Pathological small-alloc failure: keep the post-state contract
+            // (last horizon into results.labels) and drop the earlier
+            // horizons' diagnostics rather than the whole collect.
+            fprintf(stderr, "[collect-mh] batch buffer alloc failed; "
+                            "labeling last horizon only\n");
+            Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
+                                        &bt[horizon_count - 1], 1);
         } else {
-            fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
-                            "%d valid samples (%d pos, %d neg, %d neutral) of %d total\n",
-                    horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_pos, n_neg,
-                    n_valid - n_pos - n_neg, rc->results.sample_count);
+            Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
+                                        bt, horizon_count);
         }
+        // Legacy accumulate-semantics: the old loop's every per-horizon walk
+        // folded its NaN counters into results.stats. Same totals, one fold.
+        for (int h = 0; h < horizon_count; ++h) {
+            if (!bt_ok && h < horizon_count - 1) continue;  // never computed
+            rc->results.stats.nan_labels_total   += bt[h].nan_total;
+            rc->results.stats.nan_labels_dropped += bt[h].nan_dropped;
+        }
+        for (int h = 0; h < horizon_count; ++h) {
+            if (rc->cancel_flag) {
+                fprintf(stderr, "[collect-mh] cancelled at horizon %d/%d\n",
+                        h, horizon_count);
+                break;
+            }
+            if (!bt_ok && h < horizon_count - 1) continue;  // no buffer to read
+            const float *labs = bt[h].out_labels;
+            int n_valid = 0, n_pos = 0, n_neg = 0;
+            int n_stable = 0, n_peak = 0, n_valley = 0;   // 3-class (PVS) view
+            for (int s = 0; s < rc->results.sample_count; ++s) {
+                float lab = labs[s];
+                if (isnan(lab) || isinf(lab)) continue;
+                n_valid++;
+                if (lab > 0.5f) n_pos++;
+                else if (lab < 0.5f) n_neg++;
+                if      (lab < 0.5f) n_stable++;
+                else if (lab < 1.5f) n_peak++;
+                else                 n_valley++;
+            }
+            // E.1.2.C GUI polish (c) — the binary pos/neg split lumped peak(1)
+            // + valley(2) together as "pos" and printed stable as "neg" for the
+            // 3-class PVS label; print per-class counts for that kind instead.
+            if (rc->run_config.label_type == LABEL_PEAK_VALLEY_STABLE) {
+                fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
+                                "%d valid samples (%d stable, %d peak, %d valley) of %d total\n",
+                        horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_stable,
+                        n_peak, n_valley, rc->results.sample_count);
+            } else {
+                fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
+                                "%d valid samples (%d pos, %d neg, %d neutral) of %d total\n",
+                        horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_pos, n_neg,
+                        n_valid - n_pos - n_neg, rc->results.sample_count);
+            }
+        }
+        for (int h = 0; h < horizon_count; ++h) free(tmp_bufs[h]);
+    } else if (rc->cancel_flag) {
+        fprintf(stderr, "[collect-mh] cancelled at horizon 0/%d\n", horizon_count);
     }
-    rc->run_config.label_forward_ticks = saved_forward_ticks;
-    rc->run_config.label_tp_pct = saved_tp;
-    rc->run_config.label_sl_pct = saved_sl;
 
     // 3. Final SamplesSnapshot from whatever the last horizon's labels are
     //    (operator's "current" view — Train Multi-Horizon will recompute
@@ -4432,7 +4475,13 @@ struct MultiHorizonWorkerArgs {
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[664B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[11]
+// [STRADDLE]_[snap_run_name@16 · snap_horizons@376 · snap_sl_pct@440 · snap_label_kind_per_horizon@628]
 //======================================================================
 // [END_STRUCT]_[MultiHorizonWorkerArgs]
 //======================================================================
@@ -4481,6 +4530,13 @@ static inline void mh_run_one_horizon_fv(
     int snap_auto_stamp_enabled,
     const char *snap_auto_stamp_secret,
     BacktestRunConfig *local_run_cfg,
+    // E.1.2.D leaf 5 — 1 = results->labels already filled by the caller's
+    // Backtest_ComputeLabelsBatch (ONE corpus walk covers every horizon);
+    // 0 = do the single-target walk here (legacy per-horizon behavior).
+    // Deliberately NO default: every caller states its choice — leaf 4b is
+    // the record of how a defaulted new param keeps an unwired entry point
+    // invisible (AR-20).
+    int labels_precomputed,
     // v5.13.1 — sell-side training. Default 0 preserves pre-v5.13.1 path
     // for legacy callers. 1 → prepend "exit/" to run_subdir routing
     // output to models/exit/<run_subdir>/<run>_horizon_<N>/.
@@ -4516,7 +4572,13 @@ static inline void mh_run_one_horizon_fv(
     // (:4907), documented at :4284 as "mutated per horizon" — this is
     // exactly the mutation set it exists for.
     local_run_cfg->label_type          = label_type;
-    Backtest_ComputeLabelsFromSamples(results, local_run_cfg);
+    // The mutation set above stays UNCONDITIONAL even when labels arrive
+    // precomputed: Backtest_RunFullValidation + the stamp read label_type /
+    // fwd / tp / sl off local_run_cfg downstream. Only the corpus walk is
+    // skipped — the batch already produced these exact bytes (memcmp oracle).
+    if (!labels_precomputed) {
+        Backtest_ComputeLabelsFromSamples(results, local_run_cfg);
+    }
 
     int n_valid = 0;
     for (int s = 0; s < results->sample_count; ++s) {
@@ -4849,6 +4911,11 @@ struct MultiHorizonParallelJob {
     // path would keep reading `state->` live from N threads at once while ImGui
     // wrote the same non-atomic ints.
     tt::XGBHyperparams snap_hp;
+    // E.1.2.D leaf 5 — 1 = isolated_results.labels was filled by the ONE
+    // batched corpus walk before spawn (worker skips its own walk); 0 = the
+    // batch fell back (buffer alloc failure) and the worker does the legacy
+    // per-horizon walk itself.
+    int labels_precomputed;
 };
 //======================================================================
 // [END_CODE]
@@ -4892,6 +4959,7 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
         job->snap_gap_threshold, job->snap_held_out_fraction,
         job->snap_auto_stamp_enabled, job->snap_auto_stamp_secret,
         &job->local_run_cfg,
+        job->labels_precomputed,   // E.1.2.D leaf 5 — batch filled labels pre-spawn
         job->training_side,
         job->horizon_count);  // v5.15.3.B.2 PARITY-021
     free(job->isolated_results.labels);
@@ -5055,6 +5123,54 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     int saved_count = 0;
     int validated = 0;
 
+    // E.1.2.D leaf 5 — ONE batched corpus walk labels every horizon up front
+    // (was: one full walk per horizon, and in parallel mode N of them running
+    // SIMULTANEOUSLY against the same disk). Targets carry the per-horizon
+    // (kind, fwd, tp, sl); both modes consume the vectors below and skip the
+    // in-place walk. Buffer-alloc failure degrades to the legacy per-horizon
+    // walks (mh_batch_ok=0), never to wrong labels. A corpus abort keeps
+    // precomputed=1: the NAN prefill makes every horizon refuse on 0 valid
+    // labels — the legacy path would have re-walked the broken corpus N more
+    // times and, worse, counted whatever stale labels sat in results->labels.
+    float *mh_label_bufs[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
+    int mh_batch_ok = 1;
+    {
+        LabelBatchTarget bt[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+        for (int h = 0; h < horizon_count; ++h) {
+            mh_label_bufs[h] = (float *)malloc(
+                (size_t)results->sample_count * sizeof(float));
+            if (!mh_label_bufs[h]) { mh_batch_ok = 0; break; }
+            bt[h] = LabelBatchTarget{};
+            bt[h].label_type    = snap_label_kind_per_horizon[h];
+            bt[h].tp_pct        = (double)tp_pcts[h];
+            bt[h].sl_pct        = (double)sl_pcts[h];
+            bt[h].forward_ticks = horizons[h];
+            bt[h].out_labels    = mh_label_bufs[h];
+        }
+        if (mh_batch_ok) {
+            int labeled = Backtest_ComputeLabelsBatch(results, &saved_run_cfg,
+                                                      bt, horizon_count);
+            if (labeled < 0) {
+                fprintf(stderr, "[mh-train] batched label pass aborted; "
+                                "horizons will refuse on 0 valid labels\n");
+            } else if (!parallel_mode) {
+                // Serial-mode legacy stats parity: each per-horizon walk used
+                // to fold its NaN counters into results->stats (the S3-F3
+                // accumulate semantics — leaf 13 owns re-thinking them);
+                // parallel mode folded into discarded isolated copies. Both
+                // preserved (serial folds all-up-front vs per-iteration; the
+                // post-run totals are identical).
+                for (int h = 0; h < horizon_count; ++h) {
+                    results->stats.nan_labels_total   += bt[h].nan_total;
+                    results->stats.nan_labels_dropped += bt[h].nan_dropped;
+                }
+            }
+        } else {
+            fprintf(stderr, "[mh-train] label batch buffer alloc failed; "
+                            "falling back to per-horizon label walks\n");
+        }
+    }
+
     if (parallel_mode) {
         fprintf(stderr, "[mh-train] parallel mode: %d horizons across %d threads "
                         "(xgb_train_nthread pinned to 1 per thread for parity)\n",
@@ -5081,10 +5197,17 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             }
             job->state = state;
             job->snap_hp = snap_hp;   // E.1.2.C — one snapshot, every worker
-            // Shallow-copy results; replace labels[] with own heap buffer
+            // Shallow-copy results; labels[] = the horizon's batch-filled
+            // vector (ownership TRANSFERS to the job — the worker frees it;
+            // E.1.2.D leaf 5). Legacy own-malloc only on batch fallback.
             job->isolated_results = *results;
-            job->isolated_results.labels =
-                (float *)malloc((size_t)results->sample_count * sizeof(float));
+            if (mh_batch_ok) {
+                job->isolated_results.labels = mh_label_bufs[h];
+                mh_label_bufs[h] = NULL;   // consumed — post-join free skips it
+            } else {
+                job->isolated_results.labels =
+                    (float *)malloc((size_t)results->sample_count * sizeof(float));
+            }
             if (!job->isolated_results.labels) {
                 snprintf(state->mh_horizon_status[h], 128,
                          "h=%d FAILED: malloc labels[]", horizons[h]);
@@ -5092,6 +5215,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 free(job);
                 continue;
             }
+            job->labels_precomputed = mh_batch_ok;
             // Pin xgb_train_nthread=1 + xgb_eval_nthread=1 in the isolated
             // cfg for parity vs serial-mode-with-nthread=1 AND for parallel-
             // mode safety (WF folds inside RFV use xgb_eval_nthread). Both
@@ -5181,6 +5305,13 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             // v5.13.5.B (parity-check gap-close) — read stack-local snap
             // (args is freed by the worker before these reads).
             int per_horizon_lk = snap_label_kind_per_horizon[h];
+            // E.1.2.D leaf 5 — consume the batch vector (bytewise what the
+            // in-place walk produced; memcmp-pinned) instead of re-walking
+            // the corpus for every horizon.
+            if (mh_batch_ok) {
+                memcpy(results->labels, mh_label_bufs[h],
+                       (size_t)results->sample_count * sizeof(float));
+            }
             mh_run_one_horizon_fv(
                 state, results, snap_hp, h,
                 horizons[h], tp_pcts[h], sl_pcts[h],
@@ -5189,6 +5320,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 snap_gap_threshold, snap_held_out_fraction,
                 snap_auto_stamp_enabled, snap_auto_stamp_secret,
                 &run_control->run_config,
+                mh_batch_ok,       // labels_precomputed (E.1.2.D leaf 5)
                 snap_training_side,
                 horizon_count);  // v5.15.3.B.2 PARITY-021
 
@@ -5198,6 +5330,11 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             if (fv->auto_stamp_ok) saved_count++;
         }
     }
+
+    // E.1.2.D leaf 5 — release batch vectors (parallel transferred consumed
+    // slots to jobs and NULLed them; serial memcpys and keeps ownership;
+    // free(NULL) is a no-op for every consumed/never-allocated slot).
+    for (int h = 0; h < horizon_count; ++h) free(mh_label_bufs[h]);
 
     // Restore RunConfig
     run_control->run_config = saved_run_cfg;

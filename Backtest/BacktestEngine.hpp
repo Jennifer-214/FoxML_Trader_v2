@@ -668,24 +668,75 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 }
 
 //======================================================================
-// [FUNCTION]_[Backtest_ComputeLabelsFromSamples]
+// [STRUCT]_[LabelBatchTarget]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[forward-scan label post-pass — streaming 2-file sliding window keeps peak RAM at O(2*max_per_file) not O(total_ticks); reloads the forward-looking ticks the replay discarded; no-op when collect_features=0]
+// [OVERVIEW]_[one label target for the batched forward-scan pass — (label_type, tp, sl, fwd) + a caller-owned output vector + per-target NaN counters]
 //======================================================================
-// Compute labels for a populated BacktestResults using forward-looking tick
-// data. Extracted from the legacy Backtest_Run body so both legacy and
-// sharded paths can share it (sharded path adopted feature collection in
-// E.1; this is the matching label-side parity).
+// [CODE]
+//======================================================================
+struct LabelBatchTarget {
+    double tp_pct;          // 0 → same 1.5 default the single-target path applies
+    double sl_pct;          // 0 → 1.0 default
+    float *out_labels;      // caller-owned, >= results->sample_count floats
+    int    label_type;      // LABEL_* id; unknown → Label_WinLoss fallback (parity with single-target)
+    int    forward_ticks;   // 0 → 1000 default; LABEL_REGIME ignores (per-sample regime drives)
+    // Per-target NaN accounting, THIS pass only. Deliberately NOT
+    // results->stats: the legacy counters accumulate across passes and are
+    // mode-dependent (S3-F3, E.1.2.D leaf 13) — callers that want the legacy
+    // accumulate-semantics fold these in explicitly (the 1-target wrapper does).
+    uint32_t nan_total;
+    uint32_t nan_dropped;
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[40B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[LabelBatchTarget]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Backtest_ComputeLabelsBatch]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[forward-scan label post-pass, K targets in ONE streaming walk — same 2-file sliding window, the corpus is read once instead of once per target; no-op when collect_features=0]
+//======================================================================
+// Compute K label vectors for a populated BacktestResults in ONE pass over
+// the tick corpus. E.1.2.D leaf 5 (scan-3 O1): the multi-horizon paths used
+// to invoke the single-target walk once per horizon per side — P = 1 + N + N·S
+// full corpus re-reads (measured 2.65× slower at real scale, and in parallel
+// mode N threads re-read the corpus SIMULTANEOUSLY). One walk, K label_fn
+// calls per sample, amortizes all I/O + parse.
 //
-// Caller must have already set results->sample_count, results->sample_tick_indices,
-// results->sample_prices, and results->stats.ticks_processed. Uses
-// run_cfg->data_paths to reload the full tick stream (labels need forward-
-// looking data the replay already discarded).
+// BYTE-IDENTITY CONTRACT: for each target t, targets[t].out_labels after this
+// call is bytewise identical to what a dedicated single-target walk with the
+// same (label_type, tp, sl, fwd) would produce — each label_fn call sees
+// identical (tick_buf, local_tidx, total_in_buf, price, tp, sl, extra) inputs;
+// only the call ORDER differs (sample-major instead of target-major), and the
+// leaves are pure. Pinned by the batch-vs-sequential memcmp oracle in
+// tests/controller_test.cpp (TOTAL oracle).
 //
-// No-op when collect_features=0 or sample_count==0 — caller doesn't need to
-// gate.
+// Output vectors are NAN-prefilled before the walk: on a mid-walk abort
+// (unreadable corpus, sort refusal) unwritten slots read as invalid-label
+// instead of uninitialized heap — a failed pass now counts 0 valid labels
+// downstream rather than training on garbage/stale vectors. Success-path
+// bytes are unaffected (the walk writes every in-corpus sample slot).
+//
+// Caller must have set results->sample_count, results->sample_tick_indices,
+// results->sample_prices (+ sample_regimes for LABEL_REGIME targets). Uses
+// run_cfg for the corpus (data_paths) + sort mode ONLY — label parameters
+// come from targets[], NOT from run_cfg->label_*.
+//
+// No-op when collect_features=0, sample_count==0, or num_targets<=0.
 //======================================================================================================
 // v5.10.0 Item B — streaming sliding-window label compute. Closes 2026-05-03
 // OOM (28 GB label_ticks for 1-year, 57 GB for 2-year). Key insight: labels
@@ -714,11 +765,45 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
-                                                      const BacktestRunConfig *run_cfg) {
-    if (!run_cfg->collect_features) return;
-    if (results->sample_count <= 0) return;
-    if (run_cfg->num_data_files <= 0) return;
+// LABEL_BATCH_MAX_TARGETS — stack-resolution cap. 2× HORIZON_LIST_MAX so the
+// both-sides sequel (scan-3 O3: every horizon × {buy, exit}) fits without a bump.
+static constexpr int LABEL_BATCH_MAX_TARGETS = 16;
+static_assert(LABEL_BATCH_MAX_TARGETS >=
+                  2 * ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX,
+              "batch cap must cover a full both-sides horizon grid");
+
+// Returns: samples labeled (>= 0), or -1 on abort (alloc fail / sort refusal
+// / target overflow — already logged; output vectors hold the NAN prefill
+// past the abort point). The legacy single-target body returned void and
+// printed nothing on abort; the 1-target wrapper preserves that exactly.
+static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
+                                              const BacktestRunConfig *run_cfg,
+                                              LabelBatchTarget *targets,
+                                              int num_targets) {
+    if (num_targets <= 0) return 0;
+    if (num_targets > LABEL_BATCH_MAX_TARGETS) {
+        fprintf(stderr, "[backtest] label_compute: %d targets exceeds "
+                "LABEL_BATCH_MAX_TARGETS=%d; refusing\n",
+                num_targets, LABEL_BATCH_MAX_TARGETS);
+        return -1;
+    }
+
+    // NAN-prefill every output vector + zero the counters BEFORE the no-op
+    // gates too: every non-negative return must leave the outputs in a
+    // defined invalid-label state — a 0-return no-op on caller-malloc'd
+    // buffers must never hand back uninitialized heap (downstream n_valid
+    // counts then read garbage as labels). Aborts below (alloc fail, sort
+    // refusal) get the same guarantee (see contract above).
+    for (int t = 0; t < num_targets; t++) {
+        targets[t].nan_total = 0;
+        targets[t].nan_dropped = 0;
+        for (int s = 0; s < results->sample_count; s++)
+            targets[t].out_labels[s] = NAN;
+    }
+
+    if (!run_cfg->collect_features) return 0;
+    if (results->sample_count <= 0) return 0;
+    if (run_cfg->num_data_files <= 0) return 0;
 
     // v5.10.0 Item A — label_compute phase timer (wraps full body, RAII guard).
     uint64_t label_start_ns = tt::PhaseTimer_NowNs();
@@ -741,7 +826,7 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
         free(file_counts);
         free(file_offsets);
         fprintf(stderr, "[backtest] label_compute: failed to allocate file index\n");
-        return;
+        return -1;
     }
     int max_per_file = 0;
     for (int f = 0; f < num_files; f++) {
@@ -772,27 +857,38 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
         free(file_offsets);
         fprintf(stderr, "[backtest] label_compute: failed to alloc 2-file buf "
                 "(%.0f MB peak)\n", (double)buf_cap * sizeof(HistoricalTick) / 1e6);
-        return;
+        return -1;
     }
     fprintf(stderr, "[backtest] label_compute: streaming 2-file window — "
             "peak %.0f MB (%d files, %lld total ticks)\n",
             (double)buf_cap * sizeof(HistoricalTick) / 1e6,
             num_files, (long long)total_ticks);
 
-    // Phase 3 — resolve label config.
-    LabelFn label_fn = NULL;
-    for (int l = 0; l < LABEL_COUNT; l++) {
-        if (label_table[l].id == run_cfg->label_type) {
-            label_fn = label_table[l].fn;
-            break;
+    // Phase 3 — resolve per-target label config. Same defaults + Label_WinLoss
+    // fallback the single-target path applied, hoisted out of the sample loop.
+    struct ResolvedTarget {
+        LabelFn fn;
+        double tp, sl;
+        int fwd;
+        int is_multiclass, is_regression, is_regime;
+    };
+    ResolvedTarget rt[LABEL_BATCH_MAX_TARGETS];
+    for (int t = 0; t < num_targets; t++) {
+        rt[t].fn = NULL;
+        for (int l = 0; l < LABEL_COUNT; l++) {
+            if (label_table[l].id == targets[t].label_type) {
+                rt[t].fn = label_table[l].fn;
+                break;
+            }
         }
+        if (!rt[t].fn) rt[t].fn = Label_WinLoss;  // fallback (parity)
+        rt[t].tp  = targets[t].tp_pct > 0 ? targets[t].tp_pct : 1.5;
+        rt[t].sl  = targets[t].sl_pct > 0 ? targets[t].sl_pct : 1.0;
+        rt[t].fwd = targets[t].forward_ticks > 0 ? targets[t].forward_ticks : 1000;
+        rt[t].is_multiclass = LabelType_IsMulticlass(targets[t].label_type);
+        rt[t].is_regression = LabelType_IsRegression(targets[t].label_type);
+        rt[t].is_regime     = (targets[t].label_type == LABEL_REGIME);
     }
-    if (!label_fn) label_fn = Label_WinLoss;  // fallback
-    double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
-    double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
-    int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
-    int is_multiclass = LabelType_IsMulticlass(run_cfg->label_type);
-    int is_regression = LabelType_IsRegression(run_cfg->label_type);
     int sort_mode = run_cfg->use_config_override
                   ? run_cfg->config_override.csv_sort_check_mode
                   : CSV_SORT_WARN;
@@ -821,7 +917,7 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                                                      file_label);
             if (sort_rc < 0) {
                 free(tick_buf); free(file_counts); free(file_offsets);
-                return;
+                return -1;
             }
             if (n0 > 0) prev_file_last_ts = tick_buf[n0 - 1].timestamp_us;
             if (num_files > 1) {
@@ -835,7 +931,7 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                                                          n1, sort_mode, file_label);
                 if (sort_rc1 < 0) {
                     free(tick_buf); free(file_counts); free(file_offsets);
-                    return;
+                    return -1;
                 }
                 // Inter-file ordering check.
                 if (n1 > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
@@ -866,7 +962,7 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                                                          n_next, sort_mode, file_label);
                 if (sort_rc < 0) {
                     free(tick_buf); free(file_counts); free(file_offsets);
-                    return;
+                    return -1;
                 }
                 if (n_next > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
                     fprintf(stderr, "[label] WARN: file %d starts before file %d ends "
@@ -880,7 +976,10 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
             }
         }
 
-        // Label samples whose global tidx falls in file f's range.
+        // Label samples whose global tidx falls in file f's range — K targets
+        // per sample (sample-major). Each leaf call's inputs are identical to
+        // the ones its dedicated single-target walk would pass, so per-target
+        // output bytes match K sequential walks (the memcmp oracle pins this).
         int64_t file_f_start = file_offsets[f];
         int64_t file_f_end   = file_offsets[f + 1];
         while (sample_cursor < results->sample_count) {
@@ -888,36 +987,41 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
             if (global_tidx >= file_f_end) break;  // sample belongs to a later file
             if (global_tidx < file_f_start) {
                 // Out-of-order sample (shouldn't happen given monotonic
-                // append in on_slow_path) — skip with a warn.
+                // append in on_slow_path) — skip with a warn (once per sample,
+                // not per target; K sequential walks would each print it).
                 fprintf(stderr, "[label] WARN: sample %d tidx=%lld < file %d start=%lld; skipping\n",
                         sample_cursor, (long long)global_tidx, f, (long long)file_f_start);
-                results->labels[sample_cursor] = is_multiclass ? NAN
-                                                : (is_regression ? 0.0f : 0.5f);
-                if (is_multiclass) results->stats.nan_labels_dropped++;
-                results->stats.nan_labels_total++;
+                for (int t = 0; t < num_targets; t++) {
+                    targets[t].out_labels[sample_cursor] = rt[t].is_multiclass ? NAN
+                                                    : (rt[t].is_regression ? 0.0f : 0.5f);
+                    if (rt[t].is_multiclass) targets[t].nan_dropped++;
+                    targets[t].nan_total++;
+                }
                 sample_cursor++;
                 continue;
             }
             int local_tidx = (int)(global_tidx - file_f_start);
             // Forward-scan extends into file f+1 transparently (it's contiguous
             // in tick_buf). Pass total_in_buf as upper bound.
-            int extra = (run_cfg->label_type == LABEL_REGIME)
-                ? results->sample_regimes[sample_cursor] : fwd;
-            float lbl = label_fn(tick_buf, local_tidx, total_in_buf,
-                                 results->sample_prices[sample_cursor],
-                                 tp, sl, extra);
-            if (isnan(lbl) || isinf(lbl)) {
-                results->stats.nan_labels_total++;
-                if (is_multiclass) {
-                    results->labels[sample_cursor] = NAN;
-                    results->stats.nan_labels_dropped++;
-                } else if (is_regression) {
-                    results->labels[sample_cursor] = 0.0f;
+            for (int t = 0; t < num_targets; t++) {
+                int extra = rt[t].is_regime
+                    ? results->sample_regimes[sample_cursor] : rt[t].fwd;
+                float lbl = rt[t].fn(tick_buf, local_tidx, total_in_buf,
+                                     results->sample_prices[sample_cursor],
+                                     rt[t].tp, rt[t].sl, extra);
+                if (isnan(lbl) || isinf(lbl)) {
+                    targets[t].nan_total++;
+                    if (rt[t].is_multiclass) {
+                        targets[t].out_labels[sample_cursor] = NAN;
+                        targets[t].nan_dropped++;
+                    } else if (rt[t].is_regression) {
+                        targets[t].out_labels[sample_cursor] = 0.0f;
+                    } else {
+                        targets[t].out_labels[sample_cursor] = 0.5f;
+                    }
                 } else {
-                    results->labels[sample_cursor] = 0.5f;
+                    targets[t].out_labels[sample_cursor] = lbl;
                 }
-            } else {
-                results->labels[sample_cursor] = lbl;
             }
             sample_cursor++;
         }
@@ -927,8 +1031,67 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     free(file_counts);
     free(file_offsets);
 
+    // Per-target summary, THIS pass's counters. Gated to real batches: the
+    // 1-target wrapper prints the legacy accumulated-stats line itself, so
+    // every existing caller's stderr stays byte-identical.
+    if (num_targets > 1) {
+        for (int t = 0; t < num_targets; t++) {
+            fprintf(stderr, "[backtest] batch target %d/%d: computed %d labels "
+                    "(type=%d, tp=%.1f%%, sl=%.1f%%, fwd=%d) — NaN/Inf: %u total, "
+                    "%u dropped\n",
+                    t + 1, num_targets, sample_cursor, targets[t].label_type,
+                    rt[t].tp, rt[t].sl, rt[t].fwd,
+                    targets[t].nan_total, targets[t].nan_dropped);
+        }
+    }
+    return sample_cursor;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Backtest_ComputeLabelsBatch]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Backtest_ComputeLabelsFromSamples]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[single-target forward-scan label pass — 1-job wrapper over Backtest_ComputeLabelsBatch (E.1.2.D leaf 5); same signature + byte-identical labels/stats/stderr as the pre-batch body]
+//======================================================================
+// The original E.1 single-target body now lives in Backtest_ComputeLabelsBatch
+// (K=1 is a batch of one). This wrapper preserves the legacy contract exactly:
+// label params from run_cfg->label_*, output to results->labels, NaN counters
+// ACCUMULATED into results->stats (the cross-pass accumulate semantics S3-F3
+// documents — deliberately unchanged here, leaf 13 owns that re-think), and
+// the legacy summary line reading the ACCUMULATED stats. On batch abort the
+// legacy body printed nothing and returned — mirrored below.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
+                                                      const BacktestRunConfig *run_cfg) {
+    if (!run_cfg->collect_features) return;
+    if (results->sample_count <= 0) return;
+    if (run_cfg->num_data_files <= 0) return;
+
+    LabelBatchTarget t{};
+    t.label_type    = run_cfg->label_type;
+    t.tp_pct        = run_cfg->label_tp_pct;
+    t.sl_pct        = run_cfg->label_sl_pct;
+    t.forward_ticks = run_cfg->label_forward_ticks;
+    t.out_labels    = results->labels;
+    int labeled = Backtest_ComputeLabelsBatch(results, run_cfg, &t, 1);
+    if (labeled < 0) return;  // abort already logged; legacy printed nothing here
+
+    // Legacy accumulate-semantics, then the legacy summary line (which reads
+    // the ACCUMULATED counters — exactly what the pre-batch body printed).
+    results->stats.nan_labels_total   += t.nan_total;
+    results->stats.nan_labels_dropped += t.nan_dropped;
+    double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
+    double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
     fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)",
-            sample_cursor, run_cfg->label_type, tp, sl);
+            labeled, run_cfg->label_type, tp, sl);
     if (results->stats.nan_labels_total > 0) {
         fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",
                 results->stats.nan_labels_total,
