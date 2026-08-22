@@ -2583,12 +2583,16 @@ inline int EnsembleZoo_VerifyGridMemberConsistency(
             "[ensemble_auto_detect] OK: %d/%d handles agree on grid_member_count=%d\n",
             (total_handles - legacy_count), total_handles, agreed_count);
     } else if (legacy_count > 0) {
+        // E.1.2.D — the old TODO clause here was DOUBLY stale: the mh trainer
+        // has auto-stamped since v5.11.47, and the fn it named was deleted at
+        // D-d. An unstamped handle at HEAD means the overfit gate REFUSED the
+        // stamp (gap > threshold) or the artifact predates auto-stamp — say
+        // that instead of prescribing dead wiring.
         fprintf(stderr,
             "[ensemble_auto_detect] WARN: %d/%d handles missing grid_member_count "
-            "(unstamped multi-horizon model OR pre-v5.10.0a.G.2 ensemble); "
-            "consistency check skipped. "
-            "TODO(v5.10.X): wire stamp_write_for_model into "
-            "train_multi_horizon_worker_fn to emit stamps.\n",
+            "(unstamped — auto-stamp REFUSED by the gap gate, or a pre-v5.11.47 "
+            "artifact); consistency check skipped. Re-validate the family to "
+            "re-stamp (RFV writes stamps, no retrain needed).\n",
             legacy_count, total_handles);
     }
     return 1;  // ok (uniform or all-legacy)
