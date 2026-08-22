@@ -4292,6 +4292,10 @@ struct MultiHorizonWorkerArgs {
 static inline void mh_run_one_horizon_fv(
     TrainingPanelState *state,
     BacktestResults *results,
+    // E.1.2.C — the click-time hyperparameter snapshot. Replaces eight live
+    // `state->` reads and is handed to Backtest_RunFullValidation so the booster,
+    // the WF folds, the held-out model and the stamp all describe ONE architecture.
+    const tt::XGBHyperparams &snap_hp,
     int h,
     int horizon_ticks,
     float tp_pct, float sl_pct,
@@ -4464,18 +4468,8 @@ static inline void mh_run_one_horizon_fv(
                 XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
                 BoosterHandle booster = nullptr;
                 XGBoosterCreate(&dtrain, 1, &booster);
-                tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-                hp.max_depth        = state->max_depth;
-                hp.learning_rate    = state->learning_rate;
-                hp.n_estimators     = state->n_estimators;
-                hp.subsample        = state->ui_subsample;
-                hp.colsample_bytree = state->ui_colsample_bytree;
-                hp.min_child_weight = state->ui_min_child_weight;
-                hp.seed             = state->ui_seed;
-                static const char* tree_method_choices[] = {"hist","exact","approx","auto"};
-                int tm_idx = state->ui_tree_method_idx;
-                if (tm_idx < 0 || tm_idx >= 4) tm_idx = 0;
-                strncpy(hp.tree_method, tree_method_choices[tm_idx], sizeof(hp.tree_method) - 1);
+                // E.1.2.C — the click-time snapshot, not eight live widget reads.
+                tt::XGBHyperparams hp = snap_hp;
                 int eval_nthread = results->config_used.xgb_eval_nthread > 0
                                  ? results->config_used.xgb_eval_nthread : 1;
                 tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
@@ -4515,12 +4509,17 @@ static inline void mh_run_one_horizon_fv(
              "h=%d: WF + held-out (%d folds)...",
              horizon_ticks, snap_n_splits);
 
+    // E.1.2.C — hand the SAME snapshot to validation. Without this the WF folds
+    // trained at 6/0.1/200 + four cfg overrides, the held-out model at pure
+    // defaults, and the stamp recorded a third story — while the booster above
+    // used the operator's values. Four descriptions of one run.
     Backtest_RunFullValidation(fv, results, &split,
                                 snap_n_splits, horizon_ticks,
                                 snap_buffer_ticks, snap_min_train,
                                 &state->mh_horizon_progress[h],
                                 &state->mh_cancel,
-                                label_type, snap_gap_threshold);
+                                label_type, snap_gap_threshold,
+                                /*hp_override=*/&snap_hp);
 
     state->mh_horizon_complete[h] = 1;
 
@@ -4575,9 +4574,13 @@ static inline void mh_run_one_horizon_fv(
         fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
         fprintf(sf, "label_type: %d\n", label_type);
         fprintf(sf, "expected_num_classes: %d\n", num_classes);
-        fprintf(sf, "max_depth: %d\n", state->max_depth);
-        fprintf(sf, "learning_rate: %.3f\n", state->learning_rate);
-        fprintf(sf, "n_estimators: %d\n", state->n_estimators);
+        // E.1.2.C — report what actually TRAINED. These were a SECOND live read of
+        // the same widgets, minutes after the first, so an edit in between made
+        // summary.txt disagree with the model sitting beside it — and PastRuns
+        // displays the summary value as truth.
+        fprintf(sf, "max_depth: %d\n", snap_hp.max_depth);
+        fprintf(sf, "learning_rate: %.3f\n", (double)snap_hp.learning_rate);
+        fprintf(sf, "n_estimators: %d\n", snap_hp.n_estimators);
         fprintf(sf, "label_tp_pct: %.4f\n", (double)tp_pct);
         fprintf(sf, "label_sl_pct: %.4f\n", (double)sl_pct);
         fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
@@ -4666,6 +4669,11 @@ struct MultiHorizonParallelJob {
     // (previously orphan-placeholder fields in FOREACH_STAMP_BOUND_MODEL_CONST
     // that no production caller populated).
     int horizon_count;
+    // E.1.2.C — the click-time hyperparameter snapshot rides the job, because the
+    // parallel worker cannot reach the outer scope's copy. Without it the parallel
+    // path would keep reading `state->` live from N threads at once while ImGui
+    // wrote the same non-atomic ints.
+    tt::XGBHyperparams snap_hp;
 };
 //======================================================================
 // [END_CODE]
@@ -4699,6 +4707,7 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
     mh_run_one_horizon_fv(
         job->state,
         &job->isolated_results,
+        job->snap_hp,
         job->h,
         job->horizon_ticks,
         job->tp_pct, job->sl_pct,
@@ -4775,6 +4784,31 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     int   snap_min_train          = args->snap_min_train;
     float snap_gap_threshold      = args->snap_gap_threshold;
     float snap_held_out_fraction  = args->snap_held_out_fraction;
+    // E.1.2.C — capture the EIGHT hyperparameter snaps that the click handlers have
+    // populated since v5.11.41 and that NOTHING has ever read. The worker was reading
+    // `state->` live instead, from a worker thread, so an operator edit during the
+    // label pass (seconds to minutes) silently changed the model that got saved; the
+    // same fields were read AGAIN at summary-write time, so summary.txt could
+    // disagree with the model beside it; and in parallel mode N threads read
+    // non-atomic ints while ImGui wrote them. Capturing them here makes the snap
+    // block do the job it was written for, and gives us ONE value to hand to both
+    // the booster and the validation trainers so they cannot describe different
+    // architectures. Class 13, "snap block complete, consumer bypasses it".
+    tt::XGBHyperparams snap_hp = tt::XGBHyperparams_Defaults();
+    snap_hp.max_depth        = args->snap_max_depth;
+    snap_hp.learning_rate    = (float)args->snap_learning_rate;
+    snap_hp.n_estimators     = args->snap_n_estimators;
+    snap_hp.subsample        = args->snap_subsample;
+    snap_hp.colsample_bytree = args->snap_colsample_bytree;
+    snap_hp.min_child_weight = args->snap_min_child_weight;
+    snap_hp.seed             = args->snap_seed;
+    {
+        static const char* tm_choices[] = {"hist","exact","approx","auto"};
+        int tmi = args->snap_tree_method_idx;
+        if (tmi < 0 || tmi >= 4) tmi = 0;
+        strncpy(snap_hp.tree_method, tm_choices[tmi], sizeof(snap_hp.tree_method) - 1);
+        snap_hp.tree_method[sizeof(snap_hp.tree_method) - 1] = '\0';
+    }
     // v5.13.5.B (parity-check audit gap-close 2026-05-08) — copy NEW
     // v5.13.5 snap fields to stack BEFORE free(args). Without this,
     // subsequent reads at the parallel-job populate +
@@ -4871,6 +4905,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 continue;
             }
             job->state = state;
+            job->snap_hp = snap_hp;   // E.1.2.C — one snapshot, every worker
             // Shallow-copy results; replace labels[] with own heap buffer
             job->isolated_results = *results;
             job->isolated_results.labels =
@@ -4972,7 +5007,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             // (args is freed by the worker before these reads).
             int per_horizon_lk = snap_label_kind_per_horizon[h];
             mh_run_one_horizon_fv(
-                state, results, h,
+                state, results, snap_hp, h,
                 horizons[h], tp_pcts[h], sl_pcts[h],
                 per_horizon_lk, run_name,
                 snap_n_splits, snap_buffer_ticks, snap_min_train,

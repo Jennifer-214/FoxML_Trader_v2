@@ -977,7 +977,14 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
         else if (strcmp(key, "expected_poll_interval") == 0)         expected_poll_interval = atoi(val);
         else if (strcmp(key, "expected_feature_format_version") == 0) expected_feature_format_ver = atoi(val);
         else if (strcmp(key, "expected_num_features") == 0)          expected_num_features = atoi(val);
-        else if (strcmp(key, "expected_label_type") == 0)            expected_label_type = atoi(val);
+        // E.1.2.C — deliberately tt::parse_double_fast, NOT the atoi its siblings
+        // use. `tools/locale_determinism_known_pending.txt` is a SHRINK-ONLY
+        // baseline of raw atof/strtod/atoi per file, and this key would have been
+        // NodeModelZoo.hpp's 6th (5 is the pinned count). parse_double_fast is
+        // locale-immune by construction (std::from_chars) and exact for the small
+        // integers a label enum holds, so the new key is cleaner than the rows
+        // around it instead of adding to the debt they represent.
+        else if (strcmp(key, "expected_label_type") == 0)            expected_label_type = (int)tt::parse_double_fast(val);
     }
     fclose(f);
 

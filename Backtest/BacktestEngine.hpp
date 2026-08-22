@@ -1166,11 +1166,19 @@ struct HeldOutTrainEvalResult {
 
 // Forward declaration — definition follows Backtest_RunWalkForward so the
 // helper has visibility into WalkForward_Compute* and XGBoost_Compute* funcs.
+// E.1.2.C — `hp_override` (default nullptr) carries the operator's CLICK-TIME
+// hyperparameters; nullptr reproduces the previous behaviour bytewise, so every
+// un-updated caller is unaffected. Without it this function trained on pure
+// XGBHyperparams_Defaults() and honoured NOTHING from cfg — not even the four
+// (subsample/colsample/min_child_weight/seed) that WF and the stamp did — so the
+// held-out metric described a 6/0.1/200/0.8/0.8/5/42 model regardless of what the
+// operator set. That metric is the one gating deployment.
 static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     const BacktestResults *data,
     const HeldOutSplit *split,
     int label_type,
-    volatile int *cancel_flag);
+    volatile int *cancel_flag,
+    const tt::XGBHyperparams *hp_override = nullptr);
 
 //======================================================================
 // [STRUCT]_[FullValidationResults]
@@ -1278,7 +1286,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             volatile int *progress_pct,
                                             volatile int *cancel_flag,
                                             int label_type,
-                                            const ControllerConfig<BACKTEST_FP> *cfg_override = nullptr);
+                                            const ControllerConfig<BACKTEST_FP> *cfg_override = nullptr,
+                                            const tt::XGBHyperparams *hp_override = nullptr);
 
 //======================================================================
 // [FUNCTION]_[Backtest_RunFullValidation]
@@ -1298,7 +1307,13 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 volatile int *progress,
                                                 volatile int *cancel,
                                                 int label_type,
-                                                float gap_threshold) {
+                                                float gap_threshold,
+                                                // E.1.2.C — the operator's click-time
+                                                // hyperparameters. nullptr = previous
+                                                // behaviour bytewise (defaults + the
+                                                // four cfg overrides), so existing
+                                                // callers are unaffected.
+                                                const tt::XGBHyperparams *hp_override = nullptr) {
     // v5.11.49 — preserve caller-set REQUEST fields across the memset.
     // The pre-fix `memset(out, 0, sizeof(*out))` wiped auto_stamp_path /
     // auto_stamp_secret / auto_stamp_format_version / req_label_* that
@@ -1345,7 +1360,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
 
     // Run walk-forward CV on the slice
     Backtest_RunWalkForward(&out->walkforward, &slice, n_splits, horizon,
-                             buffer, min_train, progress, cancel, label_type);
+                             buffer, min_train, progress, cancel, label_type,
+                             /*cfg_override=*/nullptr, hp_override);
     out->label_kind = out->walkforward.label_kind;
     memcpy(out->fingerprint, out->walkforward.fingerprint, sizeof(out->fingerprint));
 
@@ -1354,7 +1370,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     // as a WF fold, evaluates on [trainval_end, sample_count). Honors the
     // existing cancel_flag plumbing — early cancellation leaves
     // ran_held_out=0 so the gap stays at the degenerate baseline.
-    HeldOutTrainEvalResult he = HeldOutSplit_TrainEval(data, split, label_type, cancel);
+    HeldOutTrainEvalResult he = HeldOutSplit_TrainEval(data, split, label_type, cancel,
+                                                       hp_override);
     out->ran_held_out         = he.ok;
     out->held_out_count       = he.eval_count;
     out->held_out_metric      = he.metric;
@@ -1401,11 +1418,19 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // XGBoost hyperparams: RFV uses Defaults+cfg override (operator-tunable
         // subset). Pull from config_used.
         {
-            tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+            // E.1.2.C — the STAMP now records what actually trained. Previously this
+            // built Defaults() and overrode four fields, so every stamp this suite has
+            // ever written claimed 6 / 0.1 / 200 no matter what the operator set — and
+            // because the value came from the same hardcoded defaults the validation
+            // used, no artifact on disk could contradict it.
+            tt::XGBHyperparams hp = hp_override ? *hp_override
+                                                : tt::XGBHyperparams_Defaults();
+            if (!hp_override) {
             hp.subsample        = (float)FPN_ToDouble(data->config_used.xgb_subsample);   // explicit narrow: XGBHyperparams stores float
             hp.colsample_bytree = (float)FPN_ToDouble(data->config_used.xgb_colsample_bytree);
             hp.min_child_weight = data->config_used.xgb_min_child_weight;
             hp.seed             = data->config_used.xgb_seed;
+            }
             args.snap_max_depth        = hp.max_depth;
             args.snap_learning_rate    = (double)hp.learning_rate;
             args.snap_n_estimators     = hp.n_estimators;
@@ -1639,7 +1664,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             volatile int *progress_pct,
                                             volatile int *cancel_flag,
                                             int label_type,
-                                            const ControllerConfig<BACKTEST_FP> *cfg_override) {
+                                            const ControllerConfig<BACKTEST_FP> *cfg_override,
+                                            const tt::XGBHyperparams *hp_override) {
     // v5.10.0 Item A — wf_eval phase timer (wraps full body).
     uint64_t wf_start_ns = tt::PhaseTimer_NowNs();
     memset(wf, 0, sizeof(*wf));
@@ -1867,14 +1893,23 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // so hyperparam sweep can vary subsample / colsample / etc per cell.
         // XGBHyperparams_Defaults() returns hardcoded defaults; for sweep,
         // we copy eff_cfg's values into hp so they propagate to the booster.
-        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-        hp.subsample          = (float)FPN_ToDouble(eff_cfg.xgb_subsample);
-        hp.colsample_bytree   = (float)FPN_ToDouble(eff_cfg.xgb_colsample_bytree);
-        hp.min_child_weight   = eff_cfg.xgb_min_child_weight;
-        hp.seed               = eff_cfg.xgb_seed;
-        if (eff_cfg.xgb_tree_method[0]) {
-            strncpy(hp.tree_method, eff_cfg.xgb_tree_method, sizeof(hp.tree_method) - 1);
-            hp.tree_method[sizeof(hp.tree_method) - 1] = '\0';
+        // E.1.2.C — a caller-supplied click-time snapshot wins outright. Without it
+        // this built Defaults() and overrode only four fields from cfg, so max_depth /
+        // learning_rate / n_estimators were ALWAYS 6 / 0.1 / 200 here while the shipped
+        // model trained at the operator's panel values — the WF metric therefore
+        // measured an architecture nobody deployed. The sweep path still uses the
+        // cfg_override route below, unchanged.
+        tt::XGBHyperparams hp = hp_override ? *hp_override
+                                            : tt::XGBHyperparams_Defaults();
+        if (!hp_override) {
+            hp.subsample          = (float)FPN_ToDouble(eff_cfg.xgb_subsample);
+            hp.colsample_bytree   = (float)FPN_ToDouble(eff_cfg.xgb_colsample_bytree);
+            hp.min_child_weight   = eff_cfg.xgb_min_child_weight;
+            hp.seed               = eff_cfg.xgb_seed;
+            if (eff_cfg.xgb_tree_method[0]) {
+                strncpy(hp.tree_method, eff_cfg.xgb_tree_method, sizeof(hp.tree_method) - 1);
+                hp.tree_method[sizeof(hp.tree_method) - 1] = '\0';
+            }
         }
         int eval_nthread = eff_cfg.xgb_eval_nthread > 0
                          ? eff_cfg.xgb_eval_nthread : 1;
@@ -2270,7 +2305,8 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     const BacktestResults *data,
     const HeldOutSplit *split,
     int label_type,
-    volatile int *cancel_flag) {
+    volatile int *cancel_flag,
+    const tt::XGBHyperparams *hp_override) {
     HeldOutTrainEvalResult r = {};
 
     // v5.10.0 Item A — held_out_eval phase timer.
@@ -2394,7 +2430,11 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         // 1; matches pre-v5.10 hardcoded behavior). Held-out is the
         // canonical-validation pass — multi-thread breaks bytewise
         // reproducibility of held_out_metric, so default stays single-thread.
-        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+        // E.1.2.C — honour the caller's click-time snapshot when supplied. This
+        // site used raw defaults unconditionally, so the held-out model was a
+        // different architecture from the shipped one AND from the WF folds.
+        tt::XGBHyperparams hp = hp_override ? *hp_override
+                                            : tt::XGBHyperparams_Defaults();
         int eval_nthread = data->config_used.xgb_eval_nthread > 0
                          ? data->config_used.xgb_eval_nthread : 1;
         tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
