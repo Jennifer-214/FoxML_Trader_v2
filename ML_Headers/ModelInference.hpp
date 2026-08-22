@@ -727,10 +727,19 @@ inline float Model_Predict_Normalized(ModelHandle<F>* m,
             return (v < 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v);
         }
         case ModelHandle<F>::NORM_BARRIER_CLASS_1:
-            // Loader sets buy_class_idx=1 for these handles, so
-            // Model_Predict already returned out_result[1]. Just
-            // passthrough; documented for clarity + future where the
-            // loader-side aliasing is dropped (v5.11.62 cleanup).
+            // Passthrough — Model_Predict already applied the handle's
+            // buy_class_idx, whatever it is.
+            //
+            // E.1.2.C — the enum NAME and this comment's old text both said
+            // "class 1", which was the INVERTED rule: for a PVS primary the
+            // loader now sets 2 (valley = good entry) via
+            // Model_PrimaryBuyClassIdx; only an EXIT handle keeps 1 (peak).
+            // The name is kept because it is a pinned in-memory constant
+            // (tests/controller_test.cpp pins == 2) and is NOT persisted, so
+            // renaming buys nothing an H21 tombstone would protect — but do
+            // not read it as documentation of which class is extracted.
+            // This whole switch is unreachable in production regardless:
+            // nothing writes `normalizer` off NORM_IDENTITY outside tests.
             return raw;
         case ModelHandle<F>::NORM_COMPOSITE:
             // Phase 3.A's composite extraction already ran inside
@@ -836,7 +845,9 @@ inline float Model_Predict_AtClass(ModelHandle<F>* m,
 // [CODE]
 //======================================================================
 static inline int Model_PrimaryBuyClassIdx(int num_outputs) {
-    return (num_outputs >= 2) ? 2 : 0;
+    if (num_outputs >= 3) return 2;   // PVS-shaped: 0=stable, 1=peak, 2=valley
+    if (num_outputs == 2) return 1;   // 2-class softmax: class 1 is the positive class
+    return 0;                         // single output: the raw sigmoid IS P(good entry)
 }
 //======================================================================
 // [END_CODE]
@@ -990,9 +1001,17 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
         }
         // v5.11.62 — for multiclass models (out_len > 1), return the
         // configured "buy class" probability instead of out_result[0].
-        // Default buy_class_idx=0 preserves binary semantics; loader sets
-        // buy_class_idx=1 when aliasing PEAK_VALLEY_STABLE 3-class barrier
-        // handles (class 1 = peak = price expected to rise = buy signal).
+        // Default buy_class_idx=0 preserves binary semantics.
+        //
+        // E.1.2.C — this comment used to read "loader sets buy_class_idx=1 …
+        // class 1 = peak = price expected to rise = buy signal", which is the
+        // inverted rule the session fixed, sitting on the live extraction line.
+        // Per LabelFunctions.hpp the PVS order is 0=stable / 1=peak (down
+        // barrier first = we sampled at a HIGH = BAD entry) / 2=valley (up
+        // barrier first = GOOD entry). The loader now sets 2 for a PVS PRIMARY
+        // handle and 1 for an EXIT handle — see Model_PrimaryBuyClassIdx and
+        // Model_ExitClassIdx, which exist as two NAMED rules precisely because
+        // one shared constant here read correct at whichever site you looked at.
         // Out-of-range index falls back to 0 (defensive).
         int idx = m->buy_class_idx;
         if (idx < 0 || (unsigned long)idx >= out_len) idx = 0;

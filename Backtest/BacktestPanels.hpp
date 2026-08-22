@@ -3211,6 +3211,56 @@ static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Training_SnapshotHyperparams]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE panel-state -> XGBHyperparams mapping — click-time snapshot for every worker entry point, so no two buttons can describe different architectures]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline tt::XGBHyperparams Training_SnapshotHyperparams(const TrainingPanelState *st) {
+    tt::XGBHyperparams h = tt::XGBHyperparams_Defaults();
+    if (!st) return h;
+    h.max_depth        = st->max_depth;
+    h.learning_rate    = st->learning_rate;
+    h.n_estimators     = st->n_estimators;
+    h.subsample        = st->ui_subsample;
+    h.colsample_bytree = st->ui_colsample_bytree;
+    h.min_child_weight = st->ui_min_child_weight;
+    h.seed             = st->ui_seed;
+    static const char* tm[] = {"hist","exact","approx","auto"};
+    int ti = st->ui_tree_method_idx;
+    if (ti < 0 || ti >= 4) ti = 0;
+    strncpy(h.tree_method, tm[ti], sizeof(h.tree_method) - 1);
+    h.tree_method[sizeof(h.tree_method) - 1] = '\0';
+    return h;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// E.1.2.C follow-up (2026-08-22). The Stage-6.5.4 review found the standalone
+// Run-Full-Validation button training at XGBHyperparams_Defaults() while the
+// Train path used the panel's values — one architecture measured, a different
+// one shipped, and the signed stamp overwritten with the wrong numbers. Wiring
+// the two remaining entry points fixed the SYMPTOM; this helper fixes the
+// SHAPE, because the fix as first written left two character-identical copies
+// of the mapping (an eighth hyperparameter would have to be added to both, and
+// the one that got missed would fail exactly as silently).
+//
+// This is the panel-state adapter. Two more constructions of the same mapping
+// live on the multi-horizon worker path (from `snap_*` locals at the
+// booster call, and from `args->snap_*` after the capture-before-free); those
+// take a different SOURCE, so folding all four onto one value-mapper is its own
+// leaf rather than a close-out drive-by — homed at E.1.2.D leaf 14, together
+// with the `tree_method` stamp split-brain (M1) that shares this surface.
+//======================================================================
+// [END_FUNCTION]_[Training_SnapshotHyperparams]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingPanel_Init]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
@@ -3347,10 +3397,47 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
 //======================================================================
 
 // walk-forward worker thread
+//======================================================================
+// [STRUCT]_[WalkForwardWorkerArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[worker-thread args for the standalone Walk-Forward button — panel state + data + the click-time snapshot (WF split params, label kind from run_config, XGB hyperparams) this struct went without until E.1.2.C]
+//======================================================================
+// [CODE]
+//======================================================================
 struct WalkForwardWorkerArgs {
     TrainingPanelState *state;
     const BacktestResults *data;
+    // E.1.2.C follow-up (2026-08-22) — this struct had NO snap block at all, so
+    // the worker read six operator-editable fields LIVE off `state->` (S1-F6),
+    // and it is the THIRD entry point into Backtest_RunWalkForward: it passed
+    // neither cfg_override nor hp_override, so the standalone Walk-Forward button
+    // measured XGBHyperparams_Defaults() regardless of the panel. Found by
+    // applying the Stage-6.5.4 review's own lesson — enumerate a threaded call
+    // chain's ENTRY POINTS, not just its consumers. `wf_horizon_ticks` is the
+    // temporal-leakage purge gap, so a live read there is a correctness surface,
+    // not just a tidiness one.
+    int    snap_wf_n_splits;
+    int    snap_wf_horizon_ticks;
+    int    snap_wf_buffer_ticks;
+    int    snap_wf_min_train;
+    int    snap_label_type;
+    tt::XGBHyperparams snap_hp;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[80B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[snap_hp@36]
+//======================================================================
+// [END_STRUCT]_[WalkForwardWorkerArgs]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[walkforward_worker_fn]
@@ -3366,13 +3453,23 @@ static inline void *walkforward_worker_fn(void *arg) {
     WalkForwardWorkerArgs *args = (WalkForwardWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     const BacktestResults *data = args->data;
+    // E.1.2.C follow-up — capture BEFORE free(args). This is the Class-13
+    // capture-before-free discipline the sister worker structs already follow;
+    // this one had no snap block to capture from until now.
+    int    snap_wf_n_splits      = args->snap_wf_n_splits;
+    int    snap_wf_horizon_ticks = args->snap_wf_horizon_ticks;
+    int    snap_wf_buffer_ticks  = args->snap_wf_buffer_ticks;
+    int    snap_wf_min_train     = args->snap_wf_min_train;
+    int    snap_label_type       = args->snap_label_type;
+    tt::XGBHyperparams snap_hp   = args->snap_hp;
     free(args);
 
     Backtest_RunWalkForward(&state->wf_results, data,
-                             state->wf_n_splits, state->wf_horizon_ticks,
-                             state->wf_buffer_ticks, state->wf_min_train,
+                             snap_wf_n_splits, snap_wf_horizon_ticks,
+                             snap_wf_buffer_ticks, snap_wf_min_train,
                              &state->wf_progress, &state->wf_cancel,
-                             state->label_type);
+                             snap_label_type,
+                             /*cfg_override=*/nullptr, /*hp_override=*/&snap_hp);
 
     state->wf_has_results = true;
     state->wf_complete = 1;
@@ -3532,14 +3629,24 @@ struct FullValidationWorkerArgs {
     int     snap_wf_min_train;
     float   snap_fv_gap_threshold;
     float   snap_fv_held_out_fraction;
+    // E.1.2.C follow-up (2026-08-22) — the SECOND entry point into
+    // Backtest_RunFullValidation. The multi-horizon Train path was threaded with
+    // the click-time hyperparameters at f99e102; THIS one was missed, so the
+    // standalone "Run Full Validation" button still trained WF folds + held-out at
+    // XGBHyperparams_Defaults() AND overwrote the target model's signed stamp with
+    // 6/0.1/200 — silently undoing, on disk, the thing f99e102 fixed. The
+    // `= nullptr` default that makes hp_override safe for un-updated callers is
+    // exactly what made the omission invisible: no compile error, no warning.
+    // Caught by the Stage-6.5.4 adversarial handoff review, not by the author.
+    tt::XGBHyperparams snap_hp;
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-21]
-// [SIZE]_[392B]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[432B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[7]
 // [STRADDLE]_[snap_fv_auto_stamp_secret@272]
@@ -3579,6 +3686,7 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     int    snap_wf_min_train        = args->snap_wf_min_train;
     float  snap_fv_gap_threshold    = args->snap_fv_gap_threshold;
     float  snap_fv_held_out_fraction = args->snap_fv_held_out_fraction;
+    tt::XGBHyperparams snap_hp       = args->snap_hp;   // E.1.2.C follow-up
     double snap_label_sl_pct        = args->snap_label_sl_pct;
     {
         size_t n = strnlen(args->snap_model_path,
@@ -3675,7 +3783,8 @@ static inline void *fullvalidation_worker_fn(void *arg) {
                                 snap_wf_n_splits, snap_wf_horizon_ticks,
                                 snap_wf_buffer_ticks, snap_wf_min_train,
                                 &state->fv_progress, &state->fv_cancel,
-                                snap_label_type, snap_fv_gap_threshold);
+                                snap_label_type, snap_fv_gap_threshold,
+                                /*hp_override=*/&snap_hp);
 
     // Build a one-line status summary the UI can render in fv_status_msg.
     if (state->fv_results.auto_stamp_attempted) {
@@ -6792,6 +6901,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 WalkForwardWorkerArgs *wf_args = (WalkForwardWorkerArgs *)malloc(sizeof(WalkForwardWorkerArgs));
                 wf_args->state = state;
                 wf_args->data = results;
+                // E.1.2.C follow-up — snapshot at click, on the GUI thread, which is
+                // the only moment the panel is coherent. label_type comes from
+                // run_config (the field that produced results->labels[]), same
+                // resolver-SSoT choice as the Run-Full-Validation path.
+                wf_args->snap_wf_n_splits      = state->wf_n_splits;
+                wf_args->snap_wf_horizon_ticks = state->wf_horizon_ticks;
+                wf_args->snap_wf_buffer_ticks  = state->wf_buffer_ticks;
+                wf_args->snap_wf_min_train     = state->wf_min_train;
+                wf_args->snap_label_type       = run_control->run_config.label_type;
+                wf_args->snap_hp = Training_SnapshotHyperparams(state);
                 pthread_create(&state->wf_tid, NULL, walkforward_worker_fn, wf_args);
                 pthread_detach(state->wf_tid);
             }
@@ -7354,6 +7473,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fv_args->snap_wf_min_train        = state->wf_min_train;
                 fv_args->snap_fv_gap_threshold    = state->fv_gap_threshold;
                 fv_args->snap_fv_held_out_fraction = state->fv_held_out_fraction;
+                // E.1.2.C follow-up — the same click-time snapshot the Train path
+                // builds, so BOTH entry points describe one architecture.
+                fv_args->snap_hp = Training_SnapshotHyperparams(state);
                 pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
                 pthread_detach(state->fv_tid);
             }
