@@ -588,9 +588,21 @@ static inline int Training_SideLabelGate(int label_type, int training_side) {
     switch (label_type) {
         case LABEL_WILL_PEAK:
         case LABEL_PEAK_VALLEY_STABLE: return 2;
-        case LABEL_WILL_VALLEY:
-        case LABEL_VOL_BARRIER:        return 1;  // contested — operator triage pending
-        default:                       return 0;  // WIN_LOSS / BARRIER / FORWARD_PNL / REGIME / CS_*
+        // D-b (2026-08-22, operator-decided): WILL_VALLEY + VOL_BARRIER moved
+        // WARN -> REFUSE, unifying every ENTRY-DIRECTION label under the
+        // default arm. The BARRIER/VOL_BARRIER asymmetry (structural twins,
+        // one REFUSE one WARN) had no stated reason, and a WARN on
+        // WILL_VALLEY permitted training an exit model that fires at
+        // valleys — a sell-your-lows model, the same inverted-semantics
+        // family as the fourteen-month entry inversion. The earlier
+        // /decision-check refutation of this flip applied while the tier
+        // gated nothing; the train predicates have consumed it since
+        // 057e891, so the tier has teeth now. WARN(1) is currently
+        // UNINHABITED — the tier VALUE stays (worst-tier-wins math + any
+        // future genuinely-ambiguous label).
+        default:                       return 0;  // WIN_LOSS / BARRIER / VOL_BARRIER
+                                                  // / WILL_VALLEY / FORWARD_PNL
+                                                  // / REGIME / CS_*
     }
 }
 //======================================================================
