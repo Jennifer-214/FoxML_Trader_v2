@@ -1657,8 +1657,12 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
             if (pending != STRATEGY_NONE) {
                 ImGui::SameLine();
                 const char* pname = pending < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[pending] : "?";
+                // B-4 (2026-08-22): name the blocking mechanism + the override,
+                // not just "waiting" — the operator asked which position blocks.
                 ImGui::TextColored(FoxmlColors::yellow,
-                    "swap → %s pending (waiting for position close)", pname);
+                    "swap → %s pending — blocked by node %d's open leg(s); "
+                    "applies on close (or set acknowledge_hot_swap_with_open_positions=1)",
+                    pname, node_id);
             }
         }
 
