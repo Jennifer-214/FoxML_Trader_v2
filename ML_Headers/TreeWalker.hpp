@@ -66,19 +66,26 @@ using namespace std;
 #define WALKER_OBJ_SOFTPROB  1   // multi:softprob  — per-class margins -> softmax (double wsum recipe)
 #define WALKER_OBJ_LOGISTIC  2   // binary:logistic — margin -> sigmoid (88.7f clamp + 1e-16 eps recipe)
 #define WALKER_OBJ_IDENTITY  3   // reg:squarederror — margin IS the prediction
+//======================================================================
+// [END_REGISTRY]_[refuse-code constants WALKER_ERR_*]
+//======================================================================
 
 //======================================================================
-// [STRUCT]_[FlatTreeModel]
+// [STRUCT]_[FlatTreeNode]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[blob HEADER — the node SoA and tree-root index live in the SAME
+// [OVERVIEW]_[the 16B walk node + blob layout doctrine — the node SoA and tree-root index live in the SAME
 //   aligned_alloc(64) allocation, addressed via the offsets below. 16B/node:
 //   {float cond; uint32 meta; int32 left; int32 right}. meta packs feature idx
 //   (bits 0..23) + default_left (bit 30) + is_leaf (bit 31) via manual masks
 //   (H14 — never C++ bitfields). Leaves: cond = leaf VALUE, children self-loop
 //   (constant-iter walk support, leaf 2). NOT a wire/persist format — process-
 //   lifetime only, rebuilt from JSON at every load (H21 not implicated).]
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[16B]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -94,7 +101,22 @@ struct FlatTreeNode {
     int32_t  right;   // absolute node index; leaf: self
 };
 static_assert(sizeof(FlatTreeNode) == 16, "walker node must stay 16B (L2 budget math in Limits.hpp)");
+// [END_CODE]
+// [END_STRUCT]_[FlatTreeNode]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[FlatTreeModel]
+//----------------------------------------------------------------------
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[blob header — geometry + per-class layout; nodes/tree_roots point into the ONE
+//   aligned_alloc(64) allocation. Caller-owned; TreeWalker_Free reclaims the blob only.]
+// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+//----------------------------------------------------------------------
+// [SIZE]_[0B]
+//======================================================================
+// [CODE]
+//======================================================================
 struct FlatTreeModel {
     // ---- identity + shape (cold reads; filled once at parse) ----
     int      objective;                 // WALKER_OBJ_*
@@ -113,12 +135,17 @@ struct FlatTreeModel {
     int32_t       class_tree_start[WALKER_MAX_CLASSES]; // index into tree_roots where class c's trees begin
     int32_t       class_tree_count[WALKER_MAX_CLASSES]; // == trees_per_class (kept adjacent to start for the walk's read pattern)
 };
+// [END_CODE]
+// [END_STRUCT]_[FlatTreeModel]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[TreeWalker_Free]
 //----------------------------------------------------------------------
 // [OVERVIEW]_[frees the single blob allocation. The header struct itself is
 //   caller-owned (typically embedded or stack); only nodes points at the blob.]
+//======================================================================
+// [CODE]
 //======================================================================
 inline void TreeWalker_Free(FlatTreeModel* m) {
     if (!m) return;
@@ -129,6 +156,9 @@ inline void TreeWalker_Free(FlatTreeModel* m) {
     m->total_nodes = 0;
     m->num_trees = 0;
 }
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_Free]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[TreeWalker_ParseFromJson]
@@ -138,6 +168,8 @@ inline void TreeWalker_Free(FlatTreeModel* m) {
 //   artifact is proven in-shape); pass 2 = fill nodes/roots. Returns WALKER_OK
 //   or the DISTINCT WALKER_ERR_* of the FIRST failing gate (loud stderr either
 //   way; caller dispositions per Class-49 — never a silent fallback).]
+//======================================================================
+// [CODE]
 //======================================================================
 inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
     if (!out || !path || !path[0]) return WALKER_ERR_IO;
@@ -531,3 +563,6 @@ inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
 
     return WALKER_OK;
 }
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_ParseFromJson]
+//======================================================================
