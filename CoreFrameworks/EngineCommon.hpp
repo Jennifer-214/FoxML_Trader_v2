@@ -471,14 +471,22 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         if (loaded && cfg.node_model_dir[c][0]) {
             EnsembleModelZoo<F>* ezoo_for_validate =
                 state.nodes[c].ensemble_handle ? ezoo_ptr : nullptr;
-            NodeModelZoo_ValidateAgainstCfg<F>(
-                zoo_ptr, ezoo_for_validate, cfg, /*node_id=*/c,
-                cfg.held_out_gate_strict,
-                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
-                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                &state.display_meta[c], &state.nodes[c]);
-            FeatureOverlay_PostLoadVerify<F>(
-                zoo_ptr, ezoo_for_validate, /*node_id=*/c, cfg.held_out_gate_strict);
+            // D-h §1A (2026-08-22) — validate against the NODE-RESOLVED view,
+            // not flat cfg: the drift registry's get_cfg_exprs read the cfg
+            // they're handed, and a node whose override matches its stamp was
+            // getting a FALSE drift (or a divergent node a false pass). Same
+            // resolver the slow path uses per-cycle; cold-path copy is free.
+            {
+                ControllerConfig<F> vcfg = ControllerConfig_ResolveForCore(cfg, c);
+                NodeModelZoo_ValidateAgainstCfg<F>(
+                    zoo_ptr, ezoo_for_validate, vcfg, /*node_id=*/c,
+                    vcfg.held_out_gate_strict,
+                    (int)BITMAP_IS_SET(vcfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                    (int)BITMAP_IS_SET(vcfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
+                    &state.display_meta[c], &state.nodes[c]);
+                FeatureOverlay_PostLoadVerify<F>(
+                    zoo_ptr, ezoo_for_validate, /*node_id=*/c, vcfg.held_out_gate_strict);
+            }
         }
 
         // 5h. ConfidenceScorer Init (LIVE :1136-1138, BACKTEST :408-410) — Phase 6prep
@@ -494,7 +502,10 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         //   MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED unset (legacy path).
         //   NEW for BACKTEST per v1.7.2 PARITY-028 closure.
         ConfidenceScorer_BindCompositeCfg(&state.nodes[c].confidence,
-            BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
+            // D-h §1B (2026-08-22) — the PER-NODE bit (serve gates on
+            // nodes[c]; the bind read flat — a node opted in per-node served
+            // composite against a never-composite-bound scorer).
+            BITMAP_IS_SET(cfg.nodes[c].ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
             FPN_ToDouble(cfg.nodes[c].confidence_freshness_tau_secs),
             FPN_ToDouble(cfg.nodes[c].confidence_capacity_target_dollars),
             FPN_ToDouble(cfg.nodes[c].confidence_capacity_kappa),

@@ -1904,13 +1904,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             // on hot-swap (was bypassed pre-v5.14.2.E.1).
                                             EnsembleModelZoo<F>* swap_ezoo =
                                                 (EnsembleModelZoo<F>*)state.nodes[c].ensemble_handle;
+                                            // D-h §1A — node-resolved view (see EngineCommon boot sister).
+                                            ControllerConfig<F> vcfg_e = ControllerConfig_ResolveForCore(cfg, c);
                                             int validate_rc = NodeModelZoo_ValidateAgainstCfg<F>(
                                                 /*zoo=*/nullptr,
                                                 swap_ezoo,
-                                                cfg, /*node_id=*/c,
-                                                cfg.held_out_gate_strict,
-                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
-                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
+                                                vcfg_e, /*node_id=*/c,
+                                                vcfg_e.held_out_gate_strict,
+                                                (int)BITMAP_IS_SET(vcfg_e.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                                                (int)BITMAP_IS_SET(vcfg_e.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                                                 &state.display_meta[c], &state.nodes[c]);
                                             if (validate_rc < 0) {
                                                 NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
@@ -1969,13 +1971,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             // Finding #3 closure preserved).
                                             NodeModelZoo<F>* new_swap_zoo =
                                                 (NodeModelZoo<F>*)state.nodes[c].model_handle;
+                                            // D-h §1A — node-resolved view (see EngineCommon boot sister).
+                                            ControllerConfig<F> vcfg_s = ControllerConfig_ResolveForCore(cfg, c);
                                             int validate_rc = NodeModelZoo_ValidateAgainstCfg<F>(
                                                 new_swap_zoo,
                                                 /*ezoo=*/nullptr,
-                                                cfg, /*node_id=*/c,
-                                                cfg.held_out_gate_strict,
-                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
-                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
+                                                vcfg_s, /*node_id=*/c,
+                                                vcfg_s.held_out_gate_strict,
+                                                (int)BITMAP_IS_SET(vcfg_s.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                                                (int)BITMAP_IS_SET(vcfg_s.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                                                 &state.display_meta[c], &state.nodes[c]);
                                             if (validate_rc < 0) {
                                                 NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
