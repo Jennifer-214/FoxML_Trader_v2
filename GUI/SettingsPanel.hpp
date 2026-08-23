@@ -1840,9 +1840,10 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                 "    swap is deferred until position closes (safer)\n"
                 "  acknowledge_hot_swap_with_open_positions=1:\n"
                 "    swap proceeds immediately, position exits on new model\n\n"
-                "CONSTRAINT (E.1.2.C): hot-swap reuses the horizon grid cached\n"
-                "at BOOT — swapping to a family with a DIFFERENT horizon set\n"
-                "needs an engine restart, not a live swap.");
+                "Horizon grid is RE-DETECTED from the new dir (2026-08-22) —\n"
+                "cross-family swaps with different horizon sets work live.\n"
+                "If the grid CHANGES, positional per-horizon cfg (disabled\n"
+                "horizons mask) indexes the NEW grid — engine logs a WARN.");
         }
 
         // E.1.2.C 3G-ii — resolution preview for the selected bundle: what

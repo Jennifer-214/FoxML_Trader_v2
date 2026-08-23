@@ -78,10 +78,16 @@ inline int HotSwap_ShadowLoad_Ensemble(
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // (1) Cache horizon list from the EXISTING ezoo before allocation.
-    // Operators set core_<i>_horizon_list at boot; new dir inherits that
-    // shape. Pre-swap ezoo retains horizon_ticks_at_idx[] from boot
-    // EnsembleModelZoo_AutoDetectFromDir; new ezoo needs the same.
+    // (1) Pre-swap ezoo must exist (gate invariant); its grid is kept ONLY
+    // for the grid-change WARN below. The horizon grid itself is
+    // RE-DETECTED from new_path — the E.1.2.C-era "hot-swap reuses the
+    // boot grid" constraint is DEAD (2026-08-22): it made every cross-
+    // family swap (twins {7500,15000,30000} ↔ HFT_0 {500,1000,5000})
+    // probe the wrong horizon_* children, load 0 roles, and silently
+    // preserve pre-swap state — the operator's "apply live doesn't change
+    // the models" repro. D-431's nested layout made the grid a property
+    // of the DIR, so swap now discovers it exactly like boot does (same
+    // AutoDetect sister, same args).
     // ────────────────────────────────────────────────────────────────────
     EnsembleModelZoo<F>* pre_swap_ezoo =
         (EnsembleModelZoo<F>*)state.nodes[node_idx].ensemble_handle;
@@ -90,20 +96,6 @@ inline int HotSwap_ShadowLoad_Ensemble(
             "[hot_swap] ensemble node %d FAILED: pre-swap ezoo is null "
             "(no boot ensemble); single-zoo branch should fire instead\n",
             node_idx);
-        return -2;
-    }
-
-    int horizons[ENSEMBLE_HORIZON_MAX];
-    int h_count = 0;
-    for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
-        if (pre_swap_ezoo->horizon_ticks_at_idx[i] > 0) {
-            horizons[h_count++] = pre_swap_ezoo->horizon_ticks_at_idx[i];
-        }
-    }
-    if (h_count == 0) {
-        fprintf(stderr,
-            "[hot_swap] ensemble node %d FAILED: no cached horizons "
-            "(boot must have failed)\n", node_idx);
         return -2;
     }
 
@@ -122,22 +114,46 @@ inline int HotSwap_ShadowLoad_Ensemble(
     EnsembleModelZoo_Init(new_ezoo);
 
     // ────────────────────────────────────────────────────────────────────
-    // (3) Load into new_ezoo from new_path. Pre-swap untouched.
+    // (3) Discover + load from new_path — the boot sister
+    // (EnsembleModelZoo_AutoDetectFromDir, same args as EngineCommon 5e).
+    // Pre-swap untouched on any failure.
     // ────────────────────────────────────────────────────────────────────
-    int total = EnsembleModelZoo_LoadFromCfg(
-        new_ezoo, new_path, horizons, h_count, swap_backend,
+    int total = EnsembleModelZoo_AutoDetectFromDir(
+        new_ezoo, new_path, swap_backend,
         /*held_out_stamp_secret=*/cfg.held_out_stamp_secret,
         /*gap_threshold=*/FPN_ToDouble(cfg.gap_acceptable_threshold),
         /*held_out_gate_strict=*/cfg.held_out_gate_strict,
         /*acknowledge_cross_binary_drift=*/(int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
 
-    if (total == 0) {
+    if (total == 0 || !BITMAP_IS_SET(new_ezoo->init_flags, MASK_EZOO_ACTIVE)) {
         fprintf(stderr,
-            "[hot_swap] ensemble node %d FAILED: 0 roles loaded from %s; "
-            "pre-swap state preserved\n", node_idx, new_path);
+            "[hot_swap] ensemble node %d FAILED: no horizon_* bundle "
+            "detected/loaded under %s; pre-swap state preserved\n",
+            node_idx, new_path);
         EnsembleModelZoo_Free(new_ezoo);
         free(new_ezoo);
         return -2;
+    }
+
+    // Grid-change WARN: per-horizon cfg semantics (node_N_disabled_horizons
+    // mask bits, per-arm expectations) are POSITIONAL against the grid —
+    // a changed grid re-means them. Loud, not blocking (bandit/Ridge state
+    // in new_ezoo is fresh-init either way; in-flight fill attribution is
+    // clamped by the v5.13.6.C defensive bounds at update time).
+    {
+        int grid_changed = 0;
+        for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
+            if (pre_swap_ezoo->horizon_ticks_at_idx[i] !=
+                new_ezoo->horizon_ticks_at_idx[i]) { grid_changed = 1; break; }
+        }
+        if (grid_changed) {
+            fprintf(stderr,
+                "[hot_swap] ensemble node %d: horizon GRID CHANGED across "
+                "swap (%d -> %d arms) — positional per-horizon cfg "
+                "(disabled_horizons mask, per-arm expectations) now indexes "
+                "the NEW grid; review if set\n",
+                node_idx, pre_swap_ezoo->primary_count, new_ezoo->primary_count);
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────
