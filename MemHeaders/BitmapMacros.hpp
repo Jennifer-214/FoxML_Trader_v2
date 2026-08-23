@@ -203,6 +203,18 @@
 #define BITMAP_FIRST_U32(field) ((unsigned)__builtin_ctz((unsigned)(field)))
 #define BITMAP_FIRST_U64(field) ((unsigned)__builtin_ctzll((unsigned long long)(field)))
 
+// Node -> portfolio-slot mask (uint16 active_bitmap domain). Under
+// partial exits every node owns 2 slots (legs A+B at 2n / 2n+1);
+// single-leg otherwise. Extracted 2026-08-22 from 12 identical open-coded
+// copies (EngineCommon exit-submit / strategy exit paths / hot-swap +
+// strategy-swap gates / rebuild ratchet + TP-retune sites) — the mask
+// SHAPE is the SSoT here; the partial_on SOURCE stays per-site (cfg
+// lifecycle flag at cfg-time sites, oms_state_flags at runtime sites).
+#define BITMAP_NODE_SLOT_MASK(node, partial_on)                             \
+    ((partial_on)                                                           \
+        ? (uint16_t)((1u << ((node) * 2)) | (1u << ((node) * 2 + 1)))       \
+        : (uint16_t)(1u << (node)))
+
 //----------------------------------------------------------------------
 // [MACRO]_[MBS_*]
 // [TAG]_[[ENGINE] [BITMAP_PACKED] [CONCURRENCY]]

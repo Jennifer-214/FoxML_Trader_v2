@@ -1790,9 +1790,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         if (pending != STRATEGY_NONE) {
                             // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
                             int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-                            uint16_t open_mask = partial_on
-                                ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
-                                : (uint16_t)(1u << c);
+                            uint16_t open_mask = BITMAP_NODE_SLOT_MASK(c, partial_on);
                             if ((state.oms->portfolio.active_bitmap & open_mask) == 0) {
                                 // E.1.2.C leg 3 — ensemble-aware (was
                                 // single-zoo-blind; shares the LiveReadiness
@@ -1833,9 +1831,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         if (mswap) {
                             // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
                             int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-                            uint16_t open_mask = partial_on
-                                ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
-                                : (uint16_t)(1u << c);
+                            uint16_t open_mask = BITMAP_NODE_SLOT_MASK(c, partial_on);
                             int has_open = (state.oms->portfolio.active_bitmap & open_mask) != 0;
 
                             if (has_open && !cfg.acknowledge_hot_swap_with_open_positions) {

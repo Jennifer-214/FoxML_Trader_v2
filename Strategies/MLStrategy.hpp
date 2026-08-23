@@ -14,7 +14,12 @@
 //======================================================================================================
 // model-driven buy signals using XGBoost or LightGBM inference.
 // follows the same 4-function pattern as MR/Momentum/SimpleDip.
-// model is loaded at startup, inference runs on slow path (~1-5μs per prediction).
+// model is loaded at startup, inference runs on slow path. COST LAW (measured
+// 2026-08-22, 3-class): ~550ns per boosting round + ~10µs fixed, PER predict
+// call, PER ensemble arm — 350 estimators × 3 classes = 1050 trees ≈ 217µs/call;
+// size models to the H8 slow-path budget at TRAINING time (~100-150 rounds
+// serves at ~67µs/call). The old "~1-5µs" figure was a small-binary-model era
+// claim, stale by two orders of magnitude at current tree counts.
 // when no model is loaded, all functions are no-ops (zero overhead).
 //
 // the model predicts a buy probability [0, 1]. if prediction > buy_threshold,
@@ -336,9 +341,7 @@ inline void MLStrategy_ExitAdjustSharded(
 
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
-        : (uint16_t)(1u << slot);
+    uint16_t my_mask = BITMAP_NODE_SLOT_MASK(slot, partial_on);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     FPN_Binary<F> sl_offset   = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);

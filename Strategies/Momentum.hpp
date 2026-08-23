@@ -410,9 +410,7 @@ inline void Momentum_ExitAdjustSharded(
 
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
-        : (uint16_t)(1u << slot);
+    uint16_t my_mask = BITMAP_NODE_SLOT_MASK(slot, partial_on);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     // Momentum: tighter trail (momentum_sl_mult) — but Strategy_WriteRatchetSL's

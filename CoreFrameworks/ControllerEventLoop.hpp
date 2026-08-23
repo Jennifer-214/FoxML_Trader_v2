@@ -1675,9 +1675,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED);
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
-        : (uint16_t)(1u << node_id);
+    uint16_t my_mask = BITMAP_NODE_SLOT_MASK(node_id, partial_on);
     const int max_slot = partial_on ? state->registered_count * 2
                                     : state->registered_count;
 
@@ -2931,9 +2929,7 @@ inline void EventLoop_RebuildOneCore(
                 FPN_Binary<F> tight_sl = FPN_Sub(rolling->price_avg,
                                            rolling->price_stddev);
                 int partial_on = BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
-                uint16_t my_mask = partial_on
-                    ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
-                    : (uint16_t)(1u << slot);
+                uint16_t my_mask = BITMAP_NODE_SLOT_MASK(slot, partial_on);
                 uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
                 while (bm) {
                     int pidx = __builtin_ctz(bm);
@@ -3796,9 +3792,7 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
     // Build per-core slot mask: slot c (partials off) or slots 2c+0..1 (on).
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
-        : (uint16_t)(1u << node_id);
+    uint16_t my_mask = BITMAP_NODE_SLOT_MASK(node_id, partial_on);
     uint16_t bm = (uint16_t)(oms->portfolio.active_bitmap & my_mask);
 
     while (bm) {
@@ -4130,9 +4124,7 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
 
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
-        : (uint16_t)(1u << node_id);
+    uint16_t my_mask = BITMAP_NODE_SLOT_MASK(node_id, partial_on);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     // v5.1.7: fee-floor on the ratchet. The trailing-SL ratchet writes
@@ -4225,9 +4217,7 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
                                                 int node_id) {
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    uint16_t my_mask = partial_on
-        ? (uint16_t)((1u << (node_id * 2)) | (1u << (node_id * 2 + 1)))
-        : (uint16_t)(1u << node_id);
+    uint16_t my_mask = BITMAP_NODE_SLOT_MASK(node_id, partial_on);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
     // Net-profit threshold: round-trip taker fees (entry + exit). Below

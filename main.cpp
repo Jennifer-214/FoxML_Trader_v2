@@ -51,6 +51,15 @@ constexpr unsigned FP = 64;
 // [MAIN]
 //======================================================================================================
 int main(int argc, char *argv[]) {
+    // E.1.2.D+1 — libgomp defense-in-depth (engine sister of foxml_suite's
+    // v5.15.3.C process-entry fix; see the block there for the full landmine
+    // history). Every engine loader pins nthread=1 at model load
+    // (ModelInference), so this is belt for the case a FUTURE load path
+    // forgets the param: the measured cost of one booster escaping the cap
+    // is ~29ms PER PREDICT CALL (2026-08-22 latency deep-dive) plus the
+    // libgomp+pthread shared-init race the landmine documents. MUST be
+    // before any thread exists so libgomp inherits it at first init.
+    setenv("OMP_NUM_THREADS", "1", /*overwrite=*/1);
     // v5.11.0.A — Set FTZ/DAZ as the FIRST thing in main(). Subnormal stalls
     // cost up to 100x FPU throughput (microcode trap); critical for HFT
     // determinism. Linux pthread_create inherits MXCSR, so this covers all

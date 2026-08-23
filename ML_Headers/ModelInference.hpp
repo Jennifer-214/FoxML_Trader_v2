@@ -23,7 +23,9 @@
 //======================================================================================================
 // thin C-style abstraction over XGBoost and LightGBM C APIs for single-row inference.
 // compiles to complete no-ops when neither backend is enabled (zero overhead).
-// both APIs take float* row vectors — single-row inference is ~1-5μs for typical tree models.
+// both APIs take float* row vectors. Single-row inference cost is LINEAR in
+// total tree count: ~550ns/round (3-class) + ~10µs fixed (measured 2026-08-22;
+// 1050 trees ≈ 217µs) — the old "~1-5µs" held only for small binary models.
 //
 // usage:
 //   ModelHandle<F> model;
@@ -58,7 +60,8 @@
 // v5.12.2.D — Treelite AOT backend slot (INFRASTRUCTURE-ONLY).
 // Compiled C++ from XGBoost / LightGBM trees emits an inference function;
 // Model_LoadAOT dlopen's the .so + resolves the predict symbol. Brings
-// per-row inference from ~1-5us (C API) to <100ns. Operator workflow:
+// per-row inference from the C-API cost law (~550ns/round, 3-class; ~217µs at
+// 1050 trees — measured 2026-08-22) down to <100ns. Operator workflow:
 //   1. Train model (existing pipeline)
 //   2. Run tools/aot_compile_model.sh <model.json> → emits <model>.aot.so +
 //      stamp body extension (has_aot_compiled_sha256 + aot_compiled_path)
@@ -354,7 +357,8 @@ struct alignas(64) ModelHandle {
     // ~1ns predicted-not-taken. Switch on enum is only entered when a
     // model is actually trained with non-IDENTITY normalizer. ~1ns
     // when off; ~5ns when on. Slow-path budget irrelevant either way
-    // (Model_Predict's XGBoost C API call dominates at ~1-5us).
+    // (Model_Predict's XGBoost C API call dominates; cost is linear in tree
+    // count — ~550ns/round 3-class, ~217µs at 1050 trees, measured 2026-08-22).
     enum prediction_normalizer_t {
         NORM_IDENTITY        = 0,    // passthrough (default; current behavior)
         NORM_REGRESSION      = 1,    // [-tp_pct, +tp_pct] → [0, 1] via clamp(0.5 + raw / (2*tp), 0, 1)
