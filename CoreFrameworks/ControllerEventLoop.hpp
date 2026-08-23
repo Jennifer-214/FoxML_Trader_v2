@@ -871,11 +871,11 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
+// [UPDATED]_[2026-08-22]
 //----------------------------------------------------------------------
-// [SIZE]_[9856B]
+// [SIZE]_[11456B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[154]
+// [CACHE_LINES]_[179]
 // [STRADDLE]_[unverified: slow_path_breakdown]
 //======================================================================
 // [END_STRUCT]_[NodeContextDisplayMeta]
@@ -969,10 +969,10 @@ struct alignas(64) EventLoopState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-14]
-// [SIZE]_[272640B]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[298240B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[4260]
+// [CACHE_LINES]_[4660]
 // [STRADDLE]_[unverified: nodes display_meta]
 //======================================================================
 // [END_STRUCT]_[EventLoopState]
