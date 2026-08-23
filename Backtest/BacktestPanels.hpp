@@ -3145,6 +3145,11 @@ struct TrainingPanelState {
     int label_type;
     float label_tp_pct;
     float label_sl_pct;
+    // s5 leaf-15 — venue-general round-trip cost the label's WIN threshold must
+    // clear (percent, like its siblings: 0.2 = 0.2%). Standalone knob by operator
+    // decision: it generalizes across venues instead of tracking one engine fee
+    // cfg. 0 = fee-blind labels (pre-s5 behavior).
+    float label_roundtrip_fee_pct;
     int label_forward_ticks;
     // results
     float feature_importance[MODEL_MAX_FEATURES];
@@ -3171,7 +3176,11 @@ struct TrainingPanelState {
     // writer; the mh path's RFV auto-stamp is the live mechanism.)
     // walk-forward validation (Phase 6A — A7 GUI rework)
     int wf_n_splits;          // number of temporal folds (default 5)
-    int wf_horizon_ticks;     // label horizon for purge gap calc (default 1000)
+    // s5 leaf-16: 0 = AUTO (max of the Horizons CSV, resolved at every use via
+    // Training_ResolvePurgeHorizon); nonzero = explicit operator override.
+    // NOT ini-persisted — it re-defaults every launch, which is exactly why the
+    // old literal-1000 default silently leaked on every fresh session.
+    int wf_horizon_ticks;     // label horizon for purge gap calc (0 = auto-derive)
     int wf_buffer_ticks;      // extra purge buffer (default 512)
     int wf_min_train;         // min training samples per fold (default 500)
     volatile int wf_running;  // 1 = walk-forward in progress
@@ -3348,6 +3357,50 @@ static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
     return st && (st->tm_running || st->wf_running ||
                   st->fv_running || st->hp_running || st->mh_running);
 }
+
+//======================================================================
+// [FUNCTION]_[Training_ResolvePurgeHorizon]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[s5 leaf-16 — the ONE purge-horizon resolver: explicit override, else DERIVED max(Horizons CSV). Kills the two-unlinked-fields leakage class.]
+//======================================================================
+// [CODE]
+//======================================================================
+// The purge gap between train and test folds must cover the LONGEST label's
+// forward reach, or training samples near the boundary carry outcomes that
+// peek into test — silent leakage that INFLATES every WF / sweep / Full
+// Validation number.
+//
+// Before s5 leaf-16, `wf_horizon_ticks` was an independent manual field
+// defaulting to 1000 with NOTHING binding it to the horizons the operator
+// actually collected: a 67,500-tick label grid with the box left at 1000
+// purged ~1.5k ticks instead of ~68k. Two fields that must agree, with no
+// mechanism making them agree — the same shape as the label fee knob that
+// wasn't there (Class-55-adjacent dual-source).
+//
+// Resolution: 0 = AUTO (derive max over the effective horizon list); any
+// nonzero value is an explicit operator override and is honored verbatim
+// (escape hatch preserved — an operator experimenting with a deliberately
+// short purge can still ask for one). Falls back to the legacy 1000 only
+// when auto is requested and NO horizon list exists to derive from.
+static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
+    if (!st) return 1000;
+    if (st->wf_horizon_ticks > 0) return st->wf_horizon_ticks;  // explicit override
+    int mx = 0;
+    for (int i = 0; i < st->ui_horizon_count
+                    && i < TrainingPanelState::PANEL_HORIZON_MAX; ++i) {
+        if (st->ui_horizon_list[i] > mx) mx = st->ui_horizon_list[i];
+    }
+    if (mx > 0) return mx;
+    if (st->label_forward_ticks > 0) return st->label_forward_ticks;  // single-horizon flows
+    return 1000;  // no horizons known — the historical default
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_ResolvePurgeHorizon]
+//======================================================================
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -3434,6 +3487,10 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->label_type = LABEL_WIN_LOSS;
     state->label_tp_pct = 1.5f;
     state->label_sl_pct = 1.0f;
+    // s5 leaf-15: 0 = fee-blind (bytewise-identical to pre-s5 labels). The
+    // operator sets the venue's round trip explicitly — no silent default that
+    // would change every existing run's labels on upgrade.
+    state->label_roundtrip_fee_pct = 0.0f;
     // v5.11.40 — CSV-aware TP/SL per-horizon. Default: empty CSV =
     // single-value mode (uses label_tp_pct/_sl_pct directly). Operator
     // types comma-separated values to opt in to per-horizon.
@@ -3478,7 +3535,10 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     strncpy(state->feature_names[FEAT_EMA_ABOVE_SMA],  "ema>sma", 31);
     // walk-forward defaults (FoxML battle-tested values)
     state->wf_n_splits = 5;
-    state->wf_horizon_ticks = 1000;
+    // s5 leaf-16: 0 = AUTO (derive max(Horizons CSV) at use — see
+    // Training_ResolvePurgeHorizon). The old literal 1000 default is what let a
+    // 67.5k-tick label grid run a ~1.5k-tick purge gap and leak into test.
+    state->wf_horizon_ticks = 0;
     state->wf_buffer_ticks = PURGE_BUFFER_DEFAULT;
     state->wf_min_train = 500;
     state->wf_running = 0;
@@ -4485,6 +4545,11 @@ static inline void mh_run_one_horizon_fv(
         fprintf(sf, "n_estimators: %d\n", snap_hp.n_estimators);
         fprintf(sf, "label_tp_pct: %.4f\n", (double)tp_pct);
         fprintf(sf, "label_sl_pct: %.4f\n", (double)sl_pct);
+        // s5 leaf-15 — lineage: which round trip this run's win threshold cleared.
+        // Sourced from local_run_cfg (the config that produced these labels), the
+        // same click-time-snapshot discipline as the hyperparameters above.
+        fprintf(sf, "label_roundtrip_fee_pct: %.4f\n",
+                local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
         fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
         fprintf(sf, "n_train_samples: %d\n", results->sample_count);
         fprintf(sf, "label_kind: %d\n", fv->label_kind);
@@ -5240,6 +5305,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "wider = fewer but higher-confidence labels\n\n"
                               "v5.11.40 multi-horizon: same CSV format as TP — single value\n"
                               "broadcasts; N values map positionally to Horizons (CSV).");
+        // s5 leaf-15 — the round-trip cost the WIN threshold must clear.
+        ImGui::InputFloat("Round-trip Fee %", &state->label_roundtrip_fee_pct,
+                          0.01f, 0.05f, "%.3f");
+        if (state->label_roundtrip_fee_pct < 0.0f) state->label_roundtrip_fee_pct = 0.0f;
+        ImGui::SetItemTooltip("UNIT: percent of price — 0.2 = 0.2%% (= 20 bps).\n"
+                              "The ROUND TRIP (entry + exit) cost a winning trade must clear.\n"
+                              "Added to the TP barrier ONLY when labeling: a move that hits\n"
+                              "TP but not TP+fee is not a win you could have banked.\n\n"
+                              "Venue-general on purpose — set it from YOUR venue's taker\n"
+                              "schedule (Binance taker 0.1%% both sides = 0.2), not from the\n"
+                              "engine's fee cfg. 0 = fee-blind labels (pre-2026-08-23 behavior).\n\n"
+                              "SL is NOT adjusted: it is a price-level stop — fees deepen the\n"
+                              "realized loss but do not move where it fires.\n"
+                              "Recorded in the run summary + the model stamp for lineage.");
 
         // Parse CSVs every render frame (cheap; max 8 entries, bounded loop).
         // Same shape as the horizons-CSV parser. After parsing, sync
@@ -5405,6 +5484,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->run_config.label_type = state->label_type;
         run_control->run_config.label_tp_pct = state->label_tp_pct;
         run_control->run_config.label_sl_pct = state->label_sl_pct;
+        // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
+        run_control->run_config.label_roundtrip_fee_pct = state->label_roundtrip_fee_pct;
         run_control->run_config.label_forward_ticks = state->label_forward_ticks;
 
         // start the run
@@ -5490,6 +5571,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->run_config.label_type = state->label_type;
         run_control->run_config.label_tp_pct = state->label_tp_pct;
         run_control->run_config.label_sl_pct = state->label_sl_pct;
+        // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
+        run_control->run_config.label_roundtrip_fee_pct = state->label_roundtrip_fee_pct;
         run_control->run_config.label_forward_ticks = state->label_forward_ticks;
 
         run_control->progress_pct = 0;
@@ -6410,10 +6493,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                           "more folds = more reliable estimate but slower\n"
                           "5 is standard, 3 for fast iteration");
     ImGui::InputInt("Horizon Ticks", &state->wf_horizon_ticks, 100, 500);
-    ImGui::SetItemTooltip("Label forward window in ticks\n"
-                          "controls the purge gap between train and test sets\n"
-                          "prevents data leakage from labels that look into the future\n"
-                          "should match the label horizon used during feature collection");
+    if (state->wf_horizon_ticks < 0) state->wf_horizon_ticks = 0;
+    // s5 leaf-16 — show the operator what AUTO actually resolved to, so the
+    // derived value is visible rather than implied.
+    if (state->wf_horizon_ticks == 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(auto = %d)", Training_ResolvePurgeHorizon(state));
+    }
+    ImGui::SetItemTooltip("Label forward window in ticks — drives the purge gap\n"
+                          "between train and test folds (prevents labels that look\n"
+                          "into the future from leaking across the boundary).\n\n"
+                          "0 = AUTO: derives max(Horizons CSV) — the longest label's\n"
+                          "reach, which is the value the purge gap actually needs.\n"
+                          "Nonzero = explicit override, honored verbatim.\n\n"
+                          "Why auto is the default: this field used to sit at 1000 with\n"
+                          "nothing linking it to the horizons you collected, so a 67,500-\n"
+                          "tick grid purged ~1.5k ticks and silently inflated every\n"
+                          "validation number.");
     ImGui::InputInt("Purge Buffer", &state->wf_buffer_ticks, 64, 256);
     ImGui::SetItemTooltip("Extra safety margin added to the purge gap\n"
                           "accounts for feature lookback windows (rolling stats etc.)\n"
@@ -6460,7 +6556,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 // run_config (the field that produced results->labels[]), same
                 // resolver-SSoT choice as the Run-Full-Validation path.
                 wf_args->snap_wf_n_splits      = state->wf_n_splits;
-                wf_args->snap_wf_horizon_ticks = state->wf_horizon_ticks;
+                wf_args->snap_wf_horizon_ticks = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
                 wf_args->snap_wf_buffer_ticks  = state->wf_buffer_ticks;
                 wf_args->snap_wf_min_train     = state->wf_min_train;
                 wf_args->snap_label_type       = run_control->run_config.label_type;
@@ -6855,7 +6951,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 // every cell on mismatched label semantics.
                 hp_args->snap_label_type = run_control->run_config.label_type;
                 hp_args->snap_wf_n_splits = state->wf_n_splits;
-                hp_args->snap_wf_horizon_ticks = state->wf_horizon_ticks;
+                hp_args->snap_wf_horizon_ticks = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
                 hp_args->snap_wf_buffer_ticks = state->wf_buffer_ticks;
                 hp_args->snap_wf_min_train = state->wf_min_train;
                 pthread_create(&state->hp_tid, NULL, hp_sweep_worker_fn, hp_args);
@@ -7029,7 +7125,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 // rest from the panel at click time. See the struct comment.
                 fv_args->snap_label_type          = run_control->run_config.label_type;
                 fv_args->snap_wf_n_splits         = state->wf_n_splits;
-                fv_args->snap_wf_horizon_ticks    = state->wf_horizon_ticks;
+                fv_args->snap_wf_horizon_ticks    = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
                 fv_args->snap_wf_buffer_ticks     = state->wf_buffer_ticks;
                 fv_args->snap_wf_min_train        = state->wf_min_train;
                 fv_args->snap_fv_gap_threshold    = state->fv_gap_threshold;

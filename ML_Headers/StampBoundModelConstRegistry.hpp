@@ -507,6 +507,13 @@ namespace tt {
       inf->label_tp_pct, inf->has_label_params, "label take-profit percent")                        \
     X(label_sl_pct,                             label_params, INCLUDE, double, "%.6g", 0.0,         \
       inf->label_sl_pct, inf->has_label_params, "label stop-loss percent")                          \
+    /* s5 leaf-15 (2026-08-23): a `label_roundtrip_fee_pct` row BELONGS here — the fee the label's  */ \
+    /* win threshold cleared is a train-serve semantic contract, not just a run note. It is NOT     */ \
+    /* added yet because inserting mid-registry SHIFTED 15 downstream keys' canonical emit          */ \
+    /* positions (caught by check_identifier_retirement) = a wire-format change to every signed     */ \
+    /* stamp body. Correct form = append at the TRUE END of the flat walk + STAMP_FORMAT_VERSION    */ \
+    /* bump + operator-TTY re-bless in ONE commit. Queued as its own wire change; lineage lives in  */ \
+    /* summary.txt meanwhile. See the E.1.2.D plan § s5 leaf-15 stamp rider.                        */ \
     /* === xgb_train_nthread (standalone) — emitted at line 2323 === */                             \
     X(xgb_train_nthread,                        _, INCLUDE, int, "%d", 0,                           \
       inf->xgb_train_nthread, inf->has_xgb_train_nthread,                                           \

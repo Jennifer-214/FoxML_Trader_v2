@@ -239,6 +239,15 @@ struct BacktestRunConfig {
     int label_type;         // LABEL_WIN_LOSS, LABEL_BARRIER, etc.
     double label_tp_pct;    // TP barrier for win/loss and barrier labels (e.g. 1.5 = 1.5%)
     double label_sl_pct;    // SL barrier (e.g. 1.0 = 1.0%)
+    // s5 leaf-15 (2026-08-23, operator-decided): round-trip cost the label's WIN
+    // threshold must clear — a standalone venue-general knob (NOT derived from the
+    // engine's fee cfg; set per venue/experiment). Percent like its siblings
+    // (0.2 = 0.2% = taker 0.1% × 2). Applied TP-ONLY at the ComputeLabelsBatch
+    // chokepoint (the SL is a price-level stop — fees deepen the realized loss but
+    // don't move where it FIRES; label-side trailing/ratchet = leaf 17, rides the
+    // parked D-206 redesign). 0 = fee-blind labels (pre-s5 behavior, the bytewise
+    // rail). Recorded in the run summary + the model stamp (label_params group).
+    double label_roundtrip_fee_pct;
     int label_forward_ticks; // forward window for forward_pnl label (e.g. 1000)
     // v5.10.0a.next.1 — operator-explicit bandit state prior. When set,
     // BacktestSharded_Run loads bandit weights from this path AFTER the
@@ -882,7 +891,13 @@ static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
             }
         }
         if (!rt[t].fn) rt[t].fn = Label_WinLoss;  // fallback (parity)
-        rt[t].tp  = targets[t].tp_pct > 0 ? targets[t].tp_pct : 1.5;
+        // s5 leaf-15: the label's win threshold clears the round-trip cost —
+        // TP-ONLY (long-only labels; the down barrier is a price-level stop).
+        // Applied HERE, the ONE chokepoint every label computation flows
+        // through, so per-horizon grids + single-target + WF/FV all inherit it.
+        double rt_fee = run_cfg->label_roundtrip_fee_pct > 0
+                          ? run_cfg->label_roundtrip_fee_pct : 0.0;
+        rt[t].tp  = (targets[t].tp_pct > 0 ? targets[t].tp_pct : 1.5) + rt_fee;
         rt[t].sl  = targets[t].sl_pct > 0 ? targets[t].sl_pct : 1.0;
         rt[t].fwd = targets[t].forward_ticks > 0 ? targets[t].forward_ticks : 1000;
         rt[t].is_multiclass = LabelType_IsMulticlass(targets[t].label_type);
@@ -1090,11 +1105,13 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     results->stats.nan_labels_dropped += t.nan_dropped;
     double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
     double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
+    double rtf = run_cfg->label_roundtrip_fee_pct > 0 ? run_cfg->label_roundtrip_fee_pct : 0.0;
     // s5 rider (2026-08-23, operator find): %.1f rounded 0.35f (0.34999… in
     // binary32) down to "0.3" — read as truncation, wasn't. %.3f matches the
     // multi-horizon collect emit (BacktestPanels ~:533). Display-only.
-    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.3f%%, sl=%.3f%%)",
-            labeled, run_cfg->label_type, tp, sl);
+    // s5 leaf-15: the fee term the win threshold clears is printed beside tp.
+    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.3f%%+%.3f%%fee, sl=%.3f%%)",
+            labeled, run_cfg->label_type, tp, rtf, sl);
     if (results->stats.nan_labels_total > 0) {
         fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",
                 results->stats.nan_labels_total,
