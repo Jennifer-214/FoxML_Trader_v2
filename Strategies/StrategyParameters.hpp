@@ -1420,6 +1420,12 @@ inline void ML_BuildParameters(
                     poll_interval_ticks,   // v5.15.5.F.4c.3 WIP2c.2 — caller-resolved scalar
                     /*ic_floor=*/0.02,
                     node_cfg);             // v5.15.5.F.4d — per-core bandit_algorithm source
+                // s5 BT-10' — drain a save the DRAINER deferred. Trade-close
+                // attribution runs on the global drainer, where a ~1ms four-file
+                // write would stall fills for every node; it marks instead, and
+                // this per-node slow path (the ezoo's owning thread) pays it.
+                // No-op — one predicate — when nothing is pending.
+                EnsembleModelZoo_FlushPendingBanditSave(ezoo);
             }
         } else if (zoo && (zoo->loaded_mask & NODE_MODEL_BUY_SIGNAL)) {
             // Single-zoo path (existing; bytewise unchanged from pre-G.5)

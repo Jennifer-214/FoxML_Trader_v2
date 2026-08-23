@@ -1377,6 +1377,10 @@ struct alignas(64) EnsembleModelZoo {
     // AutoDetectFromDir / LoadFromCfg time; empty path = persistence disabled.
     alignas(64) char bandit_save_path[400];   // <node_model_dir>/bandit_state.json
     int      bandit_save_interval;             // 0 = no periodic save (shutdown only)
+    // s5 BT-10' — set when a save cadence crossed on a thread that must not do
+    // file I/O (the global drainer); the per-node SLOW path performs the write on
+    // its next cycle and clears it. See EnsembleModelZoo_MaybeSaveBanditPeriodic.
+    int      bandit_save_pending;
     uint64_t bandit_update_count;              // monotonic; modulo'd against interval
 
     char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
@@ -1814,9 +1818,11 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
         rec.rewarded_lookback = 1;
         // v5.10.0a.G.9 — periodic save trigger after each ring record's
         // updates land. Cheap when bandit_save_interval==0 (no-op early
-        // return). When fires (once every N updates), atomic file write
-        // takes ~1ms — acceptable on slow path.
-        EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, updates_this_record);
+        // return). When it fires, the atomic file write takes ~1ms.
+        // s5 BT-10': may_write_now=1 — this is the per-node SLOW path
+        // (reached via StrategyParameters' rebuild), which owns this ezoo and
+        // is the sanctioned place for the flush.
+        EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, updates_this_record, /*may_write_now=*/1);
     }
 }
 
@@ -1885,8 +1891,12 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
         trade_updates++;
     }
     rec.rewarded_trade = 1;
-    // v5.10.0a.G.9 — periodic save check (no-op when interval==0)
-    EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, trade_updates);
+    // v5.10.0a.G.9 — periodic save check (no-op when interval==0).
+    // s5 BT-10': may_write_now=0 — trade-close attribution runs on the GLOBAL
+    // DRAINER (EventLoop_DrainPostFill), whose ≤10µs budget a ~1ms four-file
+    // write misses by ~100×, stalling fills for EVERY node. Defer to the owning
+    // node's slow path.
+    EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, trade_updates, /*may_write_now=*/0);
 }
 //======================================================================
 // [END_CODE]
@@ -3471,6 +3481,136 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
     ezoo->bandit_update_count = 0;
 }
 
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_DeriveStateDir]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[s5 BT-7 — the LIVE state directory: derived from bandit_save_path (where the last LOAD ran), not the boot cfg dir]
+//======================================================================
+// [CODE]
+//======================================================================
+// bandit_save_path is built as "<base_dir>/bandit_state.json" at the load site,
+// so truncating at the final '/' recovers the base dir as an INVARIANT of its
+// construction rather than a guess about path shapes.
+//
+// WHY this matters (BT-7): the shutdown saver used cfg.node_model_dir[i] — the
+// BOOT directory — while the periodic saver used bandit_save_path — the dir the
+// last load ran against. After an "Apply (live)" model swap these DIVERGE, and
+// the GUI compounds it: the picker rewrites node_N_model_dir in engine.cfg at
+// SELECTION time, but the reload path memcpy-PRESERVES the boot dirs into the
+// in-memory cfg, so the in-memory value is frozen for the session. Net effect on
+// a swap-then-quit: the swapped family's learned weights were written into the
+// PREVIOUS family's directory, where the next boot of that bundle loaded them as
+// its own — cross-family contamination, unguarded because the bundle-id check is
+// vacuous (BT-8) and every family here is 3-arm.
+//
+// Falls back to `fallback_dir` when no load has run (path empty) — that is the
+// honest answer for an ezoo that never loaded state.
+template <unsigned F>
+inline int EnsembleModelZoo_DeriveStateDir(const EnsembleModelZoo<F>* ezoo,
+                                            const char* fallback_dir,
+                                            char* out, size_t out_sz) {
+    if (!out || out_sz == 0) return 0;
+    out[0] = '\0';
+    if (ezoo && ezoo->bandit_save_path[0] != '\0') {
+        char tmp[sizeof(ezoo->bandit_save_path)];
+        strncpy(tmp, ezoo->bandit_save_path, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        char* last_slash = strrchr(tmp, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            if (tmp[0] != '\0') {
+                strncpy(out, tmp, out_sz - 1);
+                out[out_sz - 1] = '\0';
+                return 1;   // derived from the LIVE path
+            }
+        }
+    }
+    if (fallback_dir && fallback_dir[0] != '\0') {
+        strncpy(out, fallback_dir, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return 2;           // fell back to the caller's dir
+    }
+    return 0;               // nowhere to write
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_DeriveStateDir]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_SaveAllBanditState]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [ML_INFERENCE]]
+// [REFERENCE]_[CLASS]_[18]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[s5 BT-6 — the ONE "flush every learned-state family" call; replaces the 4-call block hand-copied at every save site]
+//======================================================================
+// [CODE]
+//======================================================================
+// THE MIRROR THIS REPLACES BROKE THREE TIMES IN FOUR DAYS, each time by a
+// different site forgetting a different family — the signature of a
+// hand-maintained N-site block, not of bad luck:
+//   * 2026-08-16  periodic path saved ONLY buy-side Exp3; a SIGKILL discarded
+//                 everything the other three had learned since boot
+//   * 2026-08-16  Thompson shutdown savers had ZERO production callers while
+//                 their LOADERS ran every boot — load-without-save, which reads
+//                 exactly like working persistence
+//   * 2026-08-20  backtest completion dropped 3 of the 4 families
+// A fourth site (hot-swap) never had the block at all (BT-6). With this helper
+// the matrix is one row: a fifth family is one line HERE, not five edits spread
+// across three files.
+//
+// Deliberately NOT an X-macro registry. The a-class refute is explicit: a
+// registry earns its keep only if its rows become the CONSUMED source of truth —
+// i.e. also feeding the MODEL_STATE_FILE_* constants in ModelPathSchema.hpp
+// (which the savers currently ignore, hardcoding literals at 8 sites) and
+// generating the FOREACH_ENSEMBLE_POST_LOAD load rows. A standalone 4-row table
+// whose only consumer is this function would ADD two parallel enumerations while
+// claiming to remove one (H18). That consolidation is real work with its own
+// blast radius; it is homed, not smuggled in here.
+//
+// Each saver self-guards on its own READY bit and returns 0 when its side was
+// never initialized, so an ensemble with no exit models or no Thompson simply
+// skips them — no outer condition needed.
+//
+// Returns the number of families actually written.
+template <unsigned F>
+inline int EnsembleModelZoo_SaveAllBanditState(const EnsembleModelZoo<F>* ezoo,
+                                                const char* base_dir,
+                                                const char* tag,
+                                                int node_idx) {
+    if (!ezoo || !base_dir || base_dir[0] == '\0') return 0;
+    if (!BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) ||
+        !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
+
+    const char* t = (tag && tag[0]) ? tag : "ensemble";
+    int n = 0;
+    // Four straight calls, deliberately not a function-pointer table: the table
+    // bought nothing over this and cost a layer of indirection to read through.
+    // Adding a fifth family is one line here — that was the whole point.
+    auto note = [&](int saved, const char* file) {
+        if (!saved) return;   // saver self-skipped (side never initialized)
+        ++n;
+        if (node_idx >= 0)
+            fprintf(stderr, "[%s] node %d: saved %s/%s\n", t, node_idx, base_dir, file);
+        else
+            fprintf(stderr, "[%s] saved %s/%s\n", t, base_dir, file);
+    };
+    note(EnsembleModelZoo_SaveBanditState(ezoo, base_dir, nullptr),       "bandit_state.json");
+    note(EnsembleModelZoo_SaveExitBanditState(ezoo, base_dir, nullptr),   "exit_bandit_state.json");
+    note(EnsembleModelZoo_SaveThompsonState(ezoo, base_dir, nullptr),     "buy_thompson_state.json");
+    note(EnsembleModelZoo_SaveExitThompsonState(ezoo, base_dir, nullptr), "exit_thompson_state.json");
+    return n;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_SaveAllBanditState]
+//======================================================================
+
 // Periodic save trigger. Called after each Bandit_Update batch
 // (TickRewardsFromLookback / TradeCloseReward fold this in). Increments
 // bandit_update_count; when count crosses interval threshold, flush
@@ -3481,9 +3621,24 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
 // locale authority — and Bandit_SaveJSON additionally pins thread-local
 // (uselocale) for defense-in-depth on the HMAC/stamp-adjacent path. Render-thread
 // safety: this fires on the slow-path / drainer threads, never in hot path.
+// s5 BT-10' — `may_write_now` says whether THIS thread may perform file I/O.
+// NO DEFAULT ARGUMENT: the compiler then enumerates every call site so the
+// thread question is answered explicitly at each one, rather than inherited by
+// accident (same reasoning as the parse_double_array flag).
+//
+// WHY: this write is a ~1ms four-file atomic flush. One trigger site sits on the
+// per-node SLOW path (budget ≤100µs); the other sits on the GLOBAL DRAINER
+// (budget ≤10µs), where it stalls fill processing for EVERY node, not just one.
+// Passing 0 from the drainer defers the write to the slow path's next cycle.
+//
+// Stated honestly: this RELOCATES the cost rather than eliminating it — 1ms is
+// still over the slow-path budget too. What it buys is blast radius: a slow-path
+// stall delays one node's rebuild, a drainer stall delays all four nodes' fills.
+// Making the write itself cheap (or moving it to a dedicated writer) is a
+// separate question, tracked with the s5-F10 latency investigation.
 template <unsigned F>
 inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
-    EnsembleModelZoo<F>* ezoo, int updates_this_call) {
+    EnsembleModelZoo<F>* ezoo, int updates_this_call, int may_write_now) {
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (ezoo->bandit_save_interval <= 0) return;
     if (ezoo->bandit_save_path[0] == '\0') return;
@@ -3495,6 +3650,15 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
     if (before / threshold == ezoo->bandit_update_count / threshold) {
         return;  // didn't cross
     }
+    // s5 BT-10' — crossed, but this thread may not write. Mark and leave; the
+    // per-node slow path drains it via _FlushPendingBanditSave. The counter has
+    // already advanced, so the next crossing is measured from here — a deferred
+    // save is delayed, never dropped or double-counted.
+    if (!may_write_now) {
+        ezoo->bandit_save_pending = 1;
+        return;
+    }
+    ezoo->bandit_save_pending = 0;
     char expected_id[65];
     EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
     int ok = Bandit_SaveJSON(ezoo->bandits, NUM_REGIMES,
@@ -3520,13 +3684,15 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
     // All three savers self-guard on their own READY flag and return 0 when their side
     // was never initialized, so an ensemble without exit models or without Thompson
     // simply skips them.
+    // s5 BT-6 — this block WAS the SaveAll body, written inline. Promoted to the
+    // shared helper so the other three sites (live shutdown, backtest
+    // completion, and the hot-swap pre-swap flush that never existed) expand the
+    // SAME set. Buy-side Exp3 is saved above via bandit_save_path directly, so
+    // only the remaining three run here; the helper's own buy-side save is a
+    // harmless re-write of what was just written, avoided by keeping the split.
     {
         char base_dir[sizeof(ezoo->bandit_save_path)];
-        strncpy(base_dir, ezoo->bandit_save_path, sizeof(base_dir) - 1);
-        base_dir[sizeof(base_dir) - 1] = '\0';
-        char* last_slash = strrchr(base_dir, '/');
-        if (last_slash) {
-            *last_slash = '\0';
+        if (EnsembleModelZoo_DeriveStateDir(ezoo, nullptr, base_dir, sizeof(base_dir))) {
             EnsembleModelZoo_SaveExitBanditState(ezoo, base_dir, nullptr);
             EnsembleModelZoo_SaveThompsonState(ezoo, base_dir, nullptr);
             EnsembleModelZoo_SaveExitThompsonState(ezoo, base_dir, nullptr);
@@ -3537,6 +3703,40 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[EnsembleModelZoo_MaybeSaveBanditPeriodic]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EnsembleModelZoo_FlushPendingBanditSave]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[s5 BT-10' — the per-node SLOW-PATH drain of a save deferred by the drainer; no-op when nothing is pending]
+//======================================================================
+// [CODE]
+//======================================================================
+// Call once per per-node slow-path cycle. The common case is a single predicate
+// on an already-hot cold-cluster field, so the cost when nothing is pending is
+// negligible; when something IS pending it costs the ~1ms flush the drainer
+// refused to pay.
+template <unsigned F>
+inline void EnsembleModelZoo_FlushPendingBanditSave(EnsembleModelZoo<F>* ezoo) {
+    if (!ezoo || !ezoo->bandit_save_pending) return;
+    ezoo->bandit_save_pending = 0;
+    if (!BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) ||
+        !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
+    char base_dir[sizeof(ezoo->bandit_save_path)];
+    if (!EnsembleModelZoo_DeriveStateDir(ezoo, nullptr, base_dir, sizeof(base_dir))) return;
+    // Quiet on the happy path: a periodic flush is routine and this fires on
+    // every node. The savers already shout on failure.
+    EnsembleModelZoo_SaveBanditState(ezoo, base_dir, nullptr);
+    EnsembleModelZoo_SaveExitBanditState(ezoo, base_dir, nullptr);
+    EnsembleModelZoo_SaveThompsonState(ezoo, base_dir, nullptr);
+    EnsembleModelZoo_SaveExitThompsonState(ezoo, base_dir, nullptr);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_FlushPendingBanditSave]
 //======================================================================
 
 //======================================================================
@@ -3678,9 +3878,21 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
     // - LoadExitBanditState: no boolean to check; idempotent overlay
     // - InitThompsonBandits (v5.14.10.C): MASK_EZOO_BUY_THOMPSON_READY set when primary_count>=2
     // - LoadThompsonState (v5.14.10.C): no boolean to check; idempotent overlay (skipped silently when the READY bit is unset)
+    // - InitExitThompsonBandits (.F.4d): MASK_EZOO_EXIT_THOMPSON_READY set when exit_predictor_count>=2 (checked below since s5)
+    // - LoadExitThompsonState (.F.4d): no boolean to check; idempotent overlay
     if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (ezoo->exit_predictor_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
     if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) return 0;
+    // s5 (a-class find) — the EXIT-Thompson row was added to
+    // FOREACH_ENSEMBLE_POST_LOAD at .F.4d but its contract check was never
+    // added here, so this predicate silently certified an ensemble whose
+    // exit-Thompson init had NOT run. Exactly the drift this function's own
+    // contract comment above demands be mirrored — evidence that "one registry
+    // row and everything flows" is aspirational unless each auto-flow surface
+    // is enumerated when a row lands (Class-58 complement blindness, one level
+    // in). Mirrors the exit-bandit line's shape: gated on exit_predictor_count
+    // so buy-only ensembles are unaffected.
+    if (ezoo->exit_predictor_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY)) return 0;
     if (ezoo->blend_mode[0] == '\0') return 0;
     return 1;
 }

@@ -100,6 +100,40 @@ inline int HotSwap_ShadowLoad_Ensemble(
     }
 
     // ────────────────────────────────────────────────────────────────────
+    // (1b) s5 BT-6 — FLUSH the outgoing ezoo's learned state BEFORE anything
+    // else touches it. This site did not exist: the swap built the new ezoo,
+    // swapped, and freed the old one with NO Save* call anywhere in this file,
+    // so every "Apply (live)" discarded up to a full flush interval (5000
+    // updates) of Exp3 + Thompson learning. It bites hardest during exactly the
+    // train→swap→evaluate loop an operator runs when tuning.
+    //
+    // WHY AT THE TOP, not "pre-free" between the swap and the free (which is
+    // where it looks like it belongs): by then step (4) PostLoadSetup has
+    // already LOADED state from the target dir into new_ezoo. Saving the old
+    // ezoo afterwards writes the fresh tail to disk where the live in-memory
+    // ezoo will never see it — recovered only at the NEXT boot or swap, a
+    // silent one-generation lag on a same-dir re-apply. Flushing first also
+    // makes every later failure path safe: on any early return below, the old
+    // state is still live in memory AND now on disk.
+    //
+    // Destination is DERIVED from the outgoing ezoo's own save path (BT-7), not
+    // from cfg — the two diverge precisely after a swap.
+    //
+    // Failure is LOG-AND-PROCEED, matching the periodic saver: a full disk must
+    // never pin the engine to an old model. Thread-safety: the per-node slow
+    // path is the sole ezoo owner and is the thread running this swap, the same
+    // one that performs periodic saves.
+    // ────────────────────────────────────────────────────────────────────
+    {
+        char state_dir[sizeof(pre_swap_ezoo->bandit_save_path)];
+        if (EnsembleModelZoo_DeriveStateDir(pre_swap_ezoo, cfg.node_model_dir[node_idx],
+                                             state_dir, sizeof(state_dir))) {
+            EnsembleModelZoo_SaveAllBanditState(pre_swap_ezoo, state_dir,
+                                                 "hot_swap pre-swap", node_idx);
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────
     // (2) Allocate NEW ezoo (pre-swap UNTOUCHED). aligned_alloc(64) per
     // v5.15.4.B EnsembleModelZoo alignas(64) requirement.
     // ────────────────────────────────────────────────────────────────────
@@ -137,9 +171,12 @@ inline int HotSwap_ShadowLoad_Ensemble(
 
     // Grid-change WARN: per-horizon cfg semantics (node_N_disabled_horizons
     // mask bits, per-arm expectations) are POSITIONAL against the grid —
-    // a changed grid re-means them. Loud, not blocking (bandit/Ridge state
-    // in new_ezoo is fresh-init either way; in-flight fill attribution is
-    // clamped by the v5.13.6.C defensive bounds at update time).
+    // a changed grid re-means them. Loud, not blocking.
+    // (2026-08-23 correction: the old parenthetical here claimed "bandit/Ridge
+    // state in new_ezoo is fresh-init either way". That is FALSE and has been
+    // since the POST_LOAD load rows landed — step (4) below OVERLAYS persisted
+    // state from the target dir onto new_ezoo. In-flight fill attribution is
+    // still clamped by the v5.13.6.C defensive bounds at update time.)
     {
         int grid_changed = 0;
         for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {

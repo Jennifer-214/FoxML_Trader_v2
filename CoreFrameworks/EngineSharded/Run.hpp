@@ -2334,53 +2334,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             state.nodes[i].ensemble_handle);
         if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
             cfg.node_model_dir[i][0]) {
-            int saved = EnsembleModelZoo_SaveBanditState(
-                ezoo, cfg.node_model_dir[i],
-                /*regime_names=*/nullptr);
-            if (saved) {
-                fprintf(stderr, "[sharded] node %d: saved bandit state to "
-                                "%s/bandit_state.json\n",
-                        i, cfg.node_model_dir[i]);
-            }
-            // v5.13.4.C — sell-side bandit shutdown save. Skips silently
-            // when initialized_exit_bandits=0 (no exit models loaded).
-            int saved_exit = EnsembleModelZoo_SaveExitBanditState(
-                ezoo, cfg.node_model_dir[i],
-                /*regime_names=*/nullptr);
-            if (saved_exit) {
-                fprintf(stderr, "[sharded] node %d: saved exit_bandit "
-                                "state to %s/exit_bandit_state.json\n",
-                        i, cfg.node_model_dir[i]);
-            }
-            // 2026-08-16 — Thompson shutdown saves. These were MISSING while their
-            // LOADERS ran on every boot (FOREACH_ENSEMBLE_POST_LOAD rows in
-            // NodeModelZoo.hpp), so the engine looked for buy_thompson_state.json /
-            // exit_thompson_state.json that nothing in the tree ever wrote. Net effect:
-            // Thompson posteriors learned all session and were silently discarded at
-            // every restart — a load-without-save asymmetry that reads as working
-            // persistence. EnsembleModelZoo_SaveThompsonState had ZERO production
-            // callers (its only tree-wide reference was a test); SaveExitThompsonState
-            // had zero references anywhere at all, test included.
-            //
-            // Both self-guard on their own READY flag and return 0 when the side was
-            // never initialized, exactly like SaveExitBanditState above — so they skip
-            // silently rather than needing a second outer condition.
-            int saved_thompson = EnsembleModelZoo_SaveThompsonState(
-                ezoo, cfg.node_model_dir[i],
-                /*regime_names=*/nullptr);
-            if (saved_thompson) {
-                fprintf(stderr, "[sharded] node %d: saved buy_thompson "
-                                "state to %s/buy_thompson_state.json\n",
-                        i, cfg.node_model_dir[i]);
-            }
-            int saved_exit_thompson = EnsembleModelZoo_SaveExitThompsonState(
-                ezoo, cfg.node_model_dir[i],
-                /*regime_names=*/nullptr);
-            if (saved_exit_thompson) {
-                fprintf(stderr, "[sharded] node %d: saved exit_thompson "
-                                "state to %s/exit_thompson_state.json\n",
-                        i, cfg.node_model_dir[i]);
-            }
+            // s5 BT-6/BT-7 — ONE call for all four families (the hand-written
+            // 4-block that lived here broke twice in four days), and the
+            // destination is DERIVED from the ezoo's live save path rather than
+            // the BOOT cfg dir. After an "Apply (live)" swap those diverge, and
+            // this site was writing the swapped family's learned weights into
+            // the PREVIOUS family's directory — where the next boot of that
+            // bundle loaded them as its own (the bundle-id guard that should
+            // have caught it is vacuous, BT-8).
+            char state_dir[sizeof(ezoo->bandit_save_path)];
+            EnsembleModelZoo_DeriveStateDir(ezoo, cfg.node_model_dir[i],
+                                             state_dir, sizeof(state_dir));
+            EnsembleModelZoo_SaveAllBanditState(ezoo, state_dir, "sharded", i);
         }
     }
 
