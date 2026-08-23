@@ -132,6 +132,7 @@ struct MLBuildContext {
     // perspective; semantics preserved (0 = no failure; non-zero = failure).
     int                 model_load_failed;            // read-only: BIT state at call time (0 = ok, 1 = load failed)
     int                 model_corrupt;                // v5.15.5.E.0.10 A6 (D-221) read-only: MODEL_CORRUPT bit (majority barrier-corrupt -> SHALT-the-node; distinct from load_failed)
+    int                 node_has_open_position;       // 2026-08-22 B-12 read-only: any position open on this node's slot(s) at rebuild time (threaded from the OMS bitmap at the ONE builder — Class-13: real value, never a constant). Gates the exit-arm predicts.
     uint64_t*           last_ml_critical_log_us;      // rate-limit gate for fall-through log
     double*             out_threshold;                // ml_buy_threshold at decision time
     double*             out_effective_threshold;      // post-damping threshold used
@@ -1379,17 +1380,13 @@ inline void ML_BuildParameters(
                 // ensembles also fall here (cold-start before _InitBandits).
                 // We still want per-arm predictions for G.8 reward records;
                 // run them inline.
-                for (int a = 0; a < ezoo->primary_count; ++a) {
-                    if (Model_IsLoaded(&ezoo->primary_handles[a])) {
-                        per_arm_preds[a] = Model_Predict(&ezoo->primary_handles[a],
-                                                          features, n);
-                    } else {
-                        per_arm_preds[a] = 0.5f;
-                    }
-                }
+                // 2026-08-22 (B-12 cold-start dedupe) — the ensemble call
+                // exports per-arm predictions itself now, so G.8 records +
+                // selection share ONE predict per arm (this path used to run
+                // a second full predict loop just to fill per_arm_preds).
                 pred_raw = (double)Model_Predict_Ensemble(
                     ezoo->primary_handles, ezoo->primary_count,
-                    features, n, &dominant_idx);
+                    features, n, &dominant_idx, per_arm_preds);
             }
             ezoo->last_predicted_horizon_idx = dominant_idx;
             // v5.10.0a.G.8 — record this prediction for later reward
@@ -1462,6 +1459,12 @@ inline void ML_BuildParameters(
     //   1. BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) = 1 (operator opt-in)
     //   2. ezoo->exit_predictor_count > 0 (models loaded)
     //   3. mctx->out_exit_prediction != nullptr (slow-path body wired)
+    //   4. node_has_open_position (2026-08-22 B-12) — the consumer discards
+    //      the prediction when flat (exit-submit gates on active_bitmap), so
+    //      the exit-arm predicts (~650µs at 1050-tree models) were pure waste
+    //      while flat. The exit_reward_ring pauses too: exit decisions only
+    //      exist in-position, so in-position samples ARE the Ridge/blend
+    //      history's relevant distribution.
     //
     // Reuses already-standardized features from the buy-side path (scaler
     // is shared across roles via sibling-scaler load-time check). Writes
@@ -1475,7 +1478,8 @@ inline void ML_BuildParameters(
         && ezoo_ex
         && ezoo_ex->exit_predictor_count > 0
         && mctx
-        && mctx->out_exit_prediction) {
+        && mctx->out_exit_prediction
+        && mctx->node_has_open_position) {
         // v5.14.1.E — collect per-handle predictions (used by both the
         // existing uniform/Ridge blend AND the exit_reward_ring populate
         // for Ridge correlation history).

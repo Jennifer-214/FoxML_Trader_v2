@@ -3055,6 +3055,19 @@ inline void EventLoop_RebuildOneCore(
             state->nodes[slot].last_exit_dominant_horizon = -1;
             ml_ctx.out_exit_prediction       = &state->nodes[slot].last_exit_prediction;
             ml_ctx.out_exit_dominant_horizon = &state->nodes[slot].last_exit_dominant_horizon;
+            // 2026-08-22 (B-12 exit-skip-when-flat) — thread the REAL position
+            // state (Class-13 sub-C: never substitute a constant). The exit-
+            // submit consumer discards the prediction when flat, so
+            // ML_BuildParameters skips the exit-arm predicts entirely on
+            // flat cycles. Same mask + partial_on source as that consumer
+            // (EngineCommon exit-submit block).
+            {
+                int oms_partial_on = BITMAP_IS_SET(state->oms->oms_state_flags,
+                                                   tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+                ml_ctx.node_has_open_position =
+                    (state->oms->portfolio.active_bitmap &
+                     BITMAP_NODE_SLOT_MASK(slot, oms_partial_on)) != 0;
+            }
             // v5.15.5.A.6 — buy-side per-horizon barrier observability sinks.
             // Reset per-cycle dispatch fields; shadow event counter stays
             // monotonic (don't reset across cycles).

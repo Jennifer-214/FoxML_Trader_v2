@@ -1083,22 +1083,37 @@ inline float Model_Predict_Ensemble(ModelHandle<F> *models,
                                       int count,
                                       const float *features,
                                       int num_features,
-                                      int *out_selected_idx = nullptr) {
+                                      int *out_selected_idx = nullptr,
+                                      float *out_per_arm_preds = nullptr) {
+    // out_per_arm_preds (2026-08-22, B-12 cold-start dedupe): optional
+    // per-arm export so callers needing the raw preds (G.8 reward records)
+    // don't run a SECOND predict pass. Convention matches the historical
+    // caller loop: unloaded arm -> 0.5f, loaded -> raw p (pre-NaN-skip).
+    // Default nullptr = all existing callers byte-unchanged (out-param
+    // only; no semantic default trap — a caller not wanting the export is
+    // correct with null, which is why this default is AR-20-acceptable).
     if (count <= 0) {
         if (out_selected_idx) *out_selected_idx = -1;
         return 0.0f;
     }
     if (count == 1) {
         if (out_selected_idx) *out_selected_idx = 0;
-        return Model_Predict(&models[0], features, num_features);
+        float p1 = Model_Predict(&models[0], features, num_features);
+        if (out_per_arm_preds)
+            out_per_arm_preds[0] = Model_IsLoaded(&models[0]) ? p1 : 0.5f;
+        return p1;
     }
 
     float best_pred = 0.0f;
     float best_conf = -1.0f;  // sentinel: "no valid prediction yet"
     int   best_idx = 0;
     for (int i = 0; i < count; ++i) {
-        if (!Model_IsLoaded(&models[i])) continue;
+        if (!Model_IsLoaded(&models[i])) {
+            if (out_per_arm_preds) out_per_arm_preds[i] = 0.5f;
+            continue;
+        }
         float p = Model_Predict(&models[i], features, num_features);
+        if (out_per_arm_preds) out_per_arm_preds[i] = p;
         if (std::isnan(p) || std::isinf(p)) continue;
         // Confidence = |p - 0.5| for binary (centered at neutral), or
         // |p| for regression (zero = no edge). Both metrics: higher
