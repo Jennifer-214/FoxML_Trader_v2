@@ -83,28 +83,62 @@ struct HistoricalTick {
 // [CODE]
 //======================================================================
 #define FOREACH_TARGET(X) \
-    X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0) \
-    X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0) \
-    X(FORWARD_PNL,        "forward_pnl",        "Forward P&L",        "Continuous: % return over N ticks",                  Label_ForwardPnl,        1) \
-    X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            4) \
-    X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0) \
-    X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0) \
-    X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0) \
-    X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3) \
+    X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0, TP_PCT) \
+    X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0, TP_PCT) \
+    X(FORWARD_PNL,        "forward_pnl",        "Forward P&L",        "Continuous: % return over N ticks",                  Label_ForwardPnl,        1, TP_UNUSED) \
+    X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            4, TP_UNUSED) \
+    X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0, TP_SIGMA_K) \
+    X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0, TP_UNUSED) \
+    X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0, TP_UNUSED) \
+    X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3, TP_PCT) \
     /* v5.14.5.A — cross-sectional targets (FoxML_Core port). Single-symbol */ \
     /*               mode = degenerate (returns raw return per Compute fn);   */ \
     /*               CS aggregation activates with multi-symbol (v5.16+).     */ \
-    X(CS_PERCENTILE_RANK,    "cs_percentile_rank",    "CS Percentile Rank",    "Per-timestamp rank/(N+1); SS-degenerate=raw return",       Label_CSPercentileRank,    1) \
-    X(CS_ZSCORE_ROBUST,      "cs_zscore_robust",      "CS Robust Z-Score",     "Per-timestamp (r-median)/(1.4826*MAD); SS-degenerate=raw", Label_CSZScoreRobust,      1) \
-    X(CS_VOLSCALED_DEMEANED, "cs_volscaled_demeaned", "CS Vol-scaled Demeaned","Per-timestamp (r/vol)-mean(r/vol); SS-degenerate=raw",     Label_CSVolScaledDemeaned, 1)
+    X(CS_PERCENTILE_RANK,    "cs_percentile_rank",    "CS Percentile Rank",    "Per-timestamp rank/(N+1); SS-degenerate=raw return",       Label_CSPercentileRank,    1, TP_UNUSED) \
+    X(CS_ZSCORE_ROBUST,      "cs_zscore_robust",      "CS Robust Z-Score",     "Per-timestamp (r-median)/(1.4826*MAD); SS-degenerate=raw", Label_CSZScoreRobust,      1, TP_UNUSED) \
+    X(CS_VOLSCALED_DEMEANED, "cs_volscaled_demeaned", "CS Vol-scaled Demeaned","Per-timestamp (r/vol)-mean(r/vol); SS-degenerate=raw",     Label_CSVolScaledDemeaned, 1, TP_UNUSED)
 
 // Auto-generated LABEL_* constants. Order matches FOREACH_TARGET.
 // Trailing LABEL_COUNT_AUTO acts as the count (one past the last value).
 enum {
-#define X(id_suffix, name, display, desc, fn, nc) LABEL_##id_suffix,
+#define X(id_suffix, name, display, desc, fn, nc, tpk) LABEL_##id_suffix,
     FOREACH_TARGET(X)
 #undef X
     LABEL_COUNT_AUTO
+};
+
+//----------------------------------------------------------------------
+// [SECTION]_[tp_kind — what the 5th label-fn argument MEANS]
+//----------------------------------------------------------------------
+// s5 (2026-08-23) — the `tp_kind` registry column exists because the 5th
+// parameter of a LabelFn is NOT one thing. Three different meanings share
+// that slot:
+//   TP_PCT      — a percent-of-price up-barrier: price*(1 + tp/100).
+//                 WIN_LOSS, BARRIER, PEAK_VALLEY_STABLE.
+//   TP_SIGMA_K  — a SIGMA MULTIPLIER: price*(1 + k*rolling_vol). VOL_BARRIER
+//                 names the same parameter `barrier_k` for exactly this reason
+//                 (LabelFunctions.hpp ~:205).
+//   TP_UNUSED   — the leaf ignores it outright (`(void)tp_pct;` or an unnamed
+//                 parameter). Seven of the eleven rows.
+//
+// WHY A COLUMN AND NOT AN if-CHAIN AT THE CONSUMER: a hardcoded label-name
+// list living in BacktestEngine.hpp is the Class-19 shape, and it cannot force
+// a NEW row to declare itself. As a column, a 12th FOREACH_TARGET row will not
+// COMPILE until its author states what its 5th argument means — the same
+// completeness discipline `num_classes` already carries. That is the whole
+// point: the defect this closes (a percent added to a multiplier) was invisible
+// precisely because nothing in the type system knew the units differed.
+//
+// NOT folded into label_registry_hash_compute() — the hash folds `name` and
+// `num_classes` only, so adding this column leaves LABEL_REGISTRY_HASH()
+// unchanged and every existing stamp keeps loading. Deliberate: the column
+// describes what a parameter ALWAYS meant; it does not change any label's
+// output. (A fee-bearing VOL_BARRIER run genuinely changes semantics, but that
+// combination was a bug, not a shipped behaviour worth preserving.)
+enum LabelTpKind {
+    TP_UNUSED = 0,   // leaf ignores the parameter
+    TP_PCT,          // percent-of-price barrier
+    TP_SIGMA_K,      // sigma multiplier (k * rolling_vol)
 };
 
 //----------------------------------------------------------------------
@@ -422,6 +456,9 @@ struct LabelDef {
     const char *description;
     LabelFn fn;
     int num_classes;
+    // s5 — what this leaf's 5th argument MEANS (percent barrier / sigma
+    // multiplier / ignored). See the tp_kind section comment above the enum.
+    int tp_kind;
 };
 //======================================================================
 // [END_CODE]
@@ -441,8 +478,8 @@ struct LabelDef {
 // reordering rows must happen by editing the X-macro above; this table
 // regenerates automatically. Eliminates the silent-divergence hazard
 // between LABEL_* constants, label_table rows, and dispatcher sites.
-#define X(id_suffix, name, display, desc, fn, nc) \
-    { LABEL_##id_suffix, name, display, desc, fn, nc },
+#define X(id_suffix, name, display, desc, fn, nc, tpk) \
+    { LABEL_##id_suffix, name, display, desc, fn, nc, tpk },
 static const LabelDef label_table[] = {
     FOREACH_TARGET(X)
 };
@@ -469,7 +506,10 @@ constexpr uint64_t LABEL_FNV_PRIME_64  = 0x100000001b3ULL;
 
 inline uint64_t label_registry_hash_compute() {
     uint64_t h = tt::LABEL_FNV_OFFSET_64;
-#define X(id_suffix, name, display, desc, fn, nc) \
+// s5: `tpk` intentionally NOT folded — see the tp_kind section comment. The
+// hash pins the target SET and its class shapes; adding a column that describes
+// a parameter's pre-existing meaning must not invalidate every stamp on disk.
+#define X(id_suffix, name, display, desc, fn, nc, tpk) \
     do { \
         for (const char* p = name; *p; ++p) \
             h = (h ^ (uint64_t)(uint8_t)*p) * tt::LABEL_FNV_PRIME_64; \
@@ -514,6 +554,31 @@ static inline int LabelType_IsRegression(int label_type) {
 
 static inline int LabelType_IsMulticlass(int label_type) {
     return LabelType_NumClasses(label_type) >= 2;
+}
+
+//----------------------------------------------------------------------
+// s5 — the ONE rule for "what TP barrier was this model actually trained
+// against". Both the label walk and the stamp population call THIS, so the
+// value a model learned and the value the engine later serves cannot drift.
+//
+// It exists because they DID drift: leaf-15 added the round-trip fee inside
+// Backtest_ComputeLabelsBatch, where it was a transient — the labels used
+// tp+fee while the stamp (and therefore the served bracket) recorded the raw
+// tp, so the engine served a bracket NARROWER than the model was trained to
+// predict. An M5 train-serve parity break, invisible because the effective
+// barrier was never a value anything could read.
+//
+// The fee is a correction to a PERCENT threshold, so it applies only to
+// TP_PCT leaves. Adding it to VOL_BARRIER's TP_SIGMA_K would be a unit error:
+// with the FoxML default k=0.5, a 0.2 fee silently produced k=0.7 — a 40%
+// wider vol barrier. TP_UNUSED leaves are unaffected either way, but routing
+// them through here makes that provable rather than accidental.
+static inline double Label_ResolveEffectiveTp(int label_type, double tp_pct,
+                                               double roundtrip_fee_pct) {
+    if (label_type < 0 || label_type >= LABEL_COUNT) return tp_pct;
+    if (label_table[label_type].tp_kind != TP_PCT)   return tp_pct;
+    if (!(roundtrip_fee_pct > 0.0))                  return tp_pct;
+    return tp_pct + roundtrip_fee_pct;
 }
 
 // Display name for the kind itself ("binary" / "regression" / "multiclass").

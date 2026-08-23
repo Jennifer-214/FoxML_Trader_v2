@@ -893,11 +893,18 @@ static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
         if (!rt[t].fn) rt[t].fn = Label_WinLoss;  // fallback (parity)
         // s5 leaf-15: the label's win threshold clears the round-trip cost —
         // TP-ONLY (long-only labels; the down barrier is a price-level stop).
-        // Applied HERE, the ONE chokepoint every label computation flows
-        // through, so per-horizon grids + single-target + WF/FV all inherit it.
-        double rt_fee = run_cfg->label_roundtrip_fee_pct > 0
-                          ? run_cfg->label_roundtrip_fee_pct : 0.0;
-        rt[t].tp  = (targets[t].tp_pct > 0 ? targets[t].tp_pct : 1.5) + rt_fee;
+        //
+        // s5-F12 CORRECTION (2026-08-23): the fee now goes through
+        // Label_ResolveEffectiveTp, the ONE rule the stamp path also calls.
+        // The first cut added it unconditionally right here, which was wrong
+        // twice: it added a PERCENT to VOL_BARRIER's SIGMA MULTIPLIER (0.5 +
+        // 0.2 = a 40% wider vol barrier), and it made the effective barrier a
+        // TRANSIENT that the stamp never saw — so the engine served a bracket
+        // narrower than the model was trained on.
+        rt[t].tp  = Label_ResolveEffectiveTp(
+                        targets[t].label_type,
+                        targets[t].tp_pct > 0 ? targets[t].tp_pct : 1.5,
+                        run_cfg->label_roundtrip_fee_pct);
         rt[t].sl  = targets[t].sl_pct > 0 ? targets[t].sl_pct : 1.0;
         rt[t].fwd = targets[t].forward_ticks > 0 ? targets[t].forward_ticks : 1000;
         rt[t].is_multiclass = LabelType_IsMulticlass(targets[t].label_type);

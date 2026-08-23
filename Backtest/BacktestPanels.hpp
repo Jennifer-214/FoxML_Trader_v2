@@ -4339,7 +4339,16 @@ static inline void mh_run_one_horizon_fv(
     fv->auto_stamp_format_version = 0;
     (void)snap_auto_stamp_enabled;  // kept in args for back-compat; not gating now
     fv->req_label_lookahead_ticks = horizon_ticks;
-    fv->req_label_tp_pct          = (double)tp_pct;
+    // s5-F12 — record the EFFECTIVE barrier, i.e. the one the labels were
+    // actually built against, not the raw operator input. Same resolver the
+    // label walk uses (Label_ResolveEffectiveTp), so train-time and stamp-time
+    // cannot disagree. Before this the stamp carried the raw tp while the
+    // labels carried tp+fee, and the served bracket inherited the stamp's
+    // value — an M5 train-serve parity break with no observable symptom
+    // (the fee is not in the stamp body either, so nothing could catch it).
+    fv->req_label_tp_pct          = Label_ResolveEffectiveTp(
+                                        label_type, (double)tp_pct,
+                                        local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
     fv->req_label_sl_pct          = (double)sl_pct;
     // v5.15.3.B.2 — PARITY-021 close. Grid identification plumbed from
     // multi-horizon worker through FullValidationResults → StampArgs.
