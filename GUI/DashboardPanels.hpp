@@ -2349,15 +2349,25 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         ImGui::Spacing();
         SectionHeader("PER-ENGINE SLOW-PATH WORK BREAKDOWN");
         ImGui::TextColored(FoxmlColors::comment,
-            "(per-section p50/p99 inside the slow-path cycle; per_node_slow only)");
+            "(per-section p50/p99 inside the slow-path cycle; per_node_slow only. "
+            "p50/p99 are the last 256 samples, NOT lifetime — the Avg/Max/LTp99 "
+            "columns above are lifetime. * = MLInfer is NESTED in Rebuild, so it "
+            "is excluded from the sum.)");
 
-        if (ImGui::BeginTable("##percore_breakdown", 11, tf)) {
+        if (ImGui::BeginTable("##percore_breakdown", 13, tf)) {
             ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 45);
             ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 35);
             ImGui::TableSetupColumn("Rolling p50", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Rolling p99", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Rebuild p50", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Rebuild p99", ImGuiTableColumnFlags_WidthFixed, 70);
+            // s5-F13 — ML_INFER, the 6th FOREACH_SP_SECTION row (landed
+            // 53b038f). It is NESTED inside REBUILD, so it is an attribution
+            // sub-bracket and deliberately NOT part of the Σ column below —
+            // adding it would double-count. This is the column that makes
+            // tree-count bloat a visible regression rather than a buried one.
+            ImGui::TableSetupColumn("MLInfer p50*", ImGuiTableColumnFlags_WidthFixed, 78);
+            ImGui::TableSetupColumn("MLInfer p99*", ImGuiTableColumnFlags_WidthFixed, 78);
             ImGui::TableSetupColumn("Push p50",  ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableSetupColumn("Push p99",  ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableSetupColumn("TimeExit",  ImGuiTableColumnFlags_WidthFixed, 60);
@@ -2378,23 +2388,31 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 uint8_t sid = pc->strategy_id_display;
                 ImGui::TextColored(FoxmlColors::primary, "%s",
                                    sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
-                // Section order in struct: 0=rebuild, 1=push, 2=time, 3=trail, 4=other
-                // Column display reorders for readability.
-                // v5.1.3: indices match SP_SECTION_* (0=ROLLING, 1=REBUILD,
-                // 2=PUSH, 3=TIME_EXIT, 4=TRAIL_SL).
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[0]));
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[0]));
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[1]));
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[1]));
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[2]));
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[2]));
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[3]));
-                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[4]));
-                double sum_p50 = pc->sp_breakdown_p50_ns[0] +
-                                 pc->sp_breakdown_p50_ns[1] +
-                                 pc->sp_breakdown_p50_ns[2] +
-                                 pc->sp_breakdown_p50_ns[3] +
-                                 pc->sp_breakdown_p50_ns[4];
+                // Indices are the FOREACH_SP_SECTION order: 0=ROLLING,
+                // 1=REBUILD, 2=PUSH, 3=TIME_EXIT, 4=TRAIL_SL, 5=ML_INFER.
+                // (s5-F13 removed a rotted pre-v5.1.3 ordering comment that had
+                // been contradicting the correct line beneath it.)
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[tt::SP_SECTION_ROLLING]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[tt::SP_SECTION_ROLLING]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[tt::SP_SECTION_REBUILD]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[tt::SP_SECTION_REBUILD]));
+                // s5-F13 — ML_INFER, previously measured but unpublished and
+                // unrendered. Nested inside REBUILD: shown for attribution,
+                // excluded from Σ.
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[tt::SP_SECTION_ML_INFER]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[tt::SP_SECTION_ML_INFER]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[tt::SP_SECTION_PUSH]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[tt::SP_SECTION_PUSH]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[tt::SP_SECTION_TIME_EXIT]));
+                ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[tt::SP_SECTION_TRAIL_SL]));
+                // Σ deliberately EXCLUDES ML_INFER — it is a sub-bracket of
+                // REBUILD, already counted there. Named by index rather than
+                // 0..4 so a future 7th section is a compile-visible decision.
+                double sum_p50 = pc->sp_breakdown_p50_ns[tt::SP_SECTION_ROLLING] +
+                                 pc->sp_breakdown_p50_ns[tt::SP_SECTION_REBUILD] +
+                                 pc->sp_breakdown_p50_ns[tt::SP_SECTION_PUSH] +
+                                 pc->sp_breakdown_p50_ns[tt::SP_SECTION_TIME_EXIT] +
+                                 pc->sp_breakdown_p50_ns[tt::SP_SECTION_TRAIL_SL];
                 ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(sum_p50));
             }
             ImGui::EndTable();

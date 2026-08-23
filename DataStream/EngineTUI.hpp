@@ -48,6 +48,7 @@
 #include <atomic>     // v5.11.3.B — TUISharedState seq counter
 
 #include "../CoreFrameworks/PortfolioController.hpp"
+#include "../CoreFrameworks/SpSectionRegistry.hpp"  // s5-F13 — SP_SECTION_COUNT sizes the sp_breakdown_* publish arrays (was a hardcoded 5)
 #include "../CoreFrameworks/SPSCRing.hpp"  // v5.0.3: SPSCRing_Depth for Q-depth display
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
@@ -1331,8 +1332,17 @@ struct TUISnapshot {
         uint8_t  sp_state;
         // v5.1.1 (slow-path work breakdown): per-section p50 in ns.
         // Sections: 0=rebuild, 1=push_params, 2=time_exit, 3=trail_sl, 4=other
-        double   sp_breakdown_p50_ns[5];
-        double   sp_breakdown_p99_ns[5];
+        // s5-F13 (2026-08-23) — SIZED FROM THE REGISTRY, was a hardcoded [5].
+        // FOREACH_SP_SECTION gained ML_INFER as its 6th row on 2026-08-22
+        // (53b038f) — the bracket added specifically to answer the "3.7ms
+        // measured vs ~1.25ms accounted" multiplicity gap — and these arrays
+        // did not follow. Its data was measured on every node every cycle and
+        // COULD NOT LEAVE THE ENGINE, so the panel that was supposed to answer
+        // the question could never show it. Class-58 (registry grew, hardcoded
+        // consumer blind). Deriving the extent makes the drift impossible
+        // rather than merely fixed once.
+        double   sp_breakdown_p50_ns[tt::SP_SECTION_COUNT];
+        double   sp_breakdown_p99_ns[tt::SP_SECTION_COUNT];
         // v5.10.0a.G.10 — ensemble (multi-horizon) visualization.
         // Populated by TUI snapshot when ensemble_handle is set; default
         // ensemble_active=0 keeps the GUI heatmap hidden for single-zoo
@@ -2020,7 +2030,9 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
         snap->per_node[i].sp_avg_ns  = ls.avg_ns;
         snap->per_node[i].sp_lifetime_p99_ns = ls.lifetime_p99_ns;
         // v5.1.1: per-section breakdown.
-        for (int s = 0; s < 5; ++s) {
+        // s5-F13: bound is the REGISTRY COUNT, was a hardcoded 5 that silently
+        // stopped publishing one row short the moment ML_INFER was appended.
+        for (int s = 0; s < tt::SP_SECTION_COUNT; ++s) {
             tt::NodeLatencySnapshot ss = tt::NodeLatencyStats_Snapshot(
                 &state->display_meta[i].slow_path_breakdown[s], tsc_ghz);
             snap->per_node[i].sp_breakdown_p50_ns[s] = ss.p50_ns;

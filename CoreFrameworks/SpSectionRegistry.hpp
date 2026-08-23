@@ -70,6 +70,18 @@ inline const char* SP_SECTION_DOC(int idx) {
 static_assert(SP_SECTION_COUNT >= 5,
               "FOREACH_SP_SECTION must keep at least the v5.1.3 set "
               "(ROLLING, REBUILD, PUSH, TIME_EXIT, TRAIL_SL).");
+// s5-F13 — WHY THE ASSERT ABOVE DID NOT SAVE US, recorded so the next reader
+// does not trust it for more than it says. It is a FLOOR (`>= 5`), so it stayed
+// green when ML_INFER made the count 6 while the TUISnapshot publish arrays
+// remained hardcoded `[5]`. The 6th section was measured on every node every
+// cycle and never published — a Class-51 vacuously-green guard sitting directly
+// on top of a Class-58 complement blindness.
+//
+// The real fix is not a tighter number here: it is that every consumer now
+// DERIVES its extent from SP_SECTION_COUNT (see TUISnapshot's
+// sp_breakdown_*_ns), so there is no second number left to disagree with this
+// one. A count assert can only pin what someone remembered to compare;
+// derivation removes the comparison.
 //======================================================================
 // [END_CODE]
 //======================================================================
