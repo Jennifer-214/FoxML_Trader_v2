@@ -34,7 +34,8 @@ namespace tt {
     X(REBUILD,   "EventLoop_RebuildOneCore: regime classify + strategy dispatch + gate compute (~5-30μs typical)") \
     X(PUSH,      "Seqlock push of pending_params to ExecutionCore (~100-500ns; single FPN_Binary copy + atomic)") \
     X(TIME_EXIT, "EventLoop_TimeExitOneCore (~100-300ns)")                                          \
-    X(TRAIL_SL,  "EventLoop_TrailingSLRatchetOneCore (~100-300ns)")
+    X(TRAIL_SL,  "EventLoop_TrailingSLRatchetOneCore (~100-300ns)")                                  \
+    X(ML_INFER,  "ML strategy dispatch incl. model inference — NESTED inside REBUILD (attribution sub-bracket, NOT additive with it); cost law ~550ns/boosting-round (3-class) + ~10us fixed per predict, x arms (2026-08-22); the bracket that makes tree-count bloat a visible regression instead of a buried surprise")
 
 //------------------------------------------------------------------------------
 // [SECTION]_[Auto-generated enum values + count sentinel.]

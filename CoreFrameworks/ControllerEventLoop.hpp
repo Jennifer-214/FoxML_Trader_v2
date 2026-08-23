@@ -1371,13 +1371,13 @@ static inline int Sharded_LegSlot(int node_id, int leg, int partial_exit_enabled
 // c currently in any position?" or "what portfolio slots does this
 // core occupy?".
 static inline uint16_t Sharded_NodeSlotMask(int node_id, int partial_exit_enabled) {
+    // 2026-08-22 — the mask SHAPE now delegates to BITMAP_NODE_SLOT_MASK
+    // (MemHeaders/BitmapMacros.hpp), the raw-shape SSoT extracted from 12
+    // open-coded copies; this fn stays the BOUNDS-CHECKED wrapper (the raw
+    // macro is deliberately unchecked — its historical sites are loop-bounded).
     if (node_id < 0 || node_id >= MAX_PORTFOLIO_POSITIONS) return 0;
-    if (partial_exit_enabled) {
-        int sa = node_id * 2, sb = node_id * 2 + 1;
-        if (sb >= MAX_PORTFOLIO_POSITIONS) return 0;
-        return (uint16_t)((1u << sa) | (1u << sb));
-    }
-    return (uint16_t)(1u << node_id);
+    if (partial_exit_enabled && (node_id * 2 + 1) >= MAX_PORTFOLIO_POSITIONS) return 0;
+    return BITMAP_NODE_SLOT_MASK(node_id, partial_exit_enabled);
 }
 
 // Inverse of Sharded_LegSlot: the logical node that owns portfolio slot `slot`.
@@ -2518,8 +2518,10 @@ inline int EventLoop_RebuildAllParameters(
 //
 // runs on the controller core, slow path. typical cadence is once per ~3 sim
 // seconds aligned with the existing PortfolioController slow path. cost is
-// ~1µs per core (one Strategy_BuildParameters call) so 16 cores → ~16µs per
-// rebuild. that's well inside the slow-path budget.
+// dominated by ML nodes' model inference when present — ~550ns/boosting-round
+// (3-class) + ~10µs fixed PER predict call PER arm (measured 2026-08-22; a
+// 1050-tree 3-arm ensemble ≈ 650µs+, an H8 concern tracked under the
+// SP_SECTION_ML_INFER bracket) — while non-ML strategy dispatch stays ~1µs/core.
 //
 // returns the number of cores that had their pending_params rebuilt. cores
 // with strategy_id == STRATEGY_NONE are skipped (they get a zeroed pack from
@@ -3132,6 +3134,12 @@ inline void EventLoop_RebuildOneCore(
         // resolved_cfg already merged per-core overrides via ResolveForCore at
         // slow-path entry; its .nodes[slot] reflects the post-resolve view.
         // poll_interval pre-resolved from global cfg as scalar arg.
+        // 2026-08-22 (latency deep-dive #4) — ML_INFER attribution bracket.
+        // Samples ONLY when dispatch_ctx is wired (ML nodes); nested inside
+        // the caller's REBUILD bracket by design (sub-attribution, not
+        // additive). The per-node branch is effectively static (a node's
+        // strategy is fixed between swaps) — predicted after the first cycle.
+        uint64_t _ml_infer_t0 = dispatch_ctx ? __rdtsc() : 0;
         Strategy_BuildParameters(
             effective_strategy_id,
             rolling,
@@ -3151,6 +3159,12 @@ inline void EventLoop_RebuildOneCore(
             (int)config->poll_interval   // WIP2c.2 — caller-resolved global; per-node consumer
                                           // reads tick→time conversion via this scalar arg.
         );
+        if (dispatch_ctx) {
+            uint64_t _ml_infer_t1 = __rdtsc();
+            NodeLatencyStats_Sample(
+                &state->display_meta[slot].slow_path_breakdown[tt::SP_SECTION_ML_INFER],
+                _ml_infer_t1 - _ml_infer_t0, _ml_infer_t1);
+        }
 
         // v4.0.3 D9: clear ratchet_sl when no position active on this core,
         // so stale trailing state from previous trade doesn't leak into the

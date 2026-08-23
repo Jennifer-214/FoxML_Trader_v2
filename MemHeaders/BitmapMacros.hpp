@@ -210,6 +210,9 @@
 // strategy-swap gates / rebuild ratchet + TP-retune sites) — the mask
 // SHAPE is the SSoT here; the partial_on SOURCE stays per-site (cfg
 // lifecycle flag at cfg-time sites, oms_state_flags at runtime sites).
+// DELIBERATELY UNCHECKED (historical sites are loop-bounded); the
+// bounds-checked wrapper is Sharded_NodeSlotMask (ControllerEventLoop.hpp),
+// which delegates its shape here — one impl, two safety tiers.
 #define BITMAP_NODE_SLOT_MASK(node, partial_on)                             \
     ((partial_on)                                                           \
         ? (uint16_t)((1u << ((node) * 2)) | (1u << ((node) * 2 + 1)))       \
