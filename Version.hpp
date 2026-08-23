@@ -12,7 +12,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.1"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.2.D"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -24,6 +24,12 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// .F.4d.1.E.1.2.D (v5.15.5.F.4d.1.E.1.2.D) — training + model-artifact surface (the E.1.2.C+D arc):
+//   D-431 NESTED model layout (ModelPathSchema.hpp grammar SSoT + loud flat-form detector + migrator),
+//   mh trainer = the ONE producer (D-d deleted Save Run's twin), batched K-target label pass,
+//   XGBHyperparams_FromRaw value-mapper SSoT, per-horizon expected.cfg + summary_{entry,exit},
+//   parallel horizon training default (mh_max_threads=4), H21 path-form ledger category (blessed),
+//   B-12 inference-latency levers measured (FromDense parity-proven 1.0x — traversal-bound).
 // .F.4d.1.E.1.1 (v5.15.5.F.4d.1.E.1.1) — Core→Node rename + cfg-key CLEAN-BREAK + single_core LIVE
 // deletion + the ③ config-compiler capital/feature-cfg VALIDATION arc. SECOND leaf of the decomposed
 // `.E.1` foundation (D-225 N=7: E.1.0 guards → **E.1.1 rename/clean-break** → E.1.2 SoA relayout → …
