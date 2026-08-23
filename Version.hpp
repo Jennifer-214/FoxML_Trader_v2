@@ -12,7 +12,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.2.D"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.2.D.1"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -24,6 +24,29 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// .F.4d.1.E.1.2.D.1 (v5.15.5.F.4d.1.E.1.2.D.1) — LABEL-SEMANTICS BOUNDARY + bandit non-finite hardening.
+//   ⚠️ STAMP-VISIBLE ON PURPOSE: models trained before this string are FEE-BLIND on the take-profit
+//   barrier; models trained at or after it are FEE-AWARE. The two are NOT interchangeable and the
+//   engine_version in the stamp is the ONLY way to tell them apart after the fact — hence a bump
+//   rather than folding into .D (which would have minted two incompatible label semantics under one
+//   identical stamp string; the D-431 nested-layout arc has no such divide).
+//   - Label TP is now fee-resolved through ONE seam, Label_ResolveEffectiveTp(), consumed by BOTH the
+//     label pass and the stamp emit (M5 train-serve parity; the pre-fix code had labels on tp+fee and
+//     the stamp recording raw tp). Fee applies ONLY where the barrier is a PERCENT — 7th
+//     FOREACH_TARGET column tp_kind {TP_UNUSED, TP_PCT, TP_SIGMA_K} gates it, so VOL_BARRIER's
+//     sigma-multiplier is no longer silently widened 0.5 -> 0.7 by a percent addend.
+//     tp_kind is deliberately NOT folded into label_registry_hash_compute() (H21: it partitions
+//     existing rows, it does not renumber or reuse one).
+//   - Bandit non-finite hardening (Class 60 — a comparison guard that silently exempts NaN):
+//     exp() exponent clamped to BANDIT_UPDATE_EXPO_LIMIT before the weight multiply, so the explosion
+//     guard can no longer mint NaN out of its own inf/inf renormalization; shared pre-fork finiteness
+//     gate keeps the AVX-512 and scalar paths bytewise-identical on NaN/+-Inf (H10 — _mm512_max_pd
+//     launders a NaN operand, the scalar compare does not); parse_double_array reports non-finite
+//     through a REQUIRED out-param (no default arg) and Bandit_LoadJSON rejects whole-file, restoring
+//     true uniform rather than a partially-applied bundle.
+//   - Trade-log v4 attribution: slot_id + leg columns, true node id derived via BITMAP_SLOT_NODE.
+//   - SP_SECTION arrays sized off the registry (was a hardcoded [5] with a >=5 floor static_assert),
+//     which is what finally lets SP_SECTION_ML_INFER's p50/p99 leave the engine at all.
 // .F.4d.1.E.1.2.D (v5.15.5.F.4d.1.E.1.2.D) — training + model-artifact surface (the E.1.2.C+D arc):
 //   D-431 NESTED model layout (ModelPathSchema.hpp grammar SSoT + loud flat-form detector + migrator),
 //   mh trainer = the ONE producer (D-d deleted Save Run's twin), batched K-target label pass,
