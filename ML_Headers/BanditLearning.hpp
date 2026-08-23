@@ -979,9 +979,34 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
         const char* end = strchr(p, '"');
         if (!end) { return 0; }
         size_t sha_len = (size_t)(end - p);
-        if (sha_len != strlen(expected_model_bundle_sha256_hex) ||
-            memcmp(p, expected_model_bundle_sha256_hex, sha_len) != 0) {
-            
+        // s5 BT-8 — LEGACY ACCEPT: a saved id of all zeros means the file was
+        // written before training_fingerprint had any producer, when every
+        // bundle id was 64 zeros and this check passed vacuously for everything.
+        //
+        // Without this rule, making the gate real would ORPHAN EVERY EXISTING
+        // STATE FILE on the first boot after the fix — including HFT_4's live
+        // learning — with nothing but one stderr line to explain it. That is a
+        // silent mass reset landing at exactly the moment an operator is least
+        // expecting it, and it would look like the fix caused the loss.
+        //
+        // So: accept the legacy file, and let the next periodic/shutdown save
+        // rewrite it with the real id. From that point the gate is genuinely
+        // armed for that bundle. A file whose id is real but DIFFERENT is still
+        // rejected — that is the protection this whole fix exists to restore.
+        int saved_is_legacy_zeros = 1;
+        for (size_t i = 0; i < sha_len; ++i) {
+            if (p[i] != '0') { saved_is_legacy_zeros = 0; break; }
+        }
+        if (saved_is_legacy_zeros && sha_len > 0) {
+            fprintf(stderr,
+                    "[bandit] %s: pre-fingerprint state file (all-zero bundle id) — "
+                    "accepted; the next save stamps the real id and the swap guard arms\n",
+                    path);
+        } else if (sha_len != strlen(expected_model_bundle_sha256_hex) ||
+                   memcmp(p, expected_model_bundle_sha256_hex, sha_len) != 0) {
+            fprintf(stderr,
+                    "[bandit] %s: REJECTED — bundle id mismatch (state was learned "
+                    "against a DIFFERENT model set); starting uniform\n", path);
             return 0;
         }
     }

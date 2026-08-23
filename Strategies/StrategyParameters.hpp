@@ -1168,11 +1168,12 @@ inline void ML_BuildParameters(
             // NOTE it gates SELECT only, not the reward UPDATE. That is deliberate:
             // with the flag off the pools keep learning from real outcomes but do not
             // drive decisions, so flipping it on later starts from warm posteriors
-            // rather than uniform. That is precisely the "shadow learning" idea the
-            // codebase already names in MASK_BANDIT_SHADOW_LEARNING
-            // (SlowPathGateRegistry.hpp:80) — a gate that currently has zero readers
-            // and is a candidate to either express this behaviour explicitly or be
-            // tombstoned.
+            // rather than uniform. That is "shadow learning", and it is expressed
+            // structurally by BANDIT_EXP3_UPDATE_MASK / BANDIT_THOMPSON_UPDATE_MASK
+            // driving the update sinks (BanditAlgorithmRegistry.hpp). The gate that
+            // used to NAME it (MASK_BANDIT_SHADOW_LEARNING) was deleted at s5/BT-5 —
+            // it was recomputed every cycle and read by nobody, and a second reader
+            // would have meant two mechanisms for one truth.
             if (use_weighted && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
                 BITMAP_IS_SET(node_cfg->ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED) &&
                 ezoo->primary_count >= 2) {

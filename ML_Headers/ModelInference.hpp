@@ -1540,6 +1540,12 @@ struct ModelStampResult {
     // === Runtime-only fields (NOT in registry) ===
     int      valid;             // 1 / 0 / -1 per above
     char     reason[256];       // human-readable failure reason
+    // s5 BT-8 — the stamp's model_sha256, surfaced instead of staying a local.
+    // It is already VERIFIED against the file's actual hash below (a mismatch
+    // fails the stamp outright), so by the time a caller sees it, it is a
+    // content identity for these exact model bytes. Empty for a stamp that
+    // lacks the key. NOT a new fact — just one that stops being thrown away.
+    char     model_sha256[80];
     int      model_format_version;
     double   generalization_gap;
     double   gap_threshold;
@@ -2042,6 +2048,14 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             "model file hash differs from stamp: actual=%.16s... stamp=%.16s...",
             actual_sha, model_sha);
         return r;
+    }
+    // s5 BT-8 — surface the (now file-verified) content hash to the caller.
+    // Copied AFTER the equality check so a result carrying a sha is one whose
+    // sha provably matches the bytes on disk.
+    {
+        size_t sl = strnlen(model_sha, sizeof(r.model_sha256) - 1);
+        memcpy(r.model_sha256, model_sha, sl);
+        r.model_sha256[sl] = '\0';
     }
 
     // 4. Signature verify (HMAC-SHA256 over canonical body, base64 or hex sig)

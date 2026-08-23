@@ -138,8 +138,11 @@ FOREACH_BANDIT_ALGORITHM(_BANDIT_STATE_NONDEAD_ASSERT)
 // the respective algorithm's posterior on reward attribution.
 //
 // Consumers:
-//   - `SlowPathGateRegistry.hpp` THOMPSON_ACTIVE / BANDIT_SHADOW_LEARNING gate predicates (§ I) —
-//     `(MASK >> bandit_algorithm) & 1u` for branchless metadata-driven gating
+//   - `SlowPathGateRegistry.hpp` THOMPSON_ACTIVE gate predicate (§ I) —
+//     `(MASK >> bandit_algorithm) & 1u` for branchless metadata-driven gating.
+//     (The sibling BANDIT_SHADOW_LEARNING gate was DELETED at s5/BT-5: it had
+//     zero readers, and "both algos learning" is already expressed by these two
+//     masks driving the update sinks — one truth, one mechanism.)
 //   - `bandit_dispatch_table.hpp` `?:` chain auto-derives leaf reward fn per algorithm row from
 //     (exp3_up, thompson_up) bits — these masks are an alternative consumer (slow-path predicate
 //     shortcut vs full dispatch-table indirection)

@@ -75,11 +75,21 @@ namespace tt {
     X(PER_NODE,    THOMPSON_ACTIVE,                                                                  \
       (((uint8_t)BANDIT_THOMPSON_UPDATE_MASK >> (_gate_cfg).bandit_algorithm) & 1u),                 \
       "Thompson posterior is being updated for the current bandit_algorithm (any state with thompson_up=1)") \
-    /* v5.15.5.F.4d — RENAMED from BANDIT_BOTH_ACTIVE. Semantic: BOTH algos learning from rewards.  */ \
-    /* True for any state where exp3_up=1 AND thompson_up=1 (cfg=2/3/4 post-.F.4d expansion).        */ \
-    X(PER_NODE,    BANDIT_SHADOW_LEARNING,                                                           \
-      ((((uint8_t)BANDIT_EXP3_UPDATE_MASK & (uint8_t)BANDIT_THOMPSON_UPDATE_MASK) >> (_gate_cfg).bandit_algorithm) & 1u), \
-      "Both Exp3 + Thompson learning from rewards this cycle (any algo with exp3_up=1 AND thompson_up=1)") \
+    /* s5 BT-5 (2026-08-23) — BANDIT_SHADOW_LEARNING (né BANDIT_BOTH_ACTIVE) DELETED, not          */ \
+    /* tombstoned. It was computed into every per-node gate cache every cycle and read by NOBODY:  */ \
+    /* the only other mentions tree-wide were prose. The BEHAVIOUR it named is real and works, but */ \
+    /* it is expressed structurally elsewhere — BANDIT_EXP3_UPDATE_MASK / BANDIT_THOMPSON_UPDATE_  */ \
+    /* MASK drive the update sinks directly (BanditAlgorithmRegistry.hpp) — so wiring a second     */ \
+    /* reader would create TWO mechanisms for one truth. Its own landing commit (5d45ecc) already  */ \
+    /* called it "a gate with zero readers … a candidate to either express this behaviour          */ \
+    /* explicitly or be tombstoned".                                                                */ \
+    /* WHY DELETE AND NOT H21-TOMBSTONE: H21 governs PERSISTENCE/WIRE-visible identifiers. This bit */ \
+    /* is neither — gate_state.flags is never bulk-persisted (verified: zero hits in ShardedPersist */ \
+    /* + ShardedSnapshotPersist), it is absent from the H21 identifier ledger, and the snapshot     */ \
+    /* bits derived from gates are read BY NAME, not by index. The enum is positional, so this      */ \
+    /* deletion renumbers the gates below it — safe precisely because no persisted or wire meaning  */ \
+    /* attaches to the index. Tombstoning an unpersisted recomputed bit would be cargo-culting the  */ \
+    /* invariant rather than applying it.                                                           */ \
     /* === ENGINE_WIDE — checked in engine-wide outer / function-entry; uses global cfg === */     \
     /* v5.12.2.B — lazy slow-path rebuild predicate (function-entry of EventLoop_RebuildOneCore) */ \
     X(ENGINE_WIDE, LAZY_REBUILD_ACTIVE,                                                              \

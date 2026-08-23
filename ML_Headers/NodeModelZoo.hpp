@@ -394,6 +394,33 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // for handle/result copy at the same surface AUTOPOPULATE closed
         // for emit. Deferred from v5.15.0 to keep .A bounded; ~30 LOC
         // new infrastructure when triggered.
+        // s5 BT-8 — populate training_fingerprint from the stamp's VERIFIED
+        // model_sha256 when the artifact carries no `foxml_fingerprint` booster
+        // attribute.
+        //
+        // WHY: the bundle-id gate (EnsembleModelZoo_ComputeBundleId) concatenates
+        // the first 8 hex chars of each primary handle's training_fingerprint.
+        // That field's ONLY writer is the booster attribute — and NOTHING in this
+        // tree ever calls XGBoosterSetAttr, so every deployed handle's fingerprint
+        // was empty, every bundle id was 64 zeros, expected == saved == zeros, and
+        // the check documented as catching "model-swap-without-clearing-bandit-
+        // state" passed VACUOUSLY for every model. n_arms was the only real guard,
+        // and every family here is 3-arm.
+        //
+        // model_sha256 is the right source: it identifies the model BYTES, it is
+        // already verified against the file above, and it changes exactly when the
+        // model changes. Deliberately NOT any cfg-derived stamp field — those move
+        // for reasons unrelated to model identity, which would turn every re-stamp
+        // into a silent state reset.
+        //
+        // The booster attribute still WINS when present (Model_Load sets it before
+        // this block): a real training fingerprint carries more provenance than a
+        // content hash. This is the fallback that makes the gate non-vacuous today.
+        if (handle->training_fingerprint[0] == '\0' && sr.model_sha256[0] != '\0') {
+            strncpy(handle->training_fingerprint, sr.model_sha256,
+                    sizeof(handle->training_fingerprint) - 1);
+            handle->training_fingerprint[sizeof(handle->training_fingerprint) - 1] = '\0';
+        }
         if (STAMP_HAS(sr, training_poll_interval)) {
             handle->training_poll_interval = sr.training_poll_interval;
             STAMP_SET(*handle, training_poll_interval);
