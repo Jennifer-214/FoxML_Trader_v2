@@ -3166,6 +3166,24 @@ inline void EventLoop_RebuildOneCore(
                 _ml_infer_t1 - _ml_infer_t0, _ml_infer_t1);
         }
 
+        // 2026-08-22 — SHALT_WARMING attribution (no-signal-investigation #6).
+        // During warmup every strategy runs starved and lands in the
+        // NO_SIGNAL catch-all — indistinguishable from "model ran and
+        // declined", which is exactly the ambiguity that mis-routed the
+        // 2026-08-22 investigation. Upgrade ONLY the catch-all (a specific
+        // code like FEE_FLOOR/RECOVERY survives — more actionable than the
+        // blanket warmup fact). Producer-side write BELOW the dispatcher,
+        // consistent with the D-421 reset-before-producer ordering (the
+        // reset stays above the dispatch; this is a refining producer).
+        {
+            int _wmin = (int)config->min_warmup_samples;
+            if (_wmin <= 0) _wmin = 64;  // engine default (matches the warmup-log + ShardedSnapshot fallbacks)
+            if (state->nodes[slot].strategy_halt_reason == SHALT_NO_SIGNAL
+                && rolling->count < _wmin) {
+                state->nodes[slot].strategy_halt_reason = SHALT_WARMING;
+            }
+        }
+
         // v4.0.3 D9: clear ratchet_sl when no position active on this core,
         // so stale trailing state from previous trade doesn't leak into the
         // next entry. Engine slow-path code below SETS ratchet_sl when a
