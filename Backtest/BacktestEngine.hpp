@@ -1037,7 +1037,7 @@ static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
     if (num_targets > 1) {
         for (int t = 0; t < num_targets; t++) {
             fprintf(stderr, "[backtest] batch target %d/%d: computed %d labels "
-                    "(type=%d, tp=%.1f%%, sl=%.1f%%, fwd=%d) — NaN/Inf: %u total, "
+                    "(type=%d, tp=%.3f%%, sl=%.3f%%, fwd=%d) — NaN/Inf: %u total, "
                     "%u dropped\n",
                     t + 1, num_targets, sample_cursor, targets[t].label_type,
                     rt[t].tp, rt[t].sl, rt[t].fwd,
@@ -1090,7 +1090,10 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     results->stats.nan_labels_dropped += t.nan_dropped;
     double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
     double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
-    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)",
+    // s5 rider (2026-08-23, operator find): %.1f rounded 0.35f (0.34999… in
+    // binary32) down to "0.3" — read as truncation, wasn't. %.3f matches the
+    // multi-horizon collect emit (BacktestPanels ~:533). Display-only.
+    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.3f%%, sl=%.3f%%)",
             labeled, run_cfg->label_type, tp, sl);
     if (results->stats.nan_labels_total > 0) {
         fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",

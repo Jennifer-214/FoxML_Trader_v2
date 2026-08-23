@@ -786,7 +786,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
-    ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol);
+    // s5-1b: partials mode threaded in so the log derives TRUE node + leg from
+    // the slot-keyed event.node_id (BITMAP_SLOT_NODE) for truthful attribution.
+    ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol, partial_exit_enabled);
     oms.trade_log = &g_sharded_trade_log;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer wire-to-real.
     // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md. Default = noop;

@@ -218,6 +218,15 @@
         ? (uint16_t)((1u << ((node) * 2)) | (1u << ((node) * 2 + 1)))       \
         : (uint16_t)(1u << (node)))
 
+// Inverse direction — the logical node that owns portfolio slot `slot`.
+// partial_on ∈ {0,1} IS the shift count (legs A/B at 2c/2c+1 → node c under
+// partials; identity in single-slot mode — the D-294 lesson: an UNGATED >>1
+// halved the node in single mode). Raw sibling of BITMAP_NODE_SLOT_MASK above
+// (one SSoT family, two directions); the canonical checked accessor is
+// Sharded_SlotNode (ControllerEventLoop.hpp), which delegates its shape here
+// — same two-tier split as Sharded_NodeSlotMask.
+#define BITMAP_SLOT_NODE(slot, partial_on) ((slot) >> (uint32_t)(partial_on))  // SLOT_DERIVE_OK: the raw SSoT shape (D-296)
+
 //----------------------------------------------------------------------
 // [MACRO]_[MBS_*]
 // [TAG]_[[ENGINE] [BITMAP_PACKED] [CONCURRENCY]]

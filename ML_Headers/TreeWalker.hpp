@@ -32,6 +32,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <charconv>   // s5-1b determinism-net fix — from_chars for base_score (locale-free by construction)
 #include "simdjson.h"
 #include "../Limits.hpp"
 
@@ -287,11 +288,16 @@ inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
             if (is_vec) ++p;
             int i = 0;
             while (p < end && i < WALKER_MAX_CLASSES) {
-                char* nxt = nullptr;
-                float v = strtof(p, &nxt);
-                if (nxt == p) break;                      // no progress -> unparseable tail
+                // s5-1b determinism-net fix: the locale-sensitive C float parse was
+                // replaced by the std::from_chars float overload — locale-free BY
+                // CONSTRUCTION and exact single-precision (no double-rounding vs a
+                // via-double parse; the leaf-3 parity oracle pins these bytes
+                // against XGBoosterPredict).
+                float v = 0.0f;
+                auto fc = std::from_chars(p, end, v);
+                if (fc.ec != std::errc() || fc.ptr == p) break;  // no progress -> unparseable tail
                 out->base_score[i++] = v;
-                p = nxt;
+                p = fc.ptr;
                 while (p < end && (*p == ',' || *p == ' ')) ++p;
                 if (p < end && *p == ']') { break; }
                 if (!is_vec) break;                       // scalar form: one value only

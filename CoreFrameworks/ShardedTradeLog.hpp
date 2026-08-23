@@ -51,6 +51,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../Limits.hpp"             // v5.15.5.C.3 Phase 5.B — MAX_EXECUTION_NODES for per_node_files[]
+#include "../MemHeaders/BitmapMacros.hpp"  // s5-1b — BITMAP_SLOT_NODE (slot→node derive; truthful attribution)
 #include "TradeEvent.hpp"
 #include "TradeLogColRegistry.hpp"  // v5.14.10.F — FOREACH_TRADE_LOG_COL registry (closes /merge-scan N2 for trade log)
 #include "../Strategies/StrategyInterface.hpp"  // v5.15.5.C.3 Phase 5.A — REGIME_INFO[] lookup for regime_name CSV column
@@ -72,20 +73,28 @@ namespace tt {
 // [CODE]
 //======================================================================
 struct ShardedTradeLog {
-    FILE*    file;                                       // aggregate: logging/SYMBOL_order_history.csv (GUI/TradeReader reads this)
+    FILE*    file;                                       // aggregate: logging/SYMBOL_order_history.csv (GUI/TradeHistoryPanel reads this)
     uint64_t row_count;          // total rows written this session
     uint64_t writes_truncated;   // snprintf truncations (should always be 0)
+    // s5-1b (2026-08-23) — boot-time partials mode, set at Init. event.node_id
+    // carries the OMS portfolio SLOT by engine contract (OnEvent indexes
+    // nodes[event.node_id]); the Record fns derive the TRUE node via
+    // BITMAP_SLOT_NODE(slot, this) for col 1 + mirror routing, and emit
+    // slot_id/leg as appended columns.
+    int      partial_exit_enabled;
     // v4.7.18: cache the symbol from Init so Rotate() can rebuild the
     // filename without forcing callers to thread bcfg through every
     // call site. Empty string before first Init.
     char     symbol[32];
-    // v5.15.5.C.3 Phase 5.B — hybrid per-core trade-log mirror. Each fill is
-    // written to BOTH the aggregate `file` (above; preserves GUI / TradeReader
-    // backward compat) AND `per_node_files[event.node_id]` (per-core CSV;
-    // enables per-core archive flow + future external consumers without
-    // breaking the aggregate-reader contract).
+    // v5.15.5.C.3 Phase 5.B — hybrid per-node trade-log mirror. Each fill is
+    // written to BOTH the aggregate `file` (above; preserves the GUI
+    // TradeHistoryPanel positional-parse contract) AND `per_node_files[node]`
+    // where node = BITMAP_SLOT_NODE(event.node_id, partial_exit_enabled)
+    // (s5-1b: mirrors route by the TRUE node — both legs of node N land in
+    // node N's file; pre-s5-1b they routed by the raw slot value, so the
+    // "node_2" file held node 1's leg-A rows).
     //
-    // Filename pattern: logging/SYMBOL_core_<N>_order_history.csv (N = 0..MAX_EXECUTION_NODES-1)
+    // Filename pattern: logging/SYMBOL_node_<N>_order_history.csv (N = 0..MAX_EXECUTION_NODES-1)
     //
     // Per-fill cost: 2× fwrite (aggregate + per_node); cost negligible
     // (trades are rare events at strategy fire rate). The per-core file count
@@ -97,6 +106,9 @@ struct ShardedTradeLog {
     // follow-up if/when TradeReader needs to surface per-core tabs.
     FILE*    per_node_files[MAX_EXECUTION_NODES];
 };
+// s5-1b — compile-pinned (the headless layout emitter can't refresh new fields;
+// the assert is the size oracle the [SIZE] tag cites).
+static_assert(sizeof(ShardedTradeLog) == 192, "ShardedTradeLog layout drifted — update the [SIZE] tag");
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -108,8 +120,8 @@ struct ShardedTradeLog {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[184B]
+// [UPDATED]_[2026-08-23]
+// [SIZE]_[192B]   (compile-pinned by the static_assert beside the struct — the layout emitter cannot run for this env; the assert is the oracle)
 // [ALIGN]_[8]
 // [CACHE_LINES]_[3]
 // [STRADDLE]_[none]
@@ -203,10 +215,13 @@ inline void ShardedTradeLog_WriteRow(ShardedTradeLog* log, int node_id,
 //======================================================================
 // [CODE]
 //======================================================================
-inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
+inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol,
+                                 int partial_exit_enabled) {
     log->file = nullptr;
     log->row_count = 0;
     log->writes_truncated = 0;
+    // s5-1b — normalize to {0,1}: the value IS the shift count in BITMAP_SLOT_NODE.
+    log->partial_exit_enabled = partial_exit_enabled ? 1 : 0;
     // v5.15.5.C.3 Phase 5.B — pre-zero per-core file array. Init walks 0..N-1
     // below; failure on any one is non-fatal (we log + continue without
     // that core's per-core mirror; aggregate file still serves the trade log).
@@ -217,7 +232,7 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
     log->symbol[sizeof(log->symbol) - 1] = '\0';
 
     // Build filename: logging/SYMBOL_order_history.csv
-    // matches the path the GUI's TradeReader expects
+    // matches the path the GUI's TradeHistoryPanel reads
     char filename[256];
     int n = snprintf(filename, sizeof(filename),
                      "logging/%s_order_history.csv", symbol);
@@ -248,7 +263,8 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
         // the column names. Tools that read this file should treat the leading
         // '#' line as a version sentinel.
         fprintf(log->file,
-            "# v3 sharded engine — rows are in arrival order; sort by timestamp_us for chronological view\n");
+            "# v4 sharded engine — rows in arrival order; sort by timestamp_us for chronological view. "
+            "v4 (2026-08-23): node_id = the TRUE node (rows under a v3 header carried the SLOT there); slot_id,leg appended\n");
         // v5.14.10.F — column header via FOREACH_TRADE_LOG_COL registry walk.
         // Byte-identical to pre-refactor literal (operator-parser compat).
         TradeLog_EmitHeader(log->file);
@@ -274,7 +290,7 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
         setvbuf(log->per_node_files[c], nullptr, _IOLBF, 0);
         if (!has_content_pc) {
             fprintf(log->per_node_files[c],
-                "# v3 sharded engine (per-core mirror; core=%d) — rows in arrival order; "
+                "# v4 sharded engine (per-node mirror; node=%d — both legs) — rows in arrival order; "
                 "same column shape as aggregate logging/%s_order_history.csv\n",
                 c, symbol);
             TradeLog_EmitHeader(log->per_node_files[c]);
@@ -288,9 +304,11 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// Open logging/SYMBOL_sharded_order_history.csv in append mode. Writes the v3
-// header row only if the file is empty (so re-running the engine doesn't
-// duplicate the header).
+// Open logging/SYMBOL_order_history.csv in append mode. Writes the v4
+// header only if the file is empty (so re-running the engine doesn't
+// duplicate the header; a pre-existing file keeps its old header line —
+// rows appended after the s5-1b ship carry v4 semantics regardless, which
+// the header text documents for mixed files).
 //
 // Returns 1 on success, 0 if the file open fails. Caller should treat 0 as
 // "logging disabled" and continue without crashing — the engine works fine
@@ -393,8 +411,9 @@ inline int ShardedTradeLog_Rotate(ShardedTradeLog* log) {
 
     log->row_count = 0;
     // Reopen fresh — Init writes the header again since file is now empty.
-    // _Init also reopens the per-core mirror files.
-    return ShardedTradeLog_Init(log, log->symbol);
+    // _Init also reopens the per-node mirror files. partial mode carries over
+    // (boot-time constant; param evaluated before Init resets the field).
+    return ShardedTradeLog_Init(log, log->symbol, log->partial_exit_enabled);
 }
 //======================================================================
 // [END_CODE]
@@ -471,7 +490,13 @@ inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
     // Caller-scope variables set BEFORE the registry walk macro per
     // CALLER SCOPE CONTRACT in TradeLogColRegistry.hpp.
     uint64_t timestamp_us  = event.timestamp;
-    uint32_t node_id       = event.node_id;
+    // s5-1b — event.node_id carries the OMS portfolio SLOT (engine contract:
+    // OnEvent indexes nodes[event.node_id]). Col 1 emits the DERIVED true node;
+    // slot/leg keep per-leg identity in the appended cols; the mirror write
+    // below routes by the node.
+    uint32_t slot_id_v     = event.node_id;
+    int      leg_v         = (int)(slot_id_v & (uint32_t)log->partial_exit_enabled);
+    uint32_t node_id       = (uint32_t)BITMAP_SLOT_NODE((int)slot_id_v, log->partial_exit_enabled);
     char     event_type    = 'E';
     double   price_v       = Money_ToDouble(event.price);
     double   entry_price_v = Money_ToDouble(entry_price);
@@ -538,7 +563,10 @@ inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
     // v5.14.10.F — registry-driven row build via FOREACH_TRADE_LOG_COL.
     // v5.15.5.C.3 Phase 5.A — added regime + regime_name columns (see RecordEntry).
     uint64_t timestamp_us  = event.timestamp;
-    uint32_t node_id       = event.node_id;
+    // s5-1b — same slot→node derive as RecordEntry (see the comment there).
+    uint32_t slot_id_v     = event.node_id;
+    int      leg_v         = (int)(slot_id_v & (uint32_t)log->partial_exit_enabled);
+    uint32_t node_id       = (uint32_t)BITMAP_SLOT_NODE((int)slot_id_v, log->partial_exit_enabled);
     char     event_type    = 'X';
     double   price_v       = Money_ToDouble(event.price);
     double   entry_price_v = Money_ToDouble(entry_price);

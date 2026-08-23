@@ -52,7 +52,15 @@ namespace tt {
     /* regime_v < 0. Append-only addition; existing 11-col operator parsers see   */          \
     /* the extra columns as trailing CSV; no breakage.                             */          \
     X(regime,          "%d",   regime_v)                                                       \
-    X(regime_name,     "%s",   regime_name_v)
+    X(regime_name,     "%s",   regime_name_v)                                                  \
+    /* v5.15.5.F.4d.1.E.1.2.E s5-1b — attribution truth (2026-08-23). node_id (col 1)  */     \
+    /* now carries the TRUE node (derived via the BITMAP_SLOT_NODE SSoT); these two    */     \
+    /* appended columns preserve the per-leg identity that col 1 carried before the     */     \
+    /* fix. slot_id = the portfolio slot (legs A/B at 2c/2c+1 under partials);          */     \
+    /* leg = slot & partial_on (0 = leg A / single, 1 = leg B). Append-only per the     */     \
+    /* ORDER MATTERS contract below.                                                    */     \
+    X(slot_id,         "%u",   (unsigned)slot_id_v)                                            \
+    X(leg,             "%d",   leg_v)
 
 //------------------------------------------------------------------------------
 // [SECTION]_[auto-generated count]
@@ -147,7 +155,10 @@ inline void TradeLog_EmitHeader(FILE* f) {
 //   char event_type, double price_v, double entry_price_v, double exit_price_v,
 //   double pnl_v, double fees_v, double balance_after_v, double trade_size_v,
 //   int regime_v (v5.15.5.C.3 Phase 5.A; -1 = unknown for non-strategy-aware callers),
-//   const char* regime_name_v (v5.15.5.C.3 Phase 5.A; "UNKNOWN" for regime_v < 0)
+//   const char* regime_name_v (v5.15.5.C.3 Phase 5.A; "UNKNOWN" for regime_v < 0),
+//   uint32_t slot_id_v + int leg_v (s5-1b 2026-08-23; slot = event.node_id [the OMS
+//   slot-keyed value], leg = slot & partial_on — node_id itself is now the DERIVED
+//   true node, so rows attribute to the node while slot/leg keep per-leg identity)
 //
 // HEADER + ROW EMIT:
 //   - TradeLog_EmitHeader(f) — comma-separated col_name list + trailing \n

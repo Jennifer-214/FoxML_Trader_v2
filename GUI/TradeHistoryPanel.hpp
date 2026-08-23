@@ -154,10 +154,17 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         char kind_s[8];
         csv_field(line, 3, kind_s, sizeof(kind_s));
         if (kind_s[0] == 'E') {
-            char ets_s[24], ecore_s[8];
+            char ets_s[24], ecore_s[8], eslot_s[8];
             csv_field(line, 0, ets_s,   sizeof(ets_s));
             csv_field(line, 1, ecore_s, sizeof(ecore_s));
-            int eslot = atoi(ecore_s);
+            // s5-1b v4 rows: col 13 = slot_id (the per-leg key); col 1 is now
+            // the TRUE node. v3 rows: col 13 empty → col 1 WAS the slot. Key
+            // the entry-ts map by SLOT either way so legs pair independently.
+            csv_field(line, 13, eslot_s, sizeof(eslot_s));
+            // strtol not atoi: keeps the determinism net's raw-parse count flat
+            // (integer strto* is locale-immune; the atoi family is counted wholesale).
+            int eslot = eslot_s[0] ? (int)strtol(eslot_s, nullptr, 10)
+                                   : (int)strtol(ecore_s, nullptr, 10);
             if (eslot >= 0 && eslot < 16) {
                 entry_ts_us[eslot] = (uint64_t)atoll(ets_s);
             }
@@ -187,31 +194,37 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         e->tick        = (int)atoll(tick_s);
         e->node_id     = atoi(node_s);
 
+        // s5-1b: pair by SLOT. v4 rows carry it in col 13 (col 1 is now the
+        // TRUE node — under partials both legs share it, so keying by col 1
+        // would cross-pair legs); v3 rows fall back to col 1, which WAS the
+        // slot in that era.
+        char xslot_s[8];
+        csv_field(line, 13, xslot_s, sizeof(xslot_s));
+        int xslot = xslot_s[0] ? (int)strtol(xslot_s, nullptr, 10) : e->node_id;
+
         // v5.5.2: compute hold_secs from entry-row timestamp. tick_s is
         // the X row's timestamp_us; entry_ts_us[slot] was set on the
         // matching E row above. If no E row was seen for this slot
         // (CSV truncated / log rotated), hold_secs = -1.0 sentinel.
-        if (e->node_id >= 0 && e->node_id < 16 && entry_ts_us[e->node_id] > 0) {
+        if (xslot >= 0 && xslot < 16 && entry_ts_us[xslot] > 0) {
             uint64_t exit_ts_us = (uint64_t)atoll(tick_s);
-            if (exit_ts_us > entry_ts_us[e->node_id]) {
-                e->hold_secs = (double)(exit_ts_us - entry_ts_us[e->node_id])
+            if (exit_ts_us > entry_ts_us[xslot]) {
+                e->hold_secs = (double)(exit_ts_us - entry_ts_us[xslot])
                                 / 1000000.0;
             } else {
                 e->hold_secs = 0.0;  // same-tick — same-second resolution
             }
-            entry_ts_us[e->node_id] = 0;  // consume — next E sets it again
+            entry_ts_us[xslot] = 0;  // consume — next E sets it again
         } else {
             e->hold_secs = -1.0;  // no matching E row
         }
 
-        // P.3 partials: node_id in the CSV is actually the PORTFOLIO SLOT
-        // (the drainer passes Sharded_LegSlot result as Submit's node_id).
-        // Slot c → core (c/2), leg (c%2) when partials enabled. With
-        // partials disabled, slot == node_id and leg == 0.
-        // Heuristic: even slot = leg A, odd slot = leg B. Works for both
-        // single-position (slot==node_id, leg always 0) and paired
-        // (slots 2c+0 + 2c+1) modes.
-        e->leg = e->node_id & 1;
+        // s5-1b: leg from col 14 when present (v4). v3 fallback keeps the
+        // parity heuristic on the slot value (even = leg A, odd = leg B;
+        // single-slot mode → always 0 by construction).
+        char leg_s[4];
+        csv_field(line, 14, leg_s, sizeof(leg_s));
+        e->leg = leg_s[0] ? (int)strtol(leg_s, nullptr, 10) : (xslot & 1);
 
         // Reason: derive from price direction (exit vs entry), not P&L
         // sign. The sharded log doesn't carry an explicit reason field

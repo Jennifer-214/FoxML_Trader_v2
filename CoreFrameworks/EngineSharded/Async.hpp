@@ -988,7 +988,13 @@ inline int EngineSharded_Async_DrainWithSubmit(
                                       &cfg.nodes[slot]);                                            // per-node cfg (sharded: node_id == slot)
                 cmd.intended_tp = leg_tp;
                 cmd.intended_sl = state.nodes[slot].intended_sl;
-                cmd.strategy_id = state.nodes[slot].strategy_id;
+                // s5-1b (2026-08-23) — bind the RESOLVED strategy (post-AUTO regime
+                // resolution; == strategy_id for non-AUTO nodes) so fills/CSV/calib
+                // attribute what actually FIRED, not the configured AUTO sentinel.
+                // Same class as the June F1 producer fix. No fill-path consumer
+                // branches on Order.strategy_id (enumerated 2026-08-23) — display/
+                // attribution only.
+                cmd.strategy_id = state.nodes[slot].resolved_strategy_id;
                 cmd.event_price = event.price;
                 // A25 (D-205): resolve the per-fill TP fraction (A1 SSoT — picks the per-node
                 // override, NOT global take_profit_pct) + carry it so handle_buy_fill arms
