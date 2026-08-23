@@ -12,7 +12,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 #===============================================================================
 # engine binary — ANSI TUI (zero deps, diff-based rendering)
 #===============================================================================
+# E.1.2.E leaf 1 — vendored simdjson as a static lib (imgui precedent:
+# no LTO, compile once). Consumed by the TreeWalker JSON parse (H5) in
+# every target that loads models + the ANSI test fixtures.
+add_library(simdjson_vendor STATIC ${CMAKE_SOURCE_DIR}/vendor/simdjson/simdjson.cpp)
+target_include_directories(simdjson_vendor PUBLIC ${CMAKE_SOURCE_DIR}/vendor/simdjson)
+set_target_properties(simdjson_vendor PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+
 add_executable(engine main.cpp)
+target_link_libraries(engine PRIVATE simdjson_vendor)
 # -g: debug info ONLY — zero codegen change (GCC guarantee; identical instructions). Feeds the
 # 1:1 asm sidecars' line interleave (objdump -l reads DWARF from the SHIPPED binary — the
 # source↔shipped-asm sync + inline attribution + per-line cost the plugin renders). Strippable
@@ -130,6 +138,7 @@ if(USE_IMGUI_GUI)
     )
 
     add_executable(engine_gui main.cpp)
+target_link_libraries(engine_gui PRIVATE simdjson_vendor)
     target_compile_options(engine_gui PRIVATE -O3 -march=native -funroll-loops -flto -g)
     target_compile_definitions(engine_gui PRIVATE
         MULTICORE_TUI USE_IMGUI_GUI LICENSE_BYPASS
@@ -176,6 +185,7 @@ endif()
 #===============================================================================
 if(USE_IMGUI_GUI)
     add_executable(foxml_suite foxml_suite.cpp)
+target_link_libraries(foxml_suite PRIVATE simdjson_vendor)
     target_compile_options(foxml_suite PRIVATE -O3 -march=native -funroll-loops -flto -g)
     target_compile_definitions(foxml_suite PRIVATE
         FOXML_SUITE LICENSE_BYPASS MULTICORE_TUI
@@ -220,6 +230,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 # before this line; they use no "../" engine includes). See DOCS/LANDMINES.md.
 include_directories(${CMAKE_SOURCE_DIR}/CoreFrameworks)
 add_executable(controller_test tests/controller_test.cpp)
+target_link_libraries(controller_test PRIVATE simdjson_vendor)
 target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto -g -Werror=float-conversion)  # E.1.2.C leg 0 — same class guard; measured 0 hits
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 # Phase 5d regression tests pull in Backtest/BacktestEngine.hpp for BacktestResults

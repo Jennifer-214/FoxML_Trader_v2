@@ -35,3 +35,14 @@
 // because BinanceOrderAPI is not thread-safe — see plans/oms/master.md.
 #define MAX_INFLIGHT_ORDERS 16
 #define MAX_BINANCE_WORKERS 4
+
+// ML flat-SoA tree walker (E.1.2.E leaf 1). Caps sized to the SERVING
+// BUDGET, not today's model shape (R4): the walk cost is ~linear in
+// nodes visited and the blob should stay L2-resident-ish. 128K nodes
+// x 16B = 2MB blob ceiling; per-tree cap 2048 = depth ~10 headroom
+// (today's models: depth 2, 7 nodes/tree). Parse REFUSES over-cap
+// artifacts loudly — never truncates.
+#define WALKER_MAX_TREES        4096
+#define WALKER_MAX_NODES_PER_TREE 2048
+#define WALKER_MAX_TOTAL_NODES  131072
+#define WALKER_MAX_CLASSES      8
