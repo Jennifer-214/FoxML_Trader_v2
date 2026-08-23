@@ -113,7 +113,7 @@ static_assert(sizeof(FlatTreeNode) == 16, "walker node must stay 16B (L2 budget 
 //   aligned_alloc(64) allocation. Caller-owned; TreeWalker_Free reclaims the blob only.]
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
 //----------------------------------------------------------------------
-// [SIZE]_[0B]
+// [SIZE]_[176B]   (compile-pinned by the static_assert below — the layout emitter cannot run for this env; the assert is the oracle)
 //======================================================================
 // [CODE]
 //======================================================================
@@ -135,6 +135,7 @@ struct FlatTreeModel {
     int32_t       class_tree_start[WALKER_MAX_CLASSES]; // index into tree_roots where class c's trees begin
     int32_t       class_tree_count[WALKER_MAX_CLASSES]; // == trees_per_class (kept adjacent to start for the walk's read pattern)
 };
+static_assert(sizeof(FlatTreeModel) == 176, "header layout drifted — update the [SIZE] tag + re-check the blob-offset math");
 // [END_CODE]
 // [END_STRUCT]_[FlatTreeModel]
 //======================================================================

@@ -1,4 +1,12 @@
 #!/bin/bash
+# 2026-08-22 (close-session fix-sweep) — serialize concurrent invocations.
+# Two overlapping build.sh runs in the same tree raced twice this sprint
+# (phantom syntax errors from mid-rewrite re-reads; stale/mixed results;
+# a 0-byte controller_test) — the second observation made it structural
+# (M7). One global lock: build.sh already runs its targets serially, so
+# cross-invocation parallelism was never load-bearing. Waits, never fails.
+exec 200>"/tmp/.foxml_trader_build.lock"
+flock 200
 # build.sh — build helper, single entry point for common cmake operations
 #
 # Usage:
