@@ -76,6 +76,35 @@
 #define BANDIT_RAMP_UP_DEFAULT     100     // trades to reach full blend
 #define BANDIT_MAX_ARMS            8       // max arms supported
 
+// s5 bandit ship (2026-08-23) — numerical-stability constants for Bandit_Update.
+// Both close MEASURED live defects in the persisted Exp3 state, not hypotheticals.
+//
+// BANDIT_UPDATE_EXPO_LIMIT — the max |eta * r_hat| fed to exp(). WHY 36.7:
+// ln(1e16) is exactly the dynamic range between the weight floor (1e-10) and the
+// explosion-renorm trigger (1e6), so a single update can traverse the whole live
+// range and no further. Above it two things break:
+//   * >709.78 overflows exp() to +inf, and the explosion guard's own inf/inf
+//     divide then MINTS a NaN that no comparison guard can clear (BT-1/BT-2 — a
+//     `-nan` reached models/classification/twins/bandit_state.json and survived
+//     save/load forever).
+//   * even far below overflow, one lucky trade on a floored arm can multiply by
+//     e^154 ~ 1e66, forcing the renorm to divide EVERY arm by ~1e60 and crushing
+//     the previous leader to the floor — the regime's learned ordering erased
+//     with no NaN anywhere (s5-F7 single-step renorm-crush).
+// Cost of the clamp: healthy updates whose exponent already exceeded 36.7 now
+// move less per step. Deliberate — those steps were destroying the ordering they
+// were supposed to refine. Replay/backtest results shift accordingly; free under
+// project_no_live_models_dev_test_only.
+#define BANDIT_UPDATE_EXPO_LIMIT   36.7    // ln(1e16) = floor(1e-10) -> renorm(1e6) range
+
+// BANDIT_WEIGHT_LOW_WATER — when the LARGEST weight sinks below this, scale the
+// whole vector up so max == 1.0. Ratio-preserving, so it changes no arm's
+// relative standing; it only keeps the vector off the 1e-10 floor, where
+// ordering is destroyed by clamping rather than by evidence (BT-11: HFT_4
+// regime 4 sat at [1e-10,1e-10,1e-10] after 456 real steps). Sister to the
+// >1e6 explosion renorm below it — same mechanism, opposite direction.
+#define BANDIT_WEIGHT_LOW_WATER    1e-3
+
 //======================================================================
 // [STRUCT]_[BanditDisplayMeta]
 //----------------------------------------------------------------------
@@ -263,7 +292,28 @@ static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_o
         sum_w += b->weights[i];
 
     double K = (double)b->n_arms;
-    if (sum_w <= 0.0) {
+    // s5 bandit ship — THE H10 CLOSE, and it lives HERE on purpose: this is the
+    // last code both builds execute before the __AVX512F__ fork below.
+    //
+    // A non-finite weight makes sum_w non-finite (NaN propagates through +; ±inf
+    // likewise), so widening this ONE predicate routes the entire hazardous input
+    // domain to the uniform fallback in code that is bytewise identical on both
+    // paths — and the fork then only ever sees inputs the two implementations
+    // agree on. The alternative (per-fork NaN handling) would have to keep two
+    // implementations in sync forever.
+    //
+    // What it fixes: `_mm512_max_pd(probs, floor)` returns its SECOND operand
+    // when either is NaN, laundering NaN into 1e-10, while the scalar
+    // `if (probs_out[i] < 1e-10)` is false for NaN and leaves it. On the twins
+    // artifact the AVX build returned [0.333,0.333,0.333] and the scalar build
+    // returned [nan,nan,nan] — an OBSERVED H10 violation, and under -march=native
+    // also a cross-HOST determinism break.
+    //
+    // Do NOT "fix" this by making the scalar floor an fmax to match the
+    // intrinsic: that canonizes NaN-laundering as the defined semantic and hides
+    // poisoned state forever instead of surfacing it.
+    // Spec: DESIGN_SPECS/refactor-patterns/simd-fallback-nonfinite-parity-discipline.md
+    if (!(sum_w > 0.0) || !isfinite(sum_w)) {
         // fallback to uniform
         for (int i = 0; i < b->n_arms; i++)
             probs_out[i] = 1.0 / K;
@@ -406,8 +456,24 @@ static inline void Bandit_Update(BanditState *b, int arm, double reward_bps) {
         if (eta_computed < eta) eta = eta_computed;
     }
 
-    // weight update
-    b->weights[arm] *= exp(eta * r_hat);
+    // weight update — the exponent is CLAMPED before exp(), which is the fix
+    // BT-2 actually needs. Rejecting a non-finite r_hat would NOT have helped:
+    // with the shipped params (gamma=0.05, K=3) the probability floor is
+    // gamma/K ~ 0.0167, so a legal +200bps trade-close reward yields
+    // r_hat ~ 12000 — perfectly finite — and eta*r_hat still reaches ~1200,
+    // far past exp()'s 709.78 overflow. The old code overflowed to +inf and the
+    // renorm below turned inf/inf into the persisted NaN. Clamp the exponent,
+    // not its inputs. (H20: ternaries lower to cmov/minsd-maxsd, no branch.)
+    double expo = eta * r_hat;
+    expo = expo >  BANDIT_UPDATE_EXPO_LIMIT ?  BANDIT_UPDATE_EXPO_LIMIT : expo;
+    expo = expo < -BANDIT_UPDATE_EXPO_LIMIT ? -BANDIT_UPDATE_EXPO_LIMIT : expo;
+    // Finite backstop: a NaN exponent selects NEITHER clamp arm (every ordered
+    // comparison with NaN is false), so it would reach exp() intact. 0.0 is the
+    // identity multiplier — a poisoned update becomes a no-op instead of
+    // spreading. Unreachable once the load side rejects non-finite state; kept
+    // because the cost is one cmov and the failure mode it prevents is permanent.
+    expo = isfinite(expo) ? expo : 0.0;
+    b->weights[arm] *= exp(expo);
 
     // numerical stability: prevent explosion or vanishing
     // v5.15.5.F.4d Step 6 (§ L) — Class 28 cmov branchless max-find (H20 / determinism over throughput).
@@ -419,9 +485,24 @@ static inline void Bandit_Update(BanditState *b, int arm, double reward_bps) {
     if (max_w > 1e6) {
         for (int i = 0; i < b->n_arms; i++)
             b->weights[i] /= max_w;
+    } else if (max_w > 0.0 && max_w < BANDIT_WEIGHT_LOW_WATER) {
+        // s5 bandit ship (BT-11 structural prevent) — the explosion guard's
+        // mirror image. Scaling the vector so max == 1.0 is ratio-preserving:
+        // no arm's standing changes, the vector just stops sinking toward the
+        // 1e-10 floor where the NEXT floor-clamp would flatten real differences
+        // into a tie. Mutually exclusive with the >1e6 branch above (after that
+        // divide, max == 1.0 by construction).
+        const double scale = 1.0 / max_w;
+        for (int i = 0; i < b->n_arms; i++)
+            b->weights[i] *= scale;
     }
-    for (int i = 0; i < b->n_arms; i++)
-        if (b->weights[i] < 1e-10) b->weights[i] = 1e-10;
+    // Floor, finite-backstopped as a select (H20). `w < 1e-10` alone is false for
+    // NaN, which is precisely how the twins NaN survived every pass of this loop
+    // (verified: 100 consecutive guard passes left it untouched).
+    for (int i = 0; i < b->n_arms; i++) {
+        const double w = b->weights[i];
+        b->weights[i] = (w < 1e-10 || !isfinite(w)) ? 1e-10 : w;
+    }
 }
 //======================================================================
 // [END_CODE]
@@ -442,7 +523,11 @@ static inline void Bandit_GetWeights(const BanditState *b, double *weights_out) 
     double sum_w = 0.0;
     for (int i = 0; i < b->n_arms; i++)
         sum_w += b->weights[i];
-    if (sum_w <= 0.0) {
+    // s5 bandit ship — same widened predicate as Bandit_GetProbabilities. This
+    // is a SEPARATE entry point into the weights (EngineTUI display + the legacy
+    // PortfolioController blend read it directly, never via GetProbabilities), so
+    // it needs its own finite gate rather than inheriting one.
+    if (!(sum_w > 0.0) || !isfinite(sum_w)) {
         for (int i = 0; i < b->n_arms; i++)
             weights_out[i] = 1.0 / b->n_arms;
         return;
@@ -496,8 +581,11 @@ static inline void Bandit_BlendWeights(const BanditState *b,
         blended_out[i] = (1.0 - effective) * static_weights[i] + effective * bandit_w[i];
         sum += blended_out[i];
     }
-    // renormalize
-    if (sum > 0.0) {
+    // renormalize — finite-gated for the same reason as the guards above. The
+    // bandit half is now finite by construction; this covers a non-finite
+    // static_weights[] arriving from a caller, where dividing would spread the
+    // poison across every arm instead of leaving it in the one it came from.
+    if (sum > 0.0 && isfinite(sum)) {
         for (int i = 0; i < b->n_arms; i++)
             blended_out[i] /= sum;
     }
@@ -744,7 +832,29 @@ static inline const char* find_key(const char* haystack, const char* key) {
 //
 // Locale-IMMUNE via tt::parse_double_fast_advance (uses std::from_chars per
 // v5.11.4.C). Safe regardless of process LC_NUMERIC.
-static inline int parse_double_array(const char* p, double* out, int max_count) {
+//
+// s5 bandit ship (BT-3) — NON-FINITE DETECTION. `std::from_chars` accepts the
+// literal tokens `nan` / `-nan` / `inf`, so a poisoned state file round-trips
+// its poison straight back into live weights: verified against the real parser
+// on the real bytes (`parsed 3 of 3 weights … weights[1] isnan=1`). That is why
+// the twins `-nan` reloaded at EVERY boot and no amount of further training
+// cleared it.
+//
+// The check lives HERE, in the ONE primitive all four state loaders share,
+// rather than at each call site — four hand-written caller checks is the
+// same mirror shape this ship exists to remove.
+//
+// `nonfinite_out` has NO DEFAULT ARGUMENT on purpose: the compiler then
+// enumerates every caller for the author (the leaf-5 `labels_precomputed`
+// precedent). A defaulted flag would let a future loader silently opt out of
+// the guard and reintroduce BT-3 while every gate stayed green — Class-58
+// complement blindness. Callers must reject the WHOLE FILE when it is set:
+// this copies min(got, n_arms) values, so a per-value skip would leave a
+// half-overlaid regime and still report success, which is worse than either
+// loading or rejecting outright.
+static inline int parse_double_array(const char* p, double* out, int max_count,
+                                      int* nonfinite_out) {
+    if (nonfinite_out) *nonfinite_out = 0;
     if (!p || !out) return 0;
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
     int count = 0;
@@ -752,6 +862,7 @@ static inline int parse_double_array(const char* p, double* out, int max_count) 
         const char* end_ptr = nullptr;
         double v = tt::parse_double_fast_advance(p, &end_ptr);
         if (end_ptr == p) break;   // no number consumed
+        if (!isfinite(v) && nonfinite_out) *nonfinite_out = 1;
         out[count++] = v;
         p = end_ptr;
         while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\t') ++p;
@@ -877,6 +988,10 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
 
     // Per-regime parse: walk to "regimes" array, then for each "regime_id"
     // entry, populate weights / cum_reward / pulls.
+    // s5 BT-3: sticky across ALL regimes — one poisoned value anywhere rejects
+    // the file (checked after the loop, so the diagnostic names the file once
+    // rather than once per regime).
+    int file_nonfinite = 0;
     p = tt::json_io::find_key(buf, "regimes");
     if (!p) { return 0; }
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
@@ -906,18 +1021,26 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
         const char* w_p = tt::json_io::find_key(rid_p, "weights");
         if (w_p) {
             double tmp_w[BANDIT_MAX_ARMS];
-            int got = tt::json_io::parse_double_array(w_p, tmp_w, BANDIT_MAX_ARMS);
-            int copy = (got < b.n_arms) ? got : b.n_arms;
-            for (int a = 0; a < copy; ++a) b.weights[a] = tmp_w[a];
+            int nonfinite = 0;
+            int got = tt::json_io::parse_double_array(w_p, tmp_w, BANDIT_MAX_ARMS, &nonfinite);
+            if (nonfinite) { file_nonfinite = 1; }   // s5 BT-3: never overlay poison
+            else {
+                int copy = (got < b.n_arms) ? got : b.n_arms;
+                for (int a = 0; a < copy; ++a) b.weights[a] = tmp_w[a];
+            }
         }
 
         // cum_reward
         const char* cr_p = tt::json_io::find_key(rid_p, "cum_reward");
         if (cr_p) {
             double tmp_cr[BANDIT_MAX_ARMS];
-            int got = tt::json_io::parse_double_array(cr_p, tmp_cr, BANDIT_MAX_ARMS);
-            int copy = (got < b.n_arms) ? got : b.n_arms;
-            for (int a = 0; a < copy; ++a) b.cum_reward[a] = tmp_cr[a];
+            int nonfinite = 0;
+            int got = tt::json_io::parse_double_array(cr_p, tmp_cr, BANDIT_MAX_ARMS, &nonfinite);
+            if (nonfinite) { file_nonfinite = 1; }
+            else {
+                int copy = (got < b.n_arms) ? got : b.n_arms;
+                for (int a = 0; a < copy; ++a) b.cum_reward[a] = tmp_cr[a];
+            }
         }
 
         // pulls
@@ -934,6 +1057,35 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
         p = end_brace ? end_brace + 1 : rid_p + 1;
     }
 
+    // s5 bandit ship (BT-3) — WHOLE-FILE reject on any non-finite value.
+    //
+    // Restoring uniform is what makes this honest rather than partial: earlier
+    // regimes in the file may already have been overlaid before the poisoned one
+    // was reached, and leaving that half-loaded state behind while telling the
+    // caller "rejected" is the failure mode being fixed, one level up. Reset the
+    // LEARNED fields only — gamma / eta_max / blend / n_arms are the caller's
+    // Bandit_Init configuration and are not this file's to touch.
+    //
+    // Cost, stated plainly: a file with one poisoned regime loses its HEALTHY
+    // regimes too. Accepted — a bundle that has minted a non-finite weight has
+    // demonstrated its update history is untrustworthy, and uniform is a
+    // defined starting point (missing-file already means exactly this).
+    if (file_nonfinite) {
+        for (int r = 0; r < n_regimes; ++r) {
+            BanditState& b = bandits[r];
+            b.total_steps = 0;
+            for (int a = 0; a < BANDIT_MAX_ARMS; ++a) {
+                b.weights[a]    = (a < b.n_arms) ? 1.0 : 0.0;
+                b.cum_reward[a] = 0.0;
+                b.pulls[a]      = 0;
+            }
+        }
+        fprintf(stderr,
+                "[bandit] %s: REJECTED — non-finite (NaN/Inf) value in persisted state; "
+                "restored uniform. The file is not repaired: delete it, or it will be "
+                "rejected again every boot.\n", path);
+        return 0;
+    }
 
     return 1;
 }

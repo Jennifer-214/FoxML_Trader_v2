@@ -3190,6 +3190,7 @@ inline int EnsembleModelZoo_LoadThompsonState(
     // Walk regimes array. forward-compat-by-absence: if a regime entry is
     // missing or a field is missing, leave the corresponding tb field at
     // its prior (uniform priors from InitThompsonBandits).
+    int file_nonfinite = 0;   // s5 BT-3 — sticky across regimes; checked after the walk
     p = tt::json_io::find_key(buf, "regimes");
     if (!p) return 0;
     for (int r = 0; r < NUM_REGIMES; ++r) {
@@ -3218,17 +3219,24 @@ inline int EnsembleModelZoo_LoadThompsonState(
         }
 
         // Overlay posterior arrays
+        // s5 bandit ship (BT-3) — the Thompson half of the same guard. A
+        // poisoned array is SKIPPED entirely (the caller's Init'd priors stay,
+        // which is this side's uniform), and the file is rejected below.
         const char* mu_p = tt::json_io::find_key(rid_p, "mu_post");
         if (mu_p) {
             double tmp[BANDIT_MAX_ARMS];
-            int got = tt::json_io::parse_double_array(mu_p, tmp, BANDIT_MAX_ARMS);
-            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->mu_post[a] = tmp[a];
+            int nonfinite = 0;
+            int got = tt::json_io::parse_double_array(mu_p, tmp, BANDIT_MAX_ARMS, &nonfinite);
+            if (nonfinite) file_nonfinite = 1;
+            else for (int a = 0; a < got && a < tb->n_arms; ++a) tb->mu_post[a] = tmp[a];
         }
         const char* pr_p = tt::json_io::find_key(rid_p, "precision_post");
         if (pr_p) {
             double tmp[BANDIT_MAX_ARMS];
-            int got = tt::json_io::parse_double_array(pr_p, tmp, BANDIT_MAX_ARMS);
-            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->precision_post[a] = tmp[a];
+            int nonfinite = 0;
+            int got = tt::json_io::parse_double_array(pr_p, tmp, BANDIT_MAX_ARMS, &nonfinite);
+            if (nonfinite) file_nonfinite = 1;
+            else for (int a = 0; a < got && a < tb->n_arms; ++a) tb->precision_post[a] = tmp[a];
         }
         const char* tp_p = tt::json_io::find_key(rid_p, "total_pulls");
         if (tp_p) {
@@ -3242,6 +3250,20 @@ inline int EnsembleModelZoo_LoadThompsonState(
         p = rid_p + 1;
     }
 
+    // s5 BT-3 — whole-file reject. No poisoned array was overlaid (each is
+    // skipped at its parse site), so every skipped field still holds the
+    // caller's Init'd prior. Residual, stated rather than hidden: regimes
+    // parsed BEFORE the poisoned one keep their loaded values, so the state is
+    // mixed-but-finite. Left as-is deliberately — a full restore would need the
+    // prior triple re-applied per regime, and this path has never executed in
+    // production (bandit_algorithm has always been 0). If Thompson goes live,
+    // revisit alongside the Bandit_LoadJSON restore it mirrors.
+    if (file_nonfinite) {
+        fprintf(stderr,
+                "[ensemble] %s: REJECTED — non-finite (NaN/Inf) in persisted Thompson state; "
+                "priors kept for the affected arrays. Delete the file to stop the repeat.\n", path);
+        return 0;
+    }
     fprintf(stderr, "[ensemble] loaded thompson state from %s\n", path);
     return 1;
 }
@@ -3321,6 +3343,7 @@ inline int EnsembleModelZoo_LoadExitThompsonState(
     }
 
     // Walk regimes array. forward-compat-by-absence: shorter files leave later regimes at prior.
+    int file_nonfinite = 0;   // s5 BT-3 — sticky across regimes; checked after the walk
     p = tt::json_io::find_key(buf, "regimes");
     if (!p) return 0;
     for (int r = 0; r < NUM_REGIMES; ++r) {
@@ -3346,17 +3369,24 @@ inline int EnsembleModelZoo_LoadExitThompsonState(
             }
         }
 
+        // s5 bandit ship (BT-3) — the Thompson half of the same guard. A
+        // poisoned array is SKIPPED entirely (the caller's Init'd priors stay,
+        // which is this side's uniform), and the file is rejected below.
         const char* mu_p = tt::json_io::find_key(rid_p, "mu_post");
         if (mu_p) {
             double tmp[BANDIT_MAX_ARMS];
-            int got = tt::json_io::parse_double_array(mu_p, tmp, BANDIT_MAX_ARMS);
-            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->mu_post[a] = tmp[a];
+            int nonfinite = 0;
+            int got = tt::json_io::parse_double_array(mu_p, tmp, BANDIT_MAX_ARMS, &nonfinite);
+            if (nonfinite) file_nonfinite = 1;
+            else for (int a = 0; a < got && a < tb->n_arms; ++a) tb->mu_post[a] = tmp[a];
         }
         const char* pr_p = tt::json_io::find_key(rid_p, "precision_post");
         if (pr_p) {
             double tmp[BANDIT_MAX_ARMS];
-            int got = tt::json_io::parse_double_array(pr_p, tmp, BANDIT_MAX_ARMS);
-            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->precision_post[a] = tmp[a];
+            int nonfinite = 0;
+            int got = tt::json_io::parse_double_array(pr_p, tmp, BANDIT_MAX_ARMS, &nonfinite);
+            if (nonfinite) file_nonfinite = 1;
+            else for (int a = 0; a < got && a < tb->n_arms; ++a) tb->precision_post[a] = tmp[a];
         }
         const char* tp_p = tt::json_io::find_key(rid_p, "total_pulls");
         if (tp_p) {
@@ -3368,6 +3398,13 @@ inline int EnsembleModelZoo_LoadExitThompsonState(
         p = rid_p + 1;
     }
 
+    // s5 BT-3 — see the buy-side sibling above for the reject contract.
+    if (file_nonfinite) {
+        fprintf(stderr,
+                "[ensemble] %s: REJECTED — non-finite (NaN/Inf) in persisted Thompson exit state; "
+                "priors kept for the affected arrays. Delete the file to stop the repeat.\n", path);
+        return 0;
+    }
     fprintf(stderr, "[ensemble] loaded thompson exit state from %s\n", path);
     return 1;
 }
