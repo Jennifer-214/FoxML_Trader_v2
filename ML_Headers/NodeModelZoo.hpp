@@ -841,7 +841,7 @@ inline int NodeModelZoo_LoadFromDir(NodeModelZoo<F> *zoo, const char *dir, int b
 // [CODE]
 //======================================================================
 // legacy single-model fallback: load just the buy_signal role from a single
-// path (backward compat with the old core_N_model_path config field).
+// path (the single-path node_N_model_path cfg form, vs the dir-based zoo).
 template <unsigned F>
 inline int NodeModelZoo_LoadLegacy(NodeModelZoo<F> *zoo, const char *path, int backend) {
     if (!path || path[0] == '\0') return 0;
@@ -876,11 +876,12 @@ inline int NodeModelZoo_HasAny(const NodeModelZoo<F> *zoo) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the STUPID-PROOF verify — expected.cfg (written by foxml_suite Save Run) vs live ML cfg; cadence + feature-format + gate/threshold/class mismatches; strict_mode fails the load]
+// [OVERVIEW]_[the STUPID-PROOF verify — expected.cfg (written per horizon dir by the mh trainer since D-d; the Save Run producer is deleted) vs live ML cfg; cadence + feature-format + gate/threshold/class mismatches; strict_mode fails the load. NOTE: consumed on the SINGLE-ZOO load path only — the ensemble post-load chain has no verify_expected step (PARITY-ledgered)]
 //======================================================================
 // [CODE]
 //======================================================================
-// reads <dir>/expected.cfg (written by foxml_suite Save Run) and verifies
+// reads <dir>/expected.cfg (written per horizon dir by mh_run_one_horizon_fv
+// since D-d — the Save Run producer was deleted) and verifies
 // the live ML config matches what the model was trained against. mismatches
 // are logged as warnings; if strict_mode is set, returns 0 to fail load.
 //

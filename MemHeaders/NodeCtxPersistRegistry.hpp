@@ -221,12 +221,12 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
       "_alloc_and_init_slow_state) before the producer spawn. The rolling/regime state behind "      \
       "it is warm-up-rebuilt by the owning slow thread, not restored.")                              \
     X(model_handle,      RUNTIME_POINTER,                                                            \
-      "void* re-established at NodeCtxInitRegistry.hpp:101 (nullptr) then EngineCommon.hpp:343 "     \
-      "(per-node model load from cfg core_N_model_path/_dir). A restored pointer value would "       \
+      "void* re-established at NodeCtxInitRegistry.hpp:101 (nullptr) then the EngineCommon "        \
+      "boot 5c single-zoo load (cfg node_N_model_path/_dir). A restored pointer value would "        \
       "be a dangling address from the previous process -- restoring it would be WRONG.")             \
     X(ensemble_handle,   RUNTIME_POINTER,                                                            \
-      "void* re-established at NodeCtxInitRegistry.hpp:102 (nullptr) then EngineCommon.hpp:394 "     \
-      "(zoo load). Same dangling-address argument as model_handle.")                                 \
+      "void* re-established at NodeCtxInitRegistry.hpp:102 (nullptr) then the EngineCommon "        \
+      "boot 5c/5d zoo load+PostLoadSetup. Same dangling-address argument as model_handle.")          \
     X(strategy_state,    POINTEE_STATE_REDERIVED,                                                    \
       "RUNTIME_POINTER alone is TRUE BUT INSUFFICIENT here and the distinction is the point: "       \
       "the pointer is re-established at NodeCtxInitRegistry.hpp:103 + EngineCommon.hpp (per-node "   \

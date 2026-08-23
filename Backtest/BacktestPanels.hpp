@@ -1050,7 +1050,7 @@ struct PastRun {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-22]
-// [SIZE]_[6208B]
+// [SIZE]_[6192B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[97]
 // [STRADDLE]_[none]
@@ -1098,9 +1098,9 @@ struct PastRunsState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-22]
-// [SIZE]_[397616B]
+// [SIZE]_[396592B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[6213]
+// [CACHE_LINES]_[6197]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRunsState]
@@ -3167,12 +3167,8 @@ struct TrainingPanelState {
     // render after tm_complete=1 flips). Pre-v5.9.5d the SHA was only
     // logged via stderr — operator couldn't see it in foxml_suite.
     char scaler_sha256_hex[80];
-    // v5.9.5j — Train Model auto-stamp result (Option A: WF-only).
-    // Worker fires stamp_write_for_model post-Persist when cfg.auto_stamp_on_held_out=1.
-    // Stamp records WF mean accuracy + sentinel held_out=0.0 + sentinel
-    // gap_threshold=0.0 (engine treats as training-only; load-time WARN
-    // but no refuse). Operators wanting full held-out validation use
-    // Run Full Validation panel.
+    // (v5.9.5j tm_auto_stamp_* result fields DELETED at D-d with their only
+    // writer; the mh path's RFV auto-stamp is the live mechanism.)
     // walk-forward validation (Phase 6A — A7 GUI rework)
     int wf_n_splits;          // number of temporal folds (default 5)
     int wf_horizon_ticks;     // label horizon for purge gap calc (default 1000)
@@ -3294,7 +3290,7 @@ struct TrainingPanelState {
     // = 1 when that horizon's FV pipeline finished (or failed).
     FullValidationResults  mh_horizon_fv[PANEL_HORIZON_MAX];
     volatile int           mh_horizon_complete[PANEL_HORIZON_MAX];
-    volatile int           mh_horizon_progress[PANEL_HORIZON_MAX];
+    alignas(64) volatile int mh_horizon_progress[PANEL_HORIZON_MAX];  // H6 (Stage-5.5): cross-thread, was straddling a line
     char                   mh_horizon_status[PANEL_HORIZON_MAX][128];
     // E.1.2.C GUI polish (a) — click-time snapshot of the run's horizon
     // ticks for the per-horizon results table. The live ui_horizon_list
@@ -3322,7 +3318,7 @@ struct TrainingPanelState {
     // Operator types e.g. "0,2,1" → horizon_0=binary, horizon_1=multi,
     // horizon_2=regression.
     char            ui_label_kind_csv[64];
-    int             ui_label_kind_per_horizon[PANEL_HORIZON_MAX];   // parsed (broadcast or positional)
+    alignas(64) int ui_label_kind_per_horizon[PANEL_HORIZON_MAX];   // parsed (broadcast or positional); H6-aligned (Stage-5.5 straddle)
     int             ui_label_kind_per_horizon_count; // 0=empty; 1=broadcast; N=positional
 };
 //======================================================================
@@ -3331,10 +3327,10 @@ struct TrainingPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-22]
-// [SIZE]_[499992B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[7813]
-// [STRADDLE]_[run_name@12705 · tm_phase_msg@24904 · ui_tp_pct_csv@406148 · ui_sl_pct_csv@406212 · ui_sl_per_horizon@406308 · mh_horizon_progress@498800 · ui_label_kind_csv@499892 · ui_label_kind_per_horizon@499956]
+// [SIZE]_[500096B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[7814]
+// [STRADDLE]_[run_name@12705 · tm_phase_msg@24904 · ui_tp_pct_csv@406148 · ui_sl_pct_csv@406212 · ui_sl_per_horizon@406308 · ui_label_kind_csv@499908]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -4024,8 +4020,8 @@ static inline void *fullvalidation_worker_fn(void *arg) {
 // then trains an XGBooster on (features, this-horizon's labels), then
 // saves to a per-horizon dir.
 //
-// Per-horizon save path: <model_dir>/horizon_<H>_<role>.json
-// Per-horizon summary:   <model_dir>/horizon_<H>_summary.txt
+// Per-horizon save path (D-431 nested): models/<class>/<run>/horizon_<H>/<role>.json
+// Per-horizon summary:                    .../horizon_<H>/summary_{entry|exit}.txt (D-e)
 //
 // Operator workflow:
 //   1. Set cfg.horizon_list=100,500,1000 (CSV)
@@ -4086,7 +4082,8 @@ struct MultiHorizonWorkerArgs {
     float snap_held_out_fraction;           // from state->fv_held_out_fraction
     // v5.13.1 — sell-side training routing + per-horizon label_kind.
     // snap_training_side = 0 (buy) leaves existing path bytewise; 1 (exit)
-    // prepends "exit/" to run_subdir → models/exit/<run_subdir>/<run>/.
+    // historically routed models/exit/... — that side tree is RETIRED
+    // (PARITY-044); side flips the ROLE FILE, co-located in the family.
     // snap_label_kind_per_horizon[h] overrides snap_label_type per horizon
     // when its source CSV had >1 entries; otherwise broadcasts the single
     // value (back-compat with single-uniform Label Type combo).
@@ -4167,7 +4164,8 @@ static inline void mh_run_one_horizon_fv(
     int labels_precomputed,
     // v5.13.1 — sell-side training. Default 0 preserves pre-v5.13.1 path
     // for legacy callers. 1 → prepend "exit/" to run_subdir routing
-    // output to models/exit/<run_subdir>/<run>_horizon_<N>/.
+    // output co-located: side flips the ROLE FILE in the same nested
+    // horizon dirs (the models/exit/ side tree is RETIRED, PARITY-044).
     int training_side = 0,
     // v5.15.3.B.2 — total horizon count in this multi-horizon sweep
     // (default 1 = single-horizon caller; multi-horizon callers pass N).

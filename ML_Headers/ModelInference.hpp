@@ -1613,9 +1613,9 @@ struct ModelStampResult {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-21]
+// [UPDATED]_[2026-08-22]
 //----------------------------------------------------------------------
-// [SIZE]_[5232B]
+// [SIZE]_[5216B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[82]
 // [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cuda_version environment_cpu_model]
@@ -2214,8 +2214,8 @@ struct StampInferenceCfgInputs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-21]
-// [SIZE]_[4912B]
+// [UPDATED]_[2026-08-22]
+// [SIZE]_[4896B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[77]
 // [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cuda_version environment_cpu_model]
