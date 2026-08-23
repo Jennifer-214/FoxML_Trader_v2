@@ -1854,23 +1854,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         &g_shared.swap_model_path_requested[c], 0,
                                         __ATOMIC_RELEASE);
                                 } else {
-                                    // Cast model_handle back to the typed zoo
-                                    // pointer set at boot (the InitArena block above). NULL
-                                    // means the core wasn't STRATEGY_ML at
-                                    // boot, so no zoo storage was allocated;
-                                    // hot-swap requires operator pre-config.
-                                    NodeModelZoo<F>* swap_zoo =
-                                        (NodeModelZoo<F>*)state.nodes[c].model_handle;
-                                    if (swap_zoo == nullptr) {
-                                        fprintf(stderr,
-                                            "[hot_swap] node %d REFUSED: "
-                                            "core not ML at boot (set "
-                                            "node_%d_strategy=ml + restart "
-                                            "to enable hot-swap)\n", c, c);
-                                        __atomic_store_n(
-                                            &g_shared.swap_model_path_requested[c], 0,
-                                            __ATOMIC_RELEASE);
-                                    } else if (state.nodes[c].ensemble_handle != nullptr) {
+                                    // Gate ORDER is the fix (third sibling of
+                                    // the E.1.2.C leg-3 single-zoo-blind class;
+                                    // the dispatch gate + strategy-swap gate got
+                                    // it first): an ensemble-only node — the ONLY
+                                    // layout the trainer produces since D-431 —
+                                    // has ensemble_handle set while model_handle
+                                    // stays NULL (boot 5c sets it only when the
+                                    // single zoo loads a role). So: ensemble
+                                    // first, single-zoo second, REFUSE only when
+                                    // BOTH are null (node not ML at boot — no
+                                    // arena of either kind to swap into).
+                                    if (state.nodes[c].ensemble_handle != nullptr) {
                                         // v5.15.4 — ENSEMBLE SHADOW-LOAD HOT-SWAP.
                                         // Replaces v5.14.2's in-place Free+Init+Load
                                         // pattern (its EnsembleHotSwap.hpp was
@@ -1949,7 +1944,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);
-                                    } else {
+                                    } else if (state.nodes[c].model_handle != nullptr) {
                                         // v5.15.4 — SINGLE-ZOO SHADOW-LOAD HOT-SWAP.
                                         // Replaces in-place Free+Init+LoadFromDir
                                         // (v5.10.0c "log-and-leave" pattern; brief
@@ -2001,6 +1996,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
                                             }
                                         }
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    } else {
+                                        // Neither handle exists — node was not
+                                        // ML at boot. (Ensemble-only nodes no
+                                        // longer land here; gate-order comment
+                                        // above.)
+                                        fprintf(stderr,
+                                            "[hot_swap] node %d REFUSED: no "
+                                            "single-zoo model and no ensemble "
+                                            "(set node_%d_strategy=ml + restart "
+                                            "to enable hot-swap)\n", c, c);
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);
