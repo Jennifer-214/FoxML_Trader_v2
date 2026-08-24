@@ -910,6 +910,39 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
                 "bit-parity PROVEN over %d probes; leaf coverage %d/%d\n",
                 path, w->num_trees, w->total_nodes, w->max_depth, w->num_class,
                 w->num_class == 1 ? "" : "es", probes, leaves_hit, leaves_total);
+
+            // R4 — LOAD-TIME SERVE-COST WARN. The Limits.hpp caps are sized to the
+            // BUDGET (2MB blob ceiling, depth ~10 headroom), deliberately not to
+            // today's depth-2/7-node models, so an artifact can be perfectly legal
+            // and still be a bad thing to serve per-cycle. The caps REFUSE; this
+            // WARNS — the gap between "allowed" and "advisable" is exactly where a
+            // silent latency regression lives, and the operator is the only one who
+            // can decide whether a 1.5MB blob is worth its cache footprint.
+            //
+            // Both numbers are derived, not guessed: the blob is total_nodes x 16B
+            // (the pinned FlatTreeNode size), and the per-prediction walk is
+            // constant-iter, so steps = trees x max_depth EXACTLY — not an estimate.
+            {
+                const long blob_bytes = (long)w->total_nodes * (long)sizeof(FlatTreeNode);
+                const long walk_steps = (long)w->num_trees * (long)w->max_depth;
+                // 512KB ~ a typical L2 slice; past it the blob stops being
+                // resident and the walk starts paying misses it cannot amortize.
+                if (blob_bytes > 512L * 1024L) {
+                    fprintf(stderr,
+                        "[ML] walker WARN: blob is %ld KB (%d nodes x %zuB) — past the ~512KB "
+                        "L2-residency guideline. Legal (cap is %d nodes) but the walk will take "
+                        "cache misses every cycle; consider fewer/shallower trees.\n",
+                        blob_bytes / 1024L, w->total_nodes, sizeof(FlatTreeNode),
+                        WALKER_MAX_TOTAL_NODES);
+                }
+                if (walk_steps > 32768L) {
+                    fprintf(stderr,
+                        "[ML] walker WARN: %ld node-steps per prediction (%d trees x depth %d). "
+                        "The walk is constant-iter, so this is the EXACT per-cycle cost, not an "
+                        "average — it lands on the slow path every poll_interval ticks.\n",
+                        walk_steps, w->num_trees, w->max_depth);
+                }
+            }
             if (leaves_total > 0 && leaves_hit * 2 < leaves_total) {
                 // Not a refusal — a HONESTY line. Parity proven only where the
                 // probes reached; say so rather than let "PROVEN" imply totality
