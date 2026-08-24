@@ -439,9 +439,14 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     X(int,                  KIND_INT,        regime_model_backend,        "Regime Model Backend", "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                   \
         "Regime detection model backend. Ships as KIND_INT pending TECH_DEBT-068.",                                                                                                                                 \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(int,                  KIND_BOOL,       use_aot_inference,           "Use AOT Inference",    "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                       \
-        "Use ahead-of-time-compiled inference path instead of XGBoost runtime. Faster per-tick (~50ns vs ~500ns) but requires AOT model build via tools/aot_compile. Boot-only.",                                    \
-        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* `use_aot_inference` — ROW DELETED 2026-08-24 (E.1.2.E). A Class-44 cfg    */ \
+    /* ORPHAN: parsed into the struct, read by NOTHING (zero production readers   */ \
+    /* tree-wide), while its tooltip advertised a "~50ns vs ~500ns" speedup and   */ \
+    /* a `tools/aot_compile` build step that DOES NOT EXIST. An operator setting  */ \
+    /* it got a silent no-op sold as a 10x win. Its backend (slot 3) is           */ \
+    /* H21-tombstoned in ModelInference.hpp and the NAME is burned in             */ \
+    /* check_identifier_retirement.py RETIRED_NAMES, so it cannot return with a   */ \
+    /* new meaning. Superseded by MODEL_BACKEND_FLAT_WALKER (slot 4).             */ \
     /* === Notifications (2) === */                                                                                                                                                                                   \
     X(int,                  KIND_INT,        notify_backend,              "Notify Backend",       "Notifications",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                                                      \
         "Notification backend: 0=Discord, 1=Telegram, 2=Slack (per notify_command template). Ships as KIND_INT pending TECH_DEBT-068.",                                                                              \
