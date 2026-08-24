@@ -43,6 +43,26 @@ inline void EngineHeader_Render(const struct TUISnapshot* snap = nullptr) {
         ImGui::SameLine();
         ImGui::Text("%s", ENGINE_VERSION_STRING);
 
+        // v5.15.5.F.4d.1.E.1.2.D.2 — build-commit tag. Answers "which commit is
+        // this binary?" without leaving the dashboard. Dirty builds render in
+        // yellow because a modified tree means the binary is NOT the commit it
+        // names — Landmine 24 (a stale editor buffer silently reverted committed
+        // work while every gate stayed green) is the incident where a confident
+        // clean SHA would have read as reassurance.
+        ImGui::SameLine(0, 14);
+        ImGui::TextColored(FoxmlColors::sand, "commit:");
+        ImGui::SameLine();
+        if (FOXML_BUILD_COMMIT_DIRTY) {
+            ImGui::TextColored(FoxmlColors::yellow, "%s", FOXML_BUILD_COMMIT);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("built from %s with UNCOMMITTED changes -\n"
+                                  "this binary does not match that commit",
+                                  FOXML_BUILD_COMMIT_SHA);
+            }
+        } else {
+            ImGui::Text("%s", FOXML_BUILD_COMMIT);
+        }
+
         ImGui::SameLine(0, 14);
         ImGui::TextColored(FoxmlColors::sand, "format:");
         ImGui::SameLine();

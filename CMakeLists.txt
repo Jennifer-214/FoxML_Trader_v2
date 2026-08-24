@@ -271,6 +271,49 @@ endif()
 # DESIGN_SPEC `framework-driven-cli-binary-pattern.md` retained as Stage 2 DRAFT; first canonical
 # queued for v5.16+ cmdline-invocable training per `plans/_future/2026-05-12-decoupling-endgoal-roadmap.md`.
 
+#===============================================================================
+# build-commit display tag (v5.15.5.F.4d.1.E.1.2.D.2)
+#===============================================================================
+# Emits ${CMAKE_BINARY_DIR}/generated/FoxmlBuildCommit.hpp so the GUI/banner can
+# answer "which commit is this binary?". Regenerated on EVERY build (ALL target),
+# not at configure time — a configure-time SHA is frozen when the build dir is
+# created and then keeps confidently asserting a commit the binary no longer
+# matches (Class 51: an emit that states a fact it cannot back).
+#
+# DISPLAY-ONLY. Deliberately NOT added to BUILD_FLAGS_CANONICAL and never routed
+# into a stamp / fingerprint / HMAC body — build_flags_hash must stay stable and
+# H9 forbids a re-tag perturbing determinism (same rule as RELEASE_VERSION_STRING).
+#
+# Attached at the END of the file so every target above is already declared; the
+# `if(TARGET ...)` guard keeps optional targets (GUI / suite / private tools)
+# working on a code-only public clone.
+set(FOXML_BUILD_COMMIT_DIR ${CMAKE_BINARY_DIR}/generated)
+set(FOXML_BUILD_COMMIT_HDR ${FOXML_BUILD_COMMIT_DIR}/FoxmlBuildCommit.hpp)
+file(MAKE_DIRECTORY ${FOXML_BUILD_COMMIT_DIR})
+
+# Configure-time seed so the header exists before any compile is attempted; the
+# custom target below is what keeps it CURRENT.
+execute_process(COMMAND ${CMAKE_COMMAND}
+    -DSRC_DIR=${CMAKE_SOURCE_DIR}
+    -DOUT_FILE=${FOXML_BUILD_COMMIT_HDR}
+    -P ${CMAKE_SOURCE_DIR}/cmake/GenBuildCommit.cmake)
+
+add_custom_target(foxml_build_commit ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DSRC_DIR=${CMAKE_SOURCE_DIR}
+        -DOUT_FILE=${FOXML_BUILD_COMMIT_HDR}
+        -P ${CMAKE_SOURCE_DIR}/cmake/GenBuildCommit.cmake
+    BYPRODUCTS ${FOXML_BUILD_COMMIT_HDR}
+    COMMENT "Refreshing build-commit tag"
+    VERBATIM)
+
+foreach(_fox_tgt engine engine_gui foxml_suite controller_test depth_recorder_test compare_scalers)
+    if(TARGET ${_fox_tgt})
+        add_dependencies(${_fox_tgt} foxml_build_commit)
+        target_include_directories(${_fox_tgt} PRIVATE ${FOXML_BUILD_COMMIT_DIR})
+    endif()
+endforeach()
+
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
 add_test(NAME depth_recorder_test COMMAND depth_recorder_test)

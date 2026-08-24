@@ -12,7 +12,7 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.2.D.1"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.E.1.2.D.2"
 
 // PUBLIC RELEASE VERSION — display-only; distinct from the granular internal ENGINE_VERSION above.
 // WHY two numbers: the engine version tracks the internal sprint cadence AND is WIRE-BOUND (embedded
@@ -24,6 +24,61 @@
 #define RELEASE_VERSION_MINOR 3
 #define RELEASE_VERSION_STRING "0.3"
 
+// BUILD-COMMIT TAG — display-only build identity, so an operator can read which
+// commit a running binary was built from (and whether the tree was modified).
+//
+// Generated per BUILD into the build dir by cmake/GenBuildCommit.cmake, NOT
+// checked in and NOT frozen at configure time — a stale SHA would confidently
+// name the wrong commit, which is worse than naming none (Class 51).
+//
+// __has_include keeps every consumer building when the header is absent: a
+// code-only public clone, a hand-rolled build, or any TU compiled outside the
+// cmake targets falls back to "unknown" rather than failing to compile.
+//
+// SAME WIRE RULE AS RELEASE_VERSION_STRING: display surfaces only. Never added
+// to BUILD_FLAGS_CANONICAL (ML_Headers/BuildFlags.hpp) and never written into a
+// stamp / fingerprint / HMAC body — H9 determinism forbids a re-tag perturbing
+// any wire-bound value, and ENGINE_VERSION_STRING remains the ONLY version fact
+// a model artifact records.
+#if defined(__has_include)
+#  if __has_include("FoxmlBuildCommit.hpp")
+#    include "FoxmlBuildCommit.hpp"
+#  endif
+#endif
+#ifndef FOXML_BUILD_COMMIT
+#  define FOXML_BUILD_COMMIT       "unknown"
+#  define FOXML_BUILD_COMMIT_SHA   "unknown"
+#  define FOXML_BUILD_COMMIT_DIRTY 0
+#endif
+
+// .F.4d.1.E.1.2.D.2 (v5.15.5.F.4d.1.E.1.2.D.2) — ORDER-FLOW SEMANTICS BOUNDARY (PARITY-047) + build-commit display tag.
+//   WARNING STAMP-VISIBLE ON PURPOSE, for the same reason .D.1 was: models trained before this string are
+//   ORDER-FLOW-BLIND at serve; models trained at or after it are ORDER-FLOW-REAL. PARITY-047 landed in
+//   CODE under .D.1 (1f2719f + 402c5e3) without its own bump, which left ONE stamp string covering TWO
+//   incompatible feature semantics -- precisely the failure .D.1's own note says it bumped to avoid.
+//   This bump restores the invariant that a stamp string names exactly one semantics.
+//   - WHAT CHANGED FOR A MODEL: RollingStats_Push had a defaulted tail `int is_buyer_maker = 0` that
+//     both sharded call sites omitted, so sell_volume_sum never left zero and volume_delta computed
+//     buy/buy = exactly +1.0 forever. FEAT_VOLUME_DELTA (9) was therefore CONSTANT in training AND at
+//     serve -- measured 0 splits in all 43 model artifacts on disk, i.e. XGBoost had no gain to select
+//     it and every existing model carries it as dead weight. FEAT_CUMDELTA (18) / FEAT_FLOW_10S (28) /
+//     FEAT_FLOW_1M (29) / FEAT_FLOW_5M (30) were worse: REAL in the backtest driver but degenerate on
+//     the live path, i.e. train-serve DIVERGENT (M5) across 2.7-7.5% of every model's splits.
+//   - CONSEQUENCE FOR EXISTING ARTIFACTS: the engine fix REPAIRS 18/28/29/30 for models already
+//     trained (they learned on real flow; live now finally supplies it) and cannot poison them via 9
+//     (0 splits = never read; the scaler's stddev floor + winsor clip are moot on a feature no tree
+//     consults). So pre-boundary models are not made WRONG by this -- they are made LESS wrong, and a
+//     retrain is owed to CAPTURE feature 9 and to pick up .D.1's fee-aware labels, not to defuse a
+//     hazard. Retrain cost is ~0 per project_no_live_models_dev_test_only.
+//   - No model artifact was ever stamped .D.1: the newest stamp on disk at the time of this bump reads
+//     5.15.5.F.4d.1.E.1.2.D (trained 2026-08-23 19:36 from an 18:43 binary, i.e. before both the .D.1
+//     bump and the plumb). The .D.1 string is therefore live in code history and empty in the artifact
+//     corpus, which is why the conflation is closable by a forward bump rather than a migration.
+//   - Build-commit display tag: FOXML_BUILD_COMMIT is regenerated at BUILD time (not configure time,
+//     so it cannot go stale and assert a false commit -- the Class-51 shape) and rendered in the GUI
+//     Engine header + ANSI boot banner. DISPLAY-ONLY, never wire-written: it is deliberately NOT added
+//     to BUILD_FLAGS_CANONICAL (whose order-locked allowlist is what keeps build_flags_hash stable),
+//     and never reaches a stamp / fingerprint / HMAC body (H9 -- same rule as RELEASE_VERSION_STRING).
 // .F.4d.1.E.1.2.D.1 (v5.15.5.F.4d.1.E.1.2.D.1) — LABEL-SEMANTICS BOUNDARY + bandit non-finite hardening.
 //   ⚠️ STAMP-VISIBLE ON PURPOSE: models trained before this string are FEE-BLIND on the take-profit
 //   barrier; models trained at or after it are FEE-AWARE. The two are NOT interchangeable and the
