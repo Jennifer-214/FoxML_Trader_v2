@@ -2486,8 +2486,35 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       len++;
     line[len] = '\0';
 
-    // skip empty lines and comments
-    if (len == 0 || line[0] == '#')
+    // skip empty lines and comments.
+    //
+    // 2026-08-24 — the comment test now skips LEADING WHITESPACE first. It used
+    // to be `line[0] == '#'` only, so an INDENTED continuation comment was not
+    // recognised as a comment at all: it fell through to the `=` scan below, and
+    // any such line CONTAINING an `=` parsed as a bogus key/value pair. This is
+    // not hypothetical — `engine.cfg`'s own max_hold_ticks block has two
+    // (`... which == longest model horizon (50000),` and `... re-enable (>= 2-3x
+    // longest horizon) only`), and the multi-line comment style that produces
+    // them is used throughout the file.
+    //
+    // MEASURED SCOPE (do not overstate this fix): today the bogus key RETAINS
+    // its '#' (key = everything left of the first '='), so it matches no
+    // registry key and is silently dropped — there is NO observable behaviour
+    // change from this fix right now. It also cannot regress anything, because
+    // `char *key = line;` is never trimmed, so an INDENTED KEY has never parsed
+    // either. Its value is forward-looking: the queued strict unknown-key
+    // REFUSE would turn a purely cosmetic comment indent into a
+    // BOOT FAILURE on a config that reads perfectly correct to a human. Fixed
+    // in the PARSER rather than by re-indenting the two offending lines,
+    // because the patch leaves the class open — the next indented comment
+    // containing `=` re-breaks it — while this closes it for every cfg file
+    // and every future comment (structural-fix-over-patch).
+    //
+    // An indented genuine KEY still parses exactly as before: this only
+    // reclassifies lines whose first non-blank character is '#'.
+    int ws = 0;
+    while (ws < len && (line[ws] == ' ' || line[ws] == '\t')) ws++;
+    if (len == 0 || ws == len || line[ws] == '#')
       continue;
 
     // find '='

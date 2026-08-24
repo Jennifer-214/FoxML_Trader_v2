@@ -287,20 +287,36 @@ inline bool EngineSharded_Async_FanOut(
 
     // Phase 8a (post-coding c7) — record raw tick to CSV when enabled.
     // No-op when record_ticks=0 (the gate is inside TickRecorder_Push).
-    // v5.1.2 architectural carry-forward — is_buyer_maker isn't available
-    // on the sharded fan_out's scalar bus; producer + recorder + slow-path
-    // all pass 0. (Legacy path passes the real value from BinanceStream
-    // tick read.) Train-serve parity preserved (both broken the same way)
-    // but FEAT_VOLUME_DELTA in slow-path RollingStats is locked at +1.0
-    // → effectively zero-information. Full closure (~4h) plumbs through
-    // a g_last_buyer_maker scalar; deferred to v5.10.X or v5.11+.
-    // See plans/plan_checks/parity-2026-05-06-full.md Finding #5.
-    TickRecorder_Push(&tick_rec, price_d, volume_d, (int64_t)ts_us, 0);
+    //
+    // PARITY-047 RESIDUAL, closed 2026-08-24. This site passed a hardcoded 0
+    // and carried a comment describing the pre-plumb world ("is_buyer_maker
+    // isn't available on the sharded fan_out's scalar bus; producer + recorder
+    // + slow-path all pass 0 ... deferred to v5.10.X or v5.11+"). PARITY-047
+    // DELETED that scalar bus and plumbed the real side — `is_buyer_maker` is
+    // this function's own parameter and builds `t.is_buyer_maker` above — but
+    // the plumb stopped at the rolling/flow consumers and MISSED the two
+    // recorder-shaped sinks here.
+    //
+    // Why it matters beyond tidiness: the tape is a REPLAY SOURCE. A tape
+    // written with an all-zero side column reconstructs exactly the degenerate
+    // `sell_volume_sum == 0` / `volume_delta == +1.0` state PARITY-047 closed,
+    // so any warm-restart backfill or retrain fed by it would silently
+    // reintroduce the bug through the back door — and it would look like a
+    // model problem, not a recorder problem. Inert until now ONLY because
+    // record_ticks defaults OFF (TECH_DEBT-295's option (b) turns it ON).
+    TickRecorder_Push(&tick_rec, price_d, volume_d, (int64_t)ts_us, is_buyer_maker);
 
 #ifdef USE_IMGUI_GUI
     // Feed candles for the chart panel (same pattern as main.cpp:396)
     if (candle_acc_ptr) {
-        CandleAccumulator_Push(candle_acc_ptr, price_d, volume_d, 0);
+        // Same PARITY-047 residual, GUI half. The 4th param is `is_seller`, and
+        // `is_buyer_maker == 1` IS seller aggression — authoritative at
+        // ML_Headers/RollingStats.hpp:328 ("mask is is_buyer_maker (sell side
+        // gets the volume when set)"), so this is a direct pass-through, not a
+        // polarity flip. With the hardcoded 0 every tick counted as BUY volume,
+        // so the chart's buy/sell split was a constant lie in the same shape as
+        // the vol-delta readout.
+        CandleAccumulator_Push(candle_acc_ptr, price_d, volume_d, is_buyer_maker);
     }
 #endif
 
