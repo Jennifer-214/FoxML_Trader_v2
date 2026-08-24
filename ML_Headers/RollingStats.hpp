@@ -256,15 +256,29 @@ template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_I
 // [FUNCTION]_[RollingStats_Push]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP]]
-// [COMPLEXITY]_[O(1) amortized per push (running sums + monotonic deques); O(W) worst-case deque burst, total O(N) over N pushes]
+// [COMPLEXITY]_[THROUGHPUT O(1) amortized (running sums + monotonic deques); a SINGLE push is O(W) when a monotone run collapses — an amortized bound does NOT discharge H8's p99 TAIL budget (TECH_DEBT-292)]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[add one price/volume sample + recompute ALL rolling outputs — 9 mask-blend phases, no per-push window loop since v5.11.2.C]
-// [REFERENCE]_[INVARIANT]_[[H4] [H8]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H8] [H11]]
 //======================================================================
 // [CODE]
 //======================================================================
+// PARITY-047 — `is_buyer_maker` is DELIBERATELY NOT DEFAULTED. It carried
+// `= 0` from v5.10.X until 2026-08-23, and the sharded call sites simply omitted
+// it: the default absorbed the omission at COMPILE time, so all volume routed to
+// buy, `sell_volume_sum` never left zero, and `volume_delta` computed buy/buy =
+// exactly +1.0 for the life of the process. That silently disabled a
+// falling-knife capital gate, two halt reasons, a GUI readout and an ML feature —
+// for roughly five sprints, through a full green suite.
+//
+// It is not a hypothetical: on 2026-08-23 a stale editor buffer re-dropped the
+// argument at all four live call sites and the suite still passed 3982/0. No test
+// can see a swallowed argument. Requiring it makes the next omission a COMPILE
+// ERROR at every call site, which is the only thing that would have caught either
+// event. Do not restore the default (H21 sister: TECH_DEBT-288's defaulted-tail
+// cohort; `feedback_guards_compound_enforcement_is_leverage`).
 template <unsigned F, unsigned W>
-inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_Binary<F> volume, int is_buyer_maker = 0) {
+inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_Binary<F> volume, int is_buyer_maker) {
     // ── v5.11.2.C — O(1) Push: running sums + monotonic deques replace the
     //               per-Push O(W) accumulator loop. See RollingStats struct
     //               docstring for the running-sum + deque storage rationale.
