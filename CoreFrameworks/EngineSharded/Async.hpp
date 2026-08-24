@@ -70,6 +70,7 @@
 #include "../PaperResetArchive.hpp"         // PaperResetArchive_* + Summary_WriteJson
 #include "../SPSCRing.hpp"                  // SPSCRing + SPSCRing_TryPush / _TryPop
 #include "../Tick.hpp"                      // Tick<F>
+#include "../ParameterSlot.hpp"             // ParameterSlot<Tick<F>> — latest-tick seqlock (PARITY-047)
 
 #include "../../DataStream/TickRecorder.hpp"        // TickRecorder + TickRecorder_Push
 #include "../../DataStream/BinanceDepth.hpp"        // DepthSharedState<F>
@@ -142,8 +143,15 @@ inline bool EngineSharded_Async_FanOut(
     // By-ref captures
     uint64_t& seq,
     std::atomic<uint64_t>& ticks_produced,
-    std::atomic<double>& last_price,
-    std::atomic<double>& last_volume,
+    // PARITY-047 — the latest tick is published as ONE seqlock'd sample, not as
+    // independent price/volume lanes. The slow path cannot pop the per-node SPSC
+    // rings (the hot thread is their single consumer), so it needs a published
+    // snapshot — and it needs (price, volume, is_buyer_maker) to come from the
+    // SAME tick: side is CATEGORICAL, so a mis-pair attributes a tick's volume to
+    // the wrong side outright and biases volume_delta / cum-delta / flow directly.
+    // Reuses the existing generic ParameterSlot<T> double-buffered seqlock rather
+    // than a third relaxed lane (SSoT — no new primitive, tsan-annotated already).
+    ParameterSlot<Tick<F>>& latest_tick,
     ControllerConfig<F>& cfg,
     EventLoopState<F>& state,
     OrderManagerState<F>& oms,
@@ -183,8 +191,13 @@ inline bool EngineSharded_Async_FanOut(
         if (g_engine_sharded_shutdown) return false;
     }
     ticks_produced.fetch_add(1, std::memory_order_relaxed);
-    last_price.store(price_d, std::memory_order_relaxed);
-    last_volume.store(volume_d, std::memory_order_relaxed);
+    // PARITY-047 — publish the WHOLE tick under one seqlock window. `t` is already
+    // fully built above (price/volume/timestamp/sequence/is_buyer_maker), so the
+    // consumer gets a self-consistent sample by construction; there is no pairing
+    // window to lose. Replaces the two independent relaxed lanes whose own comment
+    // called them "informational, not load-bearing" while the slow path's rolling /
+    // cum-delta / flow ingest depended on them.
+    ParameterSlot_Write(&latest_tick, t);
     // v5.12.1.A.1+.2 — publish LOCAL wall-clock us of this tick to
     // EventLoopState::last_ws_tick_us. Producer is the SOLE writer;
     // slow-path threads + GUI read with acquire ordering.
@@ -418,8 +431,14 @@ inline bool EngineSharded_Async_FanOut(
         // Phase 3: pass current_price for MTM kill switch evaluation.
         // Read once from the producer atomic; tracker is realized-only
         // on the first slow path before any tick has been seen.
-        Money mtm_price = Money{ money_from_double_payload(
-            last_price.load(std::memory_order_relaxed)) };  // producer atomic carries double (S-8 vehicle rework rides P3)
+        // PARITY-047 — read the published tick, not a bare price lane. Value is
+        // UNCHANGED: the producer derived t.price from the same double with the
+        // same money_from_double_payload call, so this is a byte-identical swap
+        // that additionally drops a use of that helper, whose own contract says
+        // "cfg-PAYLOAD bridge ONLY … NOT a general money ingress".
+        Tick<F> _latest{};
+        ParameterSlot_Read(&latest_tick, &_latest);
+        Money mtm_price = _latest.price;
         // v4.3 — pass expanded feature-pack state for the model's
         // medium-horizon features. Same pointers go to both the AUTO
         // regime resolution branch (above the dispatch) and the ML
@@ -794,7 +813,7 @@ inline bool EngineSharded_Async_FanOut(
 // [COMMENT]
 //----------------------------------------------------------------------
 // Pushes a single tick out to every core's tick ring, updates global state (ticks_produced
-// counter, last_price/_volume atomics, ema_price replication), records the tick to CSV
+// counter, the latest-tick seqlock slot, ema_price replication), records the tick to CSV
 // when enabled, feeds the GUI candle accumulator, and at slow-path cadence (every
 // poll_interval ticks) runs the cfg hot-reload + per-core kill-switch reset + book
 // depth read + paper-reset coordination + GUI TUISnapshot publish.
@@ -804,7 +823,7 @@ inline bool EngineSharded_Async_FanOut(
 // args). Body unchanged from lambda body modulo capture → arg translation.
 //
 // **Args translated from lambda captures (24 captures + 4 explicit params):**
-//   - by-ref captures (13): seq, ticks_produced, last_price, last_volume, cfg, state,
+//   - by-ref captures (12): seq, ticks_produced, latest_tick, cfg, state,
 //     oms, slow_path_counter, ema_price, paper_reset_in_progress, topo_hot_cpu,
 //     topo_slow_cpu, topo_poll_interval
 //   - by-value captures (8): num_nodes, slow_path_interval, tsc_ghz, ema_alpha,

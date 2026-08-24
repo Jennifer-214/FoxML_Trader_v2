@@ -600,6 +600,13 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                                                Money price,
                                                Money volume,
                                                uint64_t ts_us,
+                                               // PARITY-047 — trade side of THIS tick (Binance "m":
+                                               // 1 = buyer was maker / seller aggressed). Arrives
+                                               // paired with price+volume from one seqlock'd sample,
+                                               // so it cannot be mis-attributed across ticks. Was a
+                                               // hardcoded 0 below, which pinned volume_delta at
+                                               // +1.0 and left cum-delta / flow one-sided on LIVE.
+                                               int is_buyer_maker,
                                                uint64_t now_tick,
                                                const BookSnapshot<F>& depth) {
     // v1.7.3 HIGH-4 Telemetry Path A INTERNAL: helper computes own rdtsc bracket
@@ -668,7 +675,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     EventLoop_UpdateRollingStateOneCore(
         &state, c,
         price, volume, rebuild_ts_us,
-        /*is_buyer_maker=*/0, // TODO(parity-check Finding #5): plumb through scalar bus (v5.10.X)
+        is_buyer_maker,       // PARITY-047 — plumbed (was hardcoded 0 since v5.10.X)
         BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? book_imb : FPN_Zero<F>(),
         bs,
         BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? 1 : 0);
@@ -982,6 +989,7 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
                                                 Money price,
                                                 Money volume,
                                                 uint64_t ts_us,
+                                                int is_buyer_maker,   // PARITY-047 — fanned to every node
                                                 uint64_t now_tick,
                                                 const BookSnapshot<F>& depth) {
     // Fan wrapper: BACKTEST calls this ONCE per tick; loops over registered
@@ -996,7 +1004,8 @@ inline void EngineCommon_SlowPathCycleAllCores(const ControllerConfig<F>& cfg,
     // since EventLoopState_RegisterCore is the single increment site.
     for (int c = 0; c < state.registered_count; ++c) {
         EngineCommon_SlowPathCycleOneCore(cfg, c, state, oms,
-                                           price, volume, ts_us, now_tick, depth);
+                                           price, volume, ts_us, is_buyer_maker,
+                                           now_tick, depth);
     }
 }
 //======================================================================

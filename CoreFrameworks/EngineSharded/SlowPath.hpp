@@ -37,6 +37,8 @@
 #include "../OrderManager.hpp"                // OrderManagerState
 #include "../ExecutionCore.hpp"               // EventLoopState
 #include "../ControllerConfig.hpp"            // ControllerConfig
+#include "../Tick.hpp"                        // Tick<F>
+#include "../ParameterSlot.hpp"               // ParameterSlot<Tick<F>> — latest-tick seqlock (PARITY-047)
 #include "../../MemHeaders/OmsPushExitHelper.hpp"  // OMS_PushExitForSlot
 #include "../../MemHeaders/BitmapMacros.hpp"  // BITMAP_IS_SET
 
@@ -74,7 +76,10 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
     EventLoopState<F>& state,
     OrderManagerState<F>& oms,
     const ControllerConfig<F>& cfg,
-    std::atomic<double>& last_price,
+    // PARITY-047 — the latest tick arrives as ONE seqlock'd sample (was a bare
+    // price lane). Same value; the producer built .price from the same double
+    // via the same money_from_double_payload call.
+    ParameterSlot<Tick<F>>& latest_tick,
     TUISharedState* shared_ptr   // nullable; #ifdef USE_IMGUI_GUI gates body usage
 ) {
 #ifdef USE_IMGUI_GUI
@@ -103,8 +108,9 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         uint8_t strategy_id = state.nodes[node_id].strategy_id;
         // Use latest tick price as fill price for paper mode. Live
         // mode would route to a real adapter SELL — same Submit call.
-        Money fill_px = Money{ money_from_double_payload(
-            last_price.load(std::memory_order_relaxed)) };
+        Tick<F> _latest{};
+        ParameterSlot_Read(&latest_tick, &_latest);
+        Money fill_px = _latest.price;
         if (Money_IsZero(fill_px)) {
             fill_px = oms.portfolio.positions[slot].entry_price;  // safe fallback
         }
@@ -146,7 +152,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
     (void)state;
     (void)oms;
     (void)cfg;
-    (void)last_price;
+    (void)latest_tick;
     (void)shared_ptr;
 #endif
 }

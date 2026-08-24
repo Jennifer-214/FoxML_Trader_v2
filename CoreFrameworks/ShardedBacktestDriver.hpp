@@ -301,20 +301,26 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         // D-122 feature ingress: money tick -> binary feature domain, ONE cast.
         FPN_Binary<64> price_b  = Money_ToBinary(tick.price);
         FPN_Binary<64> volume_b = Money_ToBinary(tick.volume);
+        // PARITY-047 — forward the trade side here too. The defaulted
+        // `int is_buyer_maker = 0` on RollingStats_Push had been absorbing the
+        // omission on BOTH paths, so volume_delta was pinned at +1.0 identically
+        // in training and serving (dead, not divergent). Fixed together with the
+        // live site so the two never disagree.
+        const int tick_side = (int)tick.is_buyer_maker;
         if (drv->rolling) {
-            RollingStats_Push(drv->rolling, price_b, volume_b);
+            RollingStats_Push(drv->rolling, price_b, volume_b, tick_side);
         }
         if (drv->rolling_long) {
-            RollingStats_Push(drv->rolling_long, price_b, volume_b);
+            RollingStats_Push(drv->rolling_long, price_b, volume_b, tick_side);
         }
         // Track E.1 — push v4.3 state at the same cadence EngineSharded_Run's
         // producer slow-path block does. Each guarded so callers that don't
         // supply the state get prior behavior.
         if (drv->rolling_medium) {
-            RollingStats_Push(drv->rolling_medium, price_b, volume_b);
+            RollingStats_Push(drv->rolling_medium, price_b, volume_b, tick_side);
         }
         if (drv->rolling_baseline) {
-            RollingStats_Push(drv->rolling_baseline, price_b, volume_b);
+            RollingStats_Push(drv->rolling_baseline, price_b, volume_b, tick_side);
         }
         if (drv->cumdelta_state) {
             // is_buyer_maker available on Tick<F> per the v4.3 plumbing.
@@ -410,9 +416,16 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             if (drv->current_spread)    { depth.spread    = *drv->current_spread; }
             if (drv->current_mid_price) { depth.mid_price = *drv->current_mid_price; }
 
+            // PARITY-047 — pass the REAL trade side. The LIVE path now sources
+            // (price, volume, side) from one seqlock'd tick sample, so both sides
+            // of the train/serve boundary feed the same bit here. Before this,
+            // LIVE passed a hardcoded 0 while this driver fed the real bit to
+            // CumDelta_Push/FlowState_Push below — a divergence on FEAT_CUMDELTA
+            // and FEAT_FLOW_10S/1M/5M (M5).
             EngineCommon_SlowPathCycleAllCores<F>(
                 *drv->config, *drv->state, *drv->oms,
                 tick.price, tick.volume, tick.timestamp,
+                (int)tick.is_buyer_maker,
                 (uint64_t)tick_index, depth);
         }
         EventLoop_KillSwitchEvaluate(drv->state);

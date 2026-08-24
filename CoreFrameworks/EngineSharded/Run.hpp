@@ -1212,12 +1212,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     std::atomic<bool> producer_done{false};
     std::atomic<uint64_t> ticks_produced{0};
     std::atomic<uint64_t> ticks_consumed_total{0};
-    // Latest market data for the live TUI panel. Producer writes, render
-    // thread reads. Doubles are 8-byte aligned so the read/write is atomic
-    // on x86 even without an explicit atomic; we relax that for simplicity
-    // since the TUI is informational, not load-bearing.
-    std::atomic<double> last_price{0.0};
-    std::atomic<double> last_volume{0.0};
+    // Latest market tick, published as ONE seqlock'd sample. Producer writes;
+    // the render thread, the manual-close drain, and the per-node SLOW threads
+    // read (the slow path cannot pop the per-node SPSC rings — the hot thread is
+    // their single consumer — so it needs a published snapshot).
+    //
+    // PARITY-047 — this REPLACES two independent `std::atomic<double>` lanes whose
+    // own comment declared them "informational, not load-bearing" while the slow
+    // path's rolling / cum-delta / flow ingest had come to depend on them, and
+    // which had no lane at all for `is_buyer_maker`. Three separate relaxed lanes
+    // could each land from a DIFFERENT tick; for the two continuous fields that is
+    // a small numeric error, but `is_buyer_maker` is CATEGORICAL — a mis-pair
+    // attributes a tick's volume to the wrong side outright and biases
+    // volume_delta / cum-delta / the flow EWMAs directly. One seqlock window makes
+    // the sample self-consistent BY CONSTRUCTION. Reuses the existing generic
+    // ParameterSlot<T> (SSoT — no new primitive; already tsan-annotated).
+    ParameterSlot<Tick<F>> latest_tick{};
 
     //----------------------------------------------------------------------
     // [SECTION]_[v5.15.4 — Mode-specific cfg normalize]
@@ -1355,7 +1365,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     //----------------------------------------------------------------------
     // [SECTION]_[Producer thread — generates synthetic ticks and fans out to all cores]
     //----------------------------------------------------------------------
-    std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume,
+    std::thread producer([&producer_done, &ticks_produced, &bcfg, &latest_tick,
                           &cfg, &state, &oms, num_nodes, use_synthetic, tsc_ghz,
                           &ema_price, &ema_alpha, live_trading,
                           &paper_reset_in_progress,
@@ -1395,7 +1405,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         TUISharedState*    shared_ptr_for_fanout    = nullptr;
         CandleAccumulator* candle_acc_ptr_for_fanout = nullptr;
 #endif
-        auto fan_out = [num_nodes, &seq, &ticks_produced, &last_price, &last_volume,
+        auto fan_out = [num_nodes, &seq, &ticks_produced, &latest_tick,
                         &cfg, &state, &oms, &slow_path_counter, slow_path_interval, tsc_ghz,
                         &ema_price, ema_alpha, live_trading,
                         &paper_reset_in_progress,
@@ -1410,7 +1420,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 num_nodes, slow_path_interval, tsc_ghz, ema_alpha, live_trading,
                 topo_producer_cpu, topo_drainer_cpu, topo_nproc,
                 // by-ref captures
-                seq, ticks_produced, last_price, last_volume,
+                seq, ticks_produced, latest_tick,
                 cfg, state, oms, slow_path_counter, ema_price,
                 paper_reset_in_progress,
                 topo_hot_cpu, topo_slow_cpu, topo_poll_interval,
@@ -1526,7 +1536,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     //     of truth + sister to .B.4 EngineCommon_BootPerCore dual-cfg shape.
     // shared_ptr declared unconditionally (nullptr under non-GUI build) so the
     // call site is unconditional: SlowPath_DrainManualCloses(state, oms, cfg,
-    // last_price, shared_ptr). Body's #ifdef inside gates the dereference.
+    // latest_tick, shared_ptr). Body's #ifdef inside gates the dereference.
 #ifdef USE_IMGUI_GUI
     TUISharedState* shared_ptr = &g_shared;
 #else
@@ -1537,7 +1547,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // EngineSharded/Async.hpp as tt::EngineSharded_Async_DrainWithSubmit<F>().
     // Call sites below pass (state, oms, ticks_produced, cfg) explicitly.
     std::thread drainer([&state, &oms, &ticks_produced, &producer_done,
-                         &cfg, &last_price, shared_ptr] {
+                         &cfg, &latest_tick, shared_ptr] {
         // v5.15.5.C.4 Phase T1: &cfg added to capture list for DrainerConstants_Init
         // v5.15.5.C.4 Phase F — drainer-local bucket arrays for phase-separated
         // dispatch. ~7 KB stack allocation; reused per cycle (Reset at top of
@@ -1573,7 +1583,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 tt::DrainerConstants_Init(state.registered_count, cfg, oms);
 
             int total_drained = tt::EngineSharded_Async_DrainWithSubmit<F>(state, oms, ticks_produced, cfg);
-            EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, last_price, shared_ptr);
+            EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, latest_tick, shared_ptr);
             OMS_DrainSubmit(&oms, dc.drain_count);  // v4.7.37; v5.15.5.C.4 T1 uses cached dc.drain_count
 
             // v5.15.5.C.4 Phase F — phase-separated drain (replaces unified
@@ -1612,7 +1622,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (producer_done.load(std::memory_order_acquire)) {
                 for (int k = 0; k < 16; ++k) {
                     tt::EngineSharded_Async_DrainWithSubmit<F>(state, oms, ticks_produced, cfg);
-                    EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, last_price, shared_ptr);
+                    EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, latest_tick, shared_ptr);
                     // v5.4.1 Bug B2: same partials-aware drain count as the
                     // main loop above. v5.15.5.C.4 Phase T1: per-iter dc
                     // recompute (state may have shifted across k iterations).
@@ -1710,7 +1720,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             }
             topo_slow_cpu[c] = sp_cpu;  // v5.0.2: capture for topology panel
             slow_paths.emplace_back([c, sp_cpu, &state, &oms, &nodes, &cfg,
-                                      &ticks_produced, &last_price, &last_volume,
+                                      &ticks_produced, &latest_tick,
                                       &paper_reset_in_progress]() {
                 // v5.0.2: best-effort pin to chosen CPU. Failure logged,
                 // execution continues unpinned.
@@ -2035,12 +2045,26 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // Per-cycle scalar inputs (mtm_price discipline preserved; helper takes
                     // Money price = mtm_price, derives double internally via FPN_ToDouble
                     // for guard checks).
-                    double price_d = last_price.load(std::memory_order_relaxed);
-                    double volume_d = last_volume.load(std::memory_order_relaxed);
-                    Money price = price_d > 0.0
-                                 ? Money{ money_from_double_payload(price_d) } : Money_Zero();
-                    Money volume = volume_d > 0.0
-                                  ? Money{ money_from_double_payload(volume_d) } : Money_Zero();
+                    // PARITY-047 — ONE seqlock'd read yields (price, volume, side) from
+                    // the SAME tick. Previously price and volume came from two independent
+                    // relaxed lanes and the side bit had no lane at all, so
+                    // EngineCommon_SlowPathCycleOneCore was handed a hardcoded
+                    // /*is_buyer_maker=*/0 — which pinned volume_delta at exactly +1.0 and
+                    // left cum-delta / the flow EWMAs one-sided on the LIVE path while the
+                    // backtest driver fed them the real bit (a train-serve divergence on
+                    // FEAT_CUMDELTA + FEAT_FLOW_10S/1M/5M, and a dead FEAT_VOLUME_DELTA).
+                    //
+                    // Money values are UNCHANGED: the producer built latest.price/.volume
+                    // from the same doubles via the same money_from_double_payload call.
+                    // The `> 0` guard is preserved exactly — it encodes "no tick seen yet",
+                    // which ControllerEventLoop turns into a Money_IsZero early-return.
+                    Tick<F> latest{};
+                    ParameterSlot_Read(&latest_tick, &latest);
+                    Money price  = Money_Gt(latest.price,  Money_Zero())
+                                 ? latest.price  : Money_Zero();
+                    Money volume = Money_Gt(latest.volume, Money_Zero())
+                                 ? latest.volume : Money_Zero();
+                    const int tick_is_buyer_maker = (int)latest.is_buyer_maker;
                     uint64_t ts_us =
                         (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -2056,6 +2080,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // Helper call (v1.7.3 N-6 9-arg signature)
                     EngineCommon_SlowPathCycleOneCore(cfg, c, state, oms,
                                                        price, volume, ts_us,
+                                                       tick_is_buyer_maker,
                                                        now_tick, depth);
 
                     // NOTE: DrainPostFill stays on the drainer thread (single writer of
@@ -2132,8 +2157,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         fprintf(stdout, "\033[K\n");
 
         // Market + account
-        double price_d = last_price.load(std::memory_order_relaxed);
-        double vol_d = last_volume.load(std::memory_order_relaxed);
+        // PARITY-047 — display reads the same published sample as the slow path;
+        // no separate price/volume lanes remain. Money_ToDouble is DISPLAY-ONLY
+        // (H4-exempt) and is the correct bridge here.
+        Tick<F> _disp{};
+        ParameterSlot_Read(&latest_tick, &_disp);
+        double price_d = Money_ToDouble(_disp.price);
+        double vol_d   = Money_ToDouble(_disp.volume);
         // compute equity = balance + unrealized P&L across all open positions
         double unrealized = 0.0;
         {
