@@ -143,6 +143,16 @@ enum FailureModeGroupId : int {
       "Check sidecar file exists at stamp's claimed path + scaler_sha256\n"                             \
       "matches. Engine falls back to identity scaler (predictions degraded).",                          \
       tt::GROUP_STANDALONE)                                                                            \
+    X(ml_walker_parity_failed,  BIT_FLAG,    SEV_YELLOW, "walker: PARITY REFUSED",                      \
+      "ml_backend=4 (flat-SoA walker) was requested but did NOT activate.\n"                            \
+      "Either the artifact hit a walker parse REFUSE, or the load-time\n"                               \
+      "bit-parity oracle found the walker disagreeing with the XGBoost\n"                               \
+      "library on a designed probe (missing-sentinel / NaN / split-boundary).\n"                        \
+      "YELLOW not RED on purpose: predictions are UNCHANGED — the engine fell\n"                        \
+      "back to the library C API, so this costs speed, never correctness.\n"                            \
+      "Operator action: read the [ML] walker REFUSED boot line; it names the\n"                         \
+      "space (margin vs transformed), the class and the feature that diverged.", \
+      tt::GROUP_STANDALONE)                                                                            \
     X(ml_role_mismatch,         BIT_FLAG,    SEV_RED,    "role: MISMATCH",                              \
       "Stamp expected_role does not match the slot this model loaded into\n"                            \
       "(or an exit-slot stamp has no role key). A buy-trained model serving\n"                          \

@@ -43,6 +43,12 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
 #include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
+#include "TreeWalker.hpp"                // E.1.2.E — MODEL_BACKEND_FLAT_WALKER blob + walk/transform
+#include "../MemHeaders/FailureModeRegistry.hpp"  // E.1.2.E — FAILURE_MASK_ml_walker_parity_failed
+                                                  // (explicit IWYU: the walker branches live under
+                                                  //  USE_XGBOOST, so an ANSI build compiled clean while
+                                                  //  the GUI/suite lanes did not — a transitive include
+                                                  //  would leave that asymmetry latent)
 #include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
 // v5.15.5.F.4d.1.B.3 Step 2 (2026-05-24): #include "StampBoundCfgRegistry.hpp" REMOVED — file deleted (FOREACH_STAMP_BOUND_CFG body + STAMP_CFG_AUTOPOPULATE + COUNT macros); cfg_derived::populate_stamp_cfg_from_derived<F> framework call at CfgGateRegistry.hpp supersedes.
@@ -584,6 +590,206 @@ inline void Model_Init(ModelHandle<F> *m) {
 // [END_FUNCTION]_[Model_Init]
 //======================================================================
 
+#ifdef USE_XGBOOST
+
+//======================================================================
+// [FUNCTION]_[TreeWalkerOracle_Verify]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BOOT_TIME] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[load-time BIT-PARITY gate: the walker only becomes the serve
+//   backend if it reproduces XGBoosterPredict EXACTLY over a DESIGNED probe set,
+//   in BOTH margin and transformed space. Returns 1 = parity proven, 0 = refuse
+//   (caller keeps the library backend + raises a failure flag).]
+//======================================================================
+// WHY BOTH SPACES: margin (option_mask=1) isolates walk + accumulation;
+// transformed (option_mask=0) additionally proves the softmax/sigmoid recipes.
+// Comparing only the transformed output would let a walk error and a transform
+// error cancel; comparing only margin would leave the recipes unverified.
+//
+// WHY BITWISE, not epsilon: an epsilon compare is a judgement call about how
+// much divergence is acceptable on a capital path, and it silently widens as
+// models grow. float-bit equality is the only threshold that needs no defending
+// — and it is ACHIEVABLE here by construction, because the walk copies xgboost's
+// own accumulation order and its own libm recipes (W-d, D-432).
+//
+// WHY A FRESH DMatrix PER ROW: XGBoost caches predictions on the DMatrix. A
+// reused handle returns the FIRST row's answer for every subsequent probe — the
+// measured 2.6us "false floor" — which would make this oracle agree with itself
+// on a single row and call it total coverage (Class 51).
+//
+// THE PROBE SET IS DESIGNED, NOT RANDOM (R1 — an oracle whose probes cannot
+// reach the disagreement is quietly PARTIAL):
+//   (1) all-zero row                          — the trivial path
+//   (2) per-feature MISSING (-1.0f)           — the serve sentinel; routes
+//       default_left instead of comparing. PARITY-047 is the standing proof
+//       that this lane can be wrong while everything else looks right.
+//   (3) per-feature NaN                       — the other default_left lane;
+//       `x < cond` is FALSE for NaN, so a naive walk diverges here and NOWHERE
+//       else.
+//   (4) split-threshold boundaries            — for real split conditions
+//       harvested FROM THE PARSED TREES: exactly cond, and one ULP either side.
+//       This is where `<` vs `<=` disagreements live, and they are invisible to
+//       any probe that does not land precisely on a threshold.
+// Leaf coverage is COUNTED and reported so a probe set that exercises only a
+// handful of leaves cannot masquerade as a full proof.
+//======================================================================
+// [CODE]
+//======================================================================
+#define WALKER_ORACLE_MAX_PROBES 4096
+
+template <unsigned F>
+inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster,
+                                   int num_features, char* reason, size_t reason_len,
+                                   int* out_probes, int* out_leaves_hit,
+                                   int* out_leaves_total) {
+    if (reason && reason_len) reason[0] = '\0';
+    if (!w || !booster || num_features <= 0) {
+        if (reason) snprintf(reason, reason_len, "oracle: null model/booster or bad feature count");
+        return 0;
+    }
+    if (num_features > MODEL_NUM_FEATURES) {
+        if (reason) snprintf(reason, reason_len,
+                             "oracle: num_features %d exceeds build's MODEL_NUM_FEATURES %d",
+                             num_features, MODEL_NUM_FEATURES);
+        return 0;
+    }
+
+    // Leaf-coverage bitmap over the blob's node array (load-time; ~16KB worst
+    // case at the WALKER_MAX_TOTAL_NODES cap).
+    static const int COV_WORDS = (WALKER_MAX_TOTAL_NODES + 63) / 64;
+    uint64_t* covered = (uint64_t*)calloc((size_t)COV_WORDS, sizeof(uint64_t));
+    if (!covered) {
+        if (reason) snprintf(reason, reason_len, "oracle: coverage bitmap alloc failed");
+        return 0;
+    }
+
+    float row[MODEL_NUM_FEATURES];
+    float wout[WALKER_MAX_CLASSES];
+    int   probes = 0;
+    int   ok = 1;
+
+    // One probe: run BOTH engines over `row` and compare bit-for-bit.
+    auto run_probe = [&](const char* what, int which_feat) -> int {
+        if (probes >= WALKER_ORACLE_MAX_PROBES) return 1;   // budget reached; not a failure
+        ++probes;
+
+        // --- walker: margin, then transformed (record leaf coverage on the way) ---
+        for (int c = 0; c < w->num_class; ++c) {
+            const int start = w->class_tree_start[c];
+            const int cnt   = w->class_tree_count[c];
+            for (int t = 0; t < cnt; ++t) {
+                int32_t leaf = TreeWalker_WalkOneIdx(w->nodes, w->tree_roots[start + t],
+                                                     row, w->max_depth);
+                if (leaf >= 0 && leaf < w->total_nodes)
+                    covered[leaf >> 6] |= (1ULL << (leaf & 63));
+            }
+        }
+        float wmargin[WALKER_MAX_CLASSES];
+        if (TreeWalker_PredictMargin(w, row, wmargin) != WALKER_OK) {
+            if (reason) snprintf(reason, reason_len, "oracle: walker margin refused on %s", what);
+            return 0;
+        }
+        for (int c = 0; c < w->num_class; ++c) wout[c] = wmargin[c];
+        if (TreeWalker_ApplyTransform(w, wout) != WALKER_OK) {
+            if (reason) snprintf(reason, reason_len, "oracle: walker transform refused on %s", what);
+            return 0;
+        }
+
+        // --- library: fresh DMatrix per row (cache trap), margin then transformed ---
+        for (int space = 0; space < 2; ++space) {
+            DMatrixHandle dmat;
+            if (XGDMatrixCreateFromMat(row, 1, num_features, -1.0f, &dmat) != 0) {
+                if (reason) snprintf(reason, reason_len, "oracle: DMatrix create failed on %s", what);
+                return 0;
+            }
+            bst_ulong out_len = 0;
+            const float* out_result = nullptr;
+            const int option_mask = (space == 0) ? 1 : 0;   // 1 = output_margin
+            int ret = XGBoosterPredict(booster, dmat, option_mask, 0, 0, &out_len, &out_result);
+            XGDMatrixFree(dmat);
+            if (ret != 0 || out_len == 0 || !out_result) {
+                if (reason) snprintf(reason, reason_len, "oracle: XGBoosterPredict failed on %s", what);
+                return 0;
+            }
+            if ((int)out_len != w->num_class) {
+                if (reason) snprintf(reason, reason_len,
+                                     "oracle: class-count mismatch on %s (xgb %d, walker %d)",
+                                     what, (int)out_len, w->num_class);
+                return 0;
+            }
+            const float* mine = (space == 0) ? wmargin : wout;
+            for (int c = 0; c < w->num_class; ++c) {
+                // BITWISE compare via memcmp on the float storage — not `==`,
+                // which would call two different NaNs equal-or-not by IEEE rule
+                // rather than by representation.
+                if (memcmp(&mine[c], &out_result[c], sizeof(float)) != 0) {
+                    if (reason)
+                        snprintf(reason, reason_len,
+                                 "oracle: %s-space divergence on %s class %d "
+                                 "(walker %.9g vs xgb %.9g, feature %d)",
+                                 space == 0 ? "margin" : "transformed",
+                                 what, c, (double)mine[c], (double)out_result[c], which_feat);
+                    return 0;
+                }
+            }
+        }
+        return 1;
+    };
+
+    // ---- (1) all-zero row ----
+    for (int i = 0; i < num_features; ++i) row[i] = 0.0f;
+    ok = run_probe("zero-row", -1);
+
+    // ---- (2) per-feature MISSING sentinel, (3) per-feature NaN ----
+    for (int f = 0; ok && f < num_features; ++f) {
+        for (int i = 0; i < num_features; ++i) row[i] = 0.0f;
+        row[f] = WALKER_MISSING_SENTINEL;
+        ok = run_probe("missing-sentinel", f);
+        if (!ok) break;
+        row[f] = nanf("");
+        ok = run_probe("nan", f);
+    }
+
+    // ---- (4) split-threshold boundaries harvested from the parsed trees ----
+    // Walk the blob's internal nodes; for each distinct (feature, threshold),
+    // probe exactly-at, one-ULP-below and one-ULP-above. This is the only probe
+    // family that can catch a `<` vs `<=` disagreement.
+    for (int n = 0; ok && n < w->total_nodes; ++n) {
+        const FlatTreeNode* nd = &w->nodes[n];
+        if (nd->meta & WALKER_META_IS_LEAF) continue;
+        const int feat = (int)(nd->meta & WALKER_META_FEAT_MASK);
+        if (feat < 0 || feat >= num_features) continue;
+        const float thr = nd->cond;
+        const float vals[3] = { thr,
+                                nextafterf(thr, -INFINITY),
+                                nextafterf(thr,  INFINITY) };
+        for (int v = 0; v < 3 && ok; ++v) {
+            for (int i = 0; i < num_features; ++i) row[i] = 0.0f;
+            row[feat] = vals[v];
+            ok = run_probe("split-boundary", feat);
+        }
+        if (probes >= WALKER_ORACLE_MAX_PROBES) break;   // budget; coverage reported below
+    }
+
+    int hit = 0, leaves = 0;
+    for (int n = 0; n < w->total_nodes; ++n) {
+        if (!(w->nodes[n].meta & WALKER_META_IS_LEAF)) continue;
+        ++leaves;
+        if (covered[n >> 6] & (1ULL << (n & 63))) ++hit;
+    }
+    free(covered);
+
+    if (out_probes)       *out_probes = probes;
+    if (out_leaves_hit)   *out_leaves_hit = hit;
+    if (out_leaves_total) *out_leaves_total = leaves;
+    return ok;
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalkerOracle_Verify]
+//======================================================================
+#endif  // USE_XGBOOST (TreeWalkerOracle_Verify)
+
 //======================================================================
 // [FUNCTION]_[Model_Load]
 //----------------------------------------------------------------------
@@ -621,6 +827,121 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
     m->model_path[sizeof(m->model_path) - 1] = '\0';
 
 #ifdef USE_XGBOOST
+    // E.1.2.E leaf 3 — FLAT-WALKER backend, OPT-IN and PARITY-GATED (W-a/W-b, D-432).
+    //
+    // The walker NEVER activates on the operator's word alone. It activates only
+    // if it reproduces the library BIT-FOR-BIT over the designed probe set at
+    // load; otherwise the backend silently-but-loudly stays XGBOOST (behaviour
+    // unchanged) and a failure flag surfaces. "Loud fallback" is deliberate: a
+    // wrong prediction on a capital path is worth strictly less than no
+    // speedup, so the burden of proof sits on the NEW path every boot, on the
+    // operator's actual artifact — not on a fixture that resembles it.
+    //
+    // The oracle needs the library IN-PROCESS, which is why this whole branch
+    // lives under USE_XGBOOST. A build without it cannot verify the walker, and
+    // an unverifiable fast path is exactly what this gate exists to refuse — so
+    // it falls through to the "not compiled in" tail below rather than
+    // activating unchecked.
+    if (backend == MODEL_BACKEND_FLAT_WALKER) {
+        // 1) the ORACLE REFERENCE — the library booster, loaded exactly as the
+        //    XGBOOST path would load it.
+        BoosterHandle booster;
+        if (XGBoosterCreate(NULL, 0, &booster) != 0) {
+            fprintf(stderr, "[ML] walker: reference booster create failed: %s\n", XGBGetLastError());
+            return 0;
+        }
+        if (XGBoosterLoadModel(booster, path) != 0) {
+            fprintf(stderr, "[ML] walker: reference booster load failed for %s: %s\n",
+                    path, XGBGetLastError());
+            XGBoosterFree(booster);
+            return 0;
+        }
+
+        // 2) the CANDIDATE — parse the artifact into the flat-SoA blob. The
+        //    header rides its own load-time allocation (H1 load-path-sanctioned,
+        //    same standing as the blob's aligned_alloc and the HotSwap precedent);
+        //    steady state allocates nothing.
+        FlatTreeModel* w = (FlatTreeModel*)calloc(1, sizeof(FlatTreeModel));
+        if (!w) {
+            fprintf(stderr, "[ML] walker: header alloc failed; staying on XGBOOST\n");
+            m->handle = (void*)booster;
+            m->backend = MODEL_BACKEND_XGBOOST;
+            BITMAP_SET(m->drift_flags_at_load, FAILURE_MASK_ml_walker_parity_failed);
+            {
+                bst_ulong nf = 0;
+                XGBoosterGetNumFeature(booster, &nf);
+                m->num_features = (int)nf;
+            }
+            m->num_outputs = 1;
+            return 1;
+        }
+        int prc = TreeWalker_ParseFromJson(w, path);
+        if (prc != WALKER_OK) {
+            // Class-49 disposition: a REFUSE code is not a parity failure. The
+            // artifact is unsupported or corrupt, which is a different operator
+            // action (retrain / re-export vs "the walker disagrees").
+            fprintf(stderr, "[ML] walker: parse REFUSED (%d) for %s; staying on XGBOOST\n", prc, path);
+            free(w);
+            m->handle = (void*)booster;
+            m->backend = MODEL_BACKEND_XGBOOST;
+            BITMAP_SET(m->drift_flags_at_load, FAILURE_MASK_ml_walker_parity_failed);
+            bst_ulong nf = 0;
+            XGBoosterGetNumFeature(booster, &nf);
+            m->num_features = (int)nf;
+            m->num_outputs = 1;
+            return 1;
+        }
+
+        // 3) the GATE.
+        char why[256];
+        int probes = 0, leaves_hit = 0, leaves_total = 0;
+        int parity = TreeWalkerOracle_Verify<F>(w, booster, w->num_feature,
+                                                why, sizeof(why),
+                                                &probes, &leaves_hit, &leaves_total);
+        if (parity) {
+            // 4a) PROVEN — drop the library, serve from the blob.
+            XGBoosterFree(booster);
+            m->handle       = (void*)w;
+            m->backend      = MODEL_BACKEND_FLAT_WALKER;
+            m->num_features = w->num_feature;
+            m->num_outputs  = w->num_class;
+            fprintf(stderr,
+                "[ML] walker ACTIVE: %s (%d trees, %d nodes, depth %d, %d class%s) — "
+                "bit-parity PROVEN over %d probes; leaf coverage %d/%d\n",
+                path, w->num_trees, w->total_nodes, w->max_depth, w->num_class,
+                w->num_class == 1 ? "" : "es", probes, leaves_hit, leaves_total);
+            if (leaves_total > 0 && leaves_hit * 2 < leaves_total) {
+                // Not a refusal — a HONESTY line. Parity proven only where the
+                // probes reached; say so rather than let "PROVEN" imply totality
+                // (M10: this oracle is TOTAL over its probe set, PARTIAL over the
+                // input space, and the operator should be told which).
+                fprintf(stderr,
+                    "[ML] walker NOTE: probes reached %d of %d leaves — parity is proven "
+                    "over the probed paths, not over every reachable leaf.\n",
+                    leaves_hit, leaves_total);
+            }
+            return 1;
+        }
+
+        // 4b) REFUSED — keep the library, raise the flag, say exactly why.
+        fprintf(stderr,
+            "[ML] walker REFUSED for %s — %s. Falling back to XGBOOST C API "
+            "(predictions UNCHANGED); %d probes ran, leaf coverage %d/%d.\n",
+            path, why[0] ? why : "parity check failed", probes, leaves_hit, leaves_total);
+        TreeWalker_Free(w);
+        free(w);
+        m->handle  = (void*)booster;
+        m->backend = MODEL_BACKEND_XGBOOST;
+        BITMAP_SET(m->drift_flags_at_load, FAILURE_MASK_ml_walker_parity_failed);
+        {
+            bst_ulong nf = 0;
+            XGBoosterGetNumFeature(booster, &nf);
+            m->num_features = (int)nf;
+        }
+        m->num_outputs = 1;
+        return 1;
+    }
+
     if (backend == MODEL_BACKEND_XGBOOST) {
         BoosterHandle booster;
         int ret = XGBoosterCreate(NULL, 0, &booster);
@@ -821,6 +1142,17 @@ inline float Model_Predict_AtClass(ModelHandle<F>* m,
                                      int num_features,
                                      int class_idx) {
     if (!m->handle) return 0.0f;
+
+    // E.1.2.E — walker path (class-explicit, like the XGBoost branch below).
+    if (m->backend == MODEL_BACKEND_FLAT_WALKER) {
+        const FlatTreeModel* w = (const FlatTreeModel*)m->handle;
+        float out[WALKER_MAX_CLASSES];
+        if (TreeWalker_Predict(w, features, out) != WALKER_OK) return 0.0f;
+        int idx = class_idx;
+        if (idx < 0 || idx >= w->num_class) idx = 0;
+        return out[idx];
+    }
+
 #ifdef USE_XGBOOST
     if (m->backend == MODEL_BACKEND_XGBOOST) {
         BoosterHandle booster = (BoosterHandle)m->handle;
@@ -837,11 +1169,29 @@ inline float Model_Predict_AtClass(ModelHandle<F>* m,
         return out_result[idx];
     }
 #endif
-    // Other backends fall back to the standard Model_Predict (which uses
-    // m->buy_class_idx). For LIGHTGBM this is fine since LGBM single-row
-    // returns a single scalar.
-    (void)class_idx;
-    return Model_Predict(m, features, num_features);
+
+    // R6 (E.1.2.E) — REFUSE rather than answer a DIFFERENT question.
+    //
+    // This used to fall through to Model_Predict, which extracts
+    // m->buy_class_idx. The caller asked for class_idx; on any multiclass model
+    // where class_idx != buy_class_idx that returned a confident probability
+    // for the WRONG CLASS, with no error and no flag — and this function exists
+    // precisely to decouple class extraction from role aliasing, so the
+    // fallback contradicted its own purpose. On an exit-signal slot that is a
+    // capital decision made on an inverted number (the PARITY-044 shape).
+    //
+    // The old comment defended it as "fine for LIGHTGBM since single-row
+    // returns a scalar" — true for a 1-class LGBM model and silently false for
+    // any other, which is the kind of narrow-case reasoning that reads as
+    // general. A backend that cannot honour a class-explicit request must say
+    // so; 0.0f is the codebase's no-signal value and every caller already
+    // handles it.
+    (void)class_idx; (void)num_features;
+    fprintf(stderr,
+        "[ML] Model_Predict_AtClass: backend %d cannot serve a class-explicit "
+        "request (class %d); refusing rather than returning buy_class_idx %d.\n",
+        m->backend, class_idx, m->buy_class_idx);
+    return 0.0f;
 }
 //======================================================================
 // [END_CODE]
@@ -945,6 +1295,30 @@ static inline int Model_ExitClassIdx(int num_outputs) {
 template <unsigned F>
 inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_features) {
     if (!m->handle) return 0.0f;
+
+    // E.1.2.E walker path. Deliberately placed FIRST and outside USE_XGBOOST:
+    // once parity is proven at load the walk is self-contained, so serving must
+    // not depend on the library being compiled in. Composite extraction below
+    // is a verbatim mirror of the XGBoost branch's — same semantics, same
+    // out-of-range defensiveness — because a backend that quietly extracts a
+    // DIFFERENT class than the library would defeat the very parity the load
+    // gate just established.
+    if (m->backend == MODEL_BACKEND_FLAT_WALKER) {
+        const FlatTreeModel* w = (const FlatTreeModel*)m->handle;
+        float out[WALKER_MAX_CLASSES];
+        if (TreeWalker_Predict(w, features, out) != WALKER_OK) return 0.0f;
+        const int n = w->num_class;
+        if (m->num_classes_active > 1) {
+            float acc = 0.0f;
+            for (int i = 0; i < (int)m->num_classes_active && i < 8; ++i) {
+                const int ci = m->target_classes[i];
+                if (ci >= 0 && ci < n) acc += m->class_weights[i] * out[ci];
+            }
+            return acc;
+        }
+        const int idx = (m->buy_class_idx >= 0 && m->buy_class_idx < n) ? m->buy_class_idx : 0;
+        return out[idx];
+    }
 
 #ifdef USE_XGBOOST
     if (m->backend == MODEL_BACKEND_XGBOOST) {
@@ -1289,6 +1663,18 @@ inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_
                                float *out_buf, int max_outputs) {
     if (!m->handle || max_outputs <= 0) return 0;
 
+    // E.1.2.E — full per-class vector from the walker. This is the shape the
+    // composite consumers and the queued per-class blend need; a scalar-only
+    // walker would have blocked that work (plan Shape, Option A).
+    if (m->backend == MODEL_BACKEND_FLAT_WALKER) {
+        const FlatTreeModel* w = (const FlatTreeModel*)m->handle;
+        float out[WALKER_MAX_CLASSES];
+        if (TreeWalker_Predict(w, features, out) != WALKER_OK) return 0;
+        const int n = w->num_class < max_outputs ? w->num_class : max_outputs;
+        for (int i = 0; i < n; ++i) out_buf[i] = out[i];
+        return n;
+    }
+
 #ifdef USE_XGBOOST
     if (m->backend == MODEL_BACKEND_XGBOOST) {
         BoosterHandle booster = (BoosterHandle)m->handle;
@@ -1363,6 +1749,19 @@ inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_
 template <unsigned F>
 inline void Model_Free(ModelHandle<F> *m) {
     if (!m->handle) return;
+
+    // E.1.2.E — the walker blob rides `handle` like any other backend payload,
+    // so every existing free path (zoo teardown, hot-swap shadow release,
+    // Model_Load re-entry) reclaims it for free. TWO frees, not one: the blob
+    // (nodes + roots, one aligned_alloc) and the header that points at it.
+    if (m->backend == MODEL_BACKEND_FLAT_WALKER) {
+        FlatTreeModel* w = (FlatTreeModel*)m->handle;
+        TreeWalker_Free(w);
+        free(w);
+        m->handle = NULL;
+        m->backend = MODEL_BACKEND_NONE;
+        return;
+    }
 
 #ifdef USE_XGBOOST
     if (m->backend == MODEL_BACKEND_XGBOOST) {

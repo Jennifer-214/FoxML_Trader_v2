@@ -238,6 +238,18 @@ target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 # unconditionally references TUISnapshot, which is only defined under
 # MULTICORE_TUI. Match the production engine target.
 target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
+# E.1.2.E leaf 3 — give the test binary the LIBRARY when the build has it.
+# The walker's load-time parity oracle compares against XGBoosterPredict
+# in-process, so its cells cannot exist in the zero-dep ANSI lane. Without this
+# they compiled out EVERYWHERE (controller_test carried only MULTICORE_TUI, even
+# under -DUSE_XGBOOST=ON) — a whole `#ifdef USE_XGBOOST` test block that was
+# dead in every lane while reading as coverage (Class 51). Now the split is the
+# intended one: build/ = ANSI fixtures only, build_gui|build_suite = fixtures
+# PLUS the oracle.
+if(USE_XGBOOST)
+    target_compile_definitions(controller_test PRIVATE USE_XGBOOST)
+    target_link_libraries(controller_test PRIVATE xgboost)
+endif()
 # (native-FP pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 find_package(Threads REQUIRED)
 target_link_libraries(controller_test PRIVATE Threads::Threads ssl crypto)

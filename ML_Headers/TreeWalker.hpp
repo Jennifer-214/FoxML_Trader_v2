@@ -646,8 +646,8 @@ inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline float TreeWalker_WalkOne(const FlatTreeNode* nodes, int32_t root,
-                                       const float* features, int depth) {
+static inline int32_t TreeWalker_WalkOneIdx(const FlatTreeNode* nodes, int32_t root,
+                                            const float* features, int depth) {
     int32_t idx = root;
     for (int d = 0; d < depth; ++d) {
         const FlatTreeNode* n = &nodes[idx];
@@ -671,7 +671,17 @@ static inline float TreeWalker_WalkOne(const FlatTreeNode* nodes, int32_t root,
         const int32_t lmask = -(int32_t)go_left;                // all-ones when going left
         idx = (int32_t)((n->left & lmask) | (n->right & ~lmask));
     }
-    return nodes[idx].cond;
+    return idx;
+}
+
+// The value-returning form every predict path uses. Split from the index form
+// ONLY so the load-time parity oracle can count which LEAVES a probe set
+// actually reaches (leaf-coverage is what keeps that oracle from being quietly
+// PARTIAL — R1) without a second copy of the walk. One walk implementation,
+// two projections; a duplicate would be the Class-21 shape.
+static inline float TreeWalker_WalkOne(const FlatTreeNode* nodes, int32_t root,
+                                       const float* features, int depth) {
+    return nodes[TreeWalker_WalkOneIdx(nodes, root, features, depth)].cond;
 }
 // [END_CODE]
 // [END_FUNCTION]_[TreeWalker_WalkOne]
