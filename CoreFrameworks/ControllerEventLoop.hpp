@@ -1390,7 +1390,10 @@ static inline uint16_t Sharded_NodeSlotMask(int node_id, int partial_exit_enable
 // ShardedSnapshotPersist.hpp (one was UNGATED = the bug), the TrailingSLRatchet site below,
 // and ShardedSnapshot.hpp. GUI sites grandfathered for the E-series decouple. (D-294/D-295)
 static inline int Sharded_SlotNode(int slot, int partial_exit_enabled) {
-    return slot >> (uint32_t)partial_exit_enabled;  // SLOT_DERIVE_OK: THE canonical accessor (D-296)
+    // s5-1b (2026-08-23): shape delegated to the raw macro (BitmapMacros.hpp) so
+    // non-CEL consumers (ShardedTradeLog's attribution derive) share ONE impl —
+    // the same two-tier raw-macro/checked-wrapper split as Sharded_NodeSlotMask.
+    return BITMAP_SLOT_NODE(slot, partial_exit_enabled);  // SLOT_DERIVE_OK: THE canonical accessor (D-296)
 }
 
 // Boot-time validation. Returns 1 if cfg + capacity are consistent, 0
@@ -1463,6 +1466,11 @@ inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
     // Never fires alone; boot/setup cadence (not hot path).
     if (slot < 0 || slot >= state->registered_count || slot >= MAX_EXECUTION_NODES) return;
     state->nodes[slot].strategy_id       = strategy_id;
+    // s5-1b (2026-08-23): seed the resolved id at registration. It is re-stashed
+    // every rebuild (the v4.0.4 site), but a warm-restart exit can fill BEFORE the
+    // first rebuild — without this seed such a fill would attribute as id 0 (= MR).
+    // AUTO nodes honestly show the AUTO sentinel until first regime resolution.
+    state->nodes[slot].resolved_strategy_id = strategy_id;
     state->nodes[slot].allocated_balance = allocated_balance;
 }
 //======================================================================
@@ -2241,8 +2249,9 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // CSV: record AFTER portfolio mutation so the slot is consistent if the
         // log call inspects it (currently it doesn't, but kept defensive).
         if (state->oms->trade_log) {
+            // s5-1b: resolved id (post-AUTO), matching the mode-1 fill-emit path.
             ShardedTradeLog_RecordEntry(state->oms->trade_log, event,
-                                        ctx->strategy_id,
+                                        ctx->resolved_strategy_id,
                                         event.price,
                                         ctx->intended_qty,
                                         entry_fee,
@@ -2302,8 +2311,9 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         state->total_events_processed++;
         // CSV: pitfall P8.7 — log AFTER net/total_fee/balance are computed.
         if (state->oms->trade_log) {
+            // s5-1b: resolved id (post-AUTO), matching the mode-1 fill-emit path.
             ShardedTradeLog_RecordExit(state->oms->trade_log, event,
-                                       ctx->strategy_id,
+                                       ctx->resolved_strategy_id,
                                        entry_price_snap,
                                        event.price,
                                        qty_snap,
@@ -2562,10 +2572,16 @@ inline void EventLoop_UpdateRollingStateOneCore(
     FPN_Binary<F> price  = Money_ToBinary(price_m);
     FPN_Binary<F> volume = Money_ToBinary(volume_m);
 
-    RollingStats_Push(&sst->rolling_short,    price, volume);
-    RollingStats_Push(&sst->rolling_long,     price, volume);
-    RollingStats_Push(&sst->rolling_medium,   price, volume);
-    RollingStats_Push(&sst->rolling_baseline, price, volume);
+    // PARITY-047 — forward the trade side. Omitting it let RollingStats_Push's
+    // defaulted `int is_buyer_maker = 0` absorb the argument silently, so ALL
+    // volume routed to buy, sell_volume_sum never left zero, and volume_delta
+    // computed buy/buy = exactly +1.0 forever. That pinned FEAT_VOLUME_DELTA to a
+    // constant and left MeanReversion's falling-knife buy gate, HALT_VOL_DELTA and
+    // SHALT_MOM_NO_FLOW permanently open/unreachable.
+    RollingStats_Push(&sst->rolling_short,    price, volume, is_buyer_maker);
+    RollingStats_Push(&sst->rolling_long,     price, volume, is_buyer_maker);
+    RollingStats_Push(&sst->rolling_medium,   price, volume, is_buyer_maker);
+    RollingStats_Push(&sst->rolling_baseline, price, volume, is_buyer_maker);
     CumDelta_Push(&sst->cumdelta_state, volume, is_buyer_maker);
     TickRate_Push(&sst->tick_rate_state, timestamp_us);
 
