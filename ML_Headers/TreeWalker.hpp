@@ -479,6 +479,11 @@ inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
     // ================= PASS 2 — fill =================
     int fill_cursor[WALKER_MAX_CLASSES];              // next root slot per class
     for (int c = 0; c < out->num_class; ++c) fill_cursor[c] = out->class_tree_start[c];
+    // depth-DFS scratch (parse-time / cold). Declared ONCE outside the tree loop:
+    // 2 x 2048 x 4B = 16KB, re-used per tree rather than re-created per iteration.
+    static_assert(WALKER_MAX_NODES_PER_TREE > 0, "depth-DFS scratch needs a positive node cap");
+    int depth_stack_idx[WALKER_MAX_NODES_PER_TREE];
+    int depth_stack_d[WALKER_MAX_NODES_PER_TREE];
     int node_base = 0;                                 // absolute index of the current tree's node block
     int tree_idx = 0;
     int max_depth = 1;
@@ -553,15 +558,48 @@ inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
         }
         out->tree_roots[fill_cursor[gid]++] = node_base;
 
-        // derive this tree's depth (root = node 0; children strictly deeper).
-        // small trees, cold path: an O(nn) sweep with a parent-depth array on
-        // the stack would need VLA; use the log2 bound instead — a BINARY tree
-        // with nn nodes has depth <= nn (chain) but xgboost trees are proper
-        // binaries: internal count = (nn-1)/2. Exact depth computed in leaf 2's
-        // first walk-calibration is unnecessary — take the safe chain bound
-        // capped by cap: depth <= (nn+1)/2 for proper binary chains.
-        int depth_bound = (nn + 1) / 2;
-        if (depth_bound > max_depth) max_depth = depth_bound;
+        // EXACT depth via explicit-stack DFS over the block just filled.
+        //
+        // Leaf 1 used the chain bound (nn+1)/2 and called exact depth
+        // "unnecessary". It is not, and leaf 2 is where that bites: max_depth IS
+        // the constant-iter loop count, so every unit of looseness multiplies the
+        // per-tree walk cost by that factor across all num_trees. MEASURED on the
+        // real artifacts (2026-08-24): twins h7500 + HFT_LONG1 bound 4 vs actual
+        // 3 (1.3x), HFT_0 bound 8 vs actual 4 (2.0x) — and R4's depth-6 budget
+        // case is ~9x (127-node tree: bound 64, actual 7). Paying an O(nn) cold
+        // parse-time sweep once to make a per-cycle serve loop tight is the
+        // trade this whole ship exists to make.
+        //
+        // Correctness is unaffected either way (leaves self-loop, so surplus
+        // iterations park), which is exactly why the looseness was invisible —
+        // a slower-but-right walk produces no failing assertion.
+        //
+        // Stack bound: pop one / push two per INTERNAL node, so sp <= internal+1
+        // <= nn. Scratch lives outside the tree loop (declared once, cold path).
+        {
+            int sp = 0;
+            depth_stack_idx[sp] = node_base; depth_stack_d[sp] = 1; ++sp;
+            int tree_depth = 1;
+            while (sp > 0) {
+                --sp;
+                const int ni = depth_stack_idx[sp];
+                const int dd = depth_stack_d[sp];
+                if (dd > tree_depth) tree_depth = dd;
+                const FlatTreeNode* nd = &out->nodes[ni];
+                if (nd->meta & WALKER_META_IS_LEAF) continue;
+                // Defensive: a malformed-but-in-bounds child graph (e.g. a cycle
+                // that passed the OOB gate) could otherwise overrun the scratch.
+                // Structurally unreachable for a proper xgboost tree; cheap here.
+                if (sp + 2 > WALKER_MAX_NODES_PER_TREE) {
+                    fprintf(stderr, "[walker] %s: tree %d depth-DFS stack overflow (ERR_SHAPE)\n", path, tree_idx);
+                    TreeWalker_Free(out);
+                    return WALKER_ERR_SHAPE;
+                }
+                depth_stack_idx[sp] = nd->left;  depth_stack_d[sp] = dd + 1; ++sp;
+                depth_stack_idx[sp] = nd->right; depth_stack_d[sp] = dd + 1; ++sp;
+            }
+            if (tree_depth > max_depth) max_depth = tree_depth;
+        }
 
         node_base += nn;
         ++tree_idx;
@@ -572,4 +610,203 @@ inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
 }
 // [END_CODE]
 // [END_FUNCTION]_[TreeWalker_ParseFromJson]
+//======================================================================
+
+//======================================================================
+// [REGISTRY]_[serve-side parity constants]
+//----------------------------------------------------------------------
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the two magic numbers the walk MUST match bit-for-bit against the
+//   library. Both are copied from the serve path / xgboost 3.3.0, never chosen
+//   here — W-d (D-432) pins the recipes while the load-time oracle exists.]
+//======================================================================
+// The serve missing sentinel. Every production XGDMatrixCreateFromMat call site
+// passes -1.0f as the `missing` argument (ModelInference.hpp:669, :813, :996,
+// :1338 — all four verified 2026-08-24). A feature that is EXACTLY -1.0f is
+// therefore "missing" to the library and routes default_left, NOT through the
+// `< split_condition` compare. A one-sided book legitimately produces -1.0, so
+// this is a live routing path, not a theoretical one (parity enumeration #1).
+#define WALKER_MISSING_SENTINEL (-1.0f)
+
+// Sigmoid clamp + epsilon, xgboost 3.3.0 common/math.h:31-38, copied EXACTLY.
+#define WALKER_SIGMOID_CLAMP  88.7f
+#define WALKER_SIGMOID_EPS    1e-16f
+//======================================================================
+// [END_REGISTRY]_[serve-side parity constants]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TreeWalker_WalkOne]
+//----------------------------------------------------------------------
+// [OVERVIEW]_[one tree -> its leaf value. CONSTANT-ITER (always `depth` steps,
+//   never early-exits) + BRANCHLESS routing via mask-select (H7/H20): leaves
+//   self-loop, so surplus iterations park on the leaf instead of needing an
+//   is_leaf test. Returns the leaf's stored value (xgboost keeps leaf values in
+//   split_conditions, so `cond` IS the value at a leaf).]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline float TreeWalker_WalkOne(const FlatTreeNode* nodes, int32_t root,
+                                       const float* features, int depth) {
+    int32_t idx = root;
+    for (int d = 0; d < depth; ++d) {
+        const FlatTreeNode* n = &nodes[idx];
+        const uint32_t meta = n->meta;
+        // At a leaf the feature bits are 0 (leaf 1 stores `is_leaf ? 0 : feat`),
+        // so this reads features[0] — in-bounds, and the value cannot matter
+        // because both children are self. No branch needed to skip it.
+        const float fv = features[meta & WALKER_META_FEAT_MASK];
+
+        // Missing routing (parity #1): the serve sentinel OR NaN -> default_left.
+        // `fv != fv` is the NaN test; it must come BEFORE the compare because
+        // `fv < cond` is false for NaN, which would silently route right and
+        // diverge from the library (a comparison guard that exempts NaN is the
+        // Class-60 shape this codebase already closed once in the bandit).
+        const uint32_t is_missing = (uint32_t)(((fv == WALKER_MISSING_SENTINEL) | (fv != fv)) ? 1 : 0);
+        const uint32_t lt         = (uint32_t)((fv < n->cond) ? 1 : 0);
+        const uint32_t dleft      = (meta >> 30) & 1u;          // WALKER_META_DEFAULT_LEFT
+        const uint32_t mmask      = 0u - is_missing;            // all-ones when missing
+        const uint32_t go_left    = (dleft & mmask) | (lt & ~mmask);
+
+        const int32_t lmask = -(int32_t)go_left;                // all-ones when going left
+        idx = (int32_t)((n->left & lmask) | (n->right & ~lmask));
+    }
+    return nodes[idx].cond;
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_WalkOne]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TreeWalker_PredictMargin]
+//----------------------------------------------------------------------
+// [OVERVIEW]_[full model -> per-class MARGIN vector (pre-transform). Mirrors
+//   XGBoosterPredict with option_mask=1, which is what the load-time oracle
+//   compares against to isolate walk+accumulate from the transform recipes.
+//   Accumulation is float32 `+=` over the class's trees in FILE ORDER (R5),
+//   initialised from the per-class margin-space base_score.]
+//======================================================================
+// [CODE]
+//======================================================================
+inline int TreeWalker_PredictMargin(const FlatTreeModel* m, const float* features,
+                                    float* out_margin) {
+    if (!m || !m->nodes || !m->tree_roots || !features || !out_margin) return WALKER_ERR_SHAPE;
+    if (m->num_class < 1 || m->num_class > WALKER_MAX_CLASSES)         return WALKER_ERR_SHAPE;
+
+    for (int c = 0; c < m->num_class; ++c) {
+        // base_score carries MARGIN-space intercepts (leaf 1 fans the scalar
+        // form across classes), so this is the correct accumulator seed — not
+        // a post-hoc addend.
+        float acc = m->base_score[c];
+        const int start = m->class_tree_start[c];
+        const int count = m->class_tree_count[c];
+        // R5: within-class file order is preserved by the SoA build, so summing
+        // ascending over this range reproduces the library's accumulation ORDER.
+        // float addition is non-associative — order is a parity requirement, not
+        // a style choice.
+        for (int t = 0; t < count; ++t) {
+            acc += TreeWalker_WalkOne(m->nodes, m->tree_roots[start + t], features, m->max_depth);
+        }
+        out_margin[c] = acc;
+    }
+    return WALKER_OK;
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_PredictMargin]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TreeWalker_Softmax]
+//----------------------------------------------------------------------
+// [OVERVIEW]_[xgboost 3.3.0 common/math.h:70-88 Softmax, copied EXACTLY —
+//   fmaxf scan, float expf(x - wmax), DOUBLE wsum, then divide by a float CAST
+//   of that double. The mixed precision is the whole point (parity #2): summing
+//   in float or dividing by the double directly both diverge in the low bits.]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void TreeWalker_Softmax(float* v, int n) {
+    float wmax = v[0];
+    for (int i = 1; i < n; ++i) wmax = fmaxf(v[i], wmax);
+    double wsum = 0.0;                     // DOUBLE accumulator — not float
+    for (int i = 0; i < n; ++i) { v[i] = expf(v[i] - wmax); wsum += (double)v[i]; }
+    const float wsum_f = (float)wsum;      // cast ONCE, then divide by the float
+    for (int i = 0; i < n; ++i) v[i] /= wsum_f;
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_Softmax]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TreeWalker_Sigmoid]
+//----------------------------------------------------------------------
+// [OVERVIEW]_[xgboost 3.3.0 common/math.h:31-38 Sigmoid, copied EXACTLY —
+//   1 / (expf(min(-x, 88.7f)) + 1 + 1e-16). The clamp prevents expf overflow on
+//   large negative margins; the epsilon prevents a 0-divide. Both are part of
+//   the bit pattern the oracle compares (parity #3).]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline float TreeWalker_Sigmoid(float x) {
+    const float nx = -x;
+    const float clamped = (nx < WALKER_SIGMOID_CLAMP) ? nx : WALKER_SIGMOID_CLAMP;
+    return 1.0f / (expf(clamped) + 1.0f + WALKER_SIGMOID_EPS);
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_Sigmoid]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TreeWalker_ApplyTransform]
+//----------------------------------------------------------------------
+// [OVERVIEW]_[margin vector -> prediction vector, in place, per the model's
+//   parsed objective. W-d (D-432): the recipes are PINNED to libm expf while the
+//   load-time oracle exists — an FPN_Exp deterministic transform would forfeit
+//   that oracle and is a deliberate future EPOCH break, never a drift.]
+//======================================================================
+// [CODE]
+//======================================================================
+inline int TreeWalker_ApplyTransform(const FlatTreeModel* m, float* v) {
+    if (!m || !v) return WALKER_ERR_SHAPE;
+    switch (m->objective) {
+        case WALKER_OBJ_SOFTPROB:
+            if (m->num_class < 2) return WALKER_ERR_SHAPE;   // softprob needs >=2 classes
+            TreeWalker_Softmax(v, m->num_class);
+            return WALKER_OK;
+        case WALKER_OBJ_LOGISTIC:
+            v[0] = TreeWalker_Sigmoid(v[0]);
+            return WALKER_OK;
+        case WALKER_OBJ_IDENTITY:
+            return WALKER_OK;                                 // margin IS the prediction
+        default:
+            // Unknown objective cannot reach here (the parse gate refuses it),
+            // but REFUSE rather than silently returning raw margins as if they
+            // were probabilities — a wrong-scale prediction is a silent capital
+            // decision, which is the failure mode this whole ship's oracle exists
+            // to prevent.
+            return WALKER_ERR_OBJECTIVE;
+    }
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_ApplyTransform]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TreeWalker_Predict]
+//----------------------------------------------------------------------
+// [OVERVIEW]_[the leaf-2 entry point: margin walk + objective transform in one
+//   call, writing num_class values. This is what leaf 3's backend integration
+//   and the load-time parity oracle both drive; the two halves stay separately
+//   callable so the oracle can compare MARGIN space and TRANSFORMED space
+//   independently (a transform bug and a walk bug must not alias).]
+//======================================================================
+// [CODE]
+//======================================================================
+inline int TreeWalker_Predict(const FlatTreeModel* m, const float* features, float* out) {
+    const int rc = TreeWalker_PredictMargin(m, features, out);
+    if (rc != WALKER_OK) return rc;
+    return TreeWalker_ApplyTransform(m, out);
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalker_Predict]
 //======================================================================
