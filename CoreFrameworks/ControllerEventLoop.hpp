@@ -3155,6 +3155,11 @@ inline void EventLoop_RebuildOneCore(
         // the caller's REBUILD bracket by design (sub-attribution, not
         // additive). The per-node branch is effectively static (a node's
         // strategy is fixed between swaps) — predicted after the first cycle.
+        // E.1.2.E leaf 7 — zero the ML_PREDICT accumulators so what we read
+        // after the dispatch is THIS cycle's inference cost, not a running
+        // total. Thread-local + single-writer (this node's slow thread), so no
+        // cross-thread reset hazard.
+        if (dispatch_ctx) { tt::ml_predict_cycles = 0; tt::ml_predict_count = 0; }
         uint64_t _ml_infer_t0 = dispatch_ctx ? __rdtsc() : 0;
         Strategy_BuildParameters(
             effective_strategy_id,
@@ -3180,6 +3185,13 @@ inline void EventLoop_RebuildOneCore(
             NodeLatencyStats_Sample(
                 &state->display_meta[slot].slow_path_breakdown[tt::SP_SECTION_ML_INFER],
                 _ml_infer_t1 - _ml_infer_t0, _ml_infer_t1);
+            // The inference-only half. Sampled from the accumulator the three
+            // Model_Predict* entry points fed during the dispatch above, so it
+            // covers every predict site including any not enumerated here.
+            // ML_INFER - ML_PREDICT = the cost no backend swap can remove.
+            NodeLatencyStats_Sample(
+                &state->display_meta[slot].slow_path_breakdown[tt::SP_SECTION_ML_PREDICT],
+                tt::ml_predict_cycles, _ml_infer_t1);
         }
 
         // 2026-08-22 — SHALT_WARMING attribution (no-signal-investigation #6).

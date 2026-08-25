@@ -59,6 +59,56 @@
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
 #include <unistd.h>                       // v5.3.0 Phase B — unlink/rename for atomic stamp writes
 
+//======================================================================
+// [SECTION]_[ML_PREDICT attribution accumulators — E.1.2.E leaf 7]
+//----------------------------------------------------------------------
+// SP_SECTION_ML_INFER brackets the ENTIRE strategy dispatch, not inference:
+// feature packing, scaler apply, buy ensemble, exit ensemble, barrier
+// multi-class, confidence scoring and bandit update all sit inside it. So the
+// live 3306.7us reading (2026-08-24) says "the ML dispatch is expensive" and
+// says NOTHING about how much of that the walker can remove. That ambiguity is
+// TECH_DEBT-292's composite-bracket problem one level down, and its fix is the
+// same: SPLIT THE BRACKET, THEN decide.
+//
+// WHY A THREAD-LOCAL ACCUMULATOR AND NOT PLUMBED FIELDS: the predict sites are
+// PLURAL and spread across files (Strategies/MLStrategy.hpp, four sites in
+// Strategies/StrategyParameters.hpp), and which of them fire depends on the
+// live arms that cycle. A plumbed counter measures exactly the sites I
+// remembered to bracket — and an enumeration I was confident about is precisely
+// what was wrong earlier in this same ship (the "24 predicts" projection).
+// Accumulating INSIDE the three inference entry points is complete BY
+// CONSTRUCTION: every ensemble/weighted/composite path routes through them, so
+// a predict site nobody enumerated still lands in the total.
+//
+// Single-writer by construction: each node's slow path is its own thread and
+// these are thread_local, so there is no cross-thread contention and no
+// alignas(64) obligation (H6 is about SHARED cross-thread fields).
+//
+// `inline` (C++17 inline variable) NOT `static` — `static thread_local` in a
+// header mints a SEPARATE copy per TU, so the accumulation would silently split
+// across translation units and under-report.
+//
+// COST: two rdtsc per predict against a call measured at 139us. The sibling
+// ML_INFER bracket is likewise always-on (not LATENCY_PROFILING-gated), so this
+// matches its cost profile rather than introducing a new one.
+namespace tt {
+inline thread_local uint64_t ml_predict_cycles = 0;   // summed rdtsc across predicts this dispatch
+inline thread_local uint32_t ml_predict_count  = 0;   // how many predicts this dispatch
+
+// Scope guard rather than manual bracketing: each predict entry point has
+// several early returns (null handle, backend miss, library error, NaN), and a
+// measurement that silently misses a return path is worse than no measurement.
+// This is a stack-lifetime timer, not a resource owner — the codebase's
+// no-classes convention carves out RAII destructors, and measurement scope is
+// the same argument applied to correctness of the measurement itself.
+struct MlPredictTimer {
+    uint64_t t0;
+    MlPredictTimer() : t0(__rdtsc()) {}
+    ~MlPredictTimer() { ml_predict_cycles += (__rdtsc() - t0); ++ml_predict_count; }
+};
+}  // namespace tt
+//======================================================================
+
 // backend IDs
 #define MODEL_BACKEND_NONE     0
 #define MODEL_BACKEND_XGBOOST  1
@@ -1256,6 +1306,7 @@ inline float Model_Predict_AtClass(ModelHandle<F>* m,
                                      int num_features,
                                      int class_idx) {
     if (!m->handle) return 0.0f;
+    tt::MlPredictTimer _mlt;   // E.1.2.E leaf 7 — ML_PREDICT attribution
 
     // E.1.2.E — walker path (class-explicit, like the XGBoost branch below).
     if (m->backend == MODEL_BACKEND_FLAT_WALKER) {
@@ -1409,6 +1460,7 @@ static inline int Model_ExitClassIdx(int num_outputs) {
 template <unsigned F>
 inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_features) {
     if (!m->handle) return 0.0f;
+    tt::MlPredictTimer _mlt;   // E.1.2.E leaf 7 — ML_PREDICT attribution
 
     // E.1.2.E walker path. Deliberately placed FIRST and outside USE_XGBOOST:
     // once parity is proven at load the walk is self-contained, so serving must
@@ -1776,6 +1828,7 @@ template <unsigned F>
 inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_features,
                                float *out_buf, int max_outputs) {
     if (!m->handle || max_outputs <= 0) return 0;
+    tt::MlPredictTimer _mlt;   // E.1.2.E leaf 7 — ML_PREDICT attribution
 
     // E.1.2.E — full per-class vector from the walker. This is the shape the
     // composite consumers and the queued per-class blend need; a scalar-only

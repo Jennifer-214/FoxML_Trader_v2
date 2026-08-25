@@ -35,7 +35,8 @@ namespace tt {
     X(PUSH,      "Seqlock push of pending_params to ExecutionCore (~100-500ns; single FPN_Binary copy + atomic)") \
     X(TIME_EXIT, "EventLoop_TimeExitOneCore (~100-300ns)")                                          \
     X(TRAIL_SL,  "EventLoop_TrailingSLRatchetOneCore (~100-300ns)")                                  \
-    X(ML_INFER,  "ML strategy dispatch incl. model inference — NESTED inside REBUILD (attribution sub-bracket, NOT additive with it); cost law ~550ns/boosting-round (3-class) + ~10us fixed per predict, x arms (2026-08-22); the bracket that makes tree-count bloat a visible regression instead of a buried surprise")
+    X(ML_INFER,  "ML strategy dispatch incl. model inference — NESTED inside REBUILD (attribution sub-bracket, NOT additive with it); cost law ~550ns/boosting-round (3-class) + ~10us fixed per predict, x arms (2026-08-22); the bracket that makes tree-count bloat a visible regression instead of a buried surprise") \
+    X(ML_PREDICT,"model inference ONLY, summed across every predict this dispatch — NESTED inside ML_INFER (sub-sub-bracket, NOT additive). E.1.2.E leaf 7: ML_INFER measured 3306.7us live but brackets the WHOLE dispatch (feature pack + scaler + buy/exit ensembles + barrier + confidence + bandit), so it could not say what share the flat-SoA walker can remove. ML_INFER minus ML_PREDICT is the residual the walker can NEVER touch — and that residual, not the headline, decides whether this bracket needs its own optimization ship. Same medicine as TECH_DEBT-292 arm (d), one level down")
 
 //------------------------------------------------------------------------------
 // [SECTION]_[Auto-generated enum values + count sentinel.]
