@@ -84,7 +84,12 @@ using namespace std;
 //   (constant-iter walk support, leaf 2). NOT a wire/persist format — process-
 //   lifetime only, rebuilt from JSON at every load (H21 not implicated).]
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-24]
+// [ALIGN]_[4]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //----------------------------------------------------------------------
 // [SIZE]_[16B]
 //======================================================================
@@ -112,7 +117,12 @@ static_assert(sizeof(FlatTreeNode) == 16, "walker node must stay 16B (L2 budget 
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[blob header — geometry + per-class layout; nodes/tree_roots point into the ONE
 //   aligned_alloc(64) allocation. Caller-owned; TreeWalker_Free reclaims the blob only.]
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-24]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[base_score@56 · class_tree_start@112]
 //----------------------------------------------------------------------
 // [SIZE]_[176B]   (compile-pinned by the static_assert below — the layout emitter cannot run for this env; the assert is the oracle)
 //======================================================================

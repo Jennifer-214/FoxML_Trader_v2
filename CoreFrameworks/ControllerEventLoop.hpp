@@ -228,10 +228,10 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[199104B]
+// [UPDATED]_[2026-08-24]
+// [SIZE]_[191744B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[3111]
+// [CACHE_LINES]_[2996]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[NodeSlowState]
@@ -871,11 +871,11 @@ inline void NodeContextDisplayMeta_Init(NodeContextDisplayMeta<F>* m) {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-22]
+// [UPDATED]_[2026-08-24]
 //----------------------------------------------------------------------
-// [SIZE]_[11456B]
+// [SIZE]_[13056B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[179]
+// [CACHE_LINES]_[204]
 // [STRADDLE]_[unverified: slow_path_breakdown]
 //======================================================================
 // [END_STRUCT]_[NodeContextDisplayMeta]
@@ -969,10 +969,10 @@ struct alignas(64) EventLoopState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-22]
-// [SIZE]_[298240B]
+// [UPDATED]_[2026-08-24]
+// [SIZE]_[323840B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[4660]
+// [CACHE_LINES]_[5060]
 // [STRADDLE]_[unverified: nodes display_meta]
 //======================================================================
 // [END_STRUCT]_[EventLoopState]

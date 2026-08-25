@@ -43,6 +43,12 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
 #include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
+#include <x86intrin.h>                 // E.1.2.E leaf 7 — __rdtsc for the ML_PREDICT accumulator.
+                                       // EXPLICIT: it compiled in-tree only because a sibling header
+                                       // pulled it in transitively; the B-Plus snippet compiler caught
+                                       // it standalone ("__rdtsc was not declared"). Same latent-IWYU
+                                       // class as the FailureModeRegistry include below (sister to
+                                       // EngineCommon.hpp:96, which includes it for the same reason).
 #include "TreeWalker.hpp"                // E.1.2.E — MODEL_BACKEND_FLAT_WALKER blob + walk/transform
 #include "../MemHeaders/FailureModeRegistry.hpp"  // E.1.2.E — FAILURE_MASK_ml_walker_parity_failed
                                                   // (explicit IWYU: the walker branches live under
@@ -95,17 +101,41 @@ namespace tt {
 inline thread_local uint64_t ml_predict_cycles = 0;   // summed rdtsc across predicts this dispatch
 inline thread_local uint32_t ml_predict_count  = 0;   // how many predicts this dispatch
 
-// Scope guard rather than manual bracketing: each predict entry point has
-// several early returns (null handle, backend miss, library error, NaN), and a
-// measurement that silently misses a return path is worse than no measurement.
-// This is a stack-lifetime timer, not a resource owner — the codebase's
-// no-classes convention carves out RAII destructors, and measurement scope is
-// the same argument applied to correctness of the measurement itself.
+//======================================================================
+// [STRUCT]_[MlPredictTimer]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stack-lifetime rdtsc scope guard — accumulates one predict's
+//   cycles + bumps the count into the thread_local ML_PREDICT accumulators on
+//   destruction. Constructed at each inference entry point; never heap, never
+//   shared, never a resource owner.]
+//======================================================================
+// WHY A SCOPE GUARD AND NOT MANUAL BRACKETING: each predict entry point has
+// several early returns (null handle, backend miss, library error, NaN
+// rejection). Manual `t1 - t0` at the end silently misses every one of them,
+// and a measurement that under-reports on exactly the failure paths is worse
+// than no measurement — it would make a cycle that failed inference look cheap.
+//
+// WHY A DESTRUCTOR AT ALL, given the file's C-style/no-classes convention: the
+// convention carves out RAII destructors, and this is that carve-out applied to
+// the correctness of the measurement rather than to a resource. It owns
+// nothing; its whole body is two adds on thread_local scalars.
+//======================================================================
+// [DERIVED]   (tool-refreshed — do NOT hand-edit)
+//----------------------------------------------------------------------
+// [SIZE]_[8B]
+//======================================================================
+// [CODE]
+//======================================================================
 struct MlPredictTimer {
     uint64_t t0;
     MlPredictTimer() : t0(__rdtsc()) {}
     ~MlPredictTimer() { ml_predict_cycles += (__rdtsc() - t0); ++ml_predict_count; }
 };
+// [END_CODE]
+// [END_STRUCT]_[MlPredictTimer]
+//======================================================================
 }  // namespace tt
 //======================================================================
 
