@@ -1407,11 +1407,11 @@ struct TUISnapshot {
     //==================================================================
     // [DERIVED]
     // [ORIGIN]_[AUTO]
-    // [UPDATED]_[2026-08-14]
+    // [UPDATED]_[2026-08-24]
     // [SIZE]_[1216B]
     // [ALIGN]_[64]
     // [CACHE_LINES]_[19]
-    // [STRADDLE]_[sp_breakdown_p50_ns@504 · sp_breakdown_p99_ns@544 · ensemble_n_updates_per_regime@1008 · thompson_precision_post@1084]
+    // [STRADDLE]_[sp_breakdown_p50_ns@504 · sp_breakdown_p99_ns@560 · ensemble_n_updates_per_regime@1008 · thompson_precision_post@1084]
     //==================================================================
     // [END_STRUCT]_[PerNodeSnap]
     //==================================================================
