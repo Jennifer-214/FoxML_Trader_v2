@@ -474,7 +474,10 @@ int main(int argc, char *argv[]) {
 
         // trade history (reuse existing panel — reads backtest CSV)
         if (run_control.complete) {
-            TradeHistory_Refresh(&trade_history);
+            // partial_exit_enabled=0: the suite's own panel call below passes the same
+            // (no partials concept in the training/backtest surface), so v3-era rows are
+            // left un-normalized here exactly as before.
+            TradeHistory_Refresh(&trade_history, /*partial_exit_enabled=*/0);
         }
         GUI_Panel_TradeHistory(&trade_history);
 

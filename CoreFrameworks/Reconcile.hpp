@@ -274,10 +274,11 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
         // fixed-cost order_id compare per slot (16 iterations); AND with order_bitmap; __builtin_ctz
         // picks first match. Cost ~120ns deterministic (16 × ALU + tzcnt + indirect cmov).
         // DESIGN_NOTE: when the originating Order is still in an OMS slot (PARTIAL or recently-FILLED),
-        // its node_id is recovered and cfg.nodes[origin_node_id] supplies the per-core fee_rate.
+        // its portfolio SLOT is recovered and cfg.nodes[Sharded_SlotNode(slot)] supplies the per-node fee_rate.
         // For fully-released Orders (FILLED + slot reclaimed before Reconcile fires; rare, bounded
-        // by slot churn dynamics), the bitmap search misses → origin_node_id stays -1 → fallback
-        // to nodes[0] (canonical recovery-core). The corner case is documented as TECH_DEBT at
+        // by slot churn dynamics), the bitmap search misses → origin_slot falls back to 0 →
+        // nodes[0] (canonical recovery-node). (The pre-2026-08-25 comment said "stays -1";
+        // the code has always used 0 — a checkable claim that was simply wrong.) The corner case is documented as TECH_DEBT at
         // r-8 ship close (carry actual exchange-reported fee in ReconcileTrade — out of B.1 scope).
         uint16_t match_mask = 0;
         for (int s = 0; s < MAX_INFLIGHT_ORDERS; ++s) {
@@ -286,21 +287,29 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
             match_mask = (uint16_t)(match_mask | ((uint16_t)eq << s));
         }
         const uint16_t valid_match = (uint16_t)(match_mask & oms->order_bitmap);
-        const int origin_node_id = valid_match
+        // Order::node_id is the portfolio SLOT (P.3 — SubmitCommand is built from
+        // portfolio_slot, EngineSharded/Async.hpp). Under partials a node owns slots
+        // 2N+0 / 2N+1, so indexing the per-NODE cfg array with it bound leg B of node c
+        // to node 2c+1's fee_rate. fee_rate / fee_rate_maker / fee_rate_taker are all
+        // per-node overridable, so that is a capital-path mis-binding, not cosmetic.
+        const int origin_slot = valid_match
             ? (int)oms->orders[__builtin_ctz(valid_match)].node_id
-            : 0;  // fallback to nodes[0] for released Orders
-        // Bounds-clamp via mask (branchless): origin_node_id is in [0, MAX_EXECUTION_NODES).
-        const int safe_node_id = origin_node_id & (MAX_EXECUTION_NODES - 1);
+            : 0;  // fallback to slot 0 for released Orders
+        // Bounds-clamp via mask (branchless): the SLOT is in [0, MAX_PORTFOLIO_POSITIONS).
+        const int safe_slot = origin_slot & (MAX_PORTFOLIO_POSITIONS - 1);
+        // SLOT -> owning NODE via the canonical derive (D-294/D-296), for the cfg index only.
+        const int owner_node = BITMAP_SLOT_NODE(
+            safe_slot, OMS_STATE_FLAG_IS_SET(*oms, PARTIAL_EXIT_ENABLED));
 
         // Synthesize an Order from the trade record. Defaults explained
         // in the function header comment.
         Order<F> synth;
         OrderType otype = t.is_buyer ? ORDER_MARKET_BUY : ORDER_MARKET_SELL;
-        Order_Init(&synth, (uint64_t)t.order_id, (int16_t)safe_node_id, otype);
+        Order_Init(&synth, (uint64_t)t.order_id, (int16_t)safe_slot, otype);  // Order::node_id IS a slot
         Order_SetIsMaker(&synth, (bool)t.is_maker);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order_BindPreResolved with originating core's cfg.
         // Closes Class 27 cross-core fee accuracy gap for the common (in-flight) case.
-        Order_BindPreResolved(&synth, effective_nodes[safe_node_id]);
+        Order_BindPreResolved(&synth, effective_nodes[owner_node]);  // per-NODE cfg <- NODE index
         synth.requested_qty = Money{ money_from_double_payload(t.qty) };  // D-103 reconcile ingress
         synth.event_price   = Money{ money_from_double_payload(t.price) };
 

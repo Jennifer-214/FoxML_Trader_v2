@@ -227,7 +227,7 @@ struct Order {
     // Access via Order_GetType / Order_SetType / etc. inline fns; NEVER direct bit-twiddle.
     // v5.15.5.F.4c.3 WIP2d-1.B.1: widened uint16_t → uint32_t for pre_resolved_bound bit.
     uint32_t              flags_packed;   // 4 B  @ 16
-    int16_t               node_id;        // 2 B  @ 20   which executor core, -1 for non-core orders
+    int16_t               node_id;        // 2 B  @ 20   the portfolio SLOT (P.3), NOT the node; -1 = non-node
     uint8_t               strategy_id;    // 1 B  @ 22   STRATEGY_* constant, for trade log CSV
     // Ship-A 16B FPN_Binary: Money is now __int128 (alignof 16, was 8). The scalar prefix ends @ 23, so the FPN_Binary
     // block can't start until the next 16 B boundary (@ 32) — an 8 B alignment hole. _pad_hot1 grew 1→9 B to

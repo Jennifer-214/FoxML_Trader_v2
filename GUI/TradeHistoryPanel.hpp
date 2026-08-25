@@ -116,7 +116,7 @@ static inline void TradeHistory_Init(TradeHistory *th, const char *path) {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void TradeHistory_Refresh(TradeHistory *th) {
+static inline void TradeHistory_Refresh(TradeHistory *th, int partial_exit_enabled) {
     struct stat st;
     if (stat(th->csv_path, &st) != 0) return;
     if (st.st_size == th->last_size) return;
@@ -226,6 +226,14 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         csv_field(line, 14, leg_s, sizeof(leg_s));
         e->leg = leg_s[0] ? (int)strtol(leg_s, nullptr, 10) : (xslot & 1);
 
+        // NORMALIZE col 1 to the TRUE node, era-agnostically, so the render
+        // never re-derives. v4 rows (ShardedTradeLog v4, 2026-08-23) already
+        // carry the true node in col 1; v3 rows carried the SLOT there.
+        // The render used to derive unconditionally, which DOUBLE-derived
+        // every v4 row under partials — node 1 displayed as "C0", collapsing
+        // two nodes onto one label. Absent col 13 is the v3 tell.
+        if (!xslot_s[0] && partial_exit_enabled) e->node_id = (e->node_id >> 1);
+
         // Reason: derive from price direction (exit vs entry), not P&L
         // sign. The sharded log doesn't carry an explicit reason field
         // yet, but the gate that fired is determined by price crossing:
@@ -279,7 +287,7 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
 static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_enabled = 0) {
     ImGui::Begin("Trade History");
 
-    TradeHistory_Refresh(th);
+    TradeHistory_Refresh(th, partial_exit_enabled);
 
     if (th->count == 0) {
         ImGui::TextColored(FoxmlColors::comment, "no completed trades yet");
@@ -324,10 +332,11 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
             ImGui::TableNextColumn();
             ImGui::Text("%d", th->count - 1 - i + 1);
 
-            // v4.7.18: actual node_id + leg breakdown. CSV's node_id field
-            // is the portfolio SLOT (slot c → core c/2, leg c%2 under
-            // partials). With partials disabled, slot == core, leg == 0.
-            int actual_core = partial_exit_enabled ? (e->node_id >> 1) : e->node_id;
+            // v4.7.18: actual node_id + leg breakdown. As of ShardedTradeLog
+            // v4 the CSV's col-1 node_id IS the true node; TradeHistory_Refresh
+            // normalizes v3 rows (which carried the SLOT there) at parse time,
+            // so this render is era-agnostic and must NOT derive again.
+            int actual_core = e->node_id;   // already the TRUE node (normalized at parse)
             ImGui::TableNextColumn();
             ImGui::TextColored(FoxmlColors::wheat, "C%d", actual_core);
             ImGui::TableNextColumn();

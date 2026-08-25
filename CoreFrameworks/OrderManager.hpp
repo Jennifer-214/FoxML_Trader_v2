@@ -336,7 +336,11 @@ struct OrderManagerState {
     // Why per-core (not one queue): when per-core slow-paths spawn (Phase C),
     // each thread is the sole producer for its own ring. SPSC contract
     // holds. With one shared queue, multiple producers would need MPSC.
-    alignas(64) SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_EXECUTION_NODES];
+    // SLOT-keyed, not node-keyed: OMS_PushSubmit indexes these by portfolio_slot (0..2N-1 under
+    // partials) — pinned by tests/controller_test.cpp ("OMS_PushSubmit keys queues by
+    // portfolio_slot"). Sized by MAX_PORTFOLIO_POSITIONS accordingly; it read
+    // MAX_EXECUTION_NODES, which is correct today ONLY because both limits are 16.
+    alignas(64) SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_PORTFOLIO_POSITIONS];
 
     // === EVENT LOG MODE (phase 03 chunk 3) ===
     // 0 = legacy: OMS_Tick only marks FILLED/REJECTED and frees slots.
@@ -685,11 +689,11 @@ struct OrderManagerState {
     void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
 
     // v5.15.5.F.4d Step 7 § F — per-core ezoo + node_cfg lookup for calib log consumer.
-    // Per-core ARRAYS indexed by Order::node_id at consumer (sister to per-slot last_exit_fee[]
+    // Per-NODE ARRAYS indexed by the DERIVED node at consumer (sister to per-slot last_exit_fee[]
     // + bandit_reward_bps[] sibling-array pattern; OmsState is engine-wide single instance, NOT
     // per-core). void* keeps OmsState ML-agnostic (sister to ctx.ensemble_handle on NodeContext);
     // cast to EnsembleModelZoo<F>* / const PerNodeCfg<F>* in real_on_exit_calibration via
-    // oms->ezoo_refs[o->node_id]. Default nullptr (test fixtures + pre-boot state + non-ML cores);
+    // oms->ezoo_refs[Sharded_SlotNode(slot)]. Default nullptr (test fixtures + pre-boot + non-ML);
     // wired at EngineSharded per-core init alongside state.nodes[i].ensemble_handle.
     void*       ezoo_refs[MAX_EXECUTION_NODES]     = {nullptr};   // EnsembleModelZoo<F>* per-node (lazy-cast)
     const void* node_cfg_refs[MAX_EXECUTION_NODES] = {nullptr};   // const PerNodeCfg<F>* per-node (lazy-cast)
@@ -843,13 +847,18 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
     // array (added Step 7 § N.2; written at HandleFill SELL).
     const double reward_bps_attributed = oms->bandit_reward_bps[pslot];
 
-    // v5.15.5.F.4d Step 7 § F — cast per-core ezoo_refs[node_id] / node_cfg_refs[node_id] to
-    // typed pointers for ML-side access. OmsState is engine-wide single instance (line 662 of
-    // EngineSharded boot); per-core ezoo + cfg slice lookup indexed by Order::node_id (== pslot
-    // since each core owns 1 portfolio position). Nullptr-defensive: test fixtures + non-ML cores
-    // have wiring pointers nullptr; telemetry coalesces to 0/0.0 placeholders.
-    auto* ezoo     = static_cast<EnsembleModelZoo<F>*>(oms->ezoo_refs[pslot]);
-    auto* node_cfg = static_cast<const PerNodeCfg<F>*>(oms->node_cfg_refs[pslot]);
+    // v5.15.5.F.4d Step 7 § F — cast per-NODE ezoo_refs / node_cfg_refs to typed pointers for
+    // ML-side access. Both are [MAX_EXECUTION_NODES] and are WRITTEN by node index at
+    // EngineSharded/Run.hpp (per-core boot loop), so they must be READ by node index too.
+    // They were read with `pslot` under a comment asserting "== pslot since each core owns 1
+    // portfolio position" — false whenever partial_exit_enabled=1, where a node owns slots
+    // 2N+0 / 2N+1: node 0's leg B read node 1's zoo, and nodes at slot>=num_nodes read nullptr.
+    // Nullptr-defensive: test fixtures + non-ML cores have wiring pointers nullptr; telemetry
+    // coalesces to 0/0.0 placeholders.
+    const int pnode = BITMAP_SLOT_NODE(
+        pslot, OMS_STATE_FLAG_IS_SET(*oms, PARTIAL_EXIT_ENABLED));
+    auto* ezoo     = static_cast<EnsembleModelZoo<F>*>(oms->ezoo_refs[pnode]);
+    auto* node_cfg = static_cast<const PerNodeCfg<F>*>(oms->node_cfg_refs[pnode]);
 
     // Telemetry — null-coalesced.
     const int    thompson_telemetry_arm    = ezoo     ? ezoo->last_predicted_buy_thompson_arm               : 0;
@@ -1270,10 +1279,10 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
     // No internal assembly; caller constructs the cmd struct directly + we push it.
     // Eliminates the prior 9-field unpack/repack ceremony.
-    if (cmd.node_id < 0 || cmd.node_id >= MAX_EXECUTION_NODES) {
+    if (cmd.node_id < 0 || cmd.node_id >= MAX_PORTFOLIO_POSITIONS) {   // cmd.node_id is a SLOT
         std::fprintf(stderr,
-                     "[OMS] PushSubmit: invalid node_id=%d (max=%d)\n",
-                     (int)cmd.node_id, MAX_EXECUTION_NODES);
+                     "[OMS] PushSubmit: invalid portfolio_slot=%d (max=%d)\n",
+                     (int)cmd.node_id, MAX_PORTFOLIO_POSITIONS);
         return false;
     }
     bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.node_id], cmd);

@@ -114,7 +114,9 @@ struct OrderEvent {
     uint64_t       timestamp_us;   // market time of the originating event
     OrderEventType type;           // OEVT_*
     OrderType      order_type;     // ORDER_MARKET_BUY / ORDER_MARKET_SELL
-    int16_t        node_id;        // which executor core (-1 for non-core)
+    int16_t        node_id;        // the portfolio SLOT (Order::node_id; -1 = non-node event).
+                                   // NOT the executor node — read back as `int slot` below.
+                                   // H21: the -1 sentinel is wire-visible; never reassign it.
     uint8_t        _pad[4];
     Money          price;          // fill price (DECIMAL money — Ship B P2b epoch)
     Money          qty;            // fill qty (decimal)
@@ -149,6 +151,17 @@ struct OrderEvent {
 //======================================================================
 // [END_STRUCT]_[OrderEvent]
 //======================================================================
+
+// TECH_DEBT-228 — compile-time size pin on the LIVE OMSEL02 raw-struct wire image.
+// Mirrors the Position pin (Portfolio.hpp). Until now the ONLY guard was the RUNTIME
+// `entry_size` header check, which fails SAFE (reject-rotate, never misread) but lets a
+// layout change through as a silent format break instead of a build error. With this pin a
+// layout change is a compile error, forcing a DELIBERATE ORDER_EVENT_LOG_FORMAT_VERSION
+// bump (H21) rather than a silently-rotated log.
+static_assert(sizeof(OrderEvent<64>) == 144,
+              "OrderEvent<64> is the OMSEL02 wire image — a size change is a WIRE FORMAT "
+              "change: bump ORDER_EVENT_LOG_FORMAT_VERSION + update this pin in the same "
+              "commit (H21 append-only; never reuse a retired version number).");
 
 // Ship-B P2 epoch guard (S-4/D-175a): the header's magic/fpn_width/entry_size ALL stay unchanged
 // at a 16B->16B decimal re-encoding — old logs would replay binary-scaled ints as decimals.
