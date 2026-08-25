@@ -593,50 +593,117 @@ inline void Model_Init(ModelHandle<F> *m) {
 #ifdef USE_XGBOOST
 
 //======================================================================
+// [FUNCTION]_[TreeWalkerOracle_EmitLeafRows]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[PATH-DIRECTED probe synthesis — DFS one tree root-to-leaf,
+//   accumulating the [lo,hi) interval each split imposes, and emit ONE feature
+//   row per reachable leaf that satisfies the whole path by construction.]
+//======================================================================
+// WHY THIS EXISTS: the first oracle set ONE feature at a time from a zero
+// baseline, so it could only ever reach leaves whose entire root-to-leaf path is
+// satisfiable by a single non-zero feature. MEASURED consequence on the real
+// twins model: 3122 of 4200 leaves reached — 74%, with the other 26% requiring
+// feature COMBINATIONS that one-at-a-time probing cannot generate. "Parity
+// PROVEN" over a probe set that structurally cannot reach a quarter of the
+// model's outputs is the PARTIAL-masquerading-as-TOTAL shape (M10).
+//
+// Solving the path constraints instead makes leaf coverage TOTAL BY
+// CONSTRUCTION rather than by luck: every leaf gets a row built from its own
+// path, so a leaf can only go unprobed if its path is genuinely infeasible
+// (contradictory constraints — which is itself worth reporting).
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void TreeWalkerOracle_EmitLeafRows(
+        const FlatTreeModel* w, int32_t node, float* lo, float* hi,
+        int num_features, float* rows, int* nrows, int max_rows) {
+    if (*nrows >= max_rows) return;
+    const FlatTreeNode* nd = &w->nodes[node];
+
+    if (nd->meta & WALKER_META_IS_LEAF) {
+        float* r = &rows[(size_t)(*nrows) * (size_t)num_features];
+        for (int f = 0; f < num_features; ++f) {
+            float v;
+            if (lo[f] > -INFINITY)      v = lo[f];                          // satisfies f >= lo
+            else if (hi[f] <  INFINITY) v = nextafterf(hi[f], -INFINITY);   // satisfies f <  hi
+            else                        v = 0.0f;                           // unconstrained
+            if (!(v >= lo[f] && v < hi[f]) && !(lo[f] == -INFINITY && hi[f] == INFINITY)) {
+                return;   // contradictory path — unreachable leaf, emit nothing
+            }
+            // Never hand the sentinel to a CONSTRAINED feature by accident: -1.0f
+            // means MISSING to both engines, which routes default_left instead of
+            // comparing, so the row would exercise a different path than the one
+            // it was synthesized for. Nudge up if that still satisfies the interval.
+            if (v == WALKER_MISSING_SENTINEL) {
+                const float up = nextafterf(v, INFINITY);
+                if (up >= lo[f] && up < hi[f]) v = up;
+                else return;   // the only satisfying value IS the sentinel; skip
+            }
+            r[f] = v;
+        }
+        ++(*nrows);
+        return;
+    }
+
+    const int   f   = (int)(nd->meta & WALKER_META_FEAT_MASK);
+    const float thr = nd->cond;
+    if (f < 0 || f >= num_features) return;
+
+    // LEFT: f < thr  ⇒ tighten the upper bound.
+    const float saved_hi = hi[f];
+    if (thr < hi[f]) hi[f] = thr;
+    if (lo[f] < hi[f]) TreeWalkerOracle_EmitLeafRows(w, nd->left, lo, hi, num_features, rows, nrows, max_rows);
+    hi[f] = saved_hi;
+
+    // RIGHT: f >= thr ⇒ tighten the lower bound.
+    const float saved_lo = lo[f];
+    if (thr > lo[f]) lo[f] = thr;
+    if (lo[f] < hi[f]) TreeWalkerOracle_EmitLeafRows(w, nd->right, lo, hi, num_features, rows, nrows, max_rows);
+    lo[f] = saved_lo;
+}
+// [END_CODE]
+// [END_FUNCTION]_[TreeWalkerOracle_EmitLeafRows]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TreeWalkerOracle_Verify]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [BOOT_TIME] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[load-time BIT-PARITY gate: the walker only becomes the serve
-//   backend if it reproduces XGBoosterPredict EXACTLY over a DESIGNED probe set,
-//   in BOTH margin and transformed space. Returns 1 = parity proven, 0 = refuse
-//   (caller keeps the library backend + raises a failure flag).]
+//   backend if it reproduces XGBoosterPredict EXACTLY over a designed +
+//   path-directed probe set, in BOTH margin and transformed space.]
 //======================================================================
 // WHY BOTH SPACES: margin (option_mask=1) isolates walk + accumulation;
 // transformed (option_mask=0) additionally proves the softmax/sigmoid recipes.
-// Comparing only the transformed output would let a walk error and a transform
-// error cancel; comparing only margin would leave the recipes unverified.
+// Only-transformed would let a walk error and a transform error cancel;
+// only-margin would leave the recipes unverified.
 //
-// WHY BITWISE, not epsilon: an epsilon compare is a judgement call about how
-// much divergence is acceptable on a capital path, and it silently widens as
-// models grow. float-bit equality is the only threshold that needs no defending
-// — and it is ACHIEVABLE here by construction, because the walk copies xgboost's
-// own accumulation order and its own libm recipes (W-d, D-432).
+// WHY BITWISE, not epsilon: an epsilon is a judgement about how much divergence
+// is acceptable on a capital path, and it widens silently as models grow.
+// Bit-equality needs no defending and is ACHIEVABLE by construction here,
+// because the walk copies xgboost's own accumulation order and libm recipes
+// (W-d, D-432).
 //
-// WHY A FRESH DMatrix PER ROW: XGBoost caches predictions on the DMatrix. A
-// reused handle returns the FIRST row's answer for every subsequent probe — the
-// measured 2.6us "false floor" — which would make this oracle agree with itself
-// on a single row and call it total coverage (Class 51).
+// ⚠️ BATCHED ON PURPOSE — AND THIS IS NOT THE CACHE TRAP THE PLAN WARNS ABOUT.
+// The plan's "fresh DMatrix per row" rule exists because REUSING one DMatrix
+// handle across DIFFERENT data returns the FIRST row's cached prediction (the
+// measured 2.6us false floor) — an oracle that agrees with itself. Building ONE
+// DMatrix that CONTAINS all N distinct rows is the opposite: XGBoost predicts
+// every row exactly once and returns N x K outputs. No handle is reused, no
+// prediction is cached across differing inputs.
 //
-// THE PROBE SET IS DESIGNED, NOT RANDOM (R1 — an oracle whose probes cannot
-// reach the disagreement is quietly PARTIAL):
-//   (1) all-zero row                          — the trivial path
-//   (2) per-feature MISSING (-1.0f)           — the serve sentinel; routes
-//       default_left instead of comparing. PARITY-047 is the standing proof
-//       that this lane can be wrong while everything else looks right.
-//   (3) per-feature NaN                       — the other default_left lane;
-//       `x < cond` is FALSE for NaN, so a naive walk diverges here and NOWHERE
-//       else.
-//   (4) split-threshold boundaries            — for real split conditions
-//       harvested FROM THE PARSED TREES: exactly cond, and one ULP either side.
-//       This is where `<` vs `<=` disagreements live, and they are invisible to
-//       any probe that does not land precisely on a threshold.
-// Leaf coverage is COUNTED and reported so a probe set that exercises only a
-// handful of leaves cannot masquerade as a full proof.
+// The per-row version was MEASURED at 168 SECONDS for 4096 probes on the twins
+// model (~41ms/probe: two 1-row DMatrix builds + two full 1050-tree traversals
+// each, plus libgomp spin-up per call). That is ~3 minutes added to every boot,
+// per model — a gate nobody would keep enabled is a gate that does not protect
+// anything. Batching collapses 2N library calls into exactly 2.
 //======================================================================
 // [CODE]
 //======================================================================
-#define WALKER_ORACLE_MAX_PROBES 4096
+#define WALKER_ORACLE_MAX_PROBES 16384
 
 template <unsigned F>
 inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster,
@@ -644,6 +711,10 @@ inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster
                                    int* out_probes, int* out_leaves_hit,
                                    int* out_leaves_total) {
     if (reason && reason_len) reason[0] = '\0';
+    if (out_probes) *out_probes = 0;
+    if (out_leaves_hit) *out_leaves_hit = 0;
+    if (out_leaves_total) *out_leaves_total = 0;
+
     if (!w || !booster || num_features <= 0) {
         if (reason) snprintf(reason, reason_len, "oracle: null model/booster or bad feature count");
         return 0;
@@ -655,132 +726,142 @@ inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster
         return 0;
     }
 
-    // Leaf-coverage bitmap over the blob's node array (load-time; ~16KB worst
-    // case at the WALKER_MAX_TOTAL_NODES cap).
-    static const int COV_WORDS = (WALKER_MAX_TOTAL_NODES + 63) / 64;
-    uint64_t* covered = (uint64_t*)calloc((size_t)COV_WORDS, sizeof(uint64_t));
-    if (!covered) {
-        if (reason) snprintf(reason, reason_len, "oracle: coverage bitmap alloc failed");
+    const int   K        = w->num_class;
+    const int   max_rows = WALKER_ORACLE_MAX_PROBES;
+    float* rows = (float*)calloc((size_t)max_rows * (size_t)num_features, sizeof(float));
+    float* lo   = (float*)malloc((size_t)num_features * sizeof(float));
+    float* hi   = (float*)malloc((size_t)num_features * sizeof(float));
+    if (!rows || !lo || !hi) {
+        free(rows); free(lo); free(hi);
+        if (reason) snprintf(reason, reason_len, "oracle: probe-matrix alloc failed");
+        return 0;
+    }
+    int n = 0;
+
+    // ---- (1) all-zero row: the trivial path ----
+    if (n < max_rows) { /* calloc already zeroed it */ ++n; }
+
+    // ---- (2) per-feature MISSING sentinel ----
+    // The serve path passes missing=-1.0f, so a feature that IS -1.0f routes
+    // default_left rather than comparing. PARITY-047 is the standing proof this
+    // lane can be wrong while everything else looks right.
+    for (int f = 0; f < num_features && n < max_rows; ++f, ++n)
+        rows[(size_t)n * num_features + f] = WALKER_MISSING_SENTINEL;
+
+    // ---- (3) per-feature NaN ----
+    // `x < cond` is FALSE for NaN, so a walk that compares instead of routing
+    // default_left diverges HERE and nowhere else.
+    for (int f = 0; f < num_features && n < max_rows; ++f, ++n)
+        rows[(size_t)n * num_features + f] = nanf("");
+
+    // ---- (4) PATH-DIRECTED: one row per reachable leaf, per tree ----
+    // Replaces the old one-feature-at-a-time boundary probes, which reached only
+    // 74% of leaves on the real model. Each row satisfies its leaf's entire
+    // root-to-leaf constraint set by construction, so coverage is total except
+    // for genuinely infeasible paths.
+    for (int t = 0; t < w->num_trees && n < max_rows; ++t) {
+        for (int f = 0; f < num_features; ++f) { lo[f] = -INFINITY; hi[f] = INFINITY; }
+        TreeWalkerOracle_EmitLeafRows(w, w->tree_roots[t], lo, hi, num_features,
+                                      rows, &n, max_rows);
+    }
+    free(lo); free(hi);
+
+    if (n <= 0) {
+        free(rows);
+        if (reason) snprintf(reason, reason_len, "oracle: no probes synthesized");
         return 0;
     }
 
-    float row[MODEL_NUM_FEATURES];
-    float wout[WALKER_MAX_CLASSES];
-    int   probes = 0;
-    int   ok = 1;
-
-    // One probe: run BOTH engines over `row` and compare bit-for-bit.
-    auto run_probe = [&](const char* what, int which_feat) -> int {
-        if (probes >= WALKER_ORACLE_MAX_PROBES) return 1;   // budget reached; not a failure
-        ++probes;
-
-        // --- walker: margin, then transformed (record leaf coverage on the way) ---
-        for (int c = 0; c < w->num_class; ++c) {
-            const int start = w->class_tree_start[c];
-            const int cnt   = w->class_tree_count[c];
-            for (int t = 0; t < cnt; ++t) {
-                int32_t leaf = TreeWalker_WalkOneIdx(w->nodes, w->tree_roots[start + t],
-                                                     row, w->max_depth);
-                if (leaf >= 0 && leaf < w->total_nodes)
-                    covered[leaf >> 6] |= (1ULL << (leaf & 63));
-            }
-        }
-        float wmargin[WALKER_MAX_CLASSES];
-        if (TreeWalker_PredictMargin(w, row, wmargin) != WALKER_OK) {
-            if (reason) snprintf(reason, reason_len, "oracle: walker margin refused on %s", what);
-            return 0;
-        }
-        for (int c = 0; c < w->num_class; ++c) wout[c] = wmargin[c];
-        if (TreeWalker_ApplyTransform(w, wout) != WALKER_OK) {
-            if (reason) snprintf(reason, reason_len, "oracle: walker transform refused on %s", what);
-            return 0;
-        }
-
-        // --- library: fresh DMatrix per row (cache trap), margin then transformed ---
-        for (int space = 0; space < 2; ++space) {
-            DMatrixHandle dmat;
-            if (XGDMatrixCreateFromMat(row, 1, num_features, -1.0f, &dmat) != 0) {
-                if (reason) snprintf(reason, reason_len, "oracle: DMatrix create failed on %s", what);
-                return 0;
-            }
-            bst_ulong out_len = 0;
-            const float* out_result = nullptr;
-            const int option_mask = (space == 0) ? 1 : 0;   // 1 = output_margin
-            int ret = XGBoosterPredict(booster, dmat, option_mask, 0, 0, &out_len, &out_result);
-            XGDMatrixFree(dmat);
-            if (ret != 0 || out_len == 0 || !out_result) {
-                if (reason) snprintf(reason, reason_len, "oracle: XGBoosterPredict failed on %s", what);
-                return 0;
-            }
-            if ((int)out_len != w->num_class) {
-                if (reason) snprintf(reason, reason_len,
-                                     "oracle: class-count mismatch on %s (xgb %d, walker %d)",
-                                     what, (int)out_len, w->num_class);
-                return 0;
-            }
-            const float* mine = (space == 0) ? wmargin : wout;
-            for (int c = 0; c < w->num_class; ++c) {
-                // BITWISE compare via memcmp on the float storage — not `==`,
-                // which would call two different NaNs equal-or-not by IEEE rule
-                // rather than by representation.
-                if (memcmp(&mine[c], &out_result[c], sizeof(float)) != 0) {
-                    if (reason)
-                        snprintf(reason, reason_len,
-                                 "oracle: %s-space divergence on %s class %d "
-                                 "(walker %.9g vs xgb %.9g, feature %d)",
-                                 space == 0 ? "margin" : "transformed",
-                                 what, c, (double)mine[c], (double)out_result[c], which_feat);
-                    return 0;
-                }
-            }
-        }
-        return 1;
-    };
-
-    // ---- (1) all-zero row ----
-    for (int i = 0; i < num_features; ++i) row[i] = 0.0f;
-    ok = run_probe("zero-row", -1);
-
-    // ---- (2) per-feature MISSING sentinel, (3) per-feature NaN ----
-    for (int f = 0; ok && f < num_features; ++f) {
-        for (int i = 0; i < num_features; ++i) row[i] = 0.0f;
-        row[f] = WALKER_MISSING_SENTINEL;
-        ok = run_probe("missing-sentinel", f);
-        if (!ok) break;
-        row[f] = nanf("");
-        ok = run_probe("nan", f);
+    // ---- ONE DMatrix over all N distinct rows; TWO predicts total ----
+    DMatrixHandle dmat;
+    if (XGDMatrixCreateFromMat(rows, (bst_ulong)n, (bst_ulong)num_features, -1.0f, &dmat) != 0) {
+        free(rows);
+        if (reason) snprintf(reason, reason_len, "oracle: DMatrix create failed (%d rows)", n);
+        return 0;
     }
 
-    // ---- (4) split-threshold boundaries harvested from the parsed trees ----
-    // Walk the blob's internal nodes; for each distinct (feature, threshold),
-    // probe exactly-at, one-ULP-below and one-ULP-above. This is the only probe
-    // family that can catch a `<` vs `<=` disagreement.
-    for (int n = 0; ok && n < w->total_nodes; ++n) {
-        const FlatTreeNode* nd = &w->nodes[n];
-        if (nd->meta & WALKER_META_IS_LEAF) continue;
-        const int feat = (int)(nd->meta & WALKER_META_FEAT_MASK);
-        if (feat < 0 || feat >= num_features) continue;
-        const float thr = nd->cond;
-        const float vals[3] = { thr,
-                                nextafterf(thr, -INFINITY),
-                                nextafterf(thr,  INFINITY) };
-        for (int v = 0; v < 3 && ok; ++v) {
-            for (int i = 0; i < num_features; ++i) row[i] = 0.0f;
-            row[feat] = vals[v];
-            ok = run_probe("split-boundary", feat);
+    bst_ulong len_m = 0, len_t = 0;
+    const float *res_m = nullptr, *res_t = nullptr;
+    int ok = 1;
+
+    if (XGBoosterPredict(booster, dmat, 1, 0, 0, &len_m, &res_m) != 0 || !res_m) {
+        if (reason) snprintf(reason, reason_len, "oracle: margin predict failed");
+        ok = 0;
+    }
+    // COPY the margin block before the second call — out_result points at an
+    // INTERNAL buffer that the next Predict overwrites. Comparing against it
+    // afterwards would silently be comparing transformed-vs-transformed.
+    float* margin = nullptr;
+    if (ok) {
+        margin = (float*)malloc((size_t)len_m * sizeof(float));
+        if (!margin) { if (reason) snprintf(reason, reason_len, "oracle: margin copy alloc failed"); ok = 0; }
+        else memcpy(margin, res_m, (size_t)len_m * sizeof(float));
+    }
+    if (ok && (XGBoosterPredict(booster, dmat, 0, 0, 0, &len_t, &res_t) != 0 || !res_t)) {
+        if (reason) snprintf(reason, reason_len, "oracle: transformed predict failed");
+        ok = 0;
+    }
+    if (ok && ((int)len_m != n * K || (int)len_t != n * K)) {
+        if (reason) snprintf(reason, reason_len,
+                             "oracle: output shape mismatch (got %d/%d, expected %d)",
+                             (int)len_m, (int)len_t, n * K);
+        ok = 0;
+    }
+
+    // ---- walk every row, compare BOTH spaces bitwise, count leaf coverage ----
+    static const int COV_WORDS = (WALKER_MAX_TOTAL_NODES + 63) / 64;
+    uint64_t* covered = ok ? (uint64_t*)calloc((size_t)COV_WORDS, sizeof(uint64_t)) : nullptr;
+    if (ok && !covered) { if (reason) snprintf(reason, reason_len, "oracle: coverage bitmap alloc failed"); ok = 0; }
+
+    for (int r = 0; ok && r < n; ++r) {
+        const float* row = &rows[(size_t)r * num_features];
+        for (int c = 0; c < K; ++c) {
+            const int start = w->class_tree_start[c], cnt = w->class_tree_count[c];
+            for (int t = 0; t < cnt; ++t) {
+                int32_t leaf = TreeWalker_WalkOneIdx(w->nodes, w->tree_roots[start + t], row, w->max_depth);
+                if (leaf >= 0 && leaf < w->total_nodes) covered[leaf >> 6] |= (1ULL << (leaf & 63));
+            }
         }
-        if (probes >= WALKER_ORACLE_MAX_PROBES) break;   // budget; coverage reported below
+        float wm[WALKER_MAX_CLASSES], wt[WALKER_MAX_CLASSES];
+        if (TreeWalker_PredictMargin(w, row, wm) != WALKER_OK) {
+            if (reason) snprintf(reason, reason_len, "oracle: walker margin refused on probe %d", r);
+            ok = 0; break;
+        }
+        for (int c = 0; c < K; ++c) wt[c] = wm[c];
+        if (TreeWalker_ApplyTransform(w, wt) != WALKER_OK) {
+            if (reason) snprintf(reason, reason_len, "oracle: walker transform refused on probe %d", r);
+            ok = 0; break;
+        }
+        for (int c = 0; c < K && ok; ++c) {
+            // memcmp, not `==`: IEEE would call two NaNs unequal regardless of
+            // representation. Parity is about the BITS.
+            if (memcmp(&wm[c], &margin[(size_t)r * K + c], sizeof(float)) != 0) {
+                if (reason) snprintf(reason, reason_len,
+                    "oracle: MARGIN divergence on probe %d class %d (walker %.9g vs xgb %.9g)",
+                    r, c, (double)wm[c], (double)margin[(size_t)r * K + c]);
+                ok = 0;
+            } else if (memcmp(&wt[c], &res_t[(size_t)r * K + c], sizeof(float)) != 0) {
+                if (reason) snprintf(reason, reason_len,
+                    "oracle: TRANSFORMED divergence on probe %d class %d (walker %.9g vs xgb %.9g)",
+                    r, c, (double)wt[c], (double)res_t[(size_t)r * K + c]);
+                ok = 0;
+            }
+        }
     }
 
     int hit = 0, leaves = 0;
-    for (int n = 0; n < w->total_nodes; ++n) {
-        if (!(w->nodes[n].meta & WALKER_META_IS_LEAF)) continue;
-        ++leaves;
-        if (covered[n >> 6] & (1ULL << (n & 63))) ++hit;
+    if (covered) {
+        for (int i = 0; i < w->total_nodes; ++i) {
+            if (!(w->nodes[i].meta & WALKER_META_IS_LEAF)) continue;
+            ++leaves;
+            if (covered[i >> 6] & (1ULL << (i & 63))) ++hit;
+        }
     }
-    free(covered);
 
-    if (out_probes)       *out_probes = probes;
+    XGDMatrixFree(dmat);
+    free(covered); free(margin); free(rows);
+
+    if (out_probes)       *out_probes = n;
     if (out_leaves_hit)   *out_leaves_hit = hit;
     if (out_leaves_total) *out_leaves_total = leaves;
     return ok;
