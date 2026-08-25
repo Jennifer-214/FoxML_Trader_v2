@@ -29,6 +29,7 @@
 #pragma once
 
 #include "../FixedPoint/FixedPointN.hpp"
+#include "IndexSpaces.hpp"   // SlotIdx (D-438)
 #include <cstdint>
 #include <cstdio>  // std::fprintf for Order_WarnIfNotPreResolved (WIP2d-1.B.1)
 
@@ -227,7 +228,7 @@ struct Order {
     // Access via Order_GetType / Order_SetType / etc. inline fns; NEVER direct bit-twiddle.
     // v5.15.5.F.4c.3 WIP2d-1.B.1: widened uint16_t → uint32_t for pre_resolved_bound bit.
     uint32_t              flags_packed;   // 4 B  @ 16
-    int16_t               node_id;        // 2 B  @ 20   the portfolio SLOT (P.3), NOT the node; -1 = non-node
+    tt::SlotIdx           portfolio_slot; // 2 B  @ 20   the portfolio SLOT (P.3). -1 = non-node (H21 wire sentinel)
     uint8_t               strategy_id;    // 1 B  @ 22   STRATEGY_* constant, for trade log CSV
     // Ship-A 16B FPN_Binary: Money is now __int128 (alignof 16, was 8). The scalar prefix ends @ 23, so the FPN_Binary
     // block can't start until the next 16 B boundary (@ 32) — an 8 B alignment hole. _pad_hot1 grew 1→9 B to
@@ -415,10 +416,10 @@ inline void MBS_OrderSetBanditContext(Order<F>* o, int state, int regime, int ar
 // [CODE]
 //======================================================================
 template <unsigned F>
-inline void Order_Init(Order<F>* o, uint64_t id, int16_t node_id, OrderType type) {
+inline void Order_Init(Order<F>* o, uint64_t id, tt::SlotIdx portfolio_slot, OrderType type) {
     o->id              = id;
     o->client_id       = id;
-    o->node_id         = node_id;
+    o->portfolio_slot  = portfolio_slot;
     o->strategy_id     = 0xFF;  // STRATEGY_NONE
     o->flags_packed    = 0;     // type/state/is_maker/leg/retry all zero; then set type+state via accessors
     Order_SetType(o, type);
@@ -515,7 +516,7 @@ inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
             "pre_resolved.fee_rate=%f (expected explicit bind via node_cfg OR explicit "
             "Order_MarkPreResolvedBound after manual set). Production paths require node_cfg "
             "at OrderManager_Submit (sig-enforced); this Order bypassed Submit (test fixture path).\n",
-            site, (unsigned long long)o->id, (int)o->node_id,
+            site, (unsigned long long)o->id, (int)o->portfolio_slot,
             Money_ToDouble(o->pre_resolved.fee_rate));
     }
 }

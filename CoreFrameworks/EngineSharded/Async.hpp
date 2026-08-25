@@ -1016,7 +1016,7 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 // caller contract for when Phase C spawns N producers.
                 // v5.15.5.F.4c.3 WIP2d-1.B.1 option (A refined) — required-field ctor + optional .field = X.
                 // ctor: (node_id, type, qty, leg, node_cfg); optional intended_tp/intended_sl/strategy_id/event_price.
-                SubmitCommand<F> cmd((int16_t)portfolio_slot,                                       // P.3: actual slot, not node_id
+                SubmitCommand<F> cmd(tt::SlotIdx{(int16_t)portfolio_slot},                          // P.3: a SLOT, and now typed as one
                                       is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
                                       order_qty,                                        // F-096: Money end-to-end; the payload bridge is gone
                                       event.leg,                                                    // P.3: leg propagated to Order

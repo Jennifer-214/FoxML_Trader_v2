@@ -181,7 +181,7 @@ constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 template <unsigned F>
 struct SubmitCommand {
     // ─── REQUIRED (semantic; ctor-signaled) ───
-    int16_t                 node_id      = 0;
+    tt::SlotIdx             portfolio_slot = {};   // the portfolio SLOT (P.3), never the node
     uint8_t                 order_type   = 0;
     Money                  qty          = Money_Zero();
     uint8_t                 leg          = 0;
@@ -200,8 +200,8 @@ struct SubmitCommand {
 
     // Required-field ctor — recommended form for production + test callers; signals
     // which fields a valid submit needs.
-    SubmitCommand(int16_t cid, OrderType t, Money q, uint8_t lg, const ::PerNodeCfg<F>* cfg)
-        : node_id(cid), order_type((uint8_t)t), qty(q), leg(lg), node_cfg(cfg) {}
+    SubmitCommand(tt::SlotIdx slot, OrderType t, Money q, uint8_t lg, const ::PerNodeCfg<F>* cfg)
+        : portfolio_slot(slot), order_type((uint8_t)t), qty(q), leg(lg), node_cfg(cfg) {}
 };
 //======================================================================
 // [END_CODE]
@@ -341,7 +341,7 @@ struct OrderManagerState {
     // partials) — pinned by tests/controller_test.cpp ("OMS_PushSubmit keys queues by
     // portfolio_slot"). Sized by MAX_PORTFOLIO_POSITIONS accordingly; it read
     // MAX_EXECUTION_NODES, which is correct today ONLY because both limits are 16.
-    alignas(64) SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_PORTFOLIO_POSITIONS];
+    alignas(64) tt::SlotArray<SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE>, MAX_PORTFOLIO_POSITIONS> submit_queues;
 
     // === EVENT LOG MODE (phase 03 chunk 3) ===
     // 0 = legacy: OMS_Tick only marks FILLED/REJECTED and frees slots.
@@ -796,7 +796,8 @@ inline void real_on_entry_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
-    synth.node_id   = (uint16_t)o->node_id;
+    synth.node_id   = (uint16_t)(int)o->portfolio_slot;   // TradeEvent.node_id carries the SLOT here;
+                                                          // ShardedTradeLog derives the true node from it
     synth.type      = TRADE_EVENT_ENTRY;
     ShardedTradeLog_RecordEntry(oms->trade_log, synth, o->strategy_id,
                                 fill_price, fill_qty, entry_fee, oms->balance);
@@ -807,13 +808,13 @@ inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
                                     Money fill_price, Money net, Money total_fee) {
     // Re-read position state (preserved through CloseSlot per Phase F invariant — only the
     // active_bitmap bit was cleared; entry_price + quantity remain stored on Position).
-    const int pslot = (int)o->node_id;
+    const int pslot = (int)o->portfolio_slot;
     const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
     const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
-    synth.node_id   = (uint16_t)o->node_id;
+    synth.node_id   = (uint16_t)(int)o->portfolio_slot;   // SLOT (see RecordEntry note above)
     synth.type      = TRADE_EVENT_EXIT;
     ShardedTradeLog_RecordExit(oms->trade_log, synth, o->strategy_id,
                                entry_price_snap, fill_price,
@@ -823,7 +824,7 @@ inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
 template <unsigned F>
 inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
                                       Money fill_price, Money net, Money total_fee) {
-    const int pslot = (int)o->node_id;
+    const int pslot = (int)o->portfolio_slot;
     const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
     const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
     const uint64_t ts_us = (uint64_t)
@@ -1076,7 +1077,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     // Local extraction matches prior positional names so body internals are unchanged.
     // Production callers MUST set cmd.node_cfg = &cfg.nodes[c] (discipline; runtime TT_ASSERT
     // backstop catches misses at HandleFill).
-    const int16_t                node_id     = cmd.node_id;
+    const tt::SlotIdx            portfolio_slot = cmd.portfolio_slot;
     const OrderType              type        = (OrderType)cmd.order_type;
     const Money                 qty         = cmd.qty;
     const Money                 intended_tp = cmd.intended_tp;
@@ -1109,7 +1110,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
         std::fprintf(stderr,
                      "[OMS] order table full (%d slots), dropping submission "
                      "for node=%d type=%u\n",
-                     MAX_INFLIGHT_ORDERS, (int)node_id, (unsigned)type);
+                     MAX_INFLIGHT_ORDERS, (int)portfolio_slot, (unsigned)type);
         return 0;
     }
     int slot = __builtin_ctz((unsigned int)free_mask);
@@ -1128,7 +1129,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 9. Plan: master plan
     // v5.11.5 item 3.
     uint64_t encoded_id = id | ((uint64_t)slot << 60);
-    Order_Init(&oms->orders[slot], encoded_id, node_id, type);
+    Order_Init(&oms->orders[slot], encoded_id, portfolio_slot, type);
     id = encoded_id;  // returned to caller + used in cmd.order_id below
     oms->orders[slot].submitted_at_us = (uint64_t)
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1283,18 +1284,18 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
     // No internal assembly; caller constructs the cmd struct directly + we push it.
     // Eliminates the prior 9-field unpack/repack ceremony.
-    if (cmd.node_id < 0 || cmd.node_id >= MAX_PORTFOLIO_POSITIONS) {   // cmd.node_id is a SLOT
+    if ((int)cmd.portfolio_slot < 0 || (int)cmd.portfolio_slot >= MAX_PORTFOLIO_POSITIONS) {
         std::fprintf(stderr,
                      "[OMS] PushSubmit: invalid portfolio_slot=%d (max=%d)\n",
-                     (int)cmd.node_id, MAX_PORTFOLIO_POSITIONS);
+                     (int)cmd.portfolio_slot, MAX_PORTFOLIO_POSITIONS);
         return false;
     }
-    bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.node_id], cmd);
+    bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.portfolio_slot], cmd);
     if (!pushed) {
         std::fprintf(stderr,
                      "[OMS] PushSubmit: queue full for node=%d type=%u "
                      "(drainer starved?)\n",
-                     (int)cmd.node_id, (unsigned)cmd.order_type);
+                     (int)cmd.portfolio_slot, (unsigned)cmd.order_type);
     }
     return pushed;
 }
@@ -1335,7 +1336,7 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
     int max = (num_nodes > MAX_EXECUTION_NODES) ? MAX_EXECUTION_NODES : num_nodes;
     for (int c = 0; c < max; ++c) {
         SubmitCommand<F> cmd;
-        while (SPSCRing_TryPop(&oms->submit_queues[c], &cmd)) {
+        while (SPSCRing_TryPop(&oms->submit_queues[tt::SlotIdx{(int16_t)c}], &cmd)) {
             // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): pass POD directly; no unpack ceremony.
             OrderManager_Submit(oms, cmd);
             drained++;
@@ -1478,10 +1479,10 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
     const Money per_fill_tp = !Money_IsZero(o->pre_resolved.tp_pct)
         ? Money_Add(fill_price, Money_Mul(fill_price, o->pre_resolved.tp_pct))
         : o->intended_tp;
-    Portfolio_OpenSlot(&oms->portfolio, (int)o->node_id,
+    Portfolio_OpenSlot(&oms->portfolio, (int)o->portfolio_slot,
                        fill_price, fill_qty,
                        per_fill_tp, o->intended_sl, entry_fee);
-    oms->last_opened_mask |= (uint16_t)(1u << (int)o->node_id);
+    oms->last_opened_mask |= (uint16_t)(1u << (int)o->portfolio_slot);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
     // Default = noop_fill_emit (no-op); set to real_on_entry_fill_emit at boot when trade_log Init succeeds.
     // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md.
@@ -1509,7 +1510,7 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
 template <unsigned F>
 inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_price, Money fill_qty,
                              Money booked_fee) {
-    const int pslot = (int)o->node_id;
+    const int pslot = (int)o->portfolio_slot;
     // v4.7.19 race guard — H20 exception #4 (genuine predicate; alternative requires Portfolio refactor).
     // __builtin_expect-rare: production fires only on rare hot-path-SG / manual-close race.
     if (__builtin_expect((oms->portfolio.active_bitmap & (uint16_t)(1u << pslot)) == 0, 0)) {
@@ -1627,11 +1628,11 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
                                      double venue_commission = 0.0,
                                      const char* venue_commission_asset = nullptr) {
     // Bounds guard — H20 exception #4 (genuine predicate without alternative); __builtin_expect-rare.
-    if (__builtin_expect(o->node_id < 0 || o->node_id >= MAX_PORTFOLIO_POSITIONS, 0)) {
+    if (__builtin_expect((int)o->portfolio_slot < 0 || (int)o->portfolio_slot >= MAX_PORTFOLIO_POSITIONS, 0)) {
         std::fprintf(stderr,
                      "[OMS] fill handler: node_id %d out of range [0,%d), "
                      "skipping order %llu\n",
-                     (int)o->node_id, MAX_PORTFOLIO_POSITIONS,
+                     (int)o->portfolio_slot, MAX_PORTFOLIO_POSITIONS,
                      (unsigned long long)o->id);
         return;
     }
@@ -1661,7 +1662,7 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     OrderEventLog_Append(&oms->event_log,
         OrderEvent_MakeFill<F>(
             o->id, o->submitted_at_us,
-            Order_GetType(o), o->node_id,
+            Order_GetType(o), o->portfolio_slot.v,   // OrderEvent.node_id stays a raw int16_t (persisted)
             fill_price, fill_qty,
             o->intended_tp, o->intended_sl,
             booked_fee));
@@ -1769,7 +1770,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         std::fprintf(stderr,
                      "[OMS] order %llu FAIL node=%d code=%d msg=%s\n",
                      (unsigned long long)o->id,
-                     (int)o->node_id,
+                     (int)o->portfolio_slot,
                      cmd.result.error_code,
                      cmd.result.error_message);
         Order_SetState(o, ORDER_REJECTED);
@@ -1780,7 +1781,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             OrderEventLog_Append(&oms->event_log,
                 OrderEvent_MakeRejection<F>(
                     o->id, o->submitted_at_us,
-                    Order_GetType(o), o->node_id,
+                    Order_GetType(o), o->portfolio_slot.v,   // raw int16_t on the persisted path
                     cmd.result.error_message));
         }
     }

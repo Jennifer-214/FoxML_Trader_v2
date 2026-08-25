@@ -802,7 +802,7 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
         /* Layer 2 — sub-struct helper-Init + per-slot loops */                                     \
         Portfolio_Init(&(_oms_target)->portfolio);                                                   \
         for (int _i = 0; _i < MAX_INFLIGHT_ORDERS; ++_i) {                                           \
-            Order_Init(&(_oms_target)->orders[_i], 0, -1, ORDER_MARKET_BUY);                         \
+            Order_Init(&(_oms_target)->orders[_i], 0, tt::SlotIdx{-1}, ORDER_MARKET_BUY);            \
             Order_SetState(&(_oms_target)->orders[_i], ORDER_FILLED);                                \
         }                                                                                            \
         {                                                                                            \
@@ -819,7 +819,7 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
         SPSCRing_Init(&(_oms_target)->ws_result_queue);                                              \
         SPSCRing_Init(&(_oms_target)->reconcile_queue);                                              \
         for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                           \
-            SPSCRing_Init(&(_oms_target)->submit_queues[_i]);                                        \
+            SPSCRing_Init(&(_oms_target)->submit_queues[tt::SlotIdx{(int16_t)_i}]);                  \
         }                                                                                            \
         /* Layer 4 — OrderEventLog conditional init + LoadFromDisk + replay (MUST RUN BEFORE L5) */  \
         {                                                                                            \

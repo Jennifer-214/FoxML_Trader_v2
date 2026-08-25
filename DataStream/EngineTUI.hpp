@@ -2077,7 +2077,7 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
         snap->per_node[i].sp_state =
             state->nodes[i].sp_telemetry.state.load(std::memory_order_relaxed);
         snap->per_node[i].sp_submit_q_depth =
-            (uint16_t)SPSCRing_Depth(&oms->submit_queues[i]);
+            (uint16_t)SPSCRing_Depth(&oms->submit_queues[tt::SlotIdx{(int16_t)i}]);
     }
 }
 

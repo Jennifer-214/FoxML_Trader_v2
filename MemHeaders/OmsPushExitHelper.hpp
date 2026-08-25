@@ -84,7 +84,7 @@ inline bool OMS_PushExitForSlot(OrderManagerState<F>* oms,
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (A refined): required-field ctor + optional assignments.
     // Helper bakes in ORDER_MARKET_SELL; caller varies the rest. intended_tp/intended_sl/_pad
     // take SubmitCommand default (FPN_Zero).
-    SubmitCommand<F> cmd(slot, ORDER_MARKET_SELL, qty, leg, node_cfg);
+    SubmitCommand<F> cmd(tt::SlotIdx{(int16_t)slot}, ORDER_MARKET_SELL, qty, leg, node_cfg);
     cmd.strategy_id = strategy_id;
     cmd.event_price = event_price;
     return OMS_PushSubmit(oms, cmd);

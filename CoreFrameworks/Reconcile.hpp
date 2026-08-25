@@ -293,7 +293,7 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
         // to node 2c+1's fee_rate. fee_rate / fee_rate_maker / fee_rate_taker are all
         // per-node overridable, so that is a capital-path mis-binding, not cosmetic.
         const int origin_slot = valid_match
-            ? (int)oms->orders[__builtin_ctz(valid_match)].node_id
+            ? (int)oms->orders[__builtin_ctz(valid_match)].portfolio_slot
             : 0;  // fallback to slot 0 for released Orders
         // Bounds-clamp via mask (branchless): the SLOT is in [0, MAX_PORTFOLIO_POSITIONS).
         const int safe_slot = origin_slot & (MAX_PORTFOLIO_POSITIONS - 1);
@@ -305,7 +305,7 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
         // in the function header comment.
         Order<F> synth;
         OrderType otype = t.is_buyer ? ORDER_MARKET_BUY : ORDER_MARKET_SELL;
-        Order_Init(&synth, (uint64_t)t.order_id, (int16_t)safe_slot, otype);  // Order::node_id IS a slot
+        Order_Init(&synth, (uint64_t)t.order_id, tt::SlotIdx{(int16_t)safe_slot}, otype);
         Order_SetIsMaker(&synth, (bool)t.is_maker);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order_BindPreResolved with originating core's cfg.
         // Closes Class 27 cross-core fee accuracy gap for the common (in-flight) case.
