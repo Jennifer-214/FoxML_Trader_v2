@@ -4741,6 +4741,14 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
     // XGBoost init).
     omp_set_num_threads(1);
     omp_set_dynamic(0);
+    // PROGRESS PUBLISH (2026-08-25, operator: the bar read "horizon 0/3 (current: 0 ticks)" for a
+    // whole run). mh_progress / mh_current_horizon were written ONLY by the SERIAL path, and
+    // parallel became the default when E.1.2.D deleted the multi_horizon_max_threads=1 override —
+    // so in parallel mode the bar sat at 0 until the join, then jumped straight to N. That made a
+    // running job indistinguishable from a hung one, which is also why Cancel felt inert: there
+    // was no signal that anything had happened. Publish the horizon on entry; the completion
+    // counter is bumped atomically below because N workers finish out of order.
+    __atomic_store_n(&job->state->mh_current_horizon, job->horizon_ticks, __ATOMIC_RELAXED);
     mh_run_one_horizon_fv(
         job->state,
         &job->isolated_results,
@@ -4758,6 +4766,9 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
         job->labels_precomputed,   // E.1.2.D leaf 5 — batch filled labels pre-spawn
         job->training_side,
         job->horizon_count);  // v5.15.3.B.2 PARITY-021
+    // Completion tick — atomic because N workers finish out of order and a plain `volatile`
+    // increment from several threads loses counts. Display-only, so RELAXED is sufficient.
+    __atomic_add_fetch(&job->state->mh_progress, 1, __ATOMIC_RELAXED);
     free(job->isolated_results.labels);
     free(job);
     return NULL;
@@ -5075,6 +5086,8 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             if (fv->ran_held_out) validated++;
             if (fv->auto_stamp_ok) saved_count++;
         }
+        // Workers already counted themselves up; this is the terminal pin (a cancelled or
+        // failed worker may not have ticked, and the bar must still read complete at the end).
         state->mh_progress = horizon_count;
     } else {
         // Serial mode (existing v5.11.41.A behavior; now via helper)

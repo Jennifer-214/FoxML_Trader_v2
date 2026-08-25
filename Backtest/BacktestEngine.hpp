@@ -2290,6 +2290,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         int last_iter_ret = 0;
         int last_iter_idx = -1;
         for (int r = 0; r < n_rounds; r++) {
+            // Cancel checkpoint (2026-08-25, operator: "the cancel button doesn't work").
+            // The fold LOOP checked the flag once per fold, but this ROUND loop did not — so a
+            // cancel mid-fold still paid a full n_rounds training before anything noticed, which
+            // at 200-350 rounds on a real dataset is minutes of apparent no-op. The held-out
+            // trainer already checked per-round; this is the same check, and it is why the two
+            // paths felt so different. Breaking here lets the fold finish its bookkeeping and the
+            // existing per-fold guard above ends the run on the next iteration.
+            if (cancel_flag && *cancel_flag) {
+                fprintf(stderr, "[walkforward] fold %d: cancelled at round %d/%d\n",
+                        f + 1, r, n_rounds);
+                break;
+            }
             // v5.11.46 — log every 10 iters to bisect crash location
             if (r == 0 || r % 10 == 0) {
                 fprintf(stderr, "[WF marker] fold %d: pre-iter %d\n", f + 1, r);
