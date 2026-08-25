@@ -4426,6 +4426,16 @@ static inline void mh_run_one_horizon_fv(
                 } else {
                     XGBoosterSetParam(booster, "objective", "binary:logistic");
                 }
+                // TECH_DEBT-301a (2026-08-25) — THE SHIPPED MODEL WAS TRAINED UNWEIGHTED.
+                // The WF folds and the held-out eval both applied class balance; this site — the
+                // one whose artifact is actually SAVED and STAMPED — applied none. So the two
+                // numbers the stamp certifies described boosters this model is not, and on a
+                // 61.5/34.4/4.1 split an unweighted booster leans to the majority and rarely
+                // emits the rare class, which is the buy signal. Routed through the SAME producer
+                // as the other two so the three cannot drift apart again.
+                float *ship_w = XGBoost_ApplyClassBalance(booster, dtrain, train_labels, n_valid,
+                                                           K_classes, is_regr, is_multi,
+                                                           "mh-train shipped");
                 int it_completed = 0;   // E.1.2.D (scan-2 NEW-1) — real rounds only
                 for (int it = 0; it < hp.n_estimators; ++it) {
                     if (state->mh_cancel) break;
@@ -4440,6 +4450,7 @@ static inline void mh_run_one_horizon_fv(
                 // predicted base_score forever — unstamped, so every load-time
                 // check was vacuous on it (S2-F6). The 516-byte
                 // twins_horizon_7500/exit.json husk is the live instance.
+                if (ship_w) { free(ship_w); ship_w = nullptr; }   // TECH_DEBT-301a — DMatrix copied it
                 if (it_completed > 0) {
                     int save_rc = XGBoosterSaveModel(booster, fv->auto_stamp_path);
                     if (save_rc != 0) {

@@ -552,6 +552,89 @@ static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int cou
 //======================================================================
 // [END_CODE]
 //======================================================================
+
+//======================================================================
+// [FUNCTION]_[XGBoost_ApplyClassBalance]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE single class-balance producer — every booster that trains on this data routes through it, so the three training sites cannot drift apart again]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-301]
+//======================================================================
+// [CODE]
+//======================================================================
+// WHY THIS EXISTS (TECH_DEBT-301a, 2026-08-25). Three sites trained the same data with three
+// DIFFERENT loss functions, and nothing said so:
+//   · the SHIPPED model (BacktestPanels, the artifact that gets saved + stamped) — NO weights
+//   · the WF folds (which produce wf_mean_val)                — inverse-frequency, capped 5.0
+//   · the held-out eval (which produces held_out_metric)      — inverse-frequency, UNCAPPED
+// So the stamp certified two numbers that described boosters the shipped artifact was not, and
+// part of the persistent held-out-vs-WF deficit was manufactured by the cap asymmetry alone
+// rather than by the data. E.1.2.C unified these sites' HYPERPARAMETERS; the class weighting was
+// not in that sweep, which is exactly how it drifted unnoticed.
+//
+// THE CAP IS KEPT, DELIBERATELY. It is not the defect — the ASYMMETRY was. Its rationale is
+// real and measured (v5.11.46): at a 1.2 % class the raw weight reaches ~27, which overflowed
+// the gradient in histogram split-finding and SEGFAULTED. Capping costs some minority signal;
+// crashing costs the run. Applied identically everywhere so the three estimates describe the
+// same loss.
+//
+// Returns a malloc'd weight buffer the CALLER must free (nullptr for binary/regression, which
+// need no per-sample weights). Mirrors the ownership shape the call sites already used.
+//
+// USE_XGBOOST-guarded because it takes BoosterHandle/DMatrixHandle. Its two composed primitives
+// (ComputeScalePosWeight / ComputeMulticlassWeights) take only plain types and stay unguarded, so
+// the ANSI lane still compiles and still exercises them — the guard is on the handle-taking
+// wrapper only, not on the arithmetic it wraps.
+#ifdef USE_XGBOOST
+static inline float *XGBoost_ApplyClassBalance(BoosterHandle booster, DMatrixHandle dtrain,
+                                                const float *labels, int n, int num_classes,
+                                                int is_regression, int is_multiclass,
+                                                const char *site_tag) {
+    // Regression has no class-imbalance concept.
+    if (is_regression) return nullptr;
+
+    if (!is_multiclass) {
+        int n_pos = 0, n_neg = 0;
+        double spw = XGBoost_ComputeScalePosWeight(labels, n, &n_pos, &n_neg);
+        char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+        XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+        fprintf(stderr, "[%s] class balance: binary scale_pos_weight=%.4f (pos=%d neg=%d)\n",
+                site_tag, spw, n_pos, n_neg);
+        return nullptr;
+    }
+
+    float *w = (float *)malloc((size_t)n * sizeof(float));
+    if (!w) {
+        fprintf(stderr, "[%s] class balance: weight alloc FAILED (%d samples) — training "
+                        "UNWEIGHTED, which is the TECH_DEBT-301a defect; treat any metric "
+                        "from this run as not comparable\n", site_tag, n);
+        return nullptr;
+    }
+    int counts[16] = {0};
+    XGBoost_ComputeMulticlassWeights(labels, n, num_classes, w, counts);
+
+    const float WEIGHT_CAP = 5.0f;   // v5.11.46 — see the segfault rationale above
+    int capped = 0;
+    for (int i = 0; i < n; ++i) {
+        if (w[i] > WEIGHT_CAP) { w[i] = WEIGHT_CAP; capped++; }
+    }
+    XGDMatrixSetFloatInfo(dtrain, "weight", w, n);
+
+    fprintf(stderr, "[%s] class balance: multiclass inverse-frequency, cap %.1f (%d/%d capped);",
+            site_tag, WEIGHT_CAP, capped, n);
+    for (int k = 0; k < num_classes && k < 16; ++k) {
+        fprintf(stderr, " c%d=%d (%.1f%%)", k, counts[k], n > 0 ? 100.0f * counts[k] / n : 0.0f);
+    }
+    fprintf(stderr, "\n");
+    return w;
+}
+#endif // USE_XGBOOST
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[XGBoost_ApplyClassBalance]
+//======================================================================
 // [COMMENT]
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // XGBoost binary `scale_pos_weight` compensates for class imbalance.
@@ -1367,6 +1450,9 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     const BacktestResults *data,
     const HeldOutSplit *split,
     int label_type,
+    int horizon_ticks,           // TECH_DEBT-301b — REQUIRED, never defaulted: the purge gap is a
+                                 // function of the horizon, and a silent 0 would purge only the
+                                 // feature-lookback half while reading as fully purged.
     volatile int *cancel_flag,
     const tt::XGBHyperparams *hp_override = nullptr);
 
@@ -1560,7 +1646,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     // as a WF fold, evaluates on [trainval_end, sample_count). Honors the
     // existing cancel_flag plumbing — early cancellation leaves
     // ran_held_out=0 so the gap stays at the degenerate baseline.
-    HeldOutTrainEvalResult he = HeldOutSplit_TrainEval(data, split, label_type, cancel,
+    HeldOutTrainEvalResult he = HeldOutSplit_TrainEval(data, split, label_type,
+                                                       out->req_label_lookahead_ticks, cancel,
                                                        hp_override);
     out->ran_held_out         = he.ok;
     out->held_out_count       = he.eval_count;
@@ -1579,6 +1666,60 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->auto_stamp_ok        = 0;
     out->auto_stamp_error[0]  = '\0';
     out->auto_stamp_path_written[0] = '\0';
+
+    // ── SKILL FLOOR (TECH_DEBT-301c, 2026-08-25) ──────────────────────────────────────────
+    // The stamp gate measures AGREEMENT, not SKILL: it refuses on |wf_mean_val −
+    // held_out_metric| > threshold and has NO floor on either number, so a model at
+    // WF 0.05 / HO 0.05 stamps clean. Observed consequence: of three horizons the one that
+    // stamped was the one with the WORST WF — being uniformly bad makes the two estimates
+    // agree, so the two better models were refused and the weakest was certified.
+    //
+    // The floor is COMPUTABLE, not a magic constant. The classification metric is PLAIN
+    // accuracy (WalkForward_ComputeMulticlassAccuracy = correct/count), so the trivial
+    // "always predict the majority class" strategy scores exactly the majority-class rate.
+    // A model that does not beat that has no skill by construction, whatever its gap.
+    //
+    // Regression (Pearson r) uses 0 as the floor — no correlation is the trivial baseline.
+    //
+    // PLACEMENT: this guards the stamp DECISION rather than living inside
+    // stamp_write_for_model, because the gate takes only two scalars and cannot see the label
+    // distribution the baseline is derived from. Moving it inward (plumbing a baseline through
+    // StampHelper) is the follow-up recorded in TECH_DEBT-301c — it belongs where it cannot be
+    // bypassed, and today there is exactly one caller path.
+    if (out->ran_held_out && out->auto_stamp_path[0] != '\0') {
+        double skill_floor = 0.0;
+        const char *floor_kind = "regression: Pearson r > 0";
+        if (!LabelType_IsRegression(label_type)) {
+            int cls_counts[16] = {0}, cls_total = 0;
+            for (int i = 0; i < data->sample_count; ++i) {
+                if (isnan(data->labels[i])) continue;
+                int c = (int)(data->labels[i] + 0.5f);
+                if (c >= 0 && c < 16) { cls_counts[c]++; cls_total++; }
+            }
+            int majority = 0;
+            for (int k = 0; k < 16; ++k) if (cls_counts[k] > majority) majority = cls_counts[k];
+            if (cls_total > 0) skill_floor = (double)majority / (double)cls_total;
+            floor_kind = "classification: majority-class accuracy";
+        }
+        // Mirror the metric selection the stamp emit itself uses (see the wf value passed below),
+        // so the floor is applied to the SAME number the gate will compare.
+        const double wf_metric = LabelType_IsRegression(label_type)
+            ? (double)out->walkforward.mean_val_correlation
+            : (double)out->walkforward.mean_val_accuracy;
+        if (wf_metric <= skill_floor) {
+            snprintf(out->auto_stamp_error, sizeof(out->auto_stamp_error),
+                     "REFUSE: no skill — wf %.4f <= baseline %.4f (%s). The gap check "
+                     "measures agreement, not skill; a uniformly-bad model agrees with itself.",
+                     wf_metric, skill_floor, floor_kind);
+            fprintf(stderr, "[fullvalidation] STAMP REFUSED — %s\n", out->auto_stamp_error);
+            out->auto_stamp_attempted = 1;
+            out->auto_stamp_ok        = 0;
+            return;
+        }
+        fprintf(stderr, "[fullvalidation] skill floor OK — wf %.4f > baseline %.4f (%s)\n",
+                wf_metric, skill_floor, floor_kind);
+    }
+
     if (out->ran_held_out && out->auto_stamp_path[0] != '\0') {
         // v5.15.3.A — Stamp emit chain refactored to use Stamp_AssembleAndEmit
         // canonical helper. Replaces ~180 LOC of manual StampInferenceCfgInputs
@@ -2113,49 +2254,16 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
         // Multiclass: per-sample inverse-frequency weights via DMatrix info.
         // Regression: no class-imbalance concept.
-        if (!is_regression && !is_multiclass) {
-            int n_pos = 0, n_neg = 0;
-            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_train, &n_pos, &n_neg);
-            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
-            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
-            fprintf(stderr, "[walkforward] fold %d: class balance +%d / -%d → scale_pos_weight=%s\n",
-                    f + 1, n_pos, n_neg, spw_s);
-        } else if (is_multiclass) {
-            float *mc_weights = (float *)malloc(n_train * sizeof(float));
-            int   mc_counts[16] = {0};
-            if (mc_weights) {
-                XGBoost_ComputeMulticlassWeights(train_labels, n_train, num_classes_lt,
-                                                  mc_weights, mc_counts);
-                // v5.11.46 — cap per-sample weight at 5.0 to prevent
-                // numerical issues during XGBoost gradient computation
-                // when one class is very rare (e.g. c0=1.2% gives raw
-                // weight ~27, large enough to cause gradient overflow
-                // in some XGBoost versions → segfault in histogram
-                // split-finding). Capping caps the importance weighting
-                // for very rare classes; you lose some signal but stop
-                // crashing.
-                const float WEIGHT_CAP = 5.0f;
-                int capped_count = 0;
-                for (int wi = 0; wi < n_train; ++wi) {
-                    if (mc_weights[wi] > WEIGHT_CAP) {
-                        mc_weights[wi] = WEIGHT_CAP;
-                        capped_count++;
-                    }
-                }
-                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_train);
-                fprintf(stderr, "[walkforward] fold %d: multiclass class counts:", f + 1);
-                for (int k = 0; k < num_classes_lt && k < 16; k++) {
-                    fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
-                            n_train > 0 ? 100.0f * mc_counts[k] / n_train : 0.0f);
-                }
-                if (capped_count > 0) {
-                    fprintf(stderr, " — per-sample weights applied (capped %d at %.1f)\n",
-                            capped_count, WEIGHT_CAP);
-                } else {
-                    fprintf(stderr, " — per-sample weights applied\n");
-                }
-                free(mc_weights);
-            }
+        // TECH_DEBT-301a — routed through the ONE class-balance producer so this fold, the
+        // held-out eval and the SHIPPED model all train under an identical loss. Previously each
+        // of the three had its own regime and the stamp certified two numbers describing neither
+        // shipped artifact. XGDMatrixSetFloatInfo copies, so freeing here is safe.
+        {
+            char wf_tag[40]; snprintf(wf_tag, sizeof(wf_tag), "walkforward fold %d", f + 1);
+            float *wf_w = XGBoost_ApplyClassBalance(booster, dtrain, train_labels, n_train,
+                                                     num_classes_lt, is_regression, is_multiclass,
+                                                     wf_tag);
+            if (wf_w) free(wf_w);
         }
         // v5.11.46 — bisection markers for fold 2 segfault diagnosis.
         // If crash is in XGBoosterUpdateOneIter, we'll see "[WF marker]
@@ -2505,6 +2613,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     const BacktestResults *data,
     const HeldOutSplit *split,
     int label_type,
+    int horizon_ticks,           // TECH_DEBT-301b — drives the purge gap; see the band computation below
     volatile int *cancel_flag,
     const tt::XGBHyperparams *hp_override) {
     HeldOutTrainEvalResult r = {};
@@ -2545,12 +2654,47 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     int filter_neutrals = LabelType_IsBinary(label_type);
     int filter_nan      = is_multiclass;  // v5.9.1: NAN-marked = NaN-label-dropped
 
+    // ── PURGE GAP (TECH_DEBT-301b, 2026-08-25) ────────────────────────────────────────────
+    // This split was a PLAIN INDEX CUT: train was `i < trainval_end_idx`, eval was everything
+    // else, with NOTHING between them — while the WF path next door computes
+    // max(horizon, FeatureLookback_Max()) + buffer and FATALs on any fold that overlaps. The
+    // meticulous path was the one that is NOT the deployment proxy, and this is the metric the
+    // stamp gate keys on.
+    //
+    // The leak is two-directional, which is why PurgeGap_Compute takes a max of both:
+    //   · LABELS — Label_PeakValleyStable scans FORWARD (end = tick_idx + lookahead), so the
+    //     last `horizon` training labels are functions of held-out prices.
+    //   · FEATURES — the eval side reads back through FeatureLookback_Max() into training ticks.
+    // Direction of the bug: HO was INFLATED, so the true WF↔HO gap was WIDER than the gate saw.
+    //
+    // The band belongs to NEITHER side — it is dropped, not reassigned. Raw index space here
+    // (unlike WF, which density-scales because it generates folds in compacted non-neutral
+    // space); this loop walks raw `i` and compacts inline, so no scaling applies.
+    const int ho_horizon = horizon_ticks > 0 ? horizon_ticks : 0;
+    const int ho_purge   = PurgeGap_Compute(ho_horizon, PURGE_BUFFER_DEFAULT);
+    int ho_train_end = split->trainval_end_idx - ho_purge;
+    if (ho_train_end < 0) ho_train_end = 0;
+    fprintf(stderr, "[heldout] purge gap: %d samples dropped between train and eval "
+                    "(horizon=%d lookback=%d buffer=%d) — train ends %d, eval starts %d\n",
+            ho_purge, ho_horizon, FeatureLookback_Max(), PURGE_BUFFER_DEFAULT,
+            ho_train_end, split->trainval_end_idx);
+    if (ho_train_end == 0) {
+        // REFUSE rather than silently train on nothing: a purge that eats the whole train side
+        // means the split fraction and the horizon are incompatible, and a metric produced here
+        // would be meaningless while still reaching the stamp gate.
+        fprintf(stderr, "[heldout] REFUSE: purge gap %d >= trainval_end_idx %d — the horizon is "
+                        "too large for this split fraction; widen the split or shorten the horizon\n",
+                ho_purge, split->trainval_end_idx);
+        return r;
+    }
+
     int n_train = 0, n_eval = 0;
     for (int i = 0; i < data->sample_count; ++i) {
         if (filter_neutrals && data->labels[i] == 0.5f) continue;
         if (filter_nan && isnan(data->labels[i])) continue;
-        if (i < split->trainval_end_idx) n_train++;
-        else                              n_eval++;
+        if (i < ho_train_end)                    n_train++;
+        else if (i >= split->trainval_end_idx)   n_eval++;
+        // else: inside the purge band — belongs to neither side
     }
 
     if (n_train < 100 || n_eval < 10) {
@@ -2578,17 +2722,19 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         for (int i = 0; i < data->sample_count; ++i) {
             if (filter_neutrals && data->labels[i] == 0.5f) continue;
             if (filter_nan && isnan(data->labels[i])) continue;
-            if (i < split->trainval_end_idx) {
+            if (i < ho_train_end) {
                 memcpy(&train_features[ti * MODEL_NUM_FEATURES],
                        &data->feature_matrix[i * MODEL_NUM_FEATURES],
                        MODEL_NUM_FEATURES * sizeof(float));
                 train_labels[ti++] = data->labels[i];
-            } else {
+            } else if (i >= split->trainval_end_idx) {
                 memcpy(&eval_features[ei * MODEL_NUM_FEATURES],
                        &data->feature_matrix[i * MODEL_NUM_FEATURES],
                        MODEL_NUM_FEATURES * sizeof(float));
                 eval_labels[ei++] = data->labels[i];
             }
+            // else: purge band — dropped from BOTH sides (must mirror the counting pass above;
+            // a divergence here would overrun the buffers sized by that pass)
         }
 
         fprintf(stderr, "[heldout] training on %d samples, evaluating on %d (kind=%s)\n",
@@ -2639,20 +2785,14 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
                          ? data->config_used.xgb_eval_nthread : 1;
         tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
 
-        if (!is_regression && !is_multiclass) {
-            int n_pos = 0, n_neg = 0;
-            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_train, &n_pos, &n_neg);
-            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
-            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
-        } else if (is_multiclass) {
-            mc_weights = (float*)malloc((size_t)n_train * sizeof(float));
-            int mc_counts[16] = {0};
-            if (mc_weights) {
-                XGBoost_ComputeMulticlassWeights(train_labels, n_train, num_classes,
-                                                  mc_weights, mc_counts);
-                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_train);
-            }
-        }
+        // TECH_DEBT-301a — the SAME producer the WF folds and the shipped model use. This site
+        // previously applied inverse-frequency weights UNCAPPED while WF capped at 5.0, so the
+        // rare class was weighted ~1.63x harder here than in the number it was compared against:
+        // part of the persistent held-out-vs-WF deficit was manufactured by that asymmetry rather
+        // than by the data. mc_weights stays caller-owned; the existing cleanup path frees it.
+        mc_weights = XGBoost_ApplyClassBalance(booster, dtrain, train_labels, n_train,
+                                                num_classes, is_regression, is_multiclass,
+                                                "heldout");
 
         // E.1.2.D (scan-1 NEW-1) — the snapshot's round count, not the v5.9.5g
         // hardcode. With `200` here, the shipped model trained hp.n_estimators
