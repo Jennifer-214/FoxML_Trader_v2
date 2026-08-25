@@ -123,4 +123,78 @@ static_assert(sizeof(NodeIdx) == sizeof(int16_t), "NodeIdx must not change carri
 static_assert(alignof(SlotIdx) == alignof(int16_t), "SlotIdx must not change carrier alignment");
 static_assert(alignof(NodeIdx) == alignof(int16_t), "NodeIdx must not change carrier alignment");
 
+//======================================================================================================
+// [STRUCT]_[NodeArray]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a per-NODE array that accepts ONLY a NodeIdx subscript — the enforcement half of the type pair]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+// WHY A WRAPPER AND NOT A BARE ARRAY WITH TYPED CALLERS: a bare `T v[N]` accepts any integral
+// subscript forever, so the discipline would live in the CALLER and be re-lost at the next edit —
+// which is precisely how ezoo_refs[pslot] survived a 100-file rename. Binding the index space to
+// the ARRAY makes the wrong subscript a compile error at every site that will ever exist.
+//
+// LAYOUT: aggregate containing exactly one T[N] member — same size, same alignment, same offsets
+// as the raw array it replaces. Pinned below so a future member addition is a build error rather
+// than a silently re-blessed cache-layout golden.
+template <typename T, int N>
+struct NodeArray {
+    T v[N];
+    T&       operator[](NodeIdx i)       { return v[(int)i]; }
+    const T& operator[](NodeIdx i) const { return v[(int)i]; }
+};
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-25]
+//------------------------------------------------------------------------------------------------------
+// [SIZE]_[N*sizeof(T)]
+// [ALIGN]_[alignof(T)]
+// [CACHE_LINES]_[varies]
+// [STRADDLE]_[none]
+//======================================================================================================
+// [END_STRUCT]_[NodeArray]
+//======================================================================================================
+
+//======================================================================================================
+// [STRUCT]_[SlotArray]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a per-SLOT array that accepts ONLY a SlotIdx subscript — the mirror of NodeArray]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+template <typename T, int N>
+struct SlotArray {
+    T v[N];
+    T&       operator[](SlotIdx i)       { return v[(int)i]; }
+    const T& operator[](SlotIdx i) const { return v[(int)i]; }
+};
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-25]
+//------------------------------------------------------------------------------------------------------
+// [SIZE]_[N*sizeof(T)]
+// [ALIGN]_[alignof(T)]
+// [CACHE_LINES]_[varies]
+// [STRADDLE]_[none]
+//======================================================================================================
+// [END_STRUCT]_[SlotArray]
+//======================================================================================================
+
+// Layout parity with the raw arrays they replace — if either fires, a wrapper grew a member and
+// every carrier's offsets moved. Build error beats a re-blessed golden.
+static_assert(sizeof(NodeArray<void*, 16>) == sizeof(void* [16]), "NodeArray must not change layout");
+static_assert(sizeof(SlotArray<void*, 16>) == sizeof(void* [16]), "SlotArray must not change layout");
+static_assert(alignof(NodeArray<void*, 16>) == alignof(void* [16]), "NodeArray must not change alignment");
+
 }  // namespace tt

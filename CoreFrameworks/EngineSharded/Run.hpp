@@ -1040,8 +1040,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // (real_on_exit_calibration). void* cast to EnsembleModelZoo<F>* /
         // const PerNodeCfg<F>* at consumer.
         if (state.nodes[i].ensemble_handle != nullptr) {
-            oms.ezoo_refs[i]     = (void*)ezoo_ptr;
-            oms.node_cfg_refs[i] = (const void*)&cfg.nodes[i];
+            const tt::NodeIdx ni{ (int16_t)i };   // per-core boot loop: `i` IS a node index
+            oms.ezoo_refs[ni]     = (void*)ezoo_ptr;
+            oms.node_cfg_refs[ni] = (const void*)&cfg.nodes[i];
         }
         // Per-core latency sampling — the whole point of this mode (LIVE-only;
         // backtest has no latency profiling at this scope per M5 LIVE-only discipline).

@@ -82,6 +82,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../Limits.hpp"
+#include "IndexSpaces.hpp"   // SlotIdx / NodeIdx / NodeArray (D-438)
 #include "ExchangeAdapter.hpp"
 #include "Order.hpp"
 #include "OrderEventLog.hpp"
@@ -695,8 +696,11 @@ struct OrderManagerState {
     // cast to EnsembleModelZoo<F>* / const PerNodeCfg<F>* in real_on_exit_calibration via
     // oms->ezoo_refs[Sharded_SlotNode(slot)]. Default nullptr (test fixtures + pre-boot + non-ML);
     // wired at EngineSharded per-core init alongside state.nodes[i].ensemble_handle.
-    void*       ezoo_refs[MAX_EXECUTION_NODES]     = {nullptr};   // EnsembleModelZoo<F>* per-node (lazy-cast)
-    const void* node_cfg_refs[MAX_EXECUTION_NODES] = {nullptr};   // const PerNodeCfg<F>* per-node (lazy-cast)
+    // NodeArray, not a bare array: these accept ONLY a NodeIdx subscript, so the mis-index this
+    // pair actually carried (read with a SLOT under a false "== pslot" comment) is now a COMPILE
+    // ERROR rather than a convention. Layout is identical to the raw arrays (pinned in IndexSpaces).
+    tt::NodeArray<void*, MAX_EXECUTION_NODES>       ezoo_refs     = {};   // EnsembleModelZoo<F>* per-node (lazy-cast)
+    tt::NodeArray<const void*, MAX_EXECUTION_NODES> node_cfg_refs = {};   // const PerNodeCfg<F>* per-node (lazy-cast)
 
     ~OrderManagerState() {
         OrderManager_Shutdown(this);
@@ -855,8 +859,8 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
     // 2N+0 / 2N+1: node 0's leg B read node 1's zoo, and nodes at slot>=num_nodes read nullptr.
     // Nullptr-defensive: test fixtures + non-ML cores have wiring pointers nullptr; telemetry
     // coalesces to 0/0.0 placeholders.
-    const int pnode = BITMAP_SLOT_NODE(
-        pslot, OMS_STATE_FLAG_IS_SET(*oms, PARTIAL_EXIT_ENABLED));
+    const tt::NodeIdx pnode{ (int16_t)BITMAP_SLOT_NODE(
+        pslot, OMS_STATE_FLAG_IS_SET(*oms, PARTIAL_EXIT_ENABLED)) };
     auto* ezoo     = static_cast<EnsembleModelZoo<F>*>(oms->ezoo_refs[pnode]);
     auto* node_cfg = static_cast<const PerNodeCfg<F>*>(oms->node_cfg_refs[pnode]);
 
