@@ -732,7 +732,7 @@ inline bool EngineSharded_Async_FanOut(
                                       "%s/trades", dirname);
                         if (tt::PaperResetArchive_CreateDirectories(trades_subdir)) {
                             for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
-                                if (!state.oms->trade_log->per_node_files[c]) continue;
+                                if (!state.oms->trade_log->per_node_files[tt::NodeIdx{(int16_t)c}]) continue;
                                 char per_src[256], per_dst[512];
                                 if (!tt::ShardedTradeLog_FormatPerCoreFilename(
                                         per_src, sizeof(per_src),

@@ -19,7 +19,16 @@
 
 // per-core sharding (phase 04+)
 // MAX_EXECUTION_NODES caps the number of execution cores the controller can
-// register. one core per pinned CPU. node_id maps directly to portfolio slot.
+// register. one core per pinned CPU.
+//
+// ⚠ NODE AND SLOT ARE DIFFERENT INDEX SPACES. This comment used to claim
+// "node_id maps directly to portfolio slot" — true ONLY when partial_exit_enabled=0.
+// With partials ON a node owns portfolio slots 2N+0 and 2N+1, so the spaces diverge.
+// That the two caps below are EQUAL is a coincidence, not an invariant: it is why a
+// wrong-space index passes every bounds check silently (Class 61). Derive across the
+// spaces via Sharded_SlotNode / Sharded_LegSlot, and prefer the typed tt::SlotIdx /
+// tt::NodeIdx (CoreFrameworks/IndexSpaces.hpp, D-438) which make the mix-up a
+// compile error.
 // MAX_EVENTS_PER_DRAIN_PER_NODE caps how many events one drain pass will pull
 // from a single core's event ring before moving to the next core. prevents one
 // chatty core from starving the others (pitfall P4.1).

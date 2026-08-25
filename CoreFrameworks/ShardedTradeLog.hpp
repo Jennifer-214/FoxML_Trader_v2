@@ -51,6 +51,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../Limits.hpp"             // v5.15.5.C.3 Phase 5.B — MAX_EXECUTION_NODES for per_node_files[]
+#include "IndexSpaces.hpp"           // NodeIdx / NodeArray (D-438) — per_node_files is NODE-indexed
 #include "../MemHeaders/BitmapMacros.hpp"  // s5-1b — BITMAP_SLOT_NODE (slot→node derive; truthful attribution)
 #include "TradeEvent.hpp"
 #include "TradeLogColRegistry.hpp"  // v5.14.10.F — FOREACH_TRADE_LOG_COL registry (closes /merge-scan N2 for trade log)
@@ -104,7 +105,10 @@ struct ShardedTradeLog {
     // adds per-core for archive). The FULL per-core-split + TradeReader
     // merge (per bundled-plan Reader/UI Impact section) is a deferred
     // follow-up if/when TradeReader needs to surface per-core tabs.
-    FILE*    per_node_files[MAX_EXECUTION_NODES];
+    // NodeArray, not a bare array: this is indexed by the DERIVED node (BITMAP_SLOT_NODE at the
+    // write site), never by the slot the row carries. Typed so that distinction cannot be lost
+    // the way it was in the ezoo_refs cohort (Class 61).
+    tt::NodeArray<FILE*, MAX_EXECUTION_NODES> per_node_files;
 };
 // s5-1b — compile-pinned (the headless layout emitter can't refresh new fields;
 // the assert is the size oracle the [SIZE] tag cites).
@@ -176,8 +180,8 @@ inline void ShardedTradeLog_WriteRow(ShardedTradeLog* log, int node_id,
                                       const char* row, size_t n) {
     fwrite(row, 1, n, log->file);
     if ((unsigned)node_id < (unsigned)MAX_EXECUTION_NODES &&
-        log->per_node_files[node_id]) {
-        fwrite(row, 1, n, log->per_node_files[node_id]);
+        log->per_node_files[tt::NodeIdx{(int16_t)node_id}]) {
+        fwrite(row, 1, n, log->per_node_files[tt::NodeIdx{(int16_t)node_id}]);
     }
     log->row_count++;
 }
@@ -225,7 +229,7 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol,
     // v5.15.5.C.3 Phase 5.B — pre-zero per-core file array. Init walks 0..N-1
     // below; failure on any one is non-fatal (we log + continue without
     // that core's per-core mirror; aggregate file still serves the trade log).
-    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) log->per_node_files[c] = nullptr;
+    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) log->per_node_files[tt::NodeIdx{(int16_t)c}] = nullptr;
     // v4.7.18: cache symbol for Rotate() (must precede the early-return paths
     // below so even a failed Init records what was attempted)
     std::strncpy(log->symbol, symbol, sizeof(log->symbol) - 1);
@@ -285,16 +289,16 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol,
             has_content_pc = (fgetc(probe_pc) != EOF);
             fclose(probe_pc);
         }
-        log->per_node_files[c] = fopen(per_node_filename, "a");
-        if (!log->per_node_files[c]) continue;
-        setvbuf(log->per_node_files[c], nullptr, _IOLBF, 0);
+        log->per_node_files[tt::NodeIdx{(int16_t)c}] = fopen(per_node_filename, "a");
+        if (!log->per_node_files[tt::NodeIdx{(int16_t)c}]) continue;
+        setvbuf(log->per_node_files[tt::NodeIdx{(int16_t)c}], nullptr, _IOLBF, 0);
         if (!has_content_pc) {
-            fprintf(log->per_node_files[c],
+            fprintf(log->per_node_files[tt::NodeIdx{(int16_t)c}],
                 "# v4 sharded engine (per-node mirror; node=%d — both legs) — rows in arrival order; "
                 "same column shape as aggregate logging/%s_order_history.csv\n",
                 c, symbol);
-            TradeLog_EmitHeader(log->per_node_files[c]);
-            fflush(log->per_node_files[c]);
+            TradeLog_EmitHeader(log->per_node_files[tt::NodeIdx{(int16_t)c}]);
+            fflush(log->per_node_files[tt::NodeIdx{(int16_t)c}]);
         }
     }
     return 1;
@@ -330,7 +334,7 @@ inline void ShardedTradeLog_Flush(ShardedTradeLog* log) {
     if (log->file) fflush(log->file);
     // v5.15.5.C.3 Phase 5.B — flush per-core mirror files too.
     for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
-        if (log->per_node_files[c]) fflush(log->per_node_files[c]);
+        if (log->per_node_files[tt::NodeIdx{(int16_t)c}]) fflush(log->per_node_files[tt::NodeIdx{(int16_t)c}]);
     }
 }
 //======================================================================
@@ -363,9 +367,9 @@ inline int ShardedTradeLog_Rotate(ShardedTradeLog* log) {
     // computing the rename target (so the rename below sees a stable
     // filesystem snapshot for both aggregate + per-core files).
     for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
-        if (log->per_node_files[c]) {
-            fclose(log->per_node_files[c]);
-            log->per_node_files[c] = nullptr;
+        if (log->per_node_files[tt::NodeIdx{(int16_t)c}]) {
+            fclose(log->per_node_files[tt::NodeIdx{(int16_t)c}]);
+            log->per_node_files[tt::NodeIdx{(int16_t)c}] = nullptr;
         }
     }
 
@@ -449,10 +453,10 @@ inline void ShardedTradeLog_Close(ShardedTradeLog* log) {
     }
     // v5.15.5.C.3 Phase 5.B — close per-core mirror files at shutdown.
     for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
-        if (log->per_node_files[c]) {
-            fflush(log->per_node_files[c]);
-            fclose(log->per_node_files[c]);
-            log->per_node_files[c] = nullptr;
+        if (log->per_node_files[tt::NodeIdx{(int16_t)c}]) {
+            fflush(log->per_node_files[tt::NodeIdx{(int16_t)c}]);
+            fclose(log->per_node_files[tt::NodeIdx{(int16_t)c}]);
+            log->per_node_files[tt::NodeIdx{(int16_t)c}] = nullptr;
         }
     }
 }

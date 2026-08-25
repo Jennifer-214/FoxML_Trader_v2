@@ -2196,7 +2196,16 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // removed; the mode-0 / test-only bookkeeping path below books the raw trigger price (slip lives at Submit).
     // Mutate a local copy so the caller's event is untouched.
     TradeEvent<F> event = event_in;
-    int slot = (int)event.node_id;
+    // event.node_id on THIS path is the NODE (ExecutionCore writes core->node_id), while the
+    // portfolio calls below need the SLOT. Under partial_exit_enabled a node owns slots 2N+0/2N+1,
+    // so the two diverge and one variable cannot serve both — this body used `slot` for BOTH
+    // (nodes[]/effective_nodes[] AND positions[]/OpenSlot/CloseSlot), which mapped node N's fill
+    // onto portfolio slot N. Latent only because mode-0 is legacy/test-only (E.1.2.F Class-61).
+    const int node = (int)event.node_id;
+    const int partial_on_ev = BITMAP_IS_SET(state->oms->oms_state_flags,
+                                            tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    const int pslot = Sharded_LegSlot(node, (int)event.leg, partial_on_ev);
+    int slot = node;   // node-space alias; every portfolio call below uses `pslot`
     // v5.15.5.F.4c.3 WIP2d-1.B.1 option C — combined-mask collapse: 3 separate predicate branches
     // (bounds + mutex + mode-1 fast-path) collapsed into 1 combined-mask + single guard branch.
     // Reduces predictor entries 3 → 1; bounds variance to a single source. Per Caramel's
@@ -2205,7 +2214,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // Branchless mask compute (pure ALU; ~5ns):
     bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
     bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
-    const bool valid_slot   = slot < state->registered_count;     // uint16_t event.node_id → slot >= 0 always
+    const bool valid_slot   = slot < state->registered_count && pslot >= 0
+                              && pslot < MAX_PORTFOLIO_POSITIONS;   // node bound AND a derivable slot
     const bool valid_mutex  = !(is_entry && is_exit);              // same-tick entry+exit impossible by ExecutionCore_Tick construction
     const bool mode_0_body  = !MBS_EQ_U8(state->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
                                           tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);  // mode-1 (production sharded) → false → skip body
@@ -2230,7 +2240,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (slot already validated above).
         const Money entry_fee_rate = effective_nodes[slot].fee_rate_taker;
         Money entry_fee = Money_Mul(notional, entry_fee_rate);
-        Portfolio_OpenSlot(&state->oms->portfolio, slot,
+        Portfolio_OpenSlot(&state->oms->portfolio, pslot,
                            event.price,
                            ctx->intended_qty,
                            ctx->intended_tp,
@@ -2266,10 +2276,10 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // time, recorded in position) and exit fee (computed from exit notional).
         // Snapshot the position fields BEFORE CloseSlot clears the bit, so the
         // CSV row sees the entry_price + qty even though the slot is "closed".
-        Money entry_price_snap = state->oms->portfolio.positions[slot].entry_price;
-        Money qty_snap = state->oms->portfolio.positions[slot].quantity;
-        Money entry_fee = state->oms->portfolio.positions[slot].entry_fee;
-        Money gross = Portfolio_CloseSlot(&state->oms->portfolio, slot, event.price);
+        Money entry_price_snap = state->oms->portfolio.positions[pslot].entry_price;
+        Money qty_snap = state->oms->portfolio.positions[pslot].quantity;
+        Money entry_fee = state->oms->portfolio.positions[pslot].entry_fee;
+        Money gross = Portfolio_CloseSlot(&state->oms->portfolio, pslot, event.price);
         Money exit_notional = Money_Mul(event.price, qty_snap);
         // Phase 8: TP/SL exit = market sell = always taker by exchange def.
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (slot already validated above).
