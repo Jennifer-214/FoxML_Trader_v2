@@ -115,8 +115,34 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     //------------------------------------------------------------------
     FPN_Binary<F> price_buf[W];
     FPN_Binary<F> volume_buf[W];
+    // TECH_DEBT-293 T1 (delete pv_buf) — MEASURED AND DEFERRED, not forgotten.
+    // Recomputing `FPN_Mul(oldest_price, oldest_volume)` at eviction is exactly
+    // bytewise-identical (verified: all 4 window hashes matched) and saves
+    // 16 B/slot = 30,720 B across the cohort. But it is NOT free: measured on
+    // W=128 it costs p50 +358ns / p99 +794ns (~+5%/+7.5%) because a 128-bit
+    // FPN_Mul is several instructions against one 16B load, and it also grew
+    // RollingStats_Push by 94 instructions. On W=1024 it is free-to-better
+    // (the smaller ring pays back in misses), so the trade is window-DEPENDENT.
+    // Latency outranks memory in this codebase's priority order, so shipping a
+    // measured ~5% regression on the smallest/hottest window to buy DRAM
+    // footprint the tooling says is not L1d-relevant is an OPERATOR call, not an
+    // agent one. Left in place; the decision is homed in TECH_DEBT-293.
     FPN_Binary<F> pv_buf[W];          // price*volume per sample (for eviction)
-    int side_buf[W];           // is_buyer_maker flags for directional volume eviction
+    //
+    // TECH_DEBT-293 T2 — `int side_buf[W]` (4 B/slot) BIT-PACKED to one bit/slot.
+    // Was gated on PARITY-047: while `is_buyer_maker` was never forwarded, every
+    // bit here was provably zero, so a footprint pass would have read the array as
+    // dead and deleted the only structure able to carry the fix — cementing
+    // volume_delta at +1.0 permanently. PARITY-047 closed 2026-08-23; the bits now
+    // carry real trade sides, so packing them is safe.
+    // Manual word+bit arithmetic, never a C++ bitfield (H14: layout/packing-order
+    // are implementation-defined, which conflicts with the size-pins below).
+    // CEILING division, not W/64. My first cut asserted `W % 64 == 0` on the
+    // grounds that every FOREACH_ROLLING_WINDOW row is 128/256/512/1024 — true of
+    // the REGISTRY and false of the template's actual instantiation set: the suite
+    // instantiates RollingStats<64,8> for a focused small-window test. Enumerating
+    // the registry is not enumerating the callers, and the compiler caught it.
+    uint64_t side_bits[(W + 63) / 64];   // bit i = is_buyer_maker for ring slot i
 
     //------------------------------------------------------------------
     // [SECTION]_[MONOTONIC DEQUES for O(1) sliding-window min/max (v5.11.2.C)]
@@ -185,14 +211,14 @@ static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 4,
 // no "scope" assumption: these are the unambiguous per-INSTANCE sizes. A layout change
 // is now a COMPILE error; recompute via tools/check_struct_size_budget.py and update the
 // number here. Sister to the alignment asserts above + check_struct_alignment.py(c).
-// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,128>) == 8640]
-static_assert(sizeof(RollingStats<64, 128>)  ==  8640, "RollingStats<64,128> size-pin (~8.4KB)");
-// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,256>) == 16832]
-static_assert(sizeof(RollingStats<64, 256>)  == 16832, "RollingStats<64,256> size-pin (~16.4KB)");
-// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,512>) == 33216]
-static_assert(sizeof(RollingStats<64, 512>)  == 33216, "RollingStats<64,512> size-pin (~32.4KB)");
-// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,1024>) == 65984]
-static_assert(sizeof(RollingStats<64, 1024>) == 65984, "RollingStats<64,1024> size-pin (~64.4KB, NOT the stale ~1.5MB)");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,128>) == 8192]
+static_assert(sizeof(RollingStats<64, 128>) == 8192, "RollingStats<64,128> size-pin (~8.0KB after TECH_DEBT-293 T2 side_buf bit-pack)");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,256>) == 15872]
+static_assert(sizeof(RollingStats<64, 256>) == 15872, "RollingStats<64,256> size-pin (~15.5KB after TECH_DEBT-293 T2 side_buf bit-pack)");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,512>) == 31232]
+static_assert(sizeof(RollingStats<64, 512>) == 31232, "RollingStats<64,512> size-pin (~30.5KB after TECH_DEBT-293 T2 side_buf bit-pack)");
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RollingStats<64,1024>) == 62016]
+static_assert(sizeof(RollingStats<64, 1024>) == 62016, "RollingStats<64,1024> size-pin (~60.6KB after TECH_DEBT-293 T2 side_buf bit-pack)");
 
 //======================================================================
 // [FUNCTION]_[RollingStats_Init]
@@ -205,11 +231,11 @@ static_assert(sizeof(RollingStats<64, 1024>) == 65984, "RollingStats<64,1024> si
 //======================================================================
 template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_Init() {
     RollingStats<F, W> rs;
+    for (int i = 0; i < (int)((W + 63) / 64); i++) rs.side_bits[i] = 0ULL;   // T2
     for (int i = 0; i < (int)W; i++) {
         rs.price_buf[i]  = FPN_Zero<F>();
         rs.volume_buf[i] = FPN_Zero<F>();
         rs.pv_buf[i]     = FPN_Zero<F>();
-        rs.side_buf[i]   = 0;
         rs.min_dq[i]     = 0;
         rs.max_dq[i]     = 0;
         rs.vmax_dq[i]    = 0;
@@ -305,7 +331,9 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     FPN_Binary<F> oldest_price  = rs->price_buf[slot];   // garbage when count==0; masked to zero by evict_mask
     FPN_Binary<F> oldest_volume = rs->volume_buf[slot];
     FPN_Binary<F> oldest_pv     = rs->pv_buf[slot];
-    int oldest_side      = rs->side_buf[slot];
+    // T2: one-bit read, branchless — yields exactly 0 or 1, which is what the
+    // sell/buy evict masks below require.
+    int oldest_side      = (int)((rs->side_bits[slot >> 6] >> (slot & 63)) & 1ULL);
     FPN_Binary<F> sum_y_snapshot = rs->price_sum_running;   // for sum_xy formula (uses pre-update sum_y)
     FPN_Binary<F> sum_v_snapshot = rs->volume_sum_running;  // for vol_sum_xy formula
     int count_old = rs->count;
@@ -355,7 +383,13 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN_Binary<F> price, FPN_B
     rs->price_buf[slot]  = price;
     rs->volume_buf[slot] = volume;
     rs->pv_buf[slot]     = new_pv;
-    rs->side_buf[slot]   = is_buyer_maker;
+    // T2: branchless set-or-clear of bit `slot` — no data-dependent branch (H7/H20).
+    {
+        const uint64_t bit = 1ULL << (slot & 63);
+        const uint64_t on  = -(uint64_t)(is_buyer_maker != 0);
+        uint64_t* w = &rs->side_bits[slot >> 6];
+        *w = (*w & ~bit) | (bit & on);
+    }
 
     //------------------------------------------------------------
     // [SECTION]_[5. Running sums for regression]
