@@ -224,6 +224,18 @@ struct OrderEventLogFileHeader {
     uint64_t format_version; // ORDER_EVENT_LOG_FORMAT_VERSION (claimed from reserved[0] at the epoch)
     uint64_t reserved;       // future: checksum
 };
+
+// TECH_DEBT-300a — compile-time size pin on the OMSEL02 FILE HEADER.
+// The record (OrderEvent) was pinned at TECH_DEBT-228; its HEADER was not, and nothing noticed
+// because check_struct_alignment could not see `fread(&phdr, sizeof(phdr), ...)` — its detector
+// required sizeof(TYPE) and the idiom here is sizeof(VARIABLE). This header carries the magic,
+// the FPN width, `entry_size` and the format version: a silent layout change here mis-frames
+// EVERY record behind it, which is strictly worse than mis-sizing one record.
+// A size change is a WIRE FORMAT change — bump ORDER_EVENT_LOG_FORMAT_VERSION and this pin in
+// the same commit (H21 append-only; never reuse a retired version number).
+static_assert(sizeof(OrderEventLogFileHeader) == 32,
+              "OrderEventLogFileHeader is the OMSEL02 file header — a size change re-frames every "
+              "record in the log: bump ORDER_EVENT_LOG_FORMAT_VERSION + update this pin together.");
 //======================================================================
 // [END_CODE]
 //======================================================================
