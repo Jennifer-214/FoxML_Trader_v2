@@ -3139,7 +3139,6 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [THREAD]_[[TRAIN_WORKER_WRITER] [GUI_READER]]
-// [STRADDLE_EXEMPT]_[mh_horizon_ticks]_[GUI-thread-only display snapshot (click-write + render-read; the train worker never touches it) on cold per-frame UI cadence — E.1.2.C GUI polish (a) 2026-08-20]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[state for the Training panel — every training / validation / multi-horizon knob and worker handle]
 //======================================================================
