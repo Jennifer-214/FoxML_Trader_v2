@@ -2172,7 +2172,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
         // create train DMatrix from pre-compacted non-neutral data
         int ret = XGDMatrixCreateFromMat(train_features, n_train,
-                                          MODEL_NUM_FEATURES, -1.0f, &dtrain);
+                                          MODEL_NUM_FEATURES, XGB_MISSING_VALUE, &dtrain);
         if (ret != 0) {
             fprintf(stderr, "[walkforward] fold %d: failed to create train DMatrix: %s\n",
                     f + 1, XGBGetLastError());
@@ -2183,7 +2183,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
         // create test DMatrix from pre-compacted non-neutral data
         ret = XGDMatrixCreateFromMat(test_features, n_test,
-                                      MODEL_NUM_FEATURES, -1.0f, &dtest);
+                                      MODEL_NUM_FEATURES, XGB_MISSING_VALUE, &dtest);
         if (ret != 0) {
             fprintf(stderr, "[walkforward] fold %d: failed to create test DMatrix: %s\n",
                     f + 1, XGBGetLastError());
@@ -2752,13 +2752,13 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         fprintf(stderr, "[heldout] training on %d samples, evaluating on %d (kind=%s)\n",
                 n_train, n_eval, LabelType_KindName(label_type));
 
-        if (XGDMatrixCreateFromMat(train_features, n_train, MODEL_NUM_FEATURES, -1.0f, &dtrain) != 0) {
+        if (XGDMatrixCreateFromMat(train_features, n_train, MODEL_NUM_FEATURES, XGB_MISSING_VALUE, &dtrain) != 0) {
             fprintf(stderr, "[heldout] failed to create train DMatrix: %s\n", XGBGetLastError());
             break;
         }
         XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_train);
 
-        if (XGDMatrixCreateFromMat(eval_features, n_eval, MODEL_NUM_FEATURES, -1.0f, &deval) != 0) {
+        if (XGDMatrixCreateFromMat(eval_features, n_eval, MODEL_NUM_FEATURES, XGB_MISSING_VALUE, &deval) != 0) {
             fprintf(stderr, "[heldout] failed to create eval DMatrix: %s\n", XGBGetLastError());
             break;
         }

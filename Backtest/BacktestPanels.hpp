@@ -4403,8 +4403,10 @@ static inline void mh_run_one_horizon_fv(
                     j++;
                 }
                 DMatrixHandle dtrain = nullptr;
+                // PARITY-049 — was a bare quiet_NaN() literal while nine other sites passed
+                // -1.0f. The VALUE was right (and is why no retrain is owed); the divergence was.
                 XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES,
-                                        std::numeric_limits<float>::quiet_NaN(), &dtrain);
+                                        XGB_MISSING_VALUE, &dtrain);
                 XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
                 BoosterHandle booster = nullptr;
                 XGBoosterCreate(&dtrain, 1, &booster);

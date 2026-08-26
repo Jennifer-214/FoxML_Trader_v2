@@ -712,15 +712,13 @@ static inline void TreeWalkerOracle_EmitLeafRows(
             if (!(v >= lo[f] && v < hi[f]) && !(lo[f] == -INFINITY && hi[f] == INFINITY)) {
                 return;   // contradictory path — unreachable leaf, emit nothing
             }
-            // Never hand the sentinel to a CONSTRAINED feature by accident: -1.0f
-            // means MISSING to both engines, which routes default_left instead of
-            // comparing, so the row would exercise a different path than the one
-            // it was synthesized for. Nudge up if that still satisfies the interval.
-            if (v == WALKER_MISSING_SENTINEL) {
-                const float up = nextafterf(v, INFINITY);
-                if (up >= lo[f] && up < hi[f]) v = up;
-                else return;   // the only satisfying value IS the sentinel; skip
-            }
+            // PARITY-049 — the -1.0f nudge that stood here is REMOVED, not ported to NaN.
+            // It existed because -1.0f meant MISSING to both engines, so a synthesized row
+            // landing on it would route default_left instead of exercising the split it was
+            // built for. Now that -1.0f compares normally, nudging away from it would SKIP
+            // legitimate -1.0 rows — narrowing leaf coverage on precisely the value this defect
+            // was about. The NaN case needs no guard either: path-directed synthesis solves
+            // `[lo, hi)` intervals and can never produce NaN.
             r[f] = v;
         }
         ++(*nrows);
@@ -821,12 +819,16 @@ inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster
     // ---- (1) all-zero row: the trivial path ----
     if (n < max_rows) { /* calloc already zeroed it */ ++n; }
 
-    // ---- (2) per-feature MISSING sentinel ----
-    // The serve path passes missing=-1.0f, so a feature that IS -1.0f routes
-    // default_left rather than comparing. PARITY-047 is the standing proof this
-    // lane can be wrong while everything else looks right.
+    // ---- (2) per-feature -1.0f (the value that USED to be mis-routed) ----
+    // RETARGETED at PARITY-049. This section used to write the missing sentinel, which was
+    // -1.0f; the sentinel is now NaN, and section (3) below already probes NaN. Had this simply
+    // followed the constant, (2) and (3) would have become the SAME probe and the corpus would
+    // have silently lost a case — while still reporting full leaf coverage. So it now pins the
+    // literal: -1.0f is a legitimate one-sided-book output that compares normally post-fix, and
+    // is therefore exactly the input most likely to expose a walk/library disagreement here.
+    // PARITY-047 is the standing proof this lane can be wrong while everything else looks right.
     for (int f = 0; f < num_features && n < max_rows; ++f, ++n)
-        rows[(size_t)n * num_features + f] = WALKER_MISSING_SENTINEL;
+        rows[(size_t)n * num_features + f] = XGB_LEGACY_MINUS_ONE_PROBE;
 
     // ---- (3) per-feature NaN ----
     // `x < cond` is FALSE for NaN, so a walk that compares instead of routing
@@ -854,7 +856,7 @@ inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster
 
     // ---- ONE DMatrix over all N distinct rows; TWO predicts total ----
     DMatrixHandle dmat;
-    if (XGDMatrixCreateFromMat(rows, (bst_ulong)n, (bst_ulong)num_features, -1.0f, &dmat) != 0) {
+    if (XGDMatrixCreateFromMat(rows, (bst_ulong)n, (bst_ulong)num_features, XGB_MISSING_VALUE, &dmat) != 0) {
         free(rows);
         if (reason) snprintf(reason, reason_len, "oracle: DMatrix create failed (%d rows)", n);
         return 0;
@@ -1196,7 +1198,7 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
         {
             float zero_row[MODEL_MAX_FEATURES] = {0};
             DMatrixHandle probe;
-            if (XGDMatrixCreateFromMat(zero_row, 1, MODEL_NUM_FEATURES, -1.0f, &probe) == 0) {
+            if (XGDMatrixCreateFromMat(zero_row, 1, MODEL_NUM_FEATURES, XGB_MISSING_VALUE, &probe) == 0) {
                 bst_ulong out_len = 0;
                 const float *out_result = NULL;
                 if (XGBoosterPredict(booster, probe, 0, 0, 0, &out_len, &out_result) == 0) {
@@ -1352,7 +1354,7 @@ inline float Model_Predict_AtClass(ModelHandle<F>* m,
     if (m->backend == MODEL_BACKEND_XGBOOST) {
         BoosterHandle booster = (BoosterHandle)m->handle;
         DMatrixHandle dmat;
-        int ret = XGDMatrixCreateFromMat(features, 1, num_features, -1.0f, &dmat);
+        int ret = XGDMatrixCreateFromMat(features, 1, num_features, XGB_MISSING_VALUE, &dmat);
         if (ret != 0) return 0.0f;
         bst_ulong out_len;
         const float *out_result;
@@ -1521,7 +1523,7 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
         BoosterHandle booster = (BoosterHandle)m->handle;
         DMatrixHandle dmat;
         // create single-row DMatrix from float array
-        int ret = XGDMatrixCreateFromMat(features, 1, num_features, -1.0f, &dmat);
+        int ret = XGDMatrixCreateFromMat(features, 1, num_features, XGB_MISSING_VALUE, &dmat);
         if (ret != 0) return 0.0f;
 
         bst_ulong out_len;
@@ -1876,7 +1878,7 @@ inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_
     if (m->backend == MODEL_BACKEND_XGBOOST) {
         BoosterHandle booster = (BoosterHandle)m->handle;
         DMatrixHandle dmat;
-        int ret = XGDMatrixCreateFromMat(features, 1, num_features, -1.0f, &dmat);
+        int ret = XGDMatrixCreateFromMat(features, 1, num_features, XGB_MISSING_VALUE, &dmat);
         if (ret != 0) return 0;
 
         bst_ulong out_len;

@@ -630,13 +630,32 @@ inline int TreeWalker_ParseFromJson(FlatTreeModel* out, const char* path) {
 //   library. Both are copied from the serve path / xgboost 3.3.0, never chosen
 //   here — W-d (D-432) pins the recipes while the load-time oracle exists.]
 //======================================================================
-// The serve missing sentinel. Every production XGDMatrixCreateFromMat call site
-// passes -1.0f as the `missing` argument (ModelInference.hpp:669, :813, :996,
-// :1338 — all four verified 2026-08-24). A feature that is EXACTLY -1.0f is
-// therefore "missing" to the library and routes default_left, NOT through the
-// `< split_condition` compare. A one-sided book legitimately produces -1.0, so
-// this is a live routing path, not a theoretical one (parity enumeration #1).
-#define WALKER_MISSING_SENTINEL (-1.0f)
+// THE `missing` argument — one constant, every XGDMatrixCreateFromMat site, train AND serve.
+//
+// WAS `-1.0f`, AND THAT WAS THE DEFECT (PARITY-049, fixed 2026-08-25). Ten call sites existed;
+// NINE passed -1.0f and ONE — BacktestPanels.hpp, the site that trains the artifact that is
+// actually SAVED and STAMPED — passed NaN. So the shipped model learned splits on -1.0f as a
+// REAL value and every serve path then treated that same -1.0f as MISSING and routed
+// default_left: the same feature vector reached a different leaf at serve than at train, with
+// no error and no warning. Invisible to both measurement paths, because WF and held-out also
+// used -1.0f and so shared the serve semantics rather than the shipped model's.
+//
+// NaN is the correct choice, not merely the majority one: NOTHING in the tree writes -1.0 as a
+// deliberate missing marker (FlowFeatures / FeatureRegistry checked), and a one-sided book
+// LEGITIMATELY produces -1.0 — so -1.0-as-missing was destroying a real value. NaN is also
+// XGBoost's own default and is what the shipped artifact was already trained under, so this
+// moves serve TOWARD existing models: no retrain is owed for this change.
+//
+// The previous comment here claimed "EVERY production call site passes -1.0f" and cited four
+// line numbers. All four were SERVE sites; the training site was never in the set. A categorical
+// claim made over a subset, reading as verified BECAUSE it was specific (M9). Hence one constant
+// now, so the claim is derived rather than enumerated by hand.
+#define XGB_MISSING_VALUE (__builtin_nanf(""))
+
+// The value that USED to be silently treated as missing. Retained ONLY as a parity PROBE: it is
+// a legitimate one-sided-book output and therefore exactly the input most likely to expose a
+// walk/library disagreement on this surface. NOT a sentinel — it compares normally now.
+#define XGB_LEGACY_MINUS_ONE_PROBE (-1.0f)
 
 // Sigmoid clamp + epsilon, xgboost 3.3.0 common/math.h:31-38, copied EXACTLY.
 #define WALKER_SIGMOID_CLAMP  88.7f
@@ -672,7 +691,11 @@ static inline int32_t TreeWalker_WalkOneIdx(const FlatTreeNode* nodes, int32_t r
         // `fv < cond` is false for NaN, which would silently route right and
         // diverge from the library (a comparison guard that exempts NaN is the
         // Class-60 shape this codebase already closed once in the bandit).
-        const uint32_t is_missing = (uint32_t)(((fv == WALKER_MISSING_SENTINEL) | (fv != fv)) ? 1 : 0);
+        // PARITY-049: the old `fv == SENTINEL` clause is GONE, not merely dead. With a NaN
+        // `missing` the equality is always false, and leaving it would read as a live guard
+        // while policing nothing (Class 40 / Class 51). `fv != fv` IS the NaN test and is
+        // exactly what the library does. Branchless, unchanged in shape.
+        const uint32_t is_missing = (uint32_t)((fv != fv) ? 1 : 0);
         const uint32_t lt         = (uint32_t)((fv < n->cond) ? 1 : 0);
         const uint32_t dleft      = (meta >> 30) & 1u;          // WALKER_META_DEFAULT_LEFT
         const uint32_t mmask      = 0u - is_missing;            // all-ones when missing
