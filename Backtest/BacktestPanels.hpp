@@ -198,8 +198,13 @@ struct SamplesSnapshot {
     int neg_count;
     int neutral_count;
 
-    // multiclass — class_counts[c] = number of samples in class c
+    // classification (binary + multiclass) — class_counts[c] = samples in
+    // class c over the BASELINE population (Backtest_LabelClassCounts SSoT:
+    // binary excludes neutrals, matching WF pre-compaction), baseline_total =
+    // that population's size. Baseline calls divide by baseline_total, NEVER
+    // sample_count (which includes neutrals/NaN and understates the majority).
     int class_counts[16];
+    int baseline_total;
 
     // regression
     float lmin;
@@ -212,8 +217,8 @@ struct SamplesSnapshot {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-25]
-// [SIZE]_[112B]
+// [UPDATED]_[2026-08-26]
+// [SIZE]_[116B]
 // [ALIGN]_[4]
 // [CACHE_LINES]_[2]
 // [STRADDLE]_[class_counts@32]
@@ -250,10 +255,10 @@ struct RunControlState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-20]
-// [SIZE]_[631616B]
+// [UPDATED]_[2026-08-26]
+// [SIZE]_[631680B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9869]
+// [CACHE_LINES]_[9870]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
@@ -323,20 +328,23 @@ static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
         snap->lmax    = lmax;
         snap->lmean   = (float)mean;
         snap->lstddev = (var > 0.0) ? (float)sqrt(var) : 0.0f;
-    } else if (snap->label_kind == 2) {
-        // multiclass: per-class histogram
-        int Kc = K > 16 ? 16 : K;
-        for (int i = 0; i < r->sample_count; i++) {
-            int c = (int)(r->labels[i] + 0.5f);
-            if (c >= 0 && c < Kc) snap->class_counts[c]++;
-        }
     } else {
-        // binary: +/-/neutral
-        for (int i = 0; i < r->sample_count; i++) {
-            float v = r->labels[i];
-            if (v > 0.5f) snap->pos_count++;
-            else if (v < 0.5f) snap->neg_count++;
-            else snap->neutral_count++;
+        // classification (binary + multiclass): baseline histogram via the ONE
+        // population rule the stamp gate's skill floor also uses (Class-62/F4
+        // close — previously the multiclass histogram was open-coded here and
+        // binary left class_counts all-zero, so the panel's binary baseline
+        // degenerated to a flat 0.5 while the gate refused against the real one).
+        snap->baseline_total = Backtest_LabelClassCounts(r->labels, r->sample_count,
+                                                         label_type, snap->class_counts);
+        if (snap->label_kind == 0) {
+            // binary display counters: +/-/neutral over ALL samples (the
+            // neutral share is exactly what the panel must show)
+            for (int i = 0; i < r->sample_count; i++) {
+                float v = r->labels[i];
+                if (v > 0.5f) snap->pos_count++;
+                else if (v < 0.5f) snap->neg_count++;
+                else snap->neutral_count++;
+            }
         }
     }
 }
@@ -3312,7 +3320,10 @@ struct TrainingPanelState {
     FullValidationResults  mh_horizon_fv[PANEL_HORIZON_MAX];
     volatile int           mh_horizon_complete[PANEL_HORIZON_MAX];
     alignas(64) volatile int mh_horizon_progress[PANEL_HORIZON_MAX];  // H6 (Stage-5.5): cross-thread, was straddling a line
-    char                   mh_horizon_status[PANEL_HORIZON_MAX][128];
+    // 256B per row (was 128B, which clipped the skill-floor refuse reason
+    // mid-word — "classification: majo" — hiding the operative half of the
+    // message; the REFUSED format + full refuse string need ~200B headroom)
+    char                   mh_horizon_status[PANEL_HORIZON_MAX][256];
     // E.1.2.C GUI polish (a) — click-time snapshot of the run's horizon
     // ticks for the per-horizon results table. The live ui_horizon_list
     // re-parses ui_horizon_csv EVERY frame, so reading it from the table
@@ -3347,11 +3358,11 @@ struct TrainingPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-22]
-// [SIZE]_[500096B]
+// [UPDATED]_[2026-08-26]
+// [SIZE]_[501120B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[7814]
-// [STRADDLE]_[run_name@12705 · tm_phase_msg@24904 · ui_tp_pct_csv@406148 · ui_sl_pct_csv@406212 · ui_sl_per_horizon@406308 · ui_label_kind_csv@499908]
+// [CACHE_LINES]_[7830]
+// [STRADDLE]_[run_name@12705 · tm_phase_msg@24904 · ui_tp_pct_csv@406148 · ui_sl_pct_csv@406212 · ui_sl_per_horizon@406308 · ui_label_kind_csv@500932]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -4245,7 +4256,7 @@ static inline void mh_run_one_horizon_fv(
     // were orphan-placeholder fields; this plumbs the real values.
     int horizon_count = 1)
 {
-    snprintf(state->mh_horizon_status[h], 128,
+    snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
              "h=%d: computing labels...", horizon_ticks);
 
     local_run_cfg->label_forward_ticks = horizon_ticks;
@@ -4287,7 +4298,7 @@ static inline void mh_run_one_horizon_fv(
     if (n_valid < 50) {
         fprintf(stderr, "[mh-train] horizon %d: only %d valid labels; skip\n",
                 horizon_ticks, n_valid);
-        snprintf(state->mh_horizon_status[h], 128,
+        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                  "h=%d FAILED: only %d valid labels (need >= 50)",
                  horizon_ticks, n_valid);
         state->mh_horizon_complete[h] = 1;
@@ -4392,7 +4403,7 @@ static inline void mh_run_one_horizon_fv(
     // that learned from the most data possible.
 #ifdef USE_XGBOOST
     {
-        snprintf(state->mh_horizon_status[h], 128,
+        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                  "h=%d: training final model for save+stamp...", horizon_ticks);
 
         // count valid (non-NaN, non-Inf) labels
@@ -4489,7 +4500,7 @@ static inline void mh_run_one_horizon_fv(
     }
 #endif
 
-    snprintf(state->mh_horizon_status[h], 128,
+    snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
              "h=%d: WF + held-out (%d folds)...",
              horizon_ticks, snap_n_splits);
 
@@ -4519,30 +4530,34 @@ static inline void mh_run_one_horizon_fv(
         ? fv->held_out_correlation : fv->held_out_metric;
 
     if (fv->auto_stamp_attempted && fv->auto_stamp_ok) {
-        snprintf(state->mh_horizon_status[h], 128,
+        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                  "h=%d OK: WF=%.3f HO=%.3f gap=%.3f stamped",
                  horizon_ticks, wf_metric, ho_metric,
                  fv->wf_to_held_out_gap);
+    } else if (fv->ran_held_out && fv->auto_stamp_attempted) {
+        // Class-62 close — a run the gate REFUSED (or whose stamp write failed)
+        // is NOT "OK". The old format labeled the refuse branch
+        // "h=%d OK: … (stamp skipped: %s)" — a refused run read as OK, and the
+        // reason clipped at 128B. auto_stamp_error carries the gate's verdict
+        // (skill floor / gap gate) or the writer's error.
+        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
+                 "h=%d REFUSED: WF=%.3f HO=%.3f gap=%.3f — %s",
+                 horizon_ticks, wf_metric, ho_metric, fv->wf_to_held_out_gap,
+                 fv->auto_stamp_error[0] ? fv->auto_stamp_error
+                                         : "unknown write error");
     } else if (fv->ran_held_out) {
-        // v5.11.47 — distinguish WHY stamp was skipped:
-        //  - auto_stamp_attempted=0 → path was empty (cfg.auto_stamp_on_held_out=0
-        //    OR snap was 0 at click time; OR Run Control hasn't loaded a cfg)
-        //  - auto_stamp_attempted=1 + auto_stamp_ok=0 → write failed
-        //    (auto_stamp_error has the reason)
-        const char* skip_reason =
-            !fv->auto_stamp_attempted
-                ? "auto_stamp_on_held_out=0 in cfg"
-                : (fv->auto_stamp_error[0] ? fv->auto_stamp_error
-                                           : "unknown write error");
-        snprintf(state->mh_horizon_status[h], 128,
-                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f (stamp skipped: %s)",
+        // stamp not requested (auto_stamp_attempted=0: auto_stamp_on_held_out=0
+        // in cfg, OR snap was 0 at click time, OR Run Control hasn't loaded a
+        // cfg) — validation itself completed; only the stamp was never asked for.
+        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
+                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f (no stamp requested: auto_stamp_on_held_out=0)",
                  horizon_ticks, wf_metric, ho_metric,
-                 fv->wf_to_held_out_gap, skip_reason);
+                 fv->wf_to_held_out_gap);
     } else if (state->mh_cancel) {
-        snprintf(state->mh_horizon_status[h], 128,
+        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                  "h=%d CANCELLED mid-validation", horizon_ticks);
     } else {
-        snprintf(state->mh_horizon_status[h], 128,
+        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                  "h=%d FAILED: held-out did not complete",
                  horizon_ticks);
     }
@@ -5006,7 +5021,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             MultiHorizonParallelJob *job =
                 (MultiHorizonParallelJob *)malloc(sizeof(MultiHorizonParallelJob));
             if (!job) {
-                snprintf(state->mh_horizon_status[h], 128,
+                snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                          "h=%d FAILED: malloc job arg", horizons[h]);
                 state->mh_horizon_complete[h] = 1;
                 continue;
@@ -5025,7 +5040,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                     (float *)malloc((size_t)results->sample_count * sizeof(float));
             }
             if (!job->isolated_results.labels) {
-                snprintf(state->mh_horizon_status[h], 128,
+                snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                          "h=%d FAILED: malloc labels[]", horizons[h]);
                 state->mh_horizon_complete[h] = 1;
                 free(job);
@@ -5081,7 +5096,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             int rc = pthread_create(&tids[h], NULL,
                                      mh_per_horizon_parallel_worker, job);
             if (rc != 0) {
-                snprintf(state->mh_horizon_status[h], 128,
+                snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                          "h=%d FAILED: pthread_create rc=%d", horizons[h], rc);
                 state->mh_horizon_complete[h] = 1;
                 free(job->isolated_results.labels);
@@ -6818,8 +6833,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 float val_acc = wf->mean_val_accuracy;
                 float train_acc = wf->mean_train_accuracy;
                 int K = (wf->num_classes >= 2) ? wf->num_classes : 2;
+                // baseline_total, not sample_count: the counts are over the
+                // baseline population (binary excludes neutrals) — same SSoT
+                // route as the stamp gate's skill floor, so this diagnosis and
+                // that gate can never disagree (F4 close).
                 float baseline = multiclass_baseline_accuracy(
-                    K, snap->class_counts, snap->sample_count);
+                    K, snap->class_counts, snap->baseline_total);
                 // "fee-overhead" threshold: 3 percentage points above
                 // baseline. Empirical — covers ~0.1% × 2 sides for
                 // typical small-to-mid TP barriers.

@@ -1597,6 +1597,12 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             const ControllerConfig<BACKTEST_FP> *cfg_override = nullptr,
                                             const tt::XGBHyperparams *hp_override = nullptr);
 
+// Forward declaration — the skill-floor baseline lives with the WF metric
+// family further down (it composes multiclass_baseline_accuracy, which is
+// defined there). Backtest_RunFullValidation's stamp gate refuses against it.
+static inline double Backtest_SkillFloorBaseline(const float *labels, int count,
+                                                   int label_type);
+
 //======================================================================
 // [FUNCTION]_[Backtest_RunFullValidation]
 //----------------------------------------------------------------------
@@ -1687,6 +1693,26 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->held_out_mse         = he.mse;
     out->held_out_correlation = he.correlation;
 
+    // Generalization gap: |WF mean - held_out|, label-kind-aware. With
+    // ran_held_out=0 the gap is just the WF mean (degenerate but consistent).
+    //
+    // HOISTED ABOVE the stamp section (Class 62 founding-instance close,
+    // 2026-08-26): the gap is a FACT about the run, computed before any gate
+    // can exit — the skill floor's early return used to strand it at the
+    // memset zero, so every REFUSED run reported gap=0.0000 ("perfect
+    // agreement, not validated"), observed in production across a whole
+    // horizon grid. Facts first, gates after.
+    if (LabelType_IsRegression(label_type)) {
+        out->wf_to_held_out_gap = (float)fabs(
+            (double)out->walkforward.mean_val_correlation - (double)out->held_out_correlation);
+    } else {
+        out->wf_to_held_out_gap = (float)fabs(
+            (double)out->walkforward.mean_val_accuracy - (double)out->held_out_metric);
+    }
+    // gap_acceptable only meaningful when held-out actually ran. Default 0
+    // when stubbed — signals "not yet validated" rather than "validated OK".
+    out->gap_acceptable = (out->ran_held_out && out->wf_to_held_out_gap < gap_threshold) ? 1 : 0;
+
     // v5.3.2 Phase C — auto-stamp hook. Caller passes auto_stamp_path +
     // auto_stamp_secret + auto_stamp_format_version through the
     // FullValidationResults's auto_stamp_* fields BEFORE calling. When
@@ -1718,20 +1744,24 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     // distribution the baseline is derived from. Moving it inward (plumbing a baseline through
     // StampHelper) is the follow-up recorded in TECH_DEBT-301c — it belongs where it cannot be
     // bypassed, and today there is exactly one caller path.
+    //
+    // REFUSE sets the error + a flag and SKIPS ONLY the emit below — never an early
+    // return. The first cut of this gate returned here, stranding every field the
+    // tail owed (Class 62's founding instance: gap=0.0000 on every refused run).
+    // The baseline is the SSoT pair Backtest_LabelClassCounts +
+    // multiclass_baseline_accuracy — the same route the Training panel's WF
+    // diagnosis takes, so the panel can never read "real edge" while this gate
+    // says "no skill" (a-class F3/F4: the first cut open-coded a third copy that
+    // bucketed binary neutrals (0.5) into class 1, so barrier labels (~97%
+    // neutral) produced a ≈0.97 floor and every binary run stamp-refused).
+    int stamp_refused_no_skill = 0;
     if (out->ran_held_out && out->auto_stamp_path[0] != '\0') {
         double skill_floor = 0.0;
         const char *floor_kind = "regression: Pearson r > 0";
         if (!LabelType_IsRegression(label_type)) {
-            int cls_counts[16] = {0}, cls_total = 0;
-            for (int i = 0; i < data->sample_count; ++i) {
-                if (isnan(data->labels[i])) continue;
-                int c = (int)(data->labels[i] + 0.5f);
-                if (c >= 0 && c < 16) { cls_counts[c]++; cls_total++; }
-            }
-            int majority = 0;
-            for (int k = 0; k < 16; ++k) if (cls_counts[k] > majority) majority = cls_counts[k];
-            if (cls_total > 0) skill_floor = (double)majority / (double)cls_total;
-            floor_kind = "classification: majority-class accuracy";
+            skill_floor = Backtest_SkillFloorBaseline(data->labels, data->sample_count,
+                                                      label_type);
+            floor_kind = "classification: always-predict-best over the WF population";
         }
         // Mirror the metric selection the stamp emit itself uses (see the wf value passed below),
         // so the floor is applied to the SAME number the gate will compare.
@@ -1746,13 +1776,14 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             fprintf(stderr, "[fullvalidation] STAMP REFUSED — %s\n", out->auto_stamp_error);
             out->auto_stamp_attempted = 1;
             out->auto_stamp_ok        = 0;
-            return;
+            stamp_refused_no_skill    = 1;
+        } else {
+            fprintf(stderr, "[fullvalidation] skill floor OK — wf %.4f > baseline %.4f (%s)\n",
+                    wf_metric, skill_floor, floor_kind);
         }
-        fprintf(stderr, "[fullvalidation] skill floor OK — wf %.4f > baseline %.4f (%s)\n",
-                wf_metric, skill_floor, floor_kind);
     }
 
-    if (out->ran_held_out && out->auto_stamp_path[0] != '\0') {
+    if (!stamp_refused_no_skill && out->ran_held_out && out->auto_stamp_path[0] != '\0') {
         // v5.15.3.A — Stamp emit chain refactored to use Stamp_AssembleAndEmit
         // canonical helper. Replaces ~180 LOC of manual StampInferenceCfgInputs
         // assembly with StampArgs setup + helper call. Helper internally walks
@@ -1855,19 +1886,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         }
     }
 
-    // Generalization gap: |WF mean - held_out|, label-kind-aware. With
-    // ran_held_out=0 the gap is just the WF mean (degenerate but consistent).
-    // When Phase 7 finalize ships, real held-out metrics will populate.
-    if (LabelType_IsRegression(label_type)) {
-        out->wf_to_held_out_gap = (float)fabs(
-            (double)out->walkforward.mean_val_correlation - (double)out->held_out_correlation);
-    } else {
-        out->wf_to_held_out_gap = (float)fabs(
-            (double)out->walkforward.mean_val_accuracy - (double)out->held_out_metric);
-    }
-    // gap_acceptable only meaningful when held-out actually ran. Default 0
-    // when stubbed — signals "not yet validated" rather than "validated OK".
-    out->gap_acceptable = (out->ran_held_out && out->wf_to_held_out_gap < gap_threshold) ? 1 : 0;
+    // (Generalization gap + gap_acceptable were computed ABOVE the stamp
+    // section — hoisted at the Class-62 close so no gate can strand them.)
 
     // v5.10.0 Item A — extended phase summary at end of full pipeline.
     // Total = parse + fan_out_hot + feature_collect + label_compute
@@ -1897,7 +1917,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the WF prediction-metric family — binary accuracy, the always-predict-best baseline, multiclass argmax accuracy, MSE, and Pearson correlation; each rides this block]
+// [OVERVIEW]_[the WF prediction-metric family — binary accuracy, the always-predict-best baseline, the label-population counts rule + skill-floor baseline it composes into, multiclass argmax accuracy, MSE, and Pearson correlation; each rides this block]
 //======================================================================
 // compute accuracy: fraction of predictions matching labels (for classification)
 // threshold: prediction >= thresh → class 1, else class 0
@@ -1948,6 +1968,54 @@ static inline float multiclass_baseline_accuracy(int num_classes,
         }
     }
     return majority;
+}
+
+// Class-62/TD-301c close (2026-08-26) — THE label-population rule for baseline
+// computation, shared by the stamp gate's skill floor AND the Training panel's
+// WF diagnosis (via SamplesSnapshot_Compute), so gate and panel can never
+// diagnose against different baselines again (a-class F4: the gate open-coded
+// a third copy of this and diverged from the panel's).
+//
+// Population parity with Backtest_RunWalkForward's metric (its pre-compaction):
+//   - binary:     non-neutral only (label == 0.5f excluded — barrier labels are
+//                 ~97% neutral; bucketing them into class 1 was the F3 defect
+//                 that made every binary run stamp-refuse), class = (label > 0.5f)
+//                 exactly as WalkForward_ComputeAccuracy's truth rule
+//   - multiclass: every non-NaN sample, class = round(label), exactly as
+//                 WalkForward_ComputeMulticlassAccuracy
+//   - regression: not a class distribution — returns 0 with zeroed counts
+// Returns the counted total; out_counts[16] gets the per-class histogram.
+static inline int Backtest_LabelClassCounts(const float *labels, int count,
+                                              int label_type, int out_counts[16]) {
+    for (int k = 0; k < 16; ++k) out_counts[k] = 0;
+    if (!labels || count <= 0 || LabelType_IsRegression(label_type)) return 0;
+    const int is_binary = LabelType_IsBinary(label_type);
+    int total = 0;
+    for (int i = 0; i < count; ++i) {
+        const float v = labels[i];
+        if (isnan(v)) continue;
+        int c;
+        if (is_binary) {
+            if (v == 0.5f) continue;   // neutral — same exclusion as WF pre-compaction
+            c = (v > 0.5f) ? 1 : 0;
+        } else {
+            c = (int)(v + 0.5f);
+        }
+        if (c >= 0 && c < 16) { out_counts[c]++; total++; }
+    }
+    return total;
+}
+
+// The skill floor the stamp gate refuses against: always-predict-best accuracy
+// over the SAME population the WF metric is computed on. Composes the two SSoTs
+// above (population rule + multiclass_baseline_accuracy) — never open-code
+// either half (the open-coded copy is exactly how F3/F4 happened).
+static inline double Backtest_SkillFloorBaseline(const float *labels, int count,
+                                                   int label_type) {
+    int cls_counts[16];
+    const int cls_total = Backtest_LabelClassCounts(labels, count, label_type, cls_counts);
+    const int K = LabelType_IsMulticlass(label_type) ? LabelType_NumClasses(label_type) : 2;
+    return (double)multiclass_baseline_accuracy(K, cls_counts, cls_total);
 }
 
 // multiclass accuracy: predictions is count × num_classes flat array (softmax probs).
