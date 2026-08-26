@@ -122,7 +122,12 @@ inline thread_local uint32_t ml_predict_count  = 0;   // how many predicts this 
 // the correctness of the measurement rather than to a resource. It owns
 // nothing; its whole body is two adds on thread_local scalars.
 //======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit)
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-25]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //----------------------------------------------------------------------
 // [SIZE]_[8B]
 //======================================================================

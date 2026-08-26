@@ -262,7 +262,14 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [DATA_ORIENTED_DESIGN]]
 // [THREAD]_[[DRAINER_WRITER] [WORKER_PRODUCER] [GUI_READER] [SLOW_WRITER]]
 // [STRADDLE_EXEMPT]_[orders]_[element-uniform Order record pool (elements span >64B inherently — the >64B rule applies per element); name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
-// [STRADDLE_EXEMPT]_[submit_queues]_[element-uniform SPSC ring array (elements span >64B inherently); name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
+// RETIRED 2026-08-25 — submit_queues no longer carries a straddle exemption. It was one
+// ("element-uniform SPSC ring array; name-sugar unresolvable only", D-414 leaf-3 2026-08-10)
+// until the field became tt::SlotArray at E.1.2.F: the wrapper's single T[N] member resolves,
+// so the analyzer types it without help. TECH_DEBT-300b's dormant-tag note is what surfaced
+// it — an exemption matching no straddler protects nothing while still reading as a guard.
+// Left as prose, NOT as a live [STRADDLE_EXEMPT] tag: keeping the tag grammar would keep
+// claiming an exemption. Recorded rather than deleted so the next reader knows it WAS
+// exempt and why it stopped being (the TECH_DEBT-294 residual class, one instance closed).
 // [STRADDLE_EXEMPT]_[last_exit_fill_price]_[16B Money elements, 16-aligned — elements can never cross a 64B line; name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
 // [STRADDLE_EXEMPT]_[last_exit_fee]_[16B Money elements, 16-aligned — elements can never cross a 64B line; name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
 // [SYNC]_[SPSC]
@@ -771,12 +778,12 @@ struct OrderManagerState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
+// [UPDATED]_[2026-08-25]
 //----------------------------------------------------------------------
 // [SIZE]_[260928B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[4077]
-// [STRADDLE]_[unverified: orders submit_queues last_exit_fill_price last_exit_fee]
+// [STRADDLE]_[unverified: orders last_exit_fill_price last_exit_fee]
 //======================================================================
 // [END_STRUCT]_[OrderManagerState]
 //======================================================================

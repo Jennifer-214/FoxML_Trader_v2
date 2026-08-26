@@ -556,7 +556,7 @@ static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int cou
 //======================================================================
 // [FUNCTION]_[wf_marker_horizon_tag]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [BACKTEST] [OBSERVABILITY]]
+// [TAG]_[[ENGINE] [BACKTEST]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[per-thread horizon label for the [WF marker] crash-bisection lines — without it N parallel horizons interleave unattributably]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-302]
