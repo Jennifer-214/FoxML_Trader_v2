@@ -102,7 +102,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         // Map slot → node_id for strategy_id + leg lookup
         // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
         // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
-        int node_id = Sharded_SlotNode(slot, partial_on);
+        int node_id = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_on);
         int leg     = partial_on ? (slot & 1)  : 0;
         if (node_id < 0 || node_id >= state.registered_count) continue;
         uint8_t strategy_id = state.nodes[node_id].strategy_id;

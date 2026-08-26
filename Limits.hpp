@@ -26,9 +26,11 @@
 // With partials ON a node owns portfolio slots 2N+0 and 2N+1, so the spaces diverge.
 // That the two caps below are EQUAL is a coincidence, not an invariant: it is why a
 // wrong-space index passes every bounds check silently (Class 61). Derive across the
-// spaces via Sharded_SlotNode / Sharded_LegSlot, and prefer the typed tt::SlotIdx /
-// tt::NodeIdx (CoreFrameworks/IndexSpaces.hpp, D-438) which make the mix-up a
-// compile error.
+// spaces via the TYPED bridges Sharded_SlotNode / Sharded_LegSlot (NodeIdx↔SlotIdx
+// since the CLAIM-1 close 2026-08-26), and prefer tt::SlotIdx / tt::NodeIdx
+// (CoreFrameworks/IndexSpaces.hpp, D-438): a wrong-space index WITHOUT visible cast
+// ceremony is a compile error (the calibrated claim — the unqualified version was
+// defeated by the post-ship a-class via the since-closed public-.v backdoors).
 // MAX_EVENTS_PER_DRAIN_PER_NODE caps how many events one drain pass will pull
 // from a single core's event ring before moving to the next core. prevents one
 // chatty core from starving the others (pitfall P4.1).

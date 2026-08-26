@@ -1009,7 +1009,7 @@ namespace tt {
 //======================================================================
 // Fwd-decl: Sharded_SlotNode is defined with its geometry family below; this
 // early consumer precedes the definition (same tt namespace). (D-294)
-static inline int Sharded_SlotNode(int slot, int partial_exit_enabled);
+static inline tt::NodeIdx Sharded_SlotNode(tt::SlotIdx slot, int partial_exit_enabled);
 
 template <unsigned F>
 inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* state,
@@ -1034,7 +1034,7 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
         // slot → owning node: legs A/B at 2c/2c+1 → core c under partials; slot==core
         // single-mode. (was: ungated `slot>>1` — HALVED the node in single mode; D-294.)
-        int node_id = Sharded_SlotNode(slot, partial_on);
+        int node_id = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_on);   // wire-int → typed at the replay boundary
         if (node_id < 0 || node_id >= MAX_EXECUTION_NODES) continue;
 
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (hoisted above loop).
@@ -1347,22 +1347,29 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 //   PARTIAL_LEG_A = 0
 //   PARTIAL_LEG_B = 1
 
-// Returns the portfolio slot index for (node_id, leg) given the cfg.
-// leg=0 always returns a valid slot; leg=1 returns -1 when partial_exit_-
-// enabled=0. Caller-side: ignore leg=1 result when partials disabled.
+// Returns the portfolio slot for (node, leg) given the cfg.
+// leg=0 always returns a valid slot; leg=1 returns SlotIdx{-1} when partial_-
+// exit_enabled=0. Caller-side: ignore leg=1 result when partials disabled.
+//
+// TYPED at the CLAIM-1 close (2026-08-26): the bridge takes tt::NodeIdx and
+// returns tt::SlotIdx, so the routine node→slot crossing flows through here
+// WITHOUT brace-construction at the call site — which is what makes a bare
+// brace-construct a review flag instead of the routine idiom (the a-class
+// defeat of the unqualified compile-error claim).
 //
 // All slow-path / boot-time. Trivially inlined.
-static inline int Sharded_LegSlot(int node_id, int leg, int partial_exit_enabled) {
-    if (node_id < 0) return -1;
+static inline tt::SlotIdx Sharded_LegSlot(tt::NodeIdx node_id, int leg, int partial_exit_enabled) {
+    const int node = (int)node_id;
+    if (node < 0) return tt::SlotIdx{-1};
     if (!partial_exit_enabled) {
-        // Single-slot mode: leg index ignored, slot == node_id
-        return (leg == PARTIAL_LEG_A) ? node_id : -1;
+        // Single-slot mode: leg index ignored, slot == node
+        return (leg == PARTIAL_LEG_A) ? tt::SlotIdx{(int16_t)node} : tt::SlotIdx{-1};
     }
     // Pair mode: leg A = 2c, leg B = 2c+1
-    if (leg != PARTIAL_LEG_A && leg != PARTIAL_LEG_B) return -1;
-    int slot = node_id * 2 + leg;
-    if (slot >= MAX_PORTFOLIO_POSITIONS) return -1;
-    return slot;
+    if (leg != PARTIAL_LEG_A && leg != PARTIAL_LEG_B) return tt::SlotIdx{-1};
+    const int slot = node * 2 + leg;
+    if (slot >= MAX_PORTFOLIO_POSITIONS) return tt::SlotIdx{-1};
+    return tt::SlotIdx{(int16_t)slot};
 }
 
 // Build the bitmap mask for core c's portfolio slot(s). Under partials,
@@ -1389,11 +1396,12 @@ static inline uint16_t Sharded_NodeSlotMask(int node_id, int partial_exit_enable
 // replaces the open-coded shifts that lived in EngineSharded/SlowPath.hpp,
 // ShardedSnapshotPersist.hpp (one was UNGATED = the bug), the TrailingSLRatchet site below,
 // and ShardedSnapshot.hpp. GUI sites grandfathered for the E-series decouple. (D-294/D-295)
-static inline int Sharded_SlotNode(int slot, int partial_exit_enabled) {
+static inline tt::NodeIdx Sharded_SlotNode(tt::SlotIdx slot, int partial_exit_enabled) {
     // s5-1b (2026-08-23): shape delegated to the raw macro (BitmapMacros.hpp) so
     // non-CEL consumers (ShardedTradeLog's attribution derive) share ONE impl —
     // the same two-tier raw-macro/checked-wrapper split as Sharded_NodeSlotMask.
-    return BITMAP_SLOT_NODE(slot, partial_exit_enabled);  // SLOT_DERIVE_OK: THE canonical accessor (D-296)
+    // TYPED at the CLAIM-1 close (see Sharded_LegSlot above — same rationale).
+    return tt::NodeIdx{(int16_t)BITMAP_SLOT_NODE((int)slot, partial_exit_enabled)};  // SLOT_DERIVE_OK: THE canonical accessor (D-296)
 }
 
 // Boot-time validation. Returns 1 if cfg + capacity are consistent, 0
@@ -2204,7 +2212,7 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     const int node = (int)event.node_id;
     const int partial_on_ev = BITMAP_IS_SET(state->oms->oms_state_flags,
                                             tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    const int pslot = Sharded_LegSlot(node, (int)event.leg, partial_on_ev);
+    const int pslot = (int)Sharded_LegSlot(tt::NodeIdx{(int16_t)node}, (int)event.leg, partial_on_ev);
     int slot = node;   // node-space alias; every portfolio call below uses `pslot`
     // v5.15.5.F.4c.3 WIP2d-1.B.1 option C — combined-mask collapse: 3 separate predicate branches
     // (bounds + mutex + mode-1 fast-path) collapsed into 1 combined-mask + single guard branch.
@@ -3998,7 +4006,7 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         bm &= (uint16_t)(bm - 1);
         // Branchless (H20): slot → owning node via the shared Sharded_SlotNode (pure ALU shift by
         // partial_on ∈ {0,1}; no cmov — the accessor is THE single source, D-294/D-295).
-        int logical_core = Sharded_SlotNode(slot, partial_on);
+        int logical_core = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_on);
         Money qty = oms->portfolio.positions[slot].quantity;
         uint8_t sid = state->nodes[logical_core].strategy_id;
         // A8 (.E.0.10): the leg index is meaningful ONLY under partials (even slot = leg A,

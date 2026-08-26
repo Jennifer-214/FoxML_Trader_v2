@@ -52,6 +52,17 @@
 // through an explicit conversion operator unchanged — so the enforcement lands
 // on the WRONG sites while the right ones keep building.
 //
+// THE HONEST CLAIM (calibrated at the CLAIM-1 close, 2026-08-26 — the post-ship
+// a-class defeated the unqualified version with five compiling bypasses):
+// a wrong-space index WITHOUT VISIBLE CAST CEREMONY is a compile error. The
+// two `.v` backdoors are closed (all four types carry private storage), the
+// bridges (Sharded_SlotNode / Sharded_LegSlot) are typed so the routine
+// crossing never brace-constructs, and a deliberate cross-space rebuild must
+// spell a VISIBLE cross-type cast — `tt::NodeIdx{(int)s}` at minimum — where
+// the defeated idiom `tt::NodeIdx{s.v}` needed none. What the type system
+// cannot stop is a boundary construction from a WRONG raw integer; those live
+// only at declared loader/wire seams.
+//
 // NOT a wire type. Persisted structs keep raw integers; conversion happens at
 // the loader/emit boundary (H9/H21 — E.1.3 owns the next snapshot epoch).
 //======================================================================================================
@@ -69,8 +80,21 @@ namespace tt {
 // [CODE]
 //======================================================================================================
 struct SlotIdx {
-    int16_t v;
+    SlotIdx() = default;                                   // trivial; value-init zeroes, matching the old aggregate
+    explicit constexpr SlotIdx(int16_t x) : v(x) {}        // explicit-only: no implicit construction. A cross-space
+                                                           // rebuild must spell tt::NodeIdx{(int)s} — a VISIBLE
+                                                           // cross-type cast (the a-class bypass NodeIdx{s.v} needed
+                                                           // none). GCC demotes ctor-list narrowing to a warning, so
+                                                           // narrowing is NOT the enforcement — private v is.
     explicit constexpr operator int() const { return (int)v; }
+private:
+    // PRIVATE since the CLAIM-1 close (2026-08-26). Public `v` was the enforcement hole the
+    // post-ship a-class proved: `arr.v[s.v]` and `tt::NodeIdx{s.v}` both compiled — and with
+    // the bridges returning bare int, the brace-construct was ALSO the routine legit idiom,
+    // so correct and wrong were textually identical. With `v` private and the bridges typed
+    // (Sharded_SlotNode / Sharded_LegSlot), the routine crossing is bridge-flow and the raw
+    // escape is loud: (int16_t)(int)x at a declared boundary.
+    int16_t v;
 };
 //======================================================================================================
 // [END_CODE]
@@ -97,8 +121,11 @@ struct SlotIdx {
 // [CODE]
 //======================================================================================================
 struct NodeIdx {
-    int16_t v;
+    NodeIdx() = default;
+    explicit constexpr NodeIdx(int16_t x) : v(x) {}
     explicit constexpr operator int() const { return (int)v; }
+private:
+    int16_t v;   // private — see the SlotIdx note (CLAIM-1 close)
 };
 //======================================================================================================
 // [END_CODE]
@@ -142,9 +169,12 @@ static_assert(alignof(NodeIdx) == alignof(int16_t), "NodeIdx must not change car
 // than a silently re-blessed cache-layout golden.
 template <typename T, int N>
 struct NodeArray {
-    T v[N];
     T&       operator[](NodeIdx i)       { return v[(int)i]; }
     const T& operator[](NodeIdx i) const { return v[(int)i]; }
+private:
+    // PRIVATE since the CLAIM-1 close: the public payload was bypass #1 (`arr.v[i]` reopened
+    // untyped subscripting wholesale). Whole-array walks index with NodeIdx in a loop.
+    T v[N];
 };
 //======================================================================================================
 // [END_CODE]
@@ -172,9 +202,10 @@ struct NodeArray {
 //======================================================================================================
 template <typename T, int N>
 struct SlotArray {
-    T v[N];
     T&       operator[](SlotIdx i)       { return v[(int)i]; }
     const T& operator[](SlotIdx i) const { return v[(int)i]; }
+private:
+    T v[N];   // private — see the NodeArray note (CLAIM-1 close)
 };
 //======================================================================================================
 // [END_CODE]

@@ -890,7 +890,8 @@ inline int EngineSharded_Async_DrainWithSubmit(
             // preserves pre-P.3 behavior). When enabled, slot = 2*c+leg.
             // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
             // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
-            int portfolio_slot = Sharded_LegSlot(slot, (int)event.leg, partial_on);
+            // NOTE the cast documents what TD-299 tracks: this `slot` variable HOLDS A NODE.
+            int portfolio_slot = (int)Sharded_LegSlot(tt::NodeIdx{(int16_t)slot}, (int)event.leg, partial_on);
             if (portfolio_slot < 0) {
                 // Defensive: malformed event (e.g. leg=1 without partials
                 // enabled). Drop + log; don't crash the drainer.

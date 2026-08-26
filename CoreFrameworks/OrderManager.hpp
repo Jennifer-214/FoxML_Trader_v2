@@ -1672,7 +1672,7 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     OrderEventLog_Append(&oms->event_log,
         OrderEvent_MakeFill<F>(
             o->id, o->submitted_at_us,
-            Order_GetType(o), o->portfolio_slot.v,   // OrderEvent.node_id stays a raw int16_t (persisted)
+            Order_GetType(o), (int16_t)(int)o->portfolio_slot,   // OrderEvent.node_id stays a raw int16_t (persisted; loud boundary cast — .v is private since the CLAIM-1 close)
             fill_price, fill_qty,
             o->intended_tp, o->intended_sl,
             booked_fee));
@@ -1791,7 +1791,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             OrderEventLog_Append(&oms->event_log,
                 OrderEvent_MakeRejection<F>(
                     o->id, o->submitted_at_us,
-                    Order_GetType(o), o->portfolio_slot.v,   // raw int16_t on the persisted path
+                    Order_GetType(o), (int16_t)(int)o->portfolio_slot,   // raw int16_t on the persisted path (loud boundary cast)
                     cmd.result.error_message));
         }
     }

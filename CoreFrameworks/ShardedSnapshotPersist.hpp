@@ -512,7 +512,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     while (restored_bm) {
         int slot = __builtin_ctz(restored_bm);
         restored_bm &= (uint16_t)(restored_bm - 1);
-        int node_id = Sharded_SlotNode(slot, partial_exit_enabled);
+        int node_id = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_exit_enabled);
         int leg     = partial_exit_enabled ? (slot & 1)  : 0;
         if (node_id < 0 || node_id >= (int)state->registered_count) continue;
         ExecutionCore<F>* node_ptr = state->nodes[node_id].core;

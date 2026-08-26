@@ -686,8 +686,10 @@ static inline int32_t TreeWalker_WalkOneIdx(const FlatTreeNode* nodes, int32_t r
         // because both children are self. No branch needed to skip it.
         const float fv = features[meta & WALKER_META_FEAT_MASK];
 
-        // Missing routing (parity #1): the serve sentinel OR NaN -> default_left.
-        // `fv != fv` is the NaN test; it must come BEFORE the compare because
+        // Missing routing (parity #1): NaN -> default_left (the missing value IS
+        // NaN since PARITY-049; the retired -1.0f serve sentinel routed here too
+        // in its day — see the retirement note below).
+        // The NaN test must come BEFORE the compare because
         // `fv < cond` is false for NaN, which would silently route right and
         // diverge from the library (a comparison guard that exempts NaN is the
         // Class-60 shape this codebase already closed once in the bandit).
