@@ -554,6 +554,38 @@ static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int cou
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[wf_marker_horizon_tag]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [OBSERVABILITY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[per-thread horizon label for the [WF marker] crash-bisection lines — without it N parallel horizons interleave unattributably]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-302]
+//======================================================================
+// [CODE]
+//======================================================================
+// TECH_DEBT-302c. The [WF marker] lines exist for ONE job: bisect a segfault to a fold and an
+// iteration (v5.11.46). Multi-horizon training then went parallel by default, and the markers
+// are untagged fprintf to a shared stderr — so N horizons interleave and the lines can no longer
+// attribute the crash they were added to attribute. A diagnostic that cannot discriminate is
+// worse than absent, because it is still trusted.
+//
+// `inline thread_local`, NOT `static thread_local`: static in a header mints a copy per TU, and
+// the worker's write would not be the marker's read. Same reasoning as the E.1.2.E leaf-7
+// ML_PREDICT accumulator. 0 = serial / untagged, and the marker omits the qualifier then.
+inline thread_local int g_wf_marker_horizon = 0;
+inline thread_local char g_wf_marker_buf[24] = {0};
+// Renders " h=<ticks>" when tagged, "" when serial — so serial output is byte-identical
+// to what it was before this change and no existing bisection habit breaks.
+#define WF_MARKER_TAG (g_wf_marker_horizon > 0 \
+    ? (snprintf(g_wf_marker_buf, sizeof(g_wf_marker_buf), " h=%d", g_wf_marker_horizon), \
+       g_wf_marker_buf) : "")
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[wf_marker_horizon_tag]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[XGBoost_ApplyClassBalance]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML] [BACKTEST]]
@@ -2269,7 +2301,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // If crash is in XGBoosterUpdateOneIter, we'll see "[WF marker]
         // fold N: pre-iter R" before crash. If pre-predict, see "[WF
         // marker] fold N: pre-predict". Helps narrow without ASAN.
-        fprintf(stderr, "[WF marker] fold %d: pre-train-loop (booster=%p, dtrain=%p, n_train=%d)\n",
+        fprintf(stderr, "[WF marker]%s fold %d: pre-train-loop (booster=%p, dtrain=%p, n_train=%d)\n",
+                WF_MARKER_TAG,
                 f + 1, (void*)booster, (void*)dtrain, n_train);
         fflush(stderr);
 
@@ -2304,7 +2337,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             }
             // v5.11.46 — log every 10 iters to bisect crash location
             if (r == 0 || r % 10 == 0) {
-                fprintf(stderr, "[WF marker] fold %d: pre-iter %d\n", f + 1, r);
+                fprintf(stderr, "[WF marker]%s fold %d: pre-iter %d\n", WF_MARKER_TAG, f + 1, r);
                 fflush(stderr);
             }
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
@@ -2317,7 +2350,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 break;
             }
         }
-        fprintf(stderr, "[WF marker] fold %d: train-loop complete (last_iter=%d)\n",
+        fprintf(stderr, "[WF marker]%s fold %d: train-loop complete (last_iter=%d)\n",
+                WF_MARKER_TAG,
                 f + 1, last_iter_idx);
         fflush(stderr);
         if (last_iter_ret == 0 && tt::Health_LogEnabled(tt::HEALTH_INFO)) {
@@ -2333,10 +2367,11 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             bst_ulong out_len_tr = 0, out_len_te = 0;
             const float *pred_tr = nullptr, *pred_te = nullptr;
             // v5.11.46 — bisection markers
-            fprintf(stderr, "[WF marker] fold %d: pre-predict-train\n", f + 1);
+            fprintf(stderr, "[WF marker]%s fold %d: pre-predict-train\n", WF_MARKER_TAG, f + 1);
             fflush(stderr);
             int predict_tr_ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr);
-            fprintf(stderr, "[WF marker] fold %d: post-predict-train (ret=%d, out_len=%lu)\n",
+            fprintf(stderr, "[WF marker]%s fold %d: post-predict-train (ret=%d, out_len=%lu)\n",
+                    WF_MARKER_TAG,
                     f + 1, predict_tr_ret, (unsigned long)out_len_tr);
             fflush(stderr);
             // v5.11.58 — XGBoost C API: XGBoosterPredict's `out_result` is
@@ -2367,7 +2402,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 }
             }
             int predict_te_ret = XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te);
-            fprintf(stderr, "[WF marker] fold %d: post-predict-test (ret=%d, out_len=%lu)\n",
+            fprintf(stderr, "[WF marker]%s fold %d: post-predict-test (ret=%d, out_len=%lu)\n",
+                    WF_MARKER_TAG,
                     f + 1, predict_te_ret, (unsigned long)out_len_te);
             fflush(stderr);
             int pred_tr_ok = (predict_tr_ret == 0);

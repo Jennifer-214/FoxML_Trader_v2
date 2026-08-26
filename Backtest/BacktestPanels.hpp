@@ -184,6 +184,12 @@ static inline void DataPanel_Scan(DataPanelState *state) {
 struct SamplesSnapshot {
     int sample_count;        // 0 = no completed run yet
     int label_type;          // LABEL_* id used during the run
+    // TECH_DEBT-302b — WHICH horizon this distribution belongs to. The snapshot is computed from
+    // the single results->labels[] array, which under a multi-horizon collect holds whatever the
+    // LAST loop iteration wrote. The code always knew that (see the collect worker's comment);
+    // the PANEL did not say so, and presented one horizon's class split as if it were the run's.
+    // 0 = single-horizon run / unknown, and the panel omits the qualifier in that case.
+    int horizon_ticks;
     int label_kind;          // 0 = binary, 1 = regression, 2 = multiclass
     int num_classes;         // ≥2 for multiclass; 0 otherwise
 
@@ -552,6 +558,12 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
     //    iteration's distribution).
     SamplesSnapshot_Compute(&rc->stats_snapshot, &rc->results,
                               rc->run_config.label_type);
+    // TECH_DEBT-302b — stamp WHICH horizon that was, so the panel can stop implying the
+    // distribution describes the whole run. Multi-horizon only; a single-horizon collect leaves
+    // it 0 and the panel omits the qualifier.
+    rc->stats_snapshot.horizon_ticks =
+        (horizon_count > 1 && horizon_count <= ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX)
+            ? horizons[horizon_count - 1] : 0;
 
     rc->complete = 1;
     rc->running = 0;
@@ -4751,6 +4763,10 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
     // was no signal that anything had happened. Publish the horizon on entry; the completion
     // counter is bumped atomically below because N workers finish out of order.
     __atomic_store_n(&job->state->mh_current_horizon, job->horizon_ticks, __ATOMIC_RELAXED);
+    // TECH_DEBT-302c — tag this thread's [WF marker] crash-bisection lines with its horizon.
+    // Without it, N parallel horizons interleave on shared stderr and the markers cannot
+    // attribute the segfault they exist to bisect.
+    g_wf_marker_horizon = job->horizon_ticks;
     mh_run_one_horizon_fv(
         job->state,
         &job->isolated_results,
@@ -5792,6 +5808,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                     ? 100.0f * snap->class_counts[k] / snap->sample_count : 0.0f);
             }
             ImGui::TextUnformatted(buf);
+            // TECH_DEBT-302b — say WHOSE distribution this is. Under a multi-horizon collect the
+            // snapshot is computed from the single results->labels[] array, which holds whatever
+            // the LAST loop iteration wrote — so these counts describe ONE horizon, not the run.
+            // The other horizons' splits exist only as [collect-mh] stderr lines. Presenting them
+            // unqualified is how a 61.5/34.4/4.1 read as "the run's" label balance.
+            if (snap->horizon_ticks > 0) {
+                ImGui::TextColored(FoxmlColors::comment,
+                                   "  ^ horizon %d ticks ONLY (last of the multi-horizon collect) "
+                                   "— other horizons differ; see [collect-mh] lines",
+                                   snap->horizon_ticks);
+            }
             ImGui::SetItemTooltip("Multiclass labels — per-class sample counts.\n"
                                   "c0..cK-1 = class index (e.g. for Peak/Valley/Stable:\n"
                                   "  c0=stable, c1=peak, c2=valley)\n\n"
@@ -5810,14 +5837,34 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             int max_count = 0;
             int max_class = 0;
             int counts_used = 0;
+            // TECH_DEBT-302a — the RAREST class was never computed, let alone tested. The ladder
+            // below only ever asked "does one class dominate?", so a 61.5/34.4/4.1 split earned a
+            // green "balanced — model can learn each" while the 4.1% class was the buy signal.
+            // Track the minimum over NON-EMPTY classes (an absent class is the counts_used<=1 /
+            // degenerate arm's business, not this one).
+            int min_count = 0;
+            int min_class = 0;
             for (int k = 0; k < K; k++) {
                 if (snap->class_counts[k] > max_count) {
                     max_count = snap->class_counts[k]; max_class = k;
                 }
-                if (snap->class_counts[k] > 0) counts_used++;
+                if (snap->class_counts[k] > 0) {
+                    if (counts_used == 0 || snap->class_counts[k] < min_count) {
+                        min_count = snap->class_counts[k]; min_class = k;
+                    }
+                    counts_used++;
+                }
             }
             float max_pct = snap->sample_count > 0
                 ? 100.0f * max_count / snap->sample_count : 0.0f;
+            float min_pct = snap->sample_count > 0
+                ? 100.0f * min_count / snap->sample_count : 0.0f;
+            // K-AWARE, not a magic percentage: "balanced" means 100/K per class, so the honest
+            // question is how far under its FAIR SHARE the rarest class sits. At K=3 fair share is
+            // 33.3%, so 0.15 -> ~5% and 0.5 -> ~16.7%. The same thresholds stay meaningful at K=2
+            // or K=5, which a hardcoded "<5%" would not.
+            const float fair_share = (K > 0) ? (100.0f / (float)K) : 0.0f;
+            const float min_ratio  = (fair_share > 0.0f) ? (min_pct / fair_share) : 1.0f;
             if (counts_used <= 1) {
                 mc_col = &diag_red;
                 mc_text = "all samples in one class — labels are degenerate";
@@ -5840,9 +5887,39 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                           "but if minority-class signal is what you want to capture, fewer\n"
                           "training examples = noisier learning. Watch the per-class accuracy\n"
                           "after training, not just overall.";
+            } else if (min_ratio < 0.15f) {
+                // TECH_DEBT-302a — the arm that was missing. No class need DOMINATE for the split
+                // to be unlearnable; it is the rarest class that decides what the model can emit,
+                // and on this engine that class is usually the trade signal.
+                mc_col = &diag_red;
+                mc_text = "rarest class is starved — the model will rarely emit it";
+                mc_tip  = "The smallest class holds under ~15%% of its fair share (100/K).\n"
+                          "No class 'dominates', so this reads as balanced — but the class you\n"
+                          "most likely care about (the trade signal) has almost no examples to\n"
+                          "learn from, and accuracy will look fine while never predicting it.\n"
+                          "Check per-class recall, not overall accuracy. Consider tighter\n"
+                          "barriers or a longer lookahead to make that class more decisive.";
+            } else if (min_ratio < 0.5f) {
+                mc_col = &diag_yellow;
+                mc_text = "rarest class is under-represented — check its per-class recall";
+                mc_tip  = "The smallest class holds under half its fair share (100/K).\n"
+                          "Learnable, but overall accuracy will be dominated by the commoner\n"
+                          "classes — read per-class recall before trusting the headline number.";
             }
-            ImGui::TextColored(*mc_col, "Diagnosis: c%d dominates at %.1f%% — %s",
-                               max_class, max_pct, mc_text);
+            // TECH_DEBT-302a — the "cN dominates at X%%" prefix used to be UNCONDITIONAL, so it
+            // was glued onto every verdict including "balanced", producing the literal output
+            // `c0 dominates at 61.5%% — balanced`. Report whichever class the verdict is ACTUALLY
+            // about: the rarest one when scarcity is the finding, the largest when dominance is.
+            if (min_ratio < 0.5f && max_pct <= 70.0f) {
+                ImGui::TextColored(*mc_col, "Diagnosis: rarest c%d at %.1f%% (fair share %.1f%%) — %s",
+                                   min_class, min_pct, fair_share, mc_text);
+            } else if (max_pct > 70.0f || counts_used <= 1) {
+                ImGui::TextColored(*mc_col, "Diagnosis: c%d dominates at %.1f%% — %s",
+                                   max_class, max_pct, mc_text);
+            } else {
+                ImGui::TextColored(*mc_col, "Diagnosis: %s (largest c%d %.1f%%, rarest c%d %.1f%%)",
+                                   mc_text, max_class, max_pct, min_class, min_pct);
+            }
             ImGui::SetItemTooltip("%s", mc_tip);
         } else {
             // binary: +/-/neutral counts from snapshot
