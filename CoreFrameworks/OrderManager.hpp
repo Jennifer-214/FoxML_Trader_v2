@@ -803,10 +803,12 @@ inline void real_on_entry_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
-    synth.node_id   = (uint16_t)(int)o->portfolio_slot;   // TradeEvent.node_id carries the SLOT here;
-                                                          // ShardedTradeLog derives the true node from it
+    // D1/Class-61 close: the SLOT goes to the log as the typed parameter —
+    // synth.node_id is no longer written (it used to smuggle the slot through
+    // a field whose declared meaning is the NODE).
     synth.type      = TRADE_EVENT_ENTRY;
-    ShardedTradeLog_RecordEntry(oms->trade_log, synth, o->strategy_id,
+    ShardedTradeLog_RecordEntry(oms->trade_log, synth, o->portfolio_slot,
+                                o->strategy_id,
                                 fill_price, fill_qty, entry_fee, oms->balance);
 }
 
@@ -821,9 +823,10 @@ inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
     TradeEvent<F> synth{};
     synth.price     = fill_price;
     synth.timestamp = o->submitted_at_us;
-    synth.node_id   = (uint16_t)(int)o->portfolio_slot;   // SLOT (see RecordEntry note above)
+    // D1/Class-61 close: typed SLOT param (see the entry-emit note above).
     synth.type      = TRADE_EVENT_EXIT;
-    ShardedTradeLog_RecordExit(oms->trade_log, synth, o->strategy_id,
+    ShardedTradeLog_RecordExit(oms->trade_log, synth, o->portfolio_slot,
+                               o->strategy_id,
                                entry_price_snap, fill_price,
                                qty_snap, net, total_fee, oms->balance);
 }

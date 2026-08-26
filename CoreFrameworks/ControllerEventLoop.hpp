@@ -2260,7 +2260,10 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // log call inspects it (currently it doesn't, but kept defensive).
         if (state->oms->trade_log) {
             // s5-1b: resolved id (post-AUTO), matching the mode-1 fill-emit path.
+            // D1/Class-61 close: the log takes the SLOT explicitly (pslot, derived
+            // above) — this site used to forward the NODE-valued event unchanged.
             ShardedTradeLog_RecordEntry(state->oms->trade_log, event,
+                                        tt::SlotIdx{(int16_t)pslot},
                                         ctx->resolved_strategy_id,
                                         event.price,
                                         ctx->intended_qty,
@@ -2322,7 +2325,9 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // CSV: pitfall P8.7 — log AFTER net/total_fee/balance are computed.
         if (state->oms->trade_log) {
             // s5-1b: resolved id (post-AUTO), matching the mode-1 fill-emit path.
+            // D1/Class-61 close: explicit SLOT (see the entry-site comment).
             ShardedTradeLog_RecordExit(state->oms->trade_log, event,
+                                       tt::SlotIdx{(int16_t)pslot},
                                        ctx->resolved_strategy_id,
                                        entry_price_snap,
                                        event.price,

@@ -47,7 +47,11 @@ template <unsigned F>
 struct alignas(64) TradeEvent {
     Money           price;        // fill price for entry or exit (DECIMAL money — Ship B P2b)
     uint64_t timestamp;    // market time of the originating tick (microseconds)
-    uint16_t node_id;      // which execution core fired this event
+    uint16_t node_id;      // which execution NODE fired this event — SINGLE-space
+                           // since the D1/Class-61 close (2026-08-26): the trade-log
+                           // Record fns take the SLOT as an explicit tt::SlotIdx
+                           // param, so nothing smuggles a slot through this field
+                           // any more (the OMS synth events used to)
     uint8_t  type;         // bitmask: TRADE_EVENT_ENTRY and/or TRADE_EVENT_EXIT
     // P.2 (partial exits, 2026-04-27): leg index for the two-position-per-
     // core model. 0 = leg A (or single position when partial_exit_enabled=0);

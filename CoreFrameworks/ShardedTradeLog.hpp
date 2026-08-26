@@ -77,9 +77,12 @@ struct ShardedTradeLog {
     FILE*    file;                                       // aggregate: logging/SYMBOL_order_history.csv (GUI/TradeHistoryPanel reads this)
     uint64_t row_count;          // total rows written this session
     uint64_t writes_truncated;   // snprintf truncations (should always be 0)
-    // s5-1b (2026-08-23) — boot-time partials mode, set at Init. event.node_id
-    // carries the OMS portfolio SLOT by engine contract (OnEvent indexes
-    // nodes[event.node_id]); the Record fns derive the TRUE node via
+    // s5-1b (2026-08-23) — boot-time partials mode, set at Init. The Record fns
+    // take the portfolio SLOT as an EXPLICIT tt::SlotIdx parameter (D1/Class-61
+    // close 2026-08-26 — the slot used to ride the polymorphic event.node_id,
+    // an unstated cross-file contract that mode-1 honored and mode-0 violated:
+    // OnEvent forwarded a NODE-valued event, so under partials the log emitted
+    // leg = node&1 and a halved col-1 node). They derive the TRUE node via
     // BITMAP_SLOT_NODE(slot, this) for col 1 + mirror routing, and emit
     // slot_id/leg as appended columns.
     int      partial_exit_enabled;
@@ -478,6 +481,7 @@ inline void ShardedTradeLog_Close(ShardedTradeLog* log) {
 template <unsigned F>
 inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
                                          const TradeEvent<F>& event,
+                                         tt::SlotIdx slot,
                                          uint8_t strategy_id,
                                          Money entry_price,
                                          Money trade_size,
@@ -494,11 +498,12 @@ inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
     // Caller-scope variables set BEFORE the registry walk macro per
     // CALLER SCOPE CONTRACT in TradeLogColRegistry.hpp.
     uint64_t timestamp_us  = event.timestamp;
-    // s5-1b — event.node_id carries the OMS portfolio SLOT (engine contract:
-    // OnEvent indexes nodes[event.node_id]). Col 1 emits the DERIVED true node;
-    // slot/leg keep per-leg identity in the appended cols; the mirror write
-    // below routes by the node.
-    uint32_t slot_id_v     = event.node_id;
+    // D1/Class-61 close (2026-08-26) — the SLOT arrives as the typed parameter
+    // (it used to ride event.node_id, whose declared meaning is the NODE; the
+    // typed seam makes a wrong-space caller visible at the call site). Col 1
+    // emits the DERIVED true node; slot/leg keep per-leg identity in the
+    // appended cols; the mirror write below routes by the node.
+    uint32_t slot_id_v     = (uint32_t)(int)slot;
     int      leg_v         = (int)(slot_id_v & (uint32_t)log->partial_exit_enabled);
     uint32_t node_id       = (uint32_t)BITMAP_SLOT_NODE((int)slot_id_v, log->partial_exit_enabled);
     char     event_type    = 'E';
@@ -554,6 +559,7 @@ inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
 template <unsigned F>
 inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
                                         const TradeEvent<F>& event,
+                                        tt::SlotIdx slot,
                                         uint8_t strategy_id,
                                         Money entry_price,
                                         Money exit_price,
@@ -567,8 +573,8 @@ inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
     // v5.14.10.F — registry-driven row build via FOREACH_TRADE_LOG_COL.
     // v5.15.5.C.3 Phase 5.A — added regime + regime_name columns (see RecordEntry).
     uint64_t timestamp_us  = event.timestamp;
-    // s5-1b — same slot→node derive as RecordEntry (see the comment there).
-    uint32_t slot_id_v     = event.node_id;
+    // D1/Class-61 close — same typed-slot seam + slot→node derive as RecordEntry.
+    uint32_t slot_id_v     = (uint32_t)(int)slot;
     int      leg_v         = (int)(slot_id_v & (uint32_t)log->partial_exit_enabled);
     uint32_t node_id       = (uint32_t)BITMAP_SLOT_NODE((int)slot_id_v, log->partial_exit_enabled);
     char     event_type    = 'X';
