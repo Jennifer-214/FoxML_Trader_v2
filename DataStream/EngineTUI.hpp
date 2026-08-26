@@ -2052,10 +2052,14 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
 // StateT/OmsT templated to keep this header free of EventLoopState and
 // OrderManagerState dependencies.
 //======================================================================================================
+// D2 close (a-class, 2026-08-26): partial_exit_enabled arrives as a PARAMETER —
+// the caller owns the OMS flag read (this header stays free of the
+// OrderManagerState mask constants by design; OmsT is duck-typed).
 template <typename StateT, typename OmsT>
 static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
                                                   const StateT *state,
-                                                  const OmsT *oms) {
+                                                  const OmsT *oms,
+                                                  int partial_exit_enabled) {
     // v5.12.1.C — heartbeat: snapshot WS freshness for header render
     // v5.15.5.B.2 — source-side reads now hit the WsHeartbeatTelemetry cluster
     // (alignas(64) isolated). PerNodeSnap field names unchanged.
@@ -2076,8 +2080,19 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
             state->nodes[i].sp_telemetry.yield_count.load(std::memory_order_relaxed);
         snap->per_node[i].sp_state =
             state->nodes[i].sp_telemetry.state.load(std::memory_order_relaxed);
-        snap->per_node[i].sp_submit_q_depth =
-            (uint16_t)SPSCRing_Depth(&oms->submit_queues[tt::SlotIdx{(int16_t)i}]);
+        // D2 close: node i's Q-depth aggregates its OWN slot(s), derived via the
+        // canonical BITMAP_NODE_SLOT_MASK (leg B exists only under partials). The
+        // old read brace-cast the NODE loop var into SlotIdx — a false assertion:
+        // under partials slot i is NOT node i's queue (node i owns 2i/2i+1), so
+        // the panel showed the wrong queue's depth and leg B was invisible.
+        uint32_t qd = 0;
+        uint16_t smask = BITMAP_NODE_SLOT_MASK(i, partial_exit_enabled);
+        while (smask) {
+            const int s = __builtin_ctz(smask);
+            smask &= (uint16_t)(smask - 1);
+            qd += (uint32_t)SPSCRing_Depth(&oms->submit_queues[tt::SlotIdx{(int16_t)s}]);
+        }
+        snap->per_node[i].sp_submit_q_depth = (uint16_t)qd;
     }
 }
 

@@ -1285,7 +1285,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[producer-side submit funnel — push the SubmitCommand into the node's SPSC queue; drainer pops serially]
+// [OVERVIEW]_[producer-side submit funnel — push the SubmitCommand into its portfolio SLOT's SPSC queue; drainer pops serially]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1336,17 +1336,24 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[drainer-side pop of all per-node submit queues — calls OrderManager_Submit serially; returns count drained]
+// [OVERVIEW]_[drainer-side pop of the per-SLOT submit queues — calls OrderManager_Submit serially; returns count drained]
 //======================================================================
 // [CODE]
 //======================================================================
+// D3 close (a-class, 2026-08-26): the parameter is a SLOT count and always was —
+// every production caller passes DrainerConstants.drain_count = registered_count
+// × (partials ? 2 : 1). It was NAMED num_nodes and CLAMPED against
+// MAX_EXECUTION_NODES, which is benign only while the two caps are equal (16==16
+// is a coincidence, not an invariant — Limits.hpp); if MAX_PORTFOLIO_POSITIONS
+// ever grew past the node cap, the old clamp would silently strand the leg-B
+// queues. Named + clamped in the space it actually iterates.
 template <unsigned F>
-inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_nodes) {
+inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_slots) {
     int drained = 0;
-    int max = (num_nodes > MAX_EXECUTION_NODES) ? MAX_EXECUTION_NODES : num_nodes;
-    for (int c = 0; c < max; ++c) {
+    int max = (num_slots > MAX_PORTFOLIO_POSITIONS) ? MAX_PORTFOLIO_POSITIONS : num_slots;
+    for (int s = 0; s < max; ++s) {
         SubmitCommand<F> cmd;
-        while (SPSCRing_TryPop(&oms->submit_queues[tt::SlotIdx{(int16_t)c}], &cmd)) {
+        while (SPSCRing_TryPop(&oms->submit_queues[tt::SlotIdx{(int16_t)s}], &cmd)) {
             // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): pass POD directly; no unpack ceremony.
             OrderManager_Submit(oms, cmd);
             drained++;

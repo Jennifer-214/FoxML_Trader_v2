@@ -570,7 +570,10 @@ inline bool EngineSharded_Async_FanOut(
                                   topo_hot_cpu, topo_slow_cpu,
                                   topo_poll_interval);
             // v5.0.3 (Engine Topology advanced): live thread state.
-            TUI_PopulateAdvancedTopology(bs, &state, &oms);
+            // D2 close: the partials flag rides as a param (the TUI header has no
+            // OMS mask constants by design — the flag-read lives here, with the owner).
+            TUI_PopulateAdvancedTopology(bs, &state, &oms,
+                BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
             // v4.7.18: paper-reset seq for history-clearing panels
             bs->paper_reset_seq = (uint32_t)shared_ptr->paper_reset_seq;
             // v5.11.4.B — health log WARN on first non-zero observation
