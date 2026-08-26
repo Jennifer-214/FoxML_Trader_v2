@@ -693,9 +693,23 @@ static inline int32_t TreeWalker_WalkOneIdx(const FlatTreeNode* nodes, int32_t r
         // Class-60 shape this codebase already closed once in the bandit).
         // PARITY-049: the old `fv == SENTINEL` clause is GONE, not merely dead. With a NaN
         // `missing` the equality is always false, and leaving it would read as a live guard
-        // while policing nothing (Class 40 / Class 51). `fv != fv` IS the NaN test and is
-        // exactly what the library does. Branchless, unchanged in shape.
-        const uint32_t is_missing = (uint32_t)((fv != fv) ? 1 : 0);
+        // while policing nothing (Class 40 / Class 51).
+        //
+        // ⚠ BIT-PATTERN NaN TEST, NOT `fv != fv` — and the difference is measured, not stylistic.
+        // The first PARITY-049 cut wrote `(fv != fv) ? 1 : 0` and CLAIMED "branchless, unchanged
+        // in shape" in this very comment. The H8 conformance ratchet proved that claim FALSE:
+        // TreeWalker_PredictMargin's data-dependent-warm branches went 1 -> 2, the new one landing
+        // here. A float self-compare lowers to ucomiss + a PARITY jump (jp), because NaN detection
+        // is the one case the flags cannot express without it — whereas the previous
+        // `(a | b) ? 1 : 0` gave the compiler an integer OR it could fold to setcc.
+        //
+        // IEEE-754: x is NaN iff (bits & 0x7FFFFFFF) > 0x7F800000 (exponent all-ones, non-zero
+        // mantissa). An INTEGER compare lowers to cmp + seta — no branch, no parity flag. Same
+        // predicate, same routing, no jitter. memcpy for the bit read (H13: never a
+        // reinterpret_cast pun); it compiles to a single movd.
+        uint32_t fv_bits;
+        __builtin_memcpy(&fv_bits, &fv, sizeof(fv_bits));
+        const uint32_t is_missing = (uint32_t)(((fv_bits & 0x7FFFFFFFu) > 0x7F800000u) ? 1 : 0);
         const uint32_t lt         = (uint32_t)((fv < n->cond) ? 1 : 0);
         const uint32_t dleft      = (meta >> 30) & 1u;          // WALKER_META_DEFAULT_LEFT
         const uint32_t mmask      = 0u - is_missing;            // all-ones when missing
