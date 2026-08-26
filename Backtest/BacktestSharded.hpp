@@ -250,12 +250,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // call (NodeModelZoo holds open file/model handles); free + re-init each
     // run to avoid stale state when the user runs multiple backtests with
     // different ML configs in one suite session.
-    static NodeModelZoo<BACKTEST_FP> ml_zoos[MAX_EXECUTION_NODES];
+    static tt::NodeArray<NodeModelZoo<BACKTEST_FP>, MAX_EXECUTION_NODES> ml_zoos;  // typed (Class 61 — the ezoo cohort; a slot subscript cannot compile)
     // v5.10.0a.G.5 — per-core ensemble zoo (multi-horizon). Allocated alongside
     // single-zoo; populated by EnsembleModelZoo_AutoDetectFromDir if base_dir
     // has _horizon_<H> siblings on disk. Default empty = ezoo->active=0 =
     // single-zoo path runs unchanged.
-    static EnsembleModelZoo<BACKTEST_FP> ml_ensemble_zoos[MAX_EXECUTION_NODES];
+    static tt::NodeArray<EnsembleModelZoo<BACKTEST_FP>, MAX_EXECUTION_NODES> ml_ensemble_zoos;  // typed (see ml_zoos)
 
     for (int i = 0; i < num_nodes; ++i) {
         // v5.15.5.F.4d.1.B.4 Step C.2 — per-core boot extracted to
@@ -285,10 +285,11 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         NodeModelZoo<BACKTEST_FP>* zoo_ptr = nullptr;
         EnsembleModelZoo<BACKTEST_FP>* ezoo_ptr = nullptr;
         if (cfg.node_strategies[i] == STRATEGY_ML) {
-            NodeModelZoo_Free(&ml_zoos[i]);
-            EnsembleModelZoo_Free(&ml_ensemble_zoos[i]);
-            zoo_ptr  = &ml_zoos[i];
-            ezoo_ptr = &ml_ensemble_zoos[i];
+            const tt::NodeIdx ni{(int16_t)i};   // i is the node-loop var; the zoos are typed per-NODE
+            NodeModelZoo_Free(&ml_zoos[ni]);
+            EnsembleModelZoo_Free(&ml_ensemble_zoos[ni]);
+            zoo_ptr  = &ml_zoos[ni];
+            ezoo_ptr = &ml_ensemble_zoos[ni];
         }
 
         // Helper call — closes PARITY-027/028/029 by-construction. Body covers:
@@ -307,7 +308,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // transfer-learning experiments).
         if (state.nodes[i].ensemble_handle != nullptr && run_cfg && run_cfg->bandit_state_prior_path[0]) {
             EnsembleModelZoo_LoadBanditStateFromPath(
-                &ml_ensemble_zoos[i],
+                &ml_ensemble_zoos[tt::NodeIdx{(int16_t)i}],
                 run_cfg->bandit_state_prior_path,
                 /*skip_bundle_check=*/1);
         }
@@ -882,8 +883,9 @@ done:
     // case but final flush ensures end-state is persisted even if
     // total updates < interval.
     for (int i = 0; i < num_nodes; ++i) {
-        if (BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_ACTIVE) &&
-            BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_BANDITS_READY) &&
+        const tt::NodeIdx ni{(int16_t)i};   // node-loop var; the ensemble zoos are typed per-NODE
+        if (BITMAP_IS_SET(ml_ensemble_zoos[ni].init_flags, MASK_EZOO_ACTIVE) &&
+            BITMAP_IS_SET(ml_ensemble_zoos[ni].init_flags, MASK_EZOO_BANDITS_READY) &&
             cfg.node_model_dir[i][0]) {
             // s5 BT-6 — ONE call for all four families. E.1.2.C leg 0
             // (2026-08-20) had to hand-add three of them here after backtest
@@ -891,10 +893,10 @@ done:
             // stops the next site from re-learning that lesson. NOTE unchanged:
             // state files in the model dir carry across runs BY DESIGN (delete
             // them between A/B arms for a fresh arm).
-            char state_dir[sizeof(ml_ensemble_zoos[i].bandit_save_path)];
-            EnsembleModelZoo_DeriveStateDir(&ml_ensemble_zoos[i], cfg.node_model_dir[i],
+            char state_dir[sizeof(ml_ensemble_zoos[ni].bandit_save_path)];
+            EnsembleModelZoo_DeriveStateDir(&ml_ensemble_zoos[ni], cfg.node_model_dir[i],
                                              state_dir, sizeof(state_dir));
-            EnsembleModelZoo_SaveAllBanditState(&ml_ensemble_zoos[i], state_dir,
+            EnsembleModelZoo_SaveAllBanditState(&ml_ensemble_zoos[ni], state_dir,
                                                  "backtest sharded", i);
         }
     }
