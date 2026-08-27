@@ -622,6 +622,27 @@ inline bool EngineSharded_Async_FanOut(
                     }
                     prev_log_drops = bs->oms_log_full_drops;
                 }
+                // TD-283 (2026-08-26) — hot-path EVENT-ring saturation,
+                // first-non-zero WARN (the sibling the oms_log_* trio never
+                // covered: this is the ExecutionCore event ring, per node).
+                // Aggregate across nodes; the per-node breakdown lives in the
+                // Engine Topology panel (PerNodeSnap.ring_push_failures).
+                {
+                    uint64_t ring_fail_total = 0;
+                    for (int hi = 0; hi < bs->per_node_count && hi < 16; ++hi)
+                        ring_fail_total += bs->per_node[hi].ring_push_failures;
+                    static uint64_t prev_ring_push_failures = 0;
+                    if (ring_fail_total != prev_ring_push_failures) {
+                        if (prev_ring_push_failures == 0) {
+                            tt::Health_Log(tt::HEALTH_WARN, "event_ring", -1,
+                                "hot-path event ring saturation: ring_push_failures=%llu "
+                                "(pushes retried next tick — correct but the drainer is "
+                                "falling behind; per-node breakdown in Engine Topology)",
+                                (unsigned long long)ring_fail_total);
+                        }
+                        prev_ring_push_failures = ring_fail_total;
+                    }
+                }
             }
             // append current data point to graph ring buffers
             bs->price_history[bs->graph_head] = bs->price;

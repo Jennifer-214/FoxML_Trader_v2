@@ -29,6 +29,7 @@
 #include "TradeEvent.hpp"
 
 #include <cstdint>
+#include <atomic>       // TD-283 — ring_push_failures cross-thread publish read
 #include <type_traits>  // v5.11.0.E — static_assert(!std::is_polymorphic<...>)
 
 namespace tt {
@@ -160,12 +161,17 @@ struct alignas(64) ExecutionCore {
     // --- v5.11.0.1: Hot-path failure counters (no I/O on hot path) ---
     // Replaces inline fprintf on the rare ring-push-failure branch
     // (cascading libc-mutex stall risk under degraded conditions).
-    // Single writer (this core's hot path), relaxed-load by slow path
-    // for surfacing via TUISnapshot. No false sharing — accessed only
-    // by this core's threads. Position at struct tail keeps the cold
+    // Single writer (this core's hot path), relaxed-load by the publish
+    // thread for surfacing via TUISnapshot. No false sharing — written only
+    // by this core's hot thread. Position at struct tail keeps the cold
     // failure-path cache line out of line 0.
+    // TD-283 (2026-08-26): std::atomic so the cross-thread publish read is
+    // DEFINED (the torn-read discipline — no hand-waved plain-u64 races on a
+    // published counter). Single-writer, so the increment is a relaxed
+    // load+store pair, NEVER fetch_add: plain add codegen, no lock prefix on
+    // the hot failure path. Same size/align as the raw uint64_t.
     // See plans/2026-05-06-hot-path-discipline.md Rule 2 for the pattern.
-    uint64_t ring_push_failures;
+    std::atomic<uint64_t> ring_push_failures;
 };
 //======================================================================
 // [END_CODE]
@@ -309,7 +315,7 @@ static inline void ExecutionCore_Init(
     core->cached_publish_tick = 0;
     SPSCRing_Init(&core->event_ring);
     NodeLatencyStats_Init(&core->latency_stats);
-    core->ring_push_failures = 0;  // v5.11.0.1: hot-path failure counter
+    core->ring_push_failures.store(0, std::memory_order_relaxed);  // v5.11.0.1: hot-path failure counter (atomic since TD-283)
 }
 //======================================================================
 // [END_CODE]
@@ -723,15 +729,21 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
         // never landed. v5.11.3/.4.B surfaced the ORDER EVENT LOG ring's health
         // (oms_log_ring_full_spins / oms_log_full_drops) and the hot-path event
         // ring was never included — the sibling's presence is exactly what made
-        // the gap read as covered. Consequence: a ring-full drop is INVISIBLE to
-        // the operator. The v4.7.3 retry above keeps it CORRECT; nothing makes it
-        // OBSERVABLE. Wiring homed at TECH_DEBT-283 (zero-wire, mirrors the
-        // sibling: PerNodeSnap field + TUI_CopySnapshotSharded populator + the
-        // Async.hpp health-log line).
+        // the gap read as covered (the instructive false claim is preserved
+        // above by choice). TECH_DEBT-283 CLOSED 2026-08-26: the counter is
+        // READ now — PerNodeSnap.ring_push_failures, populated by
+        // TUI_PopulatePerCoreLatency (the per-node loop that owns the
+        // ExecutionCore array; the entry predicted TUI_CopySnapshotSharded,
+        // which never sees the cores), + the Async.hpp first-non-zero
+        // health-log WARN mirroring the oms_log_* pattern.
         // See plans/_cross-cutting/2026-05-06-latency-path-discipline.md Rule 2.
         if (__builtin_expect(!(exit_a_pushed & exit_b_pushed &
                                 entry_a_pushed & entry_b_pushed), 0)) {
-            core->ring_push_failures++;
+            // Single-writer relaxed load+store (NOT fetch_add — no lock prefix
+            // on the hot failure path; this thread is the only writer).
+            core->ring_push_failures.store(
+                core->ring_push_failures.load(std::memory_order_relaxed) + 1,
+                std::memory_order_relaxed);
         }
     }
 

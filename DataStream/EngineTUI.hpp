@@ -1123,6 +1123,12 @@ struct TUISnapshot {
         // long-horizon tail for overnight monitoring. Within-bucket
         // interpolated estimate; see NodeLatencyStats_Snapshot.
         double   lifetime_p99_ns;
+        // TD-283 (2026-08-26): the hot-path event ring's saturation counter —
+        // the ONLY designed signal that this node's ring filled (the v4.7.3
+        // retry keeps a dropped push CORRECT; this makes it OBSERVABLE).
+        // Monotonic; non-zero = the drainer is falling behind on this node.
+        // Sibling of the aggregate oms_log_* counters below.
+        uint64_t ring_push_failures;
         // v5.0.1 (Phase H): slow-path latency (per-cycle work in
         // per-core slow-path thread).
         uint64_t sp_samples;
@@ -1407,11 +1413,11 @@ struct TUISnapshot {
     //==================================================================
     // [DERIVED]
     // [ORIGIN]_[AUTO]
-    // [UPDATED]_[2026-08-24]
+    // [UPDATED]_[2026-08-26]
     // [SIZE]_[1216B]
     // [ALIGN]_[64]
     // [CACHE_LINES]_[19]
-    // [STRADDLE]_[sp_breakdown_p50_ns@504 · sp_breakdown_p99_ns@560 · ensemble_n_updates_per_regime@1008 · thompson_precision_post@1084]
+    // [STRADDLE]_[sp_breakdown_p99_ns@568 · ensemble_n_updates_per_regime@1008 · thompson_precision_post@1084]
     //==================================================================
     // [END_STRUCT]_[PerNodeSnap]
     //==================================================================
@@ -1981,6 +1987,11 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         snap->per_node[i].max_ns  = ls.max_ns;
         snap->per_node[i].avg_ns  = ls.avg_ns;
         snap->per_node[i].lifetime_p99_ns = ls.lifetime_p99_ns;
+        // TD-283 close (2026-08-26): the hot-path event ring's ONLY designed
+        // saturation signal, finally read. Relaxed load — single hot-thread
+        // writer, advisory monotonic counter (the sibling oms_log_* pattern).
+        snap->per_node[i].ring_push_failures =
+            nodes[i].ring_push_failures.load(std::memory_order_relaxed);
     }
     // Zero unused slots so renderer doesn't show stale data from a previous
     // tick when num_nodes changes
@@ -1993,6 +2004,7 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         snap->per_node[i].max_ns  = 0;
         snap->per_node[i].avg_ns  = 0;
         snap->per_node[i].lifetime_p99_ns = 0;
+        snap->per_node[i].ring_push_failures = 0;   // TD-283
         // v5.0.1 (Phase H): slow-path latency too
         snap->per_node[i].sp_samples = 0;
         snap->per_node[i].sp_min_ns  = 0;
