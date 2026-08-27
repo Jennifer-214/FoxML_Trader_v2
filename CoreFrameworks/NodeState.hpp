@@ -8,32 +8,38 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the E.1.3 capital-plane skeletons (D-439 Phase-0) — NodeState (per-node ledger shell) + ClusterState (per-cluster shell) + AggregatorState (composer shell); VERSION-MANAGED in-memory growth per E.1.2 amendment 2: fields land phase-by-phase inside the pinned cluster lines, each add re-pins deliberately]
-// [REFERENCE]_[DECISION]_[[D-439] [D-440]]
-// [REFERENCE]_[INVARIANT]_[[H6] [H12] [H22]]
-// [REFERENCE]_[DESIGN_SPEC]_[[decision-first-cluster-layout-pattern] [cross-thread-snapshot-publish-cluster-isolation]]
+// [OVERVIEW]_[the E.1.3 capital-plane types (D-439/D-440) — FillEvent (the normalized fill record AND the aggregation delta vehicle) + MoneySnapshot (the ONE published coherent money view) + the 3-tier kill word + NodeState/ClusterState/AggregatorState; VERSION-MANAGED growth per E.1.2 amendment 2: each phase replaces reserved words inside pinned cluster lines and re-pins deliberately]
+// [REFERENCE]_[DECISION]_[[D-439] [D-440] [D-441] [D-34] [D-54] [D-193]]
+// [REFERENCE]_[INVARIANT]_[[H6] [H12] [H14] [H22]]
+// [REFERENCE]_[DESIGN_SPEC]_[[decision-first-cluster-layout-pattern] [cross-thread-snapshot-publish-cluster-isolation] [cross-thread-multiword-read-consistency-discipline] [multi-bit-state-encoding-pattern]]
 // [CONTAINS]
+//   - [STRUCT]_[FillEvent]
+//   - [STRUCT]_[MoneySnapshotNodeRow]
+//   - [STRUCT]_[MoneySnapshot]
+//   - [MACRO]_[KILLWORD bit layout (SHIFT_/MASK_ per H14)]
 //   - [STRUCT]_[NodeState]
 //   - [STRUCT]_[ClusterState]
 //   - [STRUCT]_[AggregatorState]
 //======================================================================================================
-// WHY THIS HEADER EXISTS (Phase-0 of the merged E.1.3 ship, D-439/D-440)
+// WHY THIS HEADER EXISTS (Phase-0/1 of the merged E.1.3 ship, D-439/D-440)
 //
-// E.1.2 froze the WIRE (v11) but its NodeState/ClusterState skeleton never landed (0-hit symbols
-// at every HEAD since; E.1.2 amendment 2 made in-memory growth leaf-by-leaf). These are the shells
-// the merged coherence+fill ship relocates capital-plane state INTO:
+// The merged-design thesis (dive-v2): FillEvent is BOTH the fill-normalization artifact and the
+// aggregation delta vehicle; every tier is single-writer. Nodes will (Phase 3+) process their own
+// fills, single-write their OWN ledger rows, and emit FillEvents over per-node SPSC rings; the
+// COMPOSER (the surviving central thread) applies those rings IN RING ORDER — giving well-defined
+// global prefix sums, a per-fill-TRUE ks_peak ratchet, and replay determinism — then publishes
+// MoneySnapshot (the ONE coherent money view every former torn-read site reads) and writes the
+// 3-tier kill word (sole writer). No 16B atomics anywhere (removed per D-440).
 //
-//   NodeState<F>       — the per-node ledger row a node's OWN slow thread single-writes
-//                        (H22: a node writes ONLY its own row; nothing here is written cross-thread).
-//   ClusterState<F>    — the per-cluster shell (E.1.5 consumes; single-cluster deployment today —
-//                        the cluster CAP lands with E.1.5's semantics, not here).
-//   AggregatorState<F> — the composer's shell (sole writer: the central thread). Phase 1 grows it:
-//                        FillEvent apply cursor + MoneySnapshot pack slot + kill word live HERE
-//                        per the dive-v2 residence pin (cycle-free include topology).
-//
-// GROWTH DISCIPLINE (version-managed, per E.1.2 amendment 2): each phase REPLACES reserved words
-// inside its named cluster line — or deliberately re-pins the size asserts below in the same
-// commit. A silent size drift is a compile error, never a re-blessed golden.
+// PHASE STATE (version-managed growth; re-pin the asserts in the SAME commit as any field):
+//   Phase 0 ✅ shells + TD-299 typed substrate.
+//   Phase 1 ▶ FillEvent + MoneySnapshot + kill-word layout + AggregatorState publish/apply state.
+//            Production wiring is INTERIM-CENTRAL: the drainer composes the pack from its own
+//            (same-thread, coherent) ledger; FillEvent rings + apply machinery are unit-exercised
+//            and go production at Phase 3 (the leaf rework). Kill-word stays a DISPLAY COPY of
+//            the legacy flags until Phase 2 unifies the writers.
+//   Phase 2  kill unification + reader rewires. Phase 3 leaf rework (rings go live).
+//   Phase 4  THE FLIP (per-node ownership). NodeState/ClusterState clusters fill along the way.
 //
 // ⚠ NAME-COLLISION GUARDS (read before assuming):
 //   - `CoreFrameworks/EventLoopAggregates.hpp` is the FLOAT_DISPLAY_ONLY TUI adapter — NOT this
@@ -41,12 +47,145 @@
 //   - `MemHeaders/NodeStateFlagRegistry.hpp` / `PerNodeStateFlagsRegistry.hpp` are the NodeContext
 //     FLAG vocabulary ("NodeState SHALT" prose) — a different, pre-existing surface.
 //   - `NodeSlowState` (ControllerEventLoop.hpp) is the per-node DATA plane (rolling/regime/flow);
-//     NodeState here is the per-node CAPITAL plane. They are siblings, not duplicates.
+//     NodeState here is the per-node CAPITAL plane. Siblings, not duplicates.
 //======================================================================================================
 #include <cstdint>
 #include <cstddef>
-// NOTE: ../Limits.hpp joins at Phase 1 when the NodeArray<NodeState,...> carriers land — the
-// Phase-0 shells reference no cap yet (unused-include hygiene).
+#include <atomic>
+
+#include "../Limits.hpp"
+#include "../FixedPoint/FixedPointN.hpp"
+#include "IndexSpaces.hpp"
+#include "ParameterSlot.hpp"
+
+//======================================================================================================
+// [STRUCT]_[FillEvent]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [THREAD]_[[NODE_SLOW_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the normalized fill record AND the per-node→composer delta vehicle (D-440 thesis) — in-flight SPSC ONLY, NEVER persisted (D-441 #3: no wire/H21 surface); one emitted per applied fill leg by the owning node's fill processing (Phase 3+)]
+// [REFERENCE]_[DECISION]_[[D-440] [D-441]]
+// [REFERENCE]_[INVARIANT]_[[H1] [H12]]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+// Layout note (H12 + cache): 8B identity head + 8B seq, then the five 16B Money legs — first
+// Money lands at offset 16 with NO hidden padding; sizeof pinned 96 (1.5 cache lines; SPSC ring
+// elements pack 2-per-3-lines). `venue_fee_reserved` is the E.1.4-slim A4 slot (D-441: additive
+// venue-exact commission completion) — 0 until that ship; NOT a live field here.
+template <unsigned F>
+struct FillEvent {
+    tt::SlotIdx slot;             // portfolio slot the fill leg applies to
+    tt::NodeIdx node;             // owning node (derived at emit via the typed bridge)
+    uint8_t     is_sell;          // 0 = BUY leg, 1 = SELL leg
+    uint8_t     order_complete;   // venue completeness signal (A16/Class-46 terminal gating)
+    int16_t     _pad0 = 0;        // H12: explicit, zero-init
+    uint64_t    seq;              // per-node emit sequence (apply-order pin + forensics)
+    Money       qty;              // filled quantity (this leg)
+    Money       price;            // fill price
+    Money       fee;              // booked fee for this leg (maker/taker-resolved)
+    Money       net;              // signed realized delta (SELL: gross - total_fee; BUY: zero — buy books Δfee only, gate accounting F8)
+    Money       venue_fee_reserved;   // RESERVED for E.1.4-slim (venue-exact commission); always Money_Zero() this ship
+};
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [END_STRUCT]_[FillEvent]
+//======================================================================================================
+
+static_assert(sizeof(FillEvent<64>) == 96,  "FillEvent<64> pinned at 96B (8B id + 8B seq + 5x16B Money) — re-pin deliberately, never drift");
+static_assert(alignof(FillEvent<64>) == 16, "FillEvent aligns to Money (16B)");
+static_assert(offsetof(FillEvent<64>, seq) == 8  && offsetof(FillEvent<64>, qty) == 16,
+              "FillEvent head packs with no hidden padding (H12)");
+static_assert(std::is_trivially_copyable<FillEvent<64>>::value, "FillEvent rides SPSC rings");
+
+//======================================================================================================
+// [STRUCT]_[MoneySnapshotNodeRow]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one node's published money row — composer-written under the pack's seqlock; the rule (gate hft F3): every per-node money field that is persisted or GUI-read and becomes owner-written MUST appear here]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+struct MoneySnapshotNodeRow {
+    Money alloc;         // allocated_balance
+    Money realized;      // node_realized
+    Money fees;          // node_fees
+    Money peak;          // node_peak_balance (per-fill-true once the composer owns it — Phase 3)
+    Money dd;            // node_dd_pct (recomputed at eval, never persisted — D-420)
+    Money unrealized;    // node-computed per-position Money_FillGross sum on the node's OWN price (D-190)
+};
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [END_STRUCT]_[MoneySnapshotNodeRow]
+//======================================================================================================
+
+static_assert(sizeof(MoneySnapshotNodeRow) == 96, "MoneySnapshotNodeRow pinned at 6x16B");
+
+//======================================================================================================
+// [STRUCT]_[MoneySnapshot]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE published coherent money view (cross-thread-multiword-read-consistency: every former torn-read site reads THIS via the house seqlock, never raw OMS state) — line-0 head {generation, kill-word display copy} so a mirror poll bails without touching the rows (gate dod F4)]
+// [REFERENCE]_[DECISION]_[[D-34] [D-427] [D-440]]
+// [REFERENCE]_[INVARIANT]_[[H6] [H12]]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+template <unsigned F>
+struct alignas(64) MoneySnapshot {
+    // ---- line 0 head: cheap-poll fields FIRST (decision-first layout, gate dod F4) ----
+    uint64_t generation;          // composer generation (increments per publish; distinct from the
+                                  // ParameterSlot's own seq bits — this one is CONTENT, readable post-copy)
+    uint64_t kill_word_copy;      // DISPLAY copy of the standalone kill word (the SSoT is
+                                  // AggregatorState::kill_word — readers needing authority read THAT atomic)
+    // ---- global ledger view ----
+    Money balance;
+    Money realized;
+    Money ks_peak;
+    // ---- per-node rows (typed subscripts; composer-written whole under the seqlock —
+    //      bulk-copy family: NO per-row isolation needed, single writer; gate dod F1 contrast) ----
+    tt::NodeArray<MoneySnapshotNodeRow, MAX_EXECUTION_NODES> rows;
+};
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [END_STRUCT]_[MoneySnapshot]
+//======================================================================================================
+
+static_assert(sizeof(MoneySnapshot<64>) == 1600, "MoneySnapshot<64> pinned: 64B head+global + 16x96B rows");
+static_assert(offsetof(MoneySnapshot<64>, generation) == 0 && offsetof(MoneySnapshot<64>, rows) == 64,
+              "line-0 head {generation, kill_word_copy} then rows at the next line (gate dod F4)");
+static_assert(std::is_trivially_copyable<MoneySnapshot<64>>::value, "rides ParameterSlot");
+
+//======================================================================================================
+// [MACRO]_[KILLWORD bit layout]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [REFERENCE]_[INVARIANT]_[H14]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the 3-tier kill word — ONE uint64 so a single relaxed atomic load reads ALL tiers at the same instant (the coherence property; recorded divergence from kill-switch-hierarchical-pattern's per-tier bytes, gate dod F2); SHIFT_/MASK_ constants per H14, paired overflow static_asserts per bitmap-overflow-protection]
+//======================================================================================================
+// Tier layout (append-only within the word; the word itself is IN-MEMORY ONLY — never persisted,
+// never wire: persisted kill state remains the existing OMS/NodeContext flags, which SEED this
+// word at boot [Phase 2, gate merge F3c]):
+//   bit  0        GLOBAL kill tripped
+//   bits 8..15    per-CLUSTER kill tripped  (cap TBD at E.1.5 — 8 bits reserved; static_assert
+//                 lands with the cap. Single-cluster deployment today uses bit 8.)
+//   bits 16..31   per-NODE kill tripped     (bit 16+n for node n)
+#define KILLWORD_SHIFT_GLOBAL   0u
+#define KILLWORD_MASK_GLOBAL    (1ull << KILLWORD_SHIFT_GLOBAL)
+#define KILLWORD_SHIFT_CLUSTER  8u
+#define KILLWORD_SHIFT_NODE     16u
+#define KILLWORD_NODE_MASK(n)   (1ull << (KILLWORD_SHIFT_NODE + (unsigned)(n)))
+static_assert(MAX_EXECUTION_NODES <= 16,
+              "KILLWORD per-NODE tier holds 16 bits (16..31) — widen the layout DELIBERATELY (and "
+              "re-pin) before raising MAX_EXECUTION_NODES past 16 (bitmap-overflow-protection)");
 
 //======================================================================================================
 // [STRUCT]_[NodeState]
@@ -54,14 +193,14 @@
 // [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN] [CAPITAL_BEARING]]
 // [THREAD]_[[NODE_SLOW_WRITER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[per-node capital-plane ledger row — four alignas(64) cluster lines, single-written by the owning node's slow thread (H22); Phase-0 shell: reserved words, offsets pinned]
+// [OVERVIEW]_[per-node capital-plane ledger row — four alignas(64) cluster lines, single-written by the owning node's slow thread (H22); Phase-0 shell: reserved words, offsets pinned; fills at Phases 2-4]
 //======================================================================================================
 // [CODE]
 //======================================================================================================
 template <unsigned F>
 struct alignas(64) NodeState {
-    // ---- line 0 · cluster: slow_account (Phase 1/3 fill: node_realized/fees/peak/dd/unrealized
-    //      rows the node single-writes and the composer reads via the published pack) ----
+    // ---- line 0 · cluster: slow_account (Phase 3/4 fill: the node-owned ledger fields whose
+    //      published view is MoneySnapshotNodeRow) ----
     alignas(64) uint64_t _slow_account_reserved[8] = {};   // H12: explicit zero-init
 
     // ---- line 1 · cluster: drainer_state (Phase 4 fill: absorbed per-node drain locals —
@@ -69,11 +208,12 @@ struct alignas(64) NodeState {
     alignas(64) uint64_t _drainer_state_reserved[8] = {};
 
     // ---- line 2 · cluster: kill_mirror (Phase 2 fill: the node's READ-ONLY mirror of the
-    //      composer's kill word + per-node reset flag; the node never writes shared kill state) ----
+    //      composer's kill word + the per-node reset flag [owner zeroes its OWN rows — gate
+    //      blindspot punch 3]; the node never writes shared kill state) ----
     alignas(64) uint64_t _kill_mirror_reserved[8] = {};
 
-    // ---- line 3 · cluster: binding (Phase 1 fill: typed-bridge/cfg binding — resolved
-    //      PerNodeCfg ref, FillEvent ring handle, flatten flag) ----
+    // ---- line 3 · cluster: binding (Phase 3 fill: typed-bridge/cfg binding — resolved
+    //      PerNodeCfg ref, FillEvent emit cursor, flatten flag [design row 9]) ----
     alignas(64) uint64_t _binding_reserved[8] = {};
 };
 //======================================================================================================
@@ -94,7 +234,7 @@ struct alignas(64) NodeState {
 //======================================================================================================
 template <unsigned F>
 struct alignas(64) ClusterState {
-    // ---- line 0 · cluster: slice (Phase 1 fill: the cluster's slice of the global aggregate +
+    // ---- line 0 · cluster: slice (E.1.5 fill: the cluster's slice of the global aggregate +
     //      cluster kill-tier mirror; composer-written, E.1.5-read) ----
     alignas(64) uint64_t _slice_reserved[8] = {};   // H12: explicit zero-init
 };
@@ -110,23 +250,38 @@ struct alignas(64) ClusterState {
 // [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN] [CAPITAL_BEARING]]
 // [THREAD]_[[COMPOSER_WRITER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the composer's shell (sole writer = the central thread) — Phase 1 grows: FillEvent ring cursors + global ledger {balance, realized, ks_peak} + MoneySnapshot pack slot + the standalone atomic kill word; Phase-0: two pinned lines]
+// [OVERVIEW]_[the composer's state (sole writer = the central thread) — the standalone kill-word SSoT (its own line; readers relaxed-atomic-load it, gate merge F4), the per-node apply cursors, the reserved Phase-3 ledger line, and the MoneySnapshot publish port (house seqlock)]
+// [REFERENCE]_[DECISION]_[[D-34] [D-54] [D-440] [D-441]]
+// [REFERENCE]_[INVARIANT]_[[H3] [H6] [H22]]
 //======================================================================================================
 // [CODE]
 //======================================================================================================
 template <unsigned F>
 struct alignas(64) AggregatorState {
-    // ---- line 0 · cluster: apply (Phase 1 fill: per-node FillEvent ring cursors + composer
-    //      generation counter — the defined ring-order apply state) ----
-    alignas(64) uint64_t _apply_reserved[8] = {};   // H12: explicit zero-init
+    // ---- line 0 · the 3-tier kill word — the SSoT, on its OWN line (H6). Composer is the sole
+    //      writer (Phase 2+); every other thread reads with a relaxed atomic load. The pack's
+    //      kill_word_copy is the display twin, labeled as such (gate merge F4). Phase-1 interim:
+    //      composed FROM the legacy flags each publish; writers unify at Phase 2. ----
+    alignas(64) std::atomic<uint64_t> kill_word{0};
+    uint64_t generation = 0;            // composer generation (mirrors into each published pack)
+    uint64_t _pad_line0[6] = {};        // H12: explicit pad to the line boundary
 
-    // ---- line 1 · cluster: ledger (Phase 1 fill: composer-owned global {balance, realized,
-    //      ks_peak} — the per-fill-true ratchet lives here, D-441/source-purity pinned) ----
+    // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
+    //      from Phase 1). applied_seq[n] = last FillEvent.seq applied from node n's ring —
+    //      the defined ring-order apply state (determinism anchor). ----
+    alignas(64) tt::NodeArray<uint64_t, MAX_EXECUTION_NODES> applied_seq = {};
+
+    // ---- line 3 · cluster: ledger (Phase 3 fill: composer-owned global {balance, realized,
+    //      ks_peak} — the per-fill-true ratchet; source-purity pinned per D-441/gate accounting F4) ----
     alignas(64) uint64_t _ledger_reserved[8] = {};
 
-    // NOTE (paper/live partition — D-441 ratification #4): modes are separate PROCESSES in this
-    // engine, so mixed-mode totals cannot occur; if a mixed-mode deployment ever exists, the
-    // partition hook belongs HERE (a second ledger line keyed by mode), not in the fill leaves.
+    // ---- the publish port: the house seqlock, instantiated (TD-240 precedent — reuse outright,
+    //      never a third seqlock). 1 writer (composer), N readers. ----
+    tt::ParameterSlot<MoneySnapshot<F>> publish;
+
+    // NOTE (paper/live partition — D-441 #4): modes are separate PROCESSES; mixed-mode totals
+    // cannot occur. If a mixed-mode deployment ever exists, the partition hook is a second
+    // ledger line + row set HERE, keyed by mode — never in the fill leaves.
 };
 //======================================================================================================
 // [END_CODE]
@@ -134,14 +289,18 @@ struct alignas(64) AggregatorState {
 // [END_STRUCT]_[AggregatorState]
 //======================================================================================================
 
-// Phase-0 layout pins — growth is DELIBERATE (edit the assert in the same commit as the field),
-// never drift. offsetof anchors per decision-first-cluster-layout-pattern.md Step 5.
+// Layout pins — growth is DELIBERATE (edit the assert in the same commit as the field).
 static_assert(sizeof(NodeState<64>) == 256,      "NodeState<64> Phase-0 shell: 4 x 64B cluster lines");
 static_assert(offsetof(NodeState<64>, _slow_account_reserved)  == 0,   "cluster line 0 anchor");
 static_assert(offsetof(NodeState<64>, _drainer_state_reserved) == 64,  "cluster line 1 anchor");
 static_assert(offsetof(NodeState<64>, _kill_mirror_reserved)   == 128, "cluster line 2 anchor");
 static_assert(offsetof(NodeState<64>, _binding_reserved)       == 192, "cluster line 3 anchor");
 static_assert(sizeof(ClusterState<64>) == 64,    "ClusterState<64> Phase-0 shell: 1 x 64B line");
-static_assert(sizeof(AggregatorState<64>) == 128, "AggregatorState<64> Phase-0 shell: 2 x 64B lines");
+static_assert(offsetof(AggregatorState<64>, kill_word)   == 0,   "kill word owns line 0 (SSoT, H6)");
+static_assert(offsetof(AggregatorState<64>, applied_seq) == 64,  "apply cursors at line 1");
+static_assert(offsetof(AggregatorState<64>, _ledger_reserved) == 192, "reserved ledger line follows the cursors");
+static_assert(offsetof(AggregatorState<64>, publish)     == 256, "publish port after the state lines");
+static_assert(sizeof(AggregatorState<64>) == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),
+              "AggregatorState<64> = 4 state lines + the publish port (re-pin deliberately)");
 static_assert(alignof(NodeState<64>) == 64 && alignof(ClusterState<64>) == 64 &&
-              alignof(AggregatorState<64>) == 64, "capital-plane shells are cache-line aligned (H6)");
+              alignof(AggregatorState<64>) == 64, "capital-plane types are cache-line aligned (H6)");
