@@ -1969,7 +1969,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
 //------------------------------------------------------------------
 template <typename CoresT>
 static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
-                                                CoresT *nodes,
+                                                CoresT &nodes,   // E.1.3 P0/TD-299: typed-array ref (sole caller passes tt::NodeArray)
                                                 int num_nodes,
                                                 double tsc_ghz) {
     snap->sharded_mode_active = 1;
@@ -1978,7 +1978,7 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
     snap->per_node_count = num_nodes;
     for (int i = 0; i < num_nodes; ++i) {
         tt::NodeLatencySnapshot ls = tt::NodeLatencyStats_Snapshot(
-            &nodes[i].latency_stats, tsc_ghz);
+            &nodes[tt::NodeIdx{(int16_t)i}].latency_stats, tsc_ghz);
         snap->per_node[i].samples = ls.total_count;
         snap->per_node[i].min_ns  = ls.min_ns;
         snap->per_node[i].p50_ns  = ls.p50_ns;
@@ -1991,7 +1991,7 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         // saturation signal, finally read. Relaxed load — single hot-thread
         // writer, advisory monotonic counter (the sibling oms_log_* pattern).
         snap->per_node[i].ring_push_failures =
-            nodes[i].ring_push_failures.load(std::memory_order_relaxed);
+            nodes[tt::NodeIdx{(int16_t)i}].ring_push_failures.load(std::memory_order_relaxed);
     }
     // Zero unused slots so renderer doesn't show stale data from a previous
     // tick when num_nodes changes
@@ -2032,7 +2032,7 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
     if (n > 16) n = 16;
     for (int i = 0; i < n; ++i) {
         tt::NodeLatencySnapshot ls = tt::NodeLatencyStats_Snapshot(
-            &state->display_meta[i].slow_path_latency, tsc_ghz);
+            &state->display_meta[tt::NodeIdx{(int16_t)(i)}].slow_path_latency, tsc_ghz);
         snap->per_node[i].sp_samples = ls.total_count;
         snap->per_node[i].sp_min_ns  = ls.min_ns;
         snap->per_node[i].sp_p50_ns  = ls.p50_ns;
@@ -2046,7 +2046,7 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
         // stopped publishing one row short the moment ML_INFER was appended.
         for (int s = 0; s < tt::SP_SECTION_COUNT; ++s) {
             tt::NodeLatencySnapshot ss = tt::NodeLatencyStats_Snapshot(
-                &state->display_meta[i].slow_path_breakdown[s], tsc_ghz);
+                &state->display_meta[tt::NodeIdx{(int16_t)(i)}].slow_path_breakdown[s], tsc_ghz);
             snap->per_node[i].sp_breakdown_p50_ns[s] = ss.p50_ns;
             snap->per_node[i].sp_breakdown_p99_ns[s] = ss.p99_ns;
         }
@@ -2085,13 +2085,13 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
         // (alignas(64) isolated; cross-thread-snapshot-publish-cluster-isolation.md).
         // PerNodeSnap field names unchanged — only the source-of-truth changed.
         snap->per_node[i].sp_last_tick_us =
-            state->nodes[i].sp_telemetry.last_tick_us.load(std::memory_order_relaxed);
+            state->nodes[tt::NodeIdx{(int16_t)(i)}].sp_telemetry.last_tick_us.load(std::memory_order_relaxed);
         snap->per_node[i].sp_cycles_total =
-            state->nodes[i].sp_telemetry.cycles_total.load(std::memory_order_relaxed);
+            state->nodes[tt::NodeIdx{(int16_t)(i)}].sp_telemetry.cycles_total.load(std::memory_order_relaxed);
         snap->per_node[i].sp_yield_count =
-            state->nodes[i].sp_telemetry.yield_count.load(std::memory_order_relaxed);
+            state->nodes[tt::NodeIdx{(int16_t)(i)}].sp_telemetry.yield_count.load(std::memory_order_relaxed);
         snap->per_node[i].sp_state =
-            state->nodes[i].sp_telemetry.state.load(std::memory_order_relaxed);
+            state->nodes[tt::NodeIdx{(int16_t)(i)}].sp_telemetry.state.load(std::memory_order_relaxed);
         // D2 close: node i's Q-depth aggregates its OWN slot(s), derived via the
         // canonical BITMAP_NODE_SLOT_MASK (leg B exists only under partials). The
         // old read brace-cast the NODE loop var into SlotIdx — a false assertion:

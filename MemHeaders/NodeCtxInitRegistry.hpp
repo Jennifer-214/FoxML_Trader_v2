@@ -283,7 +283,7 @@ static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
 //     2. 6 helper-Init calls (sub-structs)
 //     3. 4 sp_telemetry atomic stores
 //     4. slow_state arena allocation + NodeSlowState_Init via _alloc_and_init_slow_state
-//     5. NodeContextDisplayMeta_Init for the sibling display_meta[i] entry
+//     5. NodeContextDisplayMeta_Init for the sibling  entry
 //
 // NODE_CTX_RESET_AUTOPOPULATE(state_ref, c)
 //   One-line per-slot paper-reset. Covers:
@@ -301,7 +301,7 @@ static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
     do {                                                                                            \
         auto* _autop_state = (_state_ptr);                                                          \
         int   _autop_idx   = (_i);                                                                  \
-        auto& _autop_ctx   = _autop_state->nodes[_autop_idx];                                       \
+        auto& _autop_ctx   = _autop_state->nodes[tt::NodeIdx{(int16_t)_autop_idx}];                                       \
         /* Layer 1 — registry-driven value-init (~40 fields) */                                     \
         tt::_node_ctx_init_value_fields(_autop_ctx);                                                \
         /* Layer 2 — helper-Init calls (sub-structs with boot defaults) */                          \
@@ -321,14 +321,14 @@ static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
         /* Layer 4 — slow_state arena allocation + NodeSlowState_Init */                            \
         tt::_alloc_and_init_slow_state(_autop_ctx);                                                 \
         /* Layer 5 — sibling-struct init (NodeContextDisplayMeta on EventLoopState) */              \
-        NodeContextDisplayMeta_Init(&_autop_state->display_meta[_autop_idx]);                       \
+        NodeContextDisplayMeta_Init(&_autop_state->display_meta[tt::NodeIdx{(int16_t)_autop_idx}]);                       \
     } while (0)
 
 #define NODE_CTX_RESET_AUTOPOPULATE(_state_ref, _c)                                                 \
     do {                                                                                            \
         auto& _autop_s   = (_state_ref);                                                            \
         int   _autop_c2  = (_c);                                                                    \
-        auto& _autop_ctx = _autop_s.nodes[_autop_c2];                                               \
+        auto& _autop_ctx = _autop_s.nodes[tt::NodeIdx{(int16_t)_autop_c2}];                                               \
         /* Layer 1 — registry-driven reset-subset value-init (~15 fields) */                        \
         tt::_node_ctx_reset_value_fields(_autop_ctx);                                               \
         /* Layer 2 — selective bitmap operations (Phase 3 KILL_TRIPPED + v5.14.9.G partner) */      \

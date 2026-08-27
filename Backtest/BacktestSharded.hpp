@@ -43,6 +43,7 @@
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
 #include "../CoreFrameworks/EngineCommon.hpp"  // v5.15.5.F.4d.1.B.4 — shared train-serve helpers (ApplyBnbDiscount + BootGlobal + BootPerCore + SlowPathCycle*)
+#include "../CoreFrameworks/IndexSpaces.hpp"   // E.1.3 P0/TD-299 — typed per-NODE subscripts
 #include "../CoreFrameworks/ShardedSnapshot.hpp"  // Track E.7 — TUI_CopySnapshotSharded
 #include "PhaseTimers.hpp"  // v5.10.0 Item A — per-phase backtest timers
 #include "../CoreFrameworks/Tick.hpp"
@@ -234,8 +235,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     if (num_nodes > MAX_EXECUTION_NODES) num_nodes = MAX_EXECUTION_NODES;
 
     // Allocate per-core resources on the stack — small fixed array, no malloc
-    static SPSCRing<Tick<BACKTEST_FP>, EXECUTION_NODE_TICK_RING_SIZE> tick_rings[MAX_EXECUTION_NODES];
-    static ExecutionCore<BACKTEST_FP> nodes[MAX_EXECUTION_NODES];
+    static tt::NodeArray<SPSCRing<Tick<BACKTEST_FP>, EXECUTION_NODE_TICK_RING_SIZE>, MAX_EXECUTION_NODES> tick_rings;   // E.1.3 P0/TD-299: typed per-NODE
+    static tt::NodeArray<ExecutionCore<BACKTEST_FP>, MAX_EXECUTION_NODES> nodes;                                        // E.1.3 P0/TD-299: typed per-NODE
 
     // Risk slice per core: even split of (total_balance × risk_pct) across
     // cores, with cfg.node_risk_pct[i] override allowed. Mirrors
@@ -275,8 +276,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // Per-core risk: same as LIVE per v1.6 O2 bytewise-identical math discipline.
         // E.1.1 ③/B — reads nodes[i].risk_pct (raw-copied from node_risk_pct[i]; 0=inherit) — byte-identical.
         double node_balance = default_per_node;
-        if (!Money_IsZero(cfg.nodes[i].risk_pct)) {
-            node_balance = total_balance * Money_ToDouble(cfg.nodes[i].risk_pct);
+        if (!Money_IsZero(cfg.nodes[tt::NodeIdx{(int16_t)i}].risk_pct)) {
+            node_balance = total_balance * Money_ToDouble(cfg.nodes[tt::NodeIdx{(int16_t)i}].risk_pct);
             if (node_balance < 1.0) node_balance = 1.0;
         }
 
@@ -297,7 +298,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // ML branch (load/init/post-load/validate/overlay/ConfidenceScorer + NEW
         // BindCompositeCfg + NEW RollingTurnover_Init) + NEW Strategy_InitPerCore +
         // SetPermission.
-        EngineCommon_BootPerCore(cfg, i, state, tick_rings[i], nodes[i],
+        EngineCommon_BootPerCore(cfg, i, state, tick_rings[tt::NodeIdx{(int16_t)i}], nodes[tt::NodeIdx{(int16_t)i}],
                                   zoo_ptr, ezoo_ptr,
                                   Money{ money_from_double_payload(node_balance) });
 
@@ -306,7 +307,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // LoadBanditState the helper just ran. Skips bundle-id check (operator may
         // be transferring weights from a sibling bundle deliberately for
         // transfer-learning experiments).
-        if (state.nodes[i].ensemble_handle != nullptr && run_cfg && run_cfg->bandit_state_prior_path[0]) {
+        if (state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle != nullptr && run_cfg && run_cfg->bandit_state_prior_path[0]) {
             EnsembleModelZoo_LoadBanditStateFromPath(
                 &ml_ensemble_zoos[tt::NodeIdx{(int16_t)i}],
                 run_cfg->bandit_state_prior_path,
@@ -506,7 +507,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 FeatureComputeCtx<BACKTEST_FP> ctx{};
                 ctx.signals       = &sig;
                 ctx.short_rolling = d->rolling;
-                ctx.current_regime = d->state->nodes[BACKTEST_REGIME_SAMPLE_CORE].regime_state.current_regime;
+                ctx.current_regime = d->state->nodes[tt::NodeIdx{BACKTEST_REGIME_SAMPLE_CORE}].regime_state.current_regime;
                 int n = Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
                 if (n < 0) {
@@ -717,8 +718,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                     ? cfg.min_warmup_samples : 64;
                 if (rolling.count >= (int)min_samples) {
                     for (int c = 0; c < num_nodes; ++c) {
-                        if (state.nodes[c].strategy_id != STRATEGY_NONE) {
-                            ExecutionCore_SetPermission(&nodes[c], 1);
+                        if (state.nodes[tt::NodeIdx{(int16_t)c}].strategy_id != STRATEGY_NONE) {
+                            ExecutionCore_SetPermission(&nodes[tt::NodeIdx{(int16_t)c}], 1);
                         }
                     }
                     warmup_permission_granted = 1;
@@ -738,19 +739,19 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 fprintf(stderr, "  rolling.volume_avg : %.4f\n", FPN_ToDouble(rolling.volume_avg));
                 fprintf(stderr, "  rolling_long.max   : %.4f\n", FPN_ToDouble(rolling_long.price_max));
                 fprintf(stderr, "  core[0] pending bg_threshold : %.4f\n",
-                        Money_ToDouble(state.nodes[0].pending_params.bg_price_threshold));
+                        Money_ToDouble(state.nodes[tt::NodeIdx{0}].pending_params.bg_price_threshold));
                 fprintf(stderr, "  core[0] pending tp_price     : %.4f\n",
-                        Money_ToDouble(state.nodes[0].pending_params.sg_take_profit_price));
+                        Money_ToDouble(state.nodes[tt::NodeIdx{0}].pending_params.sg_take_profit_price));
                 fprintf(stderr, "  core[0] pending sl_price     : %.4f\n",
-                        Money_ToDouble(state.nodes[0].pending_params.sg_stop_loss_price));
+                        Money_ToDouble(state.nodes[tt::NodeIdx{0}].pending_params.sg_stop_loss_price));
                 fprintf(stderr, "  core[0] pending trade_size   : %.8f\n",
-                        Money_ToDouble(state.nodes[0].pending_params.trade_size));
+                        Money_ToDouble(state.nodes[tt::NodeIdx{0}].pending_params.trade_size));
                 fprintf(stderr, "  core[0] pending strategy_id  : %u\n",
-                        (unsigned)state.nodes[0].pending_params.strategy_id);
+                        (unsigned)state.nodes[tt::NodeIdx{0}].pending_params.strategy_id);
                 fprintf(stderr, "  core[0] pending flags        : 0x%02x\n",
-                        (unsigned)state.nodes[0].pending_params.flags);
+                        (unsigned)state.nodes[tt::NodeIdx{0}].pending_params.flags);
                 fprintf(stderr, "  core[0] permission           : %u\n",
-                        (unsigned)__atomic_load_n(&nodes[0].permission, __ATOMIC_ACQUIRE));
+                        (unsigned)__atomic_load_n(&nodes[tt::NodeIdx{0}].permission, __ATOMIC_ACQUIRE));
             }
 
             // After the drain, check if any new exits happened by comparing

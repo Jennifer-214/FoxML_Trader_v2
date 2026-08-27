@@ -22,9 +22,9 @@
 //   1. Allocate NEW state into SEPARATE memory (aligned_alloc(64))
 //   2. Init + Load + PostLoadSetup into NEW state
 //   3. Validate (strict mode)
-//   4. ATOMIC swap pointer (state.nodes[c].handle)
+//   4. ATOMIC swap pointer (state..handle)
 //   5. Free OLD state (single-owner reclamation; per-core slow-path is
-//      sole owner of state.nodes[c].*_handle; hot-path uses cached
+//      sole owner of state..*_handle; hot-path uses cached
 //      cycle parameters via seqlock, never reads handle pointer)
 //
 // On failure (alloc / load / validate): Free NEW state; pre-swap
@@ -90,7 +90,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // AutoDetect sister, same args).
     // ────────────────────────────────────────────────────────────────────
     EnsembleModelZoo<F>* pre_swap_ezoo =
-        (EnsembleModelZoo<F>*)state.nodes[node_idx].ensemble_handle;
+        (EnsembleModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)node_idx}].ensemble_handle;
     if (!pre_swap_ezoo) {
         fprintf(stderr,
             "[hot_swap] ensemble node %d FAILED: pre-swap ezoo is null "
@@ -217,7 +217,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // 8-byte pointer; lock-free; readers see old OR new, never torn.
     // ────────────────────────────────────────────────────────────────────
     EnsembleModelZoo<F>* old_ezoo = (EnsembleModelZoo<F>*)__atomic_exchange_n(
-        &state.nodes[node_idx].ensemble_handle,
+        &state.nodes[tt::NodeIdx{(int16_t)node_idx}].ensemble_handle,
         (void*)new_ezoo,
         __ATOMIC_ACQ_REL);
 
@@ -245,7 +245,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
 // [COMMENT]
 //----------------------------------------------------------------------
 // Shadow-loads a new EnsembleModelZoo<F> from new_path; on success
-// atomically swaps state.nodes[node_idx].ensemble_handle to the new
+// atomically swaps state..ensemble_handle to the new
 // allocation + Free's the old. Pre-swap state untouched on any failure.
 //
 // Returns:
@@ -260,7 +260,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
 // of old_ezoo is safe immediately after atomic swap; no RCU grace.
 //
 // Caller responsibilities:
-//   - state.nodes[node_idx].ensemble_handle must currently point at a
+//   - state..ensemble_handle must currently point at a
 //     heap-allocated EnsembleModelZoo<F>* (boot path migrated to
 //     aligned_alloc(64) in v5.15.4) OR nullptr (first-time load).
 //   - new_path is non-null + non-empty
@@ -340,7 +340,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
 
     // ATOMIC swap.
     NodeModelZoo<F>* old_zoo = (NodeModelZoo<F>*)__atomic_exchange_n(
-        &state.nodes[node_idx].model_handle,
+        &state.nodes[tt::NodeIdx{(int16_t)node_idx}].model_handle,
         (void*)new_zoo,
         __ATOMIC_ACQ_REL);
 
@@ -365,7 +365,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
 //----------------------------------------------------------------------
 // Parallel to HotSwap_ShadowLoad_Ensemble for single-zoo NodeModelZoo<F>.
 // Allocates new zoo on heap, loads from new_path, atomically swaps
-// state.nodes[node_idx].model_handle, Free's old. Pre-swap untouched on
+// state..model_handle, Free's old. Pre-swap untouched on
 // failure.
 //
 // Returns:

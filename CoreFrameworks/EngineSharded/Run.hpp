@@ -371,8 +371,8 @@ static inline int EngineSharded_SmartSlowPathPins(int producer_cpu,
 // [CODE]
 //======================================================================
 template <unsigned F>
-static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
-                                              int num_nodes, double tsc_ghz) {
+static inline void EngineSharded_DumpLatency(const tt::NodeArray<ExecutionCore<F>, MAX_EXECUTION_NODES>& nodes,
+                                              int num_nodes, double tsc_ghz) {   // E.1.3 P0/TD-299: typed array ref (no decay)
     fprintf(stderr, "\n");
     fprintf(stderr, "================================================================\n");
     fprintf(stderr, "[sharded] PER-CORE LATENCY (samples are p-stats from 256 most recent ticks)\n");
@@ -380,7 +380,7 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* nodes,
     fprintf(stderr, "core   samples       min        p50        p95        p99        max        avg\n");
     fprintf(stderr, "----   --------   --------   --------   --------   --------   --------   --------\n");
     for (int i = 0; i < num_nodes; ++i) {
-        NodeLatencySnapshot s = NodeLatencyStats_Snapshot(&nodes[i].latency_stats, tsc_ghz);
+        NodeLatencySnapshot s = NodeLatencyStats_Snapshot(&nodes[tt::NodeIdx{(int16_t)i}].latency_stats, tsc_ghz);
         if (s.total_count == 0) {
             fprintf(stderr, " %2d        0     -          -          -          -          -          -\n", i);
             continue;
@@ -496,7 +496,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // (global default + per-instance override FORBIDDEN). Pre-refactor used the
     // legacy global-default-with-override pattern (cfg.risk_degradation_curve flat
     // + cfg.node_overrides[c].risk_degradation_curve). Post-WIP2d-0 walks
-    // cfg.nodes[c].risk_degradation_curve exclusively over active cores —
+    // cfg..risk_degradation_curve exclusively over active cores —
     // per-core authoritative per Class 25 + Anti-pattern 1 discipline. The
     // resolution gap (override=0 means inherit-from-global) no longer exists;
     // each core's own value is THE value.
@@ -510,7 +510,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         int  active_node_id    = -1;
         int  active_curve      = (int)CURVE_OFF;
         for (uint16_t c = 0; c < cfg.num_execution_nodes && c < MAX_EXECUTION_NODES; ++c) {
-            int curve = cfg.nodes[c].risk_degradation_curve;
+            int curve = cfg.nodes[tt::NodeIdx{(int16_t)c}].risk_degradation_curve;
             if (curve != (int)CURVE_OFF) {
                 any_ladder_active = true;
                 active_node_id    = (int)c;
@@ -766,8 +766,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     //   - CoreFrameworks/Order.hpp Order_BindPreResolved (the binding helper)
     //
     // v4.3.2 (Track C.1) — Binance BNB-pay 25% fee discount, applied per-core at boot
-    // so cfg.nodes[c].fee_rate_* reflect post-discount values uniformly. Order_BindPreResolved
-    // reads cfg.nodes[c].fee_rate_* (already discounted) → o->pre_resolved.fee_rate. User
+    // so cfg..fee_rate_* reflect post-discount values uniformly. Order_BindPreResolved
+    // reads cfg..fee_rate_* (already discounted) → o->pre_resolved.fee_rate. User
     // must also enable BNB fee payment in Binance UI for this to actually apply on live fills.
     // v5.15.5.F.4d.1.B.4 Step C.1 — extracted to EngineCommon_ApplyBnbDiscount
     // (closes PARITY-030 by-construction; sister BACKTEST caller invokes same helper
@@ -775,7 +775,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // EngineCommon_ApplyBnbDiscount in CoreFrameworks/EngineCommon.hpp. Non-const cfg mutation; ONE-SHOT
     // pre-loop; THE ONLY non-const-cfg helper in EngineCommon.
     EngineCommon_ApplyBnbDiscount(cfg);
-    // v4.2.1 paper-mode slippage simulation — also per-core via cfg.nodes[c].slippage_pct,
+    // v4.2.1 paper-mode slippage simulation — also per-core via cfg..slippage_pct,
     // pre-resolved onto Order at submit via Order_BindPreResolved. Live mode reads exchange
     // fill prices directly (EventLoop_OnEvent gates on live_trading); slippage value ignored.
     // v5.15.5.C.3 (Finding A) — external PARTIAL_EXIT_ENABLED SET call dropped.
@@ -824,7 +824,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // structural fold; BACKTEST sister at Step C.2 uses same helper). Body
     // preserved verbatim from prior inline at LIVE :742 + :749-753 + :760-762 →
     // EngineCommon_BootGlobal in CoreFrameworks/EngineCommon.hpp (Init + ConfigureKillSwitch +
-    // Regime_Init loop with cfg-driven hysteresis per cfg.nodes[i].regime_hysteresis).
+    // Regime_Init loop with cfg-driven hysteresis per cfg..regime_hysteresis).
     //
     // M5 LIVE-only persistence sinks (DepthRecorder + Notify + trade_log + TickRecorder
     // + BinanceUserData + ReconciliationLoop) stay post-helper at caller scope per
@@ -944,15 +944,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     // Per-core resources. Static so they live in BSS, not the stack —
     // ExecutionCore is ~66KB and num_nodes * size could blow the stack.
-    static SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE> tick_rings[MAX_EXECUTION_NODES];
-    static ExecutionCore<F> nodes[MAX_EXECUTION_NODES];
+    static tt::NodeArray<SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>, MAX_EXECUTION_NODES> tick_rings;   // E.1.3 P0/TD-299: typed per-NODE
+    static tt::NodeArray<ExecutionCore<F>, MAX_EXECUTION_NODES> nodes;                                        // E.1.3 P0/TD-299: typed per-NODE
     // v5.1.2 — full per-core data plane. All rolling stats, regime, flow,
-    // depth-history state lives in EACH engine's `state.nodes[c].slow_state`
+    // depth-history state lives in EACH engine's `state..slow_state`
     // (heap-allocated by EventLoopState_Init). Per-core slow-path lambda
     // updates its own slow_state on each cycle.
     //
     // Pre-v5.1.2 the producer maintained ONE shared copy at function scope.
-    // Removed in v5.1.2; readers now use state.nodes[c].slow_state pointers.
+    // Removed in v5.1.2; readers now use state..slow_state pointers.
     // ema_price stays at producer scope since it's per-tick (replicated to
     // all N engines via EventLoop_UpdateEmaPriceAllCores in fan_out).
     FPN_Binary<F> ema_price = FPN_Zero<F>();
@@ -984,11 +984,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
         // Per-core risk: use core-specific override if set, else shared/even split
         // (preserved verbatim per v1.6 O2 bytewise-identical math discipline).
-        // E.1.1 ③/B — reads nodes[i].risk_pct (raw-copied from node_risk_pct[i] in
+        // E.1.1 ③/B — reads .risk_pct (raw-copied from node_risk_pct[i] in
         // PopulateCoresFromFlat, 0=inherit preserved) — byte-identical to the legacy array read.
         double node_balance = default_per_node;
-        if (!Money_IsZero(cfg.nodes[i].risk_pct)) {
-            node_balance = total_balance * Money_ToDouble(cfg.nodes[i].risk_pct);
+        if (!Money_IsZero(cfg.nodes[tt::NodeIdx{(int16_t)i}].risk_pct)) {
+            node_balance = total_balance * Money_ToDouble(cfg.nodes[tt::NodeIdx{(int16_t)i}].risk_pct);
             if (node_balance < 1.0) node_balance = 1.0;
         }
 
@@ -1008,7 +1008,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (!zoo_ptr) {
                 fprintf(stderr, "[sharded] node %d: aligned_alloc(NodeModelZoo) "
                                 "failed; ML node cannot init\n", i);
-                NODE_STATE_FLAG_SET(state.nodes[i], MODEL_LOAD_FAILED);
+                NODE_STATE_FLAG_SET(state.nodes[tt::NodeIdx{(int16_t)i}], MODEL_LOAD_FAILED);
                 continue;
             }
             ezoo_ptr = (EnsembleModelZoo<F>*)aligned_alloc(64, sizeof(EnsembleModelZoo<F>));
@@ -1016,7 +1016,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 fprintf(stderr, "[sharded] node %d: aligned_alloc(EnsembleModelZoo) "
                                 "failed; ML node cannot init\n", i);
                 free(zoo_ptr); zoo_ptr = nullptr;
-                NODE_STATE_FLAG_SET(state.nodes[i], MODEL_LOAD_FAILED);
+                NODE_STATE_FLAG_SET(state.nodes[tt::NodeIdx{(int16_t)i}], MODEL_LOAD_FAILED);
                 continue;
             }
         }
@@ -1028,7 +1028,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // post-load/validate/overlay/ConfidenceScorer/RollingTurnover) +
         // Strategy_InitPerCore + SetPermission. Internal logic identical to prior
         // inline at LIVE :908-1177.
-        EngineCommon_BootPerCore(cfg, i, state, tick_rings[i], nodes[i],
+        EngineCommon_BootPerCore(cfg, i, state, tick_rings[tt::NodeIdx{(int16_t)i}], nodes[tt::NodeIdx{(int16_t)i}],
                                   zoo_ptr, ezoo_ptr,
                                   Money{ money_from_double_payload(node_balance) });
 
@@ -1039,14 +1039,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // per-core arrays indexed by Order::node_id at calib log emit time
         // (real_on_exit_calibration). void* cast to EnsembleModelZoo<F>* /
         // const PerNodeCfg<F>* at consumer.
-        if (state.nodes[i].ensemble_handle != nullptr) {
+        if (state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle != nullptr) {
             const tt::NodeIdx ni{ (int16_t)i };   // per-core boot loop: `i` IS a node index
             oms.ezoo_refs[ni]     = (void*)ezoo_ptr;
-            oms.node_cfg_refs[ni] = (const void*)&cfg.nodes[i];
+            oms.node_cfg_refs[ni] = (const void*)&cfg.nodes[tt::NodeIdx{(int16_t)i}];
         }
         // Per-core latency sampling — the whole point of this mode (LIVE-only;
         // backtest has no latency profiling at this scope per M5 LIVE-only discipline).
-        NodeLatencyStats_Enable(&nodes[i].latency_stats);
+        NodeLatencyStats_Enable(&nodes[tt::NodeIdx{(int16_t)i}].latency_stats);
     }
 
     // Phase 4 — load persisted state. Cores are now registered + initialized
@@ -1342,13 +1342,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // looks fine here — boot warning catches static-cfg cases only.
     //----------------------------------------------------------------------
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — boot validation now reads per-core fee_rate_taker
-    // (Pattern 2 — per-core in-scope; cfg.nodes[i] in loop scope). Each core's tp floor
+    // (Pattern 2 — per-core in-scope; cfg. in loop scope). Each core's tp floor
     // is computed against its own fee_rate_taker since per-core fee rates can differ.
     for (int i = 0; i < num_nodes; ++i) {
-        double fee_taker_i = Money_ToDouble(cfg.nodes[i].fee_rate_taker);
-        if (fee_taker_i <= 0.0) fee_taker_i = Money_ToDouble(cfg.nodes[i].fee_rate);  // fallback
+        double fee_taker_i = Money_ToDouble(cfg.nodes[tt::NodeIdx{(int16_t)i}].fee_rate_taker);
+        if (fee_taker_i <= 0.0) fee_taker_i = Money_ToDouble(cfg.nodes[tt::NodeIdx{(int16_t)i}].fee_rate);  // fallback
         double tp_floor_i = 3.0 * fee_taker_i;
-        double tp_pct = Money_ToDouble(cfg.nodes[i].take_profit_pct);
+        double tp_pct = Money_ToDouble(cfg.nodes[tt::NodeIdx{(int16_t)i}].take_profit_pct);
         if (tp_pct > 0.0 && tp_pct < tp_floor_i) {
             fprintf(stderr,
                 "[sharded] WARN: node %d take_profit_pct=%.4f%% is below "
@@ -1491,12 +1491,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             Tick<F> t;
             uint64_t local_consumed = 0;
             while (!g_engine_sharded_shutdown) {
-                if (SPSCRing_TryPop(&tick_rings[i], &t)) {
-                    ExecutionCore_Tick(&nodes[i], t);
+                if (SPSCRing_TryPop(&tick_rings[tt::NodeIdx{(int16_t)i}], &t)) {
+                    ExecutionCore_Tick(&nodes[tt::NodeIdx{(int16_t)i}], t);
                     local_consumed++;
                 }
                 if (producer_done.load(std::memory_order_acquire) &&
-                    SPSCRing_Depth(&tick_rings[i]) == 0) {
+                    SPSCRing_Depth(&tick_rings[tt::NodeIdx{(int16_t)i}]) == 0) {
                     break;
                 }
             }
@@ -1524,7 +1524,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // file-specific concern is wiring it into the per-tick drain pattern.
     //
     // qty source rule:
-    //   entry: read from nodes[slot].intended_qty (matches what OnEvent will
+    //   entry: read from .intended_qty (matches what OnEvent will
     //          write into portfolio.positions[slot].quantity via OpenSlot)
     //   exit:  read from portfolio.positions[slot].quantity BEFORE OnEvent,
     //          since CloseSlot inside OnEvent clears the slot
@@ -1720,7 +1720,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 sp_cpu = -1;
             }
             topo_slow_cpu[c] = sp_cpu;  // v5.0.2: capture for topology panel
-            slow_paths.emplace_back([c, sp_cpu, &state, &oms, &nodes, &cfg,
+            slow_paths.emplace_back([c, sp_cpu, &state, &oms, &cfg,   // E.1.3 P0: `nodes` is block-scope static — referenced directly, never captured
                                       &ticks_produced, &latest_tick,
                                       &paper_reset_in_progress]() {
                 // v5.0.2: best-effort pin to chosen CPU. Failure logged,
@@ -1745,39 +1745,39 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // v4.7.42 (Phase E): enable per-core slow-path latency stats.
                 // Sampled around the per-cycle work below (RebuildOneCore +
                 // PushParameters + TimeExitOneCore + TrailingSL + permission).
-                NodeLatencyStats_Enable(&state.display_meta[c].slow_path_latency);
+                NodeLatencyStats_Enable(&state.display_meta[tt::NodeIdx{(int16_t)c}].slow_path_latency);
                 // v5.1.1: enable per-section breakdown stats.
                 for (int s = 0; s < tt::SP_SECTION_COUNT; ++s) {
-                    NodeLatencyStats_Enable(&state.display_meta[c].slow_path_breakdown[s]);
+                    NodeLatencyStats_Enable(&state.display_meta[tt::NodeIdx{(int16_t)c}].slow_path_breakdown[s]);
                 }
                 uint64_t last_seen_tick = 0;
                 while (!g_engine_sharded_shutdown) {
                     // v5.0.3: user pause via paused_engines_mask bit c.
 #ifdef USE_IMGUI_GUI
                     if (g_shared.paused_engines_mask & (uint16_t)(1u << c)) {
-                        state.nodes[c].sp_telemetry.state.store(3, std::memory_order_relaxed);
-                        state.nodes[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
+                        state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.state.store(3, std::memory_order_relaxed);
+                        state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
 #endif
                     // Reset Paper coordination — park while reset runs.
                     if (paper_reset_in_progress.load(std::memory_order_acquire)) {
-                        state.nodes[c].sp_telemetry.state.store(1, std::memory_order_relaxed);
-                        state.nodes[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
+                        state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.state.store(1, std::memory_order_relaxed);
+                        state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
                     // Cadence — wake when enough ticks have passed.
                     uint64_t now_tick = ticks_produced.load(std::memory_order_acquire);
                     if (now_tick - last_seen_tick < (uint64_t)slow_path_interval) {
-                        state.nodes[c].sp_telemetry.state.store(2, std::memory_order_relaxed);
-                        state.nodes[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
+                        state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.state.store(2, std::memory_order_relaxed);
+                        state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
                     last_seen_tick = now_tick;
-                    state.nodes[c].sp_telemetry.state.store(0, std::memory_order_relaxed);  // running
+                    state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.state.store(0, std::memory_order_relaxed);  // running
 
                     // v5.15.5.F.4d.1.B.4 Step C.3 — slow-path latency telemetry
                     // (v4.7.42 outer bracket + v5.1.1 per-section breakdown) moved
@@ -1789,7 +1789,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // OneCore contract; OneCore would no-op on STRATEGY_NONE
                     // body because Strategy_BuildParameters dispatcher skips it,
                     // but the explicit check here is cheap and clarifying).
-                    if (state.nodes[c].strategy_id == STRATEGY_NONE) continue;
+                    if (state.nodes[tt::NodeIdx{(int16_t)c}].strategy_id == STRATEGY_NONE) continue;
 
                     // === Per-core swap-pending pickup ===
                     // Mirrors the producer-thread swap walker — but checks only
@@ -1809,7 +1809,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 // single-zoo-blind; shares the LiveReadiness
                                 // node_has_serving_model predicate).
                                 if (pending == STRATEGY_ML &&
-                                    !tt::node_has_serving_model(state.nodes[c])) {
+                                    !tt::node_has_serving_model(state.nodes[tt::NodeIdx{(int16_t)c}])) {
                                     fprintf(stderr,
                                         "[slow-path-%d] refusing swap to ML — "
                                         "no single-zoo model and no ready ensemble\n", c);
@@ -1817,8 +1817,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         &g_shared.swap_strategy_requested[c],
                                         STRATEGY_NONE, __ATOMIC_RELEASE);
                                 } else {
-                                    uint8_t old_strat = state.nodes[c].strategy_id;
-                                    state.nodes[c].strategy_id = pending;
+                                    uint8_t old_strat = state.nodes[tt::NodeIdx{(int16_t)c}].strategy_id;
+                                    state.nodes[tt::NodeIdx{(int16_t)c}].strategy_id = pending;
                                     __atomic_store_n(
                                         &g_shared.swap_strategy_requested[c],
                                         STRATEGY_NONE, __ATOMIC_RELEASE);
@@ -1874,7 +1874,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                     // first, single-zoo second, REFUSE only when
                                     // BOTH are null (node not ML at boot — no
                                     // arena of either kind to swap into).
-                                    if (state.nodes[c].ensemble_handle != nullptr) {
+                                    if (state.nodes[tt::NodeIdx{(int16_t)c}].ensemble_handle != nullptr) {
                                         // v5.15.4 — ENSEMBLE SHADOW-LOAD HOT-SWAP.
                                         // Replaces v5.14.2's in-place Free+Init+Load
                                         // pattern (its EnsembleHotSwap.hpp was
@@ -1887,7 +1887,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         // Helper:
                                         //   1. Allocates NEW ezoo via aligned_alloc(64)
                                         //   2. Loads + PostLoadSetup into new_ezoo
-                                        //   3. Atomically swaps state.nodes[c].ensemble_handle
+                                        //   3. Atomically swaps state..ensemble_handle
                                         //   4. Free's old ezoo
                                         // Pre-swap untouched on any failure; caller
                                         // sees nonzero rc and continues serving from
@@ -1908,15 +1908,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
-                                            NODE_STATE_FLAG_CLR(state.nodes[c], MODEL_LOAD_FAILED);
-                                            NODE_STATE_FLAG_CLR(state.nodes[c], MODEL_CORRUPT);  // v5.15.5.E.0.10 A6 (D-221) — new model starts clean
+                                            NODE_STATE_FLAG_CLR(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_LOAD_FAILED);
+                                            NODE_STATE_FLAG_CLR(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_CORRUPT);  // v5.15.5.E.0.10 A6 (D-221) — new model starts clean
                                             // Re-fetch ezoo after swap to run post-load
                                             // validators on the NEW ezoo. v5.14.2.E.1
                                             // closes PARITY-009.F: ValidateAgainstCfg +
                                             // FeatureOverlay_PostLoadVerify still run
                                             // on hot-swap (was bypassed pre-v5.14.2.E.1).
                                             EnsembleModelZoo<F>* swap_ezoo =
-                                                (EnsembleModelZoo<F>*)state.nodes[c].ensemble_handle;
+                                                (EnsembleModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)c}].ensemble_handle;
                                             // D-h §1A — node-resolved view (see EngineCommon boot sister).
                                             ControllerConfig<F> vcfg_e = ControllerConfig_ResolveForCore(cfg, c);
                                             int validate_rc = NodeModelZoo_ValidateAgainstCfg<F>(
@@ -1926,9 +1926,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 vcfg_e.held_out_gate_strict,
                                                 (int)BITMAP_IS_SET(vcfg_e.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                                                 (int)BITMAP_IS_SET(vcfg_e.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                                                &state.display_meta[c], &state.nodes[c]);
+                                                &state.display_meta[tt::NodeIdx{(int16_t)c}], &state.nodes[tt::NodeIdx{(int16_t)c}]);
                                             if (validate_rc < 0) {
-                                                NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
+                                                NODE_STATE_FLAG_SET(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_LOAD_FAILED);
                                                 fprintf(stderr,
                                                     "[hot_swap] ensemble node %d "
                                                     "REFUSED post-load validation "
@@ -1941,13 +1941,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 /*zoo=*/nullptr, swap_ezoo,
                                                 /*node_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
-                                                NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
+                                                NODE_STATE_FLAG_SET(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_LOAD_FAILED);
                                             }
                                             // v5.15.5.E.0.10 A6 ingress (D-221) — post-swap corrupt finalize on
                                             // the NEW ezoo (mirror of the boot path; same slow-path thread, AFTER
                                             // the ACQ_REL ensemble_handle swap inside HotSwap_ShadowLoad_Ensemble).
                                             if (EnsembleZoo_FinalizeCorrupt<F>(swap_ezoo, FPN_ToDouble(cfg.model_corrupt_shalt_ratio))) {
-                                                NODE_STATE_FLAG_SET(state.nodes[c], MODEL_CORRUPT);
+                                                NODE_STATE_FLAG_SET(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_CORRUPT);
                                                 fprintf(stderr, "[hot_swap] node %d: ML barrier CORRUPT for the "
                                                                 "majority of arms — node REFUSES new trades; RETRAIN (D-221)\n", c);
                                             }
@@ -1955,7 +1955,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);
-                                    } else if (state.nodes[c].model_handle != nullptr) {
+                                    } else if (state.nodes[tt::NodeIdx{(int16_t)c}].model_handle != nullptr) {
                                         // v5.15.4 — SINGLE-ZOO SHADOW-LOAD HOT-SWAP.
                                         // Replaces in-place Free+Init+LoadFromDir
                                         // (v5.10.0c "log-and-leave" pattern; brief
@@ -1978,12 +1978,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
-                                            NODE_STATE_FLAG_CLR(state.nodes[c], MODEL_LOAD_FAILED);
+                                            NODE_STATE_FLAG_CLR(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_LOAD_FAILED);
                                             // Re-fetch zoo after swap to run post-load
                                             // validators on the NEW zoo (parity-check
                                             // Finding #3 closure preserved).
                                             NodeModelZoo<F>* new_swap_zoo =
-                                                (NodeModelZoo<F>*)state.nodes[c].model_handle;
+                                                (NodeModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)c}].model_handle;
                                             // D-h §1A — node-resolved view (see EngineCommon boot sister).
                                             ControllerConfig<F> vcfg_s = ControllerConfig_ResolveForCore(cfg, c);
                                             int validate_rc = NodeModelZoo_ValidateAgainstCfg<F>(
@@ -1993,9 +1993,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 vcfg_s.held_out_gate_strict,
                                                 (int)BITMAP_IS_SET(vcfg_s.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                                                 (int)BITMAP_IS_SET(vcfg_s.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                                                &state.display_meta[c], &state.nodes[c]);
+                                                &state.display_meta[tt::NodeIdx{(int16_t)c}], &state.nodes[tt::NodeIdx{(int16_t)c}]);
                                             if (validate_rc < 0) {
-                                                NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
+                                                NODE_STATE_FLAG_SET(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_LOAD_FAILED);
                                                 fprintf(stderr,
                                                     "[hot_swap] node %d REFUSED post-load "
                                                     "validation in strict mode; new model "
@@ -2006,7 +2006,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 new_swap_zoo, /*ezoo=*/nullptr,
                                                 /*node_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
-                                                NODE_STATE_FLAG_SET(state.nodes[c], MODEL_LOAD_FAILED);
+                                                NODE_STATE_FLAG_SET(state.nodes[tt::NodeIdx{(int16_t)c}], MODEL_LOAD_FAILED);
                                             }
                                         }
                                         __atomic_store_n(
@@ -2204,7 +2204,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         fprintf(stdout, SH_BOLD SH_PEACH " PER-CORE LATENCY" SH_RESET SH_DIM "  (last 256 samples per node)" SH_RESET "\033[K\n");
         fprintf(stdout, "  " SH_DIM "core   samples       min        p50        p95        p99        max        avg" SH_RESET "\033[K\n");
         for (int i = 0; i < num_nodes; ++i) {
-            NodeLatencySnapshot ls = NodeLatencyStats_Snapshot(&nodes[i].latency_stats, tsc_ghz);
+            NodeLatencySnapshot ls = NodeLatencyStats_Snapshot(&nodes[tt::NodeIdx{(int16_t)i}].latency_stats, tsc_ghz);
             if (ls.total_count == 0) {
                 fprintf(stdout, "  " SH_FG " %2d   " SH_DIM "%8s   %6s ns   %6s ns   %6s ns   %6s ns   %6s ns   %6s ns" SH_RESET "\033[K\n",
                         i, "0", "-", "-", "-", "-", "-", "-");
@@ -2231,8 +2231,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 double tp_d    = Money_ToDouble(state.oms->portfolio.positions[s].take_profit_price);
                 double sl_d    = Money_ToDouble(state.oms->portfolio.positions[s].stop_loss_price);
                 double unreal_d = (price_d - entry_d) * qty_d;
-                const char* strat = (s < state.registered_count && state.nodes[s].strategy_id < NUM_STRATEGIES)
-                    ? STRATEGY_SHORT_NAMES[state.nodes[s].strategy_id] : "?";
+                // E.1.3 P0 — Class-61 instance #11 (found BY the TD-299 conversion): this loop walks
+                // SLOT space (active_bitmap ctz), but the old code read state.nodes[s] with the raw
+                // slot — under partials, leg-B slots displayed the WRONG node's strategy. Derive the
+                // node through the typed bridge; the count guard moves to NODE space with it.
+                const tt::NodeIdx sn = Sharded_SlotNode(tt::SlotIdx{(int16_t)s},
+                    BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
+                const char* strat = ((int)sn < state.registered_count && state.nodes[sn].strategy_id < NUM_STRATEGIES)
+                    ? STRATEGY_SHORT_NAMES[state.nodes[sn].strategy_id] : "?";
                 fprintf(stdout, "  " SH_FG " %2d    " SH_PEACH "%-5s" SH_RESET
                         "  " SH_FG "$%10.2f   %10.6f   " SH_BOLD "%s$%+8.4f" SH_RESET
                         "   " SH_GREEN "$%.2f" SH_RESET "   " SH_RED "$%.2f" SH_RESET "\033[K\n",
@@ -2362,7 +2368,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // to the init for-loop.
     for (int i = 0; i < num_nodes; ++i) {
         auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
-            state.nodes[i].ensemble_handle);
+            state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle);
         if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
             cfg.node_model_dir[i][0]) {
             // s5 BT-6/BT-7 — ONE call for all four families (the hand-written

@@ -251,14 +251,14 @@ template <unsigned F>
 inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
                                         const ReconcileTrade* trades,
                                         int n_trades,
-                                        const PerNodeCfg<F>* nodes = nullptr) {
+                                        const tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES>* nodes = nullptr) {
     if (!oms || !trades || n_trades <= 0) return 0;
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; loop body uses
     // pure ALU. Stub array supports nullptr-tolerant callers (test fixtures, post-crash recovery
     // paths without cfg available). Per branchless-dispatch-discipline.md Pattern 3.
-    static const PerNodeCfg<F> NULL_PER_NODE_CFG_STUB_ARRAY[MAX_EXECUTION_NODES] = {};
-    const PerNodeCfg<F>* effective_nodes = nodes ? nodes : NULL_PER_NODE_CFG_STUB_ARRAY;
+    static const tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES> NULL_PER_NODE_CFG_STUB_ARRAY = {};   // E.1.3 P0/TD-299: typed stub (baseline exclusion retired)
+    const tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES>& effective_nodes = nodes ? *nodes : NULL_PER_NODE_CFG_STUB_ARRAY;   // same single-cmov select, typed
 
     int replayed = 0;
     uint64_t max_trade_id = oms->last_seen_trade_id;
@@ -309,7 +309,7 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
         Order_SetIsMaker(&synth, (bool)t.is_maker);
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order_BindPreResolved with originating core's cfg.
         // Closes Class 27 cross-core fee accuracy gap for the common (in-flight) case.
-        Order_BindPreResolved(&synth, effective_nodes[owner_node]);  // per-NODE cfg <- NODE index
+        Order_BindPreResolved(&synth, effective_nodes[tt::NodeIdx{(int16_t)owner_node}]);  // per-NODE cfg <- NODE index
         synth.requested_qty = Money{ money_from_double_payload(t.qty) };  // D-103 reconcile ingress
         synth.event_price   = Money{ money_from_double_payload(t.price) };
 

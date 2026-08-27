@@ -256,7 +256,7 @@ inline void Summary_EmitPerCoreEntry(std::FILE* f, const NodeContext<F>& ctx, in
 //   std::fprintf(f, "[");
 //   for (int c = 0; c < num_nodes; ++c) {
 //       if (c > 0) std::fprintf(f, ",");
-//       Summary_EmitPerCoreEntry(f, state.nodes[c], c);
+//       Summary_EmitPerCoreEntry(f, state.nodes[tt::NodeIdx{(int16_t)c}], c);
 //   }
 //   std::fprintf(f, "]");
 //
@@ -277,8 +277,8 @@ inline void Summary_EmitPerCoreEntry(std::FILE* f, const NodeContext<F>& ctx, in
 // [CODE]
 //======================================================================
 template <unsigned F>
-inline void Summary_EmitPerStrategy(std::FILE* f, const NodeContext<F>* nodes, int num_nodes) {
-    if (!f || !nodes) return;
+inline void Summary_EmitPerStrategy(std::FILE* f, const tt::NodeArray<NodeContext<F>, MAX_EXECUTION_NODES>& nodes, int num_nodes) {   // E.1.3 P0/TD-299: typed ref
+    if (!f) return;
     constexpr int MAX_STRAT = 256;  // full uint8_t range
     struct StratAgg {
         int      present;
@@ -294,19 +294,19 @@ inline void Summary_EmitPerStrategy(std::FILE* f, const NodeContext<F>* nodes, i
     };
     StratAgg agg[MAX_STRAT] = {};
     for (int c = 0; c < num_nodes; ++c) {
-        const uint8_t sid = nodes[c].strategy_id;
+        const uint8_t sid = nodes[tt::NodeIdx{(int16_t)c}].strategy_id;
         if (sid == 0xFF) continue;  // STRATEGY_NONE — skip
         StratAgg& a = agg[sid];
         a.present = 1;
-        a.entries      += nodes[c].entries_processed;
-        a.exits        += nodes[c].exits_processed;
-        a.realized      = Money_Add(a.realized,      nodes[c].node_realized);
-        a.fees          = Money_Add(a.fees,          nodes[c].node_fees);
-        a.wins         += nodes[c].node_wins;
-        a.losses       += nodes[c].node_losses;
-        a.gross_wins    = Money_Add(a.gross_wins,    nodes[c].node_gross_wins);
-        a.gross_losses  = Money_Add(a.gross_losses,  nodes[c].node_gross_losses);
-        a.open_notional = Money_Add(a.open_notional, nodes[c].node_open_notional);
+        a.entries      += nodes[tt::NodeIdx{(int16_t)c}].entries_processed;
+        a.exits        += nodes[tt::NodeIdx{(int16_t)c}].exits_processed;
+        a.realized      = Money_Add(a.realized,      nodes[tt::NodeIdx{(int16_t)c}].node_realized);
+        a.fees          = Money_Add(a.fees,          nodes[tt::NodeIdx{(int16_t)c}].node_fees);
+        a.wins         += nodes[tt::NodeIdx{(int16_t)c}].node_wins;
+        a.losses       += nodes[tt::NodeIdx{(int16_t)c}].node_losses;
+        a.gross_wins    = Money_Add(a.gross_wins,    nodes[tt::NodeIdx{(int16_t)c}].node_gross_wins);
+        a.gross_losses  = Money_Add(a.gross_losses,  nodes[tt::NodeIdx{(int16_t)c}].node_gross_losses);
+        a.open_notional = Money_Add(a.open_notional, nodes[tt::NodeIdx{(int16_t)c}].node_open_notional);
     }
     std::fprintf(f, "[");
     bool first_strat = true;

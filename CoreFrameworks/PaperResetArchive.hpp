@@ -203,7 +203,7 @@ inline int Summary_WriteJson(const char* output_path,
     std::fprintf(f, "  \"per_node\":[");
     for (int c = 0; c < num_nodes; ++c) {
         if (c > 0) std::fprintf(f, ",");
-        Summary_EmitPerCoreEntry(f, state.nodes[c], c);
+        Summary_EmitPerCoreEntry(f, state.nodes[tt::NodeIdx{(int16_t)c}], c);
     }
     std::fprintf(f, "],\n");
 

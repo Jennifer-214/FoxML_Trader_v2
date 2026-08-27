@@ -42,6 +42,7 @@
 #include "SessionPhaseRegistry.hpp"            // v5.15.5.B.5 — FOREACH_SESSION_PHASE + SESSION_BY_HOUR[24] (closes TECH_DEBT-040)
 #include "CfgFieldRegistry.hpp"                // v5.15.5.F.4b — universal cfg field registry (FOREACH_CFG_FIELD + CfgFieldDescriptor)
 #include "CfgFieldDispatch.hpp"                // v5.15.5.F.4b — tt:: type-trait dispatch (3-barrier Class 23 fix)
+#include "IndexSpaces.hpp"                     // E.1.3 P0/TD-299 — tt::NodeIdx/NodeArray (typed per-NODE subscripts, D-438)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1374,7 +1375,7 @@ template <unsigned F> struct ControllerConfig {
   // cache-line aligned — per-core slow-path reads land in distinct cache
   // lines without cross-core false sharing (H6 discipline).
   //==================================================================================================
-  PerNodeCfg<F> nodes[MAX_EXECUTION_NODES];
+  tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES> nodes;   // E.1.3 P0/TD-299: typed per-NODE (layout-identical — memset ctor + raw-byte fingerprint unaffected, gate B1)
 
   // === Per-core legacy parallel arrays (documented exemptions; auto-generated via X-macro) ===
   // WIP2d-0.B (.F.4c.3) — 11 parallel arrays consolidated into FOREACH_MANUAL_PER_NODE_FIELD
@@ -1531,21 +1532,21 @@ inline void ControllerConfig_CapitalRangeSweep(ControllerConfig<F>& cfg) {
     const Money cap_gain = Money{ money_from_double_payload(tt::BARRIER_SANE_MAX_TP) };  // 10.0 = 1000%
 
     // (1) per-node sweep — if-constexpr walk (mirrors EMIT_PER_NODE_COPY); reads the B-merged nodes[c].
-    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
+    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) { const tt::NodeIdx nc{(int16_t)c};  // E.1.3 P0/TD-299 typed subscript
         #define CFG_SWEEP_CAPITAL_FIELD(STORAGE_T, KIND, name, label, section, meta, payload, ...)     \
             if constexpr (((meta) & CfgFieldDescriptor::CAPITAL_BOUND_LOSS) != 0) {                    \
-                if (capital_value_out_of_range(cfg.nodes[c].name, cap_loss)) {                         \
+                if (capital_value_out_of_range(cfg.nodes[nc].name, cap_loss)) {                         \
                     cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;                        \
                     fprintf(stderr, "[cfg] FATAL: node %d capital field '%s' = %.4f exceeds the LOSS " \
                         "cap (1.0 = 100%%) -> boot REFUSED.\n", c, #name,                              \
-                        Money_ToDouble(cfg.nodes[c].name));                                            \
+                        Money_ToDouble(cfg.nodes[nc].name));                                            \
                 }                                                                                     \
             } else if constexpr (((meta) & CfgFieldDescriptor::CAPITAL_BOUND_GAIN) != 0) {             \
-                if (capital_value_out_of_range(cfg.nodes[c].name, cap_gain)) {                         \
+                if (capital_value_out_of_range(cfg.nodes[nc].name, cap_gain)) {                         \
                     cfg.cfg_load_fault_flags |= CFG_FAULT_CAPITAL_OUT_OF_RANGE;                        \
                     fprintf(stderr, "[cfg] FATAL: node %d capital field '%s' = %.4f exceeds the GAIN " \
                         "cap (10.0 = 1000%%) -> boot REFUSED.\n", c, #name,                            \
-                        Money_ToDouble(cfg.nodes[c].name));                                            \
+                        Money_ToDouble(cfg.nodes[nc].name));                                            \
                 }                                                                                     \
             }  /* non-capital fields: no-op (exhaustiveness enforced by the static_assert above) */
         FOREACH_PER_NODE_CFG_FIELD(CFG_SWEEP_CAPITAL_FIELD)
@@ -1774,7 +1775,7 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 //======================================================================
 template <unsigned F>
 inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
-    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
+    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) { const tt::NodeIdx nc{(int16_t)c};  // E.1.3 P0/TD-299 typed subscript
         ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, c);
         // Per-core registry rows — X-macro auto-walker over FOREACH_PER_NODE_CFG_FIELD.
         // Future per-core row additions auto-flow here; no edits needed.
@@ -1790,7 +1791,7 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
                                     applies_to_strategy, applies_to_op_mode, \
                                     applies_to_regime, applies_to_risk, lives_in_struct) \
             if constexpr (!((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
-                cfg->nodes[c].name = resolved.name; \
+                cfg->nodes[nc].name = resolved.name; \
             }
         FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_COPY)
         #undef EMIT_PER_NODE_COPY
@@ -1815,11 +1816,11 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
         // rows ship at WIP2e and rebuild these bitmaps from rows at slow-path rebuild). The
         // resolved view already merges per-core bitmap overrides via the legacy
         // PerNodeOverrides<F> bitmap path in ControllerConfig_ResolveForCore.
-        cfg->nodes[c].lifecycle_cfg_flags = resolved.lifecycle_cfg_flags;
-        cfg->nodes[c].gate_cfg_flags      = resolved.gate_cfg_flags;
-        cfg->nodes[c].ml_cfg_flags        = resolved.ml_cfg_flags;
-        cfg->nodes[c].risk_cfg_flags      = resolved.risk_cfg_flags;
-        cfg->nodes[c].ops_cfg_flags       = resolved.ops_cfg_flags;
+        cfg->nodes[nc].lifecycle_cfg_flags = resolved.lifecycle_cfg_flags;
+        cfg->nodes[nc].gate_cfg_flags      = resolved.gate_cfg_flags;
+        cfg->nodes[nc].ml_cfg_flags        = resolved.ml_cfg_flags;
+        cfg->nodes[nc].risk_cfg_flags      = resolved.risk_cfg_flags;
+        cfg->nodes[nc].ops_cfg_flags       = resolved.ops_cfg_flags;
     }
 }
 //======================================================================

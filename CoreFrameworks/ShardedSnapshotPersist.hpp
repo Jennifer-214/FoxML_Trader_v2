@@ -201,7 +201,7 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     // the ==29 count-lock. `confidence.window` stays deliberately OFF the wire
     // (cfg-owned at Init; persisting would carry stale cfg across restarts).
     for (uint32_t i = 0; i < num_nodes; ++i) {
-        const NodeContext<F>& ctx = state->nodes[i];
+        const NodeContext<F>& ctx = state->nodes[tt::NodeIdx{(int16_t)i}];
         FOREACH_NODE_PERSIST_FIELD(NPF_PROJECT_SAVE)
     }
     // v3 NOTE: ExecutionCore leg-B mirrors (active_b, entry_price_b,
@@ -404,13 +404,13 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
         ConfidenceScorer confidence;
     };
-    NodeSnap snaps[MAX_EXECUTION_NODES];
+    tt::NodeArray<NodeSnap, MAX_EXECUTION_NODES> snaps;   // E.1.3 P0/TD-299: typed per-NODE
 
     // E.1.2 D-305 — registry-driven read walk (same 29 ordered rows as the save
     // walk; STORAGE_KIND dispatch ONLY, so NO_COMMIT rows still consume their
     // wire bytes and every later offset stays correct — the A2 invariant).
     for (uint32_t i = 0; i < file_num_nodes; ++i) {
-        NodeSnap& s = snaps[i];
+        NodeSnap& s = snaps[tt::NodeIdx{(int16_t)i}];
         FOREACH_NODE_PERSIST_FIELD(NPF_PROJECT_READ)
     }
     fclose(f);
@@ -436,7 +436,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     // init path checks strategy_state_kind and dispatches"). In
     // practice, the boot path (EngineCommon_BootPerCore, called from
     // EngineSharded/Run.hpp) dispatches Strategy_InitPerCore on
-    // `state.nodes[i].strategy_id` (cfg-derived), NOT the loaded kind.
+    // `state..strategy_id` (cfg-derived), NOT the loaded kind.
     // The persisted field is therefore dead weight — and worse,
     // restoring it corrupts the invariant that `strategy_state_kind`
     // describes the C++ type of the allocated `strategy_state` pointer.
@@ -472,8 +472,8 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     // composite-mode + window stay valid even when restoring from an older
     // config's snapshot.
     for (uint32_t i = 0; i < file_num_nodes; ++i) {
-        NodeSnap& s = snaps[i];
-        NodeContext<F>& ctx = state->nodes[i];
+        NodeSnap& s = snaps[tt::NodeIdx{(int16_t)i}];
+        NodeContext<F>& ctx = state->nodes[tt::NodeIdx{(int16_t)i}];
         FOREACH_NODE_PERSIST_FIELD(NPF_PROJECT_COMMIT)
         // E.1.2 REC-A: the derived rmse.sum_squared_errors recompute is now
         // EMBEDDED in ConfidenceScorer_CommitPersistedFields' tail (the
@@ -515,7 +515,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         int node_id = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_exit_enabled);
         int leg     = partial_exit_enabled ? (slot & 1)  : 0;
         if (node_id < 0 || node_id >= (int)state->registered_count) continue;
-        ExecutionCore<F>* node_ptr = state->nodes[node_id].core;
+        ExecutionCore<F>* node_ptr = state->nodes[tt::NodeIdx{(int16_t)node_id}].core;
         if (!node_ptr) continue;
         const Position<F>& pos = state->oms->portfolio.positions[slot];
         // Active flag last (no atomic needed — core hot-path thread
@@ -545,7 +545,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
             // .E.0.10 A1 (H22): resolve the per-NODE per-strategy override, NOT the GLOBAL pct —
             // single-sourced with the fresh-entry dispatcher (ResolvePerFillTpPct/SlPct) so a
             // restored SimpleDip/MR/EmaCross position exits at the SAME TP/SL it had while live.
-            const uint8_t a1_sid = state->nodes[node_id].resolved_strategy_id;
+            const uint8_t a1_sid = state->nodes[tt::NodeIdx{(int16_t)node_id}].resolved_strategy_id;
             Money tp_pct_a = ResolvePerFillTpPct(a1_sid, resolved);
             Money sl_pct_a = ResolvePerFillSlPct(a1_sid, resolved);
             if (!Money_IsZero(tp_pct_a))

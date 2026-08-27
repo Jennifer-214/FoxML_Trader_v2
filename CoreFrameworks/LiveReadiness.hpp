@@ -147,7 +147,7 @@ inline bool check_all_ml_cores_have_model(const ControllerConfig<F>& cfg,
         // serving a VERIFIED ensemble was refused at live boot with a
         // misleading "no model" hint — R1's narrowing).
         if (cfg.node_strategies[i] == STRATEGY_ML &&
-            !node_has_serving_model(state.nodes[i])) {
+            !node_has_serving_model(state.nodes[tt::NodeIdx{(int16_t)i}])) {
             return false;
         }
     }
@@ -161,11 +161,11 @@ inline bool check_model_max_age_set(const ControllerConfig<F>& cfg,
     if (cfg.model_max_age_hours == 0) return false;
     // (b) no core has MODEL_AGE_WARN drift bit set
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
-        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)i}].model_handle;
         // E.1.2.C leg 3 — ensemble drift bits feed the gate too (was vacuous
         // for ensemble-only nodes).
         uint16_t drift = (uint16_t)(aggregate_zoo_drift(zoo) |
-                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+                                    aggregate_ezoo_drift<F>(state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle));
         if (BITMAP_IS_SET(drift, FAILURE_MASK_model_age_warn)) {
             return false;
         }
@@ -177,9 +177,9 @@ template <unsigned F>
 inline bool check_no_feature_hash_drift(const ControllerConfig<F>& cfg,
                                         const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
-        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)i}].model_handle;
         uint16_t drift = (uint16_t)(aggregate_zoo_drift(zoo) |
-                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+                                    aggregate_ezoo_drift<F>(state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle));
         if (BITMAP_IS_SET(drift, FAILURE_MASK_feature_hash_drift)) {
             return false;
         }
@@ -191,9 +191,9 @@ template <unsigned F>
 inline bool check_no_label_hash_drift(const ControllerConfig<F>& cfg,
                                       const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
-        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)i}].model_handle;
         uint16_t drift_label_hash_drift = (uint16_t)(aggregate_zoo_drift(zoo) |
-                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+                                    aggregate_ezoo_drift<F>(state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle));
         if (BITMAP_IS_SET(drift_label_hash_drift, FAILURE_MASK_label_hash_drift)) {
             return false;
         }
@@ -205,9 +205,9 @@ template <unsigned F>
 inline bool check_no_build_flags_drift(const ControllerConfig<F>& cfg,
                                        const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
-        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)i}].model_handle;
         uint16_t drift_build_flags_drift = (uint16_t)(aggregate_zoo_drift(zoo) |
-                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+                                    aggregate_ezoo_drift<F>(state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle));
         if (BITMAP_IS_SET(drift_build_flags_drift, FAILURE_MASK_build_flags_drift)) {
             return false;
         }
@@ -219,9 +219,9 @@ template <unsigned F>
 inline bool check_all_stamps_hmac_verified(const ControllerConfig<F>& cfg,
                                            const EventLoopState<F>& state) {
     for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
-        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[i].model_handle;
+        const NodeModelZoo<F>* zoo = (const NodeModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)i}].model_handle;
         uint16_t drift_stamp_hmac_not_verified = (uint16_t)(aggregate_zoo_drift(zoo) |
-                                    aggregate_ezoo_drift<F>(state.nodes[i].ensemble_handle));
+                                    aggregate_ezoo_drift<F>(state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle));
         if (BITMAP_IS_SET(drift_stamp_hmac_not_verified, FAILURE_MASK_stamp_hmac_not_verified)) {
             return false;
         }

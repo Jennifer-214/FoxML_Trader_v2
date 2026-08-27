@@ -240,7 +240,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     // 1. Fan out to every registered execution core. Order is fixed
     //    (slot 0 first) for determinism.
     for (int slot = 0; slot < drv->state->registered_count; ++slot) {
-        ExecutionCore<F>* core = drv->state->nodes[slot].core;
+        ExecutionCore<F>* core = drv->state->nodes[tt::NodeIdx{(int16_t)slot}].core;
         if (core) ExecutionCore_Tick(core, tick);
     }
 

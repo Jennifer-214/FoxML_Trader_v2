@@ -432,7 +432,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   // regime detector — legacy single_core uses core 0's per-core value
   // (sister to EngineCommon_BootGlobal's SHARDED per-core Regime_Init convention;
   // value-equivalent via EMIT_PER_NODE_COPY walker propagating global → cores)
-  Regime_Init(&ctrl->regime, config.nodes[0].regime_hysteresis);
+  Regime_Init(&ctrl->regime, config.nodes[tt::NodeIdx{0}].regime_hysteresis);
   ctrl->regime_ror = RORRegressor_Init<F>();
   ctrl->volume_spike_ratio = FPN_Zero<F>();
   ctrl->sl_cooldown_counter = 0;
@@ -2123,7 +2123,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->mean_rev.live_stddev_mult   = new_cfg.offset_stddev_mult;
     ctrl->momentum.live_breakout_mult = new_cfg.momentum_breakout_mult;
     ctrl->momentum.live_vol_mult      = new_cfg.volume_multiplier;
-    ctrl->regime.hysteresis_threshold = new_cfg.nodes[0].regime_hysteresis;  // sister to Init at :358
+    ctrl->regime.hysteresis_threshold = new_cfg.nodes[tt::NodeIdx{0}].regime_hysteresis;  // sister to Init at :358
 
     // live strategy switch
     // default_strategy >= 0: explicit strategy selection (0=MR, 1=Momentum, 2=SimpleDip)

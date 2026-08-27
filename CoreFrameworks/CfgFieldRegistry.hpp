@@ -29,7 +29,7 @@
 //   FOREACH_PER_NODE_CFG_FIELD(X) — trading / strategy / entry / exit / ML /
 //                                   risk-gate / regime-detection / per-core
 //                                   kill switches (~79 rows). Consumed against
-//                                   `cfg.nodes[c].<field>` per-core struct
+//                                   `cfg..<field>` per-core struct
 //                                   instance (`PerNodeCfg<F>`).
 //
 // PER_NODE_OK metadata bit REMOVED — every per-core row IS per-core by
@@ -147,7 +147,7 @@ struct CfgFieldDescriptor {
     // semantic separation". Walker triplet (parser/copy/render) consumes the
     // SPECIFIC bit relevant to each walker's concern; no overload risk.
     //   - MANUAL_PARSER: skip registry parser walker (manual string-form parser handles)
-    //   - NO_FLAT_FIELD: skip copy/render walkers (field exists only on nodes[c], not on ControllerConfig flat scalar)
+    //   - NO_FLAT_FIELD: skip copy/render walkers (field exists only on , not on ControllerConfig flat scalar)
     // A row may carry one, both, or neither bit. `strategy` carries both (custom
     // string parser + no flat scalar). bandit_algorithm/risk_degradation_curve/
     // barrier_blend_mode/fee_rate_maker/fee_rate_taker carry MANUAL_PARSER only.
@@ -164,7 +164,7 @@ struct CfgFieldDescriptor {
         LOG_VALUE_FORBIDDEN   = 1u << 9,   // value never appears in logs (privacy/security; v5.15.6.B)
         MANUAL_PARSER         = 1u << 10,  // skip registry parser walker — manual string-form / side-effect parser handles (WIP2d-1.B.0; was HAS_SIDE_EFFECT pre-split)
         WARN_ON_CLAMP         = 1u << 11,  // emit "[cfg] WARN: <key>='<val>' out of range; clamping to <clamped>" when parse clamps value (.F.4c)
-        NO_FLAT_FIELD         = 1u << 12,  // field exists only on nodes[c] (no ControllerConfig flat scalar) — skip copy/render walkers (WIP2d-1.B.0)
+        NO_FLAT_FIELD         = 1u << 12,  // field exists only on nodes[tt::NodeIdx{(int16_t)c}] (no ControllerConfig flat scalar) — skip copy/render walkers (WIP2d-1.B.0)
         // v5.15.5.F.4d Charter 8 — STAMP_BOUND_CFG_DERIVED drives DERIVED_FILTER framework
         // (auto-generates POST_CFG mirror + CfgDerivedInferenceCfgRegistry + CfgDriftCheckRegistry
         // rows from single flagged source row). Per metadata-bit-driven-derived-filter-framework.md
@@ -573,7 +573,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 // [TAG]_[[ENGINE] [CFG_FLOW] [FRAMEWORK_DISCIPLINE]]
 // [REFERENCE]_[INVARIANT]_[[H17] [H22]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[~79 per-node rows at cfg.nodes[c].<field> — registry membership IS the scope assertion (PER_NODE_OK bit removed); same 13-col tuple as GLOBAL; EMIT payload macros follow inside this section]
+// [OVERVIEW]_[~79 per-node rows at cfg..<field> — registry membership IS the scope assertion (PER_NODE_OK bit removed); same 13-col tuple as GLOBAL; EMIT payload macros follow inside this section]
 // [COLUMN]_[STORAGE_T]_[C++ destination type on PerNodeCfg<F> (H13/H14: Kind never drives storage)]
 // [COLUMN]_[KIND_TOKEN]_[GUI metadata only (slider/textbox/format/clamp coercion)]
 // [COLUMN]_[name/label/section]_[cfg key + GUI label + Settings section]
@@ -803,13 +803,13 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     X(Money, KIND_DOUBLE_PCT, fee_rate_maker,               "Fee Maker %%",         "Trading",         CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT, DBL(0.075, 0.0, 5.0), "Maker fill fee rate (% per trade; e.g. 0.075 = 0.075% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_taker. .B.3 Step 1.6.2 v1.6 cohort bit-add (Class 32 full closure).", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(Money, KIND_DOUBLE_PCT, fee_rate_taker,               "Fee Taker %%",         "Trading",         CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED | CfgFieldDescriptor::HAS_SIDE_EFFECT, DBL(0.100, 0.0, 5.0), "Taker fill fee rate (% per trade; e.g. 0.100 = 0.100% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_maker. .B.3 Step 1.6.2 v1.6 cohort bit-add (Class 32 full closure).", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(FPN_Binary<F>                , KIND_DOUBLE, foxml_vol_scaling_z_max,      "Vol Scale Z-Max",      "ML",              CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3.0, 0.0, 100.0),    "Z-score clipping threshold for FoxML VolScaler (limits how much volatility scaling can compress trade size). Default 3.0 = clip at 3 sigma.", STRAT_CAT_ML, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    /* === Strategy selector (1) — WIP2d-1 Finding 1 closure (HIGH-2 amendment "node_strategies[16] → nodes[c].strategy") === */                                                                                          \
+    /* === Strategy selector (1) — WIP2d-1 Finding 1 closure (HIGH-2 amendment "node_strategies[16] → nodes[tt::NodeIdx{(int16_t)c}].strategy") === */                                                                                          \
     /* HAS_SIDE_EFFECT — registry walker triplet (parser/copy/render) uniformly skips via if-constexpr. */                                                                                                              \
     /* Manual handling: parser at legacy `node_<N>_strategy=` block (string-form: mr/momentum/simple_dip/ml/ema_cross/none); */                                                                                          \
-    /* copy via explicit `nodes[c].strategy = node_strategies[c]` line after FOREACH walker; render via Step 6 per-core tabs. */                                                                                       \
+    /* copy via explicit `nodes[tt::NodeIdx{(int16_t)c}].strategy = node_strategies[c]` line after FOREACH walker; render via Step 6 per-core tabs. */                                                                                       \
     /* Default 2 = STRATEGY_SIMPLE_DIP per ControllerConfig_Default node_strategies[i]=2 legacy init. */                                                                                                                \
     X(uint8_t               , KIND_INT,    strategy,                     "Strategy",             "Strategies",      (CfgFieldDescriptor::MANUAL_PARSER | CfgFieldDescriptor::NO_FLAT_FIELD), INT(2, 0, 5),                                                                                              \
-        "Per-node strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `node_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; nodes[c].strategy auto-syncs from node_strategies[c] via FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
+        "Per-node strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `node_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; nodes[tt::NodeIdx{(int16_t)c}].strategy auto-syncs from node_strategies[c] via FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //------------------------------------------------------------------------------
@@ -893,7 +893,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //
 // Invoked in ControllerConfig_Default<F> alongside FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT)
 // — auto-flows registry defaults to global manual struct fields; downstream EMIT_PER_NODE_COPY walker
-// propagates global → all nodes[c]; per-core override path (PER_NODE_OVERRIDE_INT_FIELDS for the 3 fields
+// propagates global → all ; per-core override path (PER_NODE_OVERRIDE_INT_FIELDS for the 3 fields
 // in that macro) applies on top via ControllerConfig_ResolveForCore.
 //======================================================================================================
 #define EMIT_PER_NODE_CFG_DEFAULT_GLOBAL_MIRROR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
@@ -907,7 +907,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// 79 rows. Each per-core row lives at `cfg.nodes[c].<field>` (one instance per
+// 79 rows. Each per-core row lives at `cfg..<field>` (one instance per
 // execution core; up to MAX_EXECUTION_NODES = 16). PER_NODE_OK metadata bit
 // is REMOVED — registry membership IS the scope assertion.
 //======================================================================
@@ -938,11 +938,11 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     X(char,                 node_symbol,               [32],    "KIND_STRING cohort at .F.4e — partial advance of .F.4c.3.A symbol axis migration") \
     /* === Hex64 bitmap awaiting KIND_HEX64 at .F.4e === */                                                                \
     X(uint64_t,             node_feature_mask,         ,        "KIND_HEX64 needed at .F.4e")                             \
-    /* === TRANSITIONAL parallel arrays — delete at WIP2g (nodes[c] authoritative) === */                                  \
-    X(Money,                       node_risk_pct,             ,        "TRANSITIONAL: nodes[c].risk_pct authoritative; delete at WIP2g") \
-    X(uint8_t,              node_strategies,           ,        "TRANSITIONAL: nodes[c].strategy authoritative (WIP2d-0); delete at WIP2g") \
-    X(uint32_t,             node_time_exit_ticks,      ,        "TRANSITIONAL: nodes[c].max_hold_ticks authoritative; legacy override array; delete at WIP2g") \
-    X(Money,                       node_max_drawdown_pct,     ,        "TRANSITIONAL: nodes[c].max_drawdown_pct authoritative; legacy override array; delete at WIP2g") \
+    /* === TRANSITIONAL parallel arrays — delete at WIP2g (nodes[tt::NodeIdx{(int16_t)c}] authoritative) === */                                  \
+    X(Money,                       node_risk_pct,             ,        "TRANSITIONAL: nodes[tt::NodeIdx{(int16_t)c}].risk_pct authoritative; delete at WIP2g") \
+    X(uint8_t,              node_strategies,           ,        "TRANSITIONAL: nodes[tt::NodeIdx{(int16_t)c}].strategy authoritative (WIP2d-0); delete at WIP2g") \
+    X(uint32_t,             node_time_exit_ticks,      ,        "TRANSITIONAL: nodes[tt::NodeIdx{(int16_t)c}].max_hold_ticks authoritative; legacy override array; delete at WIP2g") \
+    X(Money,                       node_max_drawdown_pct,     ,        "TRANSITIONAL: nodes[tt::NodeIdx{(int16_t)c}].max_drawdown_pct authoritative; legacy override array; delete at WIP2g") \
     /* === TRANSITIONAL legacy override struct — delete at WIP2f (PerNodeOverrides<F> retired) === */                      \
     X(PerNodeOverrides<F>,  node_overrides,            ,        "TRANSITIONAL: legacy global-default-with-override anti-pattern; entire mechanism retires at WIP2f when ControllerConfig_ResolveForCore deletes")
 
@@ -1056,7 +1056,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // [TAG]_[[ENGINE] [CFG_FLOW]]
 // [REFERENCE]_[DESIGN_SPEC]_[autopopulate-pattern-for-production-caller-class]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[sync sources for NO_FLAT_FIELD rows (no flat scalar exists) — legacy array -> nodes[c]; N=1 today (strategy <- node_strategies), applied per the future-easy multiplier]
+// [OVERVIEW]_[sync sources for NO_FLAT_FIELD rows (no flat scalar exists) — legacy array -> ; N=1 today (strategy <- node_strategies), applied per the future-easy multiplier]
 // [COLUMN]_[target_field]_[the NO_FLAT_FIELD-tagged row in FOREACH_PER_NODE_CFG_FIELD]
 // [COLUMN]_[source_array_field]_[the TRANSITIONAL parallel array on ControllerConfig]
 // [REFERENCE]_[MEMORY]_[feedback_overengineering_boundary_when_future_easier]
@@ -1070,7 +1070,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // Payload macro: emit per-core sync line. Used by PopulateCoresFromFlat (templated;
 // `cfg` + `c` in scope from caller's per-core loop).
 #define EMIT_NO_FLAT_FIELD_SYNC(target, source) \
-    cfg->nodes[c].target = cfg->source[c];
+    cfg->nodes[tt::NodeIdx{(int16_t)c}].target = cfg->source[c];
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -1079,7 +1079,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // PURPOSE: auxiliary registry for FOREACH_PER_NODE_CFG_FIELD rows tagged NO_FLAT_FIELD.
 // These rows lack a ControllerConfig flat scalar; the auto-flow copy walker skips them via
 // the NO_FLAT_FIELD bit. THIS registry provides the manual sync source mapping (legacy
-// parallel array → registry-driven nodes[c] slice). The AUTOPOPULATE companion macro
+// parallel array → registry-driven  slice). The AUTOPOPULATE companion macro
 // generates the sync lines in PopulateCoresFromFlat per autopopulate-pattern-for-production-
 // caller-class.md.
 //
@@ -1105,7 +1105,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[TRANSITIONAL capital-array -> nodes[c] LAST-WINS merge (D-273/B) — RAW copy preserves the 0=inherit sentinel; MUST run AFTER the copy walker; retires with the arrays at WIP2g/E.1.2]
+// [OVERVIEW]_[TRANSITIONAL capital-array ->  LAST-WINS merge (D-273/B) — RAW copy preserves the 0=inherit sentinel; MUST run AFTER the copy walker; retires with the arrays at WIP2g/E.1.2]
 // [COLUMN]_[target_field]_[on PerNodeCfg<F>]
 // [COLUMN]_[source_array_field]_[the standalone capital array on ControllerConfig<F>]
 // [REFERENCE]_[DECISION]_[D-273]
@@ -1120,7 +1120,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // Payload macro: emit per-core raw-copy overwrite. Used by PopulateCoresFromFlat AFTER the copy walker
 // (last-wins; `cfg` + `c` in scope from caller's per-core loop).
 #define EMIT_PER_NODE_ARRAY_OVERRIDE(target, source) \
-    cfg->nodes[c].target = cfg->source[c];
+    cfg->nodes[tt::NodeIdx{(int16_t)c}].target = cfg->source[c];
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -1128,16 +1128,16 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 //----------------------------------------------------------------------
 // PURPOSE: the two TRANSITIONAL capital arrays (node_risk_pct / node_max_drawdown_pct) carry the LIVE
 // per-node override value, but ControllerConfig_ResolveForCore does NOT merge them — they are standalone
-// FOREACH_MANUAL_PER_NODE_FIELD arrays, NOT PER_NODE_OVERRIDE_FIELDS — so nodes[c].<field> was a dead
-// mirror equal to the global. This sidecar merges the RAW array into nodes[c] so nodes[c] is the ONE
+// FOREACH_MANUAL_PER_NODE_FIELD arrays, NOT PER_NODE_OVERRIDE_FIELDS — so .<field> was a dead
+// mirror equal to the global. This sidecar merges the RAW array into  so  is the ONE
 // authoritative per-node read (the dual-source-storage hazard, D-273/B, closes). Consumers (allocation +
-// per-node kill-switch) then read nodes[c].<field> and keep their two-branch divided-vs-direct math
+// per-node kill-switch) then read .<field> and keep their two-branch divided-vs-direct math
 // VERBATIM — byte-identical.
 //
 // DISTINCT from FOREACH_PER_NODE_NO_FLAT_FIELD_SYNC: those rows have NO flat scalar (the copy walker
 // skips them). THESE rows HAVE a flat scalar, so the copy walker (EMIT_PER_NODE_COPY) already wrote
-// nodes[c]=global; this sidecar runs AFTER it and OVERWRITES with the raw array (LAST-WINS). The copy is
-// RAW (0=inherit PRESERVED — a 0 array slot stays 0 in nodes[c], so the consumer's
+// =global; this sidecar runs AFTER it and OVERWRITES with the raw array (LAST-WINS). The copy is
+// RAW (0=inherit PRESERVED — a 0 array slot stays 0 in , so the consumer's
 // `!Money_IsZero ? direct : divided` two-branch is unchanged). NEVER collapse to array-if-set-else-global:
 // that destroys the 0=inherit sentinel and forces every node onto the direct branch (D-I2 / A-B
 // byte-identity invariant).
@@ -1146,7 +1146,7 @@ FOREACH_PER_NODE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
 // PopulateCoresFromFlat (last-wins overwrite). A-B HIGH: applied BEFORE the walker, the override is
 // silently dropped (reverts to global-divided default) = re-arms the founding bug.
 //
-// TRANSITIONAL: retires at WIP2g/E.1.2 — the parser writes nodes[c] directly + the arrays + this sidecar
+// TRANSITIONAL: retires at WIP2g/E.1.2 — the parser writes  directly + the arrays + this sidecar
 // retire together (the NodeState relayout leaf owns that layout change).
 //
 // Row shape: X(target_field, source_array_field)  [target on PerNodeCfg<F>; source on ControllerConfig<F>]

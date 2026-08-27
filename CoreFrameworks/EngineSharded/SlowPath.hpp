@@ -105,7 +105,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         int node_id = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_on);
         int leg     = partial_on ? (slot & 1)  : 0;
         if (node_id < 0 || node_id >= state.registered_count) continue;
-        uint8_t strategy_id = state.nodes[node_id].strategy_id;
+        uint8_t strategy_id = state.nodes[tt::NodeIdx{(int16_t)node_id}].strategy_id;
         // Use latest tick price as fill price for paper mode. Live
         // mode would route to a real adapter SELL — same Submit call.
         Tick<F> _latest{};
@@ -126,7 +126,7 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
             strategy_id,
             fill_px,
             (uint8_t)leg,
-            &cfg.nodes[node_id]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-node cfg for pre-resolve at submit
+            &cfg.nodes[tt::NodeIdx{(int16_t)node_id}]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-node cfg for pre-resolve at submit
         // v4.7.19: counter bumps moved to EventLoop_DrainPostFill —
         // see the doctrine note there. Pre-v4.7.19 we bumped here
         // BEFORE Submit could fail (queue full, slot already closed,
@@ -136,9 +136,9 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         // path doesn't re-emit on the next tick (race-tolerant —
         // worst case is one duplicate exit event that HandleFill
         // dedups via the empty-slot bitmap check).
-        if (state.nodes[node_id].core) {
-            if (leg == 0) state.nodes[node_id].core->active   = 0;
-            else          state.nodes[node_id].core->active_b = 0;
+        if (state.nodes[tt::NodeIdx{(int16_t)node_id}].core) {
+            if (leg == 0) state.nodes[tt::NodeIdx{(int16_t)node_id}].core->active   = 0;
+            else          state.nodes[tt::NodeIdx{(int16_t)node_id}].core->active_b = 0;
         }
         std::fprintf(stderr,
             "[manual-close] slot %d (node %d leg %s): force-exit @ %.2f, qty %.6f\n",
