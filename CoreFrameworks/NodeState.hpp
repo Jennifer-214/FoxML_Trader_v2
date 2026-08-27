@@ -57,6 +57,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "IndexSpaces.hpp"
 #include "ParameterSlot.hpp"
+#include "SPSCRing.hpp"
 
 //======================================================================================================
 // [STRUCT]_[FillEvent]
@@ -74,6 +75,7 @@
 // Money lands at offset 16 with NO hidden padding; sizeof pinned 96 (1.5 cache lines; SPSC ring
 // elements pack 2-per-3-lines). `venue_fee_reserved` is the E.1.4-slim A4 slot (D-441: additive
 // venue-exact commission completion) — 0 until that ship; NOT a live field here.
+inline constexpr int FILL_EVENT_RING_SIZE = 256;   // per-node; fills are ~Hz-scale vs a ~10µs-ms apply cadence
 template <unsigned F>
 struct FillEvent {
     tt::SlotIdx slot;             // portfolio slot the fill leg applies to
@@ -271,13 +273,26 @@ struct alignas(64) AggregatorState {
     //      the defined ring-order apply state (determinism anchor). ----
     alignas(64) tt::NodeArray<uint64_t, MAX_EXECUTION_NODES> applied_seq = {};
 
-    // ---- line 3 · cluster: ledger (Phase 3 fill: composer-owned global {balance, realized,
-    //      ks_peak} — the per-fill-true ratchet; source-purity pinned per D-441/gate accounting F4) ----
-    alignas(64) uint64_t _ledger_reserved[8] = {};
+    // ---- line 3 · the composer-owned ledger (P1-c: fields EXIST + are unit-exercised by the
+    //      apply machinery; they become AUTHORITATIVE at Phase 3 when the leaves emit FillEvents
+    //      in production. led_ks_peak ratchets PER APPLIED FILL — per-fill-TRUE, the gate-C2
+    //      resolution — and ONLY from led_balance (realized-equity source-purity, D-441/gate
+    //      accounting F4: NEVER from an unrealized-inclusive value). ----
+    alignas(64) Money led_balance   = Money_Zero();
+    Money            led_realized   = Money_Zero();
+    Money            led_ks_peak    = Money_Zero();
+    uint64_t         _pad_ledger[2] = {};   // H12: explicit pad to the line boundary
 
     // ---- the publish port: the house seqlock, instantiated (TD-240 precedent — reuse outright,
     //      never a third seqlock). 1 writer (composer), N readers. ----
     tt::ParameterSlot<MoneySnapshot<F>> publish;
+
+    // ---- per-node FillEvent rings (P1-c machinery; PRODUCTION at Phase 3 — the leaves emit,
+    //      the composer applies IN RING ORDER n=0..N ascending, FIFO within each ring: the
+    //      defined apply order that makes global prefix sums + the peak replay-deterministic).
+    //      Single producer per ring (the owning node, Phase 3+; unit harnesses until then);
+    //      single consumer (the composer). ----
+    tt::NodeArray<tt::SPSCRing<FillEvent<F>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES> fill_rings;
 
     // NOTE (paper/live partition — D-441 #4): modes are separate PROCESSES; mixed-mode totals
     // cannot occur. If a mixed-mode deployment ever exists, the partition hook is a second
@@ -298,9 +313,12 @@ static_assert(offsetof(NodeState<64>, _binding_reserved)       == 192, "cluster 
 static_assert(sizeof(ClusterState<64>) == 64,    "ClusterState<64> Phase-0 shell: 1 x 64B line");
 static_assert(offsetof(AggregatorState<64>, kill_word)   == 0,   "kill word owns line 0 (SSoT, H6)");
 static_assert(offsetof(AggregatorState<64>, applied_seq) == 64,  "apply cursors at line 1");
-static_assert(offsetof(AggregatorState<64>, _ledger_reserved) == 192, "reserved ledger line follows the cursors");
+static_assert(offsetof(AggregatorState<64>, led_balance) == 192, "composer ledger owns line 3 (P1-c growth, re-pinned)");
 static_assert(offsetof(AggregatorState<64>, publish)     == 256, "publish port after the state lines");
-static_assert(sizeof(AggregatorState<64>) == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),
-              "AggregatorState<64> = 4 state lines + the publish port (re-pin deliberately)");
+static_assert(offsetof(AggregatorState<64>, fill_rings)  == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),
+              "fill rings follow the publish port");
+static_assert(sizeof(AggregatorState<64>) == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>)
+              + sizeof(tt::NodeArray<tt::SPSCRing<FillEvent<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>),
+              "AggregatorState<64> = 4 state lines + publish port + fill rings (re-pin deliberately)");
 static_assert(alignof(NodeState<64>) == 64 && alignof(ClusterState<64>) == 64 &&
               alignof(AggregatorState<64>) == 64, "capital-plane types are cache-line aligned (H6)");

@@ -347,6 +347,60 @@ inline void EngineCommon_MoneyComposePublish(EventLoopState<F>& state,
 //======================================================================
 // [END_FUNCTION]_[EngineCommon_MoneyComposePublish]
 //======================================================================
+//======================================================================
+// [FUNCTION]_[EngineCommon_FillEmit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[producer side of the delta path — push one FillEvent onto the emitting node's ring (Phase 3+: the owning node's fill processing calls this; unit harnesses until then). Returns false on a full ring (counter-not-retry discipline lands with the production wiring)]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline bool EngineCommon_FillEmit(AggregatorState<F>& agg, const FillEvent<F>& fe) {
+    return tt::SPSCRing_TryPush(&agg.fill_rings[fe.node], fe);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_FillEmit]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineCommon_FillRingsApply]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the composer's DEFINED-ORDER apply: rings n=0..N ascending, FIFO within each — global prefix sums are well-defined, so led_ks_peak ratchets per APPLIED FILL (per-fill-TRUE, replay-deterministic — the gate-C2 resolution; a compose-cadence sampler would miss intra-cycle excursions and is REFUTED). Source-purity: the ratchet reads ONLY led_balance (realized equity), never an unrealized-inclusive value (D-441 / gate accounting F4)]
+// [REFERENCE]_[DECISION]_[[D-34] [D-54] [D-440] [D-441]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int EngineCommon_FillRingsApply(AggregatorState<F>& agg) {
+    int applied = 0;
+    for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
+        const tt::NodeIdx nn{(int16_t)n};
+        FillEvent<F> fe;
+        while (tt::SPSCRing_TryPop(&agg.fill_rings[nn], &fe)) {
+            // BUY legs carry net == 0 (buy books Δfee only — gate accounting F8); SELL legs carry
+            // the signed realized delta. Addition is exact (Money): the TOTALS are order-free;
+            // the PEAK is order-DEFINED by this loop — that is the design, not an accident.
+            agg.led_balance  = Money_Add(agg.led_balance,  fe.net);
+            agg.led_realized = Money_Add(agg.led_realized, fe.net);
+            agg.led_ks_peak  = Money_Max(agg.led_ks_peak,  agg.led_balance);   // per-fill-TRUE ratchet
+            agg.applied_seq[nn] = fe.seq;
+            ++applied;
+        }
+    }
+    return applied;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_FillRingsApply]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[EngineCommon_BootPerCore]
