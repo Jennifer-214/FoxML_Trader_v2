@@ -220,6 +220,16 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
             cfg.kill_switch_drawdown_pct);
     }
 
+    // 2b. E.1.3 P1 (D-440; gate parity F1) — aggregator boot lives in the SHARED BootGlobal so
+    //     LIVE and BACKTEST both initialize it by construction (M5). Zero pack, generation 0,
+    //     kill word clear; the publish port is seqlock-Init'd (never memset — atomics inside).
+    {
+        state.agg.generation = 0;
+        state.agg.kill_word.store(0, std::memory_order_relaxed);
+        MoneySnapshot<F> boot_pack{};
+        tt::ParameterSlot_Init(&state.agg.publish, boot_pack);
+    }
+
     // 3. Regime_Init per-core (per Step A.4 :760-762; cfg-driven hysteresis;
     //    sister to BacktestSharded.hpp:210-212 — train-serve parity by-construction)
     for (int i = 0; i < MAX_EXECUTION_NODES; ++i) {
@@ -269,6 +279,73 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //    sister-discipline (backtest already does the same at BacktestSharded.hpp:198 + :210-212).
 //======================================================================
 // [END_FUNCTION]_[EngineCommon_BootGlobal]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineCommon_MoneyComposePublish]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the SHARED compose+publish step (M5: live drainer cycle-tail AND backtest driver call THIS — behavioral parity by construction, gate parity F1) — composes MoneySnapshot from the ledger the CALLING thread owns and publishes via the house seqlock; Phase-1 interim: kill word is a DISPLAY COPY of the legacy flags (writers unify at Phase 2), and the slow-thread-written rows (peak/dd/unrealized) stay ZERO until Phase 2 centralizes them — composing them here would BE the cross-thread torn read this ship deletes]
+// [REFERENCE]_[DECISION]_[[D-440] [D-441]]
+// [REFERENCE]_[INVARIANT]_[[H3] [H6] [H22]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void EngineCommon_MoneyComposePublish(EventLoopState<F>& state,
+                                              const OrderManagerState<F>& oms,
+                                              uint64_t publish_tick) {
+    AggregatorState<F>& agg = state.agg;
+    MoneySnapshot<F> pack{};
+    agg.generation++;
+    pack.generation = agg.generation;
+
+    // Interim kill-word compose (Phase 1): a DISPLAY aggregation of the legacy authorities —
+    // the OMS global trip bit (drainer-written; same-thread on the live path) and the per-node
+    // KILL_TRIPPED flags (slow-thread-written small-int reads; display-copy tolerance, and the
+    // writer set unifies onto the composer at Phase 2 per the kill-writer table).
+    uint64_t kw = 0;
+    if (BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED)) {
+        kw |= KILLWORD_MASK_GLOBAL;
+    }
+    for (int n = 0; n < state.registered_count && n < MAX_EXECUTION_NODES; ++n) {
+        const tt::NodeIdx nn{(int16_t)n};
+        if (NODE_STATE_FLAG_IS_SET(state.nodes[nn], KILL_TRIPPED)) {
+            kw |= KILLWORD_NODE_MASK(n);
+        }
+    }
+    agg.kill_word.store(kw, std::memory_order_relaxed);
+    pack.kill_word_copy = kw;
+
+    // Global ledger view — owned by the CALLING thread on both production paths (live: the
+    // drainer books fills and calls this at its cycle tail; backtest: single-threaded driver).
+    pack.balance  = oms.balance;
+    pack.realized = oms.realized_pnl;
+    pack.ks_peak  = oms.ks_peak_balance;
+
+    // Per-node rows — Phase-1 fills only the CALLER-owned fields (alloc boot-stable;
+    // node_realized/node_fees drainer-written via DrainPostFill). peak/dd/unrealized are
+    // slow-thread-written at HEAD and stay Money_Zero() here until Phase 2 moves their
+    // ownership (a compose-side read NOW would be a 16B cross-thread torn read — the class).
+    for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
+        const tt::NodeIdx nn{(int16_t)n};
+        MoneySnapshotNodeRow& r = pack.rows[nn];
+        r.alloc      = state.nodes[nn].allocated_balance;
+        r.realized   = state.nodes[nn].node_realized;
+        r.fees       = state.nodes[nn].node_fees;
+        r.peak       = Money_Zero();   // Phase 2 (composer-owned eval)
+        r.dd         = Money_Zero();   // Phase 2 (recomputed at eval — D-420)
+        r.unrealized = Money_Zero();   // Phase 2.2 (node-computed, node-published)
+    }
+
+    tt::ParameterSlot_Write(&agg.publish, pack, publish_tick);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_MoneyComposePublish]
 //======================================================================
 
 //======================================================================

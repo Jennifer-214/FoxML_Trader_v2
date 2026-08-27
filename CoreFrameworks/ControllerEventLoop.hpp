@@ -73,6 +73,7 @@
 #pragma once
 
 #include "../Limits.hpp"
+#include "NodeState.hpp"  // E.1.3 P1 — FillEvent/MoneySnapshot/kill word/AggregatorState (capital plane; leaf includes only, cycle-free per the residence pin)
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "SlowPathGateRegistry.hpp"  // v5.14.9.B.0 — FOREACH_SLOW_PATH_GATE + AUTOPOPULATE
 #include "../ML_Headers/LinearRegression3X.hpp"  // v4.0.3 D10 RegressionFeederX
@@ -962,6 +963,12 @@ struct alignas(64) EventLoopState {
     // engine-wide use sites (function-entry of EventLoop_RebuildOneCore +
     // engine-wide outer ws-staleness check).
     GlobalGateState global_gate_state;
+
+    // E.1.3 P1 (D-440) — the composer's capital-plane state: kill-word SSoT + apply cursors +
+    // the MoneySnapshot publish port. Lives at the struct TAIL so every existing member offset
+    // is untouched. Composer (central thread) is the SOLE writer of everything inside (H22);
+    // all other threads read the published pack or relaxed-load the kill word.
+    AggregatorState<F> agg;
 };
 //======================================================================
 // [END_CODE]
