@@ -99,6 +99,7 @@
 //   B.0 ApplyBnbDiscount → ControllerConfig.hpp (cfg..fee_rate_*) + FixedPointN.hpp (FPN_Binary<F> arithmetic)
 //   B.1 BootGlobal → ControllerEventLoop.hpp (EventLoopState_Init + ConfigureKillSwitch) + OrderManager.hpp (OrderManagerState<F>) + RegimeDetector.hpp (Regime_Init)
 #include "ControllerConfig.hpp"                  // ControllerConfig<F>, MAX_EXECUTION_NODES, MASK_RISK_CFG_KILL_SWITCH_ENABLED (transitive via RiskCfgFlagRegistry)
+#include "Notify.hpp"   // E.1.3 P2-a — Notify_Send moved here with the node-kill trip
 #include "ControllerEventLoop.hpp"               // EventLoopState<F>, EventLoopState_Init, EventLoopState_ConfigureKillSwitch, EventLoopState_RegisterCore, EventLoopState_SetCoreStrategy
 #include "OrderManager.hpp"                      // OrderManagerState<F>
 #include "ExecutionCore.hpp"                     // ExecutionCore<F>, ExecutionCore_Init, ExecutionCore_SetPermission, SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>
@@ -282,30 +283,112 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[EngineCommon_MoneyComposePublish]
+// [FUNCTION]_[EngineCommon_ComposeAndKillEval]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
 // [THREAD]_[[COMPOSER_WRITER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the SHARED compose+publish step (M5: live drainer cycle-tail AND backtest driver call THIS — behavioral parity by construction, gate parity F1) — composes MoneySnapshot from the ledger the CALLING thread owns and publishes via the house seqlock; Phase-1 interim: kill word is a DISPLAY COPY of the legacy flags (writers unify at Phase 2), and the slow-thread-written rows (peak/dd/unrealized) stay ZERO until Phase 2 centralizes them — composing them here would BE the cross-thread torn read this ship deletes]
-// [REFERENCE]_[DECISION]_[[D-440] [D-441]]
+// [OVERVIEW]_[P2-a: the SHARED compose + BOTH kill evals, on the thread that OWNS the ledger (live: drainer cycle tail; backtest: driver inline — the SAME fn, M5/gate parity F1). Per-node MtM peak/dd/trip moved HERE from RebuildOneCore (the slow-thread compute+trip is EXCISED — this closes torn-read census sites: the slow-thread walk of drainer-owned positions/node_realized, and makes the node-flags word SINGLE-writer). Applies pending kill-RESET requests (mask; producer-side reset body retired). Global eval = the same EventLoop_KillSwitchEvaluate math, now called same-thread (the producer call at the KNOWN-RACE site is DELETED). Kill word: composed from flags that are now ALL same-thread — the word becomes the coherent 3-tier read]
+// [REFERENCE]_[DECISION]_[[D-440] [D-441] [D-420]]
 // [REFERENCE]_[INVARIANT]_[[H3] [H6] [H22]]
 //======================================================================
 // [CODE]
 //======================================================================
 template <unsigned F>
-inline void EngineCommon_MoneyComposePublish(EventLoopState<F>& state,
-                                              const OrderManagerState<F>& oms,
-                                              uint64_t publish_tick) {
+inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
+                                             OrderManagerState<F>& oms,
+                                             const ControllerConfig<F>& cfg,
+                                             Money current_price,
+                                             uint64_t publish_tick) {
     AggregatorState<F>& agg = state.agg;
-    MoneySnapshot<F> pack{};
-    agg.generation++;
-    pack.generation = agg.generation;
 
-    // Interim kill-word compose (Phase 1): a DISPLAY aggregation of the legacy authorities —
-    // the OMS global trip bit (drainer-written; same-thread on the live path) and the per-node
-    // KILL_TRIPPED flags (slow-thread-written small-int reads; display-copy tolerance, and the
-    // writer set unifies onto the composer at Phase 2 per the kill-writer table).
+    // ── 0. Apply pending kill-RESET requests (single consumer: this thread) ──
+    {
+        uint32_t rm = agg.kill_reset_mask.exchange(0, std::memory_order_acq_rel);
+        while (rm) {
+            int c = __builtin_ctz(rm);
+            rm &= rm - 1;
+            const tt::NodeIdx nn{(int16_t)c};
+            NODE_STATE_FLAG_CLR(state.nodes[nn], KILL_TRIPPED);
+            state.nodes[nn].node_peak_balance = Money_Zero();
+            state.nodes[nn].node_dd_pct      = Money_Zero();
+            // Re-arm the drift auto-kill latch (the D-421 lesson — see the retired producer
+            // block's rationale, preserved here): release ONLY the latch; IC samples stay;
+            // MASK_DRIFT_BREACHED is edge-managed by the drain path and re-derives.
+            BITMAP_CLR(state.nodes[nn].drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED);
+            fprintf(stderr, "[sharded] node %d kill switch RESET\n", c);
+        }
+    }
+
+    // ── 1. Per-node MtM + peak/dd + trip (moved from RebuildOneCore — composer owns positions,
+    //       node_realized, and now the peak/dd fields + the flags word: single-writer) ──
+    const int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    const int mtm_on = BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED)
+                       && !Money_IsZero(current_price);
+    for (int n = 0; n < state.registered_count && n < MAX_EXECUTION_NODES; ++n) {
+        const tt::NodeIdx nn{(int16_t)n};
+        Money alloc    = state.nodes[nn].allocated_balance;
+        Money realized = state.nodes[nn].node_realized;
+        Money unrealized = Money_Zero();
+        if (mtm_on) {
+            uint16_t mask = Sharded_NodeSlotMask(n, partial_on);
+            uint16_t bm   = oms.portfolio.active_bitmap & mask;
+            while (bm) {
+                int ps = __builtin_ctz(bm);
+                bm &= (uint16_t)(bm - 1);
+                Position<F>& pos = oms.portfolio.positions[ps];
+                unrealized = Money_Add(unrealized,  // D-190 single-source
+                                       Money_FillGross(pos.entry_price, current_price, pos.quantity));
+            }
+        }
+        state.nodes[nn].node_unrealized_view = unrealized;   // P2-a: composer-owned view (pack row source)
+        Money current_value = Money_Add(alloc, Money_Add(realized, unrealized));
+        if (Money_IsZero(state.nodes[nn].node_peak_balance)) {
+            state.nodes[nn].node_peak_balance = alloc;
+        }
+        state.nodes[nn].node_peak_balance =
+            Money_Max(state.nodes[nn].node_peak_balance, current_value);
+        Money drop = Money_Sub(state.nodes[nn].node_peak_balance, current_value);
+        if (Money_Gt(drop, Money_Zero()) &&
+            Money_Gt(state.nodes[nn].node_peak_balance, Money_Zero())) {
+            state.nodes[nn].node_dd_pct = Money_Div(drop, state.nodes[nn].node_peak_balance);
+        } else {
+            state.nodes[nn].node_dd_pct = Money_Zero();
+        }
+        if (!NODE_STATE_FLAG_IS_SET(state.nodes[nn], KILL_TRIPPED)) {
+            Money threshold = !Money_IsZero(cfg.nodes[nn].max_drawdown_pct)
+                ? cfg.nodes[nn].max_drawdown_pct
+                : cfg.max_drawdown_pct;
+            if (Money_Gt(state.nodes[nn].node_dd_pct, threshold) &&
+                Money_Gt(drop, cfg.min_kill_loss)) {
+                NODE_STATE_FLAG_SET(state.nodes[nn], KILL_TRIPPED);
+                state.nodes[nn].node_ks_trips_total++;
+                double dd_pct_d  = Money_ToDouble(state.nodes[nn].node_dd_pct) * 100.0;
+                double drop_d    = Money_ToDouble(drop);
+                double peak_d    = Money_ToDouble(state.nodes[nn].node_peak_balance);
+                double current_d = Money_ToDouble(current_value);
+                fprintf(stderr, "[sharded] NODE KILL: node %d tripped — "
+                        "dd=%.2f%% drop=$%.2f peak=$%.2f current=$%.2f\n",
+                        n, dd_pct_d, drop_d, peak_d, current_d);
+                if (g_notify) {
+                    char body[256];
+                    snprintf(body, sizeof(body),
+                             "Node %d kill tripped: dd=%.2f%% drop=$%.2f "
+                             "peak=$%.2f current=$%.2f. Entries halted on "
+                             "this node until manual reset.",
+                             n, dd_pct_d, drop_d, peak_d, current_d);
+                    Notify_Send(g_notify, NOTIFY_ALERT, NK_NODE_KILL_TRIP,
+                                "Per-node kill switch tripped", body);
+                }
+            }
+        }
+    }
+
+    // ── 2. Global eval — the SAME math fn, now same-thread with its inputs (the producer call
+    //       at the 2026-04-09 KNOWN-RACE site is deleted; the class dies at that site) ──
+    EventLoop_KillSwitchEvaluate(&state);
+
+    // ── 3. Kill word (all source flags are composer-written now — coherent by construction) ──
     uint64_t kw = 0;
     if (BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED)) {
         kw |= KILLWORD_MASK_GLOBAL;
@@ -317,35 +400,31 @@ inline void EngineCommon_MoneyComposePublish(EventLoopState<F>& state,
         }
     }
     agg.kill_word.store(kw, std::memory_order_relaxed);
-    pack.kill_word_copy = kw;
 
-    // Global ledger view — owned by the CALLING thread on both production paths (live: the
-    // drainer books fills and calls this at its cycle tail; backtest: single-threaded driver).
+    // ── 4. Compose + publish (all rows REAL now — P1's interim zeros are retired) ──
+    MoneySnapshot<F> pack{};
+    agg.generation++;
+    pack.generation     = agg.generation;
+    pack.kill_word_copy = kw;
     pack.balance  = oms.balance;
     pack.realized = oms.realized_pnl;
     pack.ks_peak  = oms.ks_peak_balance;
-
-    // Per-node rows — Phase-1 fills only the CALLER-owned fields (alloc boot-stable;
-    // node_realized/node_fees drainer-written via DrainPostFill). peak/dd/unrealized are
-    // slow-thread-written at HEAD and stay Money_Zero() here until Phase 2 moves their
-    // ownership (a compose-side read NOW would be a 16B cross-thread torn read — the class).
     for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
         const tt::NodeIdx nn{(int16_t)n};
         MoneySnapshotNodeRow& r = pack.rows[nn];
         r.alloc      = state.nodes[nn].allocated_balance;
         r.realized   = state.nodes[nn].node_realized;
         r.fees       = state.nodes[nn].node_fees;
-        r.peak       = Money_Zero();   // Phase 2 (composer-owned eval)
-        r.dd         = Money_Zero();   // Phase 2 (recomputed at eval — D-420)
-        r.unrealized = Money_Zero();   // Phase 2.2 (node-computed, node-published)
+        r.peak       = state.nodes[nn].node_peak_balance;
+        r.dd         = state.nodes[nn].node_dd_pct;
+        r.unrealized = state.nodes[nn].node_unrealized_view;
     }
-
     tt::ParameterSlot_Write(&agg.publish, pack, publish_tick);
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [END_FUNCTION]_[EngineCommon_MoneyComposePublish]
+// [END_FUNCTION]_[EngineCommon_ComposeAndKillEval]
 //======================================================================
 //======================================================================
 // [FUNCTION]_[EngineCommon_FillEmit]

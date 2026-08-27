@@ -410,36 +410,15 @@ inline bool EngineSharded_Async_FanOut(
                     "(per-node overrides + tunables refreshed, allocations recomputed)\n");
             }
         }
-        // Phase 3: process per-core kill resets BEFORE the rebuild
-        // so a freshly-reset core can be re-evaluated this cycle.
-        // Each reset clears the trip flag and refreshes peak to the
-        // current value. GUI-only — shared_ptr lives inside the
-        // USE_IMGUI_GUI ifdef.
+        // E.1.3 P2-a — kill-RESET is a REQUEST now: the GUI/producer only sets node bits on
+        // agg.kill_reset_mask; the COMPOSER (sole writer of peaks/dd/flags/drift-latch) applies
+        // them at its next compose (EngineCommon_ComposeAndKillEval step 0). The old producer-side
+        // body — which wrote composer-owned Money fields cross-thread — is retired (gate punch 3).
         if (shared_ptr) {
             for (int c = 0; c < num_nodes; ++c) {
                 if (shared_ptr->kill_reset_per_node[c]) {
                     shared_ptr->kill_reset_per_node[c] = 0;
-                    NODE_STATE_FLAG_CLR(state.nodes[tt::NodeIdx{(int16_t)c}], KILL_TRIPPED);
-                    state.nodes[tt::NodeIdx{(int16_t)c}].node_peak_balance = Money_Zero();
-                    state.nodes[tt::NodeIdx{(int16_t)c}].node_dd_pct = Money_Zero();
-                    // E.1.2 D-421 — RE-ARM the drift auto-kill. MASK_DRIFT_KILL_TRIPPED is
-                    // the latch that stops EventLoop_DrainPostFillOneCore from tripping the
-                    // node twice for the same drift episode; before this line, NOTHING cleared
-                    // it but DriftHistory_Init. So clearing a drift kill here resumed the node
-                    // with its drift auto-kill DISARMED for the rest of the process — the
-                    // capital control silently did not exist on the second breach. (Restart
-                    // re-armed it, which is why this never surfaced: being unpersisted was
-                    // load-bearing by accident.)
-                    //
-                    // Deliberately NOT DriftHistory_Init here: this is "resume THIS node",
-                    // not a new session, so the IC samples stay. Only the latch is released,
-                    // and MASK_DRIFT_BREACHED is left alone because it is edge-managed by the
-                    // drain path itself (set :1897 / cleared :1919) and re-derives next trade.
-                    // The paper-reset path wants the opposite — full Init — and does that in
-                    // NODE_CTX_RESET_AUTOPOPULATE. Same-looking fix, two different answers.
-                    BITMAP_CLR(state.nodes[tt::NodeIdx{(int16_t)c}].drift_history.drift_state_flags,
-                               MASK_DRIFT_KILL_TRIPPED);
-                    fprintf(stderr, "[sharded] node %d kill switch RESET\n", c);
+                    state.agg.kill_reset_mask.fetch_or(1u << c, std::memory_order_release);
                 }
             }
         }

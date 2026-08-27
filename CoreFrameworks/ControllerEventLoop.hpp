@@ -94,7 +94,6 @@
 #include "../MemHeaders/NodeStateFlagRegistry.hpp"  // v5.15.5.B.3 — FOREACH_NODE_STATE_FLAG bitmap for 5 booleans
 #include "SpSectionRegistry.hpp"  // v5.15.5.B.5 — FOREACH_SP_SECTION enum + SP_SECTION_NAME/DOC helpers
 #include "ExecutionCore.hpp"
-#include "Notify.hpp"
 #include "OrderManager.hpp"
 #include "../MemHeaders/OmsPushExitHelper.hpp"  // v5.15.5.C.4 Phase D5 — OMS_PushExitForSlot helper (Class-18 close)
 #include "Portfolio.hpp"
@@ -560,6 +559,7 @@ struct alignas(64) NodeContext {
     // remains as backstop for whole-account drawdown.
     Money   node_peak_balance;         // peak of current_value over core's lifetime
     Money   node_dd_pct;               // current drawdown % (display field, recomputed each rebuild)
+    Money   node_unrealized_view;      // E.1.3 P2-a — composer-written MtM view (pack row source; recomputed each compose, NEVER persisted — D-420 sibling semantics)
     // v5.15.5.B.3 — node_kill_tripped migrated to node_state_flags bitmap on
     // NodeContext HOT cluster (see node_state_flags above). _pad_kill[3]
     // eliminated as natural pad-collapse consequence — the kill trip is now
@@ -3412,97 +3412,14 @@ inline void EventLoop_RebuildOneCore(
             }
         }
 
-        // Phase 3 — per-core kill switch: MTM peak/drawdown tracking + trip
-        // evaluation. Realized P&L from oms->realized_pnl already includes
-        // closed exits booked by this core; unrealized comes from MTM walking
-        // open positions (only this core's slot under single-position-per-core).
-        // current_value = allocated + realized + unrealized.
-        // peak ratchets up via FPN_Max; trip fires when dd_pct exceeds
-        // threshold AND drop exceeds min_kill_loss floor (so tiny allocs
-        // don't trip on rounding noise).
-        //
-        // MTM is best-effort: if current_price is null (legacy callers / tests
-        // not passing it), we fall back to realized-only — peak/dd computed
-        // without the unrealized term. enable_mtm_kill_switch=0 forces this
-        // realized-only mode regardless of whether current_price was passed.
-        {
-            Money alloc     = state->nodes[tt::NodeIdx{(int16_t)slot}].allocated_balance;
-            Money realized  = state->nodes[tt::NodeIdx{(int16_t)slot}].node_realized;
-            Money unrealized = Money_Zero();
-            const Money* px_in = (const Money*)current_price;
-            // Partials-aware MTM walk: under partials, core c's positions
-            // live in slots 2c and 2c+1 (one Position per leg, each with
-            // independent qty). Sum unrealized across both. Without
-            // partials, only slot c is walked.
-            if (BITMAP_IS_SET(config->risk_cfg_flags, MASK_RISK_CFG_MTM_KILL_SWITCH_ENABLED) && px_in && !Money_IsZero(*px_in)) {
-                uint16_t mask = Sharded_NodeSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
-                uint16_t bm   = state->oms->portfolio.active_bitmap & mask;
-                while (bm) {
-                    int s = __builtin_ctz(bm);
-                    bm &= (uint16_t)(bm - 1);
-                    Position<F>& pos = state->oms->portfolio.positions[s];
-                    unrealized = Money_Add(unrealized,  // D-190 single-source (mark gross via the canonical helper)
-                                           Money_FillGross(pos.entry_price, *px_in, pos.quantity));
-                }
-            }
-            Money current_value = Money_Add(alloc, Money_Add(realized, unrealized));
-            // Peak ratchet (branchless via FPN_Max). Initialize to alloc on
-            // first sight if peak is still zero (first rebuild after init).
-            if (Money_IsZero(state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance)) {
-                state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance = alloc;
-            }
-            state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance =
-                Money_Max(state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance, current_value);
-            // Drawdown computation. Skip if peak is zero (defensive — should
-            // never happen after the init bump above, but handles a freshly
-            // reset state). dd = (peak - current) / peak.
-            Money drop = Money_Sub(state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance, current_value);
-            if (Money_Gt(drop, Money_Zero()) &&
-                Money_Gt(state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance, Money_Zero())) {
-                state->nodes[tt::NodeIdx{(int16_t)slot}].node_dd_pct = Money_Div(drop,
-                    state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance);
-            } else {
-                state->nodes[tt::NodeIdx{(int16_t)slot}].node_dd_pct = Money_Zero();
-            }
-            // Trip evaluation. Threshold: per-core override if set, else
-            // global max_drawdown_pct. Trip ALSO requires drop > min_kill_loss
-            // so a tiny allocation doesn't trip on rounding noise.
-            if (!NODE_STATE_FLAG_IS_SET(state->nodes[tt::NodeIdx{(int16_t)slot}], KILL_TRIPPED)) {
-                // E.1.1 ③/B — reads .max_drawdown_pct (raw-copied from node_max_drawdown_pct[slot]
-                // in PopulateCoresFromFlat, 0=inherit preserved) — byte-identical to the legacy array read.
-                Money threshold = !Money_IsZero(config->nodes[tt::NodeIdx{(int16_t)slot}].max_drawdown_pct)
-                    ? config->nodes[tt::NodeIdx{(int16_t)slot}].max_drawdown_pct
-                    : config->max_drawdown_pct;
-                if (Money_Gt(state->nodes[tt::NodeIdx{(int16_t)slot}].node_dd_pct, threshold) &&
-                    Money_Gt(drop, config->min_kill_loss)) {
-                    NODE_STATE_FLAG_SET(state->nodes[tt::NodeIdx{(int16_t)slot}], KILL_TRIPPED);
-                    state->nodes[tt::NodeIdx{(int16_t)slot}].node_ks_trips_total++;
-                    double dd_pct_d  = Money_ToDouble(state->nodes[tt::NodeIdx{(int16_t)slot}].node_dd_pct) * 100.0;
-                    double drop_d    = Money_ToDouble(drop);
-                    double peak_d    = Money_ToDouble(state->nodes[tt::NodeIdx{(int16_t)slot}].node_peak_balance);
-                    double current_d = Money_ToDouble(current_value);
-                    fprintf(stderr, "[sharded] NODE KILL: node %d tripped — "
-                            "dd=%.2f%% drop=$%.2f peak=$%.2f current=$%.2f\n",
-                            slot, dd_pct_d, drop_d, peak_d, current_d);
-                    // 2A — alert via Notify subsystem alongside stderr log.
-                    // Per-kind cooldown (NK_NODE_KILL_TRIP=10) collapses
-                    // back-to-back trips on the same core to one alert per
-                    // window. Backtest leaves g_notify null → no-op.
-                    if (g_notify) {
-                        char body[256];
-                        snprintf(body, sizeof(body),
-                                 "Node %d kill tripped: dd=%.2f%% drop=$%.2f "
-                                 "peak=$%.2f current=$%.2f. Entries halted on "
-                                 "this node until manual reset.",
-                                 slot, dd_pct_d, drop_d, peak_d, current_d);
-                        Notify_Send(g_notify, NOTIFY_ALERT, NK_NODE_KILL_TRIP,
-                                    "Per-node kill switch tripped", body);
-                    }
-                }
-            }
-            if (NODE_STATE_FLAG_IS_SET(state->nodes[tt::NodeIdx{(int16_t)slot}], KILL_TRIPPED)) {
-                zero_gate(HALT_NODE_KILL);
-            }
+        // E.1.3 P2-a — the per-node MtM peak/dd/trip COMPUTE moved to
+        // EngineCommon_ComposeAndKillEval (the composer thread, which OWNS positions +
+        // node_realized + now the peak/dd fields and the node-flags word — single-writer;
+        // the slow-thread walk of drainer-owned 16B state was torn-read census member #3).
+        // This slow path keeps only the READ-side mirror below: halt the gates when the
+        // composer has tripped this node.
+        if (NODE_STATE_FLAG_IS_SET(state->nodes[tt::NodeIdx{(int16_t)slot}], KILL_TRIPPED)) {
+            zero_gate(HALT_NODE_KILL);
         }
 
         // SL COOLDOWN: decrement counter; if still active, zero-gate.

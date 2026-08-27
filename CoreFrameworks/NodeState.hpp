@@ -266,7 +266,12 @@ struct alignas(64) AggregatorState {
     //      composed FROM the legacy flags each publish; writers unify at Phase 2. ----
     alignas(64) std::atomic<uint64_t> kill_word{0};
     uint64_t generation = 0;            // composer generation (mirrors into each published pack)
-    uint64_t _pad_line0[6] = {};        // H12: explicit pad to the line boundary
+    // P2-a: kill-RESET requests — any thread (GUI/producer) fetch_or's node bits; ONLY the
+    // composer consumes (exchange(0)) and applies (clear flag, zero peak/dd, re-arm drift latch).
+    // The old producer-side reset body is retired (gate blindspot punch 3 / merge F3b).
+    std::atomic<uint32_t> kill_reset_mask{0};
+    uint32_t _pad_line0a = 0;           // H12: explicit
+    uint64_t _pad_line0[5] = {};        // H12: explicit pad to the line boundary
 
     // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
     //      from Phase 1). applied_seq[n] = last FillEvent.seq applied from node n's ring —

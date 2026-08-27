@@ -195,6 +195,12 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
 // [CODE]
 //======================================================================
 #define FOREACH_NODE_CTX_PERSIST_EXEMPT(X)                                                           \
+    /* --- E.1.3 P2-a composer views ----------------------------------------------------- */       \
+    X(node_unrealized_view, DERIVED_EACH_PASS,                                                       \
+      "Composer-written MtM view, recomputed by EngineCommon_ComposeAndKillEval every compose "      \
+      "cycle from live positions x current price (D-190 Money_FillGross walk); a persisted copy "    \
+      "would be stale at load by definition — the D-420 node_dd_pct recompute-not-persist "          \
+      "sibling semantics.")                                                                          \
     /* --- handles + lifecycle (P1) ------------------------------------------------------ */       \
     /* The pointers are re-established at boot BEFORE the producer spawns (Run.hpp:1358),   */       \
     /* so the whole family is safe for the same structural reason. RUNTIME_POINTER carries  */       \
@@ -350,10 +356,10 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
 constexpr int FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT =
     0 FOREACH_NODE_CTX_PERSIST_EXEMPT(_NPE_COUNT_ONE);
 #undef _NPE_COUNT_ONE
-// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 22 — the complement pin]
-static_assert(FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 22,
-              "NodeContext<64> has 49 members; 27 are covered by FOREACH_NODE_PERSIST_FIELD, so "
-              "EXACTLY 22 are declared-unpersisted here. Adding a NodeContext member means adding "
+// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 23 — the complement pin]
+static_assert(FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 23,
+              "NodeContext<64> has 50 members; 27 are covered by FOREACH_NODE_PERSIST_FIELD, so "
+              "EXACTLY 23 are declared-unpersisted here. Adding a NodeContext member means adding "
               "it to ONE of the two registries — run tools/check_node_ctx_partition.py, which "
               "subtracts both from clang's real member list and REDs on UNACCOUNTED / STALE-EXEMPT "
               "/ CONTRADICTION. See DESIGN_SPECS/framework-patterns/"

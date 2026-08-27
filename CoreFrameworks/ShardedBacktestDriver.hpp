@@ -428,12 +428,15 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 (int)tick.is_buyer_maker,
                 (uint64_t)tick_index, depth);
         }
-        EventLoop_KillSwitchEvaluate(drv->state);
-        // E.1.3 P1 (D-440; M5) — the SAME shared compose+publish the live drainer calls at its
-        // cycle tail; single-threaded here, so every row is caller-owned by construction.
-        // oms is OPTIONAL on this driver (nullptr = no OMS harness) — no OMS, no money to compose.
+        // E.1.3 P2-a (D-440; M5) — the SAME shared compose + BOTH kill evals the live drainer
+        // calls at its cycle tail (the global eval lives INSIDE it now — the standalone call
+        // this driver used to make is absorbed; single kill authority, both paths).
+        // oms is OPTIONAL on this driver (nullptr = no OMS harness) — no OMS, no money/kill.
         if (drv->oms) {
-            EngineCommon_MoneyComposePublish(*drv->state, *drv->oms, (uint64_t)tick_index);
+            EngineCommon_ComposeAndKillEval(*drv->state, *drv->oms, *drv->config,
+                                            tick.price, (uint64_t)tick_index);
+        } else {
+            EventLoop_KillSwitchEvaluate(drv->state);   // harness mode keeps the bare eval
         }
 
         drv->slow_path_runs++;

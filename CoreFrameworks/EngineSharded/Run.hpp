@@ -1614,10 +1614,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 money_op_flags = 0;
             }
 
-            // E.1.3 P1 (D-440) — compose+publish the money snapshot at the cycle tail, AFTER
-            // every book of this cycle (the shared helper; backtest calls the same fn — M5).
-            EngineCommon_MoneyComposePublish(state, oms,
-                ticks_produced.load(std::memory_order_relaxed));
+            // E.1.3 P2-a (D-440) — compose + BOTH kill evals at the cycle tail, AFTER every
+            // book of this cycle (the shared helper; backtest calls the same fn — M5). The
+            // MtM price is the producer-published seqlock tick (already the ONE safe read).
+            {
+                Tick<F> _lt{};
+                tt::ParameterSlot_Read(&latest_tick, &_lt);
+                EngineCommon_ComposeAndKillEval(state, oms, cfg, _lt.price,
+                    ticks_produced.load(std::memory_order_relaxed));
+            }
 
             if constexpr (BENCH) {
                 uint64_t _bench_dt = (uint64_t)__rdtsc() - _bench_t0;
@@ -1644,11 +1649,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);
                     tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);
                 }
-                // E.1.3 P1 — one final coherent publish after the tail drains, so shutdown
-                // consumers (and the Phase-2 owner-side save) see the last books. The full
-                // shutdown-ordering redesign is Phase 4.3.
-                EngineCommon_MoneyComposePublish(state, oms,
-                    ticks_produced.load(std::memory_order_relaxed));
+                // E.1.3 P2-a — one final coherent compose+eval after the tail drains, so
+                // shutdown consumers (and the owner-side save) see the last books + flags.
+                {
+                    Tick<F> _lt{};
+                    tt::ParameterSlot_Read(&latest_tick, &_lt);
+                    EngineCommon_ComposeAndKillEval(state, oms, cfg, _lt.price,
+                        ticks_produced.load(std::memory_order_relaxed));
+                }
                 break;
             }
         }
