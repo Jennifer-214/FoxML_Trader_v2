@@ -1821,7 +1821,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       ctrl->regime.regime_start_time = ctrl->sim_time;
       {
         char ts[16]; log_ts(ts, sizeof(ts));
-        static const char *rn[] = {"RANGING", "TRENDING", "VOLATILE", "DOWNTREND", "MILD_TREND"};
+        static const char *rn[] = {"RANGING", "TRENDING", "VOLATILE", "TRENDING_DOWN", "MILD_TREND"};  // names match the FOREACH_REGIME display column (TD-241 cosmetic fold)
         int or_ = (old_regime >= 0 && old_regime < 5) ? old_regime : 0;
         int nr_ = (new_regime >= 0 && new_regime < 5) ? new_regime : 0;
         if (dur_min >= 1.0)

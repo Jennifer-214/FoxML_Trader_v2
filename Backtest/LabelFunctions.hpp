@@ -27,6 +27,10 @@
 #define LABEL_FUNCTIONS_HPP
 
 #include <stdint.h>
+// NUM_REGIMES — the REGIME row's num_classes is compile-time BOUND to the
+// FOREACH_REGIME SSoT (static_assert below the label table; TD-241 close).
+// StrategyInterface is dependency-light (cstdint/cstddef only).
+#include "../Strategies/StrategyInterface.hpp"
 #include <math.h>   // NAN/isnan — the forward-scan leaves return NAN for
                      // not-enough-history (E.1.2.D leaf 13 / S3-F8: this rode a
                      // transitive include before; now explicit)
@@ -86,7 +90,7 @@ struct HistoricalTick {
     X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0, TP_PCT) \
     X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0, TP_PCT) \
     X(FORWARD_PNL,        "forward_pnl",        "Forward P&L",        "Continuous: % return over N ticks",                  Label_ForwardPnl,        1, TP_UNUSED) \
-    X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            4, TP_UNUSED) \
+    X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            5, TP_UNUSED) \
     X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0, TP_SIGMA_K) \
     X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0, TP_UNUSED) \
     X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0, TP_UNUSED) \
@@ -207,9 +211,15 @@ static inline float Label_ForwardPnl(const HistoricalTick *ticks, int tick_idx, 
 // which regime was the engine in at this sample point?
 // values follow the FOREACH_REGIME SSoT (Strategies/StrategyInterface.hpp):
 // 0=RANGING, 1=TRENDING, 2=VOLATILE, 3=TRENDING_DOWN, 4=MILD_TREND.
-// useful for training a regime classifier model. NOTE: the FOREACH_TARGET
-// regime row declares num_classes=4 but the SSoT has 5 values — a sampled
-// MILD_TREND (4) exceeds num_class=4; tracked as TECH_DEBT-241.
+// useful for training a regime classifier model.
+// TECH_DEBT-241 CLOSED (2026-08-26): the row's num_classes is 5 again and a
+// static_assert below the table BINDS it to NUM_REGIMES, so adding a 6th
+// regime without bumping the row is a COMPILE ERROR (a sampled MILD_TREND
+// used to hand XGBoost label 4.0 under num_class=4 → train-time refusal).
+// The row keeps a LITERAL deliberately: the registry hash stringizes the nc
+// token (":nc" #nc), so writing NUM_REGIMES in the row would freeze the hash
+// across a future regime-count change — the exact drift the hash exists to
+// refuse. Hash flip greenlit per project_no_live_models (epoch break free).
 //----------------------------------------------------------------------
 static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick_idx */,
                                   int /* total_ticks */, double /* sample_price */,
@@ -480,10 +490,19 @@ struct LabelDef {
 // between LABEL_* constants, label_table rows, and dispatcher sites.
 #define X(id_suffix, name, display, desc, fn, nc, tpk) \
     { LABEL_##id_suffix, name, display, desc, fn, nc, tpk },
-static const LabelDef label_table[] = {
+static constexpr LabelDef label_table[] = {
     FOREACH_TARGET(X)
 };
 #undef X
+
+// TD-241's structural close: the REGIME row's class count is BOUND to the
+// FOREACH_REGIME SSoT. A 6th regime added without bumping the row (or vice
+// versa) is a COMPILE ERROR here, not a train-time surprise. The row stays a
+// LITERAL because the registry hash stringizes the token (see the row banner).
+static_assert(label_table[LABEL_REGIME].num_classes == NUM_REGIMES,
+              "FOREACH_TARGET's REGIME row num_classes is out of sync with the FOREACH_REGIME "
+              "SSoT (NUM_REGIMES) — update the row literal (this flips LABEL_REGISTRY_HASH: "
+              "an epoch event, H21 greenlight required)");
 
 // Preserve the existing LABEL_COUNT name for call-site compatibility.
 // LABEL_COUNT_AUTO comes from the enum; one past the LAST registry row
