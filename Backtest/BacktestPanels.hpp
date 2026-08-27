@@ -7329,9 +7329,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // populated by the latest backtest run. Header is collapsing — most
     // operators don't want it open by default. Only render when populated;
     // a never-run state has nothing useful to show.
-    if (tt::PhaseTimer_Global().populated &&
+    // TD-240 WIRED (2026-08-26): read the seqlock-PUBLISHED snapshot of the
+    // last COMPLETED run — never the live PhaseTimer_Global() singleton (the
+    // old direct read was the exact mid-run torn read the snapshot pair was
+    // designed to prevent; parallel horizon workers += the global while this
+    // renders). valid=0 until the first run publishes → header hidden.
+    tt::PhaseTimerSnapshot pt;
+    if (tt::PhaseTimer_ReadSnapshot(&pt) &&
         ImGui::CollapsingHeader("Phase Timing (last run)")) {
-        const auto& pt = tt::PhaseTimer_Global();
         double total_ms = pt.total_ns / 1.0e6;
         if (total_ms > 0.0) {
             auto row = [&](const char* label, uint64_t ns, bool nested = false) {

@@ -8,7 +8,7 @@
 // [CONTAINS]
 //   - [STRUCT]_[PhaseTimer]
 //   - [FUNCTION]_[PhaseTimer_Summary]   (PhaseTimer_Global / _NowNs / _Reset ride)
-//   - [STRUCT]_[PhaseTimerSnapshot]   (PhaseTimer_PopulateSnapshot rides; UNWIRED at HEAD — TECH_DEBT-240)
+//   - [STRUCT]_[PhaseTimerSnapshot]   (PhaseTimer_PopulateSnapshot + the TD-240 seqlock publish/read pair ride — WIRED 2026-08-26)
 //======================================================================================================
 // v5.10.0 Item A — per-phase backtest timers.
 //
@@ -41,6 +41,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+#include "../CoreFrameworks/ParameterSlot.hpp"  // TD-240 — the house seqlock, reused for snapshot publication
 
 namespace tt {
 
@@ -156,7 +157,7 @@ static inline void PhaseTimer_Summary(const PhaseTimer* pt, FILE* fp) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[stable copy of the timer for GUI display, PhaseTimer_PopulateSnapshot rides — UNWIRED at HEAD, zero consumers; the Panels phase render reads the live singleton directly]
+// [OVERVIEW]_[stable copy of the timer for GUI display — WIRED at TD-240 close (2026-08-26): workers publish via PhaseTimer_PublishSnapshot (ParameterSlot seqlock) at both run-end Summary sites; the Panels phase render reads PhaseTimer_ReadSnapshot, never the live singleton]
 // [FUTURE_WORK]_[TECH_DEBT]_[TECH_DEBT-240]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-240]
 //======================================================================
@@ -187,6 +188,33 @@ static inline void PhaseTimer_PopulateSnapshot(const PhaseTimer* pt,
     s->stamp_emit_ns      = pt->stamp_emit_ns;
     s->total_ns           = pt->total_ns;
     s->valid              = pt->populated;
+}
+
+// TD-240 WIRED (2026-08-26, operator: "wire it" — "just deleting is sloppy").
+// A bare snapshot copy would only MOVE the torn read one level up (the GUI can
+// render during the worker's populate), so publication rides the house seqlock
+// — ParameterSlot<T> REUSED outright (canonical-sister discipline; it is the
+// proven, tsan-annotated slow→hot pattern), never a hand-rolled sibling.
+// ONE writer (the training worker, at run end — the two PhaseTimer_Summary
+// sites) / ONE reader (the GUI thread). Value-init'd slot = zeroed buffers =
+// valid=0, so a pre-first-run read renders nothing rather than garbage.
+static inline ParameterSlot<PhaseTimerSnapshot>& PhaseTimer_SnapshotSlot() {
+    static ParameterSlot<PhaseTimerSnapshot> slot{};
+    return slot;
+}
+
+// Worker side — call at run end, right after PhaseTimer_Summary.
+static inline void PhaseTimer_PublishSnapshot(const PhaseTimer* pt) {
+    PhaseTimerSnapshot s;
+    PhaseTimer_PopulateSnapshot(pt, &s);
+    ParameterSlot_Write(&PhaseTimer_SnapshotSlot(), s);
+}
+
+// GUI side — stable copy of the last COMPLETED run; returns snapshot.valid
+// (0 = no run has published yet — render nothing).
+static inline int PhaseTimer_ReadSnapshot(PhaseTimerSnapshot* out) {
+    ParameterSlot_Read(&PhaseTimer_SnapshotSlot(), out);
+    return out->valid;
 }
 //======================================================================
 // [END_CODE]

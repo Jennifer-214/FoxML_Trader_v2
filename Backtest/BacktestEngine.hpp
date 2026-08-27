@@ -1314,6 +1314,7 @@ static inline void Backtest_Run(BacktestResults *results,
           + tt::PhaseTimer_Global().feature_collect_ns
           + tt::PhaseTimer_Global().label_compute_ns;
         tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
+        tt::PhaseTimer_PublishSnapshot(&tt::PhaseTimer_Global());  // TD-240
     }
 }
 //======================================================================
@@ -1904,6 +1905,9 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
           + tt::PhaseTimer_Global().held_out_eval_ns
           + tt::PhaseTimer_Global().stamp_emit_ns;
         tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
+        // TD-240: publish the seqlock'd snapshot the GUI phase panel reads
+        // (a stable copy of the completed run — never the live singleton).
+        tt::PhaseTimer_PublishSnapshot(&tt::PhaseTimer_Global());
     }
 }
 //======================================================================
