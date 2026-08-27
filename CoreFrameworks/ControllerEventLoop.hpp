@@ -237,6 +237,20 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 // [END_STRUCT]_[NodeSlowState]
 //======================================================================
 
+// TECH_DEBT-293 arm (a) close (2026-08-26): the MEASUREMENT PIN. The old
+// CoreFrameworks/CLAUDE.md line claimed "per-node slow_state ≤64KB" — stale
+// (pre-cohort) and conflating SIZEOF with cache WORKING SET: Push is O(1)
+// amortized (running sums + monotonic deques, v5.11.2.C), so the rings stay
+// COLD except the alignas(64) heads + ring tails, and D-435/T1 measured that
+// shrinking the ring buys DRAM footprint "not L1d-relevant" at +5% p50 on the
+// hottest window (refused — latency outranks memory here). Growth is a
+// DELIBERATE re-pin, never silent drift; shrink freely, then re-pin.
+static_assert(sizeof(NodeSlowState<64>) == 191744,
+              "NodeSlowState<64> layout moved — re-measure, update this pin AND the "
+              "CoreFrameworks/CLAUDE.md memory-budget row (TECH_DEBT-293: the row states "
+              "the MEASURED sizeof; the budget concept is resident working set + per-node "
+              "isolation, not struct bytes)");
+
 //======================================================================
 // [STRUCT]_[SlowPathTelemetry]
 //----------------------------------------------------------------------
