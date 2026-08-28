@@ -429,7 +429,14 @@ struct alignas(64) AggregatorState {
     // Single-writer: the emit path == the composer thread under central topology; Phase 4 re-homes
     // emit-side counting per-node with the parked-event cursor (NodeState binding line).
     uint64_t fill_ring_full_events = 0;
-    uint64_t _pad_line0[4] = {};        // H12: explicit pad to the line boundary
+    // P3-c (D-445): paper-reset as a composer-executed COMMAND — the producer packages the GUI
+    // request here (fetch-style store); the drainer/composer executes the WHOLE reset flow at its
+    // cycle tail (everything pending drained + applied FIRST — pre-reset fills book to pre-reset
+    // state). reset_seq = completion counter (composer-written; the producer copies it to the GUI's
+    // paper_reset_seq — consumers stay GUI-agnostic per blindspot punch 9).
+    std::atomic<uint32_t> reset_request{0};
+    uint32_t reset_seq = 0;
+    uint64_t _pad_line0[3] = {};        // H12: explicit pad to the line boundary
 
     // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
     //      from Phase 1). applied_seq[n] = last FillEvent.seq applied from node n's ring —

@@ -1556,13 +1556,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         tt::OmsDrainBuckets drain_buckets;
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
-            // E.1.3 P2-d (gate critic #4) — park during paper reset, exactly like the slow
-            // paths: the reset flow re-bases OMS state under FULL quiesce; a draining drainer
-            // was the hole in that quiesce.
-            if (paper_reset_in_progress.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-                continue;
-            }
+            // E.1.3 P3-c (D-445) — the P2-d drainer PARK is SUPERSEDED: the drainer/composer
+            // now EXECUTES the paper reset itself at its cycle tail (see below), so there is
+            // no concurrent drainer to park — the quiesce hole is closed by construction
+            // (strictly stronger than parking). The flag still parks the SLOW paths.
             // v5.15.5.C.3 Phase 7.B — bench gate per-cycle rdtsc bracket.
             // Wraps the 4-step drainer cycle below. Compile-time elided when
             // BENCH=false (production); zero instructions emitted into the
@@ -1629,6 +1626,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 tt::ParameterSlot_Read(&latest_tick, &_lt);
                 EngineCommon_ComposeAndKillEval(state, oms, cfg, _lt.price,
                     ticks_produced.load(std::memory_order_relaxed));
+            }
+
+            // E.1.3 P3-c (D-445) — composer-executed paper reset, AFTER the tail compose:
+            // everything pending this cycle has drained + applied + composed, so pre-reset
+            // fills booked to pre-reset state; the reset then re-bases with no concurrent
+            // writer (this thread IS the writer). Producer packages the request; slow paths
+            // park on the flag; ExecutePaperReset clears the flag at completion.
+            if (state.agg.reset_request.exchange(0, std::memory_order_acq_rel)) {
+                tt::EngineSharded_ExecutePaperReset(cfg, state, paper_reset_in_progress);
             }
 
             if constexpr (BENCH) {

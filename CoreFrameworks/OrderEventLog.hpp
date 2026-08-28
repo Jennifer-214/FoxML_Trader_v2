@@ -90,6 +90,11 @@ enum OrderEventType : uint8_t {
     OEVT_REJECTED      = 4,   // exchange or OMS rejected
     OEVT_CANCELED      = 5,   // canceled by us or by exchange
     OEVT_RECONCILED    = 6,   // reconciler override (phase 05+)
+    OEVT_CTRL_TRUNCATE = 7,   // E.1.3 P3-c (D-445): IN-BAND reset control — the writer thread
+                              // intercepts + truncates; NEVER persisted to disk (rides the ring
+                              // only, so FIFO guarantees every pre-reset event lands in the OLD
+                              // file first — the ack-free property). H21: append-only code; the
+                              // value is enum-space-reserved even though no record carries it.
 };
 //======================================================================
 // [END_CODE]
@@ -552,10 +557,14 @@ inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CONCURRENCY] [PERSISTENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the writer thread body (v5.11.3.C) — drain ring, apply, drain-before-stop so shutdown flushes everything]
+// [OVERVIEW]_[the writer thread body (v5.11.3.C) — drain ring, apply, drain-before-stop so shutdown flushes everything; P3-c: D-445 in-band truncate intercept]
 //======================================================================
 // [CODE]
 //======================================================================
+// fwd decl — the truncate body lives with Reset below; the D-445 intercept calls it.
+template <unsigned F>
+inline void OrderEventLog_TruncateDisk(OrderEventLog<F>* log);
+
 template <unsigned F>
 inline void* OrderEventLog_AsyncWriterRoutine(void* arg) {
     OrderEventLog<F>* log = (OrderEventLog<F>*)arg;
@@ -564,6 +573,15 @@ inline void* OrderEventLog_AsyncWriterRoutine(void* arg) {
         // Drain whatever's in the ring right now.
         int drained = 0;
         while (SPSCRing_TryPop(&log->async_ring, &event)) {
+            // P3-c (D-445): in-band truncate intercept — every pre-reset event above already
+            // applied to the OLD file (ring FIFO); truncate + zero the writer-owned count,
+            // never persist the control record itself.
+            if (event.type == OEVT_CTRL_TRUNCATE) {
+                log->count = 0;
+                OrderEventLog_TruncateDisk(log);
+                drained++;
+                continue;
+            }
             if (!OrderEventLog_ApplyEvent(log, event)) {
                 log->writer_realloc_failed_count.fetch_add(
                     1, std::memory_order_relaxed);
@@ -577,6 +595,11 @@ inline void* OrderEventLog_AsyncWriterRoutine(void* arg) {
             // Final drain pass to catch anything pushed between "ring empty"
             // and stop check (rare but possible under shutdown race).
             while (SPSCRing_TryPop(&log->async_ring, &event)) {
+                if (event.type == OEVT_CTRL_TRUNCATE) {   // D-445: same intercept on the tail drain
+                    log->count = 0;
+                    OrderEventLog_TruncateDisk(log);
+                    continue;
+                }
                 OrderEventLog_ApplyEvent(log, event);
             }
             // Final flush so the disk file is consistent post-shutdown.
@@ -745,12 +768,12 @@ inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) 
 //======================================================================
 // [CODE]
 //======================================================================
+// P3-c (D-445): the disk half, extracted so the WRITER-thread truncate intercept and the
+// single-threaded Reset share ONE body. Touches writer-owned state only (disk_file + the
+// on-disk file) — callable from the writer thread (intercept) or a provably-single-threaded
+// context (Reset pre-Start / tests).
 template <unsigned F>
-inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
-    // In-memory: clear count + reset id sequence. Buffer stays allocated.
-    log->count = 0;
-    log->next_event_id.store(1, std::memory_order_relaxed);
-
+inline void OrderEventLog_TruncateDisk(OrderEventLog<F>* log) {
     if (!log->disk_file || log->disk_path[0] == '\0') return;
 
     // Close the current handle, recreate the file fresh (truncates), reopen
@@ -775,6 +798,38 @@ inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
     log->disk_file = std::fopen(log->disk_path, "ab");
     std::fprintf(stderr, "[OrderEventLog] reset: %s truncated + re-headered\n",
                  log->disk_path);
+}
+
+template <unsigned F>
+inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
+    // DIRECT reset — single-threaded contexts ONLY (pre-Start boot, tests). With the writer
+    // thread live, use OrderEventLog_RequestTruncate (D-445 in-band) — a direct Reset here
+    // would race the writer's fwrite on disk_file (the Class-50 3-way race this closes).
+    // In-memory: clear count + reset id sequence. Buffer stays allocated.
+    log->count = 0;
+    log->next_event_id.store(1, std::memory_order_relaxed);
+    OrderEventLog_TruncateDisk(log);
+}
+
+// P3-c (D-445): the IN-BAND reset request — appender-thread-only (the composer), like Append.
+// Pushes a control record through the SAME ring as data: FIFO guarantees every pre-reset
+// event lands in the OLD file before the truncate (the ack-free property — a side-band flag
+// would lose this ordering, which is exactly why the refuted design needed an ACK). The
+// composer resets its own id sequence at push time; the writer owns count + disk.
+template <unsigned F>
+inline void OrderEventLog_RequestTruncate(OrderEventLog<F>* log) {
+    if (log->entries == nullptr) return;   // logging disabled
+    if (!log->writer_thread_active.load(std::memory_order_acquire)) {
+        OrderEventLog_Reset(log);          // no writer = single-threaded context; direct is safe
+        return;
+    }
+    OrderEvent<F> ctrl{};
+    ctrl.type = OEVT_CTRL_TRUNCATE;        // never persisted — the writer intercepts
+    for (int spin = 0; !SPSCRing_TryPush(&log->async_ring, ctrl); ++spin) {
+        log->ring_full_spins.fetch_add(1, std::memory_order_relaxed);
+        if (spin < 64) { __builtin_ia32_pause(); } else { usleep(100); }
+    }
+    log->next_event_id.store(1, std::memory_order_relaxed);
 }
 //======================================================================
 // [END_CODE]

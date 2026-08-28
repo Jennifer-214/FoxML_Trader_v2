@@ -114,6 +114,150 @@ namespace tt {
 inline LatencyHistogram g_engine_drainer_cycle_hist{};
 
 //======================================================================
+// [FUNCTION]_[EngineSharded_ExecutePaperReset]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [PERSISTENCE] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P3-c (D-445): the WHOLE paper-reset flow, executed by the COMPOSER at its cycle tail (everything pending drained + applied first — pre-reset fills book to pre-reset state; the producer only packages the GUI request onto agg.reset_request). Archive (snapshot + trade CSVs + summary) -> OMS registry reset -> per-node ctx resets + hot-mirror disarm -> trade-log rotate (composer IS the sole trade-log writer post P3-b) -> event-log IN-BAND truncate (writer-thread intercept; the Class-50 3-way reset race closes) -> reset_seq++ (the producer copies to the GUI) -> slow-path park flag released. GUI-AGNOSTIC (blindspot punch 9): no TUISharedState reference; compiles in the zero-dep lane]
+// [REFERENCE]_[DECISION]_[[D-445] [D-444]]
+// [REFERENCE]_[INVARIANT]_[[H3] [H22]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void EngineSharded_ExecutePaperReset(const ControllerConfig<F>& cfg,
+                                             EventLoopState<F>& state,
+                                             std::atomic<bool>& paper_reset_in_progress) {
+    // v5.15.5.C.3 Phase 6 — paper-reset archive flow. Captures the prior session's state
+    // into a timestamped directory BEFORE the OMS reset wipes paper_session_start_us.
+    // Failures are NON-FATAL (log to stderr; continue with reset).
+    // MUST RUN BEFORE OMS_RESET_AUTOPOPULATE (the registry reset overwrites the anchor).
+    {
+        uint64_t prior_start_us = state.oms->paper_session_start_us;
+        uint64_t end_us = (uint64_t)
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        char dirname[256];
+        tt::PaperResetArchive_FormatDirname(prior_start_us, end_us,
+                                             dirname, sizeof(dirname));
+        if (tt::PaperResetArchive_CreateDirectories(dirname)) {
+            // 1) snapshot.dat — full OMS + per-core via existing ShardedSnapshot_Save.
+            //    Composer-executed = owner-side (design row 5 — the third emitter aligns
+            //    with the P2-d periodic + D-420 shutdown saves).
+            char snapshot_path[512];
+            std::snprintf(snapshot_path, sizeof(snapshot_path),
+                          "%s/snapshot.dat", dirname);
+            int partial_on =
+                BITMAP_IS_SET(state.oms->oms_state_flags,
+                              tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+            ShardedSnapshot_Save(&state, snapshot_path, partial_on);
+
+            // 2) trades.csv + per-node mirrors (flush first so the on-disk copy is consistent).
+            if (state.oms->trade_log) {
+                if (state.oms->trade_log->file) {
+                    std::fflush(state.oms->trade_log->file);
+                }
+                tt::ShardedTradeLog_Flush(state.oms->trade_log);
+
+                auto copy_file = [](const char* src, const char* dst) {
+                    FILE* sf = std::fopen(src, "r");
+                    FILE* df = std::fopen(dst, "w");
+                    if (sf && df) {
+                        char buf[4096];
+                        size_t n;
+                        while ((n = std::fread(buf, 1, sizeof(buf), sf)) > 0) {
+                            std::fwrite(buf, 1, n, df);
+                        }
+                    }
+                    if (sf) std::fclose(sf);
+                    if (df) std::fclose(df);
+                };
+
+                char trade_src[256], trade_dst[512];
+                std::snprintf(trade_src, sizeof(trade_src),
+                              "logging/%s_order_history.csv",
+                              state.oms->trade_log->symbol);
+                std::snprintf(trade_dst, sizeof(trade_dst),
+                              "%s/trades.csv", dirname);
+                copy_file(trade_src, trade_dst);
+
+                char trades_subdir[384];
+                std::snprintf(trades_subdir, sizeof(trades_subdir),
+                              "%s/trades", dirname);
+                if (tt::PaperResetArchive_CreateDirectories(trades_subdir)) {
+                    for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
+                        if (!state.oms->trade_log->per_node_files[tt::NodeIdx{(int16_t)c}]) continue;
+                        char per_src[256], per_dst[512];
+                        if (!tt::ShardedTradeLog_FormatPerCoreFilename(
+                                per_src, sizeof(per_src),
+                                state.oms->trade_log->symbol, c)) continue;
+                        std::snprintf(per_dst, sizeof(per_dst),
+                                      "%s/node_%d.csv", trades_subdir, c);
+                        copy_file(per_src, per_dst);
+                    }
+                }
+            }
+
+            // 3) summary.json — session + global + per_node + per_strategy + per_regime
+            char summary_path[512];
+            std::snprintf(summary_path, sizeof(summary_path),
+                          "%s/summary.json", dirname);
+            tt::Summary_WriteJson(summary_path, state, cfg,
+                                   state.registered_count, end_us);
+
+            std::fprintf(stderr,
+                "[archive] paper-reset session archived: %s "
+                "(snapshot + trades + summary)\n", dirname);
+        } else {
+            std::fprintf(stderr,
+                "[archive] WARNING — failed to create archive directory %s; "
+                "proceeding with reset without archive\n", dirname);
+        }
+    }
+
+    // v5.15.5.C.3 Phase 3b — full OMS reset via canonical registry (see the pre-extraction
+    // comment history in git; RESET_KIND column selects participating fields).
+    OMS_RESET_AUTOPOPULATE(state.oms, cfg.starting_balance);
+    state.total_entries = 0;
+    state.total_exits   = 0;
+    state.total_events_processed = 0;
+    // v5.15.5.B.7 — per-slot paper-reset via NODE_CTX_RESET_AUTOPOPULATE companion macro.
+    for (int c = 0; c < state.registered_count; ++c) {
+        NODE_CTX_RESET_AUTOPOPULATE(state, c);
+        // persist-8 (.E.0.10): the ExecutionCore hot mirror is a pointer-target outside the
+        // registry's reach — clear the active flag so the (un-parked) hot path doesn't
+        // evaluate TP/SL on the now-wiped portfolio until the next slow-path re-arm.
+        // P3-c: reached via state.nodes[].core (the extracted fn has no block-scope statics).
+        if (state.nodes[tt::NodeIdx{(int16_t)c}].core) {
+            state.nodes[tt::NodeIdx{(int16_t)c}].core->active = 0;
+        }
+    }
+    // v4.7.18: rotate the trade history CSV — composer-executed = single-threaded vs the
+    // trade-row emit by construction (the composer is the sole Record* caller post P3-b).
+    if (state.oms->trade_log) {
+        ShardedTradeLog_Rotate(state.oms->trade_log);
+    }
+    // v4.7.18 → P3-c (D-445): IN-BAND event-log truncate (the writer thread intercepts;
+    // ring FIFO flushes every pre-reset event to the OLD file first; no handshake).
+    OrderEventLog_RequestTruncate(&state.oms->event_log);
+    // Completion counter — the PRODUCER copies this to the GUI's paper_reset_seq
+    // (consumers stay GUI-agnostic; blindspot punch 9).
+    state.agg.reset_seq++;
+    fprintf(stderr, "[sharded] paper reset: balance=$%.2f "
+                    "(seq=%u, trade log + event log rotated)\n",
+            Money_ToDouble(cfg.starting_balance),
+            (unsigned)state.agg.reset_seq);
+    // Reset complete — release the slow-path threads parked on the flag.
+    paper_reset_in_progress.store(false, std::memory_order_release);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_ExecutePaperReset]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineSharded_Async_FanOut]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PRODUCER] [DATA_PLANE] [CRITICAL]]
@@ -642,192 +786,20 @@ inline bool EngineSharded_Async_FanOut(
         if (shared_ptr && shared_ptr->quit_requested) {
             g_engine_sharded_shutdown = 1;
         }
-        // paper reset: zero balance, clear positions, reset counters
+        // paper reset (P3-c, D-445): the producer only PACKAGES the request — the
+        // composer/drainer executes the whole flow at its cycle tail (everything pending
+        // drained + applied first; see EngineSharded_ExecutePaperReset above). The flag
+        // parks the slow paths exactly as before; the COMPOSER clears it at completion.
         if (shared_ptr && shared_ptr->paper_reset_requested && !ControllerConfig_IsLiveCapital(cfg)) { // NEW-1 — paper-reset interlock routes the single predicate
             shared_ptr->paper_reset_requested = 0;
-            // Coordinate Reset Paper with per-core slow-path threads.
-            // Set the in-progress flag → slow-paths park (yield) at
-            // top of their loop. After reset completes, clear the
-            // flag → slow-paths resume with fresh state.
             paper_reset_in_progress.store(true, std::memory_order_release);
-            // Brief yield to let slow-paths observe the flag and park.
-            // Worst case they don't yet — shared state writes below
-            // proceed concurrently, slow-path's next read sees fresh
-            // values (eventually consistent acceptable for slow-path).
-            std::this_thread::yield();
-
-            // v5.15.5.C.3 Phase 6 — paper-reset archive flow. Captures the
-            // prior session's state into a timestamped directory BEFORE the
-            // OMS reset wipes paper_session_start_us. Operator can review
-            // archived sessions in data/paper_resets/{start_iso}_to_{end_iso}.paper/
-            //   - snapshot.dat: full OMS + per-core state (ShardedSnapshot_Save)
-            //   - trades.csv:    copy of logging/SYMBOL_order_history.csv
-            //   - summary.json:  session + global + per_node + per_strategy +
-            //                     per_regime (per_regime is empty placeholder;
-            //                     Phase 5.B follow-up or focused aggregator
-            //                     populates from trades.csv post-rotation)
-            // Failures are NON-FATAL (log to stderr; continue with reset).
-            // MUST RUN BEFORE OMS_RESET_AUTOPOPULATE: the registry's
-            // paper_session_start_us RESET expression evaluates tt::_oms_now_us()
-            // and overwrites the prior session's anchor. We need the prior
-            // start_us for the archive dirname.
-            {
-                uint64_t prior_start_us = state.oms->paper_session_start_us;
-                uint64_t end_us = (uint64_t)
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count();
-                char dirname[256];
-                tt::PaperResetArchive_FormatDirname(prior_start_us, end_us,
-                                                     dirname, sizeof(dirname));
-                if (tt::PaperResetArchive_CreateDirectories(dirname)) {
-                    // 1) snapshot.dat — full OMS + per-core via existing ShardedSnapshot_Save
-                    char snapshot_path[512];
-                    std::snprintf(snapshot_path, sizeof(snapshot_path),
-                                  "%s/snapshot.dat", dirname);
-                    int partial_on =
-                        BITMAP_IS_SET(state.oms->oms_state_flags,
-                                      tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
-                    ShardedSnapshot_Save(&state, snapshot_path, partial_on);
-
-                    // 2) trades.csv — copy of logging/<SYMBOL>_order_history.csv (aggregate)
-                    //    Flush + copy via fread/fwrite loop (no live file pointer disturbance;
-                    //    ShardedTradeLog_Rotate below handles the rotation of the live file).
-                    //
-                    //    v5.15.5.C.3 Phase 5.B — ALSO copies per-core mirror files to
-                    //    `<dirname>/trades/core_<N>.csv` (1 + N files per archive). The
-                    //    aggregate file preserves GUI/TradeReader backward compat; the
-                    //    per-core files enable per-core archive analysis (regime
-                    //    aggregation, per-core PnL post-mortem, etc.) without parsing
-                    //    the aggregate. mkdir of `<dirname>/trades/` is best-effort.
-                    if (state.oms->trade_log) {
-                        if (state.oms->trade_log->file) {
-                            std::fflush(state.oms->trade_log->file);
-                        }
-                        // Flush per-core files before copy (mirror writes are line-buffered
-                        // but explicit flush ensures the on-disk snapshot is consistent).
-                        tt::ShardedTradeLog_Flush(state.oms->trade_log);
-
-                        // v5.15.5.C.3 Phase 5.B — local file-copy helper. Used by
-                        // aggregate + per-core archive copies below; deduplicates the
-                        // fread/fwrite loop + close-on-all-paths handling. Failure is
-                        // best-effort silent (matches pre-helper behavior).
-                        auto copy_file = [](const char* src, const char* dst) {
-                            FILE* sf = std::fopen(src, "r");
-                            FILE* df = std::fopen(dst, "w");
-                            if (sf && df) {
-                                char buf[4096];
-                                size_t n;
-                                while ((n = std::fread(buf, 1, sizeof(buf), sf)) > 0) {
-                                    std::fwrite(buf, 1, n, df);
-                                }
-                            }
-                            if (sf) std::fclose(sf);
-                            if (df) std::fclose(df);
-                        };
-
-                        // Aggregate copy: <dirname>/trades.csv
-                        char trade_src[256], trade_dst[512];
-                        std::snprintf(trade_src, sizeof(trade_src),
-                                      "logging/%s_order_history.csv",
-                                      state.oms->trade_log->symbol);
-                        std::snprintf(trade_dst, sizeof(trade_dst),
-                                      "%s/trades.csv", dirname);
-                        copy_file(trade_src, trade_dst);
-
-                        // Per-core copies: <dirname>/trades/core_<N>.csv (N = 0..MAX_EXECUTION_NODES-1).
-                        // Per-core source filename built via the single source of truth
-                        // (ShardedTradeLog_FormatPerCoreFilename — also used by _Init + _Rotate).
-                        char trades_subdir[384];
-                        std::snprintf(trades_subdir, sizeof(trades_subdir),
-                                      "%s/trades", dirname);
-                        if (tt::PaperResetArchive_CreateDirectories(trades_subdir)) {
-                            for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
-                                if (!state.oms->trade_log->per_node_files[tt::NodeIdx{(int16_t)c}]) continue;
-                                char per_src[256], per_dst[512];
-                                if (!tt::ShardedTradeLog_FormatPerCoreFilename(
-                                        per_src, sizeof(per_src),
-                                        state.oms->trade_log->symbol, c)) continue;
-                                std::snprintf(per_dst, sizeof(per_dst),
-                                              "%s/node_%d.csv", trades_subdir, c);
-                                copy_file(per_src, per_dst);
-                            }
-                        }
-                    }
-
-                    // 3) summary.json — session + global + per_node + per_strategy + per_regime
-                    char summary_path[512];
-                    std::snprintf(summary_path, sizeof(summary_path),
-                                  "%s/summary.json", dirname);
-                    tt::Summary_WriteJson(summary_path, state, cfg,
-                                           num_nodes, end_us);
-
-                    std::fprintf(stderr,
-                        "[archive] paper-reset session archived: %s "
-                        "(snapshot + trades + summary)\n", dirname);
-                } else {
-                    std::fprintf(stderr,
-                        "[archive] WARNING — failed to create archive directory %s; "
-                        "proceeding with reset without archive\n", dirname);
-                }
-            }
-
-            // v5.15.5.C.3 Phase 3b — full OMS reset via canonical registry.
-            // Replaces 10 explicit field assignments (balance, realized_pnl,
-            // ks_peak_balance, kill_switch_tripped bit clear, total_fees,
-            // total_maker_fees, total_taker_fees, maker_fills_count,
-            // taker_fills_count, Portfolio_Init) with single AUTOPOPULATE call.
-            // Adds DO_RESET coverage for atomics (total_submitted/filled/
-            // rejected — v5.5.6 Class-5 recurring-bug close completion) +
-            // paper_session_start_us refresh (Phase 2 archive anchor). See
-            // FOREACH_OMS_FIELD in MemHeaders/OmsFieldRegistry.hpp; RESET_KIND
-            // column selects which fields participate.
-            OMS_RESET_AUTOPOPULATE(state.oms, cfg.starting_balance);
-            state.total_entries = 0;
-            state.total_exits   = 0;
-            state.total_events_processed = 0;
-            // v5.15.5.B.7 — Per-slot paper-reset via NODE_CTX_RESET_AUTOPOPULATE
-            // companion macro. Closes the per-session-counter mirror class
-            // structurally: ~16 explicit field resets pre-.B.7 (anchored by
-            // Phase 2.1 P&L leak, Phase 3 kill switch, v4.7.26 partner pairing
-            // + gross accumulator leak, v5.4.3 SL-cooldown / idle-cycle leak)
-            // collapse to ONE registry-driven walk. Adding a new "per-session
-            // counter" in the future = ONE RST-flagged row in FOREACH_NODE_CTX_FIELD;
-            // every paper-reset site auto-flows. See MemHeaders/NodeCtxInitRegistry.hpp.
-            for (int c = 0; c < num_nodes; ++c) {
-                NODE_CTX_RESET_AUTOPOPULATE(state, c);
-                // persist-8 (.E.0.10): NODE_CTX_RESET resets ctx VALUE fields, but the ExecutionCore is a
-                // pointer-target (NodeCtxInitRegistry.hpp:94 "pointer; registration persists") — its hot
-                // mirror is outside the registry's reach. Clear the active flag so the (un-parked) hot path
-                // doesn't evaluate TP/SL on the now-wiped portfolio until the next cadence-gated slow-path
-                // re-arm. Single-byte flag (hardware-atomic on x86); once active=0 the hot path skips the
-                // exit eval, so the stale live_tp/live_sl are never read. Paper-mode only + the phantom sell
-                // is guarded downstream (OrderManager.hpp:1185 active_bitmap check) → hygiene, LOW severity.
-                // The robust version (full hot-path quiesce during reset, like the slow path at Run.hpp:1670)
-                // pairs with conc-5's concurrency pass.
-                nodes[tt::NodeIdx{(int16_t)c}].active = 0;
-            }
-            // v4.7.18: rotate the trade history CSV to a timestamped
-            // backup so the GUI's Trade History panel goes blank
-            // instead of mixing pre-reset rows with new ones.
-            if (state.oms->trade_log) {
-                ShardedTradeLog_Rotate(state.oms->trade_log);
-            }
-            // v4.7.18: also truncate the OMS event log on disk so
-            // the next engine restart doesn't replay 40+ zombie
-            // events from the prior session into the fresh state.
-            OrderEventLog_Reset(&state.oms->event_log);
-            // v4.7.18: bump the reset sequence counter so retained-
-            // history GUI panels (Per-Core P&L ring buffer, equity
-            // curve, etc.) can clear themselves.
-            shared_ptr->paper_reset_seq++;
-            fprintf(stderr, "[sharded] paper reset: balance=$%.2f "
-                            "(seq=%u, trade log + event log rotated)\n",
-                    Money_ToDouble(cfg.starting_balance),
-                    (unsigned)shared_ptr->paper_reset_seq);
-            // v4.7.39 (Phase C.2): reset complete; release slow-path
-            // threads. They were parked on this flag — next loop
-            // iteration sees fresh state.
-            paper_reset_in_progress.store(false, std::memory_order_release);
+            std::this_thread::yield();   // let slow-paths observe + park before ticks resume
+            state.agg.reset_request.store(1, std::memory_order_release);
+        }
+        // P3-c: completion copy-through — the composer bumps agg.reset_seq; the producer
+        // (the GUI's writer) mirrors it so retained-history panels clear on completion.
+        if (shared_ptr) {
+            shared_ptr->paper_reset_seq = state.agg.reset_seq;
         }
 #endif
     }
