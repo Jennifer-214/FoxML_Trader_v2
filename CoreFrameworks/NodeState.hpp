@@ -131,6 +131,43 @@ inline FillEvent<F> FillEvent_Make(tt::SlotIdx slot, tt::NodeIdx node,
 }
 
 //======================================================================================================
+// [STRUCT]_[EmitRecord]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [THREAD]_[[NODE_SLOW_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the trade-log TRAVEL record (plan amendment I / I-2 MED-4 / A-1 T5): the LEAF pre-builds the row payload at fill time (Position re-reads are unsafe at composer emit time — Phase-B overwrite + partial remainder-form), pushes it in LOCKSTEP with its FillEvent on the paired per-node ring; the COMPOSER pops fe -> applies -> pops this -> emits the row with the just-updated (post-apply) balance. Only pushed when trade_log is wired (live boot); in-flight SPSC only, never persisted]
+// [REFERENCE]_[DECISION]_[[D-444] [D-445]]
+// [REFERENCE]_[INVARIANT]_[[H1] [H12]]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+// Layout: five 16B Money legs + one 16B identity tail = 96B — the SAME ring geometry as
+// FillEvent (2-per-3-lines; adjacent rings line-isolated by sizeof%64==0).
+template <unsigned F>
+struct EmitRecord {
+    Money       fill_price;        // entry rows: the entry fill price; exit rows: the exit price
+    Money       entry_price_snap;  // exit rows: position entry basis at leaf time (entry rows: == fill_price)
+    Money       qty;               // this row's size (leaf-time snapshot)
+    Money       net;               // exit rows: realized net; entry rows: Money_Zero()
+    Money       fee;               // entry rows: entry fee; exit rows: total fee (entry + exit)
+    uint64_t    timestamp_us;      // order submit timestamp (the TradeEvent synth field)
+    tt::SlotIdx slot;
+    uint8_t     strategy_id;
+    uint8_t     is_entry;          // 1 = RecordEntry row, 0 = RecordExit row
+    int32_t     _pad0 = 0;         // H12: explicit, zero-init
+};
+
+static_assert(sizeof(EmitRecord<64>) == 96,  "EmitRecord<64> pinned at 96B (5x16B Money + 16B tail) — re-pin deliberately");
+static_assert(alignof(EmitRecord<64>) == 16, "EmitRecord aligns to Money (16B)");
+static_assert(std::is_trivially_copyable<EmitRecord<64>>::value, "EmitRecord rides SPSC rings");
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [END_STRUCT]_[EmitRecord]
+//======================================================================================================
+
+//======================================================================================================
 // [STRUCT]_[MoneySnapshotNodeRow]
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
@@ -413,6 +450,11 @@ struct alignas(64) AggregatorState {
     //      producer=the GUI-pickup (producer thread), consumer=the composer. ----
     tt::SPSCRing<DragCmd, 8> drag_ring;
 
+    // ---- P3-b: per-node trade-log EmitRecord rings — PAIRED with fill_rings in push order
+    //      (leaf pushes fe THEN its record on the SAME node index; the composer pops in the
+    //      same lockstep). Pushed ONLY when trade_log is wired (live boot); empty otherwise. ----
+    tt::NodeArray<tt::SPSCRing<EmitRecord<F>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES> emit_rings;
+
     // NOTE (paper/live partition — D-441 #4): modes are separate PROCESSES; mixed-mode totals
     // cannot occur. If a mixed-mode deployment ever exists, the partition hook is a second
     // ledger line + row set HERE, keyed by mode — never in the fill leaves.
@@ -423,9 +465,9 @@ struct alignas(64) AggregatorState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-28]
-// [SIZE]_[399232B]
+// [SIZE]_[794496B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6238]
+// [CACHE_LINES]_[12414]
 // [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[AggregatorState]
@@ -445,7 +487,8 @@ static_assert(offsetof(AggregatorState<64>, fill_rings)  == 192 + sizeof(tt::Par
               "fill rings follow the publish port");
 static_assert(sizeof(AggregatorState<64>) == 192 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>)
               + sizeof(tt::NodeArray<tt::SPSCRing<FillEvent<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>)
-              + sizeof(tt::SPSCRing<DragCmd, 8>),
-              "AggregatorState<64> = 3 state lines + publish port + fill rings + drag ring (re-pin deliberately)");
+              + sizeof(tt::SPSCRing<DragCmd, 8>)
+              + sizeof(tt::NodeArray<tt::SPSCRing<EmitRecord<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>),
+              "AggregatorState<64> = 3 state lines + publish port + fill rings + drag ring + emit rings (re-pin deliberately)");
 static_assert(alignof(NodeState<64>) == 64 && alignof(ClusterState<64>) == 64 &&
               alignof(AggregatorState<64>) == 64, "capital-plane types are cache-line aligned (H6)");

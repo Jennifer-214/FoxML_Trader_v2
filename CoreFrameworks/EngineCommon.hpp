@@ -198,6 +198,10 @@ inline void EngineCommon_ApplyBnbDiscount(ControllerConfig<F>& cfg) {
 // [END_FUNCTION]_[EngineCommon_ApplyBnbDiscount]
 //======================================================================
 
+// Forward decl — BootGlobal wires this Pattern-5 sink (defined with the fill plumbing below).
+template <unsigned F>
+inline void EngineCommon_FillEmitSink(OrderManagerState<F>* oms, const FillEvent<F>& fe);
+
 //======================================================================
 // [FUNCTION]_[EngineCommon_BootGlobal]
 //----------------------------------------------------------------------
@@ -214,6 +218,11 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
                                      OrderManagerState<F>& oms) {
     // 1. EventLoopState_Init (per Step A.4 :742)
     EventLoopState_Init(&state, &oms);
+
+    // 1b. P3-b (D-444) — wire the leaf emit path onto the composer's rings (BOTH drivers,
+    //     M5 by construction). Null-agg harnesses keep the OMS default (FillEmitDirect).
+    oms.agg       = &state.agg;
+    oms.fill_emit = &EngineCommon_FillEmitSink<F>;
 
     // 2. KillSwitch configure (per Step A.4 :749-753; PARITY-026 closure)
     if (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED)) {
@@ -473,35 +482,6 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
 // [END_FUNCTION]_[EngineCommon_ComposeAndKillEval]
 //======================================================================
 //======================================================================
-// [FUNCTION]_[EngineCommon_LedgerApplyFill]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
-// [THREAD]_[[COMPOSER_WRITER]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[THE one booking body (D-444): every FillEvent — live composer, backtest inline apply, (E.1.4) boot-replay — books through HERE into the EXISTING oms fields (restore/reset/persist ride their registry rows unchanged; ownership-by-TOPOLOGY, only the composer calls the apply). Fee triple books via OrderManager_AccountMakerTakerFee — ONE fee body, ONE writer (A-1 T2); fe.fee = this leg's EXECUTION fee only, entry fee rides SELL net (no double-count in either surface). The drift oracle's independent leg (start + Σnode_realized) must NEVER route through this body — it would self-confirm]
-// [REFERENCE]_[DECISION]_[[D-440] [D-441] [D-444]]
-// [REFERENCE]_[INVARIANT]_[[H4]]
-//======================================================================
-// [CODE]
-//======================================================================
-template <unsigned F>
-inline void EngineCommon_LedgerApplyFill(OrderManagerState<F>& oms, const FillEvent<F>& fe) {
-    // BUY legs carry net == 0 (buy books Δfee only — gate accounting F8); SELL legs carry
-    // the signed realized delta. Addition is exact (Money): the TOTALS are order-free.
-    OrderManager_AccountMakerTakerFee(&oms, (int)fe.is_maker, fe.fee);
-    oms.balance      = Money_Add(oms.balance,      fe.net);
-    oms.realized_pnl = Money_Add(oms.realized_pnl, fe.net);
-    // Source-purity (D-441 / gate accounting F4): the ratchet reads ONLY the realized-equity
-    // balance — NEVER an unrealized-inclusive value. Per-fill-TRUE by construction.
-    oms.ks_peak_balance = Money_Max(oms.ks_peak_balance, oms.balance);
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [END_FUNCTION]_[EngineCommon_LedgerApplyFill]
-//======================================================================
-
-//======================================================================
 // [FUNCTION]_[EngineCommon_FillRingsApply]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
@@ -519,7 +499,7 @@ inline int EngineCommon_FillRingsApply(AggregatorState<F>& agg, OrderManagerStat
         const tt::NodeIdx nn{(int16_t)n};
         FillEvent<F> fe;
         while (tt::SPSCRing_TryPop(&agg.fill_rings[nn], &fe)) {
-            EngineCommon_LedgerApplyFill(oms, fe);
+            OrderManager_LedgerApplyFill(oms, fe);   // THE one booking body (moved to OM at P3-b)
             agg.applied_seq[nn] = fe.seq;
             ++applied;
         }
@@ -557,6 +537,26 @@ inline bool EngineCommon_FillEmit(AggregatorState<F>& agg, OrderManagerState<F>&
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[EngineCommon_FillEmit]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineCommon_FillEmitSink]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the PRODUCTION fill_emit sink (Pattern 5): routes the leaf's emit onto the per-node ring via EngineCommon_FillEmit (never-drop). Wired at EngineCommon_BootGlobal for BOTH drivers (M5); the OMS default stays OrderManager_FillEmitDirect for null-agg harnesses]
+// [REFERENCE]_[DECISION]_[[D-444]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void EngineCommon_FillEmitSink(OrderManagerState<F>* oms, const FillEvent<F>& fe) {
+    (void)EngineCommon_FillEmit(*oms->agg, *oms, fe);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_FillEmitSink]
 //======================================================================
 
 //======================================================================

@@ -89,6 +89,7 @@
 #include "Portfolio.hpp"
 #include "ShardedTradeLog.hpp"
 #include "SPSCRing.hpp"
+#include "NodeState.hpp"   // P3-b (D-444) — FillEvent/EmitRecord/AggregatorState for the leaf emit path (leaf includes only; cycle-free)
 #include "../DataStream/CalibLogColRegistry.hpp"   // v5.14.10.D — FOREACH_CALIB_LOG_COL registry (closes TECH_DEBT-010)
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — FOREACH_OMS_STATE_FLAG bitmap cohort
 #include "../MemHeaders/OmsExitPredictorMetaRegistry.hpp"  // v5.15.5.C.2.1 (LOW-2) — FOREACH_OMS_META_SLOT multi-bit cohort
@@ -298,6 +299,10 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 template <unsigned F> struct OrderManagerState;
 template <unsigned F>
 inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money);
+// P3-b (D-444) — the leaf emit dispatch: default = immediate apply (test-harness / null-agg);
+// boot rewires to the ring path (EngineCommon_FillEmitSink). ONE booking body either way.
+template <unsigned F>
+inline void OrderManager_FillEmitDirect(OrderManagerState<F>*, const FillEvent<F>&);
 
 template <unsigned F>
 struct OrderManagerState {
@@ -695,6 +700,20 @@ struct OrderManagerState {
     void (*on_entry_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
     void (*on_exit_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money)  = &noop_fill_emit<F>;
     void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
+
+    // P3-b (D-444) — the leaf FILL-EMIT dispatch (Pattern 5 sister to the sinks above).
+    // Default = OrderManager_FillEmitDirect (immediate apply through the ONE booking body —
+    // preserves every direct-HandleFill test oracle; arrival-order schedule, single-thread).
+    // Boot (EngineCommon_BootGlobal, BOTH drivers) rewires to EngineCommon_FillEmitSink:
+    // ring-deferred emit, applied by the composer in DEFINED ring order (the production
+    // schedule). `agg` is the composer's state, reachable from the OMS for the ring path +
+    // the composer-side trade-row emit; null in bare test fixtures.
+    void (*fill_emit)(OrderManagerState<F>*, const FillEvent<F>&) = &OrderManager_FillEmitDirect<F>;
+    AggregatorState<F>* agg = nullptr;
+    // Per-node FillEvent emit sequence (FillEvent.seq source). Element n is written ONLY by
+    // node n's emitting thread (the central drainer for all n under Phase-3 topology; the
+    // owning node post-flip) — per-element single-writer, H22-safe across the Phase-4 flip.
+    tt::NodeArray<uint64_t, MAX_EXECUTION_NODES> fill_emit_seq = {};
 
     // v5.15.5.F.4d Step 7 § F — per-core ezoo + node_cfg lookup for calib log consumer.
     // Per-NODE ARRAYS indexed by the DERIVED node at consumer (sister to per-slot last_exit_fee[]
@@ -1418,6 +1437,55 @@ inline void OrderManager_AccountMakerTakerFee(
 // extra per fill (drainer slow path; ~0.005% of 100μs budget) for deterministic latency.
 //======================================================================
 // [END_FUNCTION]_[OrderManager_AccountMakerTakerFee]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OrderManager_LedgerApplyFill]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE one booking body (D-444): every FillEvent — live composer, backtest inline apply, the direct test-harness path, (E.1.4) boot-replay — books through HERE into the EXISTING oms fields (restore/reset/persist ride their registry rows unchanged; ownership-by-TOPOLOGY, only the composer calls the ring apply). Fee triple books via OrderManager_AccountMakerTakerFee — ONE fee body, ONE writer (A-1 T2); fe.fee = this leg's EXECUTION fee only, entry fee rides SELL net (no double-count in either surface). The drift oracle's independent leg (start + Σnode_realized) must NEVER route through this body — it would self-confirm. Moved from EngineCommon at P3-b (natural home: pure OMS math; the leaves' direct-emit fallback needs it below EngineCommon in the include graph)]
+// [REFERENCE]_[DECISION]_[[D-440] [D-441] [D-444]]
+// [REFERENCE]_[INVARIANT]_[[H4]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void OrderManager_LedgerApplyFill(OrderManagerState<F>& oms, const FillEvent<F>& fe) {
+    // BUY legs carry net == 0 (buy books Δfee only — gate accounting F8); SELL legs carry
+    // the signed realized delta. Addition is exact (Money): the TOTALS are order-free.
+    OrderManager_AccountMakerTakerFee(&oms, (int)fe.is_maker, fe.fee);
+    oms.balance      = Money_Add(oms.balance,      fe.net);
+    oms.realized_pnl = Money_Add(oms.realized_pnl, fe.net);
+    // Source-purity (D-441 / gate accounting F4): the ratchet reads ONLY the realized-equity
+    // balance — NEVER an unrealized-inclusive value. Per-fill-TRUE by construction.
+    oms.ks_peak_balance = Money_Max(oms.ks_peak_balance, oms.balance);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_LedgerApplyFill]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OrderManager_FillEmitDirect]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the default fill_emit sink: IMMEDIATE apply through the ONE booking body (null-agg test-harness path — preserves every direct-HandleFill oracle's arrival-order semantics). NOT a twin formula: same body as the ring apply, different schedule (single-thread). Production boots rewire fill_emit to the ring sink]
+// [REFERENCE]_[DECISION]_[[D-444]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void OrderManager_FillEmitDirect(OrderManagerState<F>* oms, const FillEvent<F>& fe) {
+    OrderManager_LedgerApplyFill(*oms, fe);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OrderManager_FillEmitDirect]
 //======================================================================
 
 //======================================================================
