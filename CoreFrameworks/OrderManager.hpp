@@ -1613,7 +1613,9 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
         oms->fill_emit(oms, FillEvent_Make<F>(
             o->portfolio_slot, fill_node, /*is_sell=*/0,
             (uint8_t)(Order_GetState(o) == ORDER_FILLED), (uint8_t)(Order_GetIsMaker(o) != 0),
-            ++oms->fill_emit_seq[fill_node], fill_qty, fill_price, entry_fee, Money_Zero()));
+            /*slot_flat=*/0, ++oms->fill_emit_seq[fill_node],
+            fill_qty, fill_price, entry_fee, Money_Zero(),
+            /*notional=*/Money_Mul(fill_price, fill_qty), /*entry_fee_leg=*/Money_Zero()));
     }
     // A25 (D-205): arm the trail anchor (original_tp) relative to the ACTUAL fill, not the
     // expected-entry intended_tp — post-A9 they diverge under slippage, so the 4 sharded
@@ -1697,7 +1699,11 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
         oms->fill_emit(oms, FillEvent_Make<F>(
             o->portfolio_slot, fill_node, /*is_sell=*/1,
             (uint8_t)(Order_GetState(o) == ORDER_FILLED), (uint8_t)(Order_GetIsMaker(o) != 0),
-            ++oms->fill_emit_seq[fill_node], fill_qty, fill_price, exit_fee, net));
+            /*slot_flat=*/1,   // whole-close semantics until P3-d-ii computes the real flag
+            ++oms->fill_emit_seq[fill_node],
+            fill_qty, fill_price, exit_fee, net,
+            /*notional=*/Money_Mul(entry_price_snap, qty_snap),   // symmetric entry-basis relief
+            /*entry_fee_leg=*/entry_fee));
     }
 
     // Exit-side scratch on OMS sibling arrays.

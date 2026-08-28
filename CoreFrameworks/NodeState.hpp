@@ -71,11 +71,17 @@
 //======================================================================================================
 // [CODE]
 //======================================================================================================
-// Layout note (H12 + cache): 8B identity head + 8B seq, then the five 16B Money legs — first
-// Money lands at offset 16 with NO hidden padding; sizeof pinned 96 (1.5 cache lines; SPSC ring
-// elements pack 2-per-3-lines). `venue_fee_reserved` is the E.1.4-slim A4 slot (D-441: additive
-// venue-exact commission completion) — 0 until that ship; NOT a live field here.
-inline constexpr int FILL_EVENT_RING_SIZE = 256;   // per-node; fills are ~Hz-scale vs a ~10µs-ms apply cadence
+// Layout note (H12 + cache): 8B identity head + 8B seq, then the seven 16B Money legs — first
+// Money lands at offset 16 with NO hidden padding; sizeof pinned 128 (EXACTLY 2 cache lines per
+// ring element — P3-d-i widened the delta vector with the node-row legs {notional,
+// entry_fee_leg} + the slot_flat head bit). `venue_fee_reserved` is the E.1.4-slim A4 slot
+// (D-441: additive venue-exact commission completion) — 0 until that ship; NOT a live field here.
+// Depth 128 (P3-d-i; was 256): the fill + emit rings are DEPTH-PAIRED — the occupancy
+// invariant (records push 1:1 after their FillEvent on EQUAL-size rings, so a successful fe
+// push guarantees record space) is load-bearing for the lockstep trade-row pairing; unequal
+// depths would silently drop rows at the smaller ring. 128/node/cycle is deep headroom
+// (worst arrival 512/cycle engine-WIDE) and overflow is a CORRECT inline drain either way.
+inline constexpr int FILL_EVENT_RING_SIZE = 128;   // per-node; PAIRED depth for fill_rings + emit_rings
 template <unsigned F>
 struct FillEvent {
     tt::SlotIdx slot;             // portfolio slot the fill leg applies to
@@ -86,12 +92,22 @@ struct FillEvent {
                                   // triple via OrderManager_AccountMakerTakerFee — the ONE fee body;
                                   // MARKET-only today ⇒ always taker; carried for the counts pair +
                                   // future-LIMIT)
-    int8_t      _pad0 = 0;        // H12: explicit, zero-init
+    uint8_t     slot_flat = 0;    // P3-d: 1 = this leg took the position to qty' == 0 (the H22-pure
+                                  // LOCAL truth) — gates the composer's W/L classify + partner
+                                  // pairing; DISTINCT from order_complete (the venue bit gates only
+                                  // order-slot free — Class-46's predicate split, A-2 T3)
     uint64_t    seq;              // per-node emit sequence (apply-order pin + forensics)
     Money       qty;              // filled quantity (this leg)
     Money       price;            // fill price
-    Money       fee;              // booked fee for this leg (maker/taker-resolved)
+    Money       fee;              // booked fee for this leg (maker/taker-resolved; SELL: the EXIT
+                                  // execution fee only — entry fee rides net + entry_fee_leg)
     Money       net;              // signed realized delta (SELL: gross - total_fee; BUY: zero — buy books Δfee only, gate accounting F8)
+    Money       notional;         // P3-d node-row vector: BUY = fill_price×qty (open_notional add);
+                                  // SELL = entry_basis×qty (the SYMMETRIC entry-basis relief —
+                                  // asymmetry leaks residue per round-trip)
+    Money       entry_fee_leg;    // P3-d node-row vector (SELL legs): this leg's apportioned entry
+                                  // fee — node_fees books entry+exit AT CLOSE (persisted semantics
+                                  // preserved); BUY legs: zero
     Money       venue_fee_reserved;   // RESERVED for E.1.4-slim (venue-exact commission); always Money_Zero() this ship
 };
 //======================================================================================================
@@ -108,11 +124,12 @@ struct FillEvent {
 // [END_STRUCT]_[FillEvent]
 //======================================================================================================
 
-static_assert(sizeof(FillEvent<64>) == 96,  "FillEvent<64> pinned at 96B (8B id + 8B seq + 5x16B Money) — re-pin deliberately, never drift");
+static_assert(sizeof(FillEvent<64>) == 128, "FillEvent<64> pinned at 128B (8B id head + 8B seq + 7x16B Money = exactly 2 cache lines) — re-pin deliberately, never drift");
 static_assert(alignof(FillEvent<64>) == 16, "FillEvent aligns to Money (16B)");
 static_assert(offsetof(FillEvent<64>, seq) == 8  && offsetof(FillEvent<64>, qty) == 16,
-              "FillEvent head packs with no hidden padding (H12)");
-static_assert(offsetof(FillEvent<64>, is_maker) == 6, "is_maker rides the former _pad0 hole (D-444) — offsets unchanged");
+              "FillEvent head packs fully (2+2+1+1+1+1 = 8B, no hidden padding — H12)");
+static_assert(offsetof(FillEvent<64>, is_maker) == 6 && offsetof(FillEvent<64>, slot_flat) == 7,
+              "is_maker + slot_flat ride the head's tail bytes (D-444 / P3-d) — offsets pinned");
 static_assert(std::is_trivially_copyable<FillEvent<64>>::value, "FillEvent rides SPSC rings");
 
 // D-444 + A-2 Q4: the ONE construction path — an emit site that misses a field compiles
@@ -121,11 +138,15 @@ static_assert(std::is_trivially_copyable<FillEvent<64>>::value, "FillEvent rides
 template <unsigned F>
 inline FillEvent<F> FillEvent_Make(tt::SlotIdx slot, tt::NodeIdx node,
                                    uint8_t is_sell, uint8_t order_complete, uint8_t is_maker,
-                                   uint64_t seq, Money qty, Money price, Money fee, Money net) {
+                                   uint8_t slot_flat, uint64_t seq,
+                                   Money qty, Money price, Money fee, Money net,
+                                   Money notional, Money entry_fee_leg) {
     FillEvent<F> fe{};
     fe.slot = slot; fe.node = node;
     fe.is_sell = is_sell; fe.order_complete = order_complete; fe.is_maker = is_maker;
+    fe.slot_flat = slot_flat;
     fe.seq = seq; fe.qty = qty; fe.price = price; fe.fee = fee; fe.net = net;
+    fe.notional = notional; fe.entry_fee_leg = entry_fee_leg;
     fe.venue_fee_reserved = Money_Zero();
     return fe;
 }
@@ -480,9 +501,9 @@ struct alignas(64) AggregatorState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-28]
-// [SIZE]_[794496B]
+// [SIZE]_[466816B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[12414]
+// [CACHE_LINES]_[7294]
 // [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[AggregatorState]
