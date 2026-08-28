@@ -82,7 +82,11 @@ struct FillEvent {
     tt::NodeIdx node;             // owning node (derived at emit via the typed bridge)
     uint8_t     is_sell;          // 0 = BUY leg, 1 = SELL leg
     uint8_t     order_complete;   // venue completeness signal (A16/Class-46 terminal gating)
-    int16_t     _pad0 = 0;        // H12: explicit, zero-init
+    uint8_t     is_maker = 0;     // maker/taker discriminator (D-444: the composer books the fee
+                                  // triple via OrderManager_AccountMakerTakerFee — the ONE fee body;
+                                  // MARKET-only today ⇒ always taker; carried for the counts pair +
+                                  // future-LIMIT)
+    int8_t      _pad0 = 0;        // H12: explicit, zero-init
     uint64_t    seq;              // per-node emit sequence (apply-order pin + forensics)
     Money       qty;              // filled quantity (this leg)
     Money       price;            // fill price
@@ -95,7 +99,7 @@ struct FillEvent {
 //======================================================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-27]
+// [UPDATED]_[2026-08-28]
 // [SIZE]_[96B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[2]
@@ -108,7 +112,23 @@ static_assert(sizeof(FillEvent<64>) == 96,  "FillEvent<64> pinned at 96B (8B id 
 static_assert(alignof(FillEvent<64>) == 16, "FillEvent aligns to Money (16B)");
 static_assert(offsetof(FillEvent<64>, seq) == 8  && offsetof(FillEvent<64>, qty) == 16,
               "FillEvent head packs with no hidden padding (H12)");
+static_assert(offsetof(FillEvent<64>, is_maker) == 6, "is_maker rides the former _pad0 hole (D-444) — offsets unchanged");
 static_assert(std::is_trivially_copyable<FillEvent<64>>::value, "FillEvent rides SPSC rings");
+
+// D-444 + A-2 Q4: the ONE construction path — an emit site that misses a field compiles
+// silently on the bare aggregate (garbage `seq` corrupts applied_seq forensics); the builder
+// makes every live field a named parameter. venue_fee_reserved stays zero this ship (D-441 #3).
+template <unsigned F>
+inline FillEvent<F> FillEvent_Make(tt::SlotIdx slot, tt::NodeIdx node,
+                                   uint8_t is_sell, uint8_t order_complete, uint8_t is_maker,
+                                   uint64_t seq, Money qty, Money price, Money fee, Money net) {
+    FillEvent<F> fe{};
+    fe.slot = slot; fe.node = node;
+    fe.is_sell = is_sell; fe.order_complete = order_complete; fe.is_maker = is_maker;
+    fe.seq = seq; fe.qty = qty; fe.price = price; fe.fee = fee; fe.net = net;
+    fe.venue_fee_reserved = Money_Zero();
+    return fe;
+}
 
 //======================================================================================================
 // [STRUCT]_[MoneySnapshotNodeRow]
@@ -359,22 +379,22 @@ struct alignas(64) AggregatorState {
     // executes ShardedSnapshot_Save on ITS thread (it owns every field the save reads).
     // Paper-only I/O at ~1/13min — the drainer-budget exception is documented at the call.
     std::atomic<uint32_t> save_request{0};
-    uint64_t _pad_line0[5] = {};        // H12: explicit pad to the line boundary
+    // P3-a (plan amendment H): full-ring inline-drain events — operator-visible telemetry for the
+    // never-drop policy (the counter and the drain are COMPLEMENTS, not alternatives; Rule 2).
+    // Single-writer: the emit path == the composer thread under central topology; Phase 4 re-homes
+    // emit-side counting per-node with the parked-event cursor (NodeState binding line).
+    uint64_t fill_ring_full_events = 0;
+    uint64_t _pad_line0[4] = {};        // H12: explicit pad to the line boundary
 
     // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
     //      from Phase 1). applied_seq[n] = last FillEvent.seq applied from node n's ring —
     //      the defined ring-order apply state (determinism anchor). ----
     alignas(64) tt::NodeArray<uint64_t, MAX_EXECUTION_NODES> applied_seq = {};
 
-    // ---- line 3 · the composer-owned ledger (P1-c: fields EXIST + are unit-exercised by the
-    //      apply machinery; they become AUTHORITATIVE at Phase 3 when the leaves emit FillEvents
-    //      in production. led_ks_peak ratchets PER APPLIED FILL — per-fill-TRUE, the gate-C2
-    //      resolution — and ONLY from led_balance (realized-equity source-purity, D-441/gate
-    //      accounting F4: NEVER from an unrealized-inclusive value). ----
-    alignas(64) Money led_balance   = Money_Zero();
-    Money            led_realized   = Money_Zero();
-    Money            led_ks_peak    = Money_Zero();
-    uint64_t         _pad_ledger[2] = {};   // H12: explicit pad to the line boundary
+    // D-444: the P1 `led_*` shadow ledger is RETIRED — the composer applies FillEvents into the
+    // EXISTING `oms.{balance, realized_pnl, ks_peak_balance}` through EngineCommon_LedgerApplyFill
+    // (ownership-by-TOPOLOGY: only the composer calls the apply; storage stays where restore/
+    // reset/persist already live). In-memory only — offsets below re-pinned same commit.
 
     // ---- the publish port: the house seqlock, instantiated (TD-240 precedent — reuse outright,
     //      never a third seqlock). 1 writer (composer), N readers. ----
@@ -402,10 +422,10 @@ struct alignas(64) AggregatorState {
 //======================================================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-27]
-// [SIZE]_[399296B]
+// [UPDATED]_[2026-08-28]
+// [SIZE]_[399232B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6239]
+// [CACHE_LINES]_[6238]
 // [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[AggregatorState]
@@ -419,14 +439,13 @@ static_assert(offsetof(NodeState<64>, _kill_mirror_reserved)   == 128, "cluster 
 static_assert(offsetof(NodeState<64>, _binding_reserved)       == 192, "cluster line 3 anchor");
 static_assert(sizeof(ClusterState<64>) == 64,    "ClusterState<64> Phase-0 shell: 1 x 64B line");
 static_assert(offsetof(AggregatorState<64>, kill_word)   == 0,   "kill word owns line 0 (SSoT, H6)");
-static_assert(offsetof(AggregatorState<64>, applied_seq) == 64,  "apply cursors at line 1");
-static_assert(offsetof(AggregatorState<64>, led_balance) == 192, "composer ledger owns line 3 (P1-c growth, re-pinned)");
-static_assert(offsetof(AggregatorState<64>, publish)     == 256, "publish port after the state lines");
-static_assert(offsetof(AggregatorState<64>, fill_rings)  == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),
+static_assert(offsetof(AggregatorState<64>, applied_seq) == 64,  "apply cursors at lines 1-2");
+static_assert(offsetof(AggregatorState<64>, publish)     == 192, "publish port after the state lines (D-444: led_* line retired; re-pinned 256->192)");
+static_assert(offsetof(AggregatorState<64>, fill_rings)  == 192 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),
               "fill rings follow the publish port");
-static_assert(sizeof(AggregatorState<64>) == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>)
+static_assert(sizeof(AggregatorState<64>) == 192 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>)
               + sizeof(tt::NodeArray<tt::SPSCRing<FillEvent<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>)
               + sizeof(tt::SPSCRing<DragCmd, 8>),
-              "AggregatorState<64> = 4 state lines + publish port + fill rings + drag ring (re-pin deliberately)");
+              "AggregatorState<64> = 3 state lines + publish port + fill rings + drag ring (re-pin deliberately)");
 static_assert(alignof(NodeState<64>) == 64 && alignof(ClusterState<64>) == 64 &&
               alignof(AggregatorState<64>) == 64, "capital-plane types are cache-line aligned (H6)");

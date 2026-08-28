@@ -813,6 +813,12 @@ done:
 
     // Final drain to flush anything still in flight from the last tick
     EventLoop_DrainEvents(&state);
+    // D-444 / I-1 MED-4 — FINAL FillEvent apply before final_balance/final_pnl are read
+    // below: tail fills must book (this flush is thinner than the driver's — it reads
+    // state.oms->balance directly into BacktestStats).
+    if (state.oms) {
+        (void)EngineCommon_FillRingsApply(state.agg, *state.oms);
+    }
     // v5.10.0 Item A — capture wall-clock total for the sharded run.
     // Caller (Backtest_Run / Backtest_RunFullValidation) may extend with
     // label_compute / wf_eval / held_out_eval / stamp_emit and bump

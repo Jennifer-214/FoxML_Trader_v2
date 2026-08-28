@@ -288,6 +288,18 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         EngineCommon_DrainPostFill(*drv->state, *drv->oms, *drv->config);
     }
 
+    // 2d. D-444 / A-2 T7-N1 — apply pending FillEvents PER TICK, not at the slow-path
+    //     cadence: the per-trade stats sampler below (BacktestSharded.hpp — realized_pnl
+    //     DELTA sign → win/loss counts, per-tick balance → MaxDrawdown/equity curve)
+    //     requires the ledger to move per FILL exactly as the leaf's direct writes did.
+    //     Apply-at-cadence would collapse multiple trades into ONE net delta (silent
+    //     training/WF-visible stats change) AND make backtest ring overflow ROUTINE.
+    //     No-op pop until the Phase-3 leaves emit. The cadence ComposeAndKillEval keeps
+    //     its own internal apply (a harmless empty pop after this).
+    if (drv->oms) {
+        (void)EngineCommon_FillRingsApply(drv->state->agg, *drv->oms);
+    }
+
     // 3. Slow path on cadence. tick_index is 0-based so we fire every
     //    slow_path_interval ticks starting from interval-1.
     //
@@ -509,6 +521,12 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
         // call that silently defaulted drift/ic_variant/node_cfg; live-parity
         // by construction now, incl. the exit-bandit flag + per-node fee).
         EngineCommon_DrainPostFill(*drv->state, *drv->oms, *drv->config);
+    }
+    // D-444 / I-1 MED-4 — FINAL apply: without it, fills booked by this flush would sit
+    // in the rings unapplied (a conservation break the moment the apply is ledger-bearing;
+    // live's shutdown sister gets this via its final ComposeAndKillEval).
+    if (drv->oms) {
+        (void)EngineCommon_FillRingsApply(drv->state->agg, *drv->oms);
     }
 }
 //======================================================================
