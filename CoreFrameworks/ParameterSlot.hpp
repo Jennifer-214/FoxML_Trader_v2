@@ -40,20 +40,26 @@ struct alignas(64) ParameterSlot {
     static_assert(std::is_trivially_copyable<T>::value,
                   "ParameterSlot<T> requires T to be trivially copyable");
 
+    // buffers stay raw (ParameterSlot_Init installs the boot pack; the contract is
+    // Init-or-Write before the first Read). seq/publish_ticks SELF-INITIALIZE so a
+    // stack/arena-allocated slot starts coherent (seq 0 = even/stable, warmup ticks 0)
+    // — the E.1.3 P2-e allocation-shape lesson (see SPSCRing.hpp counters); with
+    // seq{0}, Write-before-any-Read is fully correct even when Init was never called
+    // (the backtest driver's publish port does exactly that).
     T buffers[2];
-    std::atomic<uint64_t> seq;
+    std::atomic<uint64_t> seq{0};
     // v5.12.1.B — paired publish_tick per buffer. Writer stores the slow-
     // path tick counter alongside buffers[next_idx]; reader returns it
     // through the optional out-param. Hot-path uses (now_tick -
     // publish_tick) > cfg.param_max_age_ticks to gate stale params via
     // SHALT_PARAM_STALE. Same seqlock barrier protects both arrays —
     // bytewise paired with the buffer at the same index.
-    uint64_t publish_ticks[2];
+    uint64_t publish_ticks[2] = {};
     // pad the slot itself to a multiple of 64 so adjacent slots in arrays
     // (e.g. inside ExecutionCore[]) don't share cache lines (pitfall P5.5).
     // Pad shrunk from 56 → 40 to absorb the 16 bytes of publish_ticks[2]
     // without growing the struct beyond its existing 64-byte stride.
-    uint8_t _pad[64 - sizeof(std::atomic<uint64_t>) - sizeof(uint64_t) * 2];
+    uint8_t _pad[64 - sizeof(std::atomic<uint64_t>) - sizeof(uint64_t) * 2] = {};
 };
 //======================================================================
 // [END_CODE]

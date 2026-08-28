@@ -100,6 +100,7 @@
 //   B.1 BootGlobal → ControllerEventLoop.hpp (EventLoopState_Init + ConfigureKillSwitch) + OrderManager.hpp (OrderManagerState<F>) + RegimeDetector.hpp (Regime_Init)
 #include "ControllerConfig.hpp"                  // ControllerConfig<F>, MAX_EXECUTION_NODES, MASK_RISK_CFG_KILL_SWITCH_ENABLED (transitive via RiskCfgFlagRegistry)
 #include "Notify.hpp"   // E.1.3 P2-a — Notify_Send moved here with the node-kill trip
+#include "ShardedSnapshotPersist.hpp"   // E.1.3 P2-d — the composer executes owner-side saves
 #include "ControllerEventLoop.hpp"               // EventLoopState<F>, EventLoopState_Init, EventLoopState_ConfigureKillSwitch, EventLoopState_RegisterCore, EventLoopState_SetCoreStrategy
 #include "OrderManager.hpp"                      // OrderManagerState<F>
 #include "ExecutionCore.hpp"                     // ExecutionCore<F>, ExecutionCore_Init, ExecutionCore_SetPermission, SPSCRing<Tick<F>, EXECUTION_NODE_TICK_RING_SIZE>
@@ -320,6 +321,23 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
         }
     }
 
+    // ── 0b. Apply GUI-drag commands (P2-c): the composer owns positions; the producer only
+    //        packages requests now. Hot re-arm from these values is Phase 5 (TD-184). ──
+    {
+        DragCmd dc;
+        while (tt::SPSCRing_TryPop(&agg.drag_ring, &dc)) {
+            const int ps = (int)dc.slot;
+            if (ps >= 0 && ps < MAX_PORTFOLIO_POSITIONS &&
+                (oms.portfolio.active_bitmap & (uint16_t)(1u << ps))) {
+                Position<F>& pos = oms.portfolio.positions[ps];
+                if (dc.is_tp) pos.take_profit_price = dc.price;
+                else          pos.stop_loss_price   = dc.price;
+                fprintf(stderr, "[sharded] GUI drag applied: slot %d %s -> $%.2f\n",
+                        ps, dc.is_tp ? "TP" : "SL", Money_ToDouble(dc.price));
+            }
+        }
+    }
+
     // ── 1. Per-node MtM + peak/dd + trip (moved from RebuildOneCore — composer owns positions,
     //       node_realized, and now the peak/dd fields + the flags word: single-writer) ──
     const int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
@@ -420,6 +438,15 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
         r.unrealized = state.nodes[nn].node_unrealized_view;
     }
     tt::ParameterSlot_Write(&agg.publish, pack, publish_tick);
+
+    // ── 5. Owner-side save execution (P2-d): the composer owns every field the save reads,
+    //       so the persisted bytes are coherent by construction (the producer-side periodic
+    //       save was torn-read census member persist-dod-1). Paper-only cadence (~1/13min);
+    //       the file I/O inside a drainer cycle is the DOCUMENTED paper-mode budget exception. ──
+    if (agg.save_request.exchange(0, std::memory_order_acq_rel)) {
+        ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
+            BITMAP_IS_SET(oms.oms_state_flags, MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
+    }
 }
 //======================================================================
 // [END_CODE]

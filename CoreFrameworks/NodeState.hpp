@@ -93,6 +93,14 @@ struct FillEvent {
 //======================================================================================================
 // [END_CODE]
 //======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[96B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
+//======================================================================================================
 // [END_STRUCT]_[FillEvent]
 //======================================================================================================
 
@@ -121,6 +129,14 @@ struct MoneySnapshotNodeRow {
 };
 //======================================================================================================
 // [END_CODE]
+//======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[96B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[MoneySnapshotNodeRow]
 //======================================================================================================
@@ -157,6 +173,14 @@ struct alignas(64) MoneySnapshot {
 //======================================================================================================
 // [END_CODE]
 //======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[1600B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[25]
+// [STRADDLE]_[none]
+//======================================================================================================
 // [END_STRUCT]_[MoneySnapshot]
 //======================================================================================================
 
@@ -190,6 +214,38 @@ static_assert(MAX_EXECUTION_NODES <= 16,
               "re-pin) before raising MAX_EXECUTION_NODES past 16 (bitmap-overflow-protection)");
 
 //======================================================================================================
+// [STRUCT]_[DragCmd]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one GUI stop/TP drag request — producer packages, composer applies (P2-c; the raw cross-thread Position write is retired). Hot re-arm of live_tp/live_sl from the applied value lands at Phase 5 (TD-184's execution-effect half)]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+struct DragCmd {
+    tt::SlotIdx slot;
+    uint8_t     is_tp;          // 1 = take-profit drag, 0 = stop-loss drag
+    uint8_t     _pad0[5] = {0,0,0,0,0};   // H12: explicit
+    uint64_t    _pad1 = 0;      // H12: align price to 16
+    Money       price;
+};
+static_assert(sizeof(DragCmd) == 32 && std::is_trivially_copyable<DragCmd>::value,
+              "DragCmd pinned at 32B (8B id + 8B pad + 16B Money), SPSC-ridable");
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[32B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================================================
+// [END_STRUCT]_[DragCmd]
+//======================================================================================================
+
+//======================================================================================================
 // [STRUCT]_[NodeState]
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN] [CAPITAL_BEARING]]
@@ -221,6 +277,14 @@ struct alignas(64) NodeState {
 //======================================================================================================
 // [END_CODE]
 //======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[256B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[4]
+// [STRADDLE]_[none]
+//======================================================================================================
 // [END_STRUCT]_[NodeState]
 //======================================================================================================
 
@@ -242,6 +306,14 @@ struct alignas(64) ClusterState {
 };
 //======================================================================================================
 // [END_CODE]
+//======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[64B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[ClusterState]
 //======================================================================================================
@@ -270,7 +342,10 @@ struct alignas(64) AggregatorState {
     // composer consumes (exchange(0)) and applies (clear flag, zero peak/dd, re-arm drift latch).
     // The old producer-side reset body is retired (gate blindspot punch 3 / merge F3b).
     std::atomic<uint32_t> kill_reset_mask{0};
-    uint32_t _pad_line0a = 0;           // H12: explicit
+    // P2-d: owner-side save request — producer sets (paper periodic cadence); the composer
+    // executes ShardedSnapshot_Save on ITS thread (it owns every field the save reads).
+    // Paper-only I/O at ~1/13min — the drainer-budget exception is documented at the call.
+    std::atomic<uint32_t> save_request{0};
     uint64_t _pad_line0[5] = {};        // H12: explicit pad to the line boundary
 
     // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
@@ -299,12 +374,26 @@ struct alignas(64) AggregatorState {
     //      single consumer (the composer). ----
     tt::NodeArray<tt::SPSCRing<FillEvent<F>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES> fill_rings;
 
+    // ---- P2-c: GUI-drag command ring — the producer's per-tick drag pickup PACKAGES the
+    //      request (it no longer writes Position cross-thread: the census WRITE-hazard row
+    //      closes); the composer applies on the thread that owns positions. True SPSC:
+    //      producer=the GUI-pickup (producer thread), consumer=the composer. ----
+    tt::SPSCRing<DragCmd, 8> drag_ring;
+
     // NOTE (paper/live partition — D-441 #4): modes are separate PROCESSES; mixed-mode totals
     // cannot occur. If a mixed-mode deployment ever exists, the partition hook is a second
     // ledger line + row set HERE, keyed by mode — never in the fill leaves.
 };
 //======================================================================================================
 // [END_CODE]
+//======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[399168B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[6237]
+// [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[AggregatorState]
 //======================================================================================================
@@ -323,7 +412,8 @@ static_assert(offsetof(AggregatorState<64>, publish)     == 256, "publish port a
 static_assert(offsetof(AggregatorState<64>, fill_rings)  == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),
               "fill rings follow the publish port");
 static_assert(sizeof(AggregatorState<64>) == 256 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>)
-              + sizeof(tt::NodeArray<tt::SPSCRing<FillEvent<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>),
-              "AggregatorState<64> = 4 state lines + publish port + fill rings (re-pin deliberately)");
+              + sizeof(tt::NodeArray<tt::SPSCRing<FillEvent<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>)
+              + sizeof(tt::SPSCRing<DragCmd, 8>),
+              "AggregatorState<64> = 4 state lines + publish port + fill rings + drag ring (re-pin deliberately)");
 static_assert(alignof(NodeState<64>) == 64 && alignof(ClusterState<64>) == 64 &&
               alignof(AggregatorState<64>) == 64, "capital-plane types are cache-line aligned (H6)");

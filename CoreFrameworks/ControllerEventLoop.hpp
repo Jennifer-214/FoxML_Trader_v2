@@ -990,10 +990,10 @@ struct alignas(64) EventLoopState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-24]
-// [SIZE]_[323840B]
+// [UPDATED]_[2026-08-27]
+// [SIZE]_[723008B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[5060]
+// [CACHE_LINES]_[11297]
 // [STRADDLE]_[unverified: nodes display_meta]
 //======================================================================
 // [END_STRUCT]_[EventLoopState]

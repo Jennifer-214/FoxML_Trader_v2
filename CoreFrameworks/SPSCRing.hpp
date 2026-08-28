@@ -57,15 +57,23 @@ struct SPSCRing {
     // Producer side: writes head, reads cached tail on the fast path.
     // alignas(CACHE_LINE) forces the next field to start at a cache line boundary,
     // preventing false sharing with whatever lives before the struct in memory.
-    alignas(CACHE_LINE) std::atomic<uint64_t> head;
-    uint64_t cached_tail;
+    //
+    // Counters SELF-INITIALIZE ({0}) so every allocation shape — static/BSS, stack
+    // local, arena — constructs an EMPTY ring. Found the hard way (E.1.3 P2-e): the
+    // backtest driver's EventLoopState is a plain stack local; these counters were
+    // indeterminate, head != tail garbage made TryPop "succeed" for up to 2^64 pops,
+    // and the first consumer wired onto such a ring (the composer's drag drain) spun
+    // the v5.9.2 parity battery for 38 minutes. Slots stay raw deliberately — an
+    // empty ring never reads them, and zero-filling N slots per construction is waste.
+    alignas(CACHE_LINE) std::atomic<uint64_t> head{0};
+    uint64_t cached_tail = 0;
 
     // Consumer side: writes tail, reads cached head on the fast path.
     // alignas(CACHE_LINE) forces tail onto its own cache line, separate from head.
     // This is the load-bearing line in the whole header — without it, every push
     // and pop would bounce a cache line between producer and consumer cores.
-    alignas(CACHE_LINE) std::atomic<uint64_t> tail;
-    uint64_t cached_head;
+    alignas(CACHE_LINE) std::atomic<uint64_t> tail{0};
+    uint64_t cached_head = 0;
 
     // Storage. Aligned to a cache line so the array starts cleanly. Individual
     // slots use natural alignment for density.

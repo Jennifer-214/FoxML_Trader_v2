@@ -246,18 +246,22 @@ inline bool EngineSharded_Async_FanOut(
     // -1 per tick (~5ns on a modern x86). Branch is taken only on
     // the rare tick where a drag has just happened.
 #ifdef USE_IMGUI_GUI
+    // E.1.3 P2-c — the drag pickup only PACKAGES the request now; the composer (which owns
+    // positions) applies it. The raw cross-thread Position write + the producer-thread fprintf
+    // are retired (the census WRITE-hazard row). On the never-in-practice full ring, the
+    // drag_slot is restored so the request retries next tick — lossless, no producer I/O.
     if (shared_ptr) {
         int slot = __atomic_load_n(&shared_ptr->drag_slot, __ATOMIC_ACQUIRE);
         if (slot >= 0 && slot < 16) {
             int is_tp = shared_ptr->drag_is_tp;
             double dprice = shared_ptr->drag_price;
             __atomic_store_n(&shared_ptr->drag_slot, -1, __ATOMIC_RELEASE);
-            auto *pos = &state.oms->portfolio.positions[slot];
-            if (state.oms->portfolio.active_bitmap & (uint16_t)(1u << slot)) {
-                if (is_tp) pos->take_profit_price = Money{ money_from_double_payload(dprice) };
-                else       pos->stop_loss_price   = Money{ money_from_double_payload(dprice) };
-                fprintf(stderr, "[sharded] GUI drag: slot %d %s -> $%.2f\n",
-                        slot, is_tp ? "TP" : "SL", dprice);
+            DragCmd dc{};
+            dc.slot  = tt::SlotIdx{(int16_t)slot};
+            dc.is_tp = (uint8_t)(is_tp ? 1 : 0);
+            dc.price = Money{ money_from_double_payload(dprice) };
+            if (!tt::SPSCRing_TryPush(&state.agg.drag_ring, dc)) {
+                __atomic_store_n(&shared_ptr->drag_slot, slot, __ATOMIC_RELEASE);   // retry next tick
             }
         }
     }
@@ -477,26 +481,15 @@ inline bool EngineSharded_Async_FanOut(
         static int save_counter = 0;
         if (!live_trading && (++save_counter >= 1024)) {
             save_counter = 0;
-            // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
-            ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
-                                      BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
+            // E.1.3 P2-d — owner-side save: the producer only REQUESTS; the composer executes
+            // on the thread that owns every persisted field (persist-dod-1 closes at this site).
+            state.agg.save_request.store(1, std::memory_order_release);
         }
-        // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
-        // oms->balance from this (producer) thread while the drainer
-        // thread writes it via OnEvent / OMS_Tick fill handler.
-        // Money (post-Ship-B decimal; was FPN_Binary) is 16B = 2 machine
-        // words — a plain load can TEAR (high word from one fill, low word
-        // from the next) under concurrent writes. (Prior comment said
-        // "FPN_Binary<64> is 64 words" — triple-stale: FPN was always 16B/
-        // 2 words [the 64 is F, the fractional-bit count]; the field is now
-        // Money; the tear survives the decimal flip.) Probability is low at
-        // current event rates (~1 exit/sec vs 5 Hz slow path). Consequence:
-        // false-positive or missed kill switch trip from a garbage
-        // balance comparison. Pre-existing race (sharded engine always
-        // had producer + drainer on separate threads).
-        // TODO: move kill switch eval to drainer thread, or use an
-        // atomic balance snapshot for the comparison.
-        EventLoop_KillSwitchEvaluate(&state);
+        // E.1.3 P2-a — the 2026-04-09 KNOWN-RACE is CLOSED AT THIS SITE: the global kill
+        // eval no longer runs here (this was the producer reading drainer-written 16B
+        // balance/peak — torn-read census #1). It moved into EngineCommon_ComposeAndKillEval,
+        // called on the thread that OWNS the ledger (live: the drainer's cycle tail; backtest:
+        // the driver inline — the same shared fn, M5). The producer no longer reads OMS money.
         // Warmup gating: don't grant permission until rolling stats
         // have meaningful data. Pre-v4.0.1 this was `count >= 1`,
         // which let MR (buy-below-avg) AND MOM (buy-above-avg) BOTH

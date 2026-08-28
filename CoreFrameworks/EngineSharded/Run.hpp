@@ -1548,7 +1548,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // EngineSharded/Async.hpp as tt::EngineSharded_Async_DrainWithSubmit<F>().
     // Call sites below pass (state, oms, ticks_produced, cfg) explicitly.
     std::thread drainer([&state, &oms, &ticks_produced, &producer_done,
-                         &cfg, &latest_tick, shared_ptr] {
+                         &cfg, &latest_tick, &paper_reset_in_progress, shared_ptr] {
         // v5.15.5.C.4 Phase T1: &cfg added to capture list for DrainerConstants_Init
         // v5.15.5.C.4 Phase F — drainer-local bucket arrays for phase-separated
         // dispatch. ~7 KB stack allocation; reused per cycle (Reset at top of
@@ -1556,6 +1556,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         tt::OmsDrainBuckets drain_buckets;
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
+            // E.1.3 P2-d (gate critic #4) — park during paper reset, exactly like the slow
+            // paths: the reset flow re-bases OMS state under FULL quiesce; a draining drainer
+            // was the hole in that quiesce.
+            if (paper_reset_in_progress.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+                continue;
+            }
             // v5.15.5.C.3 Phase 7.B — bench gate per-cycle rdtsc bracket.
             // Wraps the 4-step drainer cycle below. Compile-time elided when
             // BENCH=false (production); zero instructions emitted into the
@@ -2360,21 +2367,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     fprintf(stderr, "[sharded] shutdown requested, joining threads...\n");
 
-    // Phase 4 — final snapshot save BEFORE force-close. Captures the
-    // pre-close state so a restart can resume regime hysteresis +
-    // pnl_feeder + kill switch peak. Force-close mutates portfolio +
-    // realized_pnl; we save first so the persisted state matches the
-    // engine's "intent" rather than an in-progress liquidation.
-    // Paper mode only — live mode treats exchange state as truth.
-    if (!live_trading) {
-        // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
-        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
-                                      BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED))) {
-            fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
-        } else {
-            fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
-        }
-    }
+    // E.1.3 P2-d (D-420 / gate parity F1) — the final save MOVED to after the joins: every
+    // thread has fully tail-drained and exited, so the persisted bytes are the true final
+    // books (the old save-here raced the drainer's tail drains). Force-close stays disabled
+    // by default (Class 9), so the old "save before force-close" rationale is preserved
+    // trivially — nothing mutates between the joins and the save.
 
     // v5.10.0a.G.9 — final bandit state save. Each active ensemble core
     // flushes to its own <node_model_dir>/bandit_state.json. Survives
@@ -2452,6 +2449,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     if (!slow_paths.empty()) {
         fprintf(stderr, "[sharded]   joining slow-paths (%zu)...\n", slow_paths.size());
         for (auto& sp : slow_paths) sp.join();
+
+    // E.1.3 P2-d — final snapshot save AFTER all joins (moved from the pre-join site; see the
+    // pre-close state so a restart can resume regime hysteresis +
+    // pnl_feeder + kill switch peak. Force-close mutates portfolio +
+    // realized_pnl; we save first so the persisted state matches the
+    // engine's "intent" rather than an in-progress liquidation.
+    // Paper mode only — live mode treats exchange state as truth.
+    if (!live_trading) {
+        // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
+        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
+                                      BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED))) {
+            fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
+        } else {
+            fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
+        }
+    }
     }
 #ifdef USE_IMGUI_GUI
     fprintf(stderr, "[sharded]   joining GUI...\n");
