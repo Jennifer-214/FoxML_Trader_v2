@@ -547,6 +547,10 @@ inline int EngineCommon_FillRingsApply(AggregatorState<F>& agg, OrderManagerStat
             ++applied;
         }
     }
+    // P3-c-ii (D-445): drain the audit-event FUNNEL at the apply tail — every apply site
+    // (live cycle tail, live shutdown, backtest per-tick + final flushes) funnels
+    // automatically; the composer stays the SOLE OrderEventLog_Append caller.
+    (void)OMS_EventFunnelDrain(&oms);
     return applied;
 }
 //======================================================================

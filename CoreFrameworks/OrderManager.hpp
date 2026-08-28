@@ -296,6 +296,10 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 //======================================================================
 // [CODE]
 //======================================================================
+// P3-c-ii (D-445): audit-funnel ring depth — 64, deliberately smaller than the fill ring's
+// 256 (audit events track fill cadence; overflow is a CORRECT inline drain, never a drop).
+inline constexpr int OE_FUNNEL_RING_SIZE = 64;
+
 template <unsigned F> struct OrderManagerState;
 template <unsigned F>
 inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money);
@@ -380,6 +384,20 @@ struct OrderManagerState {
     // (ring_full_spins, writer_realloc_failed_count, log_full_drops) are
     // isolated by OrderEventLog's internal alignas discipline.
     OrderEventLog<F> event_log;
+
+    // P3-c-ii (D-445 / amendment I): the per-node OrderEvent FUNNEL rings — every audit
+    // append (fill / rejection / reconcile) rides these to the COMPOSER, which is the sole
+    // OrderEventLog_Append caller (the event-log async_ring keeps ONE appender across the
+    // Phase-4 flip — the GATE critic #1 MPSC hazard never materializes). Producer per ring =
+    // the site's executing thread (central drainer today; the owning node post-flip);
+    // consumer = the composer (OMS_EventFunnelDrain inside the apply step). Homed on OMS per
+    // the residence pin (NodeState carries leaf includes only; OM already owns the ring family).
+    // Depth 64 (NOT the fill ring's 256): audit events track fill cadence, and overflow is a
+    // CORRECT inline drain by design (never-drop) — 256 would grow the struct +592KB, which
+    // measurably overflowed the 8MB stack across the suite's 34 stack-local OMS fixtures
+    // (and production's own EngineSharded_Run function-local; the fixture-allocation pressure
+    // itself is a Phase-6 hygiene rider).
+    tt::NodeArray<tt::SPSCRing<OrderEvent<F>, OE_FUNNEL_RING_SIZE>, MAX_EXECUTION_NODES> oe_rings;
 
     //------------------------------------------------------------------
     // [SECTION]_[WARM CLUSTER — read on fill burst (HandleFill + DrainPostFill)]
@@ -799,9 +817,9 @@ struct OrderManagerState {
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-28]
 //----------------------------------------------------------------------
-// [SIZE]_[261056B]
+// [SIZE]_[410560B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[4079]
+// [CACHE_LINES]_[6415]
 // [STRADDLE]_[unverified: orders last_exit_fill_price last_exit_fee]
 //======================================================================
 // [END_STRUCT]_[OrderManagerState]
@@ -1745,6 +1763,65 @@ inline constexpr FillHandler<F> g_fill_dispatch[4] = {
 };
 
 //======================================================================
+// [FUNCTION]_[OMS_EventFunnelDrain]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [SUPPORTIVE]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the composer's audit-event funnel drain (P3-c-ii / D-445): pop every per-node OrderEvent ring in DEFINED order (n ascending, FIFO within) -> OrderEventLog_Append — ids assigned in composer program order (deterministic; the replay fold is per-slot so cross-type interleave is oracle-neutral, A-2 T2). Called from the apply step tail — every apply site funnels automatically (M5)]
+// [REFERENCE]_[DECISION]_[[D-445]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int OMS_EventFunnelDrain(OrderManagerState<F>* oms) {
+    int drained = 0;
+    for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
+        const tt::NodeIdx nn{(int16_t)n};
+        OrderEvent<F> ev;
+        while (tt::SPSCRing_TryPop(&oms->oe_rings[nn], &ev)) {
+            (void)OrderEventLog_Append(&oms->event_log, ev);
+            ++drained;
+        }
+    }
+    return drained;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_EventFunnelDrain]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OMS_EventFunnelPush]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the audit-append producer side (P3-c-ii / D-445): route an OrderEvent onto the emitting node's funnel ring (slot < 0 = the -1 non-node sentinel, e.g. reconcile audits — routed to ring 0). NEVER-DROP (audit records): full ring under central topology = inline-drain-then-repush (the emitter IS the drain thread). Null-agg harness = direct Append — Append IS the body either way, the ring is transport only]
+// [REFERENCE]_[DECISION]_[[D-445]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void OMS_EventFunnelPush(OrderManagerState<F>* oms, const OrderEvent<F>& ev, int slot) {
+    if (__builtin_expect(oms->agg == nullptr, 0)) {
+        (void)OrderEventLog_Append(&oms->event_log, ev);
+        return;
+    }
+    const int partial_on = BITMAP_IS_SET(oms->oms_state_flags,
+                                         tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    const tt::NodeIdx nn{(int16_t)(slot >= 0 ? BITMAP_SLOT_NODE(slot, partial_on) : 0)};
+    if (__builtin_expect(tt::SPSCRing_TryPush(&oms->oe_rings[nn], ev), 1)) return;
+    (void)OMS_EventFunnelDrain(oms);   // never-drop: drain the prefix inline, then re-push
+    (void)tt::SPSCRing_TryPush(&oms->oe_rings[nn], ev);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_EventFunnelPush]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[OrderManager_HandleFill]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CRITICAL]]
@@ -1792,14 +1869,16 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         }
     }
     // Audit log append — common across BUY/SELL/future LIMIT. The S-3 fee slot makes
-    // the event log fee-self-contained from this epoch on.
-    OrderEventLog_Append(&oms->event_log,
+    // the event log fee-self-contained from this epoch on. P3-c-ii: rides the FUNNEL
+    // (the composer is the sole Append caller — D-445).
+    OMS_EventFunnelPush(oms,
         OrderEvent_MakeFill<F>(
             o->id, o->submitted_at_us,
             Order_GetType(o), (int16_t)(int)o->portfolio_slot,   // OrderEvent.node_id stays a raw int16_t (persisted; loud boundary cast — .v is private since the CLAIM-1 close)
             fill_price, fill_qty,
             o->intended_tp, o->intended_sl,
-            booked_fee));
+            booked_fee),
+        (int)o->portfolio_slot);
     // Pattern 1 1D dispatch — branchless via fn pointer table. Deterministic latency regardless
     // of BUY/SELL access pattern. Closes Class 28 first canonical.
     g_fill_dispatch<F>[(uint8_t)Order_GetType(o)](oms, o, fill_price, fill_qty, booked_fee);
@@ -1910,13 +1989,16 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         Order_SetState(o, ORDER_REJECTED);
         oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
 
-        // Mode 1: append rejection to event log for the audit trail.
+        // Mode 1: append rejection to event log for the audit trail. P3-c-ii: rides the
+        // FUNNEL (this site moves to node threads at Phase 4 — the funnel keeps the
+        // event-log async_ring single-appender, D-445 / GATE critic #1).
         if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
-            OrderEventLog_Append(&oms->event_log,
+            OMS_EventFunnelPush(oms,
                 OrderEvent_MakeRejection<F>(
                     o->id, o->submitted_at_us,
                     Order_GetType(o), (int16_t)(int)o->portfolio_slot,   // raw int16_t on the persisted path (loud boundary cast)
-                    cmd.result.error_message));
+                    cmd.result.error_message),
+                (int)o->portfolio_slot);
         }
     }
 
@@ -2061,7 +2143,8 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
         std::strncpy(recon_event.reason, cmd.result.error_message,
                      sizeof(recon_event.reason) - 1);
         recon_event.reason[sizeof(recon_event.reason) - 1] = '\0';
-        OrderEventLog_Append(&oms->event_log, recon_event);
+        // P3-c-ii: rides the FUNNEL; -1 = the non-node sentinel (routed to ring 0).
+        OMS_EventFunnelPush(oms, recon_event, /*slot=*/-1);
     }
 }
 //======================================================================
