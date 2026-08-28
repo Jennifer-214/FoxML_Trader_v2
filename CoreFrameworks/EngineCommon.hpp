@@ -482,6 +482,39 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
 // [END_FUNCTION]_[EngineCommon_ComposeAndKillEval]
 //======================================================================
 //======================================================================
+// [FUNCTION]_[EngineCommon_EmitTradeRow]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SUPPORTIVE]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the composer's trade-row emit (amendment I): renders one leaf-pre-built EmitRecord into the CSV via the ShardedTradeLog_Record* SSoT with the POST-APPLY balance (exact per-fill balance-after, free — the row emits right after its FillEvent books). Values identical to the pre-flip leaf emit; only the write WALL-TIME moved to the apply point]
+// [REFERENCE]_[DECISION]_[[D-444]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void EngineCommon_EmitTradeRow(OrderManagerState<F>& oms, const EmitRecord<F>& rec) {
+    TradeEvent<F> synth{};
+    synth.price     = rec.fill_price;
+    synth.timestamp = rec.timestamp_us;
+    if (rec.is_entry) {
+        synth.type = TRADE_EVENT_ENTRY;
+        ShardedTradeLog_RecordEntry(oms.trade_log, synth, rec.slot, rec.strategy_id,
+                                    rec.fill_price, rec.qty, rec.fee, oms.balance);
+    } else {
+        synth.type = TRADE_EVENT_EXIT;
+        ShardedTradeLog_RecordExit(oms.trade_log, synth, rec.slot, rec.strategy_id,
+                                   rec.entry_price_snap, rec.fill_price,
+                                   rec.qty, rec.net, rec.fee, oms.balance);
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_EmitTradeRow]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineCommon_FillRingsApply]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
@@ -501,6 +534,16 @@ inline int EngineCommon_FillRingsApply(AggregatorState<F>& agg, OrderManagerStat
         while (tt::SPSCRing_TryPop(&agg.fill_rings[nn], &fe)) {
             OrderManager_LedgerApplyFill(oms, fe);   // THE one booking body (moved to OM at P3-b)
             agg.applied_seq[nn] = fe.seq;
+            // Lockstep trade-row emit (amendment I): the leaf pushed its EmitRecord right
+            // after this fe on the paired ring — pop + render with the just-booked balance.
+            // trade_log is boot-stable (wired at live boot only; H20 exception); the
+            // occupancy invariant makes the paired pop non-empty whenever the log is wired.
+            if (oms.trade_log) {
+                EmitRecord<F> rec;
+                if (tt::SPSCRing_TryPop(&agg.emit_rings[nn], &rec)) {
+                    EngineCommon_EmitTradeRow(oms, rec);
+                }
+            }
             ++applied;
         }
     }
