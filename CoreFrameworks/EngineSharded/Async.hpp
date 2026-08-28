@@ -490,6 +490,20 @@ inline bool EngineSharded_Async_FanOut(
         // balance/peak — torn-read census #1). It moved into EngineCommon_ComposeAndKillEval,
         // called on the thread that OWNS the ledger (live: the drainer's cycle tail; backtest:
         // the driver inline — the same shared fn, M5). The producer no longer reads OMS money.
+
+        // ── Ship-B S-17 (census #14): producer-thread sticky money-flag tail-drain ──
+        // money_op_flags is thread_local — the drainer's drain can't see the producer's
+        // flags. The producer does little Money math (DragCmd price quantize, parse
+        // ingress), but "little" is not "none": drain our own, same contract as the
+        // drainer + slow-path blocks (observational, loud, re-arm).
+        if (__builtin_expect(money_op_flags != 0, 0)) {
+            std::fprintf(stderr,
+                "[producer] MONEY FLAGS tripped: %s%s— investigate (saturation is "
+                "deterministic but means a value left the money closure domain)\n",
+                (money_op_flags & MONEY_FLAG_OVERFLOW) ? "OVERFLOW " : "",
+                (money_op_flags & MONEY_FLAG_DIVZERO)  ? "DIVZERO "  : "");
+            money_op_flags = 0;
+        }
         // Warmup gating: don't grant permission until rolling stats
         // have meaningful data. Pre-v4.0.1 this was `count >= 1`,
         // which let MR (buy-below-avg) AND MOM (buy-above-avg) BOTH

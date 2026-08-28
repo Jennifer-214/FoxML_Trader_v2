@@ -20,6 +20,8 @@
 
 #include "../DataStream/BinanceOrderAPI.hpp"
 #include "OrderManager.hpp"
+#include "NodeState.hpp"      // AggregatorState/MoneySnapshot — census #3 pack read
+#include "ParameterSlot.hpp"
 #include "SPSCRing.hpp"
 
 #include <atomic>
@@ -49,12 +51,18 @@ struct ReconciliationLoopState {
     // Own BinanceOrderAPI instance — never shared with adapter workers.
     BinanceOrderAPI rest_api;
 
-    // Pointer to the OMS. Read-only from the reconciler's perspective —
-    // it reads oms->balance, oms->portfolio, oms->order_bitmap to compute
-    // expected state. The drainer is the only writer. The race between
-    // drainer writes and reconciler reads is tolerable: worst case is a
-    // single-cycle false drift that the next pass corrects.
+    // Pointer to the OMS — since E.1.3 P2-f used ONLY to push CMD_RECONCILE
+    // onto oms->reconcile_queue (SPSC, the designed cross-thread seam). The
+    // reconciler NO LONGER reads OMS money state: expected free cash arrives
+    // through the published MoneySnapshot below (torn-read census #3 CLOSED —
+    // the old direct walk read 16B balance + portfolio against live drainer
+    // writes; "tolerable race" was the accepted hazard this retires).
     OrderManagerState<F>* oms;
+
+    // The composer's aggregate — the reconciler reads agg->publish (the house
+    // seqlock) for a COHERENT expected-free-cash scalar the composer computed
+    // same-thread with the OMS. Read-only.
+    const AggregatorState<F>* agg;
 
     // DEAD (Phase 0.3 fix — see ReconciliationLoop_Pass): the Pass pushes to
     // oms->reconcile_queue, NOT this ring; nothing reads this one. Kept
@@ -89,8 +97,8 @@ struct ReconciliationLoopState {
 // Architecture:
 //   - Separate thread wakes every interval_secs (default 30)
 //   - Queries exchange balances via its own REST instance
-//   - Compares against oms->balance (known race with drainer — tolerable,
-//     reconciliation is advisory)
+//   - Compares against the composer-published expected_free (MoneySnapshot
+//     seqlock read — the old direct oms->balance race is CLOSED, census #3)
 //   - Excludes in-flight orders from the comparison (SUBMITTED/ACKNOWLEDGED
 //     orders have committed capital that hasn't been confirmed yet)
 //   - On drift beyond tolerance: pushes CMD_RECONCILE into a dedicated
@@ -149,7 +157,16 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
     // an alert; ProcessReconcile NEVER writes oms->balance (D-216). The authoritative
     // venue-net correction + the BTC/qty leg defer to .E.1.
     Money exchange_money = Money{ money_from_double_payload(exchange_usdt) };  // venue ingress (<=8dp; string-direct D-123 -> .E.1/.E.3)
-    Money expected       = OMS_ExpectedFreeCash(s->oms);
+    // Census #3 (E.1.3 P2-f): expected free cash comes from the PUBLISHED pack —
+    // the composer computes OMS_ExpectedFreeCash same-thread with the ledger and
+    // publishes it under the seqlock. No more cross-thread OMS walk from here.
+    MoneySnapshot<F> ms{};
+    tt::ParameterSlot_Read(&s->agg->publish, &ms);
+    if (ms.generation == 0) {
+        return 0;  // warmup: no compose has published yet — skip rather than
+                   // compare against a zero pack (one-poll delay at most)
+    }
+    Money expected       = ms.expected_free;
     Money drift          = Money_Sub(exchange_money, expected);
     double drift_usdt    = Money_ToDouble(drift);       // repurposed-field + log (display only)
     double expected_usdt = Money_ToDouble(expected);
@@ -255,9 +272,11 @@ static inline int ReconciliationLoop_Init(ReconciliationLoopState<F>* s,
                                            const char* api_secret,
                                            const char* symbol,
                                            OrderManagerState<F>* oms,
+                                           const AggregatorState<F>* agg,
                                            int interval_secs = 30,
                                            double balance_tolerance = 0.01) {
     s->oms = oms;
+    s->agg = agg;
     s->interval_secs     = interval_secs;
     s->balance_tolerance = balance_tolerance;
     s->qty_tolerance     = 1e-6;

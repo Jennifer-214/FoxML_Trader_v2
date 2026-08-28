@@ -169,6 +169,19 @@ struct alignas(64) MoneySnapshot {
     // ---- per-node rows (typed subscripts; composer-written whole under the seqlock —
     //      bulk-copy family: NO per-row isolation needed, single writer; gate dod F1 contrast) ----
     tt::NodeArray<MoneySnapshotNodeRow, MAX_EXECUTION_NODES> rows;
+    // ---- tail extension area (P2-f+): global scalars added AFTER rows so head/rows offsets
+    //      never move (boundary-stable growth — the same reason the census #3 fix could land
+    //      without touching a single existing reader) ----
+    Money expected_free = Money_Zero();  // OMS_ExpectedFreeCash at compose (balance − committed
+                                         // open cost − inflight notional+fee). Census #3: the LIVE
+                                         // reconciler reads THIS, never raw OMS state (detect-only
+                                         // contract unchanged, D-216; correction path = E.1.5)
+    // Global fee view (census #8 completion): drainer-owned Money totals published so the
+    // TUI copy stops reading them raw cross-thread. The 3 scalars + expected_free fill the
+    // tail line EXACTLY (4x16B = 64B) — no pad needed, sizeof stays 1664.
+    Money total_fees       = Money_Zero();
+    Money total_maker_fees = Money_Zero();
+    Money total_taker_fees = Money_Zero();
 };
 //======================================================================================================
 // [END_CODE]
@@ -176,15 +189,15 @@ struct alignas(64) MoneySnapshot {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-27]
-// [SIZE]_[1600B]
+// [SIZE]_[1664B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[25]
+// [CACHE_LINES]_[26]
 // [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[MoneySnapshot]
 //======================================================================================================
 
-static_assert(sizeof(MoneySnapshot<64>) == 1600, "MoneySnapshot<64> pinned: 64B head+global + 16x96B rows");
+static_assert(sizeof(MoneySnapshot<64>) == 1664, "MoneySnapshot<64> pinned: 64B head+global + 16x96B rows + 64B tail extension");
 static_assert(offsetof(MoneySnapshot<64>, generation) == 0 && offsetof(MoneySnapshot<64>, rows) == 64,
               "line-0 head {generation, kill_word_copy} then rows at the next line (gate dod F4)");
 static_assert(std::is_trivially_copyable<MoneySnapshot<64>>::value, "rides ParameterSlot");
@@ -390,9 +403,9 @@ struct alignas(64) AggregatorState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-27]
-// [SIZE]_[399168B]
+// [SIZE]_[399296B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6237]
+// [CACHE_LINES]_[6239]
 // [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[AggregatorState]

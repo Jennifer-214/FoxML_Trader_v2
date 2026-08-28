@@ -10,7 +10,7 @@
 // [OVERVIEW]_[the TUI money-view adapter — flat aggregate doubles built once from EventLoopState per snapshot rebuild]
 // [CONTAINS]
 //   - [STRUCT]_[EventLoopAggregates]
-//   - [FUNCTION]_[EventLoop_GetAggregates]
+//   - [FUNCTION]_[EventLoop_AggregatesFromPack]
 //======================================================================================================
 // Phase 10 of the per-core sharded engine. Adapter struct + builder that pulls
 // the "money view" out of an EventLoopState so the existing TUI/GUI snapshot
@@ -112,54 +112,47 @@ struct EventLoopAggregates {
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[EventLoop_GetAggregates]
+// [FUNCTION]_[EventLoop_AggregatesFromPack]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [MONITORING_PLANE] [SLOW_PATH]]
+// [TAG]_[[ENGINE] [MONITORING_PLANE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one EventLoopState walk -> the aggregate money view; unrealized marks active slots at mark_price (skip on zero)]
+// [OVERVIEW]_[the pack->display adapter (census #8) — money view from the composer-published MoneySnapshot; counts from single-word fields; NO live OMS money walk]
 //======================================================================
 // [CODE]
 //======================================================================
 template <unsigned F>
-inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* state,
-                                                    Money mark_price) {
+inline EventLoopAggregates EventLoop_AggregatesFromPack(const MoneySnapshot<F>& pack,
+                                                        const EventLoopState<F>* state) {
     EventLoopAggregates agg;
 
-    // realized side from OMS (financial state lives there since chunk 1B)
-    agg.balance      = Money_ToDouble(state->oms->balance);
-    agg.realized_pnl = Money_ToDouble(state->oms->realized_pnl);
-    agg.peak_balance = Money_ToDouble(state->oms->ks_peak_balance);
+    // money view — from the composer-published coherent pack (census #8: the retired
+    // builder walked live OMS money + positions[] cross-thread on the producer, under a
+    // comment claiming "no concurrency hazard" that had rotted since the centralized era)
+    agg.balance      = Money_ToDouble(pack.balance);
+    agg.realized_pnl = Money_ToDouble(pack.realized);
+    agg.peak_balance = Money_ToDouble(pack.ks_peak);
 
-    // counts
-    agg.registered_nodes = state->registered_count;
-    agg.total_entries    = state->total_entries;
-    agg.total_exits      = state->total_exits;
-    // v5.15.5.C.2 (S3a) — kill_switch_tripped now lives in oms_state_flags bitmap.
-    agg.kill_switch_tripped = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
-
-    // walk the active bitmap once for unrealized P&L and active count
+    // unrealized = the composer-owned per-node MtM rows (P2-a real since this ship).
+    // Marked at the COMPOSE price — display now shows exactly what the kill eval saw
+    // (≤1 drainer cycle stale), not a producer-side re-mark; zero rows when MtM is off,
+    // degrading to equity == balance like the old have_mark=false path.
     Money unreal = Money_Zero();
-    int active = 0;
-    uint16_t bm = state->oms->portfolio.active_bitmap;
-    bool have_mark = !Money_IsZero(mark_price);
-    for (int slot = 0; slot < MAX_PORTFOLIO_POSITIONS; ++slot) {
-        if (((bm >> slot) & 1) == 0) continue;
-        ++active;
-        if (have_mark) {
-            const Position<F>* pos = &state->oms->portfolio.positions[slot];
-            // unrealized = qty * (mark - entry). Long-only for now; if quantity
-            // were ever negative this still produces the correct sign.
-            Money diff = Money_Sub(mark_price, pos->entry_price);
-            Money pnl  = Money_Mul(pos->quantity, diff);
-            unreal = Money_Add(unreal, pnl);
-        }
+    for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
+        unreal = Money_Add(unreal, pack.rows[tt::NodeIdx{(int16_t)n}].unrealized);
     }
-    agg.active_position_count = active;
     agg.unrealized_pnl = Money_ToDouble(unreal);
     agg.equity         = agg.balance + agg.unrealized_pnl;
 
-    // drawdown — computed against equity (not balance) so it reflects mark to
-    // market loss in real time. matches the existing TUI semantics.
+    // counts — single-word (≤8B) fields; the Class-63 M3 surface says these are fine
+    // as plain reads (the class is MULTI-word values)
+    agg.registered_nodes      = state->registered_count;
+    agg.total_entries         = state->total_entries;
+    agg.total_exits           = state->total_exits;
+    agg.active_position_count = __builtin_popcount((unsigned)state->oms->portfolio.active_bitmap);
+
+    // risk — kill authority from the pack's display copy of the 3-tier word (same
+    // source the compose derives from the OMS flag; single coherent read)
+    agg.kill_switch_tripped = (pack.kill_word_copy & KILLWORD_MASK_GLOBAL) != 0;
     if (agg.peak_balance > 0.0 && agg.equity < agg.peak_balance) {
         agg.max_drawdown     = agg.peak_balance - agg.equity;
         agg.max_drawdown_pct = agg.max_drawdown / agg.peak_balance;
@@ -175,21 +168,20 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// Walk the EventLoopState once and emit the aggregate struct. O(MAX_PORTFOLIO_POSITIONS)
-// per call but only the bits set in active_bitmap are read for unrealized P&L.
-// Cheap enough to call on every snapshot rebuild (slow path, ~1Hz).
+// Build the display aggregate from the composer-published MoneySnapshot. O(16 rows)
+// per call. Cheap enough to call on every snapshot rebuild (~1Hz).
 //
-// mark_price: latest known market price. Pass FPN_Zero to skip unrealized P&L
-// (equity will == balance, useful when there's no current price available
-// such as during warmup or replay seek).
-//
-// pitfall P10.1 caveat: the portfolio bitmap and per-position fields read here
-// are mutated by the controller core (the same core calling this), so there is
-// no concurrency hazard. The execution cores never write to EventLoopState's
-// portfolio — only the controller's _OnEvent does. Snapshot reads from one
-// core, writes from one core, no atomics required.
+// HISTORY (census #8, E.1.3 P2-f): the predecessor (EventLoop_GetAggregates) walked
+// live OMS money + positions[] from the PRODUCER thread under a "no concurrency
+// hazard / no atomics required" comment — TRUE when the centralized controller was
+// the sole caller, ROTTED the day the sharded producer started calling it (Class-63
+// shape (b): the single-owner claim outlived its topology). The pack read closes it:
+// one seqlock copy, composed by the single writer that owns the ledger. The caller
+// obtains the pack via ParameterSlot_Read(&state->agg.publish, ...) — before the
+// first compose it reads the boot pack (generation 0, zeros): equity == balance == 0
+// for at most one frame.
 //======================================================================
-// [END_FUNCTION]_[EventLoop_GetAggregates]
+// [END_FUNCTION]_[EventLoop_AggregatesFromPack]
 //======================================================================
 
 }  // namespace tt

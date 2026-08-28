@@ -97,7 +97,12 @@ static inline void TUI_CopySnapshotSharded(
     }
 
     // account — from OMS via EventLoopAggregates
-    tt::EventLoopAggregates agg = tt::EventLoop_GetAggregates(state, Money{ money_from_double_payload(price_d) });
+    // Census #8 (E.1.3 P2-f): money view via the composer's published pack — the
+    // producer no longer walks OMS money/positions (and no longer does Money_Mul
+    // marking work per snapshot; the composer's rows carry the MtM).
+    MoneySnapshot<F> _pack{};
+    tt::ParameterSlot_Read(&state->agg.publish, &_pack);
+    tt::EventLoopAggregates agg = tt::EventLoop_AggregatesFromPack(_pack, state);
     snap->balance      = agg.balance;
     snap->equity       = agg.equity;
     snap->starting     = Money_ToDouble(cfg->starting_balance);
@@ -109,16 +114,19 @@ static inline void TUI_CopySnapshotSharded(
     // Legacy EngineTUI.hpp path set this from ctrl->total_fees; the
     // sharded equivalent is oms->total_fees, populated by HandleFill on
     // entry+exit fills.
-    snap->fees             = Money_ToDouble(state->oms->total_fees);
+    // Fees via the pack (census #8 completion): these are drainer-written 16B Money
+    // totals — the raw reads were the same torn-read class the aggregate fix closed.
+    snap->fees             = Money_ToDouble(_pack.total_fees);
     // v5.4.2 — same B1-class fix for the maker/taker breakdown
     // (used by the fees tooltip). OMS HandleFill bumps these counters
     // on every fill (BUY entry + SELL exit). Pre-fix, sharded mode
     // showed all-zeros in the maker/taker tooltip even after dozens of
-    // fills.
+    // fills. Fill COUNTS stay direct reads (≤8B single-word — the Class-63
+    // M3 surface); the Money fee totals ride the pack.
     snap->maker_fills_count = state->oms->maker_fills_count;
     snap->taker_fills_count = state->oms->taker_fills_count;
-    snap->total_maker_fees  = Money_ToDouble(state->oms->total_maker_fees);
-    snap->total_taker_fees  = Money_ToDouble(state->oms->total_taker_fees);
+    snap->total_maker_fees  = Money_ToDouble(_pack.total_maker_fees);
+    snap->total_taker_fees  = Money_ToDouble(_pack.total_taker_fees);
     // v5.11.4.B — surface async log writer health (parity-check Section J).
     // Both counters are atomic on the writer-thread side; relaxed loads on
     // the publish thread are fine — these are advisory observability metrics,
@@ -216,6 +224,13 @@ static inline void TUI_CopySnapshotSharded(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     int partial_on = BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    // Per-position display rows: RESIDUAL cross-thread 16B reads, ACCEPTED with
+    // rationale (torn-read census #8 residual, E.1.3 P2-f — stated honestly, NOT an
+    // atomicity claim): each field below is display-plane; a torn read renders one
+    // garbage cell for one snapshot frame (~1Hz) then self-heals; NO capital control
+    // consumes these. Pack-izing 16 position rows is real pack growth for zero capital
+    // benefit today — re-visit at Phase 3 (composer gains full fill visibility) or when
+    // the decoupling roadmap makes TUISnapshot the mmap contract.
     while (bm) {
         int idx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);

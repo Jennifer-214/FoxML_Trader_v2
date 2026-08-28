@@ -162,14 +162,24 @@ static_assert(NODE_STATE_FLAG_COUNT <= 8,
 //   Clear:  NODE_STATE_FLAG_CLR(ctx, DIRTY)
 //   Read:   NODE_STATE_FLAG_IS_SET(ctx, DIRTY)
 //   Toggle: NODE_STATE_FLAG_TOGGLE(ctx, DIRTY)
-//   Any-of: BITMAP_ANY(ctx.node_state_flags, tt::MASK_NODE_STATE_X | tt::MASK_NODE_STATE_Y)
+//   Any-of: BITMAP_ANY(BITMAP_ATOMIC_LOAD((ctx).node_state_flags), tt::MASK_NODE_STATE_X | tt::MASK_NODE_STATE_Y)
 //
 // MASK_NODE_STATE_<name> lives in tt:: namespace; macros assume the tt::
 // scope is visible at call sites (most callers already `using namespace tt;`).
+//
+// WORD-ATOMIC since E.1.3 P2-f (torn-read census #13): the flags byte is RMW'd
+// from TWO threads — the composer sets/clears KILL_TRIPPED while the slow thread
+// RMWs DIRTY/WARMUP_LOG_EMITTED on the SAME uint8_t. A plain |= / &= compiles to
+// load-modify-store; two threads interleaving those LOSE one writer's bit (the
+// lost-update shape, sister of Class 63's torn read — same census). The house
+// BITMAP_ATOMIC_* primitives (relaxed) close it: single-byte fetch_or/and/xor is
+// lock-free everywhere we run, and relaxed suffices — bit VISIBILITY ordering
+// rides the composer's seqlock publish + the slow path's own rebuild cadence;
+// no cross-field ordering depends on these bits.
 
-#define NODE_STATE_FLAG_IS_SET(ctx, name) BITMAP_IS_SET((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
-#define NODE_STATE_FLAG_SET(ctx, name)    BITMAP_SET((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
-#define NODE_STATE_FLAG_CLR(ctx, name)    BITMAP_CLR((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
-#define NODE_STATE_FLAG_TOGGLE(ctx, name) BITMAP_TOGGLE((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
+#define NODE_STATE_FLAG_IS_SET(ctx, name) ((BITMAP_ATOMIC_LOAD((ctx).node_state_flags) & tt::MASK_NODE_STATE_##name) != 0)
+#define NODE_STATE_FLAG_SET(ctx, name)    BITMAP_ATOMIC_SET((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
+#define NODE_STATE_FLAG_CLR(ctx, name)    BITMAP_ATOMIC_CLR((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
+#define NODE_STATE_FLAG_TOGGLE(ctx, name) BITMAP_ATOMIC_TOGGLE((ctx).node_state_flags, tt::MASK_NODE_STATE_##name)
 
 #endif  // NODE_STATE_FLAG_REGISTRY_HPP

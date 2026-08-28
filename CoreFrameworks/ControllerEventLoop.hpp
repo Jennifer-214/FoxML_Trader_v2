@@ -134,8 +134,12 @@ struct NodeSlowState {
     //
     // ema_price (per-tick: producer fan_out updates EVERY tick; slow-path
     // consumers read at slow-path cadence; in per_node_slow this is a
-    // producer→slow-path cross-thread read — eventual consistency,
-    // x86-acceptable on aligned word).
+    // producer→slow-path cross-thread read of a 16B value — it CAN tear
+    // (two machine words; alignment does NOT make it atomic). ACCEPTED
+    // (torn-read census #10, E.1.3): feature-plane only — a torn read is
+    // one garbage EMA sample for one cadence, then self-heals; NO capital
+    // control consumes it. Re-review at Phase 4 (nodes could derive ema
+    // from their OWN tick stream — the structural candidate).
     FPN_Binary<F>                  ema_price;
 
     // v5.12.2.B — lazy slow-path rebuild bookkeeping. Updated at the
@@ -991,9 +995,9 @@ struct alignas(64) EventLoopState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-27]
-// [SIZE]_[723008B]
+// [SIZE]_[723136B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[11297]
+// [CACHE_LINES]_[11299]
 // [STRADDLE]_[unverified: nodes display_meta]
 //======================================================================
 // [END_STRUCT]_[EventLoopState]

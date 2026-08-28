@@ -935,7 +935,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         const char* rc_host = bcfg.use_testnet
             ? "testnet.binance.vision" : "api.binance.us";
         if (ReconciliationLoop_Init(&g_reconciler, rc_host, rc_key, rc_secret,
-                                     bcfg.symbol, &oms, 30, 0.01)) {
+                                     bcfg.symbol, &oms, &state.agg, 30, 0.01)) {
             ReconciliationLoop_Start(&g_reconciler);
         } else {
             fprintf(stderr, "[sharded] reconciler init failed\n");

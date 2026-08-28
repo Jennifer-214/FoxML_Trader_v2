@@ -427,6 +427,14 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
     pack.balance  = oms.balance;
     pack.realized = oms.realized_pnl;
     pack.ks_peak  = oms.ks_peak_balance;
+    // Census #3 (P2-f): expected free cash computed HERE — same-thread with the OMS
+    // (the composer owns the ledger), published as a pack scalar so the reconcile
+    // poller never walks OMS state cross-thread again.
+    pack.expected_free = OMS_ExpectedFreeCash(&oms);
+    // Census #8 completion: the global fee totals ride the pack for the TUI.
+    pack.total_fees       = oms.total_fees;
+    pack.total_maker_fees = oms.total_maker_fees;
+    pack.total_taker_fees = oms.total_taker_fees;
     for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
         const tt::NodeIdx nn{(int16_t)n};
         MoneySnapshotNodeRow& r = pack.rows[nn];
@@ -1146,15 +1154,35 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
     // thread reads + clears via DrainPostFill wrapper). No
     // need for atomic mask conversion in C.2.
     //
-    // NOTE: KillSwitchEvaluate is GLOBAL (account-level
-    // drawdown), runs on producer thread in LIVE; backtest
-    // calls it from ShardedBacktestDriver scope per
-    // Step C.4 N-4 REVERT. Per-core kill switch state is
-    // mutated INSIDE RebuildOneCore.
+    // NOTE (updated E.1.3 P2): BOTH kill evals — the GLOBAL
+    // account-level KS and the per-node MtM peak/dd/trip —
+    // run inside EngineCommon_ComposeAndKillEval on the
+    // COMPOSER (live: drainer cycle tail; backtest: driver
+    // per-tick). The old producer-side eval + the RebuildOneCore
+    // compute are retired (P2-a); this body keeps only the
+    // read-mirror halt.
     //
-    // NOTE: Drag TP/SL pickup + manual close stay on drainer
-    // + producer threads respectively. They submit via
-    // OMS_PushSubmit (Phase B) — thread-safe.
+    // NOTE (updated E.1.3 P2-c): GUI drag TP/SL is a DragCmd
+    // COMMAND now — the producer packages onto agg.drag_ring,
+    // the composer applies. Manual close stays producer-side
+    // via OMS_PushSubmit (Phase B) — thread-safe.
+
+    // ── Ship-B S-17 (census #14): per-thread sticky money-flag tail-drain ──
+    // money_op_flags is thread_local: the drainer's cycle-tail drain (Run.hpp)
+    // can never see THIS thread's flags. Each slow thread drains its own here
+    // (live: the per-node slow thread; backtest: the driver thread — which had
+    // NO drain at all before this). Observational only, then re-arm — same
+    // contract as the drainer block.
+    if (__builtin_expect(money_op_flags != 0, 0)) {
+        std::fprintf(stderr,
+            "[slow-path-%d] MONEY FLAGS tripped this cycle: %s%s— investigate "
+            "(saturation is deterministic but means a value left the money "
+            "closure domain)\n",
+            c,
+            (money_op_flags & MONEY_FLAG_OVERFLOW) ? "OVERFLOW " : "",
+            (money_op_flags & MONEY_FLAG_DIVZERO)  ? "DIVZERO "  : "");
+        money_op_flags = 0;
+    }
 }
 //======================================================================
 // [END_CODE]
