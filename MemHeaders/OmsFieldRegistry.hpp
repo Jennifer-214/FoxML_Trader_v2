@@ -286,7 +286,6 @@ struct OmsResetCtx {
     /* v5.15.5.C.4 Phase J — was_win extracted from FillRecord to cross-slot bitmap (Technique 3 of aggressive-memory-reduction-techniques.md) */         \
     X(last_was_win_bitmap,    uint16_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     /* v5.15.5.C.5 — is_maker reverted from Position SKIP_PERSIST to OMS-level cross-slot bitmap per slot-state-foreach-registry-with-storage-routing.md */ \
-    X(last_is_maker_bitmap,   uint16_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     /* ============================================================================================ */                                                  \
     /* [7] Adapter struct copy (was Layer 2 special-case; now DIRECT row)                             */                                                  \
     /* ============================================================================================ */                                                  \

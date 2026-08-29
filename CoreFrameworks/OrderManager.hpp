@@ -502,11 +502,13 @@ struct OrderManagerState {
     // cross-slot bitmap per slot-state-foreach-registry-with-storage-routing.md
     // decision tree (sparse-access ephemeral state lives in sibling SoA on OMS).
     // Enables Position to be 184B PERSIST + alignas(64) → 192B = 3 cache lines
-    // exact (hot-side-array-element-alignment-for-sparse-access.md). 1 bit/slot
-    // captured at HandleFill SELL; consumed by Phase G derive at DrainPostFill.
-    uint16_t last_is_maker_bitmap;
+    // exact (hot-side-array-element-alignment-for-sparse-access.md).
+    // [last_is_maker_bitmap DELETED at E.1.3 P3-f (G-cohort census): write-only —
+    //  its claimed "Phase G derive at DrainPostFill" consumer never survived; the
+    //  maker/taker telemetry that matters rides the fee-triple counters
+    //  (total_maker/taker_fees + counts). Not persisted, not wire → clean delete.]
     // v5.15.5.C.5 — exit_fill_price reverted from Position SKIP_PERSIST to
-    // OMS-level sibling SoA array (same reasoning as last_is_maker_bitmap).
+    // OMS-level sibling SoA array (same OMS-level-sibling reasoning).
     // Per-slot captured at HandleFill SELL; consumed by Phase G derive at
     // DrainPostFill. 384B (24 × 16); not persisted.
     Money last_exit_fill_price[MAX_PORTFOLIO_POSITIONS];
@@ -1760,11 +1762,6 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
     // Exit-side scratch on OMS sibling arrays.
     oms->last_exit_fill_price[pslot] = fill_price;
     oms->last_exit_fee[pslot]        = exit_fee;
-
-    // Branchless mask-select on last_is_maker_bitmap (Pattern 3).
-    const uint16_t maker_bit       = BITMAP_BIT_U16(pslot);
-    const uint16_t maker_mask_bits = Order_GetIsMaker(o) ? maker_bit : (uint16_t)0;
-    oms->last_is_maker_bitmap      = (uint16_t)((oms->last_is_maker_bitmap & ~maker_bit) | maker_mask_bits);
 
     // Branchless mask-select on last_was_win_bitmap (Pattern 3). P3-d-ii: written at FLAT
     // only, from the TRADE accumulator (the trade's total net, not this leg's) — the
