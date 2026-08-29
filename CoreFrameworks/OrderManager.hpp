@@ -1710,12 +1710,11 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
     if (__builtin_expect(Money_IsZero(q_leg), 0)) return;
     const uint8_t leg_flat = (uint8_t)(Money_Eq(q_leg, pos_qty) ? 1 : 0);
 
-    // Entry-fee apportionment: pro-rata per leg (half-even), the FINAL leg books the exact
-    // RESIDUAL from the Position's own decrementing field — Σ apportioned ≡ original entry
-    // fee by construction (I-2 HIGH-3; no ULP leak, no double-count).
-    const Money entry_fee_leg = leg_flat ? pos_entry_fee
-        : Money_Div(Money_Mul(pos_entry_fee, q_leg), pos_qty);
-    oms->portfolio.positions[pslot].entry_fee = Money_Sub(pos_entry_fee, entry_fee_leg);
+    // Entry-fee apportionment through the D-447 SSoT (pro-rata + residual-final-leg;
+    // I-2 HIGH-3 conservation by construction) — decrements the Position's own tracker.
+    const Money entry_fee_leg =
+        Portfolio_ConsumeEntryFeeLeg(&oms->portfolio.positions[pslot].entry_fee,
+                                     q_leg, pos_qty);
 
     // Per-leg realized return (feature-plane; same price formula — identical to HEAD at
     // full-close). The CLOSED mask is now SLOT-FLAT-gated: the per-TRADE ML tail
@@ -2094,38 +2093,53 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             const Money remaining =
                 ((oms->portfolio.active_bitmap & (uint16_t)(1u << tslot)) != 0)
                     ? oms->portfolio.positions[tslot].quantity : Money_Zero();
+            // P3-close (a-class 1c): SNAPSHOT the dying order's fields, FREE its slot,
+            // THEN re-submit — the remainder exit is guaranteed ≥1 free slot (the dying
+            // order's own), so a FULL table can never silently drop it; the aliasing
+            // question dies by construction (nothing reads `o` past the free — if the
+            // re-submit reuses this slot, `o`'s storage now holds the NEW order, and
+            // the terminal-tier tail free below no-ops on its non-terminal state).
+            const uint64_t            dead_id     = o->id;
+            const uint64_t            dead_ts     = o->submitted_at_us;
+            const OrderType           dead_type   = Order_GetType(o);
+            const Money               dead_filled = o->filled_qty;
+            const Money               dead_tp     = o->intended_tp;
+            const Money               dead_sl     = o->intended_sl;
+            const uint8_t             dead_strat  = o->strategy_id;
+            const Money               dead_avg    = o->avg_fill_price;
+            const OrderPreResolved<F> dead_pre    = o->pre_resolved;
+            oms->order_bitmap = (uint16_t)(oms->order_bitmap & ~(uint16_t)(1u << slot));
             if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
                 OrderEvent<F> tev{};
                 tev.type         = OEVT_TERMINAL_INCOMPLETE;
-                tev.order_id     = o->id;
-                tev.timestamp_us = o->submitted_at_us;
-                tev.order_type   = Order_GetType(o);
+                tev.order_id     = dead_id;
+                tev.timestamp_us = dead_ts;
+                tev.order_type   = dead_type;
                 tev.node_id      = (int16_t)tslot;
-                tev.qty          = o->filled_qty;   // what DID execute (running total)
+                tev.qty          = dead_filled;   // what DID execute (running total)
                 std::snprintf(tev.reason, sizeof(tev.reason), "term-incomplete rem=%.8f",
                               Money_ToDouble(remaining));
                 OMS_EventFunnelPush(oms, tev, tslot);
             }
             std::fprintf(stderr,
                 "[OMS] order %llu TERMINAL-INCOMPLETE node=%d executed=%.8f remaining=%.8f%s\n",
-                (unsigned long long)o->id, tslot, Money_ToDouble(o->filled_qty),
+                (unsigned long long)dead_id, tslot, Money_ToDouble(dead_filled),
                 Money_ToDouble(remaining),
-                (Order_GetType(o) == ORDER_MARKET_SELL && !Money_IsZero(remaining))
+                (dead_type == ORDER_MARKET_SELL && !Money_IsZero(remaining))
                     ? " — RE-SUBMITTING remainder exit" : "");
-            if (Order_GetType(o) == ORDER_MARKET_SELL && !Money_IsZero(remaining)) {
-                SubmitCommand<F> re(o->portfolio_slot, ORDER_MARKET_SELL, remaining,
+            if (dead_type == ORDER_MARKET_SELL && !Money_IsZero(remaining)) {
+                SubmitCommand<F> re(tt::SlotIdx{(int16_t)tslot}, ORDER_MARKET_SELL, remaining,
                                     (uint8_t)(tslot & 1), /*node_cfg=*/nullptr);
-                re.intended_tp = o->intended_tp;
-                re.intended_sl = o->intended_sl;
-                re.strategy_id = o->strategy_id;
-                re.event_price = o->avg_fill_price;
+                re.intended_tp = dead_tp;
+                re.intended_sl = dead_sl;
+                re.strategy_id = dead_strat;
+                re.event_price = dead_avg;
                 uint64_t rid = OrderManager_Submit(oms, re);
-                if (rid != 0) {
-                    // node_cfg was nullptr at re-submit — carry the ORIGINAL order's
-                    // pre-resolved binding forward (fee_rate etc.; the Class-29 guard).
-                    int rslot = (int)((rid >> 60) & 0xFu);
-                    oms->orders[rslot].pre_resolved = o->pre_resolved;
-                }
+                // ≥1 slot free by construction (freed above) → Submit cannot return 0
+                // here; carry the ORIGINAL order's pre-resolved binding forward from
+                // the SNAPSHOT (node_cfg was nullptr; the Class-29 guard).
+                int rslot = (int)((rid >> 60) & 0xFu);
+                oms->orders[rslot].pre_resolved = dead_pre;
             }
         }
     } else {
@@ -2255,9 +2269,10 @@ inline Money OMS_ExpectedFreeCash(const OrderManagerState<F>* oms) {
 // expected_free_cash = balance - OMS_OpenPositionCost - Sum_inflight((requested-filled)*price + est_fee).
 // Asset-agnostic STRUCTURE (cash = ledger - committed-cost - inflight-reserved); long-only cost-sign +
 // single-currency settlement are crypto-spot-specific -- .E.6 equities extend with signed-qty + a margin
-// term (D-216). All Money (H4). NOTE (Class-38): o.filled_qty is per-invocation today (the Order.hpp:179
-// "running total" comment is aspirational) -> (requested-filled) == requested now; the -filled term is
-// INERT but kept as the correct .E.1 form, CO-GATED with the A2/A16 cumulative-fill landing. NOTE: inflight
+// term (D-216). All Money (H4). NOTE: o.filled_qty is the RUNNING total since P3-e-i (accumulated per
+// leg at ProcessFillCommand) -> the -filled term is LIVE and LOAD-BEARING — the P3-e-ii EFC oracle
+// (partial-BUY remainder reserve, 9900.6862-family char) witnesses it in both failure directions; the
+// old Class-38 "INERT" note died with the A2/A16 landing. NOTE: inflight
 // SELL is omitted -- cash-leg-correct; a mis-booked SELL is caught by the BTC/qty leg (.E.1 venue-net).
 //======================================================================
 // [END_FUNCTION]_[OMS_ExpectedFreeCash]

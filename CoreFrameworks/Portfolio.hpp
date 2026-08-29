@@ -676,7 +676,7 @@ inline Money Portfolio_CloseSlot(Portfolio<F> *portfolio, int slot, Money exit_p
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[P3-d-ii (Class-46 close): close q_leg OF the slot — gross via the Money_FillGross SSoT for THIS leg; quantity decrements; the active bit clears ONLY at flat (branchless mask — the completeness-assuming whole-close died here). entry_price basis stays FIXED across partial closes (A16: the basis moves only on BUY accumulate). The CALLER apportions entry_fee (residual-absorbing final leg on the Position's own decrementing field) and derives slot_flat BEFORE calling (q_leg == quantity)]
+// [OVERVIEW]_[P3-d-ii (Class-46 close): close q_leg OF the slot — gross via the Money_FillGross SSoT for THIS leg; quantity decrements; the active bit clears ONLY at flat (branchless mask — the completeness-assuming whole-close died here). entry_price basis stays FIXED across partial closes (A16: the basis moves only on BUY accumulate). The CALLER apportions entry_fee via Portfolio_ConsumeEntryFeeLeg (the D-447 SSoT; residual-absorbing final leg on the caller's decrementing tracker) and derives slot_flat BEFORE calling (q_leg == quantity)]
 // [REFERENCE]_[DECISION]_[[D-190] [D-446]]
 // [REFERENCE]_[CLASS]_[46]
 //======================================================================
@@ -697,6 +697,30 @@ inline Money Portfolio_CloseSlotLeg(Portfolio<F> *portfolio, int slot,
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[Portfolio_CloseSlotLeg]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Portfolio_ConsumeEntryFeeLeg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[D-447: THE entry-fee apportionment SSoT — pro-rata per leg (half-even via Money_Div), the FINAL leg (q_leg == pos_qty) consumes the exact RESIDUAL from the caller's decrementing tracker, so Σ apportioned ≡ the original entry fee by construction (no ULP leak, no double-count). ONE body for the live leaf (handle_sell_fill) + BOTH warm-restart folds (was three hand-written copies — the D-190 gross-SSoT stance applied to the fee half). Formula correctness is pinned by hand-derived char literals; the fold-vs-live drift oracle keeps catching PLUMBING divergence]
+// [REFERENCE]_[DECISION]_[[D-447] [D-190] [D-446]]
+//======================================================================
+// [CODE]
+//======================================================================
+inline Money Portfolio_ConsumeEntryFeeLeg(Money* entry_fee_remaining,
+                                          Money q_leg, Money pos_qty) {
+    const bool leg_flat = Money_Eq(q_leg, pos_qty);
+    const Money leg = leg_flat ? *entry_fee_remaining
+        : Money_Div(Money_Mul(*entry_fee_remaining, q_leg), pos_qty);
+    *entry_fee_remaining = Money_Sub(*entry_fee_remaining, leg);
+    return leg;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Portfolio_ConsumeEntryFeeLeg]
 //======================================================================
 
 //======================================================================

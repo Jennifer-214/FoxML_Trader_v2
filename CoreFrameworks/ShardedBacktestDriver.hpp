@@ -279,9 +279,12 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //     backtest NodeContexts match live for identical inputs. Safe to
     //     call when masks are zero (no fills this tick) — the function
     //     early-exits per slot.
-    if (drv->oms &&
-        BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
-        drv->config) {
+    // P3-close (a-class T5 / M5): the mode-bit conjunct DELETED — post-unify the
+    // DrainPostFill inputs (masks + trade accumulators) are produced in BOTH modes,
+    // and LIVE runs DrainPostFill unconditionally (Run.hpp drainer loop): gating it
+    // here made a mode-0 backtest silently kill the ML tail live still runs (train-
+    // serve divergence). DrainPostFill self-limits on empty masks.
+    if (drv->oms && drv->config) {
         // E.1.2.C leg 0 — through the SHARED binder (was a hand-rolled 4-arg
         // call that silently defaulted drift/ic_variant/node_cfg; live-parity
         // by construction now, incl. the exit-bandit flag + per-node fee).
@@ -514,9 +517,12 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     // v4.7.15: drain post-fill in mode 1 to match live's final-flush loop
     // (the shutdown flush in EngineSharded/Run.hpp). Without this, the last
     // tick's FillRecords sit in the OMS buffers and never apply to NodeContexts.
-    if (drv->oms &&
-        BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
-        drv->config) {
+    // P3-close (a-class T5 / M5): the mode-bit conjunct DELETED — post-unify the
+    // DrainPostFill inputs (masks + trade accumulators) are produced in BOTH modes,
+    // and LIVE runs DrainPostFill unconditionally (Run.hpp drainer loop): gating it
+    // here made a mode-0 backtest silently kill the ML tail live still runs (train-
+    // serve divergence). DrainPostFill self-limits on empty masks.
+    if (drv->oms && drv->config) {
         // E.1.2.C leg 0 — through the SHARED binder (was a hand-rolled 4-arg
         // call that silently defaulted drift/ic_variant/node_cfg; live-parity
         // by construction now, incl. the exit-bandit flag + per-node fee).

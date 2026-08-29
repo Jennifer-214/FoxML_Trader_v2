@@ -511,8 +511,8 @@ struct alignas(64) NodeContext {
     // v4.0.4: per-core P&L tracking. The OMS keeps a single global
     // realized_pnl across all cores (since portfolio is shared); these
     // counters split it out by source core for the Account panel and any
-    // future per-core kill switch / risk re-allocation logic. Updated in
-    // EventLoop_OnEvent exit branch, alongside oms->realized_pnl.
+    // future per-core kill switch / risk re-allocation logic. Updated by the
+    // COMPOSER at EngineCommon_NodeRowsBook (P3-f/D-441 — OnEvent died).
     Money   node_realized;             // sum of net P&L from this node's exits
     Money   node_fees;                 // sum of fees paid by this node's fills
     uint32_t node_wins;                 // exits with net > 0
@@ -541,10 +541,11 @@ struct alignas(64) NodeContext {
     Money   node_gross_wins;
     Money   node_gross_losses;
     // Phase 2.1: per-core open notional. Sum of (entry_price × qty) across
-    // currently-open positions for this core. Updated branchlessly in
-    // EventLoop_OnEvent — entry adds notional, exit subtracts the SAME
-    // notional snapshot (NOT exit_price × qty — asymmetric subtraction
-    // would leak positive residue per winning trade and accumulate
+    // currently-open positions for this core. Updated by the COMPOSER at
+    // EngineCommon_NodeRowsBook (P3-f/D-441 — OnEvent died): entry adds
+    // fe.notional, exit relieves the entry-side value (the final leg via the
+    // tracked slot_notional remainder — NOT exit_price × qty; asymmetric
+    // subtraction would leak positive residue per winning trade and accumulate
     // unboundedly). FPN_SubSat guards against rare underflow.
     //
     // Used by: Account panel "Budget Used %" display today (instrumentation
@@ -1109,8 +1110,8 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
             Money q_leg       = Money_Gt(e.qty, slot_entries[slot].qty) ? slot_entries[slot].qty : e.qty;
             if (Money_IsZero(q_leg)) continue;
             const bool leg_flat = Money_Eq(q_leg, slot_entries[slot].qty);
-            Money entry_fee_leg = leg_flat ? slot_entries[slot].entry_fee
-                : Money_Div(Money_Mul(slot_entries[slot].entry_fee, q_leg), slot_entries[slot].qty);
+            Money entry_fee_leg = Portfolio_ConsumeEntryFeeLeg(&slot_entries[slot].entry_fee,
+                                                               q_leg, slot_entries[slot].qty);   // D-447 SSoT (decrements the tracker)
             Money exit_fee = !Money_IsZero(e.fee) ? e.fee
                 : Money_Mul(Money_Mul(e.price, q_leg), fee_rate_taker_for_core);
             Money total_fee = Money_Add(entry_fee_leg, exit_fee);
@@ -1125,7 +1126,6 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
             state->nodes[tt::NodeIdx{(int16_t)node_id}].node_open_notional =
                 Money_Sub(state->nodes[tt::NodeIdx{(int16_t)node_id}].node_open_notional, entry_notional);
             slot_entries[slot].qty       = Money_Sub(slot_entries[slot].qty, q_leg);
-            slot_entries[slot].entry_fee = Money_Sub(slot_entries[slot].entry_fee, entry_fee_leg);
             if (leg_flat) {
                 // W/L ONCE per trade at flat (the live-side slot-flat discipline mirrored;
                 // per-leg counting would count one trade N times). Trade net approximated

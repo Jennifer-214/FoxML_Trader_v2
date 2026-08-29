@@ -609,7 +609,8 @@ inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
 // minus entry_fee minus exit_fee), total_fees is entry_fee + exit_fee.
 //
 // pitfall P8.7 — caller must compute net_pnl and total_fees BEFORE invoking
-// this function. EventLoop_OnEvent already does the math in the right order.
+// this function. The composer's EmitTradeRow path does the math in the right
+// order (P3-f/D-441 — the old EventLoop_OnEvent caller died).
 //======================================================================
 // [END_FUNCTION]_[ShardedTradeLog_RecordExit]
 //======================================================================

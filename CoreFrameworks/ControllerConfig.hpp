@@ -1187,13 +1187,11 @@ template <unsigned F> struct ControllerConfig {
   Money mr_sl_pct;           // MeanReversion SL override
   Money emacross_tp_pct;     // EMA Cross TP override
   Money emacross_sl_pct;     // EMA Cross SL override
-  // OMS phase 03: which path EventLoop_OnEvent takes when a TradeEvent
-  // arrives. mode 0 (legacy): OnEvent mutates the portfolio + balance
-  // directly, same as phase 02. mode 1 (event log): OnEvent just bumps
-  // total_events_processed and routes to OMS, the OMS callback does the
-  // portfolio mutation + balance update + kill switch peak + trade log
-  // write. mode 1 is what the head-to-head test exercises and what
-  // production runs after the soak. ⚠ CORRECTED at D-421: this said "default 0
+  // OMS event-log mode — a LOGGING toggle since P3-f (D-441 unify; the old
+  // EventLoop_OnEvent mode-0 booking body is DELETED). Booking is ONE pipeline
+  // in both modes (Submit → fill → HandleFill → FillEvent → composer apply);
+  // mode 0 = event-log append OFF, mode 1 = append ON (audit rows + the
+  // warm-restart replay folds). ⚠ CORRECTED at D-421: this said "default 0
   // so existing tests stay green during the migration window" — the migration
   // window has CLOSED and ControllerConfig_Default sets 1. The trailing inline
   // comment below was fixed in the same sweep that missed this one, two lines up.

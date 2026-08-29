@@ -1124,9 +1124,7 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
             Money q_leg = Money_Gt(e.qty, pos_qty) ? pos_qty : e.qty;
             if (Money_IsZero(q_leg)) continue;
             const bool leg_flat = Money_Eq(q_leg, pos_qty);
-            Money entry_fee_leg = leg_flat ? pos.entry_fee
-                : Money_Div(Money_Mul(pos.entry_fee, q_leg), pos_qty);
-            pos.entry_fee  = Money_Sub(pos.entry_fee, entry_fee_leg);
+            Money entry_fee_leg = Portfolio_ConsumeEntryFeeLeg(&pos.entry_fee, q_leg, pos_qty);   // D-447 SSoT
             Money exit_fee = !Money_IsZero(e.fee) ? e.fee
                 : Money_Mul(Money_Mul(e.price, q_leg), fee_rate);
             Money gross     = Portfolio_CloseSlotLeg(&result.portfolio, slot, e.price, q_leg);
