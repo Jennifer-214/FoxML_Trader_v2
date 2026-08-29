@@ -301,6 +301,9 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // P3-c-ii (D-445): audit-funnel ring depth — 64, deliberately smaller than the fill ring's
 // 256 (audit events track fill cadence; overflow is a CORRECT inline drain, never a drop).
 inline constexpr int OE_FUNNEL_RING_SIZE = 64;
+// P4-pre-2: calib funnel depth — per-COMPLETED-TRADE cadence, drained every apply (see the
+// sizing rationale at the calib_rings declaration).
+inline constexpr int CALIB_FUNNEL_RING_SIZE = 8;
 
 template <unsigned F> struct OrderManagerState;
 template <unsigned F>
@@ -400,6 +403,27 @@ struct OrderManagerState {
     // (and production's own EngineSharded_Run function-local; the fixture-allocation pressure
     // itself is a Phase-6 hygiene rider).
     tt::NodeArray<tt::SPSCRing<OrderEvent<F>, OE_FUNNEL_RING_SIZE>, MAX_EXECUTION_NODES> oe_rings;
+
+    // P4-pre-2 (amendment L / (I) residual): the per-node CALIBRATION funnel rings. Same
+    // producer/consumer shape as oe_rings above — the leaf BUILDS a CalibRecord at slot-flat
+    // (every read node-local) and the composer RENDERS it, so `calibration_log_file` keeps ONE
+    // writer across the flip instead of N node threads serializing on the stdio lock (the
+    // latency-path Rule-2 hazard on top of a multi-writer FILE*).
+    //
+    // Depth 8 (vs oe_rings' 64) — sizing is CADENCE-driven, and the oe_rings comment above
+    // records why that matters: calib rows fire once per COMPLETED TRADE (slot-flat), not per
+    // fill/rejection/reconcile, and the composer drains every apply, so 8 is ~4x the realistic
+    // per-drain worst case (a node owns 2 slots). 320B x 8 x 16 = 40KB on a struct that is
+    // stack-local in production AND in ~34 suite fixtures.
+    //
+    // DROP-with-LOUD-counter, NOT never-drop (deliberate, unlike oe_rings): a lost calib row is
+    // a missing ML training sample, not a ledger error — and never-drop here would mean either
+    // the emitter inline-draining (a node thread touching the shared FILE* + all nodes' rings —
+    // exactly the P4G-5/F-2b hazard the gate raised against the oe_rings path) or blocking
+    // until the composer drains (a quiesce deadlock shape). Dropping is the only policy that
+    // stays correct under the flip; the counter makes it observable rather than silent.
+    tt::NodeArray<tt::SPSCRing<CalibRecord, CALIB_FUNNEL_RING_SIZE>, MAX_EXECUTION_NODES> calib_rings;
+    uint64_t calib_rows_dropped = 0;   // composer/operator-visible; nonzero ⇒ raise the depth
 
     //------------------------------------------------------------------
     // [SECTION]_[WARM CLUSTER — read on fill burst (HandleFill + DrainPostFill)]
@@ -839,12 +863,12 @@ struct OrderManagerState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-28]
+// [UPDATED]_[2026-08-29]
 //----------------------------------------------------------------------
-// [SIZE]_[411072B]
+// [SIZE]_[454144B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6423]
-// [STRADDLE]_[unverified: orders last_exit_fill_price last_exit_fee]
+// [CACHE_LINES]_[7096]
+// [STRADDLE]_[unverified: orders last_exit_fill_price last_exit_fee last_trade_net last_trade_notional]
 //======================================================================
 // [END_STRUCT]_[OrderManagerState]
 //======================================================================
@@ -977,7 +1001,33 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
     double exp3_probs[BANDIT_MAX_ARMS] = {0};
     if (ezoo) Bandit_GetProbabilities(&ezoo->bandits[regime_clamped], exp3_probs);
 
-    CALIB_LOG_EMIT_ROW(oms->calibration_log_file);
+    // P4-pre-2 (amendment L): BUILD the row payload; the COMPOSER renders it (single FILE*
+    // writer across the flip). Every read above is node-local — the Position basis, the
+    // per-slot sibling arrays, this node's ezoo/cfg — so the build stays correct when this
+    // body moves onto the owning node's thread; only the stdio write relocates.
+    CalibRecord rec{};
+    rec.ts_us            = ts_us;
+    rec.pslot            = pslot;
+    rec.pred_flag        = (uint32_t)pred_flag;
+    rec.pred_p           = pred_p;
+    rec.entry_price      = entry_d_calib;
+    rec.exit_price       = exit_d_calib;
+    rec.gain_pct         = gain_pct;
+    rec.pnl_bps          = pnl_bps;
+    rec.was_win          = BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0;
+    rec.bandit_algorithm = bandit_active_state;
+    rec.regime_id        = bandit_regime;
+    rec.chosen_arm       = bandit_chosen_arm;
+    rec.reward_bps       = reward_bps_attributed;
+    rec.thompson_tel_arm = thompson_telemetry_arm;
+    rec.thompson_blend_alpha = thompson_exp3_blend_alpha;
+    for (int a = 0; a < BANDIT_MAX_ARMS; ++a) {
+        rec.exp3_w[a]         = exp3_probs[a];
+        rec.thompson_mu[a]    = ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[a]        : 0.0;
+        rec.thompson_prec[a]  = ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[a] : 0.0;
+        rec.thompson_pulls[a] = ezoo ? (uint32_t)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[a] : 0u;
+    }
+    OMS_CalibFunnelPush(oms, rec, pslot);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1892,6 +1942,70 @@ inline void OMS_EventFunnelPush(OrderManagerState<F>* oms, const OrderEvent<F>& 
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[OMS_CalibFunnelDrain]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE] [SUPPORTIVE]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P4-pre-2: the composer's calibration-row funnel drain — pop every per-node CalibRecord ring in DEFINED order (n ascending, FIFO within) and render each through CALIB_LOG_EMIT_ROW. Sole writer of calibration_log_file. Called from the apply tail beside OMS_EventFunnelDrain, so every apply site (live tail, live shutdown, backtest per-tick + finals) funnels automatically (M5)]
+// [REFERENCE]_[DECISION]_[[D-445] [D-449]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int OMS_CalibFunnelDrain(OrderManagerState<F>* oms) {
+    int drained = 0;
+    for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
+        const tt::NodeIdx nn{(int16_t)n};
+        CalibRecord r;
+        while (tt::SPSCRing_TryPop(&oms->calib_rings[nn], &r)) {
+            CALIB_LOG_EMIT_ROW(oms->calibration_log_file, r);   // the ONE macro caller
+            ++drained;
+        }
+    }
+    return drained;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_CalibFunnelDrain]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OMS_CalibFunnelPush]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P4-pre-2: the calibration-row producer side — route a leaf-built CalibRecord onto the emitting node's funnel ring. DROP-with-counter on a full ring (telemetry, not conservation — see the calib_rings declaration for why never-drop is WRONG here under the flip). Null-agg harness = direct render, mirroring the audit funnel's direct-Append arm: the render IS the body either way, the ring is transport only]
+// [REFERENCE]_[DECISION]_[[D-445] [D-449]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void OMS_CalibFunnelPush(OrderManagerState<F>* oms, const CalibRecord& r, int slot) {
+    if (__builtin_expect(oms->agg == nullptr, 0)) {
+        CALIB_LOG_EMIT_ROW(oms->calibration_log_file, r);
+        return;
+    }
+    const int partial_on = BITMAP_IS_SET(oms->oms_state_flags,
+                                         tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    const tt::NodeIdx nn{(int16_t)(slot >= 0 ? BITMAP_SLOT_NODE(slot, partial_on) : 0)};
+    if (__builtin_expect(tt::SPSCRing_TryPush(&oms->calib_rings[nn], r), 1)) return;
+    // Full ring: DROP + count (never inline-drain — that would put a node thread on the
+    // shared FILE* and on every node's ring). Loud once per occurrence; the counter is the
+    // standing signal that the depth needs raising.
+    ++oms->calib_rows_dropped;
+    std::fprintf(stderr, "[calib] WARN: node %d funnel full — calibration row DROPPED "
+                 "(total dropped %llu; raise CALIB_FUNNEL_RING_SIZE)\n",
+                 (int)nn, (unsigned long long)oms->calib_rows_dropped);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_CalibFunnelPush]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[OrderManager_HandleFill]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CRITICAL]]
@@ -2415,12 +2529,19 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[free the event log (stops its async writer thread) + close the calibration log; the RAII destructor's body]
+// [OVERVIEW]_[final calib-funnel flush, then free the event log (stops its async writer thread) + close the calibration log; the RAII destructor's body]
 //======================================================================
 // [CODE]
 //======================================================================
 template <unsigned F>
 inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
+    // P4-pre-2: flush any calib rows still in the funnel BEFORE the file closes. The live
+    // shutdown path does reach a final apply (which drains) before OMS shutdown, but that is
+    // a property of the CALLER's ordering — this makes tail-row survival a property of the
+    // OWNER instead, for every current and future shutdown path. Safe here by construction:
+    // shutdown runs after the trading-thread joins, so this is single-threaded. Idempotent
+    // (empty rings = no-op) and nullptr-safe (the render is a no-op on a null FILE*).
+    (void)OMS_CalibFunnelDrain(oms);
     OrderEventLog_Free(&oms->event_log);
     // v5.13.0.B — calibration log cleanup. nullptr-safe: most runs leave
     // it null (cfg.calibration_log_path empty by default).

@@ -22,25 +22,25 @@
 // Tuple: X(col_name, printf_fmt, value_expr)
 //   col_name    — bare identifier; used for CSV header AND macro-generated names
 //   printf_fmt  — per-column printf format string (e.g. "%llu", "%.4f")
-//   value_expr  — expression read at row-write time; MUST be valid in the
-//                 caller scope (HandleFill body for the entry-fill writer)
+//   value_expr  — expression read at row-write time, against the RECORD (see below)
 //
-// CALLER SCOPE CONTRACT:
-//   Row-write expansion expects these variables in scope (matches real_on_exit_calibration
-//   body at OrderManager.hpp post-v5.15.5.F.4d Step 7 § F):
-//     uint64_t ts_us, int pslot, uint8_t pred_flag, double pred_p,
-//     double entry_d_calib, double exit_d_calib, double gain_pct, double pnl_bps,
-//     OrderManagerState<F>* oms,
-//     // v5.15.5.F.4d Step 7 § F + Step 8 § M:
-//     int bandit_active_state, int bandit_regime, int bandit_chosen_arm,
-//     double reward_bps_attributed, int thompson_telemetry_arm,
-//     double thompson_exp3_blend_alpha, int regime_clamped,
-//     double exp3_probs[BANDIT_MAX_ARMS],
-//     EnsembleModelZoo<F>* ezoo (nullable; null-coalesce per-arm Thompson telemetry to 0.0/0u)
+// RECORD CONTRACT (replaced the old CALLER SCOPE CONTRACT at P4-pre-2 / amendment L):
+//   Every value_expr reads `r.<field>` of a `CalibRecord` (declared below). Adding a column
+//   therefore means: add the field to CalibRecord + populate it in the LEAF builder
+//   (`real_on_exit_calibration`, OrderManager.hpp) + add the row here. A column whose field
+//   does not exist fails to COMPILE — the previous contract could only fail at the call site
+//   of whichever caller happened to lack the local.
+//
+//   WHY it changed: the row emit RELOCATED off the leaf's shared `FILE*` onto the composer's
+//   calib funnel (P4-pre-2), because at the Phase-4 flip N node threads would otherwise
+//   fprintf one FILE* — a stdio-lock serialization on the slow path (latency-path Rule 2) on
+//   top of a multi-writer file. The leaf now BUILDS the record (every read node-local) and
+//   the composer RENDERS it, so there is exactly ONE macro caller. Byte output is unchanged:
+//   same registry order, same fmt strings, same values.
 //
 // HEADER + ROW EMIT:
-//   - CalibLog_EmitHeader(f) — comma-separated col_name list + trailing \n
-//   - CALIB_LOG_EMIT_ROW(f) — macro expanded inside caller; comma-separated value list + \n
+//   - CalibLog_EmitHeader(f)     — comma-separated col_name list + trailing \n
+//   - CALIB_LOG_EMIT_ROW(f, r)   — comma-separated value list + \n, rendered from the record
 //
 // BYTE-FORMAT PRESERVATION:
 //   Existing operator-side parsers (calibration analysis tooling) depend on
@@ -64,7 +64,65 @@
 #define CALIB_LOG_COL_REGISTRY_HPP
 
 #include <cstdio>
+#include <cstdint>
 #include "../ML_Headers/BanditLearning.hpp"  // v5.15.5.F.4d Step 8 § M — BANDIT_MAX_ARMS for hand-written-8-arm static_assert; registry inherently references per-arm bandit state
+
+//======================================================================
+// [STRUCT]_[CalibRecord]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [PERSISTENCE]]
+// [THREAD]_[[NODE_WRITER] [COMPOSER_READER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P4-pre-2 (amendment L): the calibration row's VALUE payload — built leaf-side at slot-flat (every read is node-local), transported over the per-node calib funnel, rendered composer-side. Replaces the registry's old CALLER SCOPE CONTRACT with a typed record contract: FOREACH_CALIB_LOG_COL value_exprs now read r.<field>, so there is exactly ONE macro caller (the composer's render) instead of an implicit contract on whatever locals a caller happened to have]
+// [REFERENCE]_[DECISION]_[[D-445] [D-449]]
+//======================================================================
+// [CODE]
+//======================================================================
+// double (not Money) BY DESIGN: this is the DISPLAY payload — the row's values are already
+// past their `Money_ToDouble` conversion at build time (H4 display-only arm). No money
+// DECISION is made from these; they are CSV bytes. Do not route accounting through them.
+struct CalibRecord {
+    uint64_t ts_us            = 0;
+    double   pred_p           = 0.0;
+    double   entry_price      = 0.0;
+    double   exit_price       = 0.0;
+    double   gain_pct         = 0.0;
+    double   pnl_bps          = 0.0;
+    double   reward_bps       = 0.0;
+    double   thompson_blend_alpha = 0.0;
+    double   exp3_w[BANDIT_MAX_ARMS]        = {};
+    double   thompson_mu[BANDIT_MAX_ARMS]   = {};
+    double   thompson_prec[BANDIT_MAX_ARMS] = {};
+    uint32_t thompson_pulls[BANDIT_MAX_ARMS] = {};
+    int32_t  pslot            = 0;
+    uint32_t pred_flag        = 0;
+    int32_t  was_win          = 0;
+    int32_t  bandit_algorithm = 0;
+    int32_t  regime_id        = 0;
+    int32_t  chosen_arm       = 0;
+    int32_t  thompson_tel_arm = 0;
+    int32_t  _pad0            = 0;   // H12: explicit, zero-init
+};
+
+// Ring-element size pin (the FillEvent/EmitRecord precedent — growth is DELIBERATE: edit this
+// assert in the same commit as the field). Field ORDER is deliberate too: u64 -> 7 doubles ->
+// the three 8-wide double arrays -> the u32 array -> the small ints, which lands ZERO padding
+// at exactly 320B (5 cache lines, no array straddling a line).
+//
+// NOT bit-packed, deliberately (operator Q, 2026-08-29): the seven small ints WOULD fit one
+// u32 (~24B/record, ~3KB across 16 nodes), but every one of them is consumed by a %d/%u CSV
+// column — packing would force an MBS_* unpack at render and cost the registry its
+// one-row-per-column readability, to optimize a term (footprint) that never compounds here:
+// the record is touched twice per COMPLETED TRADE and its consumer is 47 fprintf calls. The
+// bit-packing gradient targets hot-path / L1-resident / slot-bitmap state; this is neither.
+// H14 is satisfied by construction (nothing packed ⇒ no bitfield syntax).
+static_assert(sizeof(CalibRecord) == 320,
+              "CalibRecord is a per-node ring element — re-pin deliberately when a column's field lands");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[CalibRecord]
+//======================================================================
 
 //======================================================================
 // [REGISTRY]_[FOREACH_CALIB_LOG_COL]
@@ -80,55 +138,55 @@
 //======================================================================
 #define FOREACH_CALIB_LOG_COL(X)                                                                                                                       \
     /* legacy 9 cols — UNCHANGED (operator parsers depend on byte order) */                                                                            \
-    X(timestamp_us,        "%llu",  (unsigned long long)ts_us)                                                                                         \
-    X(slot,                "%d",    (int)pslot)                                                                                                        \
-    X(exit_predicted_flag, "%u",    (unsigned)pred_flag)                                                                                               \
-    X(predicted_p,         "%.6f",  pred_p)                                                                                                            \
-    X(entry_price,         "%.4f",  entry_d_calib)                                                                                                     \
-    X(exit_price,          "%.4f",  exit_d_calib)                                                                                                      \
-    X(gain_pct,            "%.6f",  gain_pct)                                                                                                          \
-    X(realized_pnl_bps,    "%.4f",  pnl_bps)                                                                                                           \
-    X(was_win,             "%d",    (BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0))                                          \
+    X(timestamp_us,        "%llu",  (unsigned long long)r.ts_us)                                                                                         \
+    X(slot,                "%d",    (int)r.pslot)                                                                                                        \
+    X(exit_predicted_flag, "%u",    (unsigned)r.pred_flag)                                                                                               \
+    X(predicted_p,         "%.6f",  r.pred_p)                                                                                                            \
+    X(entry_price,         "%.4f",  r.entry_price)                                                                                                     \
+    X(exit_price,          "%.4f",  r.exit_price)                                                                                                      \
+    X(gain_pct,            "%.6f",  r.gain_pct)                                                                                                          \
+    X(realized_pnl_bps,    "%.4f",  r.pnl_bps)                                                                                                           \
+    X(was_win,             "%d",    r.was_win)                                          \
     /* v5.15.5.F.4d Step 8 § M — 6 bandit-context singletons (decoded from Order::flags_packed bits 17-25 + per-core cfg + per-slot reward) */         \
-    X(bandit_algorithm,           "%d",   bandit_active_state)                                                                                         \
-    X(regime_id_at_emit,          "%d",   bandit_regime)                                                                                               \
-    X(chosen_arm,                 "%d",   bandit_chosen_arm)                                                                                           \
-    X(reward_bps_attributed,      "%.6f", reward_bps_attributed)                                                                                       \
-    X(thompson_telemetry_arm,     "%d",   thompson_telemetry_arm)                                                                                      \
-    X(thompson_exp3_blend_alpha,  "%.6f", thompson_exp3_blend_alpha)                                                                                   \
+    X(bandit_algorithm,           "%d",   r.bandit_algorithm)                                                                                         \
+    X(regime_id_at_emit,          "%d",   r.regime_id)                                                                                               \
+    X(chosen_arm,                 "%d",   r.chosen_arm)                                                                                           \
+    X(reward_bps_attributed,      "%.6f", r.reward_bps)                                                                                       \
+    X(thompson_telemetry_arm,     "%d",   r.thompson_tel_arm)                                                                                      \
+    X(thompson_exp3_blend_alpha,  "%.6f", r.thompson_blend_alpha)                                                                                   \
     /* v5.15.5.F.4d Step 8 § M — 32 per-arm cols (8 arms × {exp3_w, thompson_mu, thompson_prec, thompson_pulls}); arm-major layout */                  \
-    X(exp3_w_arm0,         "%.6f", exp3_probs[0])                                                                                                      \
-    X(thompson_mu_arm0,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[0]                  : 0.0))                                  \
-    X(thompson_prec_arm0,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[0]           : 0.0))                                  \
-    X(thompson_pulls_arm0, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[0]    : 0u))                                   \
-    X(exp3_w_arm1,         "%.6f", exp3_probs[1])                                                                                                      \
-    X(thompson_mu_arm1,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[1]                  : 0.0))                                  \
-    X(thompson_prec_arm1,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[1]           : 0.0))                                  \
-    X(thompson_pulls_arm1, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[1]    : 0u))                                   \
-    X(exp3_w_arm2,         "%.6f", exp3_probs[2])                                                                                                      \
-    X(thompson_mu_arm2,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[2]                  : 0.0))                                  \
-    X(thompson_prec_arm2,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[2]           : 0.0))                                  \
-    X(thompson_pulls_arm2, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[2]    : 0u))                                   \
-    X(exp3_w_arm3,         "%.6f", exp3_probs[3])                                                                                                      \
-    X(thompson_mu_arm3,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[3]                  : 0.0))                                  \
-    X(thompson_prec_arm3,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[3]           : 0.0))                                  \
-    X(thompson_pulls_arm3, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[3]    : 0u))                                   \
-    X(exp3_w_arm4,         "%.6f", exp3_probs[4])                                                                                                      \
-    X(thompson_mu_arm4,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[4]                  : 0.0))                                  \
-    X(thompson_prec_arm4,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[4]           : 0.0))                                  \
-    X(thompson_pulls_arm4, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[4]    : 0u))                                   \
-    X(exp3_w_arm5,         "%.6f", exp3_probs[5])                                                                                                      \
-    X(thompson_mu_arm5,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[5]                  : 0.0))                                  \
-    X(thompson_prec_arm5,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[5]           : 0.0))                                  \
-    X(thompson_pulls_arm5, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[5]    : 0u))                                   \
-    X(exp3_w_arm6,         "%.6f", exp3_probs[6])                                                                                                      \
-    X(thompson_mu_arm6,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[6]                  : 0.0))                                  \
-    X(thompson_prec_arm6,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[6]           : 0.0))                                  \
-    X(thompson_pulls_arm6, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[6]    : 0u))                                   \
-    X(exp3_w_arm7,         "%.6f", exp3_probs[7])                                                                                                      \
-    X(thompson_mu_arm7,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[7]                  : 0.0))                                  \
-    X(thompson_prec_arm7,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[7]           : 0.0))                                  \
-    X(thompson_pulls_arm7, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[7]    : 0u))
+    X(exp3_w_arm0,         "%.6f", r.exp3_w[0])                                                                                                      \
+    X(thompson_mu_arm0,    "%.6f", r.thompson_mu[0])                                  \
+    X(thompson_prec_arm0,  "%.6f", r.thompson_prec[0])                                  \
+    X(thompson_pulls_arm0, "%u",   r.thompson_pulls[0])                                   \
+    X(exp3_w_arm1,         "%.6f", r.exp3_w[1])                                                                                                      \
+    X(thompson_mu_arm1,    "%.6f", r.thompson_mu[1])                                  \
+    X(thompson_prec_arm1,  "%.6f", r.thompson_prec[1])                                  \
+    X(thompson_pulls_arm1, "%u",   r.thompson_pulls[1])                                   \
+    X(exp3_w_arm2,         "%.6f", r.exp3_w[2])                                                                                                      \
+    X(thompson_mu_arm2,    "%.6f", r.thompson_mu[2])                                  \
+    X(thompson_prec_arm2,  "%.6f", r.thompson_prec[2])                                  \
+    X(thompson_pulls_arm2, "%u",   r.thompson_pulls[2])                                   \
+    X(exp3_w_arm3,         "%.6f", r.exp3_w[3])                                                                                                      \
+    X(thompson_mu_arm3,    "%.6f", r.thompson_mu[3])                                  \
+    X(thompson_prec_arm3,  "%.6f", r.thompson_prec[3])                                  \
+    X(thompson_pulls_arm3, "%u",   r.thompson_pulls[3])                                   \
+    X(exp3_w_arm4,         "%.6f", r.exp3_w[4])                                                                                                      \
+    X(thompson_mu_arm4,    "%.6f", r.thompson_mu[4])                                  \
+    X(thompson_prec_arm4,  "%.6f", r.thompson_prec[4])                                  \
+    X(thompson_pulls_arm4, "%u",   r.thompson_pulls[4])                                   \
+    X(exp3_w_arm5,         "%.6f", r.exp3_w[5])                                                                                                      \
+    X(thompson_mu_arm5,    "%.6f", r.thompson_mu[5])                                  \
+    X(thompson_prec_arm5,  "%.6f", r.thompson_prec[5])                                  \
+    X(thompson_pulls_arm5, "%u",   r.thompson_pulls[5])                                   \
+    X(exp3_w_arm6,         "%.6f", r.exp3_w[6])                                                                                                      \
+    X(thompson_mu_arm6,    "%.6f", r.thompson_mu[6])                                  \
+    X(thompson_prec_arm6,  "%.6f", r.thompson_prec[6])                                  \
+    X(thompson_pulls_arm6, "%u",   r.thompson_pulls[6])                                   \
+    X(exp3_w_arm7,         "%.6f", r.exp3_w[7])                                                                                                      \
+    X(thompson_mu_arm7,    "%.6f", r.thompson_mu[7])                                  \
+    X(thompson_prec_arm7,  "%.6f", r.thompson_prec[7])                                  \
+    X(thompson_pulls_arm7, "%u",   r.thompson_pulls[7])
 
 // v5.15.5.F.4d Step 8 § M — hand-written 8-arm coverage invariant.
 // If BANDIT_MAX_ARMS grows, append 4 more rows (exp3_w_armN + thompson_mu_armN + thompson_prec_armN
@@ -205,7 +263,7 @@ inline void CalibLog_EmitHeader(FILE* f) {
 //
 // Walks registry; emits each value with caller-supplied fmt; comma-separates;
 // adds trailing \n.
-#define CALIB_LOG_EMIT_ROW(file_handle)                                                            \
+#define CALIB_LOG_EMIT_ROW(file_handle, r)                                                         \
     do {                                                                                            \
         int _calib_first = 1;                                                                       \
         FILE* _calib_f = (file_handle);                                                             \

@@ -684,6 +684,9 @@ inline int EngineCommon_FillRingsApply(EventLoopState<F>& state, OrderManagerSta
     // (live cycle tail, live shutdown, backtest per-tick + final flushes) funnels
     // automatically; the composer stays the SOLE OrderEventLog_Append caller.
     (void)OMS_EventFunnelDrain(&oms);
+    // P4-pre-2 (amendment L): same tail, same reason — the composer is the sole writer of
+    // calibration_log_file, so the leaf-built rows render HERE rather than on N node threads.
+    (void)OMS_CalibFunnelDrain(&oms);
     return applied;
 }
 //======================================================================
