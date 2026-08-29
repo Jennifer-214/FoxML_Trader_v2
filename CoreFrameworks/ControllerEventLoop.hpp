@@ -21,7 +21,6 @@
 //   - [FUNCTION]_[Sharded_SlotNode]     (+ LegSlot / NodeSlotMask / ValidatePartialExitCfg geometry family)
 //   - [FUNCTION]_[EventLoopState_SetCoreStrategy]
 //   - [FUNCTION]_[EventLoop_DrainPostFillOneCore] (+ DrainPostFill fan)
-//   - [FUNCTION]_[EventLoop_OnEvent]
 //   - [FUNCTION]_[EventLoop_DrainEvents]
 //   - [FUNCTION]_[EventLoop_RebuildAllParameters]
 //   - [FUNCTION]_[EventLoop_UpdateRollingStateOneCore] (+ UpdateEmaPriceAllCores)
@@ -499,6 +498,15 @@ struct alignas(64) NodeContext {
     // resolved_cfg fresh each rebuild, so there's no live-filter state
     // to drift back toward defaults).
     uint32_t idle_cycles;
+    // P3-f (D-441 rider): the slow thread's fill-activity rebase cursor —
+    // snapshot of entries_processed+exits_processed at the last rebuild. The
+    // reset-on-fill lived ONLY in mode-0 OnEvent (dead on mode-1 production
+    // since v4.7.1 → pnl_feeder wrongly idle-cleared every idle_reset_cycles
+    // while trading). Sharded-native derive: the OWNING slow thread compares
+    // the composer's monotonic counters against this cursor — idle_cycles
+    // stays single-writer (slow thread), the counters stay single-writer
+    // (composer), the read is a monotonic single-word (H22-pure, own node).
+    uint64_t idle_fills_seen;
 
     // v4.0.4: per-core P&L tracking. The OMS keeps a single global
     // realized_pnl across all cores (since portfolio is shared); these
@@ -2180,216 +2188,22 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
 // [END_FUNCTION]_[EventLoop_DrainPostFillOneCore]
 //======================================================================
 
-//======================================================================
-// [FUNCTION]_[EventLoop_OnEvent]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
-// [REFERENCE]_[INVARIANT]_[H20]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one TradeEvent -> portfolio/balance/stats; combined-mask single-guard dispatch; mode-1 (production) routes through OMS_PushSubmit and returns early — the mode-0 body is legacy/test bookkeeping]
-// [REFERENCE]_[DECISION]_[D-202]
-// [REFERENCE]_[DESIGN_SPEC]_[adversarial-pessimistic-simulation-discipline.md]
-//======================================================================
-// [CODE]
-//======================================================================
-template <unsigned F>
-inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& event_in,
-                              // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg array (nullptr fallback).
-                              // OnEvent reads event.node_id then indexes nodes[event.node_id] for
-                              // per-core fee_rate / slippage_pct. Mode-1 path returns early (sharded
-                              // production); mode-0 legacy body uses these. Per cfg-scope-discipline
-                              // § "consumer over per-core array."
-                              const tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES>* nodes = nullptr) {
-    // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; subsequent reads pure ALU.
-    static const tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES> NULL_PER_NODE_CFG_STUB_ARRAY = {};   // E.1.3 P0/TD-299: typed stub (baseline exclusion retired)
-    const tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES>& effective_nodes = nodes ? *nodes : NULL_PER_NODE_CFG_STUB_ARRAY;   // same single-cmov select, typed
-    // v5.15.5.F.4d.1.E.0.10 A9 — paper/backtest SLIPPAGE moved to the OrderManager_Submit synthetic-fill
-    // chokepoint: the SINGLE production slip SSoT (D-202 + adversarial-pessimistic-simulation-discipline.md).
-    // This OnEvent slip was DEAD on the production (mode-1) path — the should_apply gate below returns BEFORE
-    // the mode-0 body reads event.price, and Async books the raw price via Submit (the BookFill site in EngineSharded/Async.hpp). It is now
-    // removed; the mode-0 / test-only bookkeeping path below books the raw trigger price (slip lives at Submit).
-    // Mutate a local copy so the caller's event is untouched.
-    TradeEvent<F> event = event_in;
-    // event.node_id on THIS path is the NODE (ExecutionCore writes core->node_id), while the
-    // portfolio calls below need the SLOT. Under partial_exit_enabled a node owns slots 2N+0/2N+1,
-    // so the two diverge and one variable cannot serve both — this body used `slot` for BOTH
-    // (nodes[]/effective_nodes[] AND positions[]/OpenSlot/CloseSlot), which mapped node N's fill
-    // onto portfolio slot N. Latent only because mode-0 is legacy/test-only (E.1.2.F Class-61).
-    const int node = (int)event.node_id;
-    const int partial_on_ev = BITMAP_IS_SET(state->oms->oms_state_flags,
-                                            tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    const int pslot = (int)Sharded_LegSlot(tt::NodeIdx{(int16_t)node}, (int)event.leg, partial_on_ev);
-    int slot = node;   // node-space alias; every portfolio call below uses `pslot`
-    // v5.15.5.F.4c.3 WIP2d-1.B.1 option C — combined-mask collapse: 3 separate predicate branches
-    // (bounds + mutex + mode-1 fast-path) collapsed into 1 combined-mask + single guard branch.
-    // Reduces predictor entries 3 → 1; bounds variance to a single source. Per Caramel's
-    // determinism principle: even bounded predictor variance is variance worth eliminating.
-    //
-    // Branchless mask compute (pure ALU; ~5ns):
-    bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
-    bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
-    const bool valid_slot   = slot < state->registered_count && pslot >= 0
-                              && pslot < MAX_PORTFOLIO_POSITIONS;   // node bound AND a derivable slot
-    const bool valid_mutex  = !(is_entry && is_exit);              // same-tick entry+exit impossible by ExecutionCore_Tick construction
-    const bool mode_0_body  = !MBS_EQ_U8(state->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
-                                          tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);  // mode-1 (production sharded) → false → skip body
-    const bool should_apply = valid_slot && valid_mutex && mode_0_body;
-    // Single guard branch — predicted-taken in production (mode-1 means !should_apply).
-    // TECH_DEBT option B: full branchless via Portfolio_OpenSlot/CloseSlot + TradeLog_RecordEntry
-    // mask-param refactor scheduled for future ship (per ship-close TECH_DEBT entry).
-    if (!should_apply) return;
-
-    // === MODE 0: legacy OnEvent path (reached only when should_apply mask is true) ===
-    // v5.15.5.F.4c.3 WIP2d-1.B.1 — mode-1 body deleted (was pure-noop return). Combined-mask
-    // above filters out mode-1 + invalid input in single branch; mode-0 body only runs when
-    // valid + mode-0. Per v4.7.19 doctrine: production counter bumps happen via DrainPostFill,
-    // not here. Mode-0 path is legacy / test-only (sharded production is mode-1).
-    NodeContext<F>* ctx = &state->nodes[tt::NodeIdx{(int16_t)slot}];
-    if (is_entry) {
-        // Compute entry fee = entry_price * qty * fee_rate
-        // Phase 8: synchronous market BUY = taker by exchange definition.
-        // OMS HandleFill (mode 1) will book the actual maker/taker fee from
-        // the WS executionReport. This sync accounting is optimistic.
-        Money notional = Money_Mul(event.price, ctx->intended_qty);
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (slot already validated above).
-        const Money entry_fee_rate = effective_nodes[tt::NodeIdx{(int16_t)slot}].fee_rate_taker;
-        Money entry_fee = Money_Mul(notional, entry_fee_rate);
-        Portfolio_OpenSlot(&state->oms->portfolio, pslot,
-                           event.price,
-                           ctx->intended_qty,
-                           ctx->intended_tp,
-                           ctx->intended_sl,
-                           entry_fee);
-        ctx->entries_processed++;
-        state->total_entries++;
-        state->total_events_processed++;
-        // v4.2.1: reset idle-cycle counter on every fill
-        ctx->idle_cycles = 0;
-        // Phase 2.1: per-core open notional. Add the entry notional. The
-        // exit branch subtracts the SAME (entry_price × qty) snapshot so
-        // round-trips return to exactly zero — never use exit_price × qty
-        // here (asymmetric subtraction would leak residue per trade).
-        ctx->node_open_notional = Money_Add(ctx->node_open_notional, notional);
-        // CSV: record AFTER portfolio mutation so the slot is consistent if the
-        // log call inspects it (currently it doesn't, but kept defensive).
-        if (state->oms->trade_log) {
-            // s5-1b: resolved id (post-AUTO), matching the mode-1 fill-emit path.
-            // D1/Class-61 close: the log takes the SLOT explicitly (pslot, derived
-            // above) — this site used to forward the NODE-valued event unchanged.
-            ShardedTradeLog_RecordEntry(state->oms->trade_log, event,
-                                        tt::SlotIdx{(int16_t)pslot},
-                                        ctx->resolved_strategy_id,
-                                        event.price,
-                                        ctx->intended_qty,
-                                        entry_fee,
-                                        state->oms->balance,
-                                        /*regime=*/(int)ctx->regime_state.current_regime);
-        }
-        return;
-    }
-
-    if (is_exit) {
-        // close slot returns gross. apply both entry fee (already paid at fill
-        // time, recorded in position) and exit fee (computed from exit notional).
-        // Snapshot the position fields BEFORE CloseSlot clears the bit, so the
-        // CSV row sees the entry_price + qty even though the slot is "closed".
-        Money entry_price_snap = state->oms->portfolio.positions[pslot].entry_price;
-        Money qty_snap = state->oms->portfolio.positions[pslot].quantity;
-        Money entry_fee = state->oms->portfolio.positions[pslot].entry_fee;
-        Money gross = Portfolio_CloseSlot(&state->oms->portfolio, pslot, event.price);
-        Money exit_notional = Money_Mul(event.price, qty_snap);
-        // Phase 8: TP/SL exit = market sell = always taker by exchange def.
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (slot already validated above).
-        const Money exit_fee_rate = effective_nodes[tt::NodeIdx{(int16_t)slot}].fee_rate_taker;
-        Money exit_fee = Money_Mul(exit_notional, exit_fee_rate);
-        Money total_fee = Money_Add(entry_fee, exit_fee);
-        Money net = Money_Sub(gross, total_fee);
-        state->oms->balance = Money_Add(state->oms->balance, net);
-        state->oms->realized_pnl = Money_Add(state->oms->realized_pnl, net);
-        // v4.0.4: per-core P&L bookkeeping. The OMS keeps a single global
-        // accumulator (one portfolio); we split it back out by source core
-        // for the Account panel so users can see which core is making/losing
-        // money. node_fees adds the entry+exit fee for this fill.
-        // Branchless win/loss: Money_Gt returns 1/0, used as integer
-        // mask. Slow path so cost is irrelevant — kept branchless for
-        // consistency with the rest of the engine.
-        // (.E.0.10: comment de-rotted FPN_GreaterThan→Money_Gt — the line below
-        //  is decimal Money_Gt; the stale name caused a false register finding.)
-        ctx->node_realized = Money_Add(ctx->node_realized, net);
-        ctx->node_fees = Money_Add(ctx->node_fees, total_fee);
-        uint32_t is_win = (uint32_t)Money_Gt(net, Money_Zero());
-        ctx->node_wins   += is_win;
-        ctx->node_losses += (1u - is_win);
-        // Phase 2.1: subtract the SAME entry notional we added at entry time.
-        // Use entry_price_snap × qty_snap, NOT exit_price × qty_snap — the
-        // latter would leak residue per round trip (positive when winning,
-        // negative when losing) and drift the budget tracker unboundedly.
-        // FPN_SubSat saturates at zero if state ever becomes inconsistent
-        // (defensive against future bugs; should never trigger in practice).
-        Money entry_notional_snap = Money_Mul(entry_price_snap, qty_snap);
-        ctx->node_open_notional = Money_Sub(ctx->node_open_notional, entry_notional_snap);
-        // Phase 09: track peak balance for drawdown-based kill switch.
-        // Cheap on the slow path; the comparison is one FPN_Binary compare per exit.
-        if (Money_Gt(state->oms->balance, state->oms->ks_peak_balance)) {
-            state->oms->ks_peak_balance = state->oms->balance;
-        }
-        ctx->exits_processed++;
-        state->total_exits++;
-        state->total_events_processed++;
-        // CSV: pitfall P8.7 — log AFTER net/total_fee/balance are computed.
-        if (state->oms->trade_log) {
-            // s5-1b: resolved id (post-AUTO), matching the mode-1 fill-emit path.
-            // D1/Class-61 close: explicit SLOT (see the entry-site comment).
-            ShardedTradeLog_RecordExit(state->oms->trade_log, event,
-                                       tt::SlotIdx{(int16_t)pslot},
-                                       ctx->resolved_strategy_id,
-                                       entry_price_snap,
-                                       event.price,
-                                       qty_snap,
-                                       net,
-                                       total_fee,
-                                       state->oms->balance,
-                                       /*regime=*/(int)ctx->regime_state.current_regime);
-        }
-        return;
-    }
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [COMMENT]
-//----------------------------------------------------------------------
-// process one TradeEvent. dispatches to entry or exit handling based on
-// event.type bits. updates portfolio + balance + statistics. does NOT call
-// kill switch eval, regime update, or any code that might mutate gate_params
-// (those go through deferred dirty-flag mechanisms in later phases).
-//
-// entry handling:
-//   - look up NodeContext for event.node_id (the source core)
-//   - read intended TP/SL/qty from the context (set by controller earlier)
-//   - call Portfolio_OpenSlot to write the position fields and set the bit
-//   - bump per-core entries_processed counter
-//
-// exit handling:
-//   - call Portfolio_CloseSlot which clears the bit and returns gross P&L
-//   - apply fees: net = gross - (gross * fee_rate)  (matches existing
-//     PortfolioController fee model)
-//   - balance += net, realized_pnl += net
-//   - bump per-core exits_processed counter
-//
-// invalid event types (type == 0 or type == TRADE_EVENT_ENTRY|TRADE_EVENT_EXIT)
-// are silently ignored — the branchless ExecutionCore_Tick can never produce
-// them, but defensive logic in case of replay or fuzz testing.
-//======================================================================
-// [END_FUNCTION]_[EventLoop_OnEvent]
-//======================================================================
+// ─── EventLoop_OnEvent DELETED at E.1.3 P3-f (D-441 mode-0 unify) ───────────────
+// The mode-0 direct-booking body was a SECOND writer path onto the same ledger +
+// node rows the composer owns (balance/realized/ks_peak + node_realized/fees/
+// notional/W-L + trade-log records). Booking is now ONE pipeline in both modes:
+// Submit → synth/venue fill → ProcessFillCommand → HandleFill (leaf) → FillEvent →
+// composer apply (LedgerApplyFill + NodeRowsBook + trade-row emit). The mode bit
+// is a LOGGING toggle only (event-log append sites gate individually; value 0
+// stays VALID = append-off — no H21 tombstone owed). TradeEvent consumption is
+// ring hygiene in EventLoop_DrainEvents; submit conversion lives in the pumps.
 
 //======================================================================
 // [FUNCTION]_[EventLoop_DrainEvents]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[round-robin drain with per-node cap (P4.1 anti-starvation) -> OnEvent each; cross-node ordering NOT preserved (P4.2)]
+// [OVERVIEW]_[round-robin TradeEvent ring drain with per-node cap (P4.1 anti-starvation) — pure ring hygiene since P3-f/D-441 (booking rides the OMS fill path); cross-node ordering NOT preserved (P4.2)]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -2403,7 +2217,10 @@ inline int EventLoop_DrainEvents(EventLoopState<F>* state) {
         for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_NODE; ++i) {
             TradeEvent<F> event;
             if (!SPSCRing_TryPop(&core->event_ring, &event)) break;
-            EventLoop_OnEvent(state, event);
+            // P3-f (D-441): consumption IS the job — ring hygiene so producers never
+            // stall. Booking rides Submit→HandleFill→composer in BOTH modes now;
+            // submit conversion lives in the pumps (EngineSharded/Async + backtest).
+            (void)event;
             ++total_drained;
         }
     }
@@ -2803,14 +2620,23 @@ inline void EventLoop_RebuildOneCore(
                 FPN_Mul(resolved_cfg.nodes[tt::NodeIdx{(int16_t)slot}].volume_multiplier, session_mult);
         }
 
-        // v4.2.1: idle-cycle counter. Bump every rebuild; reset to 0 in
-        // OnEvent's entry branch on every fill. When the threshold is
-        // exceeded the pnl_feeder ring buffer is reset so adaptive
-        // feedback (D10) doesn't keep applying shifts based on stale
-        // outcomes from before a long quiet period. Mirrors the recovery
-        // intent of legacy `idle_reset_cycles` without the filter-decay
-        // step (sharded recomputes resolved_cfg fresh each rebuild, so
-        // there's no live-filter drift to undo).
+        // v4.2.1 idle-cycle counter, P3-f re-derive (D-441 rider): reset-on-fill
+        // used to live in mode-0 OnEvent's entry branch — DEAD on mode-1
+        // production since v4.7.1, so the pnl_feeder idle-clear below fired
+        // every idle_reset_cycles rebuilds even while actively trading. The
+        // owning slow thread now derives activity from the composer's monotonic
+        // per-node counters vs its own rebase cursor: new fills since the last
+        // rebuild → reset. Single-writer on every word (idle_cycles + cursor =
+        // this thread; the counters = composer; monotonic single-word reads).
+        // When the threshold IS exceeded the pnl_feeder ring resets so adaptive
+        // feedback (D10) doesn't keep applying shifts from stale outcomes after
+        // a long quiet period.
+        {
+            NodeContext<F>& ctx_i = state->nodes[tt::NodeIdx{(int16_t)slot}];
+            const uint64_t fills_now = ctx_i.entries_processed + ctx_i.exits_processed;
+            ctx_i.idle_cycles = (fills_now != ctx_i.idle_fills_seen) ? 0u : ctx_i.idle_cycles;
+            ctx_i.idle_fills_seen = fills_now;
+        }
         state->nodes[tt::NodeIdx{(int16_t)slot}].idle_cycles++;
         // v5.9.1 — boot-time per-core warmup-complete log (V5_9_AUDIT-#9).
         // Fires once per session per core, on the rebuild cycle that first

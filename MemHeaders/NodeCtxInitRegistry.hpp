@@ -129,6 +129,7 @@ namespace tt {
     X(last_entry_wall_us,         uint64_t,           0,              NORST)                         \
     X(sl_cooldown_remaining,      uint32_t,           0,              RST)                           \
     X(idle_cycles,                uint32_t,           0,              RST)                           \
+    X(idle_fills_seen,            uint64_t,           0,              RST)                           \
     /* WARM cluster — per-core P&L (v4.0.4) */                                                      \
     X(node_realized,              Money,              Money_Zero(),   RST)                           \
     X(node_fees,                  Money,              Money_Zero(),   RST)                           \
@@ -258,10 +259,12 @@ constexpr int NODE_CTX_RESET_FIELD_COUNT =
 #undef _NODE_CTX_RESET_COUNT_ONE
 #undef _NODE_CTX_RESET_COUNT_RST
 #undef _NODE_CTX_RESET_COUNT_NORST
-// [ASSERT]_[REGISTRY_COVERAGE]_[NODE_CTX_RESET_FIELD_COUNT == 15]
-static_assert(NODE_CTX_RESET_FIELD_COUNT == 15,
+// [ASSERT]_[REGISTRY_COVERAGE]_[NODE_CTX_RESET_FIELD_COUNT == 16]
+static_assert(NODE_CTX_RESET_FIELD_COUNT == 16,
               "The RST-flagged subset of FOREACH_NODE_CTX_FIELD is EXACTLY the 15 former "
-              "FOREACH_NODE_CTX_RESET_FIELD rows (Phase 2.1/3 + v4.7.21/26 + v5.4.3). A "
+              "FOREACH_NODE_CTX_RESET_FIELD rows (Phase 2.1/3 + v4.7.21/26 + v5.4.3) + "
+              "idle_fills_seen (E.1.3 P3-f — the slow thread's fill-activity rebase cursor; "
+              "reset-with-the-cohort so a paper reset re-arms the idle derive cleanly). A "
               "byte-identical-reset pin — flipping a NORST↔RST changes this count deliberately.");
 //======================================================================
 // [END_CODE]

@@ -946,7 +946,8 @@ inline int EngineSharded_Async_DrainWithSubmit(
                 }
             }
 
-            EventLoop_OnEvent(&state, event);
+            // P3-f (D-441): the OnEvent mode-0 direct-booking call is DELETED — this
+            // pump's Submit below IS the booking path in both modes (one pipeline).
             ++total_drained;
 
             // F-096 (HIGH-2): the guard now tests the ACTUAL SUBMITTED value.

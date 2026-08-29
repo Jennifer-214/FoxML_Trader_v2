@@ -1112,14 +1112,16 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 // self-contained from init onwards. EventLoopState_Init takes an OMS
 // pointer and forwards all financial reads through the OMS.
 //
-// event_log_mode parameter (default 0):
-//   0 = legacy mode. OMS_Tick only marks orders FILLED/REJECTED and frees
-//       slots. Portfolio mutation happens in EventLoop_OnEvent (unchanged).
-//   1 = event log mode. OMS_Tick runs a fill handler that opens/closes
-//       portfolio slots, updates balance, and appends to the event log.
-//       EventLoop_OnEvent just bumps counters.
+// event_log_mode parameter (default 0) — a LOGGING toggle since P3-f (D-441):
+//   0 = event-log append OFF. Booking is IDENTICAL to mode 1 (one pipeline:
+//       ProcessFillCommand→HandleFill→FillEvent→composer apply).
+//   1 = event-log append ON (fill/rejection/terminal/reconcile audit rows ride
+//       the funnel into the persisted OrderEventLog; warm-restart folds replay it).
 //   2-3 = reserved for future modes. Stored as 2-bit slot in oms_state_flags
 //         (v5.15.5.C.3 MULTI_BIT slot — see FOREACH_OMS_STATE_MULTI_BIT).
+//   Value 0 stays VALID (append-off) — no H21 tombstone owed; the OLD mode-0
+//   direct-booking body (EventLoop_OnEvent) + the paper count-and-return Submit
+//   shortcut died at P3-f.
 //
 // partial_exit_enabled parameter (v5.15.5.C.3 Finding A):
 //   0 = single-leg geometry; slot index == node_id (1:1 mapping).
@@ -1188,23 +1190,13 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     const ::PerNodeCfg<F>* const node_cfg    = cmd.node_cfg;
     uint64_t id = oms->next_order_id++;
 
-    // Paper mode + legacy (mode 0): count and return. Never touch the
-    // table or the adapter. Mode 1 paper falls through to the slot
-    // allocation path below so the fill handler runs in OMS_Tick.
-    // v5.15.5.C.3 — event_log_mode is a 2-bit slot in oms_state_flags
-    // (see MemHeaders/OmsStateFlagRegistry.hpp). Use MBS_EQ_U8 for K-state
-    // slot semantics (consistent with the 4 other read sites — drainer
-    // ProcessFillCommand uses MBS_EQ_U8(..., 1); this site checks ..., 0).
-    // /dod-audit MEDIUM-3 close (consistency over BITMAP_NONE for K-state).
-    if (!BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING) &&
-        MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
-                  tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 0)) {
-        oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
-        oms->total_filled.fetch_add(1, std::memory_order_relaxed);
-        return id;
-    }
+    // P3-f (D-441 mode-0 unify): the mode-0 paper count-and-return shortcut is
+    // DELETED — every mode allocates a slot + runs the synth/venue fill through
+    // ProcessFillCommand→HandleFill (ONE booking pipeline; the mode bit only
+    // gates the event-log append). The shortcut was the OMS half of the second
+    // booking path (OnEvent booked directly while the OMS just counted).
 
-    // Live mode: allocate a slot.
+    // Allocate a slot.
     uint16_t free_mask = (uint16_t)~oms->order_bitmap;
     if (free_mask == 0) {
         std::fprintf(stderr,
@@ -1952,16 +1944,20 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     }
     // Audit log append — common across BUY/SELL/future LIMIT. The S-3 fee slot makes
     // the event log fee-self-contained from this epoch on. P3-c-ii: rides the FUNNEL
-    // (the composer is the sole Append caller — D-445).
-    OMS_EventFunnelPush(oms,
-        OrderEvent_MakeFill<F>(
-            o->id, o->submitted_at_us,
-            Order_GetType(o), (int16_t)(int)o->portfolio_slot,   // OrderEvent.node_id stays a raw int16_t (persisted; loud boundary cast — .v is private since the CLAIM-1 close)
-            fill_price, fill_qty,
-            o->intended_tp, o->intended_sl,
-            booked_fee,
-            (uint8_t)(Order_GetState(o) == ORDER_FILLED)),   // P3-e: PARTIAL legs append as OEVT_PARTIAL_FILL
-        (int)o->portfolio_slot);
+    // (the composer is the sole Append caller — D-445). P3-f (D-441): mode-gated HERE
+    // now that booking runs in both modes — the mode bit is a LOGGING toggle only.
+    if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                  tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
+        OMS_EventFunnelPush(oms,
+            OrderEvent_MakeFill<F>(
+                o->id, o->submitted_at_us,
+                Order_GetType(o), (int16_t)(int)o->portfolio_slot,   // OrderEvent.node_id stays a raw int16_t (persisted; loud boundary cast — .v is private since the CLAIM-1 close)
+                fill_price, fill_qty,
+                o->intended_tp, o->intended_sl,
+                booked_fee,
+                (uint8_t)(Order_GetState(o) == ORDER_FILLED)),   // P3-e: PARTIAL legs append as OEVT_PARTIAL_FILL
+            (int)o->portfolio_slot);
+    }
     // Pattern 1 1D dispatch — branchless via fn pointer table. Deterministic latency regardless
     // of BUY/SELL access pattern. Closes Class 28 first canonical.
     g_fill_dispatch<F>[(uint8_t)Order_GetType(o)](oms, o, fill_price, fill_qty, booked_fee);
@@ -2078,11 +2074,11 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             oms->total_filled.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // Mode 1 fill handler: portfolio mutation + event log. P3-e: the LEG qty (the
-        // increment), not the running total — and a zero-qty result (pure-expire
-        // terminal) books nothing.
-        if (cmd.result.fill_qty > 0.0 &&
-            MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
+        // Fill handler — BOTH modes since P3-f (D-441 unify): one booking pipeline;
+        // the mode bit only gates the event-log append inside HandleFill. P3-e: the
+        // LEG qty (the increment), not the running total — and a zero-qty result
+        // (pure-expire terminal) books nothing.
+        if (cmd.result.fill_qty > 0.0) {
             Money fill_price = o->avg_fill_price;
             Money fill_qty   = Money{ money_from_double_payload(cmd.result.fill_qty) };
             OrderManager_HandleFill(oms, o, fill_price, fill_qty,

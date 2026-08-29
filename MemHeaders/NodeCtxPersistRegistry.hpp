@@ -195,6 +195,13 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
 // [CODE]
 //======================================================================
 #define FOREACH_NODE_CTX_PERSIST_EXEMPT(X)                                                           \
+    /* --- E.1.3 P3-f idle-activity cursor ------------------------------------------------ */      \
+    X(idle_fills_seen, ACCEPTED_RESET,                                                               \
+      "Slow-thread rebase cursor over entries_processed+exits_processed (the reset-on-fill "         \
+      "derive at ControllerEventLoop.hpp EventLoop_RebuildOneCore). Fresh-zero at boot is the "      \
+      "accepted semantics: the persisted counters reload non-zero, so the FIRST rebuild reads "     \
+      "fills_now != 0 and resets idle_cycles ONCE — a restart counts as activity, which matches "    \
+      "the idle-clear's recovery intent. Refute by finding a reader before the first rebuild.")      \
     /* --- E.1.3 P2-a composer views ----------------------------------------------------- */       \
     X(node_unrealized_view, DERIVED_EACH_PASS,                                                       \
       "Composer-written MtM view, recomputed by EngineCommon_ComposeAndKillEval every compose "      \
@@ -356,10 +363,10 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
 constexpr int FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT =
     0 FOREACH_NODE_CTX_PERSIST_EXEMPT(_NPE_COUNT_ONE);
 #undef _NPE_COUNT_ONE
-// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 23 — the complement pin]
-static_assert(FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 23,
-              "NodeContext<64> has 50 members; 27 are covered by FOREACH_NODE_PERSIST_FIELD, so "
-              "EXACTLY 23 are declared-unpersisted here. Adding a NodeContext member means adding "
+// [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 24 — the complement pin]
+static_assert(FOREACH_NODE_CTX_PERSIST_EXEMPT_COUNT == 24,
+              "NodeContext<64> has 51 members; 27 are covered by FOREACH_NODE_PERSIST_FIELD, so "
+              "EXACTLY 24 are declared-unpersisted here. Adding a NodeContext member means adding "
               "it to ONE of the two registries — run tools/check_node_ctx_partition.py, which "
               "subtracts both from clang's real member list and REDs on UNACCOUNTED / STALE-EXEMPT "
               "/ CONTRADICTION. See DESIGN_SPECS/framework-patterns/"
