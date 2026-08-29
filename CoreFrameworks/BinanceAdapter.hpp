@@ -247,6 +247,7 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
         double fill_price = 0.0;
         double fill_qty   = 0.0;
         int    order_complete = 0;   // A17: venue-reported terminal status; consumed in the genuine-fill arm only
+        int    venue_terminal = 0;   // P3-e-ii (D-446): venue ended the order short of FILLED (IOC EXPIRED etc.)
 
         // Bracket the REST call for latency stats. Phase 01 did this on
         // the drainer thread inside OMS_Tick; phase 02 does it here on
@@ -254,9 +255,11 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
         auto ts0 = std::chrono::steady_clock::now();
         int ok = (p.type == ORDER_MARKET_BUY)
             ? BinanceOrderAPI_MarketBuy(api, p.qty, order_id_buf,
-                                         &fill_price, &fill_qty, p.client_id, &order_complete)
+                                         &fill_price, &fill_qty, p.client_id, &order_complete,
+                                         &venue_terminal)
             : BinanceOrderAPI_MarketSell(api, p.qty, order_id_buf,
-                                          &fill_price, &fill_qty, p.client_id, &order_complete);
+                                          &fill_price, &fill_qty, p.client_id, &order_complete,
+                                          &venue_terminal);
         auto ts1 = std::chrono::steady_clock::now();
         if (state->latency) {
             uint64_t elapsed_us = (uint64_t)
@@ -276,10 +279,17 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
             if (state->ws_active.load(std::memory_order_relaxed)) {
                 result.avg_fill_price = 0.0;
                 result.fill_qty       = 0.0;
+                // P3-e-ii: venue_terminal DELIBERATELY dropped on the ACK arm. The WS
+                // stream delivers the terminal report ORDERED AFTER its TRADE legs; a
+                // REST-raced terminal here would run the disposition BEFORE the legs
+                // book (slot freed -> the legs' accounting lost). WS is authoritative
+                // when active; a lost WS terminal is the stale-inflight detector's
+                // case (OrderManager_Tick step 4) -> E.1.4 GetStatus recovery.
             } else {
                 result.avg_fill_price = fill_price;
                 result.fill_qty       = fill_qty;
                 result.order_complete = (uint8_t)order_complete;  // A17 (b): venue "status"==FILLED; ACK arm leaves 0
+                result.venue_terminal = (uint8_t)venue_terminal;  // P3-e-ii: single-response regime — legs + terminal in ONE cmd (handler books THEN disposes)
             }
         } else {
             result.success = 0;

@@ -353,7 +353,7 @@ static inline int ud_keepalive_listen_key(BinanceUserDataState* s) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[extract one x=="TRADE" fill into a Command — price/qty/maker/status/commission; CARRIES the open .E.0.10 parser findings (A2 "z" unparsed, A4 commission non-authoritative, A5 side uncrosschecked — see the findings block below)]
+// [OVERVIEW]_[extract one executionReport into a Command — x==TRADE fills (price/qty/maker/status/commission) + P3-e-ii terminal non-TRADE pass-through (EXPIRED/CANCELED -> venue_terminal, REJECTED -> rejection arm); CARRIES the open .E.0.10 parser findings (A4 commission non-authoritative, A5 side uncrosschecked — see the findings block below)]
 // [REFERENCE]_[DECISION]_[D-123]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-169] [TECH_DEBT-171]]
 //======================================================================
@@ -368,10 +368,17 @@ static inline int ud_parse_execution_report(const char* json, int len,
     binance_json_extract_str(json, "e", event_type, sizeof(event_type));
     if (strcmp(event_type, "executionReport") != 0) return 0;
 
-    // check execution type — only "TRADE" is a fill
-    char exec_type[16] = {};
+    // Execution type — "TRADE" is a fill. P3-e-ii (D-446): a TERMINAL non-TRADE
+    // report (the venue ENDED the order without a fill event: EXPIRED / CANCELED /
+    // REJECTED) passes through so the OMS runs the terminal-incomplete disposition.
+    // NEW / REPLACED / other working reports stay dropped (the REST ACK owns those).
+    char exec_type[24] = {};
     binance_json_extract_str(json, "x", exec_type, sizeof(exec_type));
-    if (strcmp(exec_type, "TRADE") != 0) return 0;
+    const int is_trade    = (strcmp(exec_type, "TRADE") == 0);
+    const int is_exp_canc = (strcmp(exec_type, "EXPIRED") == 0 ||
+                             strcmp(exec_type, "CANCELED") == 0);
+    const int is_rejected = (strcmp(exec_type, "REJECTED") == 0);
+    if (!is_trade && !is_exp_canc && !is_rejected) return 0;
 
     // extract clientOrderId — should be "oms_<id>"
     char client_oid[64] = {};
@@ -384,6 +391,49 @@ static inline int ud_parse_execution_report(const char* json, int len,
     // extract exchange orderId
     char exchange_oid[32] = {};
     binance_json_extract_str(json, "i", exchange_oid, sizeof(exchange_oid));
+
+    if (!is_trade) {
+        // Terminal non-TRADE — OUR orders only (a foreign order's cancel is not our
+        // event; passing id 0 would just spam the OMS surprise-fill arm). The stream
+        // delivers this AFTER the TRADE legs it followed (venue-ordered), so booked
+        // legs are already ahead of it in the SPSC ring — the OMS disposition sees
+        // them applied. That ordering is WHY the terminal signal must come from THIS
+        // stream when WS is active (a REST-raced terminal would fire the disposition
+        // before the legs book — see the adapter's ws_active arm).
+        if (oms_order_id == 0) return 0;
+        char order_status[24] = {};
+        binance_json_extract_str(json, "X", order_status, sizeof(order_status));
+        memset(cmd_out, 0, sizeof(*cmd_out));
+        cmd_out->type     = CMD_WS_FILL;
+        cmd_out->order_id = oms_order_id;
+        strncpy(cmd_out->result.exchange_id, exchange_oid,
+                sizeof(cmd_out->result.exchange_id) - 1);
+        if (is_rejected) {
+            // Venue REJECTED (filters / balance / permissions): route to the OMS
+            // rejection arm (ORDER_REJECTED + audit row + slot free) — deliberately
+            // NO venue_terminal, so no auto re-submit: a structural reject would
+            // loop tightly; the strategy re-evaluates the still-open position and
+            // retries at its own cadence.
+            cmd_out->result.success    = 0;
+            cmd_out->result.error_code = -1;
+            char reject_reason[24] = {};
+            binance_json_extract_str(json, "r", reject_reason, sizeof(reject_reason));
+            snprintf(cmd_out->result.error_message,
+                     sizeof(cmd_out->result.error_message),
+                     "WS x=REJECTED r=%s", reject_reason);
+        } else {
+            // EXPIRED / CANCELED: the venue_terminal disposition (booked legs stand;
+            // a SELL's remainder re-submits; audit row rides the funnel).
+            // order_complete from "X" — a report on an already-FILLED order keeps
+            // complete=1 and the disposition arm stays cold.
+            cmd_out->result.success        = 1;
+            cmd_out->result.venue_terminal = 1;
+            cmd_out->result.order_complete =
+                (uint8_t)(strcmp(order_status, "FILLED") == 0);
+        }
+        *trade_id_out = 0;   // non-TRADE reports carry t=-1; no trade id
+        return 1;
+    }
 
     // fill data
     double fill_price = binance_json_extract_double(json, "L");
@@ -437,8 +487,10 @@ static inline int ud_parse_execution_report(const char* json, int len,
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// Extracts fill data from a Binance executionReport JSON event.
-// Returns 1 if this is a fill event (x == "TRADE"), 0 otherwise.
+// Extracts one executionReport JSON event into a Command.
+// Returns 1 for a fill (x == "TRADE") OR a terminal non-TRADE on OUR order
+// (x == EXPIRED/CANCELED -> venue_terminal command; x == REJECTED -> success=0
+// rejection command); 0 for anything else (working reports, foreign orders).
 //
 // Relevant fields from the Binance docs:
 //   "e": "executionReport"   — event type
@@ -455,9 +507,11 @@ static inline int ud_parse_execution_report(const char* json, int len,
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // [[.E.0.10 adversarial hunt] [KNOWN OPEN CAPITAL FINDINGS — read before editing]]
 //----------------------------------------------------------------------
-// A2 (HIGH, TECH_DEBT-169): venue "z" (CUMULATIVE filled qty) is never
-//   parsed; downstream OMS overwrites filled_qty per event and frees the
-//   slot on the first fill — later partials of the same order are DROPPED.
+// A2 (was HIGH, TECH_DEBT-169) — OMS HALF FIXED at E.1.3 P3-e-i: filled_qty
+//   now ACCUMULATES per leg and the slot frees only on a TERMINAL state, so
+//   multi-partial orders book whole. Venue "z" (cumulative) stays unparsed BY
+//   DESIGN on this WS path — "l" (the leg) is the increment the OMS wants; "z"
+//   re-enters at E.1.4's GetStatus reconcile as the cross-check total.
 // A4 (MED→HIGH on BNB-pay, TECH_DEBT-169): the "n"/"N" commission parsed
 //   here is recorded but NOT booked authoritatively (Fee_Compute fabricates
 //   notional×rate downstream); the reconcile path drops commission entirely.

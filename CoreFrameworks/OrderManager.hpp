@@ -2225,9 +2225,14 @@ inline Money OMS_ExpectedFreeCash(const OrderManagerState<F>* oms) {
         if (((bm >> i) & 1) == 0) continue;
         const Order<F>& o = oms->orders[i];
         OrderState ostate = Order_GetState(&o);
-        if ((ostate == ORDER_SUBMITTED || ostate == ORDER_ACKNOWLEDGED) &&
+        // P3-e-ii: ORDER_PARTIAL joined the reserve set — before P3 a partial never
+        // persisted (slot freed per event) so SUBMITTED|ACK was the complete working
+        // set; now a partial BUY's un-executed remainder is real future cash outflow,
+        // and `remain` is live (filled_qty accumulates since P3-e-i).
+        if ((ostate == ORDER_SUBMITTED || ostate == ORDER_ACKNOWLEDGED ||
+             ostate == ORDER_PARTIAL) &&
             Order_GetType(&o) == ORDER_MARKET_BUY) {
-            Money remain   = Money_Sub(o.requested_qty, o.filled_qty);   // == requested today (Class-38)
+            Money remain   = Money_Sub(o.requested_qty, o.filled_qty);
             Money notional = Money_Mul(remain, o.event_price);
             Money est_fee  = Money_Mul(notional, o.pre_resolved.fee_rate);
             expected = Money_Sub(expected, Money_Add(notional, est_fee));
@@ -2312,9 +2317,9 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
 //======================================================================
 template <unsigned F>
 inline void OrderManager_Tick(OrderManagerState<F>* oms) {
-    // Drain all three command queues through the unified dispatcher.
-    // Adding a new command source: add one SPSCRing field, one drain
-    // call here, one handler function. No duplication.
+    // Drain all three command queues through the unified dispatcher, then run
+    // the stale-inflight age sweep (step 4). Adding a new command source: add
+    // one SPSCRing field, one drain call here, one handler function. No duplication.
     Command cmd;
 
     // 1. REST fills (adapter worker thread)
@@ -2333,6 +2338,41 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
     while (SPSCRing_TryPop(&oms->reconcile_queue, &cmd)) {
         if (cmd.type == (uint8_t)CMD_RECONCILE)
             OrderManager_ProcessReconcile(oms, cmd);
+    }
+
+    // 4. P3-e-ii (D-446 #5): stale-inflight AGE detector — DETECT-ONLY, LOUD.
+    //    Live only (paper synth results land same-cycle). An order still working
+    //    OMS_STALE_INFLIGHT_WARN_US after submit = a transport gap (lost WS
+    //    terminal report / REST response never arrived). No state change, no
+    //    free: a guessed timeout while the venue actually filled books a phantom
+    //    at reconcile. E.1.4's authoritative GetStatus re-query owns recovery
+    //    (ORDER_TIMEOUT stays its landing pad). Warned ONCE per order (bit 26).
+    //    Branch shape: empty-bitmap short-circuit = zero cost in the common
+    //    no-inflight case; the per-order arms are rare-cold diagnostics
+    //    (branchless-dispatch decision matrix, __builtin_expect-rare tier).
+    if (oms->order_bitmap != 0 &&
+        BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING)) {
+        const uint64_t now_us = (uint64_t)
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        uint16_t bm = oms->order_bitmap;
+        while (bm) {
+            const int slot = __builtin_ctz(bm);
+            bm = (uint16_t)(bm & (bm - 1));
+            Order<F>* o = &oms->orders[slot];
+            if (Order_IsTerminal(o) || Order_GetStaleWarned(o)) continue;
+            if (__builtin_expect(now_us - o->submitted_at_us > OMS_STALE_INFLIGHT_WARN_US, 0)) {
+                Order_SetStaleWarned(o, true);
+                std::fprintf(stderr,
+                    "[OMS] STALE-INFLIGHT order %llu node=%d state=%d age=%.1fs "
+                    "filled=%.8f/%.8f — transport gap suspected (lost WS terminal or "
+                    "REST response); detect-only, E.1.4 GetStatus owns recovery\n",
+                    (unsigned long long)o->id, (int)o->portfolio_slot,
+                    (int)Order_GetState(o),
+                    (double)(now_us - o->submitted_at_us) / 1e6,
+                    Money_ToDouble(o->filled_qty), Money_ToDouble(o->requested_qty));
+            }
+        }
     }
 }
 //======================================================================

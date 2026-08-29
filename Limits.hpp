@@ -46,6 +46,13 @@
 // because BinanceOrderAPI is not thread-safe — see plans/oms/master.md.
 #define MAX_INFLIGHT_ORDERS 16
 #define MAX_BINANCE_WORKERS 4
+// P3-e-ii (D-446 #5): stale-inflight AGE threshold for the detect-only warn
+// sweep (OrderManager_Tick step 4, live only). A MARKET order should reach a
+// terminal state within milliseconds; one still working after 10s means a
+// transport gap (lost WS terminal report / REST response never arrived).
+// Warn-only — recovery is E.1.4's authoritative GetStatus re-query.
+#define OMS_STALE_INFLIGHT_WARN_US 10000000ULL
+
 
 // ML flat-SoA tree walker (E.1.2.E leaf 1). Caps sized to the SERVING
 // BUDGET, not today's model shape (R4): the walk cost is ~linear in

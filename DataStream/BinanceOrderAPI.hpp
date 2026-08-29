@@ -597,7 +597,8 @@ static inline int BinanceOrderAPI_MarketBuy(BinanceOrderAPI *api,
                                              char *order_id_out,
                                              double *fill_price_out = NULL,
                                              double *fill_qty_out = NULL,
-                                             uint64_t client_order_id = 0, int *order_complete_out = NULL) {
+                                             uint64_t client_order_id = 0, int *order_complete_out = NULL,
+                                             int *venue_terminal_out = NULL) {
     // round quantity to exchange step size + clamp to the venue max (Ship-B P4
     // ratified pick, D-175: lot_max_qty was parsed-never-consumed — an oversized
     // order would be venue-REJECTED; clamping + warning keeps the entry alive).
@@ -640,10 +641,16 @@ static inline int BinanceOrderAPI_MarketBuy(BinanceOrderAPI *api,
         // (FILLED/PARTIALLY_FILLED) — never re-derive completeness from exec_qty vs the
         // requested qty (lot-rounding-fragile). Mirrors GetStatus(:691) + the WS "X" SSoT.
         // Missing/unreadable -> 0 (assume partial; keep the slot alive, the WS default).
-        if (order_complete_out) {
+        if (order_complete_out || venue_terminal_out) {
             char ostatus[32] = {};
             binance_json_extract_str(body, "status", ostatus, sizeof(ostatus));
-            *order_complete_out = (strcmp(ostatus, "FILLED") == 0);
+            if (order_complete_out) *order_complete_out = (strcmp(ostatus, "FILLED") == 0);
+            // P3-e-ii (D-446): venue-terminal classification — the venue ENDED the
+            // order SHORT of FILLED inside a 200 (IOC-style EXPIRED the visible case;
+            // CANCELED/REJECTED-in-200 defensive). Working (NEW/PARTIALLY_FILLED) -> 0.
+            if (venue_terminal_out) *venue_terminal_out =
+                (strcmp(ostatus, "EXPIRED") == 0 || strcmp(ostatus, "CANCELED") == 0 ||
+                 strcmp(ostatus, "REJECTED") == 0);
         }
         fprintf(stderr, "[REST] BUY filled: id=%s qty=%.8f price=%.2f\n",
                 order_id_out, exec_qty, avg_price);
@@ -661,7 +668,8 @@ static inline int BinanceOrderAPI_MarketSell(BinanceOrderAPI *api,
                                               char *order_id_out,
                                               double *fill_price_out = NULL,
                                               double *fill_qty_out = NULL,
-                                              uint64_t client_order_id = 0, int *order_complete_out = NULL) {
+                                              uint64_t client_order_id = 0, int *order_complete_out = NULL,
+                                              int *venue_terminal_out = NULL) {
     if (api->filters.loaded) {
         quantity = binance_round_qty(quantity, api->filters.lot_step_size);
         double max_q = Money_ToDouble(api->filters.lot_max_qty);   // D-175 ratified clamp (sell side)
@@ -698,10 +706,14 @@ static inline int BinanceOrderAPI_MarketSell(BinanceOrderAPI *api,
         if (fill_price_out) *fill_price_out = avg_price;
         if (fill_qty_out) *fill_qty_out = exec_qty;
         // A17 (.E.0.10) + D-106: the venue's own "status" terminal flag (mirror of MarketBuy).
-        if (order_complete_out) {
+        if (order_complete_out || venue_terminal_out) {
             char ostatus[32] = {};
             binance_json_extract_str(body, "status", ostatus, sizeof(ostatus));
-            *order_complete_out = (strcmp(ostatus, "FILLED") == 0);
+            if (order_complete_out) *order_complete_out = (strcmp(ostatus, "FILLED") == 0);
+            // P3-e-ii (D-446): venue-terminal classification (mirror of MarketBuy).
+            if (venue_terminal_out) *venue_terminal_out =
+                (strcmp(ostatus, "EXPIRED") == 0 || strcmp(ostatus, "CANCELED") == 0 ||
+                 strcmp(ostatus, "REJECTED") == 0);
         }
         fprintf(stderr, "[REST] SELL filled: id=%s qty=%.8f price=%.2f\n",
                 order_id_out, exec_qty, avg_price);

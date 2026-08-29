@@ -140,7 +140,8 @@ static constexpr uint32_t SHIFT_ORDER_PRE_RESOLVED = 16;
 //   Bits 17-19: bandit_active_state (3 bits for ≤ 8 states; 5 currently per FOREACH_BANDIT_ALGORITHM)
 //   Bits 20-22: bandit_regime       (3 bits for ≤ 8 regimes; 5 currently per FOREACH_REGIME)
 //   Bits 23-25: bandit_chosen_arm   (3 bits for ≤ 8 arms; ENSEMBLE_HORIZON_MAX)
-//   Bits 26-31: 6 bits free headroom for future Order metadata
+//   Bit  26:    stale_warned        (P3-e-ii D-446 #5 — stale-inflight LOUD-once latch)
+//   Bits 27-31: 5 bits free headroom for future Order metadata
 //
 // Bit-width invariants (FOREACH_BANDIT_ALGORITHM_COUNT ≤ 8 / NUM_REGIMES ≤ 8 /
 // ENSEMBLE_HORIZON_MAX ≤ 8) static_asserted in ML_Headers/bandit_dispatch_table.hpp
@@ -154,6 +155,12 @@ static constexpr uint32_t SHIFT_ORDER_BANDIT_ACTIVE_STATE = 17;
 static constexpr uint32_t SHIFT_ORDER_BANDIT_REGIME       = 20;
 static constexpr uint32_t SHIFT_ORDER_BANDIT_CHOSEN_ARM   = 23;
 static constexpr uint32_t MASK_ORDER_BANDIT_3BIT          = 0x7u;
+
+// P3-e-ii (D-446 #5) — stale-inflight warn-once latch. Set by the detect-only
+// age sweep (OrderManager_Tick step 4) so a stuck order logs LOUD exactly once;
+// never persisted (diagnostic state, dies with the slot).
+static constexpr uint32_t MASK_ORDER_STALE_WARNED  = 0x04000000u;  // bit 26
+static constexpr uint32_t SHIFT_ORDER_STALE_WARNED = 26;
 
 //======================================================================
 // [STRUCT]_[OrderPreResolved]
@@ -334,6 +341,16 @@ template <unsigned F>
 inline void Order_SetIsMaker(Order<F>* o, bool is_maker) {
     o->flags_packed = (uint32_t)((o->flags_packed & ~MASK_ORDER_IS_MAKER)
                                  | (is_maker ? MASK_ORDER_IS_MAKER : (uint32_t)0));
+}
+
+template <unsigned F>
+inline bool Order_GetStaleWarned(const Order<F>* o) {
+    return (o->flags_packed & MASK_ORDER_STALE_WARNED) != 0;
+}
+template <unsigned F>
+inline void Order_SetStaleWarned(Order<F>* o, bool warned) {
+    o->flags_packed = (uint32_t)((o->flags_packed & ~MASK_ORDER_STALE_WARNED)
+                                 | (warned ? MASK_ORDER_STALE_WARNED : (uint32_t)0));
 }
 
 template <unsigned F>
