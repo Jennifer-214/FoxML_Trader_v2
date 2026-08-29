@@ -199,7 +199,7 @@ template <unsigned F>
 inline void handle_drain_bucket_cmd(const Command& cmd,
                                      OrderManagerState<F>* oms,
                                      OmsDrainBuckets* b) {
-    int slot = (int)((cmd.order_id >> 60) & 0xFu);
+    int slot = tt::OMS_OrderIdSlot(cmd.order_id);   // P4-pre-3a: lane decode SSoT
     uint8_t otype = (uint8_t)tt::Order_GetType(&oms->orders[slot]);
     const bool is_close   = OrderType_IsClose(otype);
     Command*   bucket_arr = is_close ? b->close_bucket : b->open_bucket;

@@ -305,6 +305,51 @@ inline constexpr int OE_FUNNEL_RING_SIZE = 64;
 // sizing rationale at the calib_rings declaration).
 inline constexpr int CALIB_FUNNEL_RING_SIZE = 8;
 
+//----------------------------------------------------------------------
+// [SECTION]_[order-id LANE ENCODING — the Phase-4 routing key (P4-pre-3a / D-448)]
+//----------------------------------------------------------------------
+// The id carries its own routing information so a PRODUCER can address the owning node
+// with pure arithmetic and ZERO memory reads:
+//
+//   bits 63..60 = order slot  (0-15; MAX_INFLIGHT_ORDERS <= 16)   [since v5.11.5.B]
+//   bits 59..56 = NODE lane   (0-15; MAX_EXECUTION_NODES  <= 16)  [NEW — P4-pre-3a]
+//   bits 55..0  = monotonic counter (7.2e16 ids — ~2000 years at 1/us)
+//
+// WHY the node lane exists: at the Phase-4 flip the result/ws/reconcile producers (adapter
+// worker, WS parser thread, reconcile poller) must route each Command onto the OWNING node's
+// ring. Today they hold only the venue's `oms_<id>` string. Deriving the node the obvious way
+// — decode the slot, then read `orders[slot].portfolio_slot` — is a cross-thread read of
+// leaf-owned state (Class 63) AND is slot-reuse-racy: the slot can be freed and re-allocated
+// to another node between the venue's report and the producer's read, so the fill would be
+// routed to the wrong node's ring and then dropped by the id-verify. Self-describing ids make
+// the whole class unreachable rather than guarded.
+//
+// This is the ID-LANE half of D-448; the ALLOCATION-partition half (a node draws order slots
+// only from its own sub-range) lands at §4.1 and depends on the P4-pre-6 exit-inflight dedup.
+// The two are independent: routing reads the lane, never the slot's provenance.
+//
+// H21 note: this changes id VALUES, never the wire FORMAT (`oms_<decimal>`, which the venue
+// echoes back verbatim). No persisted record keys off an id's internal bit layout, and
+// in-flight orders do not survive a restart (boot reconciliation re-establishes venue truth),
+// so no tombstone is owed. Enrolled below as a compile-time-pinned layout instead.
+inline constexpr int      ORDER_ID_SLOT_SHIFT   = 60;
+inline constexpr int      ORDER_ID_NODE_SHIFT   = 56;
+inline constexpr uint64_t ORDER_ID_LANE_MASK    = 0xFull;
+inline constexpr uint64_t ORDER_ID_COUNTER_MASK = (1ull << ORDER_ID_NODE_SHIFT) - 1ull;
+
+static_assert(MAX_EXECUTION_NODES <= 16,
+              "order-id node lane is 4 bits (bits 59..56) — raising MAX_EXECUTION_NODES past 16 "
+              "silently truncates the routing key (bitmap-overflow-protection-discipline)");
+
+// Decode helpers — the ONLY sanctioned way to read an id's lanes (the open-coded `>> 60`
+// spelling is retired; a second spelling is how the two lanes drift apart).
+inline int OMS_OrderIdSlot(uint64_t order_id) {
+    return (int)((order_id >> ORDER_ID_SLOT_SHIFT) & ORDER_ID_LANE_MASK);
+}
+inline int OMS_OrderIdNode(uint64_t order_id) {
+    return (int)((order_id >> ORDER_ID_NODE_SHIFT) & ORDER_ID_LANE_MASK);
+}
+
 template <unsigned F> struct OrderManagerState;
 template <unsigned F>
 inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money, Money);
@@ -1266,13 +1311,25 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
     // directly from cmd.order_id for O(1) lookup, replacing the prior
     // O(MAX_INFLIGHT_ORDERS) linear scan over order_bitmap.
     //
-    // Encoding: bits 63..60 = slot (0-15, fits in 4 bits since
-    // MAX_INFLIGHT_ORDERS=16); bits 59..0 = monotonic counter.
-    // Lower 60 bits give 1.15e18 unique IDs — a million years at 1/μs.
+    // Encoding (see § order-id LANE ENCODING): bits 63..60 = slot, bits 59..56 = NODE lane,
+    // bits 55..0 = monotonic counter.
     //
     // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 9. Plan: master plan
     // v5.11.5 item 3.
-    uint64_t encoded_id = id | ((uint64_t)slot << 60);
+    //
+    // P4-pre-3a: stamp the OWNING node into the id at submit — the one site that knows the
+    // portfolio slot for certain, on the thread that owns it. Every downstream producer then
+    // routes by arithmetic instead of reading `orders[]` across threads. The derive is the
+    // house canonical (`Sharded_SlotNode` via BITMAP_SLOT_NODE), not a second spelling.
+    const int submit_node = BITMAP_SLOT_NODE((int)portfolio_slot,
+                                             OMS_STATE_FLAG_IS_SET(*oms, PARTIAL_EXIT_ENABLED));
+    // The counter is MASKED to its 56 bits rather than left to run into the lanes: at
+    // 7.2e16 ids it can only wrap in theory, but a wrap that silently rewrote the routing
+    // key would misroute fills, while a wrapped counter merely repeats an id the slot lane
+    // still disambiguates. Fail toward the recoverable side.
+    uint64_t encoded_id = (id & ORDER_ID_COUNTER_MASK)
+                        | ((uint64_t)submit_node << ORDER_ID_NODE_SHIFT)
+                        | ((uint64_t)slot        << ORDER_ID_SLOT_SHIFT);
     Order_Init(&oms->orders[slot], encoded_id, portfolio_slot, type);
     id = encoded_id;  // returned to caller + used in cmd.order_id below
     oms->orders[slot].submitted_at_us = (uint64_t)
@@ -2108,7 +2165,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
     // time. Decode + verify the slot still holds the expected order
     // (defends against late-arriving callbacks for an already-freed slot
     // that has been reused for a different order).
-    int slot = (int)((cmd.order_id >> 60) & 0xFu);
+    int slot = OMS_OrderIdSlot(cmd.order_id);   // P4-pre-3a: lane decode SSoT
     if ((oms->order_bitmap & (uint16_t)(1u << slot)) == 0 ||
         oms->orders[slot].id != cmd.order_id) {
         slot = -1;  // slot freed, or reused for a different order
@@ -2252,7 +2309,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
                 // ≥1 slot free by construction (freed above) → Submit cannot return 0
                 // here; carry the ORIGINAL order's pre-resolved binding forward from
                 // the SNAPSHOT (node_cfg was nullptr; the Class-29 guard).
-                int rslot = (int)((rid >> 60) & 0xFu);
+                int rslot = OMS_OrderIdSlot(rid);   // P4-pre-3a: lane decode SSoT
                 oms->orders[rslot].pre_resolved = dead_pre;
             }
         }
