@@ -1945,7 +1945,8 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
             Order_GetType(o), (int16_t)(int)o->portfolio_slot,   // OrderEvent.node_id stays a raw int16_t (persisted; loud boundary cast — .v is private since the CLAIM-1 close)
             fill_price, fill_qty,
             o->intended_tp, o->intended_sl,
-            booked_fee),
+            booked_fee,
+            (uint8_t)(Order_GetState(o) == ORDER_FILLED)),   // P3-e: PARTIAL legs append as OEVT_PARTIAL_FILL
         (int)o->portfolio_slot);
     // Pattern 1 1D dispatch — branchless via fn pointer table. Deterministic latency regardless
     // of BUY/SELL access pattern. Closes Class 28 first canonical.
@@ -2016,13 +2017,36 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 
         // ACK-only results (from REST when WS is active): fill_qty == 0.
         // Transition to ACKNOWLEDGED, keep the slot open for the WS fill.
-        if (cmd.result.fill_qty == 0.0 && cmd.result.avg_fill_price == 0.0) {
-            Order_SetState(o, ORDER_ACKNOWLEDGED);
+        // P3-e (D-446): a zero-fill TERMINAL result is NOT an ack — it falls through to
+        // the terminal-incomplete disposition below. And a late ACK never DOWNGRADES a
+        // PARTIAL back to ACKNOWLEDGED (the A-1 T3 state-regression guard).
+        if (cmd.result.fill_qty == 0.0 && cmd.result.avg_fill_price == 0.0 &&
+            !cmd.result.venue_terminal) {
+            if (Order_GetState(o) != ORDER_PARTIAL) {
+                Order_SetState(o, ORDER_ACKNOWLEDGED);
+            }
             return 1;  // slot stays open — don't free
         }
 
-        o->avg_fill_price = Money{ money_from_double_payload(cmd.result.avg_fill_price) };  // OrderResult ring bridge (scaled-i64 vehicle rides P3/S-8)
-        o->filled_qty     = Money{ money_from_double_payload(cmd.result.fill_qty) };
+        o->avg_fill_price = Money{ money_from_double_payload(cmd.result.avg_fill_price) };  // OrderResult ring bridge (scaled-i64 vehicle rides P3/S-8); last leg's avg (display/context)
+        // P3-e (A-1 T3 pin): fill_qty is a PER-LEG INCREMENT (WS "l"; REST single-response
+        // trivially so) — filled_qty is the RUNNING total. The TRIPWIRE: a qty-bearing
+        // CMD_FILL_RESULT arriving when legs already accumulated = the REST-cumulative
+        // regime leaking into a WS stream (structurally unreachable at HEAD topology;
+        // E.1.4's GetStatus re-arm must hit THIS seam deliberately, never silently).
+        if (__builtin_expect(cmd.type == (uint8_t)CMD_FILL_RESULT &&
+                             !Money_IsZero(o->filled_qty) &&
+                             cmd.result.fill_qty > 0.0, 0)) {
+            std::fprintf(stderr,
+                "[OMS] order %llu: qty-bearing REST result after WS legs (filled=%.8f, "
+                "incoming=%.8f) — REFUSED as a leg (regime tripwire, D-446/A-1 T3; "
+                "authoritative re-query is E.1.4's seam)\n",
+                (unsigned long long)o->id, Money_ToDouble(o->filled_qty),
+                cmd.result.fill_qty);
+            return 0;
+        }
+        o->filled_qty = Money_Add(o->filled_qty,
+                                  Money{ money_from_double_payload(cmd.result.fill_qty) });
         // Phase 8: maker/taker flag from Binance executionReport, parsed in c3.
         // Fee_Compute reads this for entry-fee math when the controller books
         // the fill. is_maker stays at Order_Init's 0 (taker) for synchronous
@@ -2040,12 +2064,62 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             oms->total_filled.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // Mode 1 fill handler: portfolio mutation + event log.
-        if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
+        // Mode 1 fill handler: portfolio mutation + event log. P3-e: the LEG qty (the
+        // increment), not the running total — and a zero-qty result (pure-expire
+        // terminal) books nothing.
+        if (cmd.result.fill_qty > 0.0 &&
+            MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
             Money fill_price = o->avg_fill_price;
-            Money fill_qty   = o->filled_qty;
+            Money fill_qty   = Money{ money_from_double_payload(cmd.result.fill_qty) };
             OrderManager_HandleFill(oms, o, fill_price, fill_qty,
                                      cmd.result.commission, cmd.result.commission_asset);
+        }
+
+        // ── P3-e (D-446): TERMINAL-INCOMPLETE disposition — the venue ended the order
+        //    short of FILLED (EXPIRED/CANCELED after zero-or-partial execution). Booked
+        //    legs STAND; the order dies terminal (the tail frees the slot); the audit
+        //    row rides the funnel; a SELL's un-executed remainder RE-SUBMITS immediately
+        //    (the venue killed our exit — we still want out; per-slot, via the normal
+        //    submit path on THIS thread, which owns Submit under both topologies).
+        if (cmd.result.venue_terminal && !cmd.result.order_complete) {
+            Order_SetState(o, ORDER_CANCELED);
+            const int tslot = (int)o->portfolio_slot;
+            const Money remaining =
+                ((oms->portfolio.active_bitmap & (uint16_t)(1u << tslot)) != 0)
+                    ? oms->portfolio.positions[tslot].quantity : Money_Zero();
+            if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
+                OrderEvent<F> tev{};
+                tev.type         = OEVT_TERMINAL_INCOMPLETE;
+                tev.order_id     = o->id;
+                tev.timestamp_us = o->submitted_at_us;
+                tev.order_type   = Order_GetType(o);
+                tev.node_id      = (int16_t)tslot;
+                tev.qty          = o->filled_qty;   // what DID execute (running total)
+                std::snprintf(tev.reason, sizeof(tev.reason), "term-incomplete rem=%.8f",
+                              Money_ToDouble(remaining));
+                OMS_EventFunnelPush(oms, tev, tslot);
+            }
+            std::fprintf(stderr,
+                "[OMS] order %llu TERMINAL-INCOMPLETE node=%d executed=%.8f remaining=%.8f%s\n",
+                (unsigned long long)o->id, tslot, Money_ToDouble(o->filled_qty),
+                Money_ToDouble(remaining),
+                (Order_GetType(o) == ORDER_MARKET_SELL && !Money_IsZero(remaining))
+                    ? " — RE-SUBMITTING remainder exit" : "");
+            if (Order_GetType(o) == ORDER_MARKET_SELL && !Money_IsZero(remaining)) {
+                SubmitCommand<F> re(o->portfolio_slot, ORDER_MARKET_SELL, remaining,
+                                    (uint8_t)(tslot & 1), /*node_cfg=*/nullptr);
+                re.intended_tp = o->intended_tp;
+                re.intended_sl = o->intended_sl;
+                re.strategy_id = o->strategy_id;
+                re.event_price = o->avg_fill_price;
+                uint64_t rid = OrderManager_Submit(oms, re);
+                if (rid != 0) {
+                    // node_cfg was nullptr at re-submit — carry the ORIGINAL order's
+                    // pre-resolved binding forward (fee_rate etc.; the Class-29 guard).
+                    int rslot = (int)((rid >> 60) & 0xFu);
+                    oms->orders[rslot].pre_resolved = o->pre_resolved;
+                }
+            }
         }
     } else {
         std::fprintf(stderr,

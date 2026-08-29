@@ -1047,14 +1047,19 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
     if (log.count == 0) return;  // no events → nothing to reconstruct (first boot)
 
     // Per-slot outstanding-entry tracker; transient (replay walk only).
-    struct SlotEntry { Money entry_price; Money qty; Money entry_fee; int valid; };
+    // P3-e: pending_net accumulates SELL-leg nets across a partially-closed trade —
+    // W/L classifies ONCE at flat on the TRADE total (the live slot-flat discipline).
+    struct SlotEntry { Money entry_price; Money qty; Money entry_fee; Money pending_net; int valid; };
     SlotEntry slot_entries[MAX_PORTFOLIO_POSITIONS] = {};
     // partial-exit flag (hoisted; drives slot→node via Sharded_SlotNode). (D-294)
     const int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
 
     for (size_t i = 0; i < log.count; ++i) {
         const tt::OrderEvent<F>& e = log.entries[i];
-        if (e.type != tt::OEVT_FULL_FILL) continue;
+        // P3-e (D-446 #4): the fold now accumulates PARTIAL legs too — a warm restart
+        // mid-partial-day reconstructs the same rows live booked (MED-5 close). Other
+        // types (rejection / reconcile / terminal-incomplete audits) stay skipped.
+        if (e.type != tt::OEVT_FULL_FILL && e.type != tt::OEVT_PARTIAL_FILL) continue;
         int slot = (int)e.node_id;
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
         // slot → owning node: legs A/B at 2c/2c+1 → core c under partials; slot==core
@@ -1065,37 +1070,67 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_nodes (hoisted above loop).
         const Money fee_rate_taker_for_core = effective_nodes[tt::NodeIdx{(int16_t)node_id}].fee_rate_taker;
         if (e.order_type == tt::ORDER_MARKET_BUY) {
-            Money notional  = Money_Mul(e.price, e.qty);
-            Money entry_fee = Money_Mul(notional, fee_rate_taker_for_core);
-            slot_entries[slot].entry_price = e.price;
-            slot_entries[slot].qty         = e.qty;
-            slot_entries[slot].entry_fee   = entry_fee;
-            slot_entries[slot].valid       = 1;
+            Money notional = Money_Mul(e.price, e.qty);
+            // P3-e (D-446 #4): the log is fee-self-contained since S-3 — PREFER the row's
+            // booked fee; the cfg recompute stays as the legacy-file fallback (pre-S-3
+            // rows carry zero — replaying an old file keeps its old semantics).
+            Money leg_fee = !Money_IsZero(e.fee) ? e.fee
+                                                 : Money_Mul(notional, fee_rate_taker_for_core);
+            if (slot_entries[slot].valid) {
+                // A16 mirror: ACCUMULATE onto the open slot — weighted-avg basis, qty +
+                // entry_fee add (the same shape as Portfolio_AccumulateSlotLeg).
+                Money old_notional = Money_Mul(slot_entries[slot].entry_price, slot_entries[slot].qty);
+                Money new_qty      = Money_Add(slot_entries[slot].qty, e.qty);
+                slot_entries[slot].entry_price = Money_Div(Money_Add(old_notional, notional), new_qty);
+                slot_entries[slot].qty         = new_qty;
+                slot_entries[slot].entry_fee   = Money_Add(slot_entries[slot].entry_fee, leg_fee);
+            } else {
+                slot_entries[slot].entry_price = e.price;
+                slot_entries[slot].qty         = e.qty;
+                slot_entries[slot].entry_fee   = leg_fee;
+                slot_entries[slot].valid       = 1;
+            }
             state->nodes[tt::NodeIdx{(int16_t)node_id}].entries_processed++;
             state->nodes[tt::NodeIdx{(int16_t)node_id}].node_open_notional =
                 Money_Add(state->nodes[tt::NodeIdx{(int16_t)node_id}].node_open_notional, notional);
         } else if (e.order_type == tt::ORDER_MARKET_SELL) {
             if (!slot_entries[slot].valid) continue;  // unmatched SELL — skip
-            Money entry_price  = slot_entries[slot].entry_price;
-            Money qty          = slot_entries[slot].qty;
-            Money entry_fee    = slot_entries[slot].entry_fee;
-            Money exit_notional= Money_Mul(e.price, qty);
-            Money exit_fee     = Money_Mul(exit_notional, fee_rate_taker_for_core);  // per-node via cores param
-            Money total_fee    = Money_Add(entry_fee, exit_fee);
-            Money gross        = Money_FillGross(entry_price, e.price, qty);  // D-190 single-source
-            Money net          = Money_Sub(gross, total_fee);
+            // P3-e: close BY the leg qty (clamped to the tracked remainder — the leaf's
+            // Σlegs discipline mirrored); the FINAL leg books the residual entry fee.
+            Money entry_price = slot_entries[slot].entry_price;
+            Money q_leg       = Money_Gt(e.qty, slot_entries[slot].qty) ? slot_entries[slot].qty : e.qty;
+            if (Money_IsZero(q_leg)) continue;
+            const bool leg_flat = Money_Eq(q_leg, slot_entries[slot].qty);
+            Money entry_fee_leg = leg_flat ? slot_entries[slot].entry_fee
+                : Money_Div(Money_Mul(slot_entries[slot].entry_fee, q_leg), slot_entries[slot].qty);
+            Money exit_fee = !Money_IsZero(e.fee) ? e.fee
+                : Money_Mul(Money_Mul(e.price, q_leg), fee_rate_taker_for_core);
+            Money total_fee = Money_Add(entry_fee_leg, exit_fee);
+            Money gross     = Money_FillGross(entry_price, e.price, q_leg);  // D-190 single-source
+            Money net       = Money_Sub(gross, total_fee);
             state->nodes[tt::NodeIdx{(int16_t)node_id}].exits_processed++;
             state->nodes[tt::NodeIdx{(int16_t)node_id}].node_realized =
                 Money_Add(state->nodes[tt::NodeIdx{(int16_t)node_id}].node_realized, net);
             state->nodes[tt::NodeIdx{(int16_t)node_id}].node_fees     =
                 Money_Add(state->nodes[tt::NodeIdx{(int16_t)node_id}].node_fees, total_fee);
-            Money entry_notional = Money_Mul(entry_price, qty);
+            Money entry_notional = Money_Mul(entry_price, q_leg);
             state->nodes[tt::NodeIdx{(int16_t)node_id}].node_open_notional =
                 Money_Sub(state->nodes[tt::NodeIdx{(int16_t)node_id}].node_open_notional, entry_notional);
-            uint32_t is_win = (uint32_t)Money_Gt(net, Money_Zero());
-            state->nodes[tt::NodeIdx{(int16_t)node_id}].node_wins   += is_win;
-            state->nodes[tt::NodeIdx{(int16_t)node_id}].node_losses += (1u - is_win);
-            slot_entries[slot].valid = 0;  // slot freed for next match
+            slot_entries[slot].qty       = Money_Sub(slot_entries[slot].qty, q_leg);
+            slot_entries[slot].entry_fee = Money_Sub(slot_entries[slot].entry_fee, entry_fee_leg);
+            if (leg_flat) {
+                // W/L ONCE per trade at flat (the live-side slot-flat discipline mirrored;
+                // per-leg counting would count one trade N times). Trade net approximated
+                // by this leg's net for MIXED partial trades is WRONG — so accumulate:
+                Money trade_net = Money_Add(slot_entries[slot].pending_net, net);
+                uint32_t is_win = (uint32_t)Money_Gt(trade_net, Money_Zero());
+                state->nodes[tt::NodeIdx{(int16_t)node_id}].node_wins   += is_win;
+                state->nodes[tt::NodeIdx{(int16_t)node_id}].node_losses += (1u - is_win);
+                slot_entries[slot].pending_net = Money_Zero();
+                slot_entries[slot].valid = 0;  // slot freed for next match
+            } else {
+                slot_entries[slot].pending_net = Money_Add(slot_entries[slot].pending_net, net);
+            }
         }
     }
 }

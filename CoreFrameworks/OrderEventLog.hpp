@@ -90,6 +90,11 @@ enum OrderEventType : uint8_t {
     OEVT_REJECTED      = 4,   // exchange or OMS rejected
     OEVT_CANCELED      = 5,   // canceled by us or by exchange
     OEVT_RECONCILED    = 6,   // reconciler override (phase 05+)
+    OEVT_TERMINAL_INCOMPLETE = 8,  // E.1.3 P3-e (D-446): the venue ended the order short of
+                              // FILLED (EXPIRED/CANCELED after zero-or-partial execution) —
+                              // the audit row for the disposition (booked legs stand; the
+                              // order slot freed; a SELL remainder re-submits). PERSISTED.
+                              // H21: append-only.
     OEVT_CTRL_TRUNCATE = 7,   // E.1.3 P3-c (D-445): IN-BAND reset control — the writer thread
                               // intercepts + truncates; NEVER persisted to disk (rides the ring
                               // only, so FIFO guarantees every pre-reset event lands in the OLD
@@ -971,13 +976,17 @@ inline OrderEvent<F> OrderEvent_MakeFill(uint64_t order_id,
                                           Money qty,
                                           Money tp,
                                           Money sl,
-                                          Money fee = Money_Zero()) {
+                                          Money fee = Money_Zero(),
+                                          uint8_t order_complete = 1) {
     OrderEvent<F> e;
     std::memset(&e, 0, sizeof(e));
     e.event_id     = 0;  // assigned by Append
     e.order_id     = order_id;
     e.timestamp_us = timestamp_us;
-    e.type         = OEVT_FULL_FILL;
+    // P3-e (D-446 #4): a partial leg appends as the RESERVED OEVT_PARTIAL_FILL — its
+    // first real use (the value was reserved for exactly this; H21-clean). The boot
+    // fold accumulates PARTIAL legs; FULL closes the slot's match.
+    e.type         = order_complete ? OEVT_FULL_FILL : OEVT_PARTIAL_FILL;
     e.order_type   = order_type;
     e.node_id      = node_id;
     e.price        = price;

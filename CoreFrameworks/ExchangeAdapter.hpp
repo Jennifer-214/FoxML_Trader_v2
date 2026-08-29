@@ -42,6 +42,12 @@ struct OrderResult {
     // market orders are always taker by definition). Backtest path uses 0.
     uint8_t  is_maker;            // 1 = maker fill, 0 = taker (default)
     uint8_t  order_complete;      // 1 = "X":"FILLED", 0 = "X":"PARTIALLY_FILLED"
+    // P3-e (D-446): 1 = the ORDER reached a TERMINAL venue status (FILLED, or
+    // EXPIRED/CANCELED/REJECTED-after-partial). Combined with order_complete:
+    // {terminal+complete = FILLED} / {terminal+incomplete = the slot-leak case the
+    // OMS disposition handles} / {0 = still working}. Producers that memset (REST
+    // sync, backtest synth, WS parser) default it 0; the venue parsers set it (e-ii).
+    uint8_t  venue_terminal;
     double   commission;          // Binance "n" — commission paid this fill (in commission_asset units)
     char     commission_asset[8]; // "BNB", "USDT", "BTC" — Binance "N" field
 };
