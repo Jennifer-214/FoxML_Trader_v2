@@ -671,6 +671,61 @@ inline Money Portfolio_CloseSlot(Portfolio<F> *portfolio, int slot, Money exit_p
 // [END_FUNCTION]_[Portfolio_CloseSlot]
 //======================================================================
 
+//======================================================================
+// [FUNCTION]_[Portfolio_CloseSlotLeg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P3-d-ii (Class-46 close): close q_leg OF the slot — gross via the Money_FillGross SSoT for THIS leg; quantity decrements; the active bit clears ONLY at flat (branchless mask — the completeness-assuming whole-close died here). entry_price basis stays FIXED across partial closes (A16: the basis moves only on BUY accumulate). The CALLER apportions entry_fee (residual-absorbing final leg on the Position's own decrementing field) and derives slot_flat BEFORE calling (q_leg == quantity)]
+// [REFERENCE]_[DECISION]_[[D-190] [D-446]]
+// [REFERENCE]_[CLASS]_[46]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline Money Portfolio_CloseSlotLeg(Portfolio<F> *portfolio, int slot,
+                                    Money exit_price, Money q_leg) {
+    Position<F>& pos = portfolio->positions[slot];
+    Money gross = Money_FillGross(pos.entry_price, exit_price, q_leg);
+    pos.quantity = Money_Sub(pos.quantity, q_leg);
+    // Branchless flat-clear (H20): the bit clears iff quantity reached zero.
+    const uint16_t flat_mask = (uint16_t)-(int16_t)(Money_IsZero(pos.quantity) ? 1 : 0);
+    portfolio->active_bitmap &= (uint16_t)~((uint16_t)(1u << slot) & flat_mask);
+    return gross;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Portfolio_CloseSlotLeg]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Portfolio_AccumulateSlotLeg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P3-d-ii (A16): accumulate a BUY leg onto an ALREADY-OPEN slot — weighted-average entry basis (Money half-even per op; qty' provably nonzero at the divide), quantity + entry_fee accumulate. Portfolio_OpenSlot stays the first-leg path. TP/SL stay FIRST-LEG-anchored (the A25 per-fill anchor; re-anchoring on accumulate is a feature-plane decision deliberately NOT taken here)]
+// [REFERENCE]_[DECISION]_[[D-446]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void Portfolio_AccumulateSlotLeg(Portfolio<F> *portfolio, int slot,
+                                        Money fill_price, Money q_leg, Money fee_leg) {
+    Position<F>& pos = portfolio->positions[slot];
+    const Money old_notional = Money_Mul(pos.entry_price, pos.quantity);
+    const Money leg_notional = Money_Mul(fill_price, q_leg);
+    const Money new_qty      = Money_Add(pos.quantity, q_leg);
+    pos.entry_price = Money_Div(Money_Add(old_notional, leg_notional), new_qty);
+    pos.quantity    = new_qty;
+    pos.entry_fee   = Money_Add(pos.entry_fee, fee_leg);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Portfolio_AccumulateSlotLeg]
+//======================================================================
+
 template <unsigned F>
 inline int Portfolio_SlotActive(const Portfolio<F> *portfolio, int slot) {
     return (portfolio->active_bitmap >> slot) & 1;

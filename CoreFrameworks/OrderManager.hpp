@@ -273,6 +273,8 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // exempt and why it stopped being (the TECH_DEBT-294 residual class, one instance closed).
 // [STRADDLE_EXEMPT]_[last_exit_fill_price]_[16B Money elements, 16-aligned — elements can never cross a 64B line; name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
 // [STRADDLE_EXEMPT]_[last_exit_fee]_[16B Money elements, 16-aligned — elements can never cross a 64B line; name-sugar unresolvable only — D-414 leaf-3 2026-08-10]
+// [STRADDLE_EXEMPT]_[last_trade_net]_[16B Money elements, 16-aligned — can never cross a 64B line; name-sugar unresolvable only; same-thread by design (leaf writes + ML tail reads on the owning thread, both topologies — H22) — P3-d-ii 2026-08-28]
+// [STRADDLE_EXEMPT]_[last_trade_notional]_[16B Money elements, 16-aligned — can never cross a 64B line; name-sugar unresolvable only; same-thread by design (sister of last_trade_net) — P3-d-ii 2026-08-28]
 // [SYNC]_[SPSC]
 // [SYNC]_[ATOMIC]
 // [REFERENCE]_[INVARIANT]_[[H3] [H6] [H20]]
@@ -302,7 +304,7 @@ inline constexpr int OE_FUNNEL_RING_SIZE = 64;
 
 template <unsigned F> struct OrderManagerState;
 template <unsigned F>
-inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money);
+inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money, Money);
 // P3-b (D-444) — the leaf emit dispatch: default = immediate apply (test-harness / null-agg);
 // boot rewires to the ring path (EngineCommon_FillEmitSink). ONE booking body either way.
 template <unsigned F>
@@ -518,6 +520,16 @@ struct OrderManagerState {
     // latent drift (existed since .F.4c.3 r-4 but wasn't in registry; init/reset hand-maintained).
     Money last_exit_fee[MAX_PORTFOLIO_POSITIONS];
 
+    // P3-d-ii — the per-slot TRADE accumulators: the leaf adds each SELL leg's net (+ the
+    // leg's entry-basis notional); the DrainPostFill per-TRADE ML tail (pnl_feeder /
+    // ensemble reward / exit-bandit counterfactual / cooldown sign) consumes + zeroes BOTH
+    // at slot-flat. Replaces the tail's dead CLOSE-form derive (structurally incompatible
+    // with partial closes — A-1 T4; the position is FLAT-form when the tail fires, so
+    // qty-derived values are gone). Same-thread today (drainer writes + reads); post-flip
+    // BOTH sides live on the owning node's thread (leaf + its tail) — H22-pure.
+    Money last_trade_net[MAX_PORTFOLIO_POSITIONS];
+    Money last_trade_notional[MAX_PORTFOLIO_POSITIONS];
+
     // v5.15.5.F.4d Step 7 (§ N.2) — NEW per-slot bandit reward attribution. Written at HandleFill SELL
     // (computed reward_bps per the dispatch's chosen leaf reward fn — for exit-side dispatch via
     // g_exit_reward_dispatch[algo]). Read at DrainPostFill body OR calib emit body for downstream
@@ -715,9 +727,11 @@ struct OrderManagerState {
     // `if (oms->calibration_log_file)` callsite branches in handle_buy_fill / handle_sell_fill.
     // Indirect call cost ~3-5ns vs predicted-correctly branch ~0-1ns; branchless wins on
     // p99 + variance per H20 + Caramel principle ("branchless even when slightly slower").
-    void (*on_entry_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
-    void (*on_exit_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money)  = &noop_fill_emit<F>;
-    void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, Money, Money, Money) = &noop_fill_emit<F>;
+    // P3-d-ii: 6th arg = the LEG qty (exit/calib rows carry the leg, not a Position re-read —
+    // the Position is remainder-form after Portfolio_CloseSlotLeg; entry passes fill_qty twice).
+    void (*on_entry_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money, Money) = &noop_fill_emit<F>;
+    void (*on_exit_fill_emit)(OrderManagerState<F>*, Order<F>*, Money, Money, Money, Money)  = &noop_fill_emit<F>;
+    void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, Money, Money, Money, Money) = &noop_fill_emit<F>;
 
     // P3-b (D-444) — the leaf FILL-EMIT dispatch (Pattern 5 sister to the sinks above).
     // Default = OrderManager_FillEmitDirect (immediate apply through the ONE booking body —
@@ -728,6 +742,12 @@ struct OrderManagerState {
     // the composer-side trade-row emit; null in bare test fixtures.
     void (*fill_emit)(OrderManagerState<F>*, const FillEvent<F>&) = &OrderManager_FillEmitDirect<F>;
     AggregatorState<F>* agg = nullptr;
+    // P3-d-ii — OPAQUE EventLoopState backref for the EngineCommon-side apply path (the
+    // composer's node-row booking needs state.nodes; OrderManager cannot include CEL — cycle).
+    // void* + ONE cast at the TYPED consumer (EngineCommon) — the sanctioned ezoo_refs shape
+    // (ML-agnostic void* on OMS, cast where the type is known). Set at BootGlobal beside agg;
+    // null in bare harnesses (the direct path books the global ledger only).
+    void* els = nullptr;
     // Per-node FillEvent emit sequence (FillEvent.seq source). Element n is written ONLY by
     // node n's emitting thread (the central drainer for all n under Phase-3 topology; the
     // owning node post-flip) — per-element single-writer, H22-safe across the Phase-4 flip.
@@ -817,9 +837,9 @@ struct OrderManagerState {
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-28]
 //----------------------------------------------------------------------
-// [SIZE]_[410560B]
+// [SIZE]_[411072B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6415]
+// [CACHE_LINES]_[6423]
 // [STRADDLE]_[unverified: orders last_exit_fill_price last_exit_fee]
 //======================================================================
 // [END_STRUCT]_[OrderManagerState]
@@ -829,7 +849,7 @@ struct OrderManagerState {
 // Single noop shared across all 3 fn-pointer fields (same sig). Used as the "always-call"
 // default when subsystems are disabled; production cost = 1 indirect call (~3-5ns deterministic).
 template <unsigned F>
-inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money) {}
+inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money, Money) {}
 
 // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 real fn definitions.
 // Wrap the previous `if (oms->trade_log) { ... }` / `if (oms->calibration_log_file) { ... }` bodies.
@@ -843,7 +863,7 @@ inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money
 // the apply already booked at the leaf's emit, so oms->balance IS balance-after (same value).
 template <unsigned F>
 inline void real_on_entry_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
-                                     Money fill_price, Money fill_qty, Money entry_fee) {
+                                     Money fill_price, Money fill_qty, Money entry_fee, Money /*unused*/) {
     if (__builtin_expect(oms->agg != nullptr, 1)) {
         const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
         const tt::NodeIdx nn{(int16_t)BITMAP_SLOT_NODE((int)o->portfolio_slot, partial_on)};
@@ -869,14 +889,14 @@ inline void real_on_entry_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
 
 template <unsigned F>
 inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
-                                    Money fill_price, Money net, Money total_fee) {
+                                    Money fill_price, Money net, Money total_fee, Money q_leg) {
     // Re-read position state (preserved through CloseSlot per Phase F invariant — only the
     // active_bitmap bit was cleared; entry_price + quantity remain stored on Position).
     // SAFE here (leaf-time, Phase A) — NOT safe at composer emit time (Phase-B overwrite +
     // partial remainder-form), which is exactly why the record pre-builds (A-1 T5).
     const int pslot = (int)o->portfolio_slot;
-    const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-    const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
+    const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;   // basis survives CloseSlotLeg
+    const Money qty_snap         = q_leg;   // P3-d-ii: the LEG qty (Position is remainder-form here)
     if (__builtin_expect(oms->agg != nullptr, 1)) {
         const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
         const tt::NodeIdx nn{(int16_t)BITMAP_SLOT_NODE(pslot, partial_on)};
@@ -901,10 +921,10 @@ inline void real_on_exit_fill_emit(OrderManagerState<F>* oms, Order<F>* o,
 
 template <unsigned F>
 inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
-                                      Money fill_price, Money net, Money total_fee) {
+                                      Money fill_price, Money net, Money total_fee, Money q_leg) {
     const int pslot = (int)o->portfolio_slot;
     const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-    const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
+    const Money qty_snap         = q_leg;   // P3-d-ii: the LEG qty (Position is remainder-form at flat)
     const uint64_t ts_us = (uint64_t)
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -1625,14 +1645,23 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
     const Money per_fill_tp = !Money_IsZero(o->pre_resolved.tp_pct)
         ? Money_Add(fill_price, Money_Mul(fill_price, o->pre_resolved.tp_pct))
         : o->intended_tp;
-    Portfolio_OpenSlot(&oms->portfolio, (int)o->portfolio_slot,
-                       fill_price, fill_qty,
-                       per_fill_tp, o->intended_sl, entry_fee);
+    // P3-d-ii (A16 ACCUMULATE): the first leg opens the slot (TP/SL anchor at the first
+    // fill per A25); subsequent legs of a partially-filling order ACCUMULATE — weighted-avg
+    // entry basis, qty + entry_fee add (Portfolio_AccumulateSlotLeg). The overwrite-on-
+    // every-leg died here (each partial leg used to re-open the slot, discarding prior legs).
+    if ((oms->portfolio.active_bitmap >> (int)o->portfolio_slot) & 1u) {
+        Portfolio_AccumulateSlotLeg(&oms->portfolio, (int)o->portfolio_slot,
+                                    fill_price, fill_qty, entry_fee);
+    } else {
+        Portfolio_OpenSlot(&oms->portfolio, (int)o->portfolio_slot,
+                           fill_price, fill_qty,
+                           per_fill_tp, o->intended_sl, entry_fee);
+    }
     oms->last_opened_mask |= (uint16_t)(1u << (int)o->portfolio_slot);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
     // Default = noop_fill_emit (no-op); set to real_on_entry_fill_emit at boot when trade_log Init succeeds.
     // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md.
-    oms->on_entry_fill_emit(oms, o, fill_price, fill_qty, entry_fee);
+    oms->on_entry_fill_emit(oms, o, fill_price, fill_qty, entry_fee, Money_Zero());
 }
 //======================================================================
 // [END_CODE]
@@ -1666,44 +1695,72 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
         return;
     }
     const Money entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-    const Money entry_fee        = oms->portfolio.positions[pslot].entry_fee;
-    const Money qty_snap         = oms->portfolio.positions[pslot].quantity;
+    const Money pos_entry_fee    = oms->portfolio.positions[pslot].entry_fee;
+    const Money pos_qty          = oms->portfolio.positions[pslot].quantity;   // remaining BEFORE this leg
     const Money tp_snap          = oms->portfolio.positions[pslot].take_profit_price;
     const Money sl_snap          = oms->portfolio.positions[pslot].stop_loss_price;
 
-    // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless last_realized_return + last_closed_mask update.
-    // Pre-r-6: `if (entry_price_d > 0.0 && bounds) { write }` — 2 branches.
-    // Post-r-6: always compute return value; mask-gate the WRITE via ternary store-select.
-    // pslot bounds already enforced by HandleFill caller guard + active_bitmap check above.
+    // ── P3-d-ii (Class-46 CLOSE): close BY fill_qty — the completeness-assuming whole-close
+    //    died here. Σlegs ≤ position is clamped LOUD (a replayed/duplicated leg cannot
+    //    over-close — the MED-2 floor); a zero leg is a no-op.
+    Money q_leg = fill_qty;
+    if (__builtin_expect(Money_Gt(q_leg, pos_qty), 0)) {
+        std::fprintf(stderr,
+            "[OMS] handle_sell_fill: slot %d leg qty %.8f EXCEEDS remaining %.8f — CLAMPED "
+            "(Σlegs ≤ position; duplicate/replayed leg or venue-feed fault — investigate)\n",
+            pslot, Money_ToDouble(fill_qty), Money_ToDouble(pos_qty));
+        q_leg = pos_qty;
+    }
+    if (__builtin_expect(Money_IsZero(q_leg), 0)) return;
+    const uint8_t leg_flat = (uint8_t)(Money_Eq(q_leg, pos_qty) ? 1 : 0);
+
+    // Entry-fee apportionment: pro-rata per leg (half-even), the FINAL leg books the exact
+    // RESIDUAL from the Position's own decrementing field — Σ apportioned ≡ original entry
+    // fee by construction (I-2 HIGH-3; no ULP leak, no double-count).
+    const Money entry_fee_leg = leg_flat ? pos_entry_fee
+        : Money_Div(Money_Mul(pos_entry_fee, q_leg), pos_qty);
+    oms->portfolio.positions[pslot].entry_fee = Money_Sub(pos_entry_fee, entry_fee_leg);
+
+    // Per-leg realized return (feature-plane; same price formula — identical to HEAD at
+    // full-close). The CLOSED mask is now SLOT-FLAT-gated: the per-TRADE ML tail
+    // (ConfidenceScorer / pnl_feeder / ensemble / cooldown) fires at TRADE end — a partial
+    // leg is not a concluded trade (the Class-46 predicate split, A-2 T3).
     const double entry_price_d   = Money_ToDouble(entry_price_snap);
     const double exit_price_d    = Money_ToDouble(fill_price);
     const bool   valid_entry     = entry_price_d > 0.0;
     const double computed_ret    = valid_entry ? (exit_price_d - entry_price_d) / entry_price_d : 0.0;
     oms->last_realized_return[pslot] = valid_entry ? computed_ret : oms->last_realized_return[pslot];
     const uint16_t closed_bit    = (uint16_t)(1u << pslot);
-    oms->last_closed_mask        = (uint16_t)(oms->last_closed_mask | (valid_entry ? closed_bit : (uint16_t)0));
+    oms->last_closed_mask        = (uint16_t)(oms->last_closed_mask |
+                                              ((valid_entry && leg_flat) ? closed_bit : (uint16_t)0));
 
-    const Money gross         = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
+    const Money gross         = Portfolio_CloseSlotLeg(&oms->portfolio, pslot, fill_price, q_leg);
     const Money exit_fee      = booked_fee;   // Ship-B P3: resolved once in HandleFill (D-173 rule)
     OMS_GuardTakerBoundFeeBasis(o);   // dormant fee-desync guard (TECH_DEBT-154); never-taken while MARKET-only
-    const Money total_fee     = Money_Add(entry_fee, exit_fee);
+    const Money total_fee     = Money_Add(entry_fee_leg, exit_fee);
     const Money net           = Money_Sub(gross, total_fee);
+    // Trade accumulators for the per-TRADE ML tail (consumed + zeroed at flat by
+    // DrainPostFill — the CLOSE-form derive is dead; the position is FLAT-form there).
+    oms->last_trade_net[pslot]      = Money_Add(oms->last_trade_net[pslot], net);
+    oms->last_trade_notional[pslot] = Money_Add(oms->last_trade_notional[pslot],
+                                                Money_Mul(entry_price_snap, q_leg));
     // P3-b flip (D-444): the leaf's ONLY global-ledger effect is this emit — the composer
     // books {net -> balance/realized_pnl, per-fill peak ratchet, exit_fee -> the maker/taker
-    // triple} through the ONE body, in DEFINED ring order. The direct writes died here
-    // (the KNOWN leaf sites the census/§3.1 named: balance/realized/ratchet + the fee call).
-    // fe.fee = the EXIT execution fee only; the entry fee rides inside `net` (A-1 T2 pin).
+    // triple, the node row via the delta legs} through the ONE body, in DEFINED ring order.
+    // fe.fee = the EXIT execution fee only; the entry fee rides inside `net` + entry_fee_leg
+    // (A-1 T2 pin). notional = this leg's entry-basis relief; the composer's slot tracker
+    // makes the FINAL leg's relief telescope exactly (zero ULP residue).
     {
         const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
         const tt::NodeIdx fill_node{(int16_t)BITMAP_SLOT_NODE(pslot, partial_on)};
         oms->fill_emit(oms, FillEvent_Make<F>(
             o->portfolio_slot, fill_node, /*is_sell=*/1,
             (uint8_t)(Order_GetState(o) == ORDER_FILLED), (uint8_t)(Order_GetIsMaker(o) != 0),
-            /*slot_flat=*/1,   // whole-close semantics until P3-d-ii computes the real flag
+            leg_flat,
             ++oms->fill_emit_seq[fill_node],
-            fill_qty, fill_price, exit_fee, net,
-            /*notional=*/Money_Mul(entry_price_snap, qty_snap),   // symmetric entry-basis relief
-            /*entry_fee_leg=*/entry_fee));
+            q_leg, fill_price, exit_fee, net,
+            /*notional=*/Money_Mul(entry_price_snap, q_leg),
+            entry_fee_leg));
     }
 
     // Exit-side scratch on OMS sibling arrays.
@@ -1715,14 +1772,19 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
     const uint16_t maker_mask_bits = Order_GetIsMaker(o) ? maker_bit : (uint16_t)0;
     oms->last_is_maker_bitmap      = (uint16_t)((oms->last_is_maker_bitmap & ~maker_bit) | maker_mask_bits);
 
-    // Branchless mask-select on last_was_win_bitmap (Pattern 3).
+    // Branchless mask-select on last_was_win_bitmap (Pattern 3). P3-d-ii: written at FLAT
+    // only, from the TRADE accumulator (the trade's total net, not this leg's) — the
+    // per-TRADE consumers (cooldown sign, W/L display) want the concluded trade.
     const uint16_t win_bit       = BITMAP_BIT_U16(pslot);
-    const uint16_t was_win_mask  = Money_Gt(net, Money_Zero()) ? win_bit : (uint16_t)0;
-    oms->last_was_win_bitmap     = (uint16_t)((oms->last_was_win_bitmap & ~win_bit) | was_win_mask);
+    const uint16_t flat_sel      = (uint16_t)-(int16_t)leg_flat;
+    const uint16_t was_win_mask  = (uint16_t)((Money_Gt(oms->last_trade_net[pslot], Money_Zero()) ? win_bit : (uint16_t)0) & flat_sel);
+    oms->last_was_win_bitmap     = (uint16_t)((oms->last_was_win_bitmap & (uint16_t)~(win_bit & flat_sel)) | was_win_mask);
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
     // Default = noop_fill_emit; set to real_on_exit_calibration when calibration_log_file fopen() succeeds.
-    oms->on_exit_calibration(oms, o, fill_price, net, total_fee);
+    // P3-d-ii: the calibration row is a per-TRADE artifact — emit at slot-flat only
+    // (branchless pointer select; a partial leg is not a concluded trade).
+    (leg_flat ? oms->on_exit_calibration : &noop_fill_emit<F>)(oms, o, fill_price, net, total_fee, q_leg);
 
     // v5.1.6 exit reason diagnostic — branchless ternary chain (replaces if-else-if; cmov on pointer).
     {
@@ -1747,7 +1809,7 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
     // Default = noop_fill_emit; set to real_on_exit_fill_emit at boot when trade_log Init succeeds.
-    oms->on_exit_fill_emit(oms, o, fill_price, net, total_fee);
+    oms->on_exit_fill_emit(oms, o, fill_price, net, total_fee, q_leg);   // per LEG (venue-truth: one CSV row per execution)
 }
 //======================================================================
 // [END_CODE]
@@ -2008,8 +2070,14 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         }
     }
 
-    // Free the slot on terminal transition.
-    oms->order_bitmap &= (uint16_t)~(1u << slot);
+    // P3-d-ii (Class-46, the ORDER-slot half): free ONLY on a TERMINAL state — a PARTIAL
+    // leg keeps the order slot alive awaiting its remaining legs (the unconditional free
+    // was the mask that hid the whole-close bug; Order_IsTerminal is the completeness
+    // predicate here — FILLED/REJECTED terminal, PARTIAL/ACK working). Branchless mask.
+    {
+        const uint16_t term_sel = (uint16_t)-(int16_t)(Order_IsTerminal(o) ? 1 : 0);
+        oms->order_bitmap &= (uint16_t)~((uint16_t)(1u << slot) & term_sel);
+    }
     return 1;
 }
 //======================================================================

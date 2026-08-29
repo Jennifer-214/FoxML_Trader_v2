@@ -817,7 +817,7 @@ done:
     // below: tail fills must book (this flush is thinner than the driver's — it reads
     // state.oms->balance directly into BacktestStats).
     if (state.oms) {
-        (void)EngineCommon_FillRingsApply(state.agg, *state.oms);
+        (void)EngineCommon_FillRingsApply(state, *state.oms);
     }
     // v5.10.0 Item A — capture wall-clock total for the sharded run.
     // Caller (Backtest_Run / Backtest_RunFullValidation) may extend with

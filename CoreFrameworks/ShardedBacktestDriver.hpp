@@ -297,7 +297,7 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //     No-op pop until the Phase-3 leaves emit. The cadence ComposeAndKillEval keeps
     //     its own internal apply (a harmless empty pop after this).
     if (drv->oms) {
-        (void)EngineCommon_FillRingsApply(drv->state->agg, *drv->oms);
+        (void)EngineCommon_FillRingsApply(*drv->state, *drv->oms);
     }
 
     // 3. Slow path on cadence. tick_index is 0-based so we fire every
@@ -526,7 +526,7 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     // in the rings unapplied (a conservation break the moment the apply is ledger-bearing;
     // live's shutdown sister gets this via its final ComposeAndKillEval).
     if (drv->oms) {
-        (void)EngineCommon_FillRingsApply(drv->state->agg, *drv->oms);
+        (void)EngineCommon_FillRingsApply(*drv->state, *drv->oms);
     }
 }
 //======================================================================

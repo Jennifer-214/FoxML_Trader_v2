@@ -995,9 +995,9 @@ struct alignas(64) EventLoopState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-28]
-// [SIZE]_[790656B]
+// [SIZE]_[791168B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[12354]
+// [CACHE_LINES]_[12362]
 // [STRADDLE]_[unverified: nodes display_meta]
 //======================================================================
 // [END_STRUCT]_[EventLoopState]
@@ -1755,16 +1755,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         const auto& pos_entry = oms->portfolio.positions[slot];
         const Money entry_notional_derived = Money_Mul(pos_entry.entry_price, pos_entry.quantity);
         const Money entry_fee_derived      = pos_entry.entry_fee;
-        ctx.node_open_notional = Money_Add(ctx.node_open_notional, entry_notional_derived);
-        // v5.3.1 (Phase D fee accounting fix): do NOT add entry_fee here.
-        // The exit pass below adds rec.exit_total_fees which already equals
-        // entry_fee + exit_fee (set in OMS_HandleFill). Adding entry_fee
-        // here was double-counting it — visible in the GUI as per-core
-        // "Fees" being ~1.5× the sum of Trade History fees (entry+exit
-        // round-trip × N legs vs entry × N + entry+exit × N).
-        ctx.entries_processed++;
-        state->total_entries++;
-        state->total_events_processed++;
+        // P3-d-ii (amendment F, same-commit excision): the entry ACCOUNTING rows died here —
+        // node_open_notional + entries counters are booked by the COMPOSER from the BUY
+        // FillEvent (EngineCommon_NodeRowsBook). This walk keeps the health log only; the
+        // derives above survive as its fields.
 
         // v5.7.1: entry-quality health log. Captures the state of the
         // engine at the moment a fill landed — strategy + resolved
@@ -1839,88 +1833,40 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // the active_bitmap bit, NOT the values; Portfolio_OpenSlot's overwrite
         // is gated to Phase B). See
         // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
-        const auto& pos = oms->portfolio.positions[slot];
-        const bool slot_is_maker = BITMAP_IS_SET(oms->last_is_maker_bitmap, BITMAP_BIT_U16(slot));
-        const Money exit_entry_notional = Money_Mul(pos.entry_price, pos.quantity);
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — read authoritative exit_fee from OMS sibling array (set by HandleFill
-        // SELL from o->pre_resolved.fee_rate). Replaces the prior cfg-recompute which lost the Order's
-        // captured fee_rate. Per decision-time-data-binding-pattern.md: Order pre_resolved is canonical;
-        // DrainPostFill is a CONSUMER, not a re-deriver. Eliminates the node_cfg param dependency at this site.
-        const Money exit_fee            = oms->last_exit_fee[slot];
-        const Money exit_total_fees     = Money_Add(pos.entry_fee, exit_fee);
-        // D-190: gross via the SINGLE-SOURCE Money_FillGross (was 2-mul Sub(exit_notional, exit_entry_notional)
-        // — the lone site that diverged from the 1-mul OMS books by 1 ULP under decimal). exit_entry_notional
-        // is kept for the node_open_notional decrement below; the standalone exit_notional is no longer needed.
-        const Money gross               = Money_FillGross(pos.entry_price, oms->last_exit_fill_price[slot], pos.quantity);
-        const Money exit_net_pnl        = Money_Sub(gross, exit_total_fees);
+        // P3-d-ii (amendment F, same-commit excision): the CLOSE-form derive + the exit
+        // ACCOUNTING rows + the W/L + partner-pairing block DIED here — all booked by the
+        // COMPOSER from the SELL FillEvents (EngineCommon_NodeRowsBook: realized/fees/
+        // notional-relief per leg; W/L + pairing ONCE per trade at slot-flat). The derive
+        // was structurally incompatible with partial closes (the position is FLAT-form when
+        // this walk fires — qty is gone; A-1 T4). This walk now fires at SLOT-FLAT only
+        // (the leaf gates last_closed_mask) and keeps the per-TRADE ML/health tail, fed by
+        // the leaf-side TRADE accumulators (consumed + zeroed here — single-use per trade).
+        const Money trade_net      = oms->last_trade_net[slot];
+        const Money trade_notional = oms->last_trade_notional[slot];
+        oms->last_trade_net[slot]      = Money_Zero();
+        oms->last_trade_notional[slot] = Money_Zero();
 
-        // Per-leg accounting: every exit fill contributes.
-        ctx.node_realized      = Money_Add(ctx.node_realized, exit_net_pnl);
-        ctx.node_open_notional = Money_Sub(ctx.node_open_notional, exit_entry_notional);
-        ctx.node_fees          = Money_Add(ctx.node_fees, exit_total_fees);
-        ctx.exits_processed++;
-        state->total_exits++;
-        state->total_events_processed++;
-
-        // v5.7.1: exit-quality health log. Pairs with entry-log lines
-        // to classify (strategy, regime_at_entry, exit_kind, net_bps)
-        // for the strategy quality dashboard. exit_kind is inferred
-        // from oms->last_realized_return + cooldown state — TP / SL
-        // distinction is captured in `was_win` for now; finer
-        // exit-kind taxonomy (time-exit, ratchet, manual) is deferred
-        // to the dashboard panel computing it from order_history CSV.
-        // v5.15.5.C.4 Phase J — was_win now in cross-slot bitmap; hoisted
-        // single read per slot iter used at multiple sites below.
+        // v5.15.5.C.4 Phase J — was_win in the cross-slot bitmap (leaf-written at FLAT from
+        // the trade accumulator); hoisted single read per slot iter.
         const bool slot_was_win = BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(slot));
         if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
             double realized = oms->last_realized_return[slot];
+            // P3-d-ii: fields re-pointed to the TRADE accumulators (whole-trade net + entry
+            // notional; the per-leg fee detail lives on the trade-log CSV rows).
             tt::Health_Log(tt::HEALTH_INFO, "exit", node_id,
                 "slot=%d strat=%u resolved=%u was_win=%d realized_ret=%g "
-                "net_pnl=%g entry_notional=%g total_fees=%g leg_a=%d",
+                "trade_net=%g trade_notional=%g leg_a=%d",
                 slot, (unsigned)ctx.strategy_id,
                 (unsigned)ctx.resolved_strategy_id,
                 (int)slot_was_win, realized,
-                Money_ToDouble(exit_net_pnl),         // v5.15.5.C.4 Phase G — derived
-                Money_ToDouble(exit_entry_notional),  // v5.15.5.C.4 Phase G — derived
-                Money_ToDouble(exit_total_fees),       // v5.15.5.C.4 Phase G — derived
+                Money_ToDouble(trade_net),
+                Money_ToDouble(trade_notional),
                 is_leg_a ? 1 : 0);
         }
 
-        // v4.7.21 W/L pairing under partials.
-        // v5.14.9.G — partner_pending_active is now BITMAP_IS_SET(state->partner_pending_bitmap, bit)
-        if (partial_on) {
-            if (BITMAP_IS_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(node_id))) {
-                // v5.15.5.C.4 Phase G — exit_net_pnl is derived (see top of slot iter).
-                Money total_net = Money_Add(ctx.partner_pending_pnl, exit_net_pnl);
-                if (Money_Gt(total_net, Money_Zero())) {
-                    ctx.node_wins++;
-                    ctx.node_gross_wins = Money_Add(ctx.node_gross_wins, total_net);
-                } else {
-                    ctx.node_losses++;
-                    ctx.node_gross_losses = Money_Add(ctx.node_gross_losses,
-                                                    Money_Negate(total_net));
-                }
-                ctx.partner_pending_pnl = Money_Zero();
-                BITMAP_CLR(state->partner_pending_bitmap, BITMAP_BIT_U16(node_id));
-            } else {
-                ctx.partner_pending_pnl = exit_net_pnl;  // v5.15.5.C.4 Phase G — derived
-                BITMAP_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(node_id));
-            }
-        }
-
-        // Per-trade signals: leg A only.
+        // Per-trade signals: leg A only. P3-d-ii: the W/L arm died (the composer books
+        // wins/losses/gross buckets from the FillEvents at slot-flat — NodeRowsBook).
         if (is_leg_a) {
-            if (!partial_on) {
-                // v5.15.5.C.4 Phase J — uses hoisted slot_was_win from above.
-                ctx.node_wins   += (slot_was_win ? 1u : 0u);
-                ctx.node_losses += (slot_was_win ? 0u : 1u);
-                if (slot_was_win) {
-                    ctx.node_gross_wins = Money_Add(ctx.node_gross_wins, exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
-                } else {
-                    ctx.node_gross_losses = Money_Add(ctx.node_gross_losses,
-                                                    Money_Negate(exit_net_pnl));
-                }
-            }
             double realized = oms->last_realized_return[slot];
             if (ctx.strategy_id == STRATEGY_ML) {
                 // v5.14.1.B.1 (PARITY-002 + CLAUDE.md item 16 merge-scan):
@@ -2009,7 +1955,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
                     double bal_d = Money_ToDouble(oms->balance);
                     if (bal_d > 0.0) {
-                        double pnl_d = Money_ToDouble(exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
+                        double pnl_d = Money_ToDouble(trade_net);  // P3-d-ii: the TRADE total (accumulator)
                         double pnl_bps = (pnl_d / bal_d) * 10000.0;
                         // v5.15.5.F.4d — pass node_cfg for per-core bandit_algorithm dispatch
                         // (Step 3 + § H Class 25 sweep). Inside _TradeCloseReward, reward attribution
@@ -2034,7 +1980,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         //   5. captured arm + regime are valid
         //
         // Counterfactual reward (basis points relative to entry notional):
-        //   actual_pnl_bps = exit_net_pnl / entry_notional * 10000
+        //   actual_pnl_bps = trade_net / trade_notional * 10000   (P3-d-ii: TRADE accumulators)
         //   hypothetical_pnl_bps = (tp_pct - 2*fee_rate) * 10000
         //     where tp_pct = (original_tp - entry_price) / entry_price
         //   reward = actual - hypothetical
@@ -2078,9 +2024,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                     double fee_taker_cf = Money_ToDouble(node_cfg->fee_rate_taker);
                     double hypothetical_pnl_bps =
                         (tp_pct - 2.0 * fee_taker_cf) * 10000.0;
-                    double notional_d = Money_ToDouble(exit_entry_notional);  // v5.15.5.C.4 Phase G — derived
+                    double notional_d = Money_ToDouble(trade_notional);  // P3-d-ii: trade entry notional (accumulator)
                     double actual_pnl_bps = (notional_d > 0.0)
-                        ? Money_ToDouble(exit_net_pnl) / notional_d * 10000.0  // v5.15.5.C.4 Phase G — derived
+                        ? Money_ToDouble(trade_net) / notional_d * 10000.0  // P3-d-ii: trade total
                         : 0.0;
                     double reward_bps = actual_pnl_bps - hypothetical_pnl_bps;
                     // v5.15.5.F.4d — exit-side bandit reward attribution via g_exit_reward_dispatch

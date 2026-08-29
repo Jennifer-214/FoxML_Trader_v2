@@ -398,7 +398,13 @@ struct OmsResetCtx {
      * consumption (replaces Class 27 cfg-mirror recompute pattern; reward stays bound to    \
      * the slot through trade lifecycle per decision-time-data-binding-pattern.md sibling-   \
      * array carrier variant).                                                                */ \
-    X(bandit_reward_bps[_i],            double,    0.0,            0.0)
+    X(bandit_reward_bps[_i],            double,    0.0,            0.0)                        \
+    /* E.1.3 P3-d-ii — last_trade_net[_i] sibling: the leaf accumulates each SELL leg's net; \
+     * the DrainPostFill per-TRADE ML tail consumes + zeroes at slot-flat (replaces the      \
+     * CLOSE-form derive, which is structurally incompatible with partial closes — A-1 T4).  \
+     * Enrolled AT CREATION per the warning above.                                            */ \
+    X(last_trade_net[_i],               Money,            Money_Zero(),   Money_Zero())              \
+    X(last_trade_notional[_i],          Money,            Money_Zero(),   Money_Zero())
 
 //------------------------------------------------------------------
 // [SECTION]_[COMPILE-TIME COUNT SENTINELS — both registries]

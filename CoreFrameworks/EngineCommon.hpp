@@ -222,6 +222,7 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
     // 1b. P3-b (D-444) — wire the leaf emit path onto the composer's rings (BOTH drivers,
     //     M5 by construction). Null-agg harnesses keep the OMS default (FillEmitDirect).
     oms.agg       = &state.agg;
+    oms.els       = (void*)&state;   // P3-d-ii: opaque backref for the apply path's node-row booking
     oms.fill_emit = &EngineCommon_FillEmitSink<F>;
 
     // 2. KillSwitch configure (per Step A.4 :749-753; PARITY-026 closure)
@@ -305,7 +306,7 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 // [CODE]
 //======================================================================
 template <unsigned F>
-inline int EngineCommon_FillRingsApply(AggregatorState<F>& agg, OrderManagerState<F>& oms);
+inline int EngineCommon_FillRingsApply(EventLoopState<F>& state, OrderManagerState<F>& oms);
 
 template <unsigned F>
 inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
@@ -321,7 +322,7 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
     //    live cycle-tail + live shutdown + backtest cadence + backtest final flush the
     //    apply-before-eval ordering BY CONSTRUCTION [M5]). Rings are empty until the Phase-3
     //    leaves emit — a no-op pop until then. ──
-    (void)EngineCommon_FillRingsApply(agg, oms);
+    (void)EngineCommon_FillRingsApply(state, oms);
 
     // ── 0. Apply pending kill-RESET requests (single consumer: this thread) ──
     {
@@ -482,6 +483,91 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
 // [END_FUNCTION]_[EngineCommon_ComposeAndKillEval]
 //======================================================================
 //======================================================================
+// [FUNCTION]_[EngineCommon_NodeRowsBook]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P3-d-ii: the composer books the NODE accounting row from the FillEvent — node_realized/node_fees/node_open_notional + entries/exits counters + W/L classify + partner pairing at slot-flat. Reader census (2026-08-28) PROVED every reader is composer-plane (compose/pack, composer-executed saves + archive summary, GUI-via-snap, boot fold — zero strategy/slow readers), so composer ownership extends P2-a's peak/dd precedent; the node's LEDGER is a pure function of its OWN fills (H22). The open-notional relief TELESCOPES exactly: BUY adds ride slot_notional; the FINAL leg relieves the tracked remainder — Σ reliefs ≡ Σ adds, zero ULP residue. W/L + partner pairing fire ONCE per TRADE at slot-flat on the accumulated total (I-2 MED-1); replaces DrainPostFill's dead accumulation rows (same-commit excision, amendment F)]
+// [REFERENCE]_[DECISION]_[[D-444] [D-446]]
+// [REFERENCE]_[INVARIANT]_[[H22]]
+// [REFERENCE]_[CLASS]_[46]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void EngineCommon_NodeRowsBook(EventLoopState<F>& state, OrderManagerState<F>& oms,
+                                      const FillEvent<F>& fe) {
+    AggregatorState<F>& agg = state.agg;
+    NodeContext<F>& ctx = state.nodes[fe.node];
+    const int slot = (int)fe.slot;
+    if (!fe.is_sell) {
+        // BUY leg: notional add (+ the slot tracker for exact final relief); entry counters.
+        // NO fee here — node_fees books entry+exit AT CLOSE (v5.3.1 rule preserved).
+        agg.slot_notional[fe.slot] = Money_Add(agg.slot_notional[fe.slot], fe.notional);
+        ctx.node_open_notional     = Money_Add(ctx.node_open_notional, fe.notional);
+        ctx.entries_processed++;
+        state.total_entries++;
+        state.total_events_processed++;
+        return;
+    }
+    // SELL leg: realized + fees (entry portion AT CLOSE via entry_fee_leg + this leg's
+    // execution fee); notional relief — non-final legs relieve the leg's entry-basis
+    // notional, the FINAL leg relieves the tracked REMAINDER (exact telescope).
+    ctx.node_realized = Money_Add(ctx.node_realized, fe.net);
+    ctx.node_fees     = Money_Add(ctx.node_fees, Money_Add(fe.entry_fee_leg, fe.fee));
+    const Money relief = fe.slot_flat ? agg.slot_notional[fe.slot] : fe.notional;
+    ctx.node_open_notional     = Money_Sub(ctx.node_open_notional, relief);
+    agg.slot_notional[fe.slot] = Money_Sub(agg.slot_notional[fe.slot], relief);
+    ctx.exits_processed++;
+    state.total_exits++;
+    state.total_events_processed++;
+    // Per-TRADE W/L at slot-flat on the accumulated total (a partial leg is not a trade).
+    agg.pending_trade_net[fe.slot] = Money_Add(agg.pending_trade_net[fe.slot], fe.net);
+    if (fe.slot_flat) {
+        const Money trade_net = agg.pending_trade_net[fe.slot];
+        agg.pending_trade_net[fe.slot] = Money_Zero();
+        const int partial_on = BITMAP_IS_SET(oms.oms_state_flags,
+                                             tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+        const int node_id = (int)fe.node;
+        if (partial_on) {
+            // v4.7.21 partner pairing: legs A+B of one node = ONE logical trade.
+            if (BITMAP_IS_SET(state.partner_pending_bitmap, BITMAP_BIT_U16(node_id))) {
+                Money total_net = Money_Add(ctx.partner_pending_pnl, trade_net);
+                if (Money_Gt(total_net, Money_Zero())) {
+                    ctx.node_wins++;
+                    ctx.node_gross_wins = Money_Add(ctx.node_gross_wins, total_net);
+                } else {
+                    ctx.node_losses++;
+                    ctx.node_gross_losses = Money_Add(ctx.node_gross_losses,
+                                                      Money_Negate(total_net));
+                }
+                ctx.partner_pending_pnl = Money_Zero();
+                BITMAP_CLR(state.partner_pending_bitmap, BITMAP_BIT_U16(node_id));
+            } else {
+                ctx.partner_pending_pnl = trade_net;
+                BITMAP_SET(state.partner_pending_bitmap, BITMAP_BIT_U16(node_id));
+            }
+        } else {
+            const bool win = Money_Gt(trade_net, Money_Zero());
+            ctx.node_wins   += (win ? 1u : 0u);
+            ctx.node_losses += (win ? 0u : 1u);
+            if (win) {
+                ctx.node_gross_wins = Money_Add(ctx.node_gross_wins, trade_net);
+            } else {
+                ctx.node_gross_losses = Money_Add(ctx.node_gross_losses,
+                                                  Money_Negate(trade_net));
+            }
+        }
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_NodeRowsBook]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineCommon_EmitTradeRow]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SUPPORTIVE]]
@@ -526,13 +612,15 @@ inline void EngineCommon_EmitTradeRow(OrderManagerState<F>& oms, const EmitRecor
 // [CODE]
 //======================================================================
 template <unsigned F>
-inline int EngineCommon_FillRingsApply(AggregatorState<F>& agg, OrderManagerState<F>& oms) {
+inline int EngineCommon_FillRingsApply(EventLoopState<F>& state, OrderManagerState<F>& oms) {
+    AggregatorState<F>& agg = state.agg;
     int applied = 0;
     for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
         const tt::NodeIdx nn{(int16_t)n};
         FillEvent<F> fe;
         while (tt::SPSCRing_TryPop(&agg.fill_rings[nn], &fe)) {
             OrderManager_LedgerApplyFill(oms, fe);   // THE one booking body (moved to OM at P3-b)
+            EngineCommon_NodeRowsBook(state, oms, fe);   // P3-d-ii: the node accounting row
             agg.applied_seq[nn] = fe.seq;
             // Lockstep trade-row emit (amendment I): the leaf pushed its EmitRecord right
             // after this fe on the paired ring — pop + render with the just-booked balance.
@@ -570,13 +658,14 @@ inline int EngineCommon_FillRingsApply(AggregatorState<F>& agg, OrderManagerStat
 // [CODE]
 //======================================================================
 template <unsigned F>
-inline bool EngineCommon_FillEmit(AggregatorState<F>& agg, OrderManagerState<F>& oms,
+inline bool EngineCommon_FillEmit(EventLoopState<F>& state, OrderManagerState<F>& oms,
                                   const FillEvent<F>& fe) {
+    AggregatorState<F>& agg = state.agg;
     if (__builtin_expect(tt::SPSCRing_TryPush(&agg.fill_rings[fe.node], fe), 1)) return true;
     // Full ring (rare; operator-visible via the counter — Rule 2). The drained prefix applies
     // in the same defined order it would at the cycle tail; the in-flight event pushes after.
     agg.fill_ring_full_events++;
-    (void)EngineCommon_FillRingsApply(agg, oms);
+    (void)EngineCommon_FillRingsApply(state, oms);
     // A fully-drained ring has FILL_EVENT_RING_SIZE free slots — this push cannot fail.
     return tt::SPSCRing_TryPush(&agg.fill_rings[fe.node], fe);
 }
@@ -598,7 +687,8 @@ inline bool EngineCommon_FillEmit(AggregatorState<F>& agg, OrderManagerState<F>&
 //======================================================================
 template <unsigned F>
 inline void EngineCommon_FillEmitSink(OrderManagerState<F>* oms, const FillEvent<F>& fe) {
-    (void)EngineCommon_FillEmit(*oms->agg, *oms, fe);
+    // ONE typed cast of the opaque backref (the ezoo_refs shape) — EngineCommon knows the type.
+    (void)EngineCommon_FillEmit(*(EventLoopState<F>*)oms->els, *oms, fe);
 }
 //======================================================================
 // [END_CODE]

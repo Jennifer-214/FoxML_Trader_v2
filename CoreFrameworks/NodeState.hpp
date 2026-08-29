@@ -116,7 +116,7 @@ struct FillEvent {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-28]
-// [SIZE]_[96B]
+// [SIZE]_[128B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[2]
 // [STRADDLE]_[none]
@@ -491,6 +491,17 @@ struct alignas(64) AggregatorState {
     //      same lockstep). Pushed ONLY when trade_log is wired (live boot); empty otherwise. ----
     tt::NodeArray<tt::SPSCRing<EmitRecord<F>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES> emit_rings;
 
+    // ---- P3-d-ii: composer-owned per-slot residual trackers (in-memory; single-writer =
+    //      the composer). slot_notional makes the open-notional relief TELESCOPE exactly:
+    //      BUY legs add fe.notional here + to the node row; non-final SELL legs relieve
+    //      fe.notional; the FINAL leg (fe.slot_flat) relieves the tracked REMAINDER — Σ
+    //      reliefs ≡ Σ adds by construction, zero ULP residue (the symmetric-subtraction
+    //      discipline, exact). pending_trade_net accumulates SELL-leg nets per slot; the
+    //      W/L classify + partner pairing fire ONCE at slot-flat on the TRADE total
+    //      (I-2 MED-1 — per-leg booking would count one trade N times). ----
+    tt::SlotArray<Money, MAX_PORTFOLIO_POSITIONS> slot_notional = {};
+    tt::SlotArray<Money, MAX_PORTFOLIO_POSITIONS> pending_trade_net = {};
+
     // NOTE (paper/live partition — D-441 #4): modes are separate PROCESSES; mixed-mode totals
     // cannot occur. If a mixed-mode deployment ever exists, the partition hook is a second
     // ledger line + row set HERE, keyed by mode — never in the fill leaves.
@@ -501,9 +512,9 @@ struct alignas(64) AggregatorState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-28]
-// [SIZE]_[466816B]
+// [SIZE]_[467328B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[7294]
+// [CACHE_LINES]_[7302]
 // [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[AggregatorState]
@@ -524,7 +535,8 @@ static_assert(offsetof(AggregatorState<64>, fill_rings)  == 192 + sizeof(tt::Par
 static_assert(sizeof(AggregatorState<64>) == 192 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>)
               + sizeof(tt::NodeArray<tt::SPSCRing<FillEvent<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>)
               + sizeof(tt::SPSCRing<DragCmd, 8>)
-              + sizeof(tt::NodeArray<tt::SPSCRing<EmitRecord<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>),
-              "AggregatorState<64> = 3 state lines + publish port + fill rings + drag ring + emit rings (re-pin deliberately)");
+              + sizeof(tt::NodeArray<tt::SPSCRing<EmitRecord<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>)
+              + 2 * sizeof(tt::SlotArray<Money, MAX_PORTFOLIO_POSITIONS>),
+              "AggregatorState<64> = 3 state lines + publish port + fill rings + drag ring + emit rings + 2 per-slot residual trackers (re-pin deliberately)");
 static_assert(alignof(NodeState<64>) == 64 && alignof(ClusterState<64>) == 64 &&
               alignof(AggregatorState<64>) == 64, "capital-plane types are cache-line aligned (H6)");
