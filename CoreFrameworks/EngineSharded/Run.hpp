@@ -1071,6 +1071,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                   BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED),
                                                   &cfg);  // v5.5.5
             (void)loaded;  // logged inside; nothing else to do here
+            // P4-pre-1 (amendment L; gate V8): seed the composer's per-slot residual
+            // trackers from the restored Position set — the snapshot restores positions +
+            // node_open_notional but nothing populated agg.slot_notional, so the first
+            // slot-flat relief telescoped ZERO and the restored node_open_notional stuck
+            // >0 forever (budget gate zero-gates the node). Pre-thread-spawn: quiesced.
+            // The LIVE branch below needs no seed by construction — reconciled positions
+            // arrive as HandleFill fills -> fill_emit rings -> NodeRowsBook books the
+            // trackers organically (verification-pass V8).
+            AggregatorState_Seed(state.agg, oms.portfolio);
         } else {
             // Live reconciliation: exchange truth is authoritative in live mode.
             // Fetch account + open orders + recent trades and reconcile against

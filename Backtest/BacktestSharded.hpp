@@ -229,6 +229,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // distinct state fields (kill_switch_state vs regime_state) with no
     // cross-dependency. Train-serve parity preserved.
     EngineCommon_BootGlobal(cfg, state, oms);
+    // P4-pre-1 (amendment L): the M5 sister of the live paper-restore seed — hermetic fresh
+    // state derives to all-zeros today; the call exists so a future backtest restore path
+    // inherits correct tracker seeding by construction instead of re-discovering gate V8.
+    AggregatorState_Seed(state.agg, oms.portfolio);
 
     int num_nodes = (int)cfg.num_execution_nodes;
     if (num_nodes < 1) num_nodes = 1;

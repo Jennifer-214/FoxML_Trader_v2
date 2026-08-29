@@ -294,6 +294,51 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[AggregatorState_Seed]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P4-pre-1 (amendment L; gate V1/V8): derive the composer's per-slot residual trackers from the LIVE Position set — slot_notional[s] = entry_basis x qty for each active slot, pending_trade_net always zero. ONE derivation body serves every quiesced call site (paper-restore boot, paper reset, backtest fresh boot), so restore and reset cannot drift from each other. Every site is single-threaded by construction: boot = main pre-thread-spawn; reset = composer-executed at cycle tail post-apply (D-445). Ring-clear pin (amendment J): at every seed site the fill/emit rings are quiescent — boot rings are self-initialized empty (D-443), reset runs after the composer's step-0 apply drained them]
+// [REFERENCE]_[DECISION]_[[D-444] [D-445] [D-449]]
+// [REFERENCE]_[INVARIANT]_[[H4] [H22]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void AggregatorState_Seed(AggregatorState<F>& agg, const Portfolio<F>& pf) {
+    // Derive-from-truth: the trackers are a pure function of the Position set. Without this,
+    // a paper WARM RESTART leaves slot_notional at zero under a restored node_open_notional
+    // (the slot-flat relief then telescopes 0 and the budget gate zero-gates the node — gate
+    // V8), and a paper RESET with open positions leaves STALE slot_notional that drives
+    // node_open_notional negative on the next round-trip (gate V1). Boot/reset cold path —
+    // readable-code-wins (H20 boot exception).
+    for (int s = 0; s < MAX_PORTFOLIO_POSITIONS; ++s) {
+        const tt::SlotIdx si{(int16_t)s};
+        const bool on = ((pf.active_bitmap >> s) & 1u) != 0;
+        // Sub-lsb note (a1 T6 definitional): for a multi-leg accumulated entry, the live
+        // Sigma of per-leg fe.notional adds can differ from Mul(weighted_basis, total_qty)
+        // by <=(n-1) ULP. The seed value is still telescope-exact going forward: the
+        // slot-flat relief relieves the TRACKED remainder, so Sigma reliefs == the seeded
+        // add by construction (the symmetric-subtraction discipline).
+        agg.slot_notional[si] = on ? Money_Mul(pf.positions[s].entry_price,
+                                               pf.positions[s].quantity)
+                                   : Money_Zero();
+        // pending_trade_net is mid-TRADE accumulation; every seed site is a quiesced
+        // boundary where a partial trade's running net cannot legitimately survive.
+        agg.pending_trade_net[si] = Money_Zero();
+    }
+    // D-449 rider: the composer's {entry_basis, qty} slot mirrors enroll HERE when they
+    // land (P4G-2) — this function is the ONE seeding story for all composer-derived
+    // per-slot state.
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[AggregatorState_Seed]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineCommon_ComposeAndKillEval]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]

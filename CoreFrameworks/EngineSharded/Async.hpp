@@ -92,7 +92,18 @@ struct CandleAccumulator;
 
 // parent_index: CoreFrameworks/EngineSharded.hpp
 
+// P4-pre-1 (B17/Class-34 discipline): AggregatorState + Portfolio are GLOBAL-scope templates,
+// so ADL cannot find tt::AggregatorState_Seed (defined in EngineCommon.hpp, which the TU
+// includes AFTER this header) at the reset-site call below. Forward-declare at the correct
+// scopes — global structs OUTSIDE tt, the function INSIDE tt (the PaperResetArchive.hpp:90
+// scope model; declaring the structs inside tt would create DIFFERENT types).
+template <unsigned F> struct AggregatorState;
+template <unsigned F> struct Portfolio;
+
 namespace tt {
+
+template <unsigned F>
+inline void AggregatorState_Seed(::AggregatorState<F>& agg, const ::Portfolio<F>& pf);
 
 //------------------------------------------------------------------------------------------------------
 // [SECTION]_[drainer-cycle bench histogram — file-shared inline global]
@@ -233,6 +244,14 @@ inline void EngineSharded_ExecutePaperReset(const ControllerConfig<F>& cfg,
             state.nodes[tt::NodeIdx{(int16_t)c}].core->active = 0;
         }
     }
+    // P4-pre-1 (amendment L; gate V1): re-seed the composer's per-slot residual trackers
+    // AFTER the position wipe — the just-emptied portfolio derives to all-zeros, killing the
+    // stale slot_notional/pending_trade_net residue that a reset-with-open-positions left
+    // behind (next round-trip drove node_open_notional NEGATIVE + mis-classified W/L).
+    // Neither tracker is a row of the OMS or node-ctx reset registries (they live on
+    // AggregatorState); the ONE derivation body is the enrollment. Composer-executed:
+    // single-threaded vs the apply by construction (D-445).
+    AggregatorState_Seed(state.agg, state.oms->portfolio);
     // v4.7.18: rotate the trade history CSV — composer-executed = single-threaded vs the
     // trade-row emit by construction (the composer is the sole Record* caller post P3-b).
     if (state.oms->trade_log) {
