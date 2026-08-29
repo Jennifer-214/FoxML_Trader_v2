@@ -453,7 +453,8 @@ static_assert(FOREACH_OMS_FIELD_PERSIST_COUNT == 10,
 // v5.15.5.F.4d Step 7 (§ N.2) — per-slot scalar count bumped 3 → 5 via 2-row extension:
 //   + last_exit_fee[16] (closes Class 30 latent drift from .F.4c.3 r-4 — field existed but
 //     wasn't enrolled in this registry; reset path was hand-maintained)
-//   + bandit_reward_bps[16] (NEW; per-slot bandit reward sibling for DrainPostFill consumer)
+//   + bandit_reward_bps[16] (per-slot bandit reward sibling; WIRED at E.1.3 P3-f — written
+//     at handle_sell_fill FLAT as trade net bps, read at the flat-gated calib emit)
 // [ASSERT]_[REGISTRY_COVERAGE]_[FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5]
 static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5,
               "FOREACH_OMS_PER_SLOT_FIELD must keep the 5 per-slot scalar entries "

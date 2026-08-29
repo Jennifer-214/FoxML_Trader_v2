@@ -530,12 +530,14 @@ struct OrderManagerState {
     Money last_trade_net[MAX_PORTFOLIO_POSITIONS];
     Money last_trade_notional[MAX_PORTFOLIO_POSITIONS];
 
-    // v5.15.5.F.4d Step 7 (§ N.2) — NEW per-slot bandit reward attribution. Written at HandleFill SELL
-    // (computed reward_bps per the dispatch's chosen leaf reward fn — for exit-side dispatch via
-    // g_exit_reward_dispatch[algo]). Read at DrainPostFill body OR calib emit body for downstream
-    // metric capture. Sibling-array carrier mechanism per decision-time-data-binding-pattern.md
-    // Stage 3 amendment v1.2 — bandit reward stays bound to slot through trade lifecycle without
-    // requiring re-resolution from cfg (no Class 27 cache-mirror). 128B (8 × 16); not persisted.
+    // Per-slot bandit reward attribution (.F.4d § N.2 scaffold; WIRED at E.1.3 P3-f).
+    // Written at handle_sell_fill FLAT: the trade's realized net bps (last_trade_net /
+    // last_trade_notional × 1e4 — the same signal the exit-bandit reward consumes).
+    // Read at the calib emit body (real_on_exit_calibration, also flat-gated — read-
+    // consistent by construction). The fuller algo-dispatch reward-fn design
+    // (g_exit_reward_dispatch[algo]) remains TECH_DEBT-174 parked scope. Sibling-array
+    // carrier per decision-time-data-binding-pattern.md (no Class 27 cache-mirror).
+    // 128B (16 × 8); not persisted.
     double bandit_reward_bps[MAX_PORTFOLIO_POSITIONS];
 
     // v5.13.0.B — calibration logging. Populated by slow-path body when
@@ -1779,6 +1781,18 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
     const uint16_t flat_sel      = (uint16_t)-(int16_t)leg_flat;
     const uint16_t was_win_mask  = (uint16_t)((Money_Gt(oms->last_trade_net[pslot], Money_Zero()) ? win_bit : (uint16_t)0) & flat_sel);
     oms->last_was_win_bitmap     = (uint16_t)((oms->last_was_win_bitmap & (uint16_t)~(win_bit & flat_sel)) | was_win_mask);
+
+    // P3-f (TECH_DEBT-174 partial): bandit_reward_bps WIRED — the trade's realized net
+    // bps (net/notional × 1e4), written at FLAT from the same accumulators the exit-bandit
+    // reward consumes (single-source-of-semantics; the calib column was emitting a
+    // never-written 0). Telemetry double math (display-only per H4). The algo-dispatch
+    // reward-fn design (g_exit_reward_dispatch) stays TECH_DEBT-174 parked scope.
+    {
+        const double tnet_d  = Money_ToDouble(oms->last_trade_net[pslot]);
+        const double tnotl_d = Money_ToDouble(oms->last_trade_notional[pslot]);
+        const double bps     = (tnotl_d > 0.0) ? (tnet_d / tnotl_d) * 1e4 : 0.0;
+        oms->bandit_reward_bps[pslot] = leg_flat ? bps : oms->bandit_reward_bps[pslot];
+    }
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
     // Default = noop_fill_emit; set to real_on_exit_calibration when calibration_log_file fopen() succeeds.

@@ -132,8 +132,8 @@ struct OrderEvent {
     Money          qty;            // fill qty (decimal)
     Money          tp;             // intended TP at fill time (entry only; decimal)
     Money          sl;             // intended SL at fill time (entry only; decimal)
-    Money          fee;            // booked fee for fill events (S-3; semantics land at P3
-                                   // fill-lifecycle rework — zero until then; wire slot settles NOW)
+    Money          fee;            // booked fee for this fill leg (S-3 wire slot; LIVE since
+                                   // E.1.3 P3 — the folds PREFER this over any cfg recompute)
     char           reason[32];     // short description for REJECTED/RECONCILED
 };
 //======================================================================
