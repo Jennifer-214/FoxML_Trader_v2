@@ -1082,40 +1082,56 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
 
     for (size_t i = 0; i < log->count; ++i) {
         const OrderEvent<F>& e = log->entries[i];
-        if (e.type != OEVT_FULL_FILL) continue;
+        // P3-e (D-446 #4 / TECH_DEBT-162): PARTIAL legs replay too — a mid-partial-day
+        // restart reconstructs the position its legs built (skipping them under-sized
+        // the portfolio once partial appends became real). The row-carried e.fee is
+        // PREFERRED (the log is fee-self-contained since S-3); the rate recompute stays
+        // as the legacy zero-fee-row fallback, so replay is now fee-accurate 1:1 with
+        // what live HandleFill booked.
+        if (e.type != OEVT_FULL_FILL && e.type != OEVT_PARTIAL_FILL) continue;
 
         int slot = (int)e.node_id;
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
 
         if (e.order_type == ORDER_MARKET_BUY) {
-            // Entry fill: open the slot. v5.15.5.F.2 — build a
-            // PositionEntryArgs struct that preserves the original event
-            // timestamp so hold-time display survives engine restart +
-            // replay. Closes the Class-18 mirror between live-entry +
-            // replay paths per CLAUDE.md item 19.
-            Money notional  = Money_Mul(e.price, e.qty);
-            Money entry_fee = Money_Mul(notional, fee_rate);
-            PositionEntryArgs<F> args;
-            args.entry_price        = e.price;
-            args.quantity           = e.qty;
-            args.take_profit_price  = e.tp;
-            args.stop_loss_price    = e.sl;
-            args.entry_fee          = entry_fee;
-            args.entry_timestamp_us = e.timestamp_us;  // preserve original
-            // pair_index left at default -1; partial-exit pairing across
-            // replay is a future enhancement tracked under .F.1.B (would
-            // require OrderEvent to carry pair_index too).
-            Portfolio_OpenSlot(&result.portfolio, slot, args);
+            Money notional = Money_Mul(e.price, e.qty);
+            Money leg_fee  = !Money_IsZero(e.fee) ? e.fee : Money_Mul(notional, fee_rate);
+            if ((result.portfolio.active_bitmap >> slot) & 1u) {
+                // A16 mirror: a follow-on BUY leg accumulates (weighted-avg basis + fee add).
+                Portfolio_AccumulateSlotLeg(&result.portfolio, slot, e.price, e.qty, leg_fee);
+            } else {
+                // First leg: open the slot. v5.15.5.F.2 — preserve the original event
+                // timestamp so hold-time display survives engine restart + replay
+                // (the Class-18 live-entry/replay mirror per CLAUDE.md item 19).
+                PositionEntryArgs<F> args;
+                args.entry_price        = e.price;
+                args.quantity           = e.qty;
+                args.take_profit_price  = e.tp;
+                args.stop_loss_price    = e.sl;
+                args.entry_fee          = leg_fee;
+                args.entry_timestamp_us = e.timestamp_us;  // preserve original
+                // pair_index left at default -1; partial-exit pairing across
+                // replay is a future enhancement tracked under .F.1.B (would
+                // require OrderEvent to carry pair_index too).
+                Portfolio_OpenSlot(&result.portfolio, slot, args);
+            }
         } else if (e.order_type == ORDER_MARKET_SELL) {
-            // Exit fill: close the slot, compute net P&L, update balance.
-            // Same math as EventLoop_OnEvent in ControllerEventLoop.hpp.
-            Money entry_fee     = result.portfolio.positions[slot].entry_fee;
-            Money qty_snap      = result.portfolio.positions[slot].quantity;
-            Money gross         = Portfolio_CloseSlot(&result.portfolio, slot, e.price);
-            Money exit_notional = Money_Mul(e.price, qty_snap);
-            Money exit_fee      = Money_Mul(exit_notional, fee_rate);
-            Money total_fee     = Money_Add(entry_fee, exit_fee);
-            Money net           = Money_Sub(gross, total_fee);
+            if (((result.portfolio.active_bitmap >> slot) & 1u) == 0) continue;  // unmatched SELL — skip
+            // Leg-close BY qty, clamped to the tracked remainder (the leaf's Σlegs
+            // discipline mirrored); the FINAL leg books the residual entry fee exactly.
+            Position<F>& pos = result.portfolio.positions[slot];
+            const Money pos_qty = pos.quantity;
+            Money q_leg = Money_Gt(e.qty, pos_qty) ? pos_qty : e.qty;
+            if (Money_IsZero(q_leg)) continue;
+            const bool leg_flat = Money_Eq(q_leg, pos_qty);
+            Money entry_fee_leg = leg_flat ? pos.entry_fee
+                : Money_Div(Money_Mul(pos.entry_fee, q_leg), pos_qty);
+            pos.entry_fee  = Money_Sub(pos.entry_fee, entry_fee_leg);
+            Money exit_fee = !Money_IsZero(e.fee) ? e.fee
+                : Money_Mul(Money_Mul(e.price, q_leg), fee_rate);
+            Money gross     = Portfolio_CloseSlotLeg(&result.portfolio, slot, e.price, q_leg);
+            Money total_fee = Money_Add(entry_fee_leg, exit_fee);
+            Money net       = Money_Sub(gross, total_fee);
             result.balance       = Money_Add(result.balance, net);
             result.realized_pnl  = Money_Add(result.realized_pnl, net);
         }
@@ -1134,13 +1150,14 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
 // deterministic: same events in, same state out, every time. This is the
 // foundation for phase 07 replay and the phase 03 head-to-head test.
 //
-// The fold only processes OEVT_FULL_FILL events. Other event types
-// (SUBMITTED, ACKNOWLEDGED, REJECTED, CANCELED) don't affect portfolio
-// or balance. OEVT_PARTIAL_FILL is deferred to phase 06 — partial fills
-// don't occur in phase 03 (market orders fill fully).
+// The fold processes OEVT_FULL_FILL + OEVT_PARTIAL_FILL (P3-e: BUY legs
+// accumulate weighted-avg basis; SELL legs close BY qty with pro-rata entry
+// fee, residual on the final leg). Other event types (SUBMITTED, REJECTED,
+// CANCELED, TERMINAL_INCOMPLETE audits) don't affect portfolio or balance.
 //
-// Fee model: symmetric (entry fee + exit fee), each = price * qty * fee_rate.
-// Matches the OnEvent computation at ControllerEventLoop.hpp.
+// Fee model: the row-carried e.fee when present (fee-self-contained log,
+// S-3) — replay matches live HandleFill booking 1:1; fee_rate recompute is
+// the legacy zero-fee-row fallback only.
 //
 // Returns the number of fill events processed (for verification).
 //======================================================================

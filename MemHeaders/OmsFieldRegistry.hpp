@@ -835,10 +835,10 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
                 OrderEventLog_Init(&(_oms_target)->event_log);                                       \
                 int _loaded = OrderEventLog_LoadFromDisk(&(_oms_target)->event_log, _evt_path);      \
                 if (_loaded > 0) {                                                                    \
-                    /* v5.15.5.F.4c.3 WIP2d-1.B.1 — _fee_rate deleted; event-log replay can't */     \
-                    /* reconstruct per-trade fees from price+qty (decision-time-data-binding-pattern.md */ \
-                    /* recovery-path nullable semantic). Pass FPN_Zero — replayed balance reflects */     \
-                    /* gross-of-fee P&L (acceptable for boot recovery; live HandleFill is authoritative). */ \
+                    /* P3-e (TECH_DEBT-162 close): the fold PREFERS the row-carried e.fee */        \
+                    /* (fee-self-contained log, S-3) — replayed balance is fee-accurate 1:1 with */   \
+                    /* live HandleFill for S-3+ logs. Money_Zero here is only the fallback rate */    \
+                    /* for LEGACY zero-fee rows (those replay gross-of-fee, their old semantics). */  \
                     tt::FoldResult<F> _fold = Portfolio_FromEventLog(&(_oms_target)->event_log,      \
                                                                       (_starting_balance),           \
                                                                       Money_Zero());                 \
