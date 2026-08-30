@@ -1948,9 +1948,21 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
     if (s->ml.confidence_enabled && ImGui::CollapsingHeader("Confidence", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextColored(FoxmlColors::sand, "IC:");
         ImGui::SameLine();
-        ImVec4 ic_c = (s->ml.confidence_ic > 0.1) ? FoxmlColors::green :
-                      (s->ml.confidence_ic > 0.0) ? FoxmlColors::yellow : FoxmlColors::red;
-        ImGui::TextColored(ic_c, "%.3f", s->ml.confidence_ic);
+        {
+            // D-461 (H5) — same not-measured arm as the Per-Node ML table. This
+            // headline render carried the identical defect and was MISSED by the
+            // first D-461 pass; the per-node footnote names this block, so leaving
+            // it showing a red 0.000 actively contradicted the fix.
+            const unsigned hn   = s->ml.confidence_ic_samples;
+            const unsigned hmin = s->ml.confidence_ic_min_samples;
+            if (hmin > 0 && hn < hmin) {
+                ImGui::TextColored(FoxmlColors::fg_dim, "%u/%u", hn, hmin);
+            } else {
+                ImVec4 ic_c = (s->ml.confidence_ic > 0.1) ? FoxmlColors::green :
+                              (s->ml.confidence_ic > 0.0) ? FoxmlColors::yellow : FoxmlColors::red;
+                ImGui::TextColored(ic_c, "%.3f", s->ml.confidence_ic);
+            }
+        }
         ImGui::SameLine(0, 15);
         ImGui::TextColored(FoxmlColors::sand, "RMSE:");
         ImGui::SameLine();
@@ -2075,8 +2087,7 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
                                     "prediction/outcome samples.\n"
                                     "One sample is booked per ML trade (leg A at "
                                     "close), so this needs %u more closed ML "
-                                    "trade(s).\nConfidence is IC x freshness x "
-                                    "stability, so it reads 0.00 until then.",
+                                    "trade(s).",
                                     n_ic, min_ic, min_ic - n_ic);
                         } else {
                             double ic = s->per_node[i].ml_confidence_ic;

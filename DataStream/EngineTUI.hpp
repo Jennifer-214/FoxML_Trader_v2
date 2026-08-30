@@ -752,6 +752,12 @@ struct MLSnapshot {
     // confidence detail (Phase 7C)
     double confidence_ic;      // information coefficient (rank correlation)
     double confidence_rmse;    // rolling RMSE of predictions
+    // D-461 (H5, re-gate 2026-08-30) — the headline IC carried the SAME
+    // not-measured-sentinel defect as the per-node column, and the per-node
+    // fix's footnote pointed the operator straight at it. Mirror the sample
+    // count + the engine's own gate here so both renders agree.
+    uint16_t confidence_ic_samples;      // paired prediction/outcome count
+    uint16_t confidence_ic_min_samples;  // CONFIDENCE_MIN_SAMPLES at build
     double confidence_freshness; // data recency factor [0, 1]
     // cost detail (Phase 7C)
     double cost_spread;        // spread component (bps)

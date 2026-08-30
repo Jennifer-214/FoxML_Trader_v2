@@ -936,6 +936,9 @@ static inline void TUI_CopySnapshotSharded(
         snap->ml.confidence            = node_pc.ml_last_confidence;
         snap->ml.confidence_ic         = node_pc.ml_confidence_ic;
         snap->ml.confidence_rmse       = node_pc.ml_confidence_rmse;
+        // D-461 (H5) — carry the sample count + gate to the headline render too.
+        snap->ml.confidence_ic_samples     = node_pc.ml_confidence_ic_samples;
+        snap->ml.confidence_ic_min_samples = node_pc.ml_confidence_ic_min_samples;
         // Stability ≈ exp(-rmse) per Confidence_Stability; the GUI labels
         // this as "Stability" not "Freshness" despite the field name (legacy).
         snap->ml.confidence_freshness  = (node_pc.ml_confidence_rmse > 0.0)
