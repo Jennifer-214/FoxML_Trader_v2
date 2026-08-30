@@ -1554,7 +1554,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 #endif
 
     // v5.15.5.F.4d.1.B.6 Phase B Step B.2: drain_with_submit hoisted to
-    // EngineSharded/Async.hpp as tt::EngineSharded_Async_DrainWithSubmit<F>().
+    // EngineCommon.hpp as tt::EngineCommon_DrainEventsAndSubmit<F>() — the ONE
+    // pump both drivers call (P4-pre-3c; the backtest had none).
     // Call sites below pass (state, oms, ticks_produced, cfg) explicitly.
     std::thread drainer([&state, &oms, &ticks_produced, &producer_done,
                          &cfg, &latest_tick, &paper_reset_in_progress, shared_ptr] {
@@ -1596,7 +1597,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             const tt::DrainerConstants dc =
                 tt::DrainerConstants_Init(state.registered_count, cfg, oms);
 
-            int total_drained = tt::EngineSharded_Async_DrainWithSubmit<F>(state, oms, ticks_produced, cfg);
+            int total_drained = tt::EngineCommon_DrainEventsAndSubmit<F>(state, oms, ticks_produced.load(std::memory_order_relaxed), cfg);
             EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, latest_tick, shared_ptr);
             OMS_DrainSubmit(&oms, dc.drain_count);  // v4.7.37; v5.15.5.C.4 T1 uses cached dc.drain_count
 
@@ -1654,7 +1655,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
                 for (int k = 0; k < 16; ++k) {
-                    tt::EngineSharded_Async_DrainWithSubmit<F>(state, oms, ticks_produced, cfg);
+                    tt::EngineCommon_DrainEventsAndSubmit<F>(state, oms, ticks_produced.load(std::memory_order_relaxed), cfg);
                     EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, latest_tick, shared_ptr);
                     // v5.4.1 Bug B2: same partials-aware drain count as the
                     // main loop above. v5.15.5.C.4 Phase T1: per-iter dc

@@ -646,6 +646,246 @@ inline void EngineCommon_EmitTradeRow(OrderManagerState<F>& oms, const EmitRecor
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[EngineCommon_DrainEventsAndSubmit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CRITICAL]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[THE event pump, shared by BOTH drivers (M5): TradeEvent rings -> leg-split qty -> SubmitCommand -> OMS_PushSubmit. Moved here from EngineSharded/Async.hpp at P4-pre-3c because the backtest had NO pump — D-441 deleted the EventLoop_OnEvent booking body and wired only the LIVE converter, so backtest entries were popped and DISCARDED (zero trades). One body, both drivers, parity by construction]
+//======================================================================
+// [CODE]
+//======================================================================
+template<unsigned F>
+inline int EngineCommon_DrainEventsAndSubmit(
+    EventLoopState<F>& state,
+    OrderManagerState<F>& oms,
+    uint64_t now_tick,                 // live: the producer tick counter; backtest: its own tick index
+    const ControllerConfig<F>& cfg
+) {
+    int total_drained = 0;
+    // v5.15.5.C.4 Phase T1 — hoist partial_on out of inner event loop.
+    // Drainer-thread-stable predicate; one read per drain_with_submit call
+    // vs N events × 1 read. Saves ~16-32 cycles/cycle at typical burst.
+    const int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    for (int slot = 0; slot < state.registered_count; ++slot) {
+        ExecutionCore<F>* core = state.nodes[tt::NodeIdx{(int16_t)slot}].core;
+        if (core == nullptr) continue;
+        for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_NODE; ++i) {
+            TradeEvent<F> event;
+            if (!SPSCRing_TryPop(&core->event_ring, &event)) break;
+
+            bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
+            bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
+
+            // P.3: map (node_id, leg) → portfolio slot. When
+            // partial_exit_enabled=0, slot == node_id (1:1 mapping
+            // preserves pre-P.3 behavior). When enabled, slot = 2*c+leg.
+            // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
+            // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
+            // NOTE the cast documents what TD-299 tracks: this `slot` variable HOLDS A NODE.
+            int portfolio_slot = (int)Sharded_LegSlot(tt::NodeIdx{(int16_t)slot}, (int)event.leg, partial_on);
+            if (portfolio_slot < 0) {
+                // Defensive: malformed event (e.g. leg=1 without partials
+                // enabled). Drop + log; don't crash the drainer.
+                fprintf(stderr,
+                    "[sharded] drainer: invalid (node=%d, leg=%u) for "
+                    "partial_enabled=%d → dropping event\n",
+                    slot, (unsigned)event.leg, partial_on);
+                continue;
+            }
+
+            // snapshot exit qty BEFORE OnEvent because CloseSlot clears it
+            // F-096 (TD-167/H4): Money end-to-end. This whole block used to run
+            // Money -> double -> arithmetic -> money_from_double_payload, which
+            // put TWO inexact conversions and a half-away-from-zero llround on a
+            // capital path, and used the payload bridge outside its documented
+            // contract (FixedPointN.hpp:2302 — cfg literals only, not computed
+            // products). No double survives here.
+            Money order_qty = Money_Zero();
+            if (is_exit) {
+                // Exit qty: read from the LEG's portfolio slot (leg A's
+                // qty for leg A exit, leg B's for leg B exit). With
+                // partials disabled, portfolio_slot == slot == node_id
+                // and behavior is identical to pre-P.3.
+                // Carried VERBATIM — the slot already holds Money, so the old
+                // round-trip was pure loss with nothing to gain.
+                order_qty = state.oms->portfolio.positions[portfolio_slot].quantity;
+            } else if (is_entry) {
+                // Entry qty: split intended_qty between legs by
+                // partial_exit_pct. Leg A gets partial_pct, leg B gets
+                // (1 - partial_pct). When partials disabled, leg is
+                // always 0 and we use the full intended_qty (no split).
+                // v4.7.32: read partial_exit_pct from per-core override
+                // when set (0 = inherit). Pre-fix it always read global,
+                // making the per-core override a silent no-op.
+                // v5.15.5.C.4 Phase T1: hoisted node_overrides[slot] ref —
+                // single deref shared with the tp2_mult read at line ~2386
+                // below (was two separate `const auto&` declarations).
+                // F-096: ONE read of intended_qty feeds BOTH legs. Load-bearing —
+                // the slow path writes this field (ControllerEventLoop.hpp:3486 —
+                // corrected at D-421; the old cite :3461 had drifted)
+                // while the drainer reads it bare, so two separate reads could
+                // straddle a rebuild and see different values. Conservation is
+                // then only guaranteed per-READ-PAIR, which is exactly what this
+                // single `intended` local pins.
+                const Money intended = state.nodes[tt::NodeIdx{(int16_t)slot}].intended_qty;
+                const auto& ov_slot = cfg.node_overrides[slot];
+                Money partial_pct = !Money_IsZero(ov_slot.partial_exit_pct)
+                    ? ov_slot.partial_exit_pct : cfg.nodes[tt::NodeIdx{(int16_t)slot}].partial_exit_pct;
+                // Leg A = intended x pct (ONE half-even reduce inside Money_Mul).
+                // Leg B = the exact REMAINDER — never intended x (1 - pct).
+                //
+                // The remainder form makes `legA + legB == intended` a THEOREM,
+                // not a hope: Money_Sub is exact by domain, so the identity holds
+                // by construction and no runtime check can fail. That is why there
+                // is no assert here — there is nothing left to doubt. (The old
+                // form computed each leg independently in double and conserved
+                // only to within +-1 unit / 1e-8.)
+                //
+                // ⚠ NEVER rewrite leg B as Money_Mul(intended, Money_Sub(one, pct)).
+                // That reintroduces the two-independent-roundings leak this fix
+                // exists to close. tests/controller_test.cpp pins the identity so
+                // the revert is caught, not just discouraged.
+                const Money leg_a = Money_Mul(intended, partial_pct);
+                if (partial_on && event.leg == PARTIAL_LEG_A) {
+                    order_qty = leg_a;
+                } else if (partial_on && event.leg == PARTIAL_LEG_B) {
+                    order_qty = Money_Sub(intended, leg_a);
+                } else {
+                    order_qty = intended;
+                }
+            }
+
+            // P3-f (D-441): the OnEvent mode-0 direct-booking call is DELETED — this
+            // pump's Submit below IS the booking path in both modes (one pipeline).
+            ++total_drained;
+
+            // F-096 (HIGH-2): the guard now tests the ACTUAL SUBMITTED value.
+            // Pre-fix it tested the double while the submitted qty was llround-ed
+            // separately, so a leg whose true qty landed in (0, 0.5e-8) passed the
+            // guard and submitted a ZERO-qty order. OrderManager has no zero-qty
+            // defense (:1123 books requested_qty verbatim), so paper opened a 0-qty
+            // position; on its exit the slot qty read back 0.0, this same guard then
+            // skipped the SELL forever, and the hot mirror cleared while
+            // portfolio.active_bitmap never did => an un-closeable zombie slot +
+            // permanent bitmap drift + the partner XOR stuck at 1. Testing the Money
+            // value closes that class: a sub-unit leg now SKIPS instead of zombifying.
+            // Money_Gt (not !Money_IsZero) is deliberate — it also fail-safes a
+            // negative leg, which an out-of-clamp partial_exit_pct could produce.
+            // The skip must stay AHEAD of this whole block so the prediction/entry
+            // stamps below do not fire for a leg that was never submitted.
+            if ((is_entry || is_exit) && Money_Gt(order_qty, Money_Zero())) {
+                // v4.7.2: leg B's intended_tp must be TP2, not TP1.
+                // intended_tp on the core is leg A's absolute TP. For
+                // leg B, scale the TP-distance by cfg.tp2_mult — same
+                // computation the hot path does for live_tp_b, just
+                // expressed in absolute price form so Position.tp +
+                // snapshot persistence reflect the actual TP2. Keeps
+                // the panel display honest AND prevents
+                // snapshot-restore-while-paired from reviving leg B
+                // with TP1 instead of TP2.
+                Money leg_tp = state.nodes[tt::NodeIdx{(int16_t)slot}].intended_tp;
+                if (is_entry && partial_on && event.leg == PARTIAL_LEG_B) {
+                    // v5.15.5.C.4 Phase T1: use leg_tp local (already
+                    // captured at line above) instead of re-reading
+                    // state..intended_tp; saves 1 indexed read.
+                    Money tp_dist_a = Money_Sub(leg_tp, event.price);
+                    // v4.7.32: per-core tp2_mult override (0 = inherit).
+                    // v5.15.5.C.4 Phase T1: NOTE — `ov_slot` from earlier
+                    // entry branch is NOT in scope here; the entry-qty
+                    // branch + this entry-tp branch are sibling blocks.
+                    // Re-declare `ov_tp2` local for tp2_mult access.
+                    // Future structural fix: hoist `ov_slot` to top of
+                    // iteration (above is_exit/is_entry split) if more
+                    // sites need it.
+                    const auto& ov_tp2 = cfg.node_overrides[slot];
+                    Money tp2_mult_eff = !Money_IsZero(ov_tp2.tp2_mult)
+                        ? ov_tp2.tp2_mult : cfg.nodes[tt::NodeIdx{(int16_t)slot}].tp2_mult;
+                    Money tp_dist_b = Money_Mul(tp_dist_a, tp2_mult_eff);
+                    leg_tp = Money_Add(event.price, tp_dist_b);
+                }
+                // v4.7.37 (Phase B reordered): push through OMS_PushSubmit
+                // instead of calling Submit directly. Drainer drains the
+                // queue + calls Submit serially — preserves OMS single-
+                // caller contract for when Phase C spawns N producers.
+                // v5.15.5.F.4c.3 WIP2d-1.B.1 option (A refined) — required-field ctor + optional .field = X.
+                // ctor: (node_id, type, qty, leg, node_cfg); optional intended_tp/intended_sl/strategy_id/event_price.
+                SubmitCommand<F> cmd(tt::SlotIdx{(int16_t)portfolio_slot},                          // P.3: a SLOT, and now typed as one
+                                      is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
+                                      order_qty,                                        // F-096: Money end-to-end; the payload bridge is gone
+                                      event.leg,                                                    // P.3: leg propagated to Order
+                                      &cfg.nodes[tt::NodeIdx{(int16_t)slot}]);                                            // per-node cfg (sharded: node_id == slot)
+                cmd.intended_tp = leg_tp;
+                cmd.intended_sl = state.nodes[tt::NodeIdx{(int16_t)slot}].intended_sl;
+                // s5-1b (2026-08-23) — bind the RESOLVED strategy (post-AUTO regime
+                // resolution; == strategy_id for non-AUTO nodes) so fills/CSV/calib
+                // attribute what actually FIRED, not the configured AUTO sentinel.
+                // Same class as the June F1 producer fix. No fill-path consumer
+                // branches on Order.strategy_id (enumerated 2026-08-23) — display/
+                // attribution only.
+                cmd.strategy_id = state.nodes[tt::NodeIdx{(int16_t)slot}].resolved_strategy_id;
+                cmd.event_price = event.price;
+                // A25 (D-205): resolve the per-fill TP fraction (A1 SSoT — picks the per-node
+                // override, NOT global take_profit_pct) + carry it so handle_buy_fill arms
+                // original_tp = fill×(1+tp_pct), matching where the exit actually fires post-A9.
+                // leg B carries the TP2-scaled fraction (same tp2_mult that scaled leg_tp above;
+                // reg line 188 tp_pct_b = tp_pct×tp2_mult). Entry-only — no buy fill on exits.
+                // tp2_mult re-read locally (the leg-B block's tp2_mult_eff has gone out of scope;
+                // consistent with the existing ov_tp2 re-declare pattern above).
+                // F1 FIX (deep-check 2026-06-12): resolve from resolved_strategy_id (AUTO→the
+                // regime-resolved strategy), NOT the configured strategy_id — for an AUTO core
+                // strategy_id==STRATEGY_AUTO would hit ResolvePerFillTpPct's default arm (global
+                // take_profit_pct) while live_tp (ExecutionCore.hpp:543) arms from the RESOLVED
+                // strategy's tp_pct → original_tp != live_tp (the bug A25 fixes, for AUTO). This
+                // matches A1's restore path (ShardedSnapshotPersist.hpp uses resolved_strategy_id).
+                if (is_entry) {
+                    Money tp_pct_eff = ResolvePerFillTpPct(state.nodes[tt::NodeIdx{(int16_t)slot}].resolved_strategy_id, cfg.nodes[tt::NodeIdx{(int16_t)slot}]);
+                    if (partial_on && event.leg == PARTIAL_LEG_B) {
+                        const auto& ov_tp2b = cfg.node_overrides[slot];
+                        Money tp2m = !Money_IsZero(ov_tp2b.tp2_mult)
+                            ? ov_tp2b.tp2_mult : cfg.nodes[tt::NodeIdx{(int16_t)slot}].tp2_mult;
+                        tp_pct_eff = Money_Mul(tp_pct_eff, tp2m);
+                    }
+                    cmd.tp_pct = tp_pct_eff;
+                }
+                OMS_PushSubmit(&oms, cmd);
+                // Phase 6prep sharded c13: snapshot the staged prediction
+                // into active_prediction at entry submit. Persists across
+                // the entry→exit window so the IC update at exit pairs the
+                // realized return with the prediction that actually
+                // triggered the trade — not the latest rebuild's value.
+                // Only on leg A entry — leg B is part of the same trade,
+                // shouldn't double-stamp the prediction.
+                if (is_entry && event.leg == PARTIAL_LEG_A &&
+                    state.nodes[tt::NodeIdx{(int16_t)slot}].strategy_id == STRATEGY_ML) {
+                    state.nodes[tt::NodeIdx{(int16_t)slot}].active_prediction =
+                        state.nodes[tt::NodeIdx{(int16_t)slot}].staged_prediction;
+                }
+                // v4.0.3 spacing + time-based exit: stamp this entry
+                // for cross-cutting checks on the next rebuild. Only
+                // on leg A entry (one trade = one entry stamp).
+                if (is_entry && event.leg == PARTIAL_LEG_A) {
+                    state.nodes[tt::NodeIdx{(int16_t)slot}].last_entry_price = event.price;
+                    state.nodes[tt::NodeIdx{(int16_t)slot}].last_entry_tick  = now_tick;
+                    // v4.7.6: wall-clock entry time so GUI's "Hold"
+                    // column can show real elapsed minutes for open
+                    // positions. Microseconds since epoch — divide
+                    // by 60_000_000 in the snapshot copy for minutes.
+                    state.nodes[tt::NodeIdx{(int16_t)slot}].last_entry_wall_us = (uint64_t)
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+                }
+            }
+        }
+    }
+    return total_drained;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_DrainEventsAndSubmit]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineCommon_FillRingsApply]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]

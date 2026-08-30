@@ -244,8 +244,18 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         if (core) ExecutionCore_Tick(core, tick);
     }
 
-    // 2. Drain any trade events the cores fired this tick.
-    EventLoop_DrainEvents(drv->state);
+    // 2. Drain the trade events the cores fired this tick AND convert them to submits.
+    //    P4-pre-3c: this is the SHARED pump (EngineCommon_DrainEventsAndSubmit) — the SAME
+    //    body the live drainer calls. Before this it was EventLoop_DrainEvents, which since
+    //    D-441 pops and DISCARDS every event (booking moved to Submit->HandleFill and only
+    //    the LIVE converter was wired) — so the backtest queued no entries and produced ZERO
+    //    trades. One body, both drivers: an M5 divergence here cannot recur by construction.
+    if (drv->oms && drv->config) {
+        (void)EngineCommon_DrainEventsAndSubmit(*drv->state, *drv->oms,
+                                                (uint64_t)tick_index, *drv->config);
+    } else {
+        EventLoop_DrainEvents(drv->state);   // harness without OMS/cfg: ring hygiene only
+    }
 
     // 2a. v4.7.37 (Phase B reordered) — drain submit_queue first. EventLoop_
     //     TimeExit (called below in the slow-path block) and any future
@@ -500,7 +510,17 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     }
     // Final drain — catches anything the last tick fired that the slow path
     // didn't have time to process.
-    EventLoop_DrainEvents(drv->state);
+    // P4-pre-3c: final flush uses the SHARED pump too (see the per-tick site). The tick
+    // stamp is the LAST index the loop ran (num_ticks-1), matching what the final RunTick
+    // would have stamped — an entry filled on the flush must not read as newer than the
+    // stream that produced it (TimeExit measures elapsed ticks from last_entry_tick).
+    if (drv->oms && drv->config) {
+        (void)EngineCommon_DrainEventsAndSubmit(*drv->state, *drv->oms,
+                                                (uint64_t)(num_ticks > 0 ? num_ticks - 1 : 0),
+                                                *drv->config);
+    } else {
+        EventLoop_DrainEvents(drv->state);
+    }
     // v4.7.37 (Phase B reordered): drain any pending submit commands from
     // the final iteration BEFORE OMS_Tick so they get filled.
     if (drv->oms) {

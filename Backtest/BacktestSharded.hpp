@@ -815,8 +815,14 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 done:
     *progress_pct = 100;
 
-    // Final drain to flush anything still in flight from the last tick
-    EventLoop_DrainEvents(&state);
+    // Final drain to flush anything still in flight from the last tick.
+    // P4-pre-3c: the SHARED pump — a tail entry the last tick fired must still convert to a
+    // submit here, exactly as the live shutdown flush does. EventLoop_DrainEvents alone pops
+    // and DISCARDS (D-441 moved booking to Submit->HandleFill), which is what left the
+    // backtest producing zero trades.
+    (void)tt::EngineCommon_DrainEventsAndSubmit(state, *state.oms,
+                                                (uint64_t)(total_processed > 0 ? total_processed - 1 : 0),
+                                                cfg);
     // D-444 / I-1 MED-4 — FINAL FillEvent apply before final_balance/final_pnl are read
     // below: tail fills must book (this flush is thinner than the driver's — it reads
     // state.oms->balance directly into BacktestStats).
