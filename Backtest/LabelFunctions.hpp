@@ -100,7 +100,11 @@ struct HistoricalTick {
     /*               CS aggregation activates with multi-symbol (v5.16+).     */ \
     X(CS_PERCENTILE_RANK,    "cs_percentile_rank",    "CS Percentile Rank",    "Per-timestamp rank/(N+1); SS-degenerate=raw return",       Label_CSPercentileRank,    1, TP_UNUSED) \
     X(CS_ZSCORE_ROBUST,      "cs_zscore_robust",      "CS Robust Z-Score",     "Per-timestamp (r-median)/(1.4826*MAD); SS-degenerate=raw", Label_CSZScoreRobust,      1, TP_UNUSED) \
-    X(CS_VOLSCALED_DEMEANED, "cs_volscaled_demeaned", "CS Vol-scaled Demeaned","Per-timestamp (r/vol)-mean(r/vol); SS-degenerate=raw",     Label_CSVolScaledDemeaned, 1, TP_UNUSED)
+    X(CS_VOLSCALED_DEMEANED, "cs_volscaled_demeaned", "CS Vol-scaled Demeaned","Per-timestamp (r/vol)-mean(r/vol); SS-degenerate=raw",     Label_CSVolScaledDemeaned, 1, TP_UNUSED) \
+    /* E.1.2.G — 3-class sister of VOL_BARRIER. APPENDED, never inserted: LABEL_* */ \
+    /*            values are persisted via label_registry_hash, so the position   */ \
+    /*            of every existing row is frozen (H21).                          */ \
+    X(VOL_BARRIER_3C,     "vol_barrier_3c",     "Vol Barrier 3-Class","3-class k*sigma: 0=stable, 1=down-first(peak), 2=up-first(valley)", Label_VolBarrier3C, 3, TP_SIGMA_K)
 
 // Auto-generated LABEL_* constants. Order matches FOREACH_TARGET.
 // Trailing LABEL_COUNT_AUTO acts as the count (one past the last value).
@@ -245,25 +249,23 @@ static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick
 // FoxML constants: barrier_size = 0.5 (k*sigma), vol_window = 20, min_periods = 5
 // source: ~/FoxML/private/DATA_PROCESSING/targets/barrier.py
 //----------------------------------------------------------------------
-static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, int total_ticks,
-                                      double sample_price, double barrier_k, double /* sl_pct */,
-                                      int vol_window) {
-    // parameter defaults (from FoxML barrier.py)
-    if (barrier_k <= 0.0) barrier_k = 0.5;   // FoxML: barrier_size = 0.5
-    if (vol_window <= 0) vol_window = 20;     // FoxML: vol_window = 20
-
+// E.1.2.G — extracted so the binary VOL_BARRIER and the 3-class VOL_BARRIER_3C
+// compute sigma from ONE body (SSoT). Pure code motion: same operations in the
+// same order, so both labels stay bytewise identical to the pre-extraction
+// VOL_BARRIER. Returns 1 with *out_vol written, or 0 for "insufficient history
+// or degenerate vol" — the caller supplies its own neutral class, because the
+// binary encoding (0.5 = neutral) and the 3-class encoding (0 = stable) differ.
+static inline int LabelVol_RollingSigma(const HistoricalTick *ticks, int tick_idx,
+                                        int vol_window, double *out_vol) {
     // need at least min_periods returns to compute vol (FoxML: min_periods = 5)
     int min_periods = 5;
-    if (tick_idx < min_periods + 1) return 0.5f; // not enough history, neutral
+    if (tick_idx < min_periods + 1) return 0;
 
-    // compute rolling volatility (stddev of returns over last vol_window ticks)
-    // uses a ring of returns ending at tick_idx
     int start = tick_idx - vol_window;
-    if (start < 1) start = 1; // need at least 1 prior tick for returns
+    if (start < 1) start = 1;              // need at least 1 prior tick for returns
     int n_returns = tick_idx - start;
-    if (n_returns < min_periods) return 0.5f; // not enough data for reliable vol
+    if (n_returns < min_periods) return 0;
 
-    // single-pass mean + variance (Welford-style for numerical stability)
     double sum = 0.0, sum_sq = 0.0;
     for (int j = start; j < tick_idx; j++) {
         if (ticks[j - 1].price <= 0.0) continue;
@@ -274,21 +276,29 @@ static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, 
 
     double mean = sum / n_returns;
     double variance = (sum_sq / n_returns) - (mean * mean);
-    if (variance <= 0.0) return 0.5f; // zero vol = no signal
+    if (variance <= 0.0) return 0;          // zero vol = no signal
+
+    // manual sqrt to avoid pulling in math.h just for this (Newton, 8 iters)
+    double x = variance;
+    double guess = x * 0.5;
+    if (guess <= 0.0) guess = 1e-10;
+    for (int iter = 0; iter < 8; iter++)
+        guess = 0.5 * (guess + x / guess);
+    if (guess <= 1e-15) return 0;           // degenerate
+
+    *out_vol = guess;
+    return 1;
+}
+
+static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                      double sample_price, double barrier_k, double /* sl_pct */,
+                                      int vol_window) {
+    // parameter defaults (from FoxML barrier.py)
+    if (barrier_k <= 0.0) barrier_k = 0.5;   // FoxML: barrier_size = 0.5
+    if (vol_window <= 0) vol_window = 20;     // FoxML: vol_window = 20
 
     double vol = 0.0;
-    // manual sqrt to avoid pulling in math.h just for this
-    // Newton's method: 4 iterations is plenty for double precision
-    {
-        double x = variance;
-        double guess = x * 0.5;
-        if (guess <= 0.0) guess = 1e-10;
-        for (int iter = 0; iter < 8; iter++)
-            guess = 0.5 * (guess + x / guess);
-        vol = guess;
-    }
-
-    if (vol <= 1e-15) return 0.5f; // degenerate
+    if (!LabelVol_RollingSigma(ticks, tick_idx, vol_window, &vol)) return 0.5f;
 
     // vol-scaled barriers (from FoxML: barrier = k * rolling_vol)
     double up_barrier   = sample_price * (1.0 + barrier_k * vol);
@@ -300,6 +310,47 @@ static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, 
         if (ticks[j].price <= down_barrier) return 0.0f;   // hit down barrier first
     }
     return 0.5f; // neither hit = neutral
+}
+
+//----------------------------------------------------------------------
+// [SECTION]_[VOL_BARRIER_3C]
+//----------------------------------------------------------------------
+// E.1.2.G — the 3-class sister of VOL_BARRIER. Same k*sigma first-passage
+// geometry, but emitted as softmax classes instead of a binary-with-neutral,
+// so class balance stays stable across volatility regimes: the barriers scale
+// with realized vol, where a fixed-pct barrier family (PEAK_VALLEY_STABLE) has
+// its class mix drift as vol does. That drift is the leading suspect behind
+// train-below-pooled-baseline across time folds.
+//
+// Class encoding deliberately matches PEAK_VALLEY_STABLE's DIRECTION so the two
+// 3-class targets stay mentally and numerically interchangeable downstream:
+//   0 = neither barrier hit within the window  (stable / timeout)
+//   1 = DOWN barrier first  -> you were at a peak    -> BAD entry
+//   2 = UP   barrier first  -> you were at a valley  -> GOOD entry
+// (PVS semantics verified at LabelFunctions.hpp Label_PeakValleyStable; the
+// same 2=good-entry reading applies here.)
+//
+// Note the neutral differs from the binary sister BY DESIGN: VOL_BARRIER returns
+// 0.5 for "no signal", which is a legitimate midpoint in a binary encoding but
+// would be an invalid class index under softmax. Here insufficient history and
+// timeout both fold into class 0.
+static inline float Label_VolBarrier3C(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                        double sample_price, double barrier_k, double /* sl_pct */,
+                                        int vol_window) {
+    if (barrier_k <= 0.0) barrier_k = 0.5;
+    if (vol_window <= 0) vol_window = 20;
+
+    double vol = 0.0;
+    if (!LabelVol_RollingSigma(ticks, tick_idx, vol_window, &vol)) return 0.0f;  // class 0 = stable
+
+    double up_barrier   = sample_price * (1.0 + barrier_k * vol);
+    double down_barrier = sample_price * (1.0 - barrier_k * vol);
+
+    for (int j = tick_idx + 1; j < total_ticks; j++) {
+        if (ticks[j].price >= up_barrier)   return 2.0f;  // up first  = valley = GOOD entry
+        if (ticks[j].price <= down_barrier) return 1.0f;  // down first = peak  = bad entry
+    }
+    return 0.0f; // neither = stable
 }
 
 //----------------------------------------------------------------------
@@ -649,6 +700,12 @@ static inline const char* Training_ResolveRole(int label_type, int training_side
                                              // CO-LOCATED; the ensemble loader
                                              // already walks <dir>/exit.json.
     if (label_type == LABEL_PEAK_VALLEY_STABLE) return "barrier";
+    // E.1.2.G — VOL_BARRIER_3C is the vol-scaled sister of PEAK_VALLEY_STABLE
+    // (same 3-class stable/peak/valley encoding, barriers scaled by realized
+    // vol instead of fixed pct), so it produces the SAME role file. Note it
+    // does NOT follow its binary namesake VOL_BARRIER -> "buy_signal": the role
+    // follows the CLASS STRUCTURE, not the barrier geometry.
+    if (label_type == LABEL_VOL_BARRIER_3C)     return "barrier";
     if (label_type == LABEL_REGIME)             return "regime";
     return "buy_signal";
 }
@@ -671,7 +728,16 @@ static inline int Training_SideLabelGate(int label_type, int training_side) {
     if (training_side != 1) return 2;
     switch (label_type) {
         case LABEL_WILL_PEAK:
-        case LABEL_PEAK_VALLEY_STABLE: return 2;
+        case LABEL_PEAK_VALLEY_STABLE:
+        // E.1.2.G — VOL_BARRIER_3C joins the peak-bearing arm. The D-b rule is
+        // "does the label carry a genuine PEAK class?", not "is it a barrier?":
+        // its class 1 (down-barrier first) IS the peak, exactly as PVS's is.
+        // Its BINARY namesake VOL_BARRIER stays REFUSE and that is not an
+        // inconsistency — a binary up/down label is entry-DIRECTION, so an exit
+        // model trained on it inverts (fires at valleys). Separating "stable"
+        // into its own class is precisely what makes the 3-class form a valid
+        // exit target.
+        case LABEL_VOL_BARRIER_3C:     return 2;
         // D-b (2026-08-22, operator-decided): WILL_VALLEY + VOL_BARRIER moved
         // WARN -> REFUSE, unifying every ENTRY-DIRECTION label under the
         // default arm. The BARRIER/VOL_BARRIER asymmetry (structural twins,

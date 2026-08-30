@@ -39,8 +39,13 @@
 //     in BookSnapshot, sum + mean stay FPN_Binary).
 //   - FlowState: double internally (EWMA decay uses exp(); double is
 //     natural; values bounded by recent volume so no precision concern).
-//     RegimeSignals.flow_* fields are FPN_Binary<F> (converted in
-//     Regime_ComputeSignals) to match the rest of the feature pack.
+//     RegimeSignals.flow_* fields are ALSO double (RegimeDetector.hpp
+//     flow_10s/1m/5m); Regime_ComputeSignals copies them RAW, and the
+//     conversion to FPN_Binary happens later, at ML_Compute_Flow10s/1m/5m
+//     (FeatureRegistry.hpp). Corrected E.1.2.G — this comment previously
+//     claimed the RegimeSignals fields were FPN_Binary "converted in
+//     Regime_ComputeSignals"; both halves were false, and being false about
+//     WHERE the conversion happens is what makes a stale comment expensive.
 //   - LargeTradeState: FPN_Binary<F> for sums; double for z-score (matches
 //     RegimeSignals.large_trade_z's double type, mirrors tick_rate_z).
 //======================================================================================================
@@ -322,6 +327,78 @@ static_assert(alignof(FlowState) == 64,
     "FlowState MUST be cache-line aligned.");
 
 //======================================================================
+// [FUNCTION]_[Ewma_AccumulateStep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the decaying-SUM step: prev*decay + sample. For FLOW quantities (signed volume), where the accumulated total IS the signal]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline double Ewma_AccumulateStep(double prev, double decay, double sample) {
+    return prev * decay + sample;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]_[why these two forms are named — E.1.2.G]
+//----------------------------------------------------------------------
+// There are TWO exponential-decay recurrences in this file's problem space and
+// they are NOT interchangeable. Naming them is the point of this pair: the
+// feature-horizon ladder's first draft proposed reusing FlowState_Push for
+// long-half-life PRICE emas on the reasoning "it is the proven pattern with new
+// half-life constants" — which is true of the DECAY, and false of the
+// RECURRENCE.
+//
+//   ACCUMULATE (this fn):  e <- e*d + x        -- a decaying SUM
+//   NORMALIZE  (below):    e <- e*d + (1-d)*x  -- a decaying AVERAGE
+//
+// For signed volume the sum is correct and intended: "how much net flow has
+// there been lately, weighted toward recent". It has no fixed point in x -- for
+// a constant x it converges to x/(1-d), which GROWS as the half-life grows.
+//
+// That property is fatal for a LEVEL. At half-life 2h and a ~60/s push cadence,
+// (1-d) is about 2.3e-6, so a price accumulator settles near 432000*price and
+// (price - ema)/ema pins to about -1.0 -- a constant whose only real variation
+// is the TICK RATE. Four ret_ema_* rows and rvol_ratio would have shipped as
+// tick-rate proxies wearing momentum names, and nothing would have crashed.
+//
+// Rule: SUM for flow, AVERAGE for levels (price, realized vol, VWAP legs).
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Ewma_NormalizedStep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the decaying-AVERAGE step: prev*decay + (1-decay)*sample, FPN_Binary per D-455. For LEVELS — has a fixed point at the sample, so it is half-life-stable]
+// [REFERENCE]_[INVARIANT]_[[H4] [H11]]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline FPN_Binary<64> Ewma_NormalizedStep(FPN_Binary<64> prev,
+                                                 FPN_Binary<64> decay,
+                                                 FPN_Binary<64> sample) {
+    const FPN_Binary<64> one = FPN_FromDouble<64>(1.0);
+    return FPN_Add(FPN_Mul(prev, decay), FPN_Mul(FPN_Sub(one, decay), sample));
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// FPN_Binary rather than double per D-455: these accumulate over hours-to-days
+// and are the rider-2 persist targets, so determinism across runs and binaries
+// (H9/H10) governs, not throughput. Branchless + constant-work (H11).
+//
+// SEEDING is the caller's job and it matters more here than for the sum form.
+// From a zero start the average climbs toward the sample over ~one half-life;
+// at 24h that is a day of a feature reading low with no indication it is
+// warming. Callers seed on first push (the FlowState_Push convention) AND owe a
+// min-history gate before serving the row.
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[FlowState_Push]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [DETERMINISM]]
@@ -374,9 +451,12 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
     double decay_1m  = FPN_ToDouble(FPN_Exp(arg_1m));
     double decay_5m  = FPN_ToDouble(FPN_Exp(arg_5m));
 
-    s->ewma_10s = s->ewma_10s * decay_10s + signed_volume;
-    s->ewma_1m  = s->ewma_1m  * decay_1m  + signed_volume;
-    s->ewma_5m  = s->ewma_5m  * decay_5m  + signed_volume;
+    // ACCUMULATE form — signed volume is a flow, so the decaying SUM is the
+    // intended quantity. Named rather than inlined so the ladder's LEVEL rows
+    // cannot reach for this recurrence by imitation (see Ewma_NormalizedStep).
+    s->ewma_10s = Ewma_AccumulateStep(s->ewma_10s, decay_10s, signed_volume);
+    s->ewma_1m  = Ewma_AccumulateStep(s->ewma_1m,  decay_1m,  signed_volume);
+    s->ewma_5m  = Ewma_AccumulateStep(s->ewma_5m,  decay_5m,  signed_volume);
     s->last_us = timestamp_us;
 }
 //======================================================================
