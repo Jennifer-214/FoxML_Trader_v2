@@ -1207,6 +1207,17 @@ struct TUISnapshot {
         double   ml_last_confidence;   // ConfidenceScorer_Compute result [0, 1]
         double   ml_confidence_ic;     // RollingIC value for tooltip / debug
         double   ml_confidence_rmse;   // RollingRMSE value
+        // v5.15.5.F.4d.1.E.1.2.G (D-461) — IC READABILITY. RollingIC_Compute
+        // returns a hard 0.0 below its minimum-sample gate
+        // (ConfidenceScore.hpp:344), which formats identically to a MEASURED
+        // zero — Class 2 sub-pattern 2d, operator-reported when a node trading
+        // ML showed "IC +0.000". Publish the sample count AND the threshold the
+        // ENGINE actually used, so the renderer can show "n/N warming" instead
+        // of a sentinel and never hardcodes the gate itself (Class 2 prevention:
+        // the display reads the SAME value the producer checks). Sister to the
+        // drift_n_samples precedent below.
+        uint16_t ml_confidence_ic_samples;      // paired prediction/outcome count
+        uint16_t ml_confidence_ic_min_samples;  // CONFIDENCE_MIN_SAMPLES at build
         // v5.14.1.G — portfolio turnover diagnostic. Average symmetric-
         // difference ratio across the rolling window of top-K arm picks.
         // 0.0 = stable convictions (same top-3 every cycle); 1.0 = thrashing

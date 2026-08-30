@@ -631,6 +631,13 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_node[i].ml_confidence_ic   = ConfidenceScorer_ComputeICVariant(
                 &state->nodes[tt::NodeIdx{(int16_t)i}].confidence, cfg ? cfg->confidence_ic_variant : 0);
             snap->per_node[i].ml_confidence_rmse = RollingRMSE_Compute(&state->nodes[tt::NodeIdx{(int16_t)i}].confidence.rmse);
+            // D-461 — publish the IC sample count + the gate the engine used, so
+            // the panel distinguishes "not measured yet" from a measured 0.000.
+            // predictions/actuals advance in lockstep (RollingIC_Push), so the
+            // predictions ring is canonical per ConfidenceScore.hpp:341.
+            snap->per_node[i].ml_confidence_ic_samples =
+                (uint16_t)state->nodes[tt::NodeIdx{(int16_t)i}].confidence.ic.predictions.count;
+            snap->per_node[i].ml_confidence_ic_min_samples = (uint16_t)CONFIDENCE_MIN_SAMPLES;
             // v5.14.1.G — portfolio turnover. Reads per-core RollingTurnover
             // ring; ~500ns at window=100 (popcount-based; within slow-path
             // budget). HOT_PATH_CHANGELOG entry committed in this ship.

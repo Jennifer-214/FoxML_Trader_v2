@@ -2058,11 +2058,33 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
                     }
                     ImGui::TableNextColumn();
                     {
-                        double ic = s->per_node[i].ml_confidence_ic;
-                        ImVec4 cc = ic > 0.1 ? FoxmlColors::green
-                                  : ic > 0.0 ? FoxmlColors::yellow
-                                  : FoxmlColors::red;
-                        ImGui::TextColored(cc, "%+.3f", ic);
+                        // D-461 — a not-measured IC must NOT render as a measured
+                        // one. Below the engine's sample gate RollingIC_Compute
+                        // returns a hard 0.0; formatting that as "+0.000" and
+                        // colouring it RED reads as "measured, terrible" when the
+                        // truth is "needs N more trades" (Class 2 sub-pattern 2d).
+                        // The threshold comes from the SNAPSHOT, not a GUI literal,
+                        // so display and engine can never disagree about the gate.
+                        const unsigned n_ic   = s->per_node[i].ml_confidence_ic_samples;
+                        const unsigned min_ic = s->per_node[i].ml_confidence_ic_min_samples;
+                        if (min_ic > 0 && n_ic < min_ic) {
+                            ImGui::TextColored(FoxmlColors::fg_dim, "%u/%u", n_ic, min_ic);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "IC not measured yet: %u of %u paired "
+                                    "prediction/outcome samples.\n"
+                                    "One sample is booked per ML trade (leg A at "
+                                    "close), so this needs %u more closed ML "
+                                    "trade(s).\nConfidence is IC x freshness x "
+                                    "stability, so it reads 0.00 until then.",
+                                    n_ic, min_ic, min_ic - n_ic);
+                        } else {
+                            double ic = s->per_node[i].ml_confidence_ic;
+                            ImVec4 cc = ic > 0.1 ? FoxmlColors::green
+                                      : ic > 0.0 ? FoxmlColors::yellow
+                                      : FoxmlColors::red;
+                            ImGui::TextColored(cc, "%+.3f", ic);
+                        }
                     }
                     ImGui::TableNextColumn();
                     ImGui::Text("%.3f", s->per_node[i].ml_confidence_rmse);
@@ -2073,8 +2095,9 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
             // when the per-core view is open (avoids confusion with the
             // top-of-panel single-core summary).
             ImGui::TextColored(FoxmlColors::comment,
-                "(headline above shows highest-conf node; "
-                "noise-floor IC clamps to 0.01)");
+                "(headline above shows highest-conf node; IC shows n/N while "
+                "warming \u2014 the 0.01 noise floor applies to the IC term INSIDE "
+                "the confidence composite, not to the raw IC column here)");
         }
     }
 
