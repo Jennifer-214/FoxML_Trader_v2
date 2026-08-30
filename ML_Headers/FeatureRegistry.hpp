@@ -522,59 +522,59 @@ inline FPN_Binary<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ct
 // Initial values all 0 (preserves pre-v5.14.9.E behavior bytewise). Operator
 // opts in per-feature by editing the registry. Per TECH_DEBT-015 close.
 #define FOREACH_FEATURE(X) \
-    X(SHORT_SLOPE,        "short_slope",        1, FEATURE_ENABLED, ML_Compute_ShortSlope,        "regression slope, 128-tick window", 0) \
-    X(SHORT_R2,           "short_r2",           1, FEATURE_ENABLED, ML_Compute_ShortR2,           "R² of short-window regression", 0) \
-    X(SHORT_VARIANCE,     "short_variance",     1, FEATURE_ENABLED, ML_Compute_ShortVariance,     "price variance over 128 ticks", 0) \
-    X(LONG_SLOPE,         "long_slope",         1, FEATURE_ENABLED, ML_Compute_LongSlope,         "regression slope, 512-tick window", 0) \
-    X(LONG_R2,            "long_r2",            1, FEATURE_ENABLED, ML_Compute_LongR2,            "R² of long-window regression", 0) \
-    X(LONG_VARIANCE,      "long_variance",      1, FEATURE_ENABLED, ML_Compute_LongVariance,      "price variance over 512 ticks", 0) \
-    X(VOL_RATIO,          "vol_ratio",          1, FEATURE_ENABLED, ML_Compute_VolRatio,          "short variance / long variance", 0) \
-    X(ROR_SLOPE,          "ror_slope",          1, FEATURE_ENABLED, ML_Compute_RorSlope,          "regression-on-regression slope", 0) \
-    X(VOLUME_SLOPE,       "volume_slope",       1, FEATURE_ENABLED, ML_Compute_VolumeSlope,       "regression slope of volume", 0) \
-    X(VOLUME_DELTA,       "volume_delta",       1, FEATURE_ENABLED, ML_Compute_VolumeDelta,       "volume change last vs avg", 0) \
-    X(EMA_SMA_SPREAD,     "ema_sma_spread",     1, FEATURE_ENABLED, ML_Compute_EmaSmaSpread,      "(ema - sma) / sma normalized", 0) \
-    X(VWAP_DEV,           "vwap_dev",           1, FEATURE_ENABLED, ML_Compute_VwapDev,           "VWAP deviation from short rolling", 0) \
-    X(PRICE_STDDEV,       "price_stddev",       1, FEATURE_ENABLED, ML_Compute_PriceStddev,       "stddev of price, short window", 0) \
-    X(PRICE_AVG,          "price_avg",          1, FEATURE_ENABLED, ML_Compute_PriceAvg,          "mean price, short window", 0) \
-    X(VOLUME_AVG,         "volume_avg",         1, FEATURE_ENABLED, ML_Compute_VolumeAvg,         "mean volume, short window", 0) \
-    X(EMA_ABOVE_SMA,      "ema_above_sma",      1, FEATURE_ENABLED, ML_Compute_EmaAboveSma,       "1 if ema > short SMA (binary)", 0) \
-    X(MID_SLOPE,          "mid_slope",          1, FEATURE_ENABLED, ML_Compute_MidSlope,          "regression slope, 256-tick window", 0) \
-    X(MID_R2,             "mid_r2",             1, FEATURE_ENABLED, ML_Compute_MidR2,             "R² of mid-window regression", 0) \
-    X(CUMDELTA,           "cumdelta",           1, FEATURE_ENABLED, ML_Compute_CumDelta,          "rolling cumulative buyer-vs-seller", 0) \
-    X(HOUR_SIN,           "hour_sin",           1, FEATURE_ENABLED, ML_Compute_HourSin,           "cyclical hour-of-day sin", 0) \
-    X(HOUR_COS,           "hour_cos",           1, FEATURE_ENABLED, ML_Compute_HourCos,           "cyclical hour-of-day cos", 0) \
-    X(VOL_REGIME_RAT,     "vol_regime_rat",     1, FEATURE_ENABLED, ML_Compute_VolRegimeRatio,    "short stddev / baseline stddev", 0) \
-    X(TICK_RATE_Z,        "tick_rate_z",        1, FEATURE_ENABLED, ML_Compute_TickRateZ,         "ticks/sec z-score vs trailing baseline", 0) \
-    X(DIST_TO_HIGH,       "dist_to_high",       1, FEATURE_ENABLED, ML_Compute_DistToHigh,        "(baseline_max - price) / price", 0) \
-    X(DIST_TO_LOW,        "dist_to_low",        1, FEATURE_ENABLED, ML_Compute_DistToLow,         "(price - baseline_min) / price", 0) \
-    X(BOOK_IMB_MEAN_SHORT, "book_imb_mean_short", 1, FEATURE_ENABLED, ML_Compute_BookImbMeanShort, "mean of last 64 book_imbalance samples", 0) \
-    X(BOOK_IMB_MEAN_LONG,  "book_imb_mean_long",  1, FEATURE_ENABLED, ML_Compute_BookImbMeanLong,  "mean over full BookImbalanceHistory window", 0) \
-    X(BOOK_IMB_DRIFT,      "book_imb_drift",      1, FEATURE_ENABLED, ML_Compute_BookImbDrift,     "current book_imbalance - mean_long", 0) \
-    X(FLOW_10S,           "flow_10s",           1, FEATURE_ENABLED, ML_Compute_Flow10s,           "signed-volume EWMA, half-life 10s", 0) \
-    X(FLOW_1M,            "flow_1m",            1, FEATURE_ENABLED, ML_Compute_Flow1m,            "signed-volume EWMA, half-life 60s", 0) \
-    X(FLOW_5M,            "flow_5m",            1, FEATURE_ENABLED, ML_Compute_Flow5m,            "signed-volume EWMA, half-life 300s", 0) \
-    X(LARGE_TRADE_Z,      "large_trade_z",      1, FEATURE_ENABLED, ML_Compute_LargeTradeZ,       "z-score of current trade size", 0) \
-    X(SPREAD_BPS,         "spread_bps",         1, FEATURE_ENABLED, ML_Compute_SpreadBps,         "spread / mid_price × 10000", 0) \
-    X(SPREAD_ZSCORE,      "spread_zscore",      1, FEATURE_ENABLED, ML_Compute_SpreadZscore,      "z-score of current spread", 0) \
+    X(SHORT_SLOPE,        "short_slope",        1, FEATURE_ENABLED, ML_Compute_ShortSlope,        "regression slope, 128-tick window", 0, 128) \
+    X(SHORT_R2,           "short_r2",           1, FEATURE_ENABLED, ML_Compute_ShortR2,           "R² of short-window regression", 0, 128) \
+    X(SHORT_VARIANCE,     "short_variance",     1, FEATURE_ENABLED, ML_Compute_ShortVariance,     "price variance over 128 ticks", 0, 128) \
+    X(LONG_SLOPE,         "long_slope",         1, FEATURE_ENABLED, ML_Compute_LongSlope,         "regression slope, 512-tick window", 0, 512) \
+    X(LONG_R2,            "long_r2",            1, FEATURE_ENABLED, ML_Compute_LongR2,            "R² of long-window regression", 0, 512) \
+    X(LONG_VARIANCE,      "long_variance",      1, FEATURE_ENABLED, ML_Compute_LongVariance,      "price variance over 512 ticks", 0, 512) \
+    X(VOL_RATIO,          "vol_ratio",          1, FEATURE_ENABLED, ML_Compute_VolRatio,          "short variance / long variance", 0, 512) \
+    X(ROR_SLOPE,          "ror_slope",          1, FEATURE_ENABLED, ML_Compute_RorSlope,          "regression-on-regression slope", 0, 512) \
+    X(VOLUME_SLOPE,       "volume_slope",       1, FEATURE_ENABLED, ML_Compute_VolumeSlope,       "regression slope of volume", 0, 128) \
+    X(VOLUME_DELTA,       "volume_delta",       1, FEATURE_ENABLED, ML_Compute_VolumeDelta,       "volume change last vs avg", 0, 128) \
+    X(EMA_SMA_SPREAD,     "ema_sma_spread",     1, FEATURE_ENABLED, ML_Compute_EmaSmaSpread,      "(ema - sma) / sma normalized", 0, 512) \
+    X(VWAP_DEV,           "vwap_dev",           1, FEATURE_ENABLED, ML_Compute_VwapDev,           "VWAP deviation from short rolling", 0, 128) \
+    X(PRICE_STDDEV,       "price_stddev",       1, FEATURE_ENABLED, ML_Compute_PriceStddev,       "stddev of price, short window", 0, 128) \
+    X(PRICE_AVG,          "price_avg",          1, FEATURE_ENABLED, ML_Compute_PriceAvg,          "mean price, short window", 0, 128) \
+    X(VOLUME_AVG,         "volume_avg",         1, FEATURE_ENABLED, ML_Compute_VolumeAvg,         "mean volume, short window", 0, 128) \
+    X(EMA_ABOVE_SMA,      "ema_above_sma",      1, FEATURE_ENABLED, ML_Compute_EmaAboveSma,       "1 if ema > short SMA (binary)", 0, 512) \
+    X(MID_SLOPE,          "mid_slope",          1, FEATURE_ENABLED, ML_Compute_MidSlope,          "regression slope, 256-tick window", 0, 256) \
+    X(MID_R2,             "mid_r2",             1, FEATURE_ENABLED, ML_Compute_MidR2,             "R² of mid-window regression", 0, 256) \
+    X(CUMDELTA,           "cumdelta",           1, FEATURE_ENABLED, ML_Compute_CumDelta,          "rolling cumulative buyer-vs-seller", 0, 1024) \
+    X(HOUR_SIN,           "hour_sin",           1, FEATURE_ENABLED, ML_Compute_HourSin,           "cyclical hour-of-day sin", 0, 1) \
+    X(HOUR_COS,           "hour_cos",           1, FEATURE_ENABLED, ML_Compute_HourCos,           "cyclical hour-of-day cos", 0, 1) \
+    X(VOL_REGIME_RAT,     "vol_regime_rat",     1, FEATURE_ENABLED, ML_Compute_VolRegimeRatio,    "short stddev / baseline stddev", 0, 1024) \
+    X(TICK_RATE_Z,        "tick_rate_z",        1, FEATURE_ENABLED, ML_Compute_TickRateZ,         "ticks/sec z-score vs trailing baseline", 0, 1024) \
+    X(DIST_TO_HIGH,       "dist_to_high",       1, FEATURE_ENABLED, ML_Compute_DistToHigh,        "(baseline_max - price) / price", 0, 1024) \
+    X(DIST_TO_LOW,        "dist_to_low",        1, FEATURE_ENABLED, ML_Compute_DistToLow,         "(price - baseline_min) / price", 0, 1024) \
+    X(BOOK_IMB_MEAN_SHORT, "book_imb_mean_short", 1, FEATURE_ENABLED, ML_Compute_BookImbMeanShort, "mean of last 64 book_imbalance samples", 0, 64) \
+    X(BOOK_IMB_MEAN_LONG,  "book_imb_mean_long",  1, FEATURE_ENABLED, ML_Compute_BookImbMeanLong,  "mean over full BookImbalanceHistory window", 0, 1024) \
+    X(BOOK_IMB_DRIFT,      "book_imb_drift",      1, FEATURE_ENABLED, ML_Compute_BookImbDrift,     "current book_imbalance - mean_long", 0, 1024) \
+    X(FLOW_10S,           "flow_10s",           1, FEATURE_ENABLED, ML_Compute_Flow10s,           "signed-volume EWMA, half-life 10s", 0, 10) \
+    X(FLOW_1M,            "flow_1m",            1, FEATURE_ENABLED, ML_Compute_Flow1m,            "signed-volume EWMA, half-life 60s", 0, 60) \
+    X(FLOW_5M,            "flow_5m",            1, FEATURE_ENABLED, ML_Compute_Flow5m,            "signed-volume EWMA, half-life 300s", 0, 300) \
+    X(LARGE_TRADE_Z,      "large_trade_z",      1, FEATURE_ENABLED, ML_Compute_LargeTradeZ,       "z-score of current trade size", 0, 1024) \
+    X(SPREAD_BPS,         "spread_bps",         1, FEATURE_ENABLED, ML_Compute_SpreadBps,         "spread / mid_price × 10000", 0, 1) \
+    X(SPREAD_ZSCORE,      "spread_zscore",      1, FEATURE_ENABLED, ML_Compute_SpreadZscore,      "z-score of current spread", 0, 1024) \
     /* v5.14.5.B — regime-conditional features. Empirical-verification    */ \
     /*               discipline applies (TECH_DEBT-007): trend_strength + */ \
     /*               vol_zscore have semantic overlap with existing       */ \
     /*               SHORT_SLOPE / VOL_RATIO but differ in normalization. */ \
     /*               Verify post-first-retrain feature_importance gain.   */ \
-    X(REGIME_TREND_STRENGTH, "regime_trend_strength", 1, FEATURE_ENABLED, ML_Compute_RegimeTrendStrength, "saturating tanh(short_slope) bounded [-1,1]", 0) \
-    X(REGIME_VOL_ZSCORE,     "regime_vol_zscore",     1, FEATURE_ENABLED, ML_Compute_RegimeVolZscore,     "(short_var - long_var) / sqrt(long_var) z-score", 0) \
-    X(REGIME_CLASS_ONEHOT,   "regime_class_onehot",   1, FEATURE_ENABLED, ML_Compute_RegimeClassOneHot,   "current_regime as int (0..NUM_REGIMES-1)", 0) \
+    X(REGIME_TREND_STRENGTH, "regime_trend_strength", 1, FEATURE_ENABLED, ML_Compute_RegimeTrendStrength, "saturating tanh(short_slope) bounded [-1,1]", 0, 128) \
+    X(REGIME_VOL_ZSCORE,     "regime_vol_zscore",     1, FEATURE_ENABLED, ML_Compute_RegimeVolZscore,     "(short_var - long_var) / sqrt(long_var) z-score", 0, 512) \
+    X(REGIME_CLASS_ONEHOT,   "regime_class_onehot",   1, FEATURE_ENABLED, ML_Compute_RegimeClassOneHot,   "current_regime as int (0..NUM_REGIMES-1)", 0, 1024) \
     /* v5.14.5.C — Marcos Lopez de Prado fractional differentiation       */ \
     /*               (FoxML_Core port). 3 integration orders bracket the  */ \
     /*               typical informative range for crypto tick prices.    */ \
     /*               Cold-start: returns 0 until rolling.count >= K=50.   */ \
-    X(FRAC_DIFF_PRICE_D04, "frac_diff_price_d04", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d04, "fractional diff of price (d=0.4); long-memory removed", 0) \
-    X(FRAC_DIFF_PRICE_D05, "frac_diff_price_d05", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d05, "fractional diff of price (d=0.5); often the sweet spot", 0) \
-    X(FRAC_DIFF_PRICE_D06, "frac_diff_price_d06", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d06, "fractional diff of price (d=0.6); near-stationary residual", 0)
+    X(FRAC_DIFF_PRICE_D04, "frac_diff_price_d04", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d04, "fractional diff of price (d=0.4); long-memory removed", 0, 50) \
+    X(FRAC_DIFF_PRICE_D05, "frac_diff_price_d05", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d05, "fractional diff of price (d=0.5); often the sweet spot", 0, 50) \
+    X(FRAC_DIFF_PRICE_D06, "frac_diff_price_d06", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d06, "fractional diff of price (d=0.6); near-stationary residual", 0, 50)
 
 // Auto-generated FEATURE_<ID> enum constants. Order matches FOREACH_FEATURE.
 enum FeatureId : uint16_t {
-#define X(id, name, version, enabled, fn, note, staleness) FEATURE_##id,
+#define X(id, name, version, enabled, fn, note, staleness, lookback) FEATURE_##id,
     FOREACH_FEATURE(X)
 #undef X
     NUM_REGISTERED_FEATURES
@@ -585,13 +585,13 @@ static_assert(NUM_REGISTERED_FEATURES <= 64,
 
 // Names + versions arrays — auto-generated.
 static const char* FEATURE_NAMES[] = {
-#define X(id, name, version, enabled, fn, note, staleness) name,
+#define X(id, name, version, enabled, fn, note, staleness, lookback) name,
     FOREACH_FEATURE(X)
 #undef X
 };
 
 static const int FEATURE_VERSIONS[] = {
-#define X(id, name, version, enabled, fn, note, staleness) version,
+#define X(id, name, version, enabled, fn, note, staleness, lookback) version,
     FOREACH_FEATURE(X)
 #undef X
 };
@@ -603,7 +603,7 @@ static const int FEATURE_VERSIONS[] = {
 //
 // Compile-time fold: each enabled feature contributes 1<<FEATURE_##id.
 // Bit i set iff feature i has FEATURE_ENABLED in the registry tuple.
-#define X_ACCUMULATE_ENABLED(id, name, version, enabled, fn, note, staleness) \
+#define X_ACCUMULATE_ENABLED(id, name, version, enabled, fn, note, staleness, lookback) \
     | (((enabled) ? 1ULL : 0ULL) << FEATURE_##id)
 static constexpr uint64_t FEATURE_ENABLED_BITMAP =
     0ULL FOREACH_FEATURE(X_ACCUMULATE_ENABLED);
@@ -617,7 +617,7 @@ static constexpr uint64_t FEATURE_ENABLED_BITMAP =
 // pre-v5.14.9.E behavior bytewise). Operator opts in per-feature by
 // editing the registry tuple.
 static const uint16_t FEATURE_MAX_STALENESS_MINUTES[] = {
-#define X(id, name, version, enabled, fn, note, staleness) (uint16_t)(staleness),
+#define X(id, name, version, enabled, fn, note, staleness, lookback) (uint16_t)(staleness),
     FOREACH_FEATURE(X)
 #undef X
 };
@@ -659,7 +659,7 @@ inline uint64_t feature_registry_hash_compute() {
     // (operator policy, not training-time invariant). FEATURE_REGISTRY_HASH
     // remains stable across staleness changes; bytewise replay-determinism
     // preserved.
-#define X(id, name, version, enabled, fn, note, staleness) \
+#define X(id, name, version, enabled, fn, note, staleness, lookback) \
     if ((enabled)) { \
         for (const char* p = name; *p; ++p) \
             h = (h ^ (uint64_t)(uint8_t)*p) * tt::FNV_PRIME_64; \
@@ -730,7 +730,7 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
     // do-while wrapper enables flag-skip pattern (X-macro inline sequence
     // doesn't permit `continue` since FOREACH_FEATURE expands to a sequence
     // of statements, not a loop body).
-#define X(id, name, version, enabled, fn, note, staleness) \
+#define X(id, name, version, enabled, fn, note, staleness, lookback) \
     do { \
         if (!(enabled)) break; \
         bool _stale_skip = false; \
@@ -812,7 +812,7 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out,
     }
     uint64_t m = *mask;
     int n = 0;
-#define X(id, name, version, enabled, fn, note, staleness) \
+#define X(id, name, version, enabled, fn, note, staleness, lookback) \
     if ((enabled)) { \
         if (m & (1ULL << FEATURE_##id)) { \
             FPN_Binary<F> _fpn = fn(ctx); \

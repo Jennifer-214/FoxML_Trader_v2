@@ -55,6 +55,7 @@
                                                   //  USE_XGBOOST, so an ANSI build compiled clean while
                                                   //  the GUI/suite lanes did not — a transitive include
                                                   //  would leave that asymmetry latent)
+#include "FeatureRegistry.hpp"          // E.1.2.G — NUM_REGISTERED_FEATURES: the feature-count SSoT
 #include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
 // v5.15.5.F.4d.1.B.3 Step 2 (2026-05-24): #include "StampBoundCfgRegistry.hpp" REMOVED — file deleted (FOREACH_STAMP_BOUND_CFG body + STAMP_CFG_AUTOPOPULATE + COUNT macros); cfg_derived::populate_stamp_cfg_from_derived<F> framework call at CfgGateRegistry.hpp supersedes.
@@ -223,12 +224,41 @@ struct MlPredictTimer {
 // identical values for identical input bid/ask streams.
 #define FEAT_SPREAD_BPS          32  // current spread / mid_price × 10000 (basis points)
 #define FEAT_SPREAD_ZSCORE       33  // z-score of current spread vs trailing window
-#define MODEL_NUM_FEATURES       34
+// v5.15.5.F.4d.1.E.1.2.G — DERIVED from the registry, no longer a literal.
+//
+// Was hardcoded `34`: a Class-18 mirror left behind when Features_PackAll +
+// FOREACH_FEATURE became the feature SSoT at v5.8.1b and the registry then
+// grew past 34 rows. The collector based each row at stride 34
+// (BacktestSharded.hpp) while Features_PackAll writes NUM_REGISTERED_FEATURES
+// floats there, so features 34..39 landed in the NEXT row's slot and were
+// overwritten before any reader saw them — REGIME_TREND_STRENGTH,
+// REGIME_VOL_ZSCORE, REGIME_CLASS_ONEHOT and all three FRAC_DIFF_PRICE_*
+// never reached a training matrix. Deriving it closes the class: the stride
+// cannot drift from the registry again.
+//
+// NOT to be confused with the legacy ModelFeatures_Pack below, which stays
+// frozen at 34 BY DESIGN (it pins the equivalence test's legacy range). That
+// freeze is about the frozen reference packer, never about this stride.
+#define MODEL_NUM_FEATURES       ((int)NUM_REGISTERED_FEATURES)
 
 // max features buffer — bumped 32 → 64 to leave headroom for D.3 (Wave 2:
 // spread_bps, spread_zscore) and any further expansion without retouching
 // every fixed-size feature buffer in the codebase.
 #define MODEL_MAX_FEATURES   64
+
+// E.1.2.G — the guard that was actually load-bearing. MODEL_MAX_FEATURES sizes
+// SIX fixed-size feature buffers (StrategyParameters.hpp, MLStrategy.hpp,
+// PortfolioController.hpp x2, BacktestEngine.hpp, BacktestPanels.hpp) while
+// Features_PackAll writes out[FEATURE_##id] unbounded. Before this, the only
+// thing keeping the registry under 64 was an assert in FeatureRegistry.hpp
+// phrased as a BITMAP-width check — so widening the bitmap would have silently
+// unguarded the buffers and made row #65 a stack smash. Pin the real invariant
+// here, where both quantities are visible, and keep it independent of any
+// bitmap-width change.
+static_assert((int)NUM_REGISTERED_FEATURES <= MODEL_MAX_FEATURES,
+    "feature registry exceeds MODEL_MAX_FEATURES: every fixed-size feature buffer "
+    "(and the 1ULL<<idx feature-mask path) overflows. Raise MODEL_MAX_FEATURES and "
+    "audit the mask cohort before adding the row.");
 
 // model format version — increment when FEAT_* indices or count changes.
 // embedded in trained models, checked at load time. old models with wrong
@@ -257,7 +287,16 @@ struct MlPredictTimer {
 //           given identical inputs. Bit-level shifts vs. v5 absorbed by
 //           retraining; v5 stamps refuse to load with a "model trained
 //           with pre-v5.10 IEEE-754 math; retrain required" message.
-#define MODEL_FORMAT_VERSION 6
+// v7 (v5.15.5.F.4d.1.E.1.2.G): MODEL_NUM_FEATURES stopped being a hardcoded
+//           34 and became NUM_REGISTERED_FEATURES (40 at this ship). The
+//           training matrix stride therefore changes, and every v6 model was
+//           trained on 34 columns. Bumped per this constant's own contract
+//           ("increment when FEAT_* indices or count changes") so v6 stamps
+//           fail LOUDLY at load rather than being served a wider matrix —
+//           the pre-existing `num_features > MODEL_NUM_FEATURES` oracle would
+//           NOT have caught it (34 > 40 is false), and expected_num_features
+//           is recorded in the stamp but never compared. Retrain required.
+#define MODEL_FORMAT_VERSION 7
 
 // v5.15.5.F.4d.1.B.3 Step 1.6.7.1-3 — SOFT version bump infrastructure per
 // DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.
@@ -339,46 +378,25 @@ struct FeatureLookback {
 // [END_STRUCT]_[FeatureLookback]
 //======================================================================
 
-// default lookbacks for current features (from RollingStats 128-tick + 512-tick windows)
-// table is append-only — matches FEAT_* ordering for direct indexing
+// v5.15.5.F.4d.1.E.1.2.G — GENERATED from FOREACH_FEATURE, no longer hand-maintained.
+//
+// Was a manual 34-row table against a 40-row registry — a Class-18 mirror whose
+// own comment claimed "append-only — matches FEAT_* ordering for direct indexing"
+// while it had silently fallen 6 rows behind. That mattered well beyond display:
+// FeatureLookback_Max() feeds PurgeGap_Compute (Backtest/ValidationSplit.hpp),
+// which sets the train/validation purge gap, and Fingerprint_Compute hashes this
+// table to "catch feature set changes" — neither could see a feature the mirror
+// had never been told about.
+//
+// Generating it makes all four columns derived: adding a feature now raises the
+// max lookback, widens the purge gap, and moves the fingerprint automatically.
+// Ordering matches FEATURE_<ID> BY CONSTRUCTION (same X-macro walk), so the
+// direct-indexing contract is now structural rather than asserted.
 static const FeatureLookback FEATURE_LOOKBACKS[] = {
-    { FEAT_SHORT_SLOPE,    "short_slope",    128, 1 },  // 128-tick rolling window
-    { FEAT_SHORT_R2,       "short_r2",       128, 1 },
-    { FEAT_SHORT_VARIANCE, "short_variance", 128, 1 },
-    { FEAT_LONG_SLOPE,     "long_slope",     512, 1 },  // 512-tick rolling window
-    { FEAT_LONG_R2,        "long_r2",        512, 1 },
-    { FEAT_LONG_VARIANCE,  "long_variance",  512, 1 },
-    { FEAT_VOL_RATIO,      "vol_ratio",      512, 1 },  // uses both windows
-    { FEAT_ROR_SLOPE,      "ror_slope",      512, 1 },  // ROR regressor lookback
-    { FEAT_VOLUME_SLOPE,   "volume_slope",   128, 1 },
-    { FEAT_VOLUME_DELTA,   "volume_delta",   128, 1 },
-    { FEAT_EMA_SMA_SPREAD, "ema_sma_spread", 512, 1 },  // EMA + SMA comparison
-    { FEAT_VWAP_DEV,       "vwap_dev",       128, 1 },
-    { FEAT_PRICE_STDDEV,   "price_stddev",   128, 1 },
-    { FEAT_PRICE_AVG,      "price_avg",      128, 1 },
-    { FEAT_VOLUME_AVG,     "volume_avg",     128, 1 },
-    { FEAT_EMA_ABOVE_SMA,  "ema_above_sma",  512, 1 },
-    // v4.3 features
-    { FEAT_MID_SLOPE,      "mid_slope",      256, 1 },  // 256-tick rolling window
-    { FEAT_MID_R2,         "mid_r2",         256, 1 },
-    { FEAT_CUMDELTA,       "cumdelta",       1024, 1 },  // rolling buyer-seller agg delta
-    { FEAT_HOUR_SIN,       "hour_sin",       1, 1 },     // pure time-of-day, no lookback
-    { FEAT_HOUR_COS,       "hour_cos",       1, 1 },
-    { FEAT_VOL_REGIME_RAT, "vol_regime_rat", 1024, 1 },  // current vs longer baseline
-    { FEAT_TICK_RATE_Z,    "tick_rate_z",    1024, 1 },
-    { FEAT_DIST_TO_HIGH,   "dist_to_high",   1024, 1 },
-    { FEAT_DIST_TO_LOW,    "dist_to_low",    1024, 1 },
-    // v4.5 Wave 1 features
-    { FEAT_BOOK_IMB_MEAN_SHORT, "book_imb_mean_short", 64,   1 },  // last 64 slow-path samples
-    { FEAT_BOOK_IMB_MEAN_LONG,  "book_imb_mean_long",  1024, 1 },  // BookImbalanceHistory window
-    { FEAT_BOOK_IMB_DRIFT,      "book_imb_drift",      1024, 1 },
-    { FEAT_FLOW_10S,            "flow_10s",            10,   1 },  // ~10s wallclock
-    { FEAT_FLOW_1M,             "flow_1m",             60,   1 },  // ~60s wallclock
-    { FEAT_FLOW_5M,             "flow_5m",             300,  1 },  // ~300s wallclock
-    { FEAT_LARGE_TRADE_Z,       "large_trade_z",       1024, 1 },
-    // v4.6 Wave 2 features
-    { FEAT_SPREAD_BPS,          "spread_bps",          1,    1 },  // current value, no lookback
-    { FEAT_SPREAD_ZSCORE,       "spread_zscore",       1024, 1 },
+#define X(id, name, version, enabled, fn, note, staleness, lookback) \
+    { FEATURE_##id, name, lookback, enabled },
+    FOREACH_FEATURE(X)
+#undef X
 };
 
 static const int FEATURE_LOOKBACK_COUNT = sizeof(FEATURE_LOOKBACKS) / sizeof(FEATURE_LOOKBACKS[0]);
