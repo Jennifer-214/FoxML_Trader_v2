@@ -365,6 +365,8 @@ static inline double Ewma_AccumulateStep(double prev, double decay, double sampl
 //
 // Rule: SUM for flow, AVERAGE for levels (price, realized vol, VWAP legs).
 //======================================================================
+// [END_FUNCTION]_[Ewma_AccumulateStep]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[Ewma_NormalizedStep]
@@ -396,6 +398,8 @@ static inline FPN_Binary<64> Ewma_NormalizedStep(FPN_Binary<64> prev,
 // at 24h that is a day of a feature reading low with no indication it is
 // warming. Callers seed on first push (the FlowState_Push convention) AND owe a
 // min-history gate before serving the row.
+//======================================================================
+// [END_FUNCTION]_[Ewma_NormalizedStep]
 //======================================================================
 
 //======================================================================
