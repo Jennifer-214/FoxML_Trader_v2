@@ -861,10 +861,10 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[4800B]
+// [UPDATED]_[2026-08-30]
+// [SIZE]_[4808B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[75]
+// [CACHE_LINES]_[76]
 // [STRADDLE]_[bandit_weights@32 · bandit_avg_reward@112]
 //======================================================================
 // [END_STRUCT]_[MLSnapshot]
@@ -1430,11 +1430,11 @@ struct TUISnapshot {
     //==================================================================
     // [DERIVED]
     // [ORIGIN]_[AUTO]
-    // [UPDATED]_[2026-08-26]
+    // [UPDATED]_[2026-08-30]
     // [SIZE]_[1216B]
     // [ALIGN]_[64]
     // [CACHE_LINES]_[19]
-    // [STRADDLE]_[sp_breakdown_p99_ns@568 · ensemble_n_updates_per_regime@1008 · thompson_precision_post@1084]
+    // [STRADDLE]_[ensemble_n_updates_per_regime@1008 · thompson_precision_post@1084]
     //==================================================================
     // [END_STRUCT]_[PerNodeSnap]
     //==================================================================

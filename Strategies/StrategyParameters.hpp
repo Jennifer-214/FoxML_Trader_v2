@@ -1015,9 +1015,15 @@ inline void ML_BuildParameters(
     // have feature_mask_train matching the runtime mask — verified at
     // load-time by verify_model_stamp's expected_feature_mask param.
     float features[MODEL_MAX_FEATURES];
-    FeatureComputeCtx<F> ctx{};
-    ctx.signals       = &sig;
-    ctx.short_rolling = rolling;
+    // PARITY-053 (2026-08-30) — current_regime was NEVER set here while the
+    // backtest collector set the real 0..4, so regime_class_onehot trained on the
+    // regime and served a constant 0. `mctx->current_regime_id` is populated at
+    // ControllerEventLoop.hpp:2857 from the SAME source the collector reads
+    // (nodes[slot].regime_state.current_regime). The `mctx ? : 0` shape is the
+    // established house idiom for this field (see :1181, :1561); mctx is non-null
+    // on every production path and null only in unit harnesses.
+    auto ctx = FeatureComputeCtx_Build<F>(
+        &sig, rolling, mctx ? mctx->current_regime_id : 0);
     const uint64_t* eff_mask = (mctx && mctx->feature_mask) ? mctx->feature_mask : nullptr;
     int n = Features_PackAll(&ctx, features, eff_mask);
     // v5.9.0 — NaN/Inf in feature pack → fall through to SimpleDip.

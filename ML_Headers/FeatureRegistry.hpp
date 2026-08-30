@@ -71,13 +71,18 @@ struct FeatureComputeCtx {
     const RollingStats<F, 128>*           short_rolling;
 
     // v5.14.5.B — hysteresed regime classification (REGIME_RANGING /
-    // _TRENDING / _VOLATILE / _TRENDING_DOWN / _MILD_TREND). Populated
-    // at slow-path callers from EventLoopCoreState.regime_state.current_regime
-    // (universalized in v5.14.5.B.0 to fire for ALL cores, not just AUTO).
+    // _TRENDING / _VOLATILE / _TRENDING_DOWN / _MILD_TREND).
     // Read by ML_Compute_RegimeClassOneHot.
     //
-    // Default 0 (REGIME_RANGING) when caller doesn't populate; safe for
-    // legacy/test paths that don't have regime_state in scope.
+    // CORRECTED 2026-08-30 (PARITY-053). This comment previously claimed the
+    // field was "populated at slow-path callers ... for ALL cores" and that a
+    // default 0 was "safe for legacy/test paths". BOTH halves were false, and
+    // being false HERE is what stopped anyone looking: the LIVE sharded serve
+    // seam never populated it, so the default was not a legacy convenience but
+    // a live train-serve divergence on an ENABLED feature.
+    //
+    // There is no longer a "caller doesn't populate" case: construct via
+    // FeatureComputeCtx_Build, where this is a REQUIRED parameter.
     int                                   current_regime;
 
     // v5.14.9.E — TECH_DEBT-015 close (infrastructure-only scaffold).
@@ -132,6 +137,60 @@ struct FeatureComputeCtx {
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[FeatureComputeCtx]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[FeatureComputeCtx_Build]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [SLOW_PATH] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONLY sanctioned FeatureComputeCtx construction — every field the compute leaves read is a REQUIRED parameter, so a caller cannot half-populate the bundle and a new field cannot be silently defaulted at one site]
+// [REFERENCE]_[PARITY]_[PARITY-053]
+// [REFERENCE]_[DESIGN_SPEC]_[[train-serve-execution-layer-parity] [structural-enforcement-when-memory-insufficient]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline FeatureComputeCtx<F> FeatureComputeCtx_Build(
+        const RegimeSignals<F>*     signals,
+        const RollingStats<F, 128>* short_rolling,
+        int                         current_regime) {
+    FeatureComputeCtx<F> ctx{};
+    ctx.signals        = signals;
+    ctx.short_rolling  = short_rolling;
+    ctx.current_regime = current_regime;
+    // The staleness trio (now_us / feature_last_update_us /
+    // stale_feature_events_total) stays at its inert defaults DELIBERATELY:
+    // it is a scaffold with zero writers tree-wide, and the gate exists only
+    // in the no-mask Features_PackAll overload while live serve uses the mask
+    // one. Wiring it here would fire at TRAIN and stay silent at SERVE.
+    return ctx;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// WHY A BUILDER (PARITY-053, found by the 2026-08-30 re-gate). The five
+// construction sites populated `signals` + `short_rolling` uniformly, but only
+// THREE of five set `current_regime` — and the missing one was
+// `StrategyParameters.hpp`, the LIVE sharded serve seam. Because
+// `FeatureComputeCtx<F> ctx{}` value-initializes, the field read 0 there while
+// the backtest collector set the real 0..4, so `regime_class_onehot` TRAINED on
+// the regime and SERVED a constant. Nothing crashed and no test failed.
+//
+// It was invisible for a second reason worth recording: the feature had never
+// reached a training matrix at all until the E.1.2.G pre-ship fixed the stride-34
+// clobber, so the divergence was inert until the moment it became live.
+//
+// The class, not the instance: enumerating the SITES (M9) is what the amendment
+// did, and it still missed a per-FIELD gap. Only making every read field a
+// REQUIRED parameter removes the failure mode — a new ctx field becomes a
+// compile error at every site instead of a silent default at some. That is the
+// M7 escalation (codified memory proved insufficient at this exact surface).
+// `tools/check_feature_ctx_build.py` keeps bare construction from returning.
+//======================================================================
+// [END_FUNCTION]_[FeatureComputeCtx_Build]
 //======================================================================
 
 //======================================================================

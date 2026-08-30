@@ -170,9 +170,11 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     if (!state->model_ready) return conds;
 
     // pack features from regime signals + rolling stats (v5.8.1b: registry-driven)
-    FeatureComputeCtx<F> ctx{};
-    ctx.signals       = signals;
-    ctx.short_rolling = rolling;
+    // No regime is in scope in this signature and this entry point has NO
+    // callers tree-wide (verified 2026-08-30). REGIME_RANGING is passed
+    // explicitly rather than inherited from a value-init default, so the choice
+    // is visible; if this path is ever revived it must thread a real regime.
+    auto ctx = FeatureComputeCtx_Build<F>(signals, rolling, REGIME_RANGING);
     int n = Features_PackAll(&ctx, state->feature_buf);
     // v5.9.0 — NaN/Inf in feature pack → no entry (Features_PackAll returns
     // -1 sentinel; never pass garbage to XGBoost, never silently entry).

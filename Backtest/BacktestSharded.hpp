@@ -508,10 +508,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 // read from canonical sample core for ctx.current_regime —
                 // bytewise-identical to pre-.B.4 fc_ctx.regime_state semantic
                 // (single regime per feature collector tick).
-                FeatureComputeCtx<BACKTEST_FP> ctx{};
-                ctx.signals       = &sig;
-                ctx.short_rolling = d->rolling;
-                ctx.current_regime = d->state->nodes[tt::NodeIdx{BACKTEST_REGIME_SAMPLE_CORE}].regime_state.current_regime;
+                auto ctx = FeatureComputeCtx_Build<BACKTEST_FP>(
+                    &sig, d->rolling,
+                    d->state->nodes[tt::NodeIdx{BACKTEST_REGIME_SAMPLE_CORE}].regime_state.current_regime);
                 int n = Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
                 if (n < 0) {
