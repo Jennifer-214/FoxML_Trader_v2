@@ -166,6 +166,15 @@ struct Command {
 //======================================================================
 
 constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
+// P4-pre-3b: the per-node result ring depth. PARTITIONS the total above rather than
+// replicating it — see the sizing rationale at the `result_rings` declaration.
+constexpr size_t OMS_RESULT_RING_PER_NODE = OMS_RESULT_QUEUE_SIZE / MAX_EXECUTION_NODES;
+static_assert(OMS_RESULT_RING_PER_NODE * MAX_EXECUTION_NODES == OMS_RESULT_QUEUE_SIZE,
+              "per-node result depth must PARTITION the old total exactly (capacity conserved, "
+              "struct does not grow) — a non-divisor silently changes the OMS stack footprint");
+static_assert(OMS_RESULT_RING_PER_NODE >= 4,
+              "per-node result depth floor: a node owns <=2 slots but bursts (partial ladders + "
+              "a disposition re-submit) must not wedge against its own ring");
 
 //======================================================================
 // [STRUCT]_[SubmitCommand]
@@ -374,19 +383,29 @@ struct OrderManagerState {
     uint32_t _pad1;
     uint64_t next_order_id;      // monotonic id counter; 0 reserved for "no id"
 
-    // Result queue: adapter worker thread (single producer with
-    // worker_count==1) pushes CMD_FILL_RESULT here when an order
-    // completes. Drainer thread (single consumer) drains it from
-    // OrderManager_Tick. SPSC contract relies on worker_count==1.
+    // Result rings (P4-pre-3b): PER-NODE CMD_FILL_RESULT transport. Producers (the adapter
+    // worker thread; the paper-synth inside Submit) route by the id's NODE lane — pure
+    // arithmetic, no `orders[]` read (P4-pre-3a). Consumer today = the central drainer, which
+    // drains every ring (1 consumer per ring, so the SPSC contract holds); at the flip each
+    // node drains ITS OWN ring and the cross-node drain disappears.
+    //
+    // CAPACITY IS PARTITIONED, NOT REPLICATED: per-node depth x MAX_EXECUTION_NODES ==
+    // the old single-ring depth, so OrderManagerState does not grow by the ring family.
+    // Replicating the 256-deep ring per node would have added 256B x 256 x 16 = 1MB for THIS
+    // family alone, onto a struct that is stack-local in production and in ~34 suite fixtures
+    // against an 8MB stack (the hazard the oe_rings depth comment records). Per-node worst
+    // case that justifies 16: a node owns <=2 portfolio slots, each with <=1 in-flight order
+    // at a time, and the drainer empties every ring each cycle — 16 is ~8x that.
     // v5.15.5.C.1 — alignas(64) at enclosing-struct level per NC2
     // (spsc-ring-embedded-in-hot-struct-cluster-discipline.md); ensures
     // preceding field's tail doesn't share line with ring head.
-    alignas(64) SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> result_queue;
+    alignas(64) tt::NodeArray<SPSCRing<Command, OMS_RESULT_RING_PER_NODE>,
+                              MAX_EXECUTION_NODES> result_rings;
 
     // WS fill queue (phase 04): user data websocket thread is the sole
     // producer, drainer is the sole consumer. Separate ring preserves
     // the SPSC contract — no MPSC needed. OrderManager_Tick drains
-    // this after the REST result_queue.
+    // this after the REST result rings.
     alignas(64) SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> ws_result_queue;
 
     // Reconcile queue (phase 05): reconciler thread is the sole producer,
@@ -910,9 +929,9 @@ struct OrderManagerState {
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-08-29]
 //----------------------------------------------------------------------
-// [SIZE]_[454144B]
+// [SIZE]_[456064B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[7096]
+// [CACHE_LINES]_[7126]
 // [STRADDLE]_[unverified: orders last_exit_fill_price last_exit_fee last_trade_net last_trade_notional]
 //======================================================================
 // [END_STRUCT]_[OrderManagerState]
@@ -1084,12 +1103,20 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
 // ════════════════════════════════════════════════════════════════════════
 // [ASSERT]_[LAYOUT_LOCK]_[alignof(OrderManagerState<64>) >= 64]
 static_assert(alignof(OrderManagerState<64>) >= 64,
-              "OrderManagerState MUST be 64-byte aligned (cluster anchors + alignas(64) on result_queue).");
+              "OrderManagerState MUST be 64-byte aligned (cluster anchors + alignas(64) on result_rings).");
 // HOT cluster — first SPSCRing anchor (preceding fields = orders[] + scalars).
-// [ASSERT]_[LAYOUT_LOCK]_[offsetof(result_queue) % 64 == 0]
-static_assert(offsetof(OrderManagerState<64>, result_queue) % 64 == 0,
-              "result_queue (HOT cluster ring 1) MUST start at a cache-line boundary. "
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(result_rings) % 64 == 0]
+static_assert(offsetof(OrderManagerState<64>, result_rings) % 64 == 0,
+              "result_rings (HOT cluster ring 1) MUST start at a cache-line boundary. "
               "See spsc-ring-embedded-in-hot-struct-cluster-discipline.md.");
+// P4-pre-3b: the partition must not have grown the struct — each SPSCRing carries its own
+// producer/consumer lines, so 16 rings cost 16 head/tail line-pairs the single ring did not.
+// Pinned so a depth change that quietly re-inflates the family is a compile error, not a
+// discovery made when a stack-local fixture segfaults.
+static_assert(sizeof(tt::NodeArray<SPSCRing<Command, OMS_RESULT_RING_PER_NODE>, MAX_EXECUTION_NODES>)
+              <= sizeof(SPSCRing<Command, OMS_RESULT_QUEUE_SIZE>) + 64 * 2 * MAX_EXECUTION_NODES,
+              "per-node result rings must stay within the old single-ring payload + per-ring "
+              "head/tail line overhead (capacity is PARTITIONED, never replicated)");
 // WARM cluster — Portfolio anchor (per-fill bookkeeping cluster start).
 // [ASSERT]_[LAYOUT_LOCK]_[offsetof(portfolio) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, portfolio) % 64 == 0,
@@ -1127,6 +1154,59 @@ static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
               "and ks_min_balance. Re-check _pad_osf[7] explicit pad.");
 
 //======================================================================
+// [FUNCTION]_[OMS_ResultPush]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P4-pre-3b producer side: route a CMD_FILL_RESULT onto the OWNING node's result ring, addressed by the id's NODE lane — pure arithmetic, zero reads of leaf-owned state. Returns false on a full ring so the caller keeps its existing loud-drop behavior]
+// [REFERENCE]_[DECISION]_[D-448]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline bool OMS_ResultPush(OrderManagerState<F>* oms, const Command& cmd) {
+    // The lane is stamped at Submit (P4-pre-3a). Deriving the node any other way here —
+    // decoding the slot and reading orders[slot].portfolio_slot — would be a cross-thread
+    // read at the flip AND slot-reuse-racy (the slot can belong to another node by the time
+    // the venue's report arrives).
+    const tt::NodeIdx nn{(int16_t)OMS_OrderIdNode(cmd.order_id)};
+    return SPSCRing_TryPush(&oms->result_rings[nn], cmd);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_ResultPush]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OMS_ResultPop]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [SUPPORTIVE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[P4-pre-3b consumer side, INTERIM: pop the next CMD_FILL_RESULT under the central topology by walking the per-node rings in node order (FIFO within a node). One consumer across all rings keeps every ring SPSC. RETIRES at the flip, when each node drains only its own ring]
+// [REFERENCE]_[DECISION]_[D-448]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline bool OMS_ResultPop(OrderManagerState<F>* oms, Command* out) {
+    // ORDER NOTE (deliberate, measured): the old single ring drained in PUSH order across all
+    // nodes; this drains NODE-MAJOR. Per-node FIFO — the only order a node's own accounting
+    // depends on — is preserved exactly. Cross-node interleaving changes, which is the same
+    // reordering the flip makes permanent and PARITY-052 already pins as schedule-defined
+    // (totals are order-invariant; peaks and emit ids are not).
+    for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
+        if (SPSCRing_TryPop(&oms->result_rings[tt::NodeIdx{(int16_t)n}], out)) return true;
+    }
+    return false;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_ResultPop]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[OrderManager_FillResultCallback]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CONCURRENCY] [LIVE_TRADING]]
@@ -1144,10 +1224,10 @@ static void OrderManager_FillResultCallback(void* user_ctx,
     cmd.type     = (uint8_t)CMD_FILL_RESULT;
     cmd.order_id = client_id;
     cmd.result   = *result;
-    if (!SPSCRing_TryPush(&oms->result_queue, cmd)) {
+    if (!OMS_ResultPush(oms, cmd)) {
         std::fprintf(stderr,
-                     "[OMS] result queue full, dropping fill result for order %llu\n",
-                     (unsigned long long)client_id);
+                     "[OMS] result ring full for node %d, dropping fill result for order %llu\n",
+                     OMS_OrderIdNode(client_id), (unsigned long long)client_id);
     }
 }
 //======================================================================
@@ -1393,10 +1473,10 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
         cmd.result.order_complete = 1;
         std::strncpy(cmd.result.exchange_id, "PAPER",
                      sizeof(cmd.result.exchange_id) - 1);
-        if (!SPSCRing_TryPush(&oms->result_queue, cmd)) {
+        if (!OMS_ResultPush(oms, cmd)) {
             std::fprintf(stderr,
-                         "[OMS] result queue full on paper submit for order %llu\n",
-                         (unsigned long long)id);
+                         "[OMS] result ring full for node %d on paper submit for order %llu\n",
+                         OMS_OrderIdNode(id), (unsigned long long)id);
         }
         return id;
     }
@@ -2516,7 +2596,7 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
     Command cmd;
 
     // 1. REST fills (adapter worker thread)
-    while (SPSCRing_TryPop(&oms->result_queue, &cmd)) {
+    while (OMS_ResultPop(oms, &cmd)) {   // P4-pre-3b: per-node rings, node-major interim drain
         if (cmd.type == (uint8_t)CMD_FILL_RESULT)
             OrderManager_ProcessFillCommand(oms, cmd);
     }

@@ -821,7 +821,12 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
             }                                                                                        \
         }                                                                                            \
         /* Layer 3 — SPSC ring inits */                                                              \
-        SPSCRing_Init(&(_oms_target)->result_queue);                                                 \
+        /* P4-pre-3b: result transport is per-node now — init every ring (the single-ring       */ \
+        /* Init this replaces was explicit here, so the partition stays explicit too rather    */ \
+        /* than leaning on the D-443 self-init the funnel rings rely on).                      */ \
+        for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                       \
+            SPSCRing_Init(&(_oms_target)->result_rings[tt::NodeIdx{(int16_t)_i}]);               \
+        }                                                                                        \
         SPSCRing_Init(&(_oms_target)->ws_result_queue);                                              \
         SPSCRing_Init(&(_oms_target)->reconcile_queue);                                              \
         for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                           \

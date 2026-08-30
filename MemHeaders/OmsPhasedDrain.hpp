@@ -282,8 +282,8 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
     OmsDrainBuckets_Reset(b);
     Command cmd;
 
-    // 1. REST result_queue (adapter worker thread) — branchless dispatch via fn pointer table.
-    while (SPSCRing_TryPop(&oms->result_queue, &cmd)) {
+    // 1. REST result RINGS, per-node (adapter worker thread) — branchless dispatch via fn pointer table.
+    while (tt::OMS_ResultPop(oms, &cmd)) {   // P4-pre-3b: per-node rings, node-major interim drain
         g_rest_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 
