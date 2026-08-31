@@ -58,6 +58,7 @@
 #include <cstddef>   // v5.15.5.D.A — offsetof for layout-lock static_asserts
 #include <cstdint>
 #include <cstring>
+#include <type_traits>  // E.1.2.G — D-465's "the wrong call does not compile" is asserted, not claimed
 
 //======================================================================
 // [STRUCT]_[BookImbalanceHistory]
@@ -258,6 +259,57 @@ static inline FPN_Binary<F> BookImbHistory_MeanShort(const BookImbalanceHistory<
 //======================================================================
 
 //======================================================================
+// [STRUCT]_[EwmaSum] / [STRUCT]_[EwmaAvg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the two exponential-decay recurrences as distinct TYPES (D-465) — the state carries its own kind, so calling the wrong step function does not compile]
+// [REFERENCE]_[DESIGN_SPEC]_[[canonical-sister-extension-discipline]]
+//======================================================================
+// [CODE]
+//======================================================================
+// D-465. There are TWO decay recurrences here and they are NOT interchangeable
+// (the long-form why is in the [COMMENT] block under Ewma_AccumulateStep below):
+//
+//   SUM      e <- e*d + x          flow quantities; no fixed point in x
+//   AVERAGE  e <- e*d + (1-d)*x    levels; fixed point AT x, so half-life-stable
+//
+// Until now the rule "SUM for flow, AVERAGE for levels" was a COMMENT, and a
+// comment protects only the instance in front of it. The ladder adds ten
+// accumulators — 2 SUM, 8 AVERAGE — and a mis-assignment is silent: at a 2h
+// half-life a price SUM settles near 432000*price and the feature ships as a
+// TICK-RATE proxy wearing a momentum name. Nothing crashes; the model just
+// learns noise.
+//
+// Making the STATE carry the kind turns that from a convention into a type
+// error. `EwmaSum_Step(&price_ema, ...)` does not compile when `price_ema` is
+// an EwmaAvg. Chosen over D-458's FOREACH_LONG_EWMA registry because it closes
+// the same class with no MetaRegistry row (H15), no PARENT row (H19), no DOMAIN
+// token, and no CI surface at all — and because a per-row `kind` COLUMN would
+// have left the VWAP pair legal-but-wrong: both legs work under either
+// recurrence (the factor cancels in the ratio) but a MIX inflates VWAP ~432000x,
+// which a column cannot forbid and a shared type makes unrepresentable.
+//
+// One field each, deliberately: EwmaAvg needs no companion weight accumulator
+// because Ewma_NormalizedStep already carries the (1-d) weight in the recurrence
+// itself. Had it needed one, 8 AVERAGE fields x 32 B would have pushed FlowState
+// past 256 B and changed the growth's cache-line math.
+struct EwmaSum { FPN_Binary<64> v; };   // decaying SUM     — flow
+struct EwmaAvg { FPN_Binary<64> v; };   // decaying AVERAGE — levels
+
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(EwmaSum) == 16 && sizeof(EwmaAvg) == 16]
+static_assert(sizeof(EwmaSum) == 16 && sizeof(EwmaAvg) == 16,
+    "Ewma* wrappers MUST stay single-FPN_Binary<64> sized — FlowState's 256 B budget "
+    "and its cache-line math assume 16 B per accumulator.");
+static_assert(alignof(EwmaSum) == 16 && alignof(EwmaAvg) == 16,
+    "Ewma* alignment feeds FlowState's field packing; a change moves every offset after it.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[EwmaSum]
+//======================================================================
+
+//======================================================================
 // [STRUCT]_[FlowState]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [DATA_ORIENTED_DESIGN] [DETERMINISM]]
@@ -407,6 +459,75 @@ static inline FPN_Binary<64> Ewma_NormalizedStep(FPN_Binary<64> prev,
 // min-history gate before serving the row.
 //======================================================================
 // [END_FUNCTION]_[Ewma_NormalizedStep]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EwmaSum_Step] / [FUNCTION]_[EwmaAvg_Step] (+ their Seed pair)
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the typed steps (D-465) — each accepts ONLY its own state type, so a wrong-form call is a compile error rather than a silently wrong feature]
+// [REFERENCE]_[INVARIANT]_[[H4] [H11]]
+//======================================================================
+// [CODE]
+//======================================================================
+// NAMED AFTER THE STATE, not after the recurrence — deliberately, and this is the
+// whole point of the pair.
+//
+// The 2 new SUM rows are FPN_Binary per D-455, but Ewma_AccumulateStep above is
+// `double` (it serves the three LEGACY ewma_10s/1m/5m fields, which D-455
+// deliberately leaves as double). So an FPN accumulate step is genuinely needed.
+// Adding it as `Ewma_AccumulateStep(FPN_Binary<64>, ...)` would create an OVERLOAD
+// PAIR on the accumulate name — which is exactly the reach-for-it-by-imitation
+// affordance the [COMMENT] block above was written to kill, re-created by the fix
+// for it. Overload resolution would silently pick a form based on argument type
+// rather than on the caller's intent.
+//
+// Keying the name to the STATE instead means the call site reads as an assertion
+// about what kind of accumulator this is, and the compiler checks that assertion.
+static inline void EwmaSum_Step(EwmaSum *s, FPN_Binary<64> decay, FPN_Binary<64> sample) {
+    s->v = FPN_Add(FPN_Mul(s->v, decay), sample);            // e <- e*d + x
+}
+static inline void EwmaAvg_Step(EwmaAvg *s, FPN_Binary<64> decay, FPN_Binary<64> sample) {
+    s->v = Ewma_NormalizedStep(s->v, decay, sample);         // e <- e*d + (1-d)*x
+}
+
+// Seeding is the caller's job (see Ewma_NormalizedStep's [COMMENT]) and matters
+// most for the AVERAGE form: from zero it climbs toward the sample over ~one
+// half-life, so a 24h row would read low for a day with nothing indicating it is
+// still warming. Named rather than left as a bare `s->v = x` so the first-push arm
+// is greppable, and so the seed cannot be mistaken for a step.
+//
+// The min-history gate (D-467) is the OTHER half of that contract and is not
+// optional: seeding fixes the starting VALUE, it does not make the row meaningful
+// before enough history exists.
+static inline void EwmaSum_Seed(EwmaSum *s, FPN_Binary<64> sample) { s->v = sample; }
+static inline void EwmaAvg_Seed(EwmaAvg *s, FPN_Binary<64> sample) { s->v = sample; }
+
+// ── D-465's claim, ASSERTED rather than stated ──────────────────────────────
+// The decision's whole value is "a wrong-form call does not compile". A runtime
+// char cannot demonstrate that — code which fails to compile cannot be executed
+// by a test. These four static_asserts ARE the proof, and they re-run on every
+// build rather than once at review time.
+//
+// The positive pair is what keeps the negative pair non-vacuous: without it, a
+// typo that broke BOTH signatures would still satisfy the "must not accept"
+// assertions and look like success. Same shape as the non-vacuity controls on the
+// SHALT and arch-drift chars this ship already carries.
+static_assert(std::is_invocable_v<decltype(EwmaSum_Step) &, EwmaSum *, FPN_Binary<64>, FPN_Binary<64>>,
+    "EwmaSum_Step must accept its OWN state (non-vacuity control for the assertions below).");
+static_assert(std::is_invocable_v<decltype(EwmaAvg_Step) &, EwmaAvg *, FPN_Binary<64>, FPN_Binary<64>>,
+    "EwmaAvg_Step must accept its OWN state (non-vacuity control for the assertions below).");
+static_assert(!std::is_invocable_v<decltype(EwmaSum_Step) &, EwmaAvg *, FPN_Binary<64>, FPN_Binary<64>>,
+    "D-465 VIOLATED: EwmaSum_Step accepts an EwmaAvg* — the SUM recurrence on a LEVEL is the "
+    "432000x tick-rate-proxy bug the type split exists to make unrepresentable.");
+static_assert(!std::is_invocable_v<decltype(EwmaAvg_Step) &, EwmaSum *, FPN_Binary<64>, FPN_Binary<64>>,
+    "D-465 VIOLATED: EwmaAvg_Step accepts an EwmaSum* — a flow quantity normalized as a level "
+    "silently loses the accumulated total that IS the signal.");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EwmaSum_Step]
 //======================================================================
 
 //======================================================================
