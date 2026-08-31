@@ -36,7 +36,6 @@ struct StrategyQualityAggregate {
     uint32_t wins    = 0;
     uint32_t losses  = 0;
     double   net_pnl_sum   = 0.0;
-    double   fees_sum      = 0.0;
     double   notional_sum  = 0.0;  // for bps computation
     // Per-regime entry counts (indexed by regime id 0..NUM_REGIMES-1)
     uint32_t entries_by_regime[5] = {0,0,0,0,0};
@@ -305,13 +304,17 @@ inline void StrategyQuality_Refresh(StrategyQualityState* state,
             int was_win = 0;
             if (sq_parse_kv(line, "was_win", buf, sizeof(buf))) was_win = atoi(buf);
             if (was_win) a.wins++; else a.losses++;
-            double net_pnl = 0.0;
-            if (sq_parse_kv(line, "net_pnl", buf, sizeof(buf))) {
-                net_pnl = strtod(buf, nullptr);
-                a.net_pnl_sum += net_pnl;
-            }
-            if (sq_parse_kv(line, "total_fees", buf, sizeof(buf))) {
-                a.fees_sum += strtod(buf, nullptr);
+            // v5.15.5.F.4d.1.E.1.2.G — the writer renamed this at ff983ba
+            // (2026-08-28, the P3-d-ii leg-math rework) and the reader was never
+            // updated, so Net $ and Net bps rendered +0.00 for 21 commits while
+            // looking like measurements. `trade_net` is the WHOLE-TRADE net, i.e.
+            // already fee-inclusive, which is why the Fees column that used to sit
+            // beside it is gone rather than renamed: ff983ba deliberately moved the
+            // per-leg fee detail to the trade-log CSV rows (see the emit comment at
+            // ControllerEventLoop.hpp:1897), so this panel has no source for it and
+            // must not imply one.
+            if (sq_parse_kv(line, "trade_net", buf, sizeof(buf))) {
+                a.net_pnl_sum += strtod(buf, nullptr);
             }
             // Track per-regime exit pnl using regime captured at entry —
             // not perfect (regime may change between E and X), but a
@@ -367,13 +370,15 @@ inline void GUI_Panel_StrategyQuality(StrategyQualityState* state,
     ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV |
                           ImGuiTableFlags_RowBg |
                           ImGuiTableFlags_SizingStretchProp;
-    if (ImGui::BeginTable("##sq", 7, tf)) {
+    if (ImGui::BeginTable("##sq", 6, tf)) {
         ImGui::TableSetupColumn("Strat",   ImGuiTableColumnFlags_WidthFixed, 50);
-        ImGui::TableSetupColumn("Trades",  ImGuiTableColumnFlags_WidthFixed, 55);
+        // "Entries/Exits", not "Trades": the cell prints `entries/exits`, so a
+        // window holding exits but no entries read as "0 of 2 trades" under the
+        // old header when it actually meant "0 entries, 2 exits" (operator-reported).
+        ImGui::TableSetupColumn("Ent/Exit", ImGuiTableColumnFlags_WidthFixed, 62);
         ImGui::TableSetupColumn("W",       ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("L",       ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("Net $",   ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("Fees $",  ImGuiTableColumnFlags_WidthFixed, 65);
         ImGui::TableSetupColumn("Net bps", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (int i = 0; i < NUM_STRATEGIES; ++i) {
@@ -391,8 +396,6 @@ inline void GUI_Panel_StrategyQuality(StrategyQualityState* state,
             ImGui::TableNextColumn();
             auto pnl_col = a.net_pnl_sum >= 0 ? FoxmlColors::green : FoxmlColors::red;
             ImGui::TextColored(pnl_col, "%+.2f", a.net_pnl_sum);
-            ImGui::TableNextColumn();
-            ImGui::Text("%.2f", a.fees_sum);
             ImGui::TableNextColumn();
             double bps = (a.notional_sum > 0.0)
                 ? (a.net_pnl_sum / a.notional_sum) * 10000.0 : 0.0;
