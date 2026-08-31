@@ -600,6 +600,22 @@ static inline void FlowState_Init(FlowState *s) {
     s->ewma_1m  = 0.0;
     s->ewma_5m  = 0.0;
     s->last_us  = 0;
+
+    // E.1.2.G — the ladder accumulators. NOT optional: `_padding[48] = {}` gives
+    // FlowState a default member initializer, so the implicit default constructor
+    // initializes THE PADDING AND NOTHING ELSE. Production is safe either way
+    // (NodeCtxInitRegistry's placement-new with `()` value-initializes the whole
+    // object), but a stack-declared `FlowState f; FlowState_Init(&f);` — which is
+    // exactly what the chars do — would otherwise read indeterminate accumulators.
+    // Seeding on first push is a SEPARATE contract (see Ewma_NormalizedStep's
+    // comment); this is the zero floor beneath it.
+    const FPN_Binary<64> z = FPN_Zero<64>();
+    s->flow_30m.v    = z;  s->flow_2h.v     = z;
+    s->ret_ema_30m.v = z;  s->ret_ema_2h.v  = z;
+    s->ret_ema_8h.v  = z;  s->ret_ema_24h.v = z;
+    s->rvol_1h.v     = z;  s->rvol_8h.v     = z;
+    s->vwap_pv_24h.v = z;  s->vwap_v_24h.v  = z;
+    s->prev_price    = z;
 }
 
 // v5.10.0b.2.5.C: decay computation goes through FPN_Exp (bytewise-
@@ -657,6 +673,170 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[FlowState_Push]
+//======================================================================
+
+//======================================================================
+// [STRUCT]_[BucketRingState] (+ [FUNCTION]_[BucketRing_Init] / [FUNCTION]_[BucketRing_Push])
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [DATA_ORIENTED_DESIGN] [BINARY_FP] [DETERMINISM]]
+// [SCOPE]_[NODE]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[288 five-minute buckets covering 24h — SoA arrays with a per-slot 1-BASED ordinal for validity; serves both the 24h extrema rows and the bar-frac-diff rows]
+// [REFERENCE]_[INVARIANT]_[[H6] [H11] [H12] [H14]]
+//======================================================================
+// [CODE]
+//======================================================================
+static constexpr uint64_t BUCKET_US    = 300'000'000;   // 5 minutes
+static constexpr int      BUCKET_SLOTS = 288;           // 288 x 5min = 24h exactly
+
+// ── SoA, NOT AoS — and the plan's stated reason for it was WRONG ────────────
+// (A)(7) carried "same byte size" from the re-gate's dod pass. Measured at the
+// ADOPTED design (i.e. with the ordinal array present), SoA is 3,456 B SMALLER:
+//
+//   AoS  struct{FPN close,min,max; uint32 stamp;} e[288]   18,432 B
+//   SoA  three FPN[288] + one uint32[288]                  14,976 B   (-18.75%)
+//
+// The "same size" figure was true for the PRE-ORDINAL three-array shape (48 B per
+// element, a multiple of alignof(FPN)=16, so AoS == SoA). Adding the 4-byte stamp
+// pushes the AoS element to 52 B, which alignof(FPN)=16 rounds up to 64 — 288
+// cache lines carrying 3,456 B of pure padding. SoA wins by MORE than the
+// document claims, and the document's evidence is struck rather than repeated.
+//
+// Those two figures are the ARRAY portion only, which is the right comparison for
+// the layout choice. The STRUCT is larger, and it is worth recording how that was
+// established: the first draft of this comment claimed 14,976 was also the struct
+// size and that it therefore needed no H12 padding. Wrong — that arithmetic forgot
+// cur_ordinal and last_us. MEASURED via a -fsyntax-only Reveal<N> probe:
+//
+//   sizeof(BucketRingState)                 15,040 B  (235 cache lines)
+//   offsetof(BucketRingState, slot_bucket)  13,824 B  (64-aligned, as designed)
+//
+// The trailing padding was hand-computed TWICE and wrong BOTH times before being
+// measured — 52 B, then 48 B by a corrected sum — which is the entire argument for
+// the Reveal<N> probe over arithmetic. The compiler's offsets:
+//
+//   close/min/max + slot_bucket end   14,976
+//   cur_ordinal                       14,976  (4 B)
+//   last_us                           14,984  (8-aligned, so a 4 B gap precedes it)
+//   _padding                          14,992  -> [48] lands sizeof exactly on 15,040
+//
+// Made EXPLICIT per H12 rather than left implicit. If a field moves, take the new
+// number FROM THE PROBE; do not re-do the sum.
+//
+// Consumers are disjoint, which is the DOD argument independent of size: the
+// extrema rows walk min[] and max[]; the frac-diff rows walk close[] only. AoS
+// would drag all three plus the stamp through cache for every walk.
+struct alignas(64) BucketRingState {
+    FPN_Binary<64> close[BUCKET_SLOTS];   // bar close  — frac_diff_bars_* read this alone
+    FPN_Binary<64> min[BUCKET_SLOTS];     // bar low    — dist_to_low_24h / range_pos_24h
+    FPN_Binary<64> max[BUCKET_SLOTS];     // bar high   — dist_to_high_24h / range_pos_24h
+
+    // Validity carrier. 1-BASED: a slot stores `ordinal + 1`, so 0 unambiguously
+    // means NEVER WRITTEN and the struct is correct under plain zero-init rather
+    // than only after Init has run. That distinction is the whole point on this
+    // ship: the cheaper alternative (seed every slot to 0x80000000 in Init and
+    // keep a single `age < 288` term) is one instruction leaner but is correct
+    // ONLY IF Init ran, and "a not-valid state presenting as valid" is precisely
+    // the failure family this ship exists to close.
+    //
+    // The naive 0-based form is a live bug, not a theoretical one: with
+    // `age = cur - stamp[i]` and stamp 0, a SMALL cur (any replay or test path
+    // whose timestamps start near zero) makes age small, so every unwritten slot
+    // reads VALID and feeds zeros into the 24h extrema as if measured. The suite
+    // builds ticks at timestamp 0/1/2, so the char meant to prove this design is
+    // exactly where that would have bitten.
+    uint32_t slot_bucket[BUCKET_SLOTS];
+
+    uint32_t cur_ordinal;    // bucket index of the write cursor (0-based, absolute)
+    uint64_t last_us;        // last accepted timestamp (0 = no prior) — see the guard in Push
+
+    // H12 explicit padding. `= {}` so a stack-declared ring has determinate bytes
+    // even though production value-initializes the whole enclosing NodeSlowState.
+    uint8_t _padding[48] = {};
+};
+
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(BucketRingState) == 15040]
+static_assert(sizeof(BucketRingState) == 15040,
+    "BucketRingState layout moved — take the new number from the compiler (a -fsyntax-only "
+    "`template<unsigned long N> struct Reveal;` probe prints it), then fix _padding[N] from THAT. "
+    "check_struct_size_budget.py can also measure this one: unlike NodeSlowState it has no "
+    "link-heavy header, so add a manifest row rather than hand-computing (TECH_DEBT-309).");
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(slot_bucket) == 13824]
+static_assert(offsetof(BucketRingState, slot_bucket) == 13824,
+    "The ordinal array must stay 64-ALIGNED at the end of the three FPN arrays — it is walked "
+    "alongside min[]/max[] in the validity reduction, and unaligning it re-introduces the "
+    "cache-line straddle the SoA layout was chosen to avoid.");
+static_assert(alignof(BucketRingState) == 64,
+    "BucketRingState MUST stay cache-line aligned (H6).");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[BucketRingState]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BucketRing_Init] / [FUNCTION]_[BucketRing_Push]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[O(1) push into the timestamp-derived slot; a bucket ROLL re-seeds the slot, and a non-advancing timestamp folds into the current bar rather than corrupting a stale one]
+// [REFERENCE]_[INVARIANT]_[[H7] [H11] [H20]]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void BucketRing_Init(BucketRingState *r) {
+    const FPN_Binary<64> z = FPN_Zero<64>();
+    for (int i = 0; i < BUCKET_SLOTS; i++) {
+        r->close[i] = z;
+        r->min[i]   = z;
+        r->max[i]   = z;
+        r->slot_bucket[i] = 0u;      // 0 == never written (the 1-based convention)
+    }
+    r->cur_ordinal = 0u;
+    r->last_us     = 0u;
+}
+
+// Slot derives from the DATA TIMESTAMP, not from a wrap counter, so the write and
+// read paths agree by construction rather than by keeping two update paths in step
+// — the M5 property this ship needs. Measured at -O2 with both operands constexpr,
+// `(t / 300000000) % 288` compiles to mulq;shrq;mulq;shrq — ZERO divq — so the
+// division worry raised against this form is empirically void.
+static inline void BucketRing_Push(BucketRingState *r, uint64_t timestamp_us,
+                                   FPN_Binary<64> price) {
+    // OUT-OF-ORDER GUARD. FlowState_Push has had this arm since v5.10 and the ring
+    // spec did not, which the pre-coding refute caught. Without it a tick more than
+    // 288 buckets stale computes a colliding slot (idx = ordinal % 288), overwrites
+    // a LIVE recent bar, and re-stamps it with the OLD ordinal — silently destroying
+    // current data. Fold a non-advancing timestamp into the current bar instead:
+    // that is what its sibling does, and it degrades rather than corrupts.
+    if (timestamp_us <= r->last_us) {
+        const int cidx = (int)(r->cur_ordinal % (uint32_t)BUCKET_SLOTS);
+        const uint64_t seeded = -(uint64_t)(r->slot_bucket[cidx] != 0u);
+        r->close[cidx] = price;
+        r->min[cidx]   = FPN_BlendOnMask(FPN_Min(r->min[cidx], price), price, seeded);
+        r->max[cidx]   = FPN_BlendOnMask(FPN_Max(r->max[cidx], price), price, seeded);
+        return;
+    }
+
+    const uint32_t ordinal = (uint32_t)(timestamp_us / BUCKET_US);
+    const int      idx     = (int)(ordinal % (uint32_t)BUCKET_SLOTS);
+
+    // A slot is STALE when its stamp does not name this bucket — either it was
+    // never written (0) or it holds a value from 288 buckets ago. Both cases seed
+    // rather than fold, and the 1-based stamp is what lets one compare cover both.
+    const uint64_t fresh = -(uint64_t)(r->slot_bucket[idx] == ordinal + 1u);
+    r->close[idx] = price;
+    r->min[idx]   = FPN_BlendOnMask(FPN_Min(r->min[idx], price), price, fresh);
+    r->max[idx]   = FPN_BlendOnMask(FPN_Max(r->max[idx], price), price, fresh);
+
+    r->slot_bucket[idx] = ordinal + 1u;   // 1-BASED; 0 stays reserved for never-written
+    r->cur_ordinal      = ordinal;
+    r->last_us          = timestamp_us;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BucketRing_Init]
 //======================================================================
 
 //======================================================================
