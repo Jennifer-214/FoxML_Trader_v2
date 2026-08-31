@@ -241,6 +241,60 @@ static inline int Model_RoleCheckDecide(const char* slot_role, const char* stamp
     return (strict == 1) ? ROLE_CHECK_REFUSE : ROLE_CHECK_WARN;
 }
 
+//======================================================================
+// [FUNCTION]_[ArchFieldDrift_Evaluate]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[walk FOREACH_ARCH_FIELD_DRIFT and return the drift bits — a stamp-side ZERO is the documented ABSENT sentinel and is SKIPPED, never compared]
+//======================================================================
+// [CODE]
+//======================================================================
+// v5.15.5.F.4d.1.E.1.2.G — EXTRACTED from the TryLoadRole chokepoint so the walk
+// has ONE implementation that a char can drive directly. It previously lived
+// inline inside a function that needs a real model file on disk, which is why the
+// defect below survived: nothing could reach it.
+//
+// THE DEFECT: the walk compared `sr.<hash> != runtime_hash` with no guard, but
+// ModelInference.hpp:2201 documents the field's own contract — "0 if absent (old
+// stamps)". For a model with NO .stamp sidecar every stamp-side hash is 0, so all
+// three hash rows fired and the operator saw `feat: HASH DRIFT` (RED),
+// `label: HASH DRIFT` (RED), `build: FLAG DRIFT` — a model reported as DRIFTED
+// for the sole reason that it could not be checked.
+//
+// That is the exact MIRROR of the rule D-464 enforces five hundred lines above at
+// ModelStamp_StructuralIncompatibility (:196-204), which deliberately treats
+// hash == 0 as UNVERIFIABLE-not-incompatible and prints
+// "carries NO feature_registry_hash — compatibility is UNVERIFIABLE". Two paths
+// read the same zeroed struct and reached opposite conclusions; this one rendered
+// NOT-MEASURED as MEASURED-AND-FAILING.
+//
+// Not cosmetic: feature_hash_drift and label_hash_drift are LR_SEV_REFUSE
+// live-readiness gates (CoreFrameworks/LiveReadiness.hpp:297-300), so a stampless
+// artifact refused live boot telling the operator to RETRAIN — when the true fact
+// ("this model has no stamp") is already carried, correctly, by
+// stamp_hmac_not_verified. And post-D-464 a genuinely mismatched STAMPED model
+// refuses upstream at :434 before ever reaching this walk, so these two rows could
+// fire ONLY on the false positive.
+template <unsigned F>
+inline uint16_t ArchFieldDrift_Evaluate(const ModelStampResult &sr,
+                                        const ModelHandle<F> *handle) {
+    uint16_t bits = 0;
+    #define X(name, stamp_field, runtime_value, fail_mask)                     \
+        /* stamp-side 0 == ABSENT (ModelInference.hpp:2201), not a value */    \
+        if ((stamp_field) != 0 && (stamp_field) != (runtime_value)) {          \
+            BITMAP_SET(bits, fail_mask);                                       \
+        }
+    FOREACH_ARCH_FIELD_DRIFT(X)
+    #undef X
+    return bits;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ArchFieldDrift_Evaluate]
+//======================================================================
+
 template <unsigned F>
 inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     const char *role_name, int backend,
@@ -767,12 +821,11 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     if (have_sr) {
         // (1) Arch-field drift checks (registry-driven; auto-flows for
         //     future entries via FOREACH_ARCH_FIELD_DRIFT).
-        #define X(name, stamp_field, runtime_value, fail_mask) \
-            if ((stamp_field) != (runtime_value)) { \
-                BITMAP_SET(handle->drift_flags_at_load, fail_mask); \
-            }
-        FOREACH_ARCH_FIELD_DRIFT(X)
-        #undef X
+        //     v5.15.5.F.4d.1.E.1.2.G — the walk moved to ArchFieldDrift_Evaluate
+        //     so a char can drive it without a model file on disk. It also now
+        //     SKIPS a stamp-side zero (the documented ABSENT sentinel) instead of
+        //     comparing it; see that function for why that was a live false RED.
+        handle->drift_flags_at_load |= ArchFieldDrift_Evaluate<F>(sr, handle);
 
         // (2) CFG_BINDING_DRIFT aggregate bit (single-fact; consolidates
         //     with the X-macro drift check earlier in this fn, which already
