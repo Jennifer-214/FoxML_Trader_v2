@@ -518,26 +518,66 @@ constexpr auto kFracDiff_d04_Coeffs = ComputeFracDiffCoeffs(0.4);
 constexpr auto kFracDiff_d05_Coeffs = ComputeFracDiffCoeffs(0.5);
 constexpr auto kFracDiff_d06_Coeffs = ComputeFracDiffCoeffs(0.6);
 
-// Generic Compute helper: walk K=50 most-recent prices, accumulate
-// alternating sum. Branchless wrap relies on W=128 being a power of 2.
+// E.1.2.G — the walk, generalized over ANY window size. The ladder's bar-frac-diff
+// rows read the 288-slot BucketRingState, and 288 is not a power of two, so the
+// `& (W-1)` form cannot serve both consumers.
+//
+// THE GUARD IS A REQUIRED PARAMETER, and that is the point of this signature.
+// The obvious generalization — `(buf, head, W)` — SILENTLY DROPS the
+// `count < FRAC_DIFF_K` early-return, because a raw buffer has no `count` and the
+// bucket ring has none either (its ordinal replaced it). A pre-coding refute rated
+// that the highest-probability silent corruption in this leg: the walk would read
+// 50 taps of whatever the buffer happened to contain. Making `available` a
+// non-defaulted parameter means a caller CANNOT omit it — the same structural move
+// as FeatureComputeCtx_Build's required fields (PARITY-053).
+//
+// WRAP: the walk decrements by exactly 1 per iteration, so neither a modulo nor a
+// power-of-two window is needed inside the loop — one masked conditional add
+// suffices, and it is the house `-(uint64_t)pass` idiom. That lets the old
+// `static_assert((W & (W-1)) == 0)` be DELETED rather than conditioned
+// (structural-fix-over-belt-and-suspenders: remove the special case, do not add
+// one). Nothing is lost — RollingStats carries the identical assert INSIDE the
+// template, so a non-power-of-two RollingStats cannot be instantiated at all.
+//
+// SEED: `idx = head % W` before the loop, deliberately. The old `(head-1) & (W-1)`
+// did TWO jobs — wrap, and truncate an out-of-range head — and the masked add only
+// does the first. Rather than promote `head < W` from defensive to load-bearing,
+// the modulo restores the truncation at ONE operation outside the loop (for a
+// power-of-two W the compiler emits the same `&`; for 288 a multiply-shift).
+template <unsigned F, int W>
+inline FPN_Binary<F> FracDiffWalk(const FPN_Binary<F>* buf, int head, int available,
+                                  const std::array<double, FRAC_DIFF_K>& coeffs) {
+    static_assert(W > 0, "window must be positive");
+    if (!buf || available < FRAC_DIFF_K) return FPN_Zero<F>();
+
+    int idx = head % W;                       // truncate any out-of-range head
+    idx -= 1;
+    idx += W & -(int)(idx < 0);               // branchless wrap; ANY W, no div
+
+    FPN_Binary<F> sum = FPN_Zero<F>();
+    for (int k = 0; k < FRAC_DIFF_K; k++) {
+        FPN_Binary<F> coeff_fpn = FPN_FromDouble<F>(coeffs[k]);
+        FPN_Binary<F> term = FPN_Mul(coeff_fpn, buf[idx]);
+        // Sign alternates: even k → add, odd k → subtract. The ternary is on the
+        // LOOP COUNTER, so it unrolls at compile time — not a data-dependent branch.
+        sum = ((k & 1) == 0) ? FPN_Add(sum, term) : FPN_Sub(sum, term);
+        idx -= 1;
+        idx += W & -(int)(idx < 0);
+    }
+    return sum;
+}
+
+// Adapter for the rolling-window consumer. W is DERIVED from the instantiation via
+// RollingStats::WINDOW rather than re-typed — the previous `constexpr int W = 128`
+// was a duplicated constant that indexed price_buf with its own idea of the width,
+// so a RollingStats<F,256> would have silently walked the wrong slots.
 template <unsigned F>
 inline FPN_Binary<F> FracDiffPriceCompute(const FeatureComputeCtx<F>* ctx,
                                     const std::array<double, FRAC_DIFF_K>& coeffs) {
     if (!ctx || !ctx->short_rolling) return FPN_Zero<F>();
     const auto* rs = ctx->short_rolling;
-    if (rs->count < FRAC_DIFF_K) return FPN_Zero<F>();
-    constexpr int W = 128;
-    static_assert((W & (W - 1)) == 0, "W must be power of 2 for branchless wrap");
-    FPN_Binary<F> sum = FPN_Zero<F>();
-    int idx = (rs->head - 1) & (W - 1);
-    for (int k = 0; k < FRAC_DIFF_K; k++) {
-        FPN_Binary<F> coeff_fpn = FPN_FromDouble<F>(coeffs[k]);
-        FPN_Binary<F> term = FPN_Mul(coeff_fpn, rs->price_buf[idx]);
-        // Sign alternates: even k → add, odd k → subtract.
-        sum = ((k & 1) == 0) ? FPN_Add(sum, term) : FPN_Sub(sum, term);
-        idx = (idx - 1) & (W - 1);
-    }
-    return sum;
+    constexpr int W = (int)std::remove_pointer_t<decltype(rs)>::WINDOW;
+    return FracDiffWalk<F, W>(rs->price_buf, rs->head, rs->count, coeffs);
 }
 
 template <unsigned F>

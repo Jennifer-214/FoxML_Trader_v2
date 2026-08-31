@@ -57,6 +57,14 @@
 template <unsigned F, unsigned W = 128> struct RollingStats {
     static_assert(W > 0 && (W & (W - 1)) == 0, "W must be power of 2");
 
+    // E.1.2.G — expose the window size so CONSUMERS can derive it instead of
+    // re-typing it. FracDiffPriceCompute previously carried its own
+    // `constexpr int W = 128`, a duplicated constant that would have silently
+    // corrupted the walk if this instantiation ever changed: it indexes
+    // price_buf with its own W, not the buffer's. Deriving closes that at the
+    // source rather than once per consumer.
+    static constexpr unsigned WINDOW = W;
+
     //------------------------------------------------------------------
     // [SECTION]_[READ-HEAVY OUTPUTS]
     //------------------------------------------------------------------
