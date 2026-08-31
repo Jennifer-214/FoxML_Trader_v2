@@ -946,6 +946,24 @@ inline void ML_BuildParameters(
                 load_failed ? "model load failed" : "no model configured",
                 zoo ? "empty" : "null");
         }
+        // v5.15.5.F.4d.1.E.1.2.G — surface WHY this node is not trading its
+        // configured strategy. SHALT_ML_NO_PRED ("ML: zoo unloaded or no inference
+        // output") has been registered, ledger-tombstoned, snapshot-published and
+        // GUI-rendered since it was added, with ZERO writers tree-wide — a dead
+        // code sitting on exactly these semantics. Writing it IS the observability
+        // fix; no new state-flag bit, no new registry row.
+        //
+        // Deliberately NOT written at the three NaN fall-throughs below: those
+        // already carry nan_feature_events_total, and one code covering both "no
+        // model — retrain" and "features went NaN — investigate the data" would
+        // conflate two different operator actions. A distinct code for them is a
+        // registry decision, not a drive-by.
+        //
+        // strategy_halt_reason is reset-per-rebuild (enforced by
+        // tools/check_reset_before_producer.py), which is the right carrier here:
+        // the condition clears itself the moment a usable model loads.
+        if (mctx && mctx->out_strategy_halt_reason)
+            *mctx->out_strategy_halt_reason = SHALT_ML_NO_PRED;
         SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
