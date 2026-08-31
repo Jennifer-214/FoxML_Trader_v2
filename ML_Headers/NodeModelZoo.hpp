@@ -175,6 +175,41 @@ inline void NodeModelZoo_Init(NodeModelZoo<F> *zoo) {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[ModelStamp_StructuralIncompatibility]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the STRUCTURAL-vs-POLICY discriminator — returns a reason when a stamp proves the model was trained against a different feature/label registry, else nullptr. A fact, so it is deliberately not gated on any strict flag]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-290]
+//======================================================================
+// [CODE]
+//======================================================================
+// Extracted as a predicate so it can be DRIVEN by a characterization test: the
+// refusal itself sits before Model_Load, where a dummy fixture cannot distinguish
+// "refused structurally" from "load failed", making the branch untestable in place.
+//
+// A hash of 0 means the stamp does not carry one (pre-v5.8.1a). That is
+// UNVERIFIABLE, not incompatible — the caller warns rather than refusing, because
+// collapsing "cannot check" into "checked and fine" is the exact failure shape this
+// guard exists to end.
+inline const char* ModelStamp_StructuralIncompatibility(const ModelStampResult& sr) {
+    if (sr.feature_registry_hash != 0 &&
+        sr.feature_registry_hash != FEATURE_REGISTRY_HASH()) {
+        return "feature-registry hash mismatch — trained against a DIFFERENT feature set";
+    }
+    if (sr.label_registry_hash != 0 &&
+        sr.label_registry_hash != LABEL_REGISTRY_HASH()) {
+        return "label-registry hash mismatch — trained against DIFFERENT label semantics";
+    }
+    return nullptr;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ModelStamp_StructuralIncompatibility]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[NodeModelZoo_TryLoadRole]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
@@ -371,6 +406,57 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                         found_path, sr.engine_version, ENGINE_VERSION_STRING);
                 }
             }
+        }
+    }
+
+    //------------------------------------------------------------------
+    // [SECTION]_[STRUCTURAL INCOMPATIBILITY — refuses regardless of strict]
+    //------------------------------------------------------------------
+    // Re-gate C3 (2026-08-30). `held_out_gate_strict` exists to tolerate
+    // GENERALIZATION-GAP drift — a judgment call about model QUALITY, which an
+    // operator may reasonably choose to run with. It was never meant to tolerate
+    // "this model was trained against a different feature set", which is a TYPE
+    // ERROR: the engine feeds an N-column vector to a booster trained on M.
+    //
+    // Before this, the registry-hash mismatch WAS detected — and only recorded as a
+    // display bit (FAILURE_MASK_feature_hash_drift, set below at the drift
+    // chokepoint, AFTER the load already happened). Four independent gates were all
+    // disarmed in the operator's actual paper cfg: held_out_gate_strict defaults to 0
+    // and is absent from engine.cfg; model_verify_strict defaults to 0 and is only
+    // flipped by trading_mode=live; LiveReadiness' no_feature_hash_drift is
+    // LR_SEV_REFUSE only in live; and the format-version reject runs only when the
+    // booster carries a foxml_version attribute, which the operator's artifacts do
+    // not (TECH_DEBT-290). The num_features oracle catches only `>` the build's
+    // count, so a 40-feature model against a 60-feature build passes it too.
+    //
+    // So this check is deliberately NOT gated on any of them. A hash the stamp
+    // ACTUALLY carries and that disagrees is a fact, not a policy.
+    if (have_sr) {
+        const char* structural_why = ModelStamp_StructuralIncompatibility(sr);
+        if (structural_why) {
+            fprintf(stderr,
+                "[model] REFUSING to load %s — %s.\n"
+                "        stamp feature_registry=%016lx label_registry=%016lx\n"
+                "        build feature_registry=%016lx label_registry=%016lx\n"
+                "        This is a STRUCTURAL incompatibility, not a quality warning, so it\n"
+                "        refuses regardless of held_out_gate_strict / model_verify_strict.\n"
+                "        Retrain against this build. The node falls through to its non-ML strategy.\n",
+                found_path, structural_why,
+                (unsigned long)sr.feature_registry_hash,
+                (unsigned long)sr.label_registry_hash,
+                (unsigned long)FEATURE_REGISTRY_HASH(),
+                (unsigned long)LABEL_REGISTRY_HASH());
+            return 0;
+        }
+        // A stamp with NO hash cannot prove compatibility either way. Not a refusal
+        // (it would reject every pre-v5.8.1a artifact wholesale), but it must not read
+        // as a pass — "unverifiable" and "verified compatible" are different states,
+        // and collapsing them is the failure shape this whole arc keeps finding.
+        if (sr.feature_registry_hash == 0) {
+            fprintf(stderr,
+                "[model] WARN: %s carries NO feature_registry_hash — compatibility with "
+                "this build is UNVERIFIABLE (pre-v5.8.1a stamp). Loading anyway; retrain "
+                "to get a checkable artifact.\n", found_path);
         }
     }
 
