@@ -268,6 +268,13 @@ static inline FPN_Binary<F> BookImbHistory_MeanShort(const BookImbalanceHistory<
 //======================================================================
 // [CODE]
 //======================================================================
+// Half-lives in MICROSECONDS — the unit FlowState_Push is handed. Named + integer
+// so the decay ratio can be formed without ever crossing `double` (see the push).
+// These are compile-time constants, not persisted or wire-visible (no H21 slot).
+static constexpr int64_t FLOW_HALFLIFE_10S_US =  10'000'000;
+static constexpr int64_t FLOW_HALFLIFE_1M_US  =  60'000'000;
+static constexpr int64_t FLOW_HALFLIFE_5M_US  = 300'000'000;
+
 struct alignas(64) FlowState {
     double ewma_10s;     // signed-volume EWMA, half-life 10s
     double ewma_1m;      // half-life 60s
@@ -438,13 +445,19 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
         s->ewma_5m  += signed_volume;
         return;
     }
-    double dt = (double)(timestamp_us - s->last_us) / 1e6;  // seconds
+    // v5.15.5.F.4d.1.E.1.2.G (re-gate F2) — the decay ratio is formed in INTEGER
+    // MICROSECOND space and crosses into FPN exactly once. The prior form rounded
+    // TWICE before the divide (`(double)dt_us / 1e6`, then FPN_FromDouble) and put a
+    // hardware `divsd` on the slow path, which check_latency_path_conformance.py
+    // gates (H4 / §5). dt_us/hl_us is the same dimensionless ratio as dt_s/hl_s, and
+    // integer→FPN is EXACT below 2^63 — so this is strictly MORE precise, not a trade.
+    const uint64_t dt_us = timestamp_us - s->last_us;   // > 0: the <= branch returned
 
     // FPN_Binary-native decay: -dt / halflife → exp via Taylor.
-    FPN_Binary<64> dt_fpn = FPN_FromDouble<64>(dt);
-    FPN_Binary<64> hl_10s = FPN_FromDouble<64>(10.0);
-    FPN_Binary<64> hl_1m  = FPN_FromDouble<64>(60.0);
-    FPN_Binary<64> hl_5m  = FPN_FromDouble<64>(300.0);
+    FPN_Binary<64> dt_fpn = FPN_FromInt<64>((int64_t)dt_us);
+    FPN_Binary<64> hl_10s = FPN_FromInt<64>(FLOW_HALFLIFE_10S_US);
+    FPN_Binary<64> hl_1m  = FPN_FromInt<64>(FLOW_HALFLIFE_1M_US);
+    FPN_Binary<64> hl_5m  = FPN_FromInt<64>(FLOW_HALFLIFE_5M_US);
 
     // -dt/halflife for the decay exponent (was `.sign = 1` on the positive div; 16B two's-comp → negate).
     FPN_Binary<64> arg_10s = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_10s));
