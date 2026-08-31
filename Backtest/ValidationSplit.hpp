@@ -80,10 +80,52 @@
 //
 // this is the minimum gap needed between the last training tick and the
 // first test tick to prevent any form of temporal leakage.
-static inline int PurgeGap_Compute(int horizon_ticks, int buffer_ticks) {
-    int max_lookback = FeatureLookback_Max(); // from ModelInference.hpp
-    int base = (horizon_ticks > max_lookback) ? horizon_ticks : max_lookback;
-    return base + buffer_ticks;
+//======================================================================
+// [FUNCTION]_[FeatureCadence_TicksPerSample]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[measure the OBSERVED ticks-per-collected-sample from the collector's own tick-index array — the cadence the purge gap needs to convert a tick reach into sample space]
+// [REFERENCE]_[DECISION]_[D-463]
+//======================================================================
+// [CODE]
+//======================================================================
+// MEASURED, not assumed: the collector records the tick index of every sample, so the
+// mean spacing is exact arithmetic over real data rather than a poll_interval constant
+// that a mid-run cfg change or a short final batch would falsify. Integer division —
+// deterministic and exact (H9/H10). Returns >= 1 always; degenerate inputs yield 1,
+// which reduces the conversion to the identity (the OLD behaviour) rather than a
+// divide-by-zero or a silent 0 gap.
+static inline int FeatureCadence_TicksPerSample(const int *sample_tick_indices,
+                                                 int sample_count) {
+    if (!sample_tick_indices || sample_count < 2) return 1;
+    const int span = sample_tick_indices[sample_count - 1] - sample_tick_indices[0];
+    if (span <= 0) return 1;
+    const int tps = span / (sample_count - 1);
+    return (tps < 1) ? 1 : tps;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FeatureCadence_TicksPerSample]
+//======================================================================
+
+// D-463 — SAMPLE SPACE, explicitly. This function's result is subtracted from a
+// FEATURE-MATRIX ROW index (ValidationSplit_Generate's total_samples;
+// BacktestEngine.hpp's `trainval_end_idx - ho_purge`), so every term must be in
+// samples. It previously took FeatureLookback_Max() — a RAW-TICK reach — and used it
+// as a sample count, over-purging by ~ticks_per_sample (~100x at poll_interval=100).
+// That was safe (conservative) but silently consumed the fold budget, and it is why a
+// truthful long-horizon lookback made held-out validation refuse outright.
+//
+// ticks_per_sample / sample_period_us are the caller's MEASURED cadences — see
+// FeatureReach_MaxSamples. They are required, not defaulted: a wrong default here is
+// invisible and re-creates exactly the bug this replaces.
+static inline int PurgeGap_Compute(int horizon_samples, int buffer_samples,
+                                    int ticks_per_sample, uint64_t sample_period_us) {
+    int max_reach = FeatureReach_MaxSamples(ticks_per_sample, sample_period_us);
+    int base = (horizon_samples > max_reach) ? horizon_samples : max_reach;
+    return base + buffer_samples;
 }
 
 // overload: caller provides explicit max_lookback (for testing or custom feature sets)
@@ -157,7 +199,9 @@ static inline int ValidationSplit_Generate(PurgedSplit *folds, int total_samples
     if (n_splits > VALIDATION_MAX_FOLDS) n_splits = VALIDATION_MAX_FOLDS;
     if (total_samples < n_splits * 2) return 0; // not enough data for any fold
 
-    int purge_gap = PurgeGap_Compute(horizon_ticks, buffer_ticks);
+    // ORPHAN (no callers tree-wide; production uses ValidationSplit_GenerateExplicit).
+    // Identity cadence preserves its historical behaviour exactly.
+    int purge_gap = PurgeGap_Compute(horizon_ticks, buffer_ticks, /*ticks_per_sample=*/1, 0);
 
     // compute fold boundaries (equal-sized test sets, like FoxML)
     // distribute samples evenly: fold_size = total / n_splits
@@ -220,7 +264,7 @@ static inline int ValidationSplit_Generate(PurgedSplit *folds, int total_samples
     } else {
         fprintf(stderr, "[validation] generated %d/%d valid folds "
                 "(purge_gap=%d, max_lookback=%d, horizon=%d, buffer=%d)\n",
-                valid_count, n_splits, purge_gap, FeatureLookback_Max(),
+                valid_count, n_splits, purge_gap, FeatureLookback_MaxTicks(),
                 horizon_ticks, buffer_ticks);
     }
 

@@ -2214,7 +2214,14 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
     // compute purge gap in non-neutral index space
     // original purge_gap is in sample indices; scale by non-neutral density
-    int raw_purge = PurgeGap_Compute(horizon_ticks, buffer_ticks);
+    // D-463 — the gap is SAMPLE space; convert the tick reach with the collector's
+    // own measured cadence. sample_period_us=0: BacktestResults carries no per-sample
+    // wall-clock, so the EWMA term is EXPLICITLY skipped rather than guessed. Inert
+    // today (no enabled feature's half-life reach exceeds the window reach); wiring a
+    // timestamp source is what activates it.
+    const int tps_wf = FeatureCadence_TicksPerSample(data->sample_tick_indices,
+                                                      data->sample_count);
+    int raw_purge = PurgeGap_Compute(horizon_ticks, buffer_ticks, tps_wf, /*sample_period_us=*/0);
     double nn_density = (double)nn_count / data->sample_count;
     int nn_purge = (int)(raw_purge * nn_density + 0.5);
     if (nn_purge < 1) nn_purge = 1;
@@ -2791,12 +2798,14 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     // (unlike WF, which density-scales because it generates folds in compacted non-neutral
     // space); this loop walks raw `i` and compacts inline, so no scaling applies.
     const int ho_horizon = horizon_ticks > 0 ? horizon_ticks : 0;
-    const int ho_purge   = PurgeGap_Compute(ho_horizon, PURGE_BUFFER_DEFAULT);
+    const int tps_ho     = FeatureCadence_TicksPerSample(data->sample_tick_indices,
+                                                          data->sample_count);
+    const int ho_purge   = PurgeGap_Compute(ho_horizon, PURGE_BUFFER_DEFAULT, tps_ho, /*sample_period_us=*/0);
     int ho_train_end = split->trainval_end_idx - ho_purge;
     if (ho_train_end < 0) ho_train_end = 0;
     fprintf(stderr, "[heldout] purge gap: %d samples dropped between train and eval "
                     "(horizon=%d lookback=%d buffer=%d) — train ends %d, eval starts %d\n",
-            ho_purge, ho_horizon, FeatureLookback_Max(), PURGE_BUFFER_DEFAULT,
+            ho_purge, ho_horizon, FeatureLookback_MaxTicks(), PURGE_BUFFER_DEFAULT,
             ho_train_end, split->trainval_end_idx);
     if (ho_train_end == 0) {
         // REFUSE rather than silently train on nothing: a purge that eats the whole train side

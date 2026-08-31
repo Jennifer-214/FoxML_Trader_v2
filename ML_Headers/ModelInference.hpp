@@ -359,18 +359,28 @@ static_assert(STAMP_FORMAT_VERSION_EPOCH_FLOOR == 3u,
 // [CODE]
 //======================================================================
 struct FeatureLookback {
-    int feat_idx;           // FEAT_* constant
-    const char *name;       // human-readable name (for display/debugging)
-    int lookback_ticks;     // how many ticks back this feature reads (from RollingStats window)
-    int enabled;            // 1 = active, 0 = disabled (future: feature toggling)
+    int      feat_idx;        // FEAT_* constant
+    const char *name;         // human-readable name (for display/debugging)
+    // D-463 — TWO physical quantities, deliberately NOT one integer.
+    //   lookback_ticks: a FINITE reach in RAW TICKS (rolling window / frac-diff taps).
+    //                   0 for time-based features, which have no finite tick reach.
+    //   half_life_us:   the EWMA half-life in MICROSECONDS. 0 for window features.
+    // Storing the half-life as TIME is the point: a tick-count would need a rate, and
+    // engine.cfg:31 documents the rate varying ~10x (active vs dead hours), so a
+    // compile-time tick figure would be false most of the day. Consumers convert with
+    // the cadence THEY can measure — see FeatureReach_MaxSamples.
+    // uint64: a 24h half-life is 86,400,000,000 us and overflows int32.
+    int      lookback_ticks;
+    uint64_t half_life_us;
+    int      enabled;         // 1 = active, 0 = disabled (future: feature toggling)
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[24B]
+// [UPDATED]_[2026-08-30]
+// [SIZE]_[40B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
@@ -393,8 +403,8 @@ struct FeatureLookback {
 // Ordering matches FEATURE_<ID> BY CONSTRUCTION (same X-macro walk), so the
 // direct-indexing contract is now structural rather than asserted.
 static const FeatureLookback FEATURE_LOOKBACKS[] = {
-#define X(id, name, version, enabled, fn, note, staleness, lookback) \
-    { FEATURE_##id, name, lookback, enabled },
+#define X(id, name, version, enabled, fn, note, staleness, lookback_ticks, half_life_us) \
+    { FEATURE_##id, name, lookback_ticks, half_life_us, enabled },
     FOREACH_FEATURE(X)
 #undef X
 };
@@ -410,7 +420,7 @@ static const int FEATURE_LOOKBACK_COUNT = sizeof(FEATURE_LOOKBACKS) / sizeof(FEA
 //======================================================================
 // [CODE]
 //======================================================================
-static inline int FeatureLookback_Max(void) {
+static inline int FeatureLookback_MaxTicks(void) {
     int max_lb = 0;
     for (int i = 0; i < FEATURE_LOOKBACK_COUNT; i++) {
         if (FEATURE_LOOKBACKS[i].enabled && FEATURE_LOOKBACKS[i].lookback_ticks > max_lb)
@@ -418,6 +428,66 @@ static inline int FeatureLookback_Max(void) {
     }
     return max_lb;
 }
+
+// D-463 — the longest EWMA half-life, in microseconds. 0 when no time-based feature
+// is enabled. Kept separate from the tick reach because they are different physical
+// quantities; combining them requires a cadence only the caller knows.
+static inline uint64_t FeatureHalfLife_MaxUs(void) {
+    uint64_t max_hl = 0;
+    for (int i = 0; i < FEATURE_LOOKBACK_COUNT; i++) {
+        if (FEATURE_LOOKBACKS[i].enabled && FEATURE_LOOKBACKS[i].half_life_us > max_hl)
+            max_hl = FEATURE_LOOKBACKS[i].half_life_us;
+    }
+    return max_hl;
+}
+
+// How many EWMA half-lives count as "the feature still reads that far back".
+// 3 half-lives retains ~12.5% weight; beyond that the contribution is below the
+// noise floor of the features themselves. Named so the choice is visible and
+// tunable rather than buried in an expression.
+#define FEATURE_EWMA_REACH_HALF_LIVES 3
+
+//======================================================================
+// [FUNCTION]_[FeatureReach_MaxSamples]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the max feature reach expressed in FEATURE-MATRIX SAMPLES — the space the purge gap actually indexes; converts BOTH columns using cadences the caller measures, in exact integer arithmetic]
+// [REFERENCE]_[DECISION]_[D-463]
+//======================================================================
+// [CODE]
+//======================================================================
+// ticks_per_sample: how many raw ticks between collected feature rows (poll_interval).
+// sample_period_us: the OBSERVED mean wall-time between feature rows, measured from the
+//                   dataset by the caller (total_span_us / sample_count). 0 = unknown,
+//                   in which case the EWMA contribution is skipped rather than guessed.
+//
+// All-integer on purpose: these are microsecond COUNTS, so integer division is exact and
+// bit-identical across runs and binaries (H9/H10). No FPN needed — FPN buys fractional
+// precision this has no use for, and a double would add contraction variance for nothing.
+static inline int FeatureReach_MaxSamples(int ticks_per_sample, uint64_t sample_period_us) {
+    if (ticks_per_sample < 1) ticks_per_sample = 1;
+
+    // window features: a RAW-TICK reach -> samples. This division is the ~100x
+    // over-purge fix (D-463): the tick figure was previously used as a sample count.
+    const int win_ticks   = FeatureLookback_MaxTicks();
+    const int win_samples = (win_ticks + ticks_per_sample - 1) / ticks_per_sample;  // ceil
+
+    // time features: half-life -> samples via the OBSERVED period.
+    int ewma_samples = 0;
+    const uint64_t hl_us = FeatureHalfLife_MaxUs();
+    if (hl_us > 0 && sample_period_us > 0) {
+        const uint64_t reach_us = hl_us * (uint64_t)FEATURE_EWMA_REACH_HALF_LIVES;
+        const uint64_t n = (reach_us + sample_period_us - 1) / sample_period_us;      // ceil
+        ewma_samples = (n > (uint64_t)INT32_MAX) ? INT32_MAX : (int)n;
+    }
+    return (win_samples > ewma_samples) ? win_samples : ewma_samples;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[FeatureReach_MaxSamples]
+//======================================================================
 
 // count enabled features (for validation)
 static inline int FeatureLookback_CountEnabled(void) {

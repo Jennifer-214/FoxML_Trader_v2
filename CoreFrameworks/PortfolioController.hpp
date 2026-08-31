@@ -592,7 +592,10 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   // warmup validation: ensure warmup_ticks >= max feature lookback
   // features read N ticks back — if warmup is shorter, features see uninitialized data
   {
-    int max_lookback = FeatureLookback_Max();
+    // D-463 — RAW TICKS is the right space here (compared against warmup_ticks),
+    // unlike the purge gap which indexes feature-matrix rows. Same number, two
+    // spaces — which is what the column split exists to keep straight.
+    int max_lookback = FeatureLookback_MaxTicks();
     if (max_lookback > 0 && (int)ctrl->config.warmup_ticks < max_lookback) {
       fprintf(stderr, "[WARN] warmup_ticks=%u < max feature lookback=%d — "
               "features may use uninitialized data. recommend warmup_ticks >= %d\n",
