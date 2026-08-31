@@ -131,6 +131,28 @@ template <unsigned F> struct RegimeSignals {
 //======================================================================
 // [END_CODE]
 //======================================================================
+// v5.15.5.F.4d.1.E.1.2.G — Layout pin for RegimeSignals.
+//
+// Until now this struct had NO static_assert, NO layout lock and NO manifest row
+// anywhere in the tree: its only `sizeof(RegimeSignals...)` uses were memsets in
+// the suite. That is a gap, not an oversight to leave — RegimeSignals is already a
+// check_latency_path_conformance.py manifest input (it is Regime_Classify's
+// parameter), so a silent layout change moves a GATED kernel's register and stack
+// profile. The feature-horizon ladder grows this struct, which is why the pin lands
+// BEFORE the growth rather than after (the generalized (A)(5) rule: pin every
+// derived-fact-budget gate this ship moves, before it moves).
+//
+// Value taken from tools/check_struct_size_budget.py, which emits the assert to
+// paste — never hand-asserted. Composition at this pin: 22 FPN_Binary + 9 double +
+// 4 int = 440 B used of 448, i.e. 8 B implicit trailing pad. That pad is NOT
+// H12-explicit; the struct is not currently byte-serialized, and making it so is a
+// separate decision from pinning its size.
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(RegimeSignals<64>) == 448]
+static_assert(sizeof(RegimeSignals<64>) == 448,
+    "RegimeSignals<64> layout moved — re-measure via tools/check_struct_size_budget.py, "
+    "update this pin, and re-check the Regime_Classify row in "
+    "tools/check_latency_path_conformance.py (this struct is its parameter).");
+//======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
 // [[2026] [regime-signals]]

@@ -433,16 +433,16 @@ static inline void FlowState_Init(FlowState *s) {
 // Full RegimeSignals→FPN_Binary cascade is a v5.11 ship (large blast radius).
 static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double signed_volume) {
     if (s->last_us == 0) {
-        s->ewma_10s = signed_volume;
-        s->ewma_1m  = signed_volume;
-        s->ewma_5m  = signed_volume;
+        s->ewma_10s = signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+        s->ewma_1m  = signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+        s->ewma_5m  = signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
         s->last_us  = timestamp_us;
         return;
     }
     if (timestamp_us <= s->last_us) {
-        s->ewma_10s += signed_volume;
-        s->ewma_1m  += signed_volume;
-        s->ewma_5m  += signed_volume;
+        s->ewma_10s += signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+        s->ewma_1m  += signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+        s->ewma_5m  += signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
         return;
     }
     // v5.15.5.F.4d.1.E.1.2.G (re-gate F2) — the decay ratio is formed in INTEGER
@@ -464,16 +464,16 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
     FPN_Binary<64> arg_1m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_1m));
     FPN_Binary<64> arg_5m  = FPN_Negate(FPN_DivNoAssert(dt_fpn, hl_5m));
 
-    double decay_10s = FPN_ToDouble(FPN_Exp(arg_10s));
-    double decay_1m  = FPN_ToDouble(FPN_Exp(arg_1m));
-    double decay_5m  = FPN_ToDouble(FPN_Exp(arg_5m));
+    double decay_10s = FPN_ToDouble(FPN_Exp(arg_10s));  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+    double decay_1m  = FPN_ToDouble(FPN_Exp(arg_1m));  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+    double decay_5m  = FPN_ToDouble(FPN_Exp(arg_5m));  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
 
     // ACCUMULATE form — signed volume is a flow, so the decaying SUM is the
     // intended quantity. Named rather than inlined so the ladder's LEVEL rows
     // cannot reach for this recurrence by imitation (see Ewma_NormalizedStep).
-    s->ewma_10s = Ewma_AccumulateStep(s->ewma_10s, decay_10s, signed_volume);
-    s->ewma_1m  = Ewma_AccumulateStep(s->ewma_1m,  decay_1m,  signed_volume);
-    s->ewma_5m  = Ewma_AccumulateStep(s->ewma_5m,  decay_5m,  signed_volume);
+    s->ewma_10s = Ewma_AccumulateStep(s->ewma_10s, decay_10s, signed_volume);  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+    s->ewma_1m  = Ewma_AccumulateStep(s->ewma_1m,  decay_1m,  signed_volume);  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+    s->ewma_5m  = Ewma_AccumulateStep(s->ewma_5m,  decay_5m,  signed_volume);  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
     s->last_us = timestamp_us;
 }
 //======================================================================
