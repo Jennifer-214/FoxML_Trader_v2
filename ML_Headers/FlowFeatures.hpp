@@ -327,11 +327,64 @@ static constexpr int64_t FLOW_HALFLIFE_10S_US =  10'000'000;
 static constexpr int64_t FLOW_HALFLIFE_1M_US  =  60'000'000;
 static constexpr int64_t FLOW_HALFLIFE_5M_US  = 300'000'000;
 
+// E.1.2.G ladder half-lives. FIVE DISTINCT values across TEN accumulators — one
+// decay is computed per distinct half-life and SHARED by every accumulator using
+// it (D-468), which is what the three legacy fields above already do. int64 is
+// required, not stylistic: 24h in microseconds overflows int32 by ~20x.
+static constexpr int64_t FLOW_HALFLIFE_30M_US =  1'800'000'000;
+static constexpr int64_t FLOW_HALFLIFE_1H_US  =  3'600'000'000;
+static constexpr int64_t FLOW_HALFLIFE_2H_US  =  7'200'000'000;
+static constexpr int64_t FLOW_HALFLIFE_8H_US  = 28'800'000'000;
+static constexpr int64_t FLOW_HALFLIFE_24H_US = 86'400'000'000;
+
 struct alignas(64) FlowState {
+    // ── cache line 0: the legacy hot trio + the push cursor ──────────────────
+    // These three stay `double` BY DECISION (D-455) — they are the short-horizon
+    // signed-volume EWMAs the regime path already reads, and re-typing them would
+    // be a bytewise change to a shipped feature for no gain. offsetof(ewma_10s)
+    // MUST remain 0 (locked below); the lazy-rebuild gate keys on it.
     double ewma_10s;     // signed-volume EWMA, half-life 10s
     double ewma_1m;      // half-life 60s
     double ewma_5m;      // half-life 300s
     uint64_t last_us;    // timestamp of last push (0 = no prior)
+
+    // ── the E.1.2.G ladder accumulators — FPN_Binary per D-455 ───────────────
+    // Typed by RECURRENCE per D-465, so the kind is checked by the compiler
+    // rather than by the "SUM for flow, AVERAGE for levels" comment. The 2/8
+    // split below is derived from the ladder table, and it is worth stating that
+    // BOTH ratified decisions miscount it: D-453 says "11 FPN fields" (right, but
+    // only because it counts prev_price) and D-465 says "11 accumulators: 2 SUM /
+    // 9 AVERAGE" (wrong — there are TEN accumulators, 2 SUM + 8 AVERAGE). The
+    // table is ground truth; the counts in prose are not.
+    EwmaSum flow_30m;        // signed volume, HL 30m   — SUM: the accumulated total IS the signal
+    EwmaSum flow_2h;         // signed volume, HL  2h
+
+    EwmaAvg ret_ema_30m;     // price level, HL 30m     — AVERAGE: has a fixed point at the sample
+    EwmaAvg ret_ema_2h;      // price level, HL  2h
+    EwmaAvg ret_ema_8h;      // price level, HL  8h
+    EwmaAvg ret_ema_24h;     // price level, HL 24h     (T3)
+    EwmaAvg rvol_1h;         // squared per-cycle returns, HL 1h
+    EwmaAvg rvol_8h;         // squared per-cycle returns, HL 8h
+    EwmaAvg vwap_pv_24h;     // VWAP numerator   EWMA(P*V), HL 24h
+    EwmaAvg vwap_v_24h;      // VWAP denominator EWMA(V),   HL 24h
+
+    // rvol needs the PREVIOUS price to form a return; it is state, not an
+    // accumulator, which is why it carries no half-life and no Ewma* type.
+    FPN_Binary<64> prev_price;
+
+    // ── H12 explicit padding ─────────────────────────────────────────────────
+    // The literal is DERIVED, not copied: `static_assert(sizeof == 256)` below is
+    // the authority, and it is there precisely because the two decisions that
+    // describe this struct disagree about the field count. If a field is added or
+    // removed, the assert fails with the real size — fix the literal from THAT,
+    // never from a document.
+    //
+    // `= {}` is load-bearing. Production already zeroes this padding
+    // (NodeCtxInitRegistry.hpp placement-new with `()` is value-initialization,
+    // which zeroes padding before any ctor runs), but a stack-declared
+    // `FlowState f;` in a test would otherwise leave it indeterminate. With the
+    // initializer the implicit default ctor zeroes it in both cases.
+    uint8_t _padding[48] = {};
 };
 //======================================================================
 // [END_CODE]
@@ -376,8 +429,11 @@ struct alignas(64) FlowState {
 
 // v5.15.5.D.A — Layout lock for FlowState.
 // [ASSERT]_[LAYOUT_LOCK]_[sizeof(FlowState) == 64]
-static_assert(sizeof(FlowState) == 64,
-    "FlowState sizeof MUST be 64 B (1 cache line).");
+static_assert(sizeof(FlowState) == 256,
+    "FlowState sizeof MUST be 256 B (4 cache lines) — E.1.2.G grew it from 64 for the ladder's "
+    "ten accumulators + prev_price. If this fails, the compiler's number is the truth: fix "
+    "_padding[N] from THIS error, never from a plan or decision-log field count (D-453 and D-465 "
+    "disagree about that count, which is why the assert exists).");
 // [ASSERT]_[LAYOUT_LOCK]_[offsetof(ewma_10s) == 0]
 static_assert(offsetof(FlowState, ewma_10s) == 0,
     "FlowState fields MUST sit at offset 0.");

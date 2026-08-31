@@ -248,7 +248,15 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 // shrinking the ring buys DRAM footprint "not L1d-relevant" at +5% p50 on the
 // hottest window (refused — latency outranks memory here). Growth is a
 // DELIBERATE re-pin, never silent drift; shrink freely, then re-pin.
-static_assert(sizeof(NodeSlowState<64>) == 191744,
+// v5.15.5.F.4d.1.E.1.2.G — re-pinned 191744 -> 191936 (+192 B). FlowState grew
+// 64 -> 256 for the ladder's ten accumulators + prev_price. The number is taken
+// FROM THE COMPILER (a -fsyntax-only probe; check_struct_size_budget.py cannot
+// measure this type — its probe LINKS and this header pulls simdjson, TECH_DEBT-309),
+// never hand-computed. Verified alongside it: offsetof(flow_state) is UNCHANGED at
+// 158784, so nothing ahead of flow_state moved — it is the third-from-last member,
+// and 192 = 3 x 64 with both shifted members (large_trade_state, spread_state)
+// alignas(64) and 257 x 64 B each, so no new straddle is introduced.
+static_assert(sizeof(NodeSlowState<64>) == 191936,
               "NodeSlowState<64> layout moved — re-measure, update this pin AND the "
               "CoreFrameworks/CLAUDE.md memory-budget row (TECH_DEBT-293: the row states "
               "the MEASURED sizeof; the budget concept is resident working set + per-node "
