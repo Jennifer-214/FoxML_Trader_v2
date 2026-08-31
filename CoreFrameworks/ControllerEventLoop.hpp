@@ -1945,7 +1945,32 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                     // direct RollingIC_Compute call).
                     double ic_now = ConfidenceScorer_ComputeICVariant(
                         &ctx.confidence, confidence_ic_variant);
-                    DriftHistory_Push(&ctx.drift_history, ic_now, now_us);
+
+                    // (A)(13) item 4 / D-461 — DO NOT push a NOT-MEASURED IC into
+                    // the drift window. RollingIC_Compute hard-returns 0.0 below
+                    // CONFIDENCE_MIN_SAMPLES (ML_Headers/ConfidenceScore.hpp:344),
+                    // and that 0.0 is a SENTINEL, not a measurement.
+                    //
+                    // Unguarded, trades 1-4 seed the window with zeros the engine
+                    // never measured. DriftHistory_CheckBreach guards the COUNT
+                    // (dh->count < 5) but not the CONTENT, so a node whose true IC
+                    // is 0.05 averages (0+0+0+0+0.05)/5 = 0.01 against a 0.02
+                    // confidence_ic_floor and BREACHES ON DATA IT NEVER MEASURED —
+                    // a false auto-kill on the capital path.
+                    //
+                    // Narrow but real: it needs operator-set drift_floor > 0, and it
+                    // self-clears as the zeros age out of the window. Skipping the
+                    // push (rather than substituting a value) is right because the
+                    // window is time-based — an absent sample is honestly absent,
+                    // whereas any substitute would be another invented measurement.
+                    //
+                    // predictions/actuals advance in lockstep via RollingIC_Push, so
+                    // the predictions ring is canonical — same access path D-461 used
+                    // to publish the count (ShardedSnapshot.hpp:638).
+                    const bool ic_measured = RollingIC_IsMeasured(&ctx.confidence.ic);
+                    if (ic_measured) {
+                        DriftHistory_Push(&ctx.drift_history, ic_now, now_us);
+                    }
                     double avg_ic = 0.0;
                     int    n_samples = 0;
                     int    breach = DriftHistory_CheckBreach(

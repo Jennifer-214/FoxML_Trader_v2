@@ -340,8 +340,25 @@ static inline void confidence_rank(const double *values, double *ranks, int n) {
 // v5.15.5.E.C — Updated for composed RollingWindow layout. predictions +
 // actuals rings have IDENTICAL count + head + window (kept in sync by
 // RollingIC_Push). Read either; using predictions's metadata canonically.
+// E.1.2.G ((A)(13) item 4) — "is this IC a MEASUREMENT or the not-measured
+// sentinel?" as ONE named predicate.
+//
+// RollingIC_Compute returns 0.0 below CONFIDENCE_MIN_SAMPLES, and that 0.0 is
+// indistinguishable at the call site from a measured zero. Three places need to
+// know the difference and each had spelled it itself: this function's own internal
+// gate, the snapshot publish (D-461, ShardedSnapshot.hpp:638), and the drift-window
+// push. The third one had NOT — which is the false-auto-kill bug (A)(13) item 4
+// closes. Naming it once makes the next consumer ask the question instead of
+// inheriting the sentinel.
+//
+// predictions/actuals advance in lockstep via RollingIC_Push, so the predictions
+// ring is canonical (see the note at :288).
+static inline bool RollingIC_IsMeasured(const RollingIC *ric) {
+    return ric && ric->predictions.count >= CONFIDENCE_MIN_SAMPLES;
+}
+
 static inline double RollingIC_Compute(const RollingIC *ric) {
-    if (ric->predictions.count < CONFIDENCE_MIN_SAMPLES) return 0.0;
+    if (!RollingIC_IsMeasured(ric)) return 0.0;
 
     int n      = ric->predictions.count;
     int head   = ric->predictions.head;
