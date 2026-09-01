@@ -403,7 +403,7 @@ struct FeatureLookback {
 // Ordering matches FEATURE_<ID> BY CONSTRUCTION (same X-macro walk), so the
 // direct-indexing contract is now structural rather than asserted.
 static const FeatureLookback FEATURE_LOOKBACKS[] = {
-#define X(id, name, version, enabled, fn, note, staleness, lookback_ticks, half_life_us) \
+#define X(id, name, version, enabled, fn, note, staleness, lookback_ticks, half_life_us, min_history_us) \
     { FEATURE_##id, name, lookback_ticks, half_life_us, enabled },
     FOREACH_FEATURE(X)
 #undef X
