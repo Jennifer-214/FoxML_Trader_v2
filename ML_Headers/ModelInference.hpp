@@ -382,8 +382,18 @@ struct FeatureLookback {
     // compile-time tick figure would be false most of the day. Consumers convert with
     // the cadence THEY can measure — see FeatureReach_MaxSamples.
     // uint64: a 24h half-life is 86,400,000,000 us and overflows int32.
+    // D-469 — a THIRD reach column, and the one six enabled rows use EXCLUSIVELY.
+    //   min_history_us: the warm-up floor in MICROSECONDS (the D-467 gate column).
+    // It was dropped by this table's X expansion, so `dist_to_high_24h` /
+    // `dist_to_low_24h` / `range_pos_24h` (24h) and `frac_diff_bars_d04/05/06` (4.2h)
+    // arrived here with lookback_ticks == 0 AND half_life_us == 0 — a reach of ZERO
+    // for features that genuinely read a full day back. Their reach is real, not a
+    // warm-up artifact: the bucket ring is 288 x 5min = 24h exactly
+    // (ML_Headers/FlowFeatures.hpp). Carrying the column is what lets
+    // FeatureReach_MaxSamples see them at all.
     int      lookback_ticks;
     uint64_t half_life_us;
+    uint64_t min_history_us;
     int      enabled;         // 1 = active, 0 = disabled (future: feature toggling)
 };
 //======================================================================
@@ -391,8 +401,8 @@ struct FeatureLookback {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-30]
-// [SIZE]_[40B]
+// [UPDATED]_[2026-09-01]
+// [SIZE]_[48B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
@@ -416,7 +426,7 @@ struct FeatureLookback {
 // direct-indexing contract is now structural rather than asserted.
 static const FeatureLookback FEATURE_LOOKBACKS[] = {
 #define X(id, name, version, enabled, fn, note, staleness, lookback_ticks, half_life_us, min_history_us) \
-    { FEATURE_##id, name, lookback_ticks, half_life_us, enabled },
+    { FEATURE_##id, name, lookback_ticks, half_life_us, min_history_us, enabled },
     FOREACH_FEATURE(X)
 #undef X
 };
@@ -453,6 +463,20 @@ static inline uint64_t FeatureHalfLife_MaxUs(void) {
     return max_hl;
 }
 
+// D-469 — the longest warm-up floor, in microseconds. For six enabled rows this is the
+// ONLY column carrying their reach (the bucket-ring extrema + the frac-diff bar rows
+// declare neither a tick window nor a half-life), so a reach walk that skips it reports
+// ZERO for features that read a full day back. Sister of the two above by construction:
+// same walk, same enabled filter, different physical column.
+static inline uint64_t FeatureMinHistory_MaxUs(void) {
+    uint64_t max_mh = 0;
+    for (int i = 0; i < FEATURE_LOOKBACK_COUNT; i++) {
+        if (FEATURE_LOOKBACKS[i].enabled && FEATURE_LOOKBACKS[i].min_history_us > max_mh)
+            max_mh = FEATURE_LOOKBACKS[i].min_history_us;
+    }
+    return max_mh;
+}
+
 // How many EWMA half-lives count as "the feature still reads that far back".
 // 3 half-lives retains ~12.5% weight; beyond that the contribution is below the
 // noise floor of the features themselves. Named so the choice is visible and
@@ -485,15 +509,31 @@ static inline int FeatureReach_MaxSamples(int ticks_per_sample, uint64_t sample_
     const int win_ticks   = FeatureLookback_MaxTicks();
     const int win_samples = (win_ticks + ticks_per_sample - 1) / ticks_per_sample;  // ceil
 
-    // time features: half-life -> samples via the OBSERVED period.
-    int ewma_samples = 0;
+    // time features -> samples via the OBSERVED period. TWO time columns feed this,
+    // not one (D-469): the EWMA half-life scaled by FEATURE_EWMA_REACH_HALF_LIVES, and
+    // min_history_us, which is already a reach and is taken AS-IS (it is authored per
+    // row as ~3 half-lives where an EWMA is involved, so scaling it again would double
+    // -count). Whichever is larger wins; both are skipped when the period is unknown.
+    //
+    // WHY min_history_us belongs here and its omission was the defect: six ENABLED rows
+    // declare NEITHER a tick window NOR a half-life, so before D-469 this function
+    // returned the 11-sample window reach for a feature set that reads 24 HOURS back —
+    // and the purge gap it feeds is the codebase's own stated leakage control
+    // ("the eval side reads back through the feature reach into training ticks").
+    // D-463 converted one arm of the max() and left another; this is the THIRD arm,
+    // found by enumerating the reach COLUMNS rather than the reported symptom (M9).
+    int time_samples = 0;
     const uint64_t hl_us = FeatureHalfLife_MaxUs();
-    if (hl_us > 0 && sample_period_us > 0) {
-        const uint64_t reach_us = hl_us * (uint64_t)FEATURE_EWMA_REACH_HALF_LIVES;
-        const uint64_t n = (reach_us + sample_period_us - 1) / sample_period_us;      // ceil
-        ewma_samples = (n > (uint64_t)INT32_MAX) ? INT32_MAX : (int)n;
+    const uint64_t mh_us = FeatureMinHistory_MaxUs();
+    if (sample_period_us > 0) {
+        uint64_t reach_us = hl_us * (uint64_t)FEATURE_EWMA_REACH_HALF_LIVES;
+        if (mh_us > reach_us) reach_us = mh_us;
+        if (reach_us > 0) {
+            const uint64_t n = (reach_us + sample_period_us - 1) / sample_period_us;  // ceil
+            time_samples = (n > (uint64_t)INT32_MAX) ? INT32_MAX : (int)n;
+        }
     }
-    return (win_samples > ewma_samples) ? win_samples : ewma_samples;
+    return (win_samples > time_samples) ? win_samples : time_samples;
 }
 //======================================================================
 // [END_CODE]

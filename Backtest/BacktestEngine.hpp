@@ -2214,11 +2214,26 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
     // compute purge gap in non-neutral index space
     // original purge_gap is in sample indices; scale by non-neutral density
-    // D-463 — the gap is SAMPLE space; convert the tick reach with the collector's
-    // own measured cadence. sample_period_us=0: BacktestResults carries no per-sample
-    // wall-clock, so the EWMA term is EXPLICITLY skipped rather than guessed. Inert
-    // today (no enabled feature's half-life reach exceeds the window reach); wiring a
-    // timestamp source is what activates it.
+    // D-463 — the gap is SAMPLE space; PurgeGap_Compute takes ticks + the collector's
+    // own measured cadence and converts internally (D-469 collapsed the mixed-unit
+    // signature that let a raw-tick horizon be read as a sample count).
+    //
+    // sample_period_us=0: BacktestResults carries no per-sample wall-clock, so BOTH time
+    // reach columns are EXPLICITLY skipped rather than guessed.
+    //
+    // ⚠️ THIS IS NOT INERT, AND THE PREVIOUS COMMENT SAYING SO WAS FALSE (D-469). It
+    // claimed "no enabled feature's half-life reach exceeds the window reach". Measured
+    // at HEAD: window reach 11 samples, time reach ~70,000 (FeatureHalfLife_MaxUs() is
+    // 24h -> 3 half-lives = 72h; FeatureMinHistory_MaxUs() is 24h for the bucket-ring
+    // rows). It is skipped ONLY because this argument is hardcoded 0 — a far weaker
+    // guarantee than that sentence promised, and it is the sentence that would stop the
+    // next reader looking.
+    //
+    // So wiring a timestamp source is currently a TRAP, not an enhancement: it would
+    // jump the gap to ~70,000 samples and REFUSE every fold on a short file. That is the
+    // HONEST number (D-469 — the feature side of the purge is serial-dependence control
+    // and the ladder genuinely reads 24h back), so the answer is a longer dataset, not a
+    // smaller reach. Do not wire the clock without reading D-469 first.
     const int tps_wf = FeatureCadence_TicksPerSample(data->sample_tick_indices,
                                                       data->sample_count);
     int raw_purge = PurgeGap_Compute(horizon_ticks, buffer_ticks, tps_wf, /*sample_period_us=*/0);
@@ -2228,6 +2243,28 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
     fprintf(stderr, "[walkforward] purge gap: %d raw → %d in non-neutral space (density %.3f)\n",
             raw_purge, nn_purge, nn_density);
+
+    // D-469 — REFUSE rather than silently under-purge. The held-out path next door has
+    // had this arm since it was written ("REFUSE: purge gap >= trainval_end_idx"); the
+    // walk-forward path did not, so an unaffordable purge here degraded into whatever
+    // folds happened to survive, and reported their mean as a result.
+    //
+    // The number this guards is the one the stamp gate keys on, so a quietly-inflated
+    // metric is worse than no metric. An honest reach against a short file is EXPECTED
+    // to refuse: the ladder's 24h features need ~24h of purge per fold boundary, which a
+    // 3-day file cannot pay (see D-469's table — 3d refuses, 14d costs 36%, 30d costs
+    // 17%). The fix for a refusal is a LONGER FILE, never a smaller reach, and the
+    // message says so rather than leaving the operator to infer it.
+    if (nn_purge * n_splits >= nn_count) {
+        fprintf(stderr,
+                "[walkforward] REFUSE: purge %d x %d folds = %d >= %d non-neutral samples.\n"
+                "              The feature reach is honest (see D-469); this dataset cannot pay it.\n"
+                "              Use a longer file (~30 days is comfortable at this reach) or fewer folds.\n",
+                nn_purge, n_splits, nn_purge * n_splits, nn_count);
+        free(nn_features); free(nn_labels); free(nn_indices);
+        *progress_pct = 100;
+        return;
+    }
 
     // generate folds over non-neutral samples using explicit purge gap
     // (ValidationSplit_Generate would apply FeatureLookback_Max in raw space, not non-neutral space)

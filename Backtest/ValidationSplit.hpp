@@ -10,7 +10,8 @@
 // [OVERVIEW]_[purged temporal walk-forward CV — expanding-window folds with a lookback-aware purge gap so no train sample's features overlap any test label window; leakage post-check invalidates violating folds]
 // [REFERENCE]_[SOURCE]_[FoxML/private purged_time_series_split.py + feature_time_meta.py]
 // [CONTAINS]
-//   - [FUNCTION]_[PurgeGap_Compute]   (PurgeGap_ComputeExplicit rides)
+//   - [FUNCTION]_[Ticks_ToSamples]
+//   - [FUNCTION]_[PurgeGap_Compute]
 //   - [STRUCT]_[PurgedSplit]
 //   - [FUNCTION]_[ValidationSplit_Generate]   (GenerateExplicit + Verify + Print ride)
 //======================================================================================================
@@ -22,7 +23,10 @@
 // destroys time patterns and allows training on future data to predict past data.
 //
 // key FoxML design principles preserved:
-//   1. lookback-aware purge gap: purge = max(horizon, max_feature_lookback) + buffer
+//   1. reach-aware purge gap: purge = max(horizon, max_feature_reach) + buffer, where
+//      the reach spans THREE registry columns — lookback_ticks, half_life_us and
+//      min_history_us (D-469; the third was unread, and six enabled 24h/4.2h features
+//      carry their reach in it exclusively)
 //   2. growing train window (expanding, not sliding): fold 1 = [0..20%], fold 2 = [0..40%]
 //   3. skip fold if train set too small after purge
 //   4. time contract (t+1): labels never include current tick (enforced in LabelFunctions)
@@ -30,7 +34,9 @@
 // tick-level adaptations (vs FoxML's 5-minute bars):
 //   - tick indices ARE the time axis (single symbol, no panel data)
 //   - no pd.Timedelta / searchsorted needed
-//   - purge gap in ticks, not minutes
+//   - the purge gap is computed FROM ticks and RETURNED in samples (D-463/D-469);
+//     this line read "purge gap in ticks, not minutes" while the value had been in
+//     sample space since D-463
 //
 // source: ~/FoxML/private/TRAINING/ranking/utils/purged_time_series_split.py
 // source: ~/FoxML/private/TRAINING/ranking/utils/feature_time_meta.py
@@ -110,6 +116,34 @@ static inline int FeatureCadence_TicksPerSample(const int *sample_tick_indices,
 // [END_FUNCTION]_[FeatureCadence_TicksPerSample]
 //======================================================================
 
+//======================================================================
+// [FUNCTION]_[Ticks_ToSamples]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE tick->sample conversion seam for the purge path — ceil, exact integer, saturating at 1 tick/sample]
+// [REFERENCE]_[DECISION]_[[D-469] [D-463]]
+//======================================================================
+// [CODE]
+//======================================================================
+// CEIL, not floor, and that is a correctness choice rather than a rounding taste: this
+// feeds a LEAKAGE control, so the error must land on the conservative side. A floor
+// divide would under-purge by up to one sample per term, silently.
+//
+// Exact integer arithmetic — these are counts, so there is no rounding to disagree
+// about across runs or binaries (H9/H10). Mirrors the ceil already used for the window
+// column in FeatureReach_MaxSamples; SSoT for the operation so the two cannot drift.
+static inline int Ticks_ToSamples(int ticks, int ticks_per_sample) {
+    if (ticks_per_sample < 1) ticks_per_sample = 1;   // same clamp as FeatureReach_MaxSamples
+    if (ticks <= 0) return 0;
+    return (ticks + ticks_per_sample - 1) / ticks_per_sample;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Ticks_ToSamples]
+//======================================================================
+
 // D-463 — SAMPLE SPACE, explicitly. This function's result is subtracted from a
 // FEATURE-MATRIX ROW index (ValidationSplit_Generate's total_samples;
 // BacktestEngine.hpp's `trainval_end_idx - ho_purge`), so every term must be in
@@ -121,17 +155,26 @@ static inline int FeatureCadence_TicksPerSample(const int *sample_tick_indices,
 // ticks_per_sample / sample_period_us are the caller's MEASURED cadences — see
 // FeatureReach_MaxSamples. They are required, not defaulted: a wrong default here is
 // invisible and re-creates exactly the bug this replaces.
-static inline int PurgeGap_Compute(int horizon_samples, int buffer_samples,
+// D-469 — the signature now takes EVERYTHING IN TICKS plus the cadence, and returns
+// SAMPLES. The mixed-unit boundary this function used to present does not exist any
+// more; it is not policed, it is unrepresentable.
+//
+// WHY THIS SHAPE, and why not a typed tick/sample index: all three callers were already
+// passing tick-space values UNANIMOUSLY — only these parameter NAMES dissented, which is
+// why D-463 could convert one arm and leave the other with every caller unchanged and
+// the suite green. Asking callers for a unit none of them had is what created the bug;
+// the fix is to stop asking. (A tt::Ticks/tt::Samples type was evaluated and rejected on
+// mechanism: `Samples{horizon_ticks}` compiles and reproduces the defect, because the
+// caller-side value is a bare int — see CoreFrameworks/IndexSpaces.hpp's own calibrated
+// claim that a boundary construction from a WRONG raw integer is outside what the type
+// buys. Full reasoning in decision-log D-469.)
+static inline int PurgeGap_Compute(int horizon_ticks, int buffer_ticks,
                                     int ticks_per_sample, uint64_t sample_period_us) {
-    int max_reach = FeatureReach_MaxSamples(ticks_per_sample, sample_period_us);
-    int base = (horizon_samples > max_reach) ? horizon_samples : max_reach;
+    const int horizon_samples = Ticks_ToSamples(horizon_ticks, ticks_per_sample);
+    const int buffer_samples  = Ticks_ToSamples(buffer_ticks,  ticks_per_sample);
+    const int max_reach       = FeatureReach_MaxSamples(ticks_per_sample, sample_period_us);
+    const int base = (horizon_samples > max_reach) ? horizon_samples : max_reach;
     return base + buffer_samples;
-}
-
-// overload: caller provides explicit max_lookback (for testing or custom feature sets)
-static inline int PurgeGap_ComputeExplicit(int horizon_ticks, int max_lookback, int buffer_ticks) {
-    int base = (horizon_ticks > max_lookback) ? horizon_ticks : max_lookback;
-    return base + buffer_ticks;
 }
 //======================================================================
 // [END_CODE]
@@ -159,7 +202,9 @@ struct PurgedSplit {
     int train_end;      // exclusive (last train tick + 1)
     int test_start;     // inclusive
     int test_end;       // exclusive
-    int purge_gap;      // ticks between train_end and test_start
+    int purge_gap;      // SAMPLES between train_end and test_start (D-463 changed the
+                        // space; this comment said "ticks" until D-469 — the exact
+                        // unit confusion the surrounding fix exists to remove)
     int train_count;    // train_end - train_start (convenience)
     int test_count;     // test_end - test_start (convenience)
     int valid;          // 1 = usable fold, 0 = skipped (train too small after purge)
@@ -199,8 +244,14 @@ static inline int ValidationSplit_Generate(PurgedSplit *folds, int total_samples
     if (n_splits > VALIDATION_MAX_FOLDS) n_splits = VALIDATION_MAX_FOLDS;
     if (total_samples < n_splits * 2) return 0; // not enough data for any fold
 
-    // ORPHAN (no callers tree-wide; production uses ValidationSplit_GenerateExplicit).
-    // Identity cadence preserves its historical behaviour exactly.
+    // No PRODUCTION callers (production uses ValidationSplit_GenerateExplicit), but NOT
+    // callerless: tests/controller_test.cpp exercises it — a `grep -r` from the engine
+    // root misses it because tests/ is a SYMLINK and -r does not traverse those. The
+    // previous "ORPHAN (no callers tree-wide)" wording was therefore false, and it is the
+    // sentence someone changing this contract would rely on before concluding nothing
+    // downstream can break (D-469).
+    // Identity cadence (tps=1) preserves its historical behaviour exactly — which is also
+    // why this path could never have surfaced the D-469 unit defect.
     int purge_gap = PurgeGap_Compute(horizon_ticks, buffer_ticks, /*ticks_per_sample=*/1, 0);
 
     // compute fold boundaries (equal-sized test sets, like FoxML)
