@@ -624,18 +624,54 @@ static inline void FlowState_Init(FlowState *s) {
 // bytewise contract is "same input → same stored bytes" guaranteed by
 // FPN_FromDouble + FPN_Exp + FPN_ToDouble all being deterministic.
 // Full RegimeSignals→FPN_Binary cascade is a v5.11 ship (large blast radius).
-static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double signed_volume) {
+// E.1.2.G — price + volume are REQUIRED parameters, not defaulted. The ladder's
+// ten accumulators need them, and a defaulted overload would let one seam supply
+// them and the other silently not: PARITY-053's shape, on the feature source this
+// ship exists to add. Both callers pass Money_ToBinary(...) of the same tick
+// fields, so the crossing OPERATION is identical on live and backtest even though
+// the crossing LOCATION differs (contrast the open PARITY-054, where the two sides
+// use FPN_ToDouble vs Money_ToDouble — two kernels, one quantity).
+static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double signed_volume,
+                                  FPN_Binary<64> price, FPN_Binary<64> volume) {
     if (s->last_us == 0) {
         s->ewma_10s = signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
         s->ewma_1m  = signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
         s->ewma_5m  = signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
         s->last_us  = timestamp_us;
+
+        // E.1.2.G — seed the ladder accumulators. Seeding matters far more for the
+        // AVERAGE form than the SUM: from zero an average climbs toward the sample
+        // over ~one half-life, so a 24h row would read low for a DAY with nothing
+        // indicating it is still warming. Seeding fixes the starting VALUE; the
+        // min_history_us gate (D-467) is the separate half that stops the row being
+        // SERVED before it means anything. Both are required.
+        const FPN_Binary<64> sv = FPN_FromDouble<64>(signed_volume);
+        EwmaSum_Seed(&s->flow_30m, sv);   EwmaSum_Seed(&s->flow_2h, sv);
+        EwmaAvg_Seed(&s->ret_ema_30m, price); EwmaAvg_Seed(&s->ret_ema_2h,  price);
+        EwmaAvg_Seed(&s->ret_ema_8h,  price); EwmaAvg_Seed(&s->ret_ema_24h, price);
+        // rvol accumulates SQUARED RETURNS and there is no return on the first
+        // sample — seed at zero, not at the price, or the first value would be a
+        // price-scaled outlier that takes a half-life to decay away.
+        EwmaAvg_Seed(&s->rvol_1h, FPN_Zero<64>());
+        EwmaAvg_Seed(&s->rvol_8h, FPN_Zero<64>());
+        EwmaAvg_Seed(&s->vwap_pv_24h, FPN_Mul(price, volume));
+        EwmaAvg_Seed(&s->vwap_v_24h,  volume);
+        s->prev_price = price;
         return;
     }
     if (timestamp_us <= s->last_us) {
         s->ewma_10s += signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
         s->ewma_1m  += signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
         s->ewma_5m  += signed_volume;  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+        // E.1.2.G — at dt == 0 the decay is 1, so an AVERAGE step is the identity
+        // (e*1 + 0*x == e) and the AVERAGE accumulators are deliberately untouched.
+        // The SUMs still take the sample, matching the legacy trio directly above:
+        // a decaying SUM has no fixed point, so a same-timestamp trade is real flow.
+        {
+            const FPN_Binary<64> sv = FPN_FromDouble<64>(signed_volume);
+            s->flow_30m.v = FPN_Add(s->flow_30m.v, sv);
+            s->flow_2h.v  = FPN_Add(s->flow_2h.v,  sv);
+        }
         return;
     }
     // v5.15.5.F.4d.1.E.1.2.G (re-gate F2) — the decay ratio is formed in INTEGER
@@ -667,6 +703,56 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
     s->ewma_10s = Ewma_AccumulateStep(s->ewma_10s, decay_10s, signed_volume);  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
     s->ewma_1m  = Ewma_AccumulateStep(s->ewma_1m,  decay_1m,  signed_volume);  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
     s->ewma_5m  = Ewma_AccumulateStep(s->ewma_5m,  decay_5m,  signed_volume);  // [LAT_EXEMPT]_[D-455 feature<->double seam: FlowState's EWMAs are double BY DECISION; H4-exempt]
+
+    // ── E.1.2.G: the ladder accumulators (D-468) ─────────────────────────────
+    // ONE decay per DISTINCT half-life, SHARED by every accumulator using it. Ten
+    // accumulators, FIVE half-lives — which is the whole reason the dyadic ladder
+    // was REFUSED: the alarm justifying it assumed eleven independent exps and
+    // re-measured at ~2.7x, not 14x, while the ladder's own cost is a permanent
+    // constraint pinning every future half-life to a power-of-two grid. Sharing is
+    // what the legacy trio above already does; this is the same move, not a new one.
+    const FPN_Binary<64> d_30m = FPN_Exp(FPN_Negate(FPN_DivNoAssert(dt_fpn, FPN_FromInt<64>(FLOW_HALFLIFE_30M_US))));
+    const FPN_Binary<64> d_1h  = FPN_Exp(FPN_Negate(FPN_DivNoAssert(dt_fpn, FPN_FromInt<64>(FLOW_HALFLIFE_1H_US))));
+    const FPN_Binary<64> d_2h  = FPN_Exp(FPN_Negate(FPN_DivNoAssert(dt_fpn, FPN_FromInt<64>(FLOW_HALFLIFE_2H_US))));
+    const FPN_Binary<64> d_8h  = FPN_Exp(FPN_Negate(FPN_DivNoAssert(dt_fpn, FPN_FromInt<64>(FLOW_HALFLIFE_8H_US))));
+    const FPN_Binary<64> d_24h = FPN_Exp(FPN_Negate(FPN_DivNoAssert(dt_fpn, FPN_FromInt<64>(FLOW_HALFLIFE_24H_US))));
+
+    const FPN_Binary<64> sv_fpn = FPN_FromDouble<64>(signed_volume);
+
+    // SUM for flow — the accumulated total IS the signal. The TYPE enforces it
+    // (D-465): EwmaSum_Step will not accept an EwmaAvg, so the 432,000x tick-rate
+    // proxy these rows would otherwise have shipped as is unrepresentable.
+    EwmaSum_Step(&s->flow_30m, d_30m, sv_fpn);
+    EwmaSum_Step(&s->flow_2h,  d_2h,  sv_fpn);
+
+    // AVERAGE for levels — a fixed point AT the sample, so it is half-life-stable
+    // where a SUM would settle near 432,000 x price.
+    EwmaAvg_Step(&s->ret_ema_30m, d_30m, price);
+    EwmaAvg_Step(&s->ret_ema_2h,  d_2h,  price);
+    EwmaAvg_Step(&s->ret_ema_8h,  d_8h,  price);
+    EwmaAvg_Step(&s->ret_ema_24h, d_24h, price);
+
+    // Realized vol: EWMA of SQUARED SIMPLE returns. Simple, NOT log (re-gate H15):
+    // FPN_Log would be the FIRST libm consumer tree-wide, inside accumulators D-455
+    // typed FPN_Binary precisely FOR determinism and which are a rider-2 persist
+    // target (H9). prev_price is non-zero on this path — the seed branch set it
+    // from a real price before any push can reach here.
+    {
+        const FPN_Binary<64> r  = FPN_DivNoAssert(FPN_Sub(price, s->prev_price), s->prev_price);
+        const FPN_Binary<64> r2 = FPN_Mul(r, r);
+        EwmaAvg_Step(&s->rvol_1h, d_1h, r2);
+        EwmaAvg_Step(&s->rvol_8h, d_8h, r2);
+    }
+
+    // VWAP as two SEPARATE legs at the SAME half-life, both AVERAGE — load-bearing,
+    // not incidental. Each leg is individually correct under EITHER recurrence (the
+    // normalisation factor cancels in the ratio), but a MIX inflates VWAP
+    // ~432,000x. A per-row `kind` COLUMN could not forbid that mix; a shared TYPE
+    // makes it unrepresentable (D-465 / re-gate H14).
+    EwmaAvg_Step(&s->vwap_pv_24h, d_24h, FPN_Mul(price, volume));
+    EwmaAvg_Step(&s->vwap_v_24h,  d_24h, volume);
+
+    s->prev_price = price;
     s->last_us = timestamp_us;
 }
 //======================================================================

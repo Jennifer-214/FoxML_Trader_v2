@@ -2487,7 +2487,7 @@ inline void EventLoop_UpdateRollingStateOneCore(
 
     double signed_vol = FPN_ToDouble(volume);
     if (is_buyer_maker) signed_vol = -signed_vol;
-    FlowState_Push(&sst->flow_state, timestamp_us, signed_vol);
+    FlowState_Push(&sst->flow_state, timestamp_us, signed_vol, price, volume);
     // E.1.2.G — the ring's LIVE push. Lands in the same commit as the BACKTEST
     // push (ShardedBacktestDriver) per M5: two update paths for one feature source
     // is how train and serve drift, and PARITY-053 is this ship's evidence.

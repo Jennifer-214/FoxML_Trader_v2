@@ -381,7 +381,8 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             double signed_vol = Money_ToDouble(tick.volume);
             if (tick.is_buyer_maker) signed_vol = -signed_vol;
             FlowState_Push((FlowState*)drv->flow_state,
-                            tick.timestamp, signed_vol);
+                            tick.timestamp, signed_vol,
+                            Money_ToBinary(tick.price), Money_ToBinary(tick.volume));
         }
         // E.1.2.G — the ring's BACKTEST push. Same commit as the LIVE push in
         // ControllerEventLoop per M5: one feature source updated by two paths is
