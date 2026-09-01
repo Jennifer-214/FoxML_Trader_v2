@@ -85,6 +85,14 @@ struct FeatureComputeCtx {
     // FeatureComputeCtx_Build, where this is a REQUIRED parameter.
     int                                   current_regime;
 
+    // E.1.2.G — the 24h bucket ring (288 x 5min). Read by the extrema rows
+    // (dist_to_high_24h / dist_to_low_24h / range_pos_24h) and the bar-frac-diff
+    // rows. REQUIRED at FeatureComputeCtx_Build, like current_regime and for the
+    // same reason: PARITY-053 was a field that three of five sites populated, and
+    // a pointer defaulting to nullptr here would reproduce it exactly — the rows
+    // would return zero at whichever seam forgot, silently.
+    const BucketRingState*                bucket_ring;
+
     // v5.14.9.E — TECH_DEBT-015 close (infrastructure-only scaffold).
     // Per-feature staleness gate plumbing. Default values (0 / nullptr)
     // mean "no staleness checks fire" → preserves pre-v5.14.9.E behavior
@@ -154,11 +162,13 @@ template <unsigned F>
 inline FeatureComputeCtx<F> FeatureComputeCtx_Build(
         const RegimeSignals<F>*     signals,
         const RollingStats<F, 128>* short_rolling,
-        int                         current_regime) {
+        int                         current_regime,
+        const BucketRingState*      bucket_ring) {
     FeatureComputeCtx<F> ctx{};
     ctx.signals        = signals;
     ctx.short_rolling  = short_rolling;
     ctx.current_regime = current_regime;
+    ctx.bucket_ring    = bucket_ring;
     // The staleness trio (now_us / feature_last_update_us /
     // stale_feature_events_total) stays at its inert defaults DELIBERATELY:
     // it is a scaffold with zero writers tree-wide, and the gate exists only

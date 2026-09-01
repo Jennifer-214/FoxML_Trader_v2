@@ -351,9 +351,11 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // each backtest run so multiple Collect Features clicks start clean.
     static BookImbalanceHistory<BACKTEST_FP, 1024> book_imb_history;
     static FlowState                               flow_state;
+    static BucketRingState                         bucket_ring;   // E.1.2.G
     static LargeTradeState<BACKTEST_FP, 1024>      large_trade_state;
     BookImbHistory_Init(&book_imb_history);
     FlowState_Init(&flow_state);
+    BucketRing_Init(&bucket_ring);
     LargeTradeState_Init(&large_trade_state);
     // v4.6 Wave 2 — D.3 spread state + holders updated per-tick from
     // depth_replay.current.spread / mid_price.
@@ -416,6 +418,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // by Regime_ComputeSignals via MLBuildContext threading.
     drv.book_imb_history  = &book_imb_history;
     drv.flow_state        = &flow_state;
+    drv.bucket_ring       = &bucket_ring;
     drv.large_trade_state = &large_trade_state;
     drv.spread_state      = &spread_state;
     drv.current_spread    = depth_enabled ? &spread_holder    : nullptr;
@@ -508,9 +511,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 // read from canonical sample core for ctx.current_regime —
                 // bytewise-identical to pre-.B.4 fc_ctx.regime_state semantic
                 // (single regime per feature collector tick).
+                // E.1.2.G — the ring the DRIVER has been pushing, so the collector
+                // trains on the same object the live seam serves from (M5).
                 auto ctx = FeatureComputeCtx_Build<BACKTEST_FP>(
                     &sig, d->rolling,
-                    d->state->nodes[tt::NodeIdx{BACKTEST_REGIME_SAMPLE_CORE}].regime_state.current_regime);
+                    d->state->nodes[tt::NodeIdx{BACKTEST_REGIME_SAMPLE_CORE}].regime_state.current_regime,
+                    (const BucketRingState*)d->bucket_ring);
                 int n = Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
                 if (n < 0) {

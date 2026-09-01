@@ -172,6 +172,14 @@ struct NodeSlowState {
     FlowState               flow_state;
     LargeTradeState<F, 1024> large_trade_state;
     SpreadState<F, 1024>    spread_state;
+
+    // E.1.2.G — the feature-horizon ladder's 24h bucket ring (288 x 5min).
+    // APPENDED AT THE TAIL deliberately: every existing member keeps its offset,
+    // so only sizeof moves and the offset-0 lazy-rebuild invariant plus the
+    // offsetof(flow_state) relied on by the growth's straddle analysis both hold
+    // unchanged. Inserting it mid-struct would have shifted two alignas(64)
+    // members for no benefit.
+    BucketRingState         bucket_ring;
 };
 
 // v5.15.5.B.1 — Layout invariant. ema_price + lazy_rebuild gate fields MUST
@@ -197,6 +205,7 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
     FlowState_Init(&s->flow_state);
     LargeTradeState_Init(&s->large_trade_state);
     SpreadState_Init(&s->spread_state);
+    BucketRing_Init(&s->bucket_ring);
     s->ema_price = FPN_Zero<F>();
     // v5.12.2.B — initial values force a full rebuild on the first cycle
     // (us_at_last_rebuild=0 → time-bound predicate fires; price=0 →
@@ -248,15 +257,21 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 // shrinking the ring buys DRAM footprint "not L1d-relevant" at +5% p50 on the
 // hottest window (refused — latency outranks memory here). Growth is a
 // DELIBERATE re-pin, never silent drift; shrink freely, then re-pin.
-// v5.15.5.F.4d.1.E.1.2.G — re-pinned 191744 -> 191936 (+192 B). FlowState grew
-// 64 -> 256 for the ladder's ten accumulators + prev_price. The number is taken
+// v5.15.5.F.4d.1.E.1.2.G — re-pinned TWICE this ship, both numbers from the compiler:
+//   191744 -> 191936  (+192)     FlowState 64 -> 256, the ladder's accumulators
+//   191936 -> 206976  (+15,040)  BucketRingState appended at the TAIL
+// The tail placement is verified, not assumed: offsetof(flow_state) measured
+// 158784 BEFORE and AFTER the ring landed, and offsetof(bucket_ring) == 191936 is
+// exactly the pre-ring sizeof. So no existing member moved at all — only sizeof.
+// (A pre-coding cross-check projected 206912; it used 14,976 for the ring, which is
+// the ARRAY portion, not sizeof. The compiler's 15,040 is the one to trust.) The number is taken
 // FROM THE COMPILER (a -fsyntax-only probe; check_struct_size_budget.py cannot
 // measure this type — its probe LINKS and this header pulls simdjson, TECH_DEBT-309),
 // never hand-computed. Verified alongside it: offsetof(flow_state) is UNCHANGED at
 // 158784, so nothing ahead of flow_state moved — it is the third-from-last member,
 // and 192 = 3 x 64 with both shifted members (large_trade_state, spread_state)
 // alignas(64) and 257 x 64 B each, so no new straddle is introduced.
-static_assert(sizeof(NodeSlowState<64>) == 191936,
+static_assert(sizeof(NodeSlowState<64>) == 206976,
               "NodeSlowState<64> layout moved — re-measure, update this pin AND the "
               "CoreFrameworks/CLAUDE.md memory-budget row (TECH_DEBT-293: the row states "
               "the MEASURED sizeof; the budget concept is resident working set + per-node "
@@ -2473,6 +2488,11 @@ inline void EventLoop_UpdateRollingStateOneCore(
     double signed_vol = FPN_ToDouble(volume);
     if (is_buyer_maker) signed_vol = -signed_vol;
     FlowState_Push(&sst->flow_state, timestamp_us, signed_vol);
+    // E.1.2.G — the ring's LIVE push. Lands in the same commit as the BACKTEST
+    // push (ShardedBacktestDriver) per M5: two update paths for one feature source
+    // is how train and serve drift, and PARITY-053 is this ship's evidence.
+    // `price` is already FPN_Binary here (the D-122 ingress converted it once).
+    BucketRing_Push(&sst->bucket_ring, timestamp_us, price);
     LargeTradeState_Push(&sst->large_trade_state, volume);
 
     if (depth_enabled) {
@@ -2888,6 +2908,11 @@ inline void EventLoop_RebuildOneCore(
             ml_ctx.model_handle   = state->nodes[tt::NodeIdx{(int16_t)slot}].model_handle;
             ml_ctx.ensemble_zoo   = state->nodes[tt::NodeIdx{(int16_t)slot}].ensemble_handle;  // v5.10.0a.G.5 — nullptr-safe; single-zoo when null
             ml_ctx.current_regime_id = state->nodes[tt::NodeIdx{(int16_t)slot}].regime_state.current_regime;  // v5.10.0a.G.7
+            // E.1.2.G — populate the ring HERE, beside current_regime_id, on purpose:
+            // that field is the one PARITY-053 proved could be forgotten at exactly
+            // this seam. Same statement, same slot expression, so the two cannot
+            // drift apart under a future edit.
+            ml_ctx.bucket_ring = &state->nodes[tt::NodeIdx{(int16_t)slot}].slow_state->bucket_ring;
             ml_ctx.confidence     = &state->nodes[tt::NodeIdx{(int16_t)slot}].confidence;
             ml_ctx.out_prediction = &state->nodes[tt::NodeIdx{(int16_t)slot}].staged_prediction;
             ml_ctx.out_confidence = &state->nodes[tt::NodeIdx{(int16_t)slot}].last_confidence;

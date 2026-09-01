@@ -143,6 +143,13 @@ struct MLBuildContext {
     // dispatcher's strategy_halt_reason pointer is wired to this slot so the
     // GUI Strategy Halt panel + entry log can attribute the block correctly.
     uint8_t*            out_strategy_halt_reason;
+
+    // E.1.2.G — the node's 24h bucket ring, for the ladder's extrema and
+    // bar-frac-diff rows. Populated beside current_regime_id in
+    // ControllerEventLoop so the LIVE serve seam reads the same object the
+    // collector trains on (M5). Null only in unit harnesses, where the ctx
+    // build substitutes BucketRing_Empty() explicitly.
+    const BucketRingState* bucket_ring;
     // v4.0 train-serve parity: pass through the RORRegressor + EMA price
     // that the engine's slow path maintains. ML_BuildParameters uses these
     // with Regime_ComputeSignals so ALL features ModelFeatures_Pack reads
@@ -1040,8 +1047,12 @@ inline void ML_BuildParameters(
     // (nodes[slot].regime_state.current_regime). The `mctx ? : 0` shape is the
     // established house idiom for this field (see :1181, :1561); mctx is non-null
     // on every production path and null only in unit harnesses.
+    // E.1.2.G — the ring follows current_regime_id's established `mctx ? :` idiom.
+    // The fallback is the NAMED empty ring, not nullptr: a null here would be the
+    // PARITY-053 shape again (a field some sites populate and some silently do not).
     auto ctx = FeatureComputeCtx_Build<F>(
-        &sig, rolling, mctx ? mctx->current_regime_id : 0);
+        &sig, rolling, mctx ? mctx->current_regime_id : 0,
+        (mctx && mctx->bucket_ring) ? mctx->bucket_ring : BucketRing_Empty());
     const uint64_t* eff_mask = (mctx && mctx->feature_mask) ? mctx->feature_mask : nullptr;
     int n = Features_PackAll(&ctx, features, eff_mask);
     // v5.9.0 — NaN/Inf in feature pack → fall through to SimpleDip.

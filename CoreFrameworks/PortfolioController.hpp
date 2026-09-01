@@ -1794,8 +1794,12 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       float feat_buf[MODEL_MAX_FEATURES];
       // v5.14.5.B — current_regime is the PRIOR cycle's classification
       // (Regime_Classify below updates for next cycle).
+      // LEGACY path (E.1.3 P4.5(b) deletes this file). The legacy controller has
+      // no bucket ring; passing the named empty one keeps the choice VISIBLE
+      // rather than defaulting a pointer — see BucketRing_Empty()'s comment.
       auto ctx = FeatureComputeCtx_Build<F>(
-          &signals, &ctrl->rolling, ctrl->regime.current_regime);
+          &signals, &ctrl->rolling, ctrl->regime.current_regime,
+          BucketRing_Empty());
       int n = Features_PackAll(&ctx, feat_buf);
       // v5.9.3b — apply scaler. Identity no-op when not loaded.
       if (n >= 0 && tt::FeatureStandardizer_Apply(
@@ -1961,8 +1965,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   if (BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) && !FPN_IsZero(ctrl->buy_conds.price)
       && Model_IsLoaded(&ctrl->peak_model)) {
     float features[MODEL_MAX_FEATURES];
+    // LEGACY path (E.1.3 P4.5(b) deletes this file) — see the sibling above.
     auto ctx = FeatureComputeCtx_Build<F>(
-        &ctrl->last_signals, &ctrl->rolling, ctrl->regime.current_regime);
+        &ctrl->last_signals, &ctrl->rolling, ctrl->regime.current_regime,
+        BucketRing_Empty());
     int n = Features_PackAll(&ctx, features);
     // v5.9.3b — apply scaler ONCE before both peak + valley predictions
     // share the same features buffer. Use peak_model's scaler (peak +

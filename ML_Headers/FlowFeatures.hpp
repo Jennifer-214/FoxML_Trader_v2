@@ -835,6 +835,21 @@ static inline void BucketRing_Push(BucketRingState *r, uint64_t timestamp_us,
 }
 //======================================================================
 // [END_CODE]
+// A deliberately-EMPTY ring, for construction sites that genuinely have none.
+//
+// NAMED rather than passing nullptr, because "some sites pass the real thing and
+// some pass a silent default" is exactly PARITY-053's shape — the bug this ship
+// spent a day closing. A caller reaching for BucketRing_Empty() is making a
+// visible choice that shows up in review and in grep; a nullptr is invisible.
+//
+// Zero-init is CORRECT here rather than merely convenient, and that is the 1-based
+// ordinal paying off: every slot stamped 0 means never-written, so an empty ring
+// reports no valid slots without Init ever running. Under the 0-based form this
+// object would have claimed 288 valid zero-priced buckets.
+static inline const BucketRingState* BucketRing_Empty() {
+    static const BucketRingState empty{};
+    return &empty;
+}
 //======================================================================
 // [END_FUNCTION]_[BucketRing_Init]
 //======================================================================

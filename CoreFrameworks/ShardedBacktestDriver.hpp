@@ -117,6 +117,7 @@ struct ShardedBacktestDriver {
     // consumer end. NULL = legacy callers (pre-Wave-1 behavior).
     void*                  book_imb_history;   // BookImbalanceHistory<F, 1024>*
     void*                  flow_state;         // FlowState*
+    void*                  bucket_ring;        // BucketRingState*  (E.1.2.G)
     void*                  large_trade_state;  // LargeTradeState<F, 1024>*
     // v4.6 Wave 2 — D.3 spread dynamics. spread_state ring; current
     // spread + mid_price observed from depth state (caller-owned holders
@@ -200,6 +201,7 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
     // v4.5 Wave 1
     drv->book_imb_history   = nullptr;
     drv->flow_state         = nullptr;
+    drv->bucket_ring        = nullptr;
     drv->large_trade_state  = nullptr;
     // v4.6 Wave 2
     drv->spread_state       = nullptr;
@@ -380,6 +382,15 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             if (tick.is_buyer_maker) signed_vol = -signed_vol;
             FlowState_Push((FlowState*)drv->flow_state,
                             tick.timestamp, signed_vol);
+        }
+        // E.1.2.G — the ring's BACKTEST push. Same commit as the LIVE push in
+        // ControllerEventLoop per M5: one feature source updated by two paths is
+        // how train and serve drift apart, and PARITY-053 is this ship's evidence
+        // of what that costs. Money_ToBinary is the D-122 crossing, matching what
+        // the live path already holds as FPN_Binary at its push.
+        if (drv->bucket_ring) {
+            BucketRing_Push((BucketRingState*)drv->bucket_ring,
+                            tick.timestamp, Money_ToBinary(tick.price));
         }
         if (drv->large_trade_state) {
             LargeTradeState_Push(
