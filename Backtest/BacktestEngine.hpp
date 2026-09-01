@@ -2246,7 +2246,12 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     ValidationSplit_Print(wf->splits, n_splits);
 
     float sum_val = 0.0f, sum_val_sq = 0.0f, sum_train = 0.0f;
+    // counted_folds = folds contributing to the VAL mean (the number the stamp gate and
+    // the skill floor key on). counted_train is tracked separately because train and val
+    // predicts fail independently — one divisor for two populations is how a partial
+    // failure silently biases the train/val GAP, which is the overfit signal.
     int counted_folds = 0;
+    int counted_train = 0;
 
     for (int f = 0; f < n_splits; f++) {
         if (*cancel_flag) break;
@@ -2254,6 +2259,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         PurgedSplit *sp = &wf->splits[f];
         WalkForwardFoldResult *fr = &wf->folds[f];
         memset(fr, 0, sizeof(*fr));
+
+        // TECH_DEBT-313 (second defect) — per-fold metric AVAILABILITY. "the metric was
+        // computed" and "the metric is 0.0" are different facts, and a zero-initialised
+        // fold result cannot tell them apart. A fold whose XGBoosterPredict fails or
+        // returns an unexpected out_len leaves val_accuracy/val_mse at their 0.0 default;
+        // counting it averages a FAILURE in as a 0% SCORE, and with one surviving fold the
+        // reported mean is exactly 0.0000 — indistinguishable from a genuinely useless
+        // model. Tracked for BOTH arms deliberately: D-463 fixed one arm of a two-arm
+        // construct on this very surface and left the other, which is the defect this
+        // ship closes (Class 33 / M9). The fix must not repeat the shape of the bug.
+        int val_ok   = 0;
+        int train_ok = 0;
 
         if (!sp->valid) {
             fr->valid = 0;
@@ -2507,10 +2524,12 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
                     fr->train_mse         = WalkForward_ComputeMSE(pred_tr, train_labels, n_train);
                     fr->train_correlation = WalkForward_ComputeCorrelation(pred_tr, train_labels, n_train);
+                    train_ok = 1;
                 }
                 if (pred_te_ok && (int)out_len_te == n_test) {
                     fr->val_mse         = WalkForward_ComputeMSE(pred_te, test_labels, n_test);
                     fr->val_correlation = WalkForward_ComputeCorrelation(pred_te, test_labels, n_test);
+                    val_ok = 1;
                 }
             } else if (is_multiclass) {
                 int K = num_classes_lt;
@@ -2528,6 +2547,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 if (pred_tr_ok && (int)out_len_tr == n_train * K) {
                     fr->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_tr, train_labels, n_train, K);
+                    train_ok = 1;
 #ifdef FOXML_DEBUG_LOGS
                     {
                         // Sample first 5 (argmax, label) pairs.
@@ -2561,13 +2581,14 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 } else {
                     tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
                         "train SKIP — pred_tr_ok=%d out_len_tr=%lu expected=%d "
-                        "(n_train=%d K=%d) → train_accuracy stays at 0.0 default",
+                        "(n_train=%d K=%d) → fold EXCLUDED from the train mean",
                         pred_tr_ok, (unsigned long)out_len_tr, n_train * K,
                         n_train, K);
                 }
                 if (pred_te_ok && (int)out_len_te == n_test * K) {
                     fr->val_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_te, test_labels, n_test, K);
+                    val_ok = 1;
 #ifdef FOXML_DEBUG_LOGS
                     {
                         char sample_buf[128] = {0};
@@ -2600,18 +2621,35 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 } else {
                     tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
                         "val SKIP — pred_te_ok=%d out_len_te=%lu expected=%d "
-                        "(n_test=%d K=%d) → val_accuracy stays at 0.0 default",
+                        "(n_test=%d K=%d) → fold EXCLUDED from the val mean",
                         pred_te_ok, (unsigned long)out_len_te, n_test * K,
                         n_test, K);
                 }
             } else {
+                // BINARY. The WARN arms below were absent entirely while the multiclass
+                // sister next door had them since v5.11.32 — so a binary shape-mismatch
+                // was not merely miscounted, it was SILENT. Same sibling-asymmetry shape
+                // as the metric bug itself; closed here rather than left for the class to
+                // be rediscovered on the arm that has no voice.
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
                     fr->train_accuracy = WalkForward_ComputeAccuracy(
                         pred_tr, train_labels, n_train, 0.5f);
+                    train_ok = 1;
+                } else {
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
+                        "train SKIP — pred_tr_ok=%d out_len_tr=%lu expected=%d "
+                        "(n_train=%d) → fold EXCLUDED from the train mean",
+                        pred_tr_ok, (unsigned long)out_len_tr, n_train, n_train);
                 }
                 if (pred_te_ok && (int)out_len_te == n_test) {
                     fr->val_accuracy = WalkForward_ComputeAccuracy(
                         pred_te, test_labels, n_test, 0.5f);
+                    val_ok = 1;
+                } else {
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
+                        "val SKIP — pred_te_ok=%d out_len_te=%lu expected=%d "
+                        "(n_test=%d) → fold EXCLUDED from the val mean",
+                        pred_te_ok, (unsigned long)out_len_te, n_test, n_test);
                 }
             }
             // v5.11.58 — release the train-prediction snapshot
@@ -2639,19 +2677,32 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         OverfitDetection_Print(&fr->overfit, f);
         if (fr->overfit.is_overfit) wf->overfit_count++;
 
-        // accumulate aggregates — kind-appropriate
-        if (is_regression) {
-            sum_val      += fr->val_mse;          // MSE for "lower=better" aggregate
-            sum_val_sq   += fr->val_mse * fr->val_mse;
-            sum_train    += fr->train_mse;
-            wf->mean_val_correlation   += fr->val_correlation;   // mean of fold rs
-            wf->mean_train_correlation += fr->train_correlation;
-        } else {
-            sum_val    += fr->val_accuracy;
-            sum_val_sq += fr->val_accuracy * fr->val_accuracy;
-            sum_train  += fr->train_accuracy;
+        // accumulate aggregates — kind-appropriate, and ONLY from folds whose metric was
+        // actually COMPUTED (TECH_DEBT-313). Gated independently per side: a shape
+        // mismatch on one predict call says nothing about the other, so folding both
+        // behind one flag would re-create the same one-arm blindness at a smaller scale.
+        // Cleanup below stays UNCONDITIONAL — the naive `continue` this replaces would
+        // have leaked the booster and both DMatrix handles on every excluded fold.
+        if (val_ok) {
+            if (is_regression) {
+                sum_val    += fr->val_mse;          // MSE for "lower=better" aggregate
+                sum_val_sq += fr->val_mse * fr->val_mse;
+                wf->mean_val_correlation += fr->val_correlation;   // mean of fold rs
+            } else {
+                sum_val    += fr->val_accuracy;
+                sum_val_sq += fr->val_accuracy * fr->val_accuracy;
+            }
+            counted_folds++;
         }
-        counted_folds++;
+        if (train_ok) {
+            if (is_regression) {
+                sum_train += fr->train_mse;
+                wf->mean_train_correlation += fr->train_correlation;
+            } else {
+                sum_train += fr->train_accuracy;
+            }
+            counted_train++;
+        }
 
         // cleanup
         XGBoosterFree(booster);
@@ -2677,18 +2728,21 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     free(nn_indices);
 
     // compute aggregate stats — kind-appropriate
+    // each mean divides by its OWN population — see the counted_train rationale above.
     if (counted_folds > 0) {
         if (is_regression) {
-            wf->mean_val_mse           = sum_val   / counted_folds;
-            wf->mean_val_correlation  /= counted_folds;
-            wf->mean_train_correlation /= counted_folds;
+            wf->mean_val_mse          = sum_val / counted_folds;
+            wf->mean_val_correlation /= counted_folds;
             // mean_val/train_accuracy stay 0 — display reads label_kind to pick
         } else {
-            wf->mean_val_accuracy   = sum_val / counted_folds;
-            wf->mean_train_accuracy = sum_train / counted_folds;
+            wf->mean_val_accuracy = sum_val / counted_folds;
             float var = (sum_val_sq / counted_folds) - (wf->mean_val_accuracy * wf->mean_val_accuracy);
             wf->std_val_accuracy = (var > 0.0f) ? (float)sqrt((double)var) : 0.0f;
         }
+    }
+    if (counted_train > 0) {
+        if (is_regression) wf->mean_train_correlation /= counted_train;
+        else               wf->mean_train_accuracy    = sum_train / counted_train;
     }
 
     gettimeofday(&t_end, NULL);
@@ -2698,7 +2752,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     *progress_pct = 100;
 
     fprintf(stderr, "\n[walkforward] === RESULTS ===\n");
-    fprintf(stderr, "  valid folds: %d/%d\n", counted_folds, n_splits);
+    fprintf(stderr, "  valid folds: %d/%d (val-scored; train-scored %d)\n",
+            counted_folds, n_splits, counted_train);
     fprintf(stderr, "  mean val accuracy:   %.4f +/- %.4f\n",
             wf->mean_val_accuracy, wf->std_val_accuracy);
     fprintf(stderr, "  mean train accuracy: %.4f\n", wf->mean_train_accuracy);
