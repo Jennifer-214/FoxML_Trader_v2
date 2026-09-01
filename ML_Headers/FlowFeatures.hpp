@@ -449,7 +449,7 @@ struct alignas(64) FlowState {
 //======================================================================
 
 // v5.15.5.D.A — Layout lock for FlowState.
-// [ASSERT]_[LAYOUT_LOCK]_[sizeof(FlowState) == 64]
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(FlowState) == 256]
 static_assert(sizeof(FlowState) == 256,
     "FlowState sizeof MUST be 256 B (4 cache lines) — E.1.2.G grew it from 64 for the ladder's "
     "ten accumulators + prev_price. If this fails, the compiler's number is the truth: fix "

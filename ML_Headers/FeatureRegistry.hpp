@@ -11,7 +11,7 @@
 // [OVERVIEW]_[the ML feature SSoT — one FOREACH_FEATURE row per feature auto-flows enum + names/versions + enabled bitmap + staleness + registry hash + the Features_PackAll packers]
 // [CONTAINS]
 //   - [STRUCT]_[FeatureComputeCtx]
-//   - [REGISTRY]_[FOREACH_FEATURE]   (the 40 ML_Compute_* leaves + registry hash + both Features_PackAll overloads share the block)
+//   - [REGISTRY]_[FOREACH_FEATURE]   (the ML_Compute_* leaves + registry hash + both Features_PackAll overloads share the block)
 //======================================================================================================
 // Single source of truth for ML features. Adding a new feature:
 //   1. Implement `ML_Compute_<Name>(ctx)` returning FPN_Binary<F>
@@ -217,7 +217,7 @@ inline FeatureComputeCtx<F> FeatureComputeCtx_Build(
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [FRAMEWORK_DISCIPLINE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[40 feature rows — one row auto-flows FeatureId enum + NAMES/VERSIONS arrays + enabled bitmap + staleness table + FEATURE_REGISTRY_HASH + the Features_PackAll walkers]
+// [OVERVIEW]_[the feature-row registry — one row auto-flows FeatureId enum + NAMES/VERSIONS arrays + enabled bitmap + staleness table + FEATURE_REGISTRY_HASH + the Features_PackAll walkers; re-derive the count with `grep -c '^    X(' ML_Headers/FeatureRegistry.hpp`]
 // [COLUMN]_[id]_[UPPERCASE token -> FEATURE_<id> enum; IDs contiguous from 0, order LOCKED to historical indices (trained models address by position)]
 // [COLUMN]_[name]_[string folded into FEATURE_REGISTRY_HASH + FEATURE_NAMES display table]
 // [COLUMN]_[version]_[bump on formula change — flips the hash, forces retrain; never bump for renames/comments]

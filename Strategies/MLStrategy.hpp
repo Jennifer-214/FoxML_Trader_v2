@@ -170,10 +170,19 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     if (!state->model_ready) return conds;
 
     // pack features from regime signals + rolling stats (v5.8.1b: registry-driven)
-    // No regime is in scope in this signature and this entry point has NO
-    // callers tree-wide (verified 2026-08-30). REGIME_RANGING is passed
+    // No regime is in scope in this signature. REGIME_RANGING is passed
     // explicitly rather than inherited from a value-init default, so the choice
-    // is visible; if this path is ever revived it must thread a real regime.
+    // is visible.
+    //
+    // ⚠️ CLAIM CORRECTED 2026-09-01: this said "this entry point has NO callers
+    // tree-wide (verified 2026-08-30)" and that is FALSE —
+    // CoreFrameworks/PortfolioController.hpp calls MLStrategy_BuySignal. The
+    // caller is on the LEGACY single-core path (deprecated, warned at boot), not
+    // the sharded production path, which is why the hardcoded regime has not
+    // surfaced as a live defect. But the justification the old wording rested on
+    // — "nothing calls this" — was simply wrong, and a hardcoded regime served to
+    // a real caller is the PARITY-053 shape. If the legacy path is revived rather
+    // than deleted, this MUST thread a real regime first.
     auto ctx = FeatureComputeCtx_Build<F>(signals, rolling, REGIME_RANGING,
                                           BucketRing_Empty(), FlowState_Empty());   // neither in this signature; explicit, not defaulted
     int n = Features_PackAll(&ctx, state->feature_buf);
