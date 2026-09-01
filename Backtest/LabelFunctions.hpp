@@ -633,8 +633,8 @@ struct LabelDef {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[48B]
+// [UPDATED]_[2026-09-01]
+// [SIZE]_[56B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
