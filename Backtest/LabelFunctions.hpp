@@ -87,33 +87,33 @@ struct HistoricalTick {
 // [CODE]
 //======================================================================
 #define FOREACH_TARGET(X) \
-    X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0, TP_PCT) \
-    X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0, TP_PCT) \
-    X(FORWARD_PNL,        "forward_pnl",        "Forward P&L",        "Continuous: % return over N ticks",                  Label_ForwardPnl,        1, TP_UNUSED) \
-    X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            5, TP_UNUSED) \
-    X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0, TP_SIGMA_K) \
-    X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0, TP_UNUSED) \
-    X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0, TP_UNUSED) \
-    X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3, TP_PCT) \
+    X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0, TP_PCT, SL_PCT) \
+    X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0, TP_PCT, SL_PCT) \
+    X(FORWARD_PNL,        "forward_pnl",        "Forward P&L",        "Continuous: % return over N ticks",                  Label_ForwardPnl,        1, TP_UNUSED, SL_UNUSED) \
+    X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            5, TP_UNUSED, SL_UNUSED) \
+    X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0, TP_SIGMA_K, SL_UNUSED) \
+    X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0, TP_UNUSED, SL_UNUSED) \
+    X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0, TP_UNUSED, SL_UNUSED) \
+    X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3, TP_PCT, SL_PCT) \
     /* v5.14.5.A — cross-sectional targets (FoxML_Core port). Single-symbol */ \
     /*               mode = degenerate (returns raw return per Compute fn);   */ \
     /*               CS aggregation activates with multi-symbol (v5.16+).     */ \
-    X(CS_PERCENTILE_RANK,    "cs_percentile_rank",    "CS Percentile Rank",    "Per-timestamp rank/(N+1); SS-degenerate=raw return",       Label_CSPercentileRank,    1, TP_UNUSED) \
-    X(CS_ZSCORE_ROBUST,      "cs_zscore_robust",      "CS Robust Z-Score",     "Per-timestamp (r-median)/(1.4826*MAD); SS-degenerate=raw", Label_CSZScoreRobust,      1, TP_UNUSED) \
-    X(CS_VOLSCALED_DEMEANED, "cs_volscaled_demeaned", "CS Vol-scaled Demeaned","Per-timestamp (r/vol)-mean(r/vol); SS-degenerate=raw",     Label_CSVolScaledDemeaned, 1, TP_UNUSED) \
+    X(CS_PERCENTILE_RANK,    "cs_percentile_rank",    "CS Percentile Rank",    "Per-timestamp rank/(N+1); SS-degenerate=raw return",       Label_CSPercentileRank,    1, TP_UNUSED, SL_UNUSED) \
+    X(CS_ZSCORE_ROBUST,      "cs_zscore_robust",      "CS Robust Z-Score",     "Per-timestamp (r-median)/(1.4826*MAD); SS-degenerate=raw", Label_CSZScoreRobust,      1, TP_UNUSED, SL_UNUSED) \
+    X(CS_VOLSCALED_DEMEANED, "cs_volscaled_demeaned", "CS Vol-scaled Demeaned","Per-timestamp (r/vol)-mean(r/vol); SS-degenerate=raw",     Label_CSVolScaledDemeaned, 1, TP_UNUSED, SL_UNUSED) \
     /* E.1.2.G — 3-class sister of VOL_BARRIER. APPENDED, never inserted: LABEL_* */ \
     /*            values are persisted via label_registry_hash, so the position   */ \
     /*            of every existing row is frozen (H21).                          */ \
-    X(VOL_BARRIER_3C,     "vol_barrier_3c",     "Vol Barrier 3-Class","3-class k*sigma: 0=stable, 1=down-first(peak), 2=up-first(valley) — NO time barrier, scans to end-of-corpus; prefer VOL_BARRIER_3C_TIMED", Label_VolBarrier3C, 3, TP_SIGMA_K) \
+    X(VOL_BARRIER_3C,     "vol_barrier_3c",     "Vol Barrier 3-Class","3-class k*sigma: 0=stable, 1=down-first(peak), 2=up-first(valley) — NO time barrier, scans to end-of-corpus; prefer VOL_BARRIER_3C_TIMED", Label_VolBarrier3C, 3, TP_SIGMA_K, SL_UNUSED) \
     /* APPENDED: the vol-scaled geometry WITH the vertical barrier its sister    */ \
     /*           lacks. sl_pct slot carries the sigma window (dead in this       */ \
     /*           family); extra_param is the HORIZON, as everywhere else.        */ \
-    X(VOL_BARRIER_3C_TIMED, "vol_barrier_3c_timed", "Vol Barrier 3-Class (timed)","3-class k*sigma with a TIME barrier: 0=stable/timeout, 1=down-first(peak), 2=up-first(valley). tp=sigma-k, sl=vol-window, horizon=forward ticks", Label_VolBarrier3CTimed, 3, TP_SIGMA_K)
+    X(VOL_BARRIER_3C_TIMED, "vol_barrier_3c_timed", "Vol Barrier 3-Class (timed)","3-class k*sigma with a TIME barrier: 0=stable/timeout, 1=down-first(peak), 2=up-first(valley). tp=sigma-k, sl=vol-window, horizon=forward ticks", Label_VolBarrier3CTimed, 3, TP_SIGMA_K, SL_VOL_WINDOW_TICKS)
 
 // Auto-generated LABEL_* constants. Order matches FOREACH_TARGET.
 // Trailing LABEL_COUNT_AUTO acts as the count (one past the last value).
 enum {
-#define X(id_suffix, name, display, desc, fn, nc, tpk) LABEL_##id_suffix,
+#define X(id_suffix, name, display, desc, fn, nc, tpk, slk) LABEL_##id_suffix,
     FOREACH_TARGET(X)
 #undef X
     LABEL_COUNT_AUTO
@@ -151,6 +151,36 @@ enum LabelTpKind {
     TP_UNUSED = 0,   // leaf ignores the parameter
     TP_PCT,          // percent-of-price barrier
     TP_SIGMA_K,      // sigma multiplier (k * rolling_vol)
+};
+
+//----------------------------------------------------------------------
+// [SECTION]_[sl_kind — what the 6th label-fn argument MEANS]
+//----------------------------------------------------------------------
+// D-473 — the SAME defect tp_kind was invented for, one slot over, found the
+// hard way: VOL_BARRIER_3C_TIMED repurposed the (dead-for-its-family) sl_pct
+// slot as a SIGMA WINDOW IN TICKS, and nothing forced that meaning to be
+// declared. Two consumers then treated it as a percent — the batch resolver's
+// `sl_pct > 0 ? sl_pct : 1.0` default and the GUI's percent-shaped input — so
+// the leaf received vol_window = 1, LabelVol_RollingSigma refused (1 return <
+// min_periods 5), and EVERY sample returned class 0. 1.85 M samples, 100% one
+// class, silently, because this label folds "sigma unavailable" and "timeout"
+// into the same class.
+//
+// The lesson tp_kind already taught and this row re-learned: a shared numeric
+// parameter whose MEANING varies per row needs a column, or the next row to
+// repurpose it repeats this. A new FOREACH_TARGET row now cannot compile
+// without saying what its 6th argument is.
+//
+//   SL_UNUSED           — leaf ignores the parameter
+//   SL_PCT              — percent-of-price down-barrier: price*(1 - sl/100)
+//   SL_VOL_WINDOW_TICKS — a TICK COUNT: how many prior ticks to estimate sigma
+//                         over. NOT a percent. Plausible operator percents
+//                         (0.03 .. 2.0) all truncate below min_periods and
+//                         produce a degenerate all-one-class label.
+enum LabelSlKind {
+    SL_UNUSED = 0,
+    SL_PCT,
+    SL_VOL_WINDOW_TICKS,
 };
 
 //----------------------------------------------------------------------
@@ -594,6 +624,9 @@ struct LabelDef {
     // s5 — what this leaf's 5th argument MEANS (percent barrier / sigma
     // multiplier / ignored). See the tp_kind section comment above the enum.
     int tp_kind;
+    // D-473 — what the 6th argument means (percent / sigma-window-ticks /
+    // ignored). See the sl_kind section comment above the enum.
+    int sl_kind;
 };
 //======================================================================
 // [END_CODE]
@@ -613,8 +646,8 @@ struct LabelDef {
 // reordering rows must happen by editing the X-macro above; this table
 // regenerates automatically. Eliminates the silent-divergence hazard
 // between LABEL_* constants, label_table rows, and dispatcher sites.
-#define X(id_suffix, name, display, desc, fn, nc, tpk) \
-    { LABEL_##id_suffix, name, display, desc, fn, nc, tpk },
+#define X(id_suffix, name, display, desc, fn, nc, tpk, slk) \
+    { LABEL_##id_suffix, name, display, desc, fn, nc, tpk, slk },
 static constexpr LabelDef label_table[] = {
     FOREACH_TARGET(X)
 };
@@ -650,10 +683,11 @@ constexpr uint64_t LABEL_FNV_PRIME_64  = 0x100000001b3ULL;
 
 inline uint64_t label_registry_hash_compute() {
     uint64_t h = tt::LABEL_FNV_OFFSET_64;
-// s5: `tpk` intentionally NOT folded — see the tp_kind section comment. The
+// s5: `tpk` (and D-473's `slk`) intentionally NOT folded — see the kind section
+// comments. The
 // hash pins the target SET and its class shapes; adding a column that describes
 // a parameter's pre-existing meaning must not invalidate every stamp on disk.
-#define X(id_suffix, name, display, desc, fn, nc, tpk) \
+#define X(id_suffix, name, display, desc, fn, nc, tpk, slk) \
     do { \
         for (const char* p = name; *p; ++p) \
             h = (h ^ (uint64_t)(uint8_t)*p) * tt::LABEL_FNV_PRIME_64; \
@@ -717,6 +751,46 @@ static inline int LabelType_IsMulticlass(int label_type) {
 // with the FoxML default k=0.5, a 0.2 fee silently produced k=0.7 — a 40%
 // wider vol barrier. TP_UNUSED leaves are unaffected either way, but routing
 // them through here makes that provable rather than accidental.
+//======================================================================
+// [FUNCTION]_[Label_ResolveEffectiveSl]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE sl-slot default resolver — kind-aware, so a percent default cannot be substituted into a tick-window slot (D-473)]
+// [REFERENCE]_[DECISION]_[[D-473] [D-471]]
+//======================================================================
+// [CODE]
+//======================================================================
+// WHY THIS EXISTS. The batch resolver did `sl = sl_pct > 0 ? sl_pct : 1.0`, a
+// single percent-shaped default for a slot whose meaning varies per row. For
+// SL_VOL_WINDOW_TICKS that substituted 1 TICK, which cannot produce a sigma
+// (min_periods = 5), so every sample fell to class 0 — and it also made the
+// leaf's own documented `<=0 takes the default` escape hatch UNREACHABLE,
+// because the caller replaced the 0 before the leaf ever saw it.
+//
+// A kind-blind default is not a rounding choice; it is a unit substitution. The
+// fix is for the resolver to know what it is defaulting, which is exactly what
+// the sl_kind column now guarantees it can.
+//
+// Returns 0 for SL_UNUSED so a leaf that ignores the slot is handed a value it
+// cannot misread, and 0 for SL_VOL_WINDOW_TICKS when unset so the LEAF's own
+// named default (LABEL_VOL_WINDOW_DEFAULT) is the one that applies — the leaf
+// is where that constant lives and where its rationale is written.
+static inline double Label_ResolveEffectiveSl(int label_type, double sl_pct) {
+    if (label_type < 0 || label_type >= LABEL_COUNT) return sl_pct > 0 ? sl_pct : 1.0;
+    if (sl_pct > 0) return sl_pct;                       // operator-supplied wins, whatever the kind
+    switch (label_table[label_type].sl_kind) {
+        case SL_PCT:              return 1.0;            // the historical percent default
+        case SL_VOL_WINDOW_TICKS: return 0.0;            // let the leaf apply its own named default
+        default:                  return 0.0;            // SL_UNUSED — the leaf ignores it
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Label_ResolveEffectiveSl]
+//======================================================================
+
 static inline double Label_ResolveEffectiveTp(int label_type, double tp_pct,
                                                double roundtrip_fee_pct) {
     if (label_type < 0 || label_type >= LABEL_COUNT) return tp_pct;

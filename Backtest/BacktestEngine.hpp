@@ -802,7 +802,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 //======================================================================
 struct LabelBatchTarget {
     double tp_pct;          // 0 → same 1.5 default the single-target path applies
-    double sl_pct;          // 0 → 1.0 default
+    double sl_pct;          // 0 → resolved per the row's sl_kind (D-473); NOT a blanket 1.0
     float *out_labels;      // caller-owned, >= results->sample_count floats
     int    label_type;      // LABEL_* id; unknown → Label_WinLoss fallback (parity with single-target)
     int    forward_ticks;   // 0 → 1000 default; LABEL_REGIME ignores (per-sample regime drives)
@@ -812,6 +812,11 @@ struct LabelBatchTarget {
     // accumulate-semantics fold these in explicitly (the 1-target wrapper does).
     uint32_t nan_total;
     uint32_t nan_dropped;
+    // D-473 — set by the labeler when EVERY finite label in this target is the
+    // same class. At corpus scale that is a parameter-plumbing failure, not a
+    // market fact; the trainer refuses on it rather than fitting 100%-accuracy
+    // garbage on a single class.
+    int      degenerate_one_class;
 };
 //======================================================================
 // [END_CODE]
@@ -1020,7 +1025,12 @@ static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
                         targets[t].label_type,
                         targets[t].tp_pct > 0 ? targets[t].tp_pct : 1.5,
                         run_cfg->label_roundtrip_fee_pct);
-        rt[t].sl  = targets[t].sl_pct > 0 ? targets[t].sl_pct : 1.0;
+        // D-473 — KIND-AWARE. The old `sl_pct > 0 ? sl_pct : 1.0` substituted a
+        // PERCENT default into whatever the slot meant, which for
+        // SL_VOL_WINDOW_TICKS meant 1 TICK — below min_periods, so sigma refused
+        // and every sample fell to class 0. It also made the leaf's own
+        // LABEL_VOL_WINDOW_DEFAULT unreachable by replacing the 0 first.
+        rt[t].sl  = Label_ResolveEffectiveSl(targets[t].label_type, targets[t].sl_pct);
         rt[t].fwd = targets[t].forward_ticks > 0 ? targets[t].forward_ticks : 1000;
         rt[t].is_multiclass = LabelType_IsMulticlass(targets[t].label_type);
         rt[t].is_regression = LabelType_IsRegression(targets[t].label_type);
@@ -1171,6 +1181,42 @@ static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
     // Per-target summary, THIS pass's counters. Gated to real batches: the
     // 1-target wrapper prints the legacy accumulated-stats line itself, so
     // every existing caller's stderr stays byte-identical.
+    // D-473 — DEGENERACY CHECK. An all-one-class label is never a market fact at
+    // corpus scale; it means a parameter did not reach the leaf. This is the guard
+    // that would have caught the SL_VOL_WINDOW_TICKS unit substitution on its first
+    // run instead of after 1.85 M samples of silent class-0, and it generalises: it
+    // fires for ANY future row whose parameters fail to arrive, without knowing why.
+    //
+    // It reports rather than refuses HERE because this function is the labeler, not
+    // the trainer — the refusal belongs where a model would be fitted. Reporting the
+    // FACT loudly and precisely is what this layer owes; see the train-side gate.
+    for (int t = 0; t < num_targets; t++) {
+        if (sample_cursor <= 0) break;
+        const float first = targets[t].out_labels[0];
+        int uniform = 1;
+        int finite_seen = 0;
+        for (int s2 = 0; s2 < sample_cursor; s2++) {
+            const float v = targets[t].out_labels[s2];
+            if (isnan(v)) continue;
+            finite_seen = 1;
+            if (v != first) { uniform = 0; break; }
+        }
+        targets[t].degenerate_one_class = (uniform && finite_seen) ? 1 : 0;
+        if (targets[t].degenerate_one_class) {
+            fprintf(stderr,
+                "[backtest] ⚠️  DEGENERATE LABEL: target %d/%d (type=%d) produced ONE class "
+                "for ALL %d samples (value=%.4f).\n"
+                "           At corpus scale this is a PARAMETER-PLUMBING failure, not a market\n"
+                "           fact — a barrier/window that never reached the leaf. Resolved args\n"
+                "           were tp=%.3f sl=%.3f fwd=%d; check them against the label's tp_kind /\n"
+                "           sl_kind (a percent fed into a TICK-WINDOW slot truncates below\n"
+                "           min_periods and yields exactly this). Training on it fits garbage at\n"
+                "           100%% accuracy.\n",
+                t + 1, num_targets, targets[t].label_type, sample_cursor, (double)first,
+                rt[t].tp, rt[t].sl, rt[t].fwd);
+        }
+    }
+
     if (num_targets > 1) {
         for (int t = 0; t < num_targets; t++) {
             fprintf(stderr, "[backtest] batch target %d/%d: computed %d labels "
@@ -2182,6 +2228,44 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 nn_count, filter_neutrals ? "non-neutral" : "labeled");
         *progress_pct = 100;
         return;
+    }
+
+    // D-473 — REFUSE a degenerate label set. Checked HERE, at the trainer's own
+    // entry, rather than trusting the labeler's flag: this function is reachable
+    // from paths that did not run the batch (and a flag can be stale), so the
+    // trainer verifies the property it actually depends on. Cheap — one pass over
+    // labels it is about to copy anyway.
+    //
+    // WHY REFUSE RATHER THAN WARN. XGBoost fits a single-class target happily and
+    // reports ~100% accuracy; every downstream number — fold means, the skill
+    // floor, the held-out gap the stamp gate keys on — then reads as a triumph.
+    // A warning in a log an operator may not be reading is not proportionate to a
+    // metric that looks like success. This is the guard that would have caught
+    // D-473's own unit substitution on its first run rather than after 1.85 M
+    // samples of silent class-0.
+    {
+        float first_lab = 0.0f; int have_first = 0, uniform = 1;
+        for (int i = 0; i < data->sample_count; i++) {
+            const float v = data->labels[i];
+            if (isnan(v)) continue;
+            if (filter_neutrals && v == 0.5f) continue;
+            if (!have_first) { first_lab = v; have_first = 1; continue; }
+            if (v != first_lab) { uniform = 0; break; }
+        }
+        if (have_first && uniform) {
+            fprintf(stderr,
+                "[walkforward] REFUSE: every one of the %d usable samples carries the SAME\n"
+                "              label (%.4f). At this scale that is a parameter-plumbing\n"
+                "              failure, not a market fact — a barrier or window that never\n"
+                "              reached the label leaf. Check the resolved tp/sl/fwd against\n"
+                "              this label's tp_kind / sl_kind: a PERCENT fed into a\n"
+                "              TICK-WINDOW slot truncates below min_periods and yields\n"
+                "              exactly this. Training would report ~100%% accuracy on one\n"
+                "              class and every downstream metric would read as success.\n",
+                nn_count, (double)first_lab);
+            *progress_pct = 100;
+            return;
+        }
     }
 
     // allocate compacted data (features + labels + original indices for purge)

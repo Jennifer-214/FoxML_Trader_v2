@@ -5325,9 +5325,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                           "  Peak/Valley/Stable: 3-class softmax (PRIMARY for BarrierGate) —\n"
                           "    saves to barrier.json for zoo auto-discovery");
 
-    // TP/SL barriers — used by win_loss, barrier, vol_barrier, peak_valley_stable
-    if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER ||
-        state->label_type == LABEL_VOL_BARRIER || state->label_type == LABEL_PEAK_VALLEY_STABLE) {
+    // TP/SL barriers — D-473: gated on the REGISTRY COLUMNS, not a hand-listed id
+    // set. The old list named four labels and silently gave none to any row added
+    // after it was written — so VOL_BARRIER_3C_TIMED, the one row whose sl slot was
+    // deliberately repurposed, had no UI at all: its sigma-window was un-settable
+    // AND invisible, and the percent-shaped fallback then degenerated every label.
+    // A hand-listed consumer of a registry is the Class-19 shape the registry's own
+    // comment warns about; driving it off tp_kind/sl_kind means a new row auto-flows
+    // its inputs instead of silently getting none.
+    const int _lt_ok   = (state->label_type >= 0 && state->label_type < LABEL_COUNT);
+    const int _tp_kind = _lt_ok ? label_table[state->label_type].tp_kind : TP_UNUSED;
+    const int _sl_kind = _lt_ok ? label_table[state->label_type].sl_kind : SL_UNUSED;
+    if (_tp_kind != TP_UNUSED || _sl_kind != SL_UNUSED) {
         // v5.11.40 — TP/SL fields now accept comma-separated values for
         // per-horizon mapping (broadcast-or-match rule). Single value
         // (e.g. "0.030") works as before — applies to every horizon.
