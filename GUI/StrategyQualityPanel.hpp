@@ -46,11 +46,11 @@ struct StrategyQualityAggregate {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[104B]
+// [UPDATED]_[2026-08-31]
+// [SIZE]_[96B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[2]
-// [STRADDLE]_[none]
+// [STRADDLE]_[net_by_regime@56]
 //======================================================================
 // [END_STRUCT]_[StrategyQualityAggregate]
 //======================================================================
@@ -78,8 +78,8 @@ struct StrategyQualityState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
-// [SIZE]_[768B]
+// [UPDATED]_[2026-08-31]
+// [SIZE]_[720B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[12]
 // [STRADDLE]_[unverified: agg]

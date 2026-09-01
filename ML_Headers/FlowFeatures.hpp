@@ -259,11 +259,11 @@ static inline FPN_Binary<F> BookImbHistory_MeanShort(const BookImbalanceHistory<
 //======================================================================
 
 //======================================================================
-// [STRUCT]_[EwmaSum] / [STRUCT]_[EwmaAvg]
+// [STRUCT]_[EwmaSum]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the two exponential-decay recurrences as distinct TYPES (D-465) — the state carries its own kind, so calling the wrong step function does not compile]
+// [OVERVIEW]_[the two exponential-decay recurrences as distinct TYPES (D-465) — the state carries its own kind, so calling the wrong step function does not compile; EwmaAvg rides in this section]
 // [REFERENCE]_[DESIGN_SPEC]_[[canonical-sister-extension-discipline]]
 //======================================================================
 // [CODE]
@@ -305,6 +305,14 @@ static_assert(alignof(EwmaSum) == 16 && alignof(EwmaAvg) == 16,
     "Ewma* alignment feeds FlowState's field packing; a change moves every offset after it.");
 //======================================================================
 // [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-31]
+// [SIZE]_[16B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[EwmaSum]
 //======================================================================
@@ -417,19 +425,24 @@ struct alignas(64) FlowState {
 //======================================================================
 // [COMMENT]_[layout — v5.15.5.D.A]
 //----------------------------------------------------------------------
-// v5.15.5.D.A — alignas(64) ensures FlowState's 32 B never straddles two
-// cache lines. All 4 fields are HOT (Push and read both touch all 4 every
-// slow-path cycle); no HOT/WARM/COLD tier needed (whole struct fits in 1
-// cache line). Trailing 32 B pad is structural minimum given alignas(64)
-// requirement (32 B natural; pad to 64).
+// v5.15.5.D.A — alignas(64) keeps FlowState off a cache-line straddle.
+//
+// E.1.2.G — the figures in this note were written for the 32 B / one-line
+// struct and are RE-DERIVED, not adjusted: the ladder took it to 256 B across
+// FOUR lines (the mechanical [SIZE]/[CACHE_LINES] below are the SSoT; do not
+// hand-maintain a second copy here). The single-tier claim survives the growth
+// and is still the reason there is no HOT/WARM split: FlowState_Push touches
+// EVERY accumulator on every slow-path cycle, so there is no cold set to
+// demote. What changed is only that the working set is four lines instead of
+// one -- still trivially L1d-resident, and still one contiguous prefetch run.
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-08-31]
 //----------------------------------------------------------------------
-// [SIZE]_[64B]
+// [SIZE]_[256B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[1]
+// [CACHE_LINES]_[4]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[FlowState]
@@ -526,11 +539,11 @@ static inline FPN_Binary<64> Ewma_NormalizedStep(FPN_Binary<64> prev,
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[EwmaSum_Step] / [FUNCTION]_[EwmaAvg_Step] (+ their Seed pair)
+// [FUNCTION]_[EwmaSum_Step]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the typed steps (D-465) — each accepts ONLY its own state type, so a wrong-form call is a compile error rather than a silently wrong feature]
+// [OVERVIEW]_[the typed steps (D-465) — each accepts ONLY its own state type, so a wrong-form call is a compile error rather than a silently wrong feature; EwmaAvg_Step and both Seed helpers ride in this section]
 // [REFERENCE]_[INVARIANT]_[[H4] [H11]]
 //======================================================================
 // [CODE]
@@ -772,7 +785,7 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
 //======================================================================
 
 //======================================================================
-// [STRUCT]_[BucketRingState] (+ [FUNCTION]_[BucketRing_Init] / [FUNCTION]_[BucketRing_Push])
+// [STRUCT]_[BucketRingState]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [DATA_ORIENTED_DESIGN] [BINARY_FP] [DETERMINISM]]
 // [SCOPE]_[NODE]
@@ -867,15 +880,23 @@ static_assert(alignof(BucketRingState) == 64,
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-08-31]
+// [SIZE]_[15040B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[235]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[BucketRingState]
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[BucketRing_Init] / [FUNCTION]_[BucketRing_Push]
+// [FUNCTION]_[BucketRing_Init]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [BINARY_FP] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[O(1) push into the timestamp-derived slot; a bucket ROLL re-seeds the slot, and a non-advancing timestamp folds into the current bar rather than corrupting a stale one]
+// [OVERVIEW]_[O(1) push into the timestamp-derived slot; a bucket ROLL re-seeds the slot, and a non-advancing timestamp folds into the current bar rather than corrupting a stale one; BucketRing_Push rides in this section]
 // [REFERENCE]_[INVARIANT]_[[H7] [H11] [H20]]
 //======================================================================
 // [CODE]
@@ -911,6 +932,16 @@ static inline void BucketRing_Push(BucketRingState *r, uint64_t timestamp_us,
         r->close[cidx] = price;
         r->min[cidx]   = FPN_BlendOnMask(FPN_Min(r->min[cidx], price), price, seeded);
         r->max[cidx]   = FPN_BlendOnMask(FPN_Max(r->max[cidx], price), price, seeded);
+        // STAMP the slot this branch just wrote. In the ordinary fold this is a
+        // no-op — the advancing branch already stamped `cur_ordinal + 1` here. It
+        // is load-bearing in exactly one reachable case: a FIRST push at
+        // timestamp 0. `last_us` starts 0, so `0 <= 0` takes THIS branch, and
+        // without the stamp the bar is written into slot 0 and left marked
+        // NEVER-WRITTEN — real data invisible to every extrema row. Replay and
+        // the test harness both build ticks from timestamp 0, so that path is
+        // live, not theoretical; leaving it out is this ship's own failure family
+        // pointed the other way (a valid state presenting as absent).
+        r->slot_bucket[cidx] = r->cur_ordinal + 1u;
         return;
     }
 

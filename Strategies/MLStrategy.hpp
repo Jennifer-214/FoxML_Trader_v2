@@ -68,10 +68,10 @@ template <unsigned F> struct MLStrategyState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-16]
-// [SIZE]_[7040B]
+// [UPDATED]_[2026-08-31]
+// [SIZE]_[7680B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[110]
+// [CACHE_LINES]_[120]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[MLStrategyState]

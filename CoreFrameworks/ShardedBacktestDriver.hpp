@@ -155,8 +155,8 @@ struct ShardedBacktestDriver {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[176B]
+// [UPDATED]_[2026-08-31]
+// [SIZE]_[184B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[3]
 // [STRADDLE]_[none]

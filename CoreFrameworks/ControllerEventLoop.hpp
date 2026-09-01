@@ -240,10 +240,10 @@ inline void NodeSlowState_Init(NodeSlowState<F>* s) {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-24]
-// [SIZE]_[191744B]
+// [UPDATED]_[2026-08-31]
+// [SIZE]_[206976B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[2996]
+// [CACHE_LINES]_[3234]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[NodeSlowState]

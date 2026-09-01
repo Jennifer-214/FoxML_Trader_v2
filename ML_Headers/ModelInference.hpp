@@ -697,11 +697,11 @@ struct alignas(64) ModelHandle {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-16]
+// [UPDATED]_[2026-08-31]
 //----------------------------------------------------------------------
-// [SIZE]_[6656B]
+// [SIZE]_[7296B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[104]
+// [CACHE_LINES]_[114]
 // [STRADDLE]_[unverified: scaler_sha256 overlay_hash effective_hash run_name scaler_fit_data_hash removal_reasons_csv environment_tf_version environment_cpu_model environment_libgomp_version]
 //======================================================================
 // [END_STRUCT]_[ModelHandle]
