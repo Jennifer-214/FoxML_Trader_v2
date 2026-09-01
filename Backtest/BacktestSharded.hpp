@@ -539,6 +539,19 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 }
             }
             fc->results->sample_tick_indices[fc->results->sample_count] = (uint64_t)tick_index;
+            // D-474 — the corpus TIME span, tracked at the ONE site that sees both the
+            // tick and the sample. This is the input D-469's reach function needed and
+            // never had: without it the purge gap skips its whole time arm and covers an
+            // 11-sample window against features that read 24 h back.
+            //
+            // Taken from the DATA timestamp (tk.timestamp), never a clock — the same
+            // discipline the warm-start replay depends on (D-472). first is set once;
+            // last advances, so the span is monotone by construction and a non-monotone
+            // corpus yields last <= first, which the accessor reads as UNKNOWN and
+            // degrades to window-only rather than to a fabricated period.
+            if (fc->results->first_tick_us == 0)
+                fc->results->first_tick_us = (uint64_t)tk.timestamp;
+            fc->results->last_tick_us = (uint64_t)tk.timestamp;
             fc->results->sample_prices[fc->results->sample_count] = Money_ToDouble(tk.price);
             // Sharded has no central regime field (each core may run a
             // different strategy). Default 0 — Past Runs / regime histograms

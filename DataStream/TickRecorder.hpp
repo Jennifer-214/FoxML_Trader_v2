@@ -68,10 +68,10 @@ struct TickRecorder {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[304B]
+// [UPDATED]_[2026-09-01]
+// [SIZE]_[832B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[5]
+// [CACHE_LINES]_[13]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TickRecorder]
@@ -137,7 +137,20 @@ static inline void TickRecorder_OpenFile(TickRecorder *rec, int date_int) {
 
     rec->file = fopen(path, "a");
     if (!rec->file) {
-        fprintf(stderr, "[tick-recorder] failed to open %s\n", path);
+        // Class 62 — this early return used to strand current_day / coverage_path /
+        // the session window, leaving the PREVIOUS day's coverage_path live while no
+        // file is open. A later seal would then append this session's window to the
+        // WRONG day's sidecar: coverage claiming a day the engine never recorded,
+        // which is precisely the over-claim the manifest exists to prevent.
+        // Clearing coverage_path makes CoverageSeal a no-op by its own guard, so the
+        // failure degrades to NOT-COVERED — the conservative reading (re-fetched)
+        // rather than the silent one. current_day is deliberately left UNSET so the
+        // next push retries the rotation (pre-existing behaviour, preserved).
+        rec->coverage_path[0] = '\0';
+        rec->session_open_us  = 0;
+        rec->session_last_us  = 0;
+        fprintf(stderr, "[tick-recorder] failed to open %s — this day will read as "
+                        "NOT-COVERED\n", path);
         return;
     }
 
@@ -164,7 +177,7 @@ static inline void TickRecorder_OpenFile(TickRecorder *rec, int date_int) {
 //======================================================================================================
 // [FUNCTION]_[TickRecorder_CoverageSeal]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [DATA_CAPTURE] [DETERMINISM]]
+// [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[append one closed coverage window to the day's sidecar — the record of what this process was awake for (D-472)]
 // [REFERENCE]_[DECISION]_[D-472]

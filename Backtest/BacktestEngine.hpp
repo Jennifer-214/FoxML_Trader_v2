@@ -357,12 +357,56 @@ struct BacktestResults {
     int   *sample_regimes;     // regime at each sample point
     int sample_count;
     int sample_capacity;       // current allocation size
+    // D-474 — the corpus TIME SPAN, so the purge gap can convert the feature set's
+    // TIME reach (half-life, min-history) into sample space. Two scalars, not a
+    // per-sample array: FeatureReach_MaxSamples wants the MEAN period, and its own
+    // comment defines that as `total_span_us / sample_count`.
+    //
+    // Until this existed both PurgeGap_Compute callers passed sample_period_us = 0,
+    // which skips the ENTIRE time arm — so the purge covered an 11-sample tick window
+    // against features that read 24 h back, and every walk-forward / held-out number
+    // was optimistically biased by feature leakage across every fold boundary. The
+    // reach function was correct (D-469); nobody had wired its input.
+    uint64_t first_tick_us;    // 0 = unknown (the reach falls back to window-only)
+    uint64_t last_tick_us;
     // config used (for comparison)
     ControllerConfig<BACKTEST_FP> config_used;
 };
 //----------------------------------------------------------------------
 // [SECTION]_[lifecycle: Init / Free / Reset / Ensure*Capacity]
 //----------------------------------------------------------------------
+
+//======================================================================
+// [FUNCTION]_[BacktestResults_MeanSamplePeriodUs]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the observed mean wall-time between feature rows — the input D-469's reach function needed and never had (D-474)]
+// [REFERENCE]_[DECISION]_[[D-474] [D-469]]
+//======================================================================
+// [CODE]
+//======================================================================
+// Returns 0 when the span is unknown or degenerate, and 0 is the value
+// FeatureReach_MaxSamples already treats as "skip the time arm" — so an
+// un-populated corpus degrades to exactly the pre-D-474 behaviour rather than to
+// a guessed period. A WRONG period is worse than none: it would scale a 72 h reach
+// by a fabricated rate and produce a confident purge that is wrong in an unknown
+// direction.
+//
+// Integer division, deliberately: these are microsecond COUNTS, so the result is
+// exact and bit-identical across runs and binaries (H9/H10). One helper rather than
+// the expression at each call site — the two callers computing it independently is
+// how the two arms of PurgeGap_Compute drifted apart in the first place.
+static inline uint64_t BacktestResults_MeanSamplePeriodUs(const BacktestResults *r) {
+    if (!r || r->sample_count <= 1) return 0;
+    if (r->last_tick_us <= r->first_tick_us) return 0;   // unset, or non-monotonic
+    return (r->last_tick_us - r->first_tick_us) / (uint64_t)r->sample_count;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestResults_MeanSamplePeriodUs]
+//======================================================================
 
 static inline void BacktestResults_Init(BacktestResults *r) {
     memset(r, 0, sizeof(*r));
@@ -823,8 +867,8 @@ struct LabelBatchTarget {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-22]
-// [SIZE]_[40B]
+// [UPDATED]_[2026-09-01]
+// [SIZE]_[48B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
@@ -2320,7 +2364,11 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     // smaller reach. Do not wire the clock without reading D-469 first.
     const int tps_wf = FeatureCadence_TicksPerSample(data->sample_tick_indices,
                                                       data->sample_count);
-    int raw_purge = PurgeGap_Compute(horizon_ticks, buffer_ticks, tps_wf, /*sample_period_us=*/0);
+    // D-474 — the MEASURED period, not a hardcoded 0. This is what engages the time
+    // reach (EWMA half-life AND min_history_us), i.e. what makes the gap cover the
+    // ladder's 24 h features instead of an 11-sample tick window.
+    const uint64_t sp_wf = BacktestResults_MeanSamplePeriodUs(data);
+    int raw_purge = PurgeGap_Compute(horizon_ticks, buffer_ticks, tps_wf, sp_wf);
     double nn_density = (double)nn_count / data->sample_count;
     int nn_purge = (int)(raw_purge * nn_density + 0.5);
     if (nn_purge < 1) nn_purge = 1;
@@ -2976,12 +3024,20 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     const int ho_horizon = horizon_ticks > 0 ? horizon_ticks : 0;
     const int tps_ho     = FeatureCadence_TicksPerSample(data->sample_tick_indices,
                                                           data->sample_count);
-    const int ho_purge   = PurgeGap_Compute(ho_horizon, PURGE_BUFFER_DEFAULT, tps_ho, /*sample_period_us=*/0);
+    const uint64_t sp_ho = BacktestResults_MeanSamplePeriodUs(data);   // D-474
+    const int ho_purge   = PurgeGap_Compute(ho_horizon, PURGE_BUFFER_DEFAULT, tps_ho, sp_ho);
     int ho_train_end = split->trainval_end_idx - ho_purge;
     if (ho_train_end < 0) ho_train_end = 0;
+    // D-474 / PARITY-062 — print the REACH THAT WAS USED, not FeatureLookback_MaxTicks().
+    // The old line printed a 1024-tick window while 16 enabled rows reach 24-72 h, so an
+    // operator reading it concluded the purge covered the feature reach. It did not, by
+    // ~4 orders of magnitude — and this is the number the stamp gate keys on.
     fprintf(stderr, "[heldout] purge gap: %d samples dropped between train and eval "
-                    "(horizon=%d lookback=%d buffer=%d) — train ends %d, eval starts %d\n",
-            ho_purge, ho_horizon, FeatureLookback_MaxTicks(), PURGE_BUFFER_DEFAULT,
+                    "(horizon=%d reach=%d buffer=%d, sample_period=%lluus%s) — "
+                    "train ends %d, eval starts %d\n",
+            ho_purge, ho_horizon, FeatureReach_MaxSamples(tps_ho, sp_ho), PURGE_BUFFER_DEFAULT,
+            (unsigned long long)sp_ho,
+            sp_ho == 0 ? " — TIME REACH SKIPPED, window-only" : "",
             ho_train_end, split->trainval_end_idx);
     if (ho_train_end == 0) {
         // REFUSE rather than silently train on nothing: a purge that eats the whole train side
