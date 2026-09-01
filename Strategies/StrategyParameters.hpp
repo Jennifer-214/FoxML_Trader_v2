@@ -12,6 +12,7 @@
 //   - [STRUCT]_[MLBuildContext]
 //   - [FUNCTION]_[Strategy_SpacingOk]        (+ TpFloor / GateEgress helpers section)
 //   - [FUNCTION]_[SimpleDip_BuildParameters] (+ ResolvePerFillTpPct/SlPct)
+//   - [FUNCTION]_[ML_FallThroughToSimpleDip]
 //   - [FUNCTION]_[MeanReversion_BuildParameters]
 //   - [FUNCTION]_[Momentum_BuildParameters]
 //   - [FUNCTION]_[EmaCross_BuildParameters]
@@ -143,6 +144,19 @@ struct MLBuildContext {
     // dispatcher's strategy_halt_reason pointer is wired to this slot so the
     // GUI Strategy Halt panel + entry log can attribute the block correctly.
     uint8_t*            out_strategy_halt_reason;
+    // TECH_DEBT-306 / S2 — WHICH strategy actually produced this pack. `out->strategy_id`
+    // carries the configured INTENT (ML) and must keep doing so; this reports what RAN, so
+    // the event loop can re-point NodeContext::resolved_strategy_id at it. Written ONLY by
+    // ML_FallThroughToSimpleDip, i.e. at every ML→SimpleDip fall-through and nowhere else.
+    //
+    // WHY a dedicated signal instead of keying the caller off strategy_halt_reason: only ONE
+    // of the five fall-throughs writes a SHALT code (SHALT_ML_NO_PRED at the no-model arm).
+    // The other four are deliberately code-less — a single code cannot mean both "no model,
+    // retrain" and "features went NaN, investigate the data". Keying attribution off the halt
+    // reason would therefore have re-attributed 1 of 5 and left four paths booking SimpleDip
+    // trades as ML, which is the defect, not the fix. Reset-per-rebuild by the caller
+    // (STRATEGY_NONE = nothing degraded this pass), same producer discipline as D-421.
+    uint8_t*            out_degraded_to_strategy_id;
 
     // E.1.2.G — the node's 24h bucket ring, for the ladder's extrema and
     // bar-frac-diff rows. Populated beside current_regime_id in
@@ -260,9 +274,9 @@ struct MLBuildContext {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-31]
+// [UPDATED]_[2026-09-01]
 //----------------------------------------------------------------------
-// [SIZE]_[304B]
+// [SIZE]_[312B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[5]
 // [STRADDLE]_[none]
@@ -511,6 +525,64 @@ inline void SimpleDip_BuildParameters(
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[SimpleDip_BuildParameters]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ML_FallThroughToSimpleDip]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE ML->SimpleDip degrade funnel — builds the SimpleDip pack, keeps strategy_id as the configured ML intent, and reports what actually ran so attribution can follow]
+// [REFERENCE]_[INVARIANT]_[[H22] [H21]]
+//======================================================================
+// [CODE]
+//======================================================================
+//
+// Every ML->SimpleDip fall-through goes through here. There are FIVE of them
+// (no-model, NaN feature pack, two scaler-apply failures, and the !have_signal
+// catch-all), and before this helper each one hand-wrote the same two lines:
+//
+//     SimpleDip_BuildParameters(...);
+//     out->strategy_id = STRATEGY_ML;
+//
+// ...which is why the degrade was invisible downstream: the pack said ML while
+// SimpleDip's numbers were in it, so the trade CSV, the health log, the Strategy
+// Quality panel and reward attribution all booked SimpleDip trades as ML.
+//
+// The reason this is a HELPER and not three lines repeated a fifth time is that
+// the set has already been miscounted twice in writing: TECH_DEBT-306's cascade
+// C6 enumerated FOUR sites, and the comment at the no-model arm says "the three
+// NaN fall-throughs below" — both undercount the five that exist. A sixth
+// fall-through is a plausible future edit, and the only way it cannot forget to
+// report itself is if reporting IS the call it makes. Structural-fix-over-patch;
+// same M9/Class-33 shape this ship is closing elsewhere.
+//
+// NOTE what is deliberately NOT done here: effective_strategy_id is untouched.
+// It selects the STATE CAST in Strategy_BuildParameters, where
+// (SimpleDipState<F>*)strategy_state is unguarded and the memory was allocated as
+// MLStrategyState<F>. Re-pointing it would look equivalent and would be silent
+// memory corruption on a capital path.
+template <unsigned F, unsigned W = 128, unsigned WL = 512>
+inline void ML_FallThroughToSimpleDip(
+    const RollingStats<F, W>* rolling,
+    const PerNodeCfg<F>* node_cfg,
+    Money allocated_balance,
+    GateParameters<F>* out,
+    const RollingStats<F, WL>* rolling_long,
+    MLBuildContext* mctx
+) {
+    SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
+    // the node's CONFIGURED strategy stays ML — this field is intent, and the
+    // GUI's cfg-vs-live rendering depends on it continuing to say so.
+    out->strategy_id = STRATEGY_ML;
+    // ...and what actually RAN is reported separately, for the caller to bind.
+    if (mctx && mctx->out_degraded_to_strategy_id)
+        *mctx->out_degraded_to_strategy_id = STRATEGY_SIMPLE_DIP;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ML_FallThroughToSimpleDip]
 //======================================================================
 
 //======================================================================
@@ -960,19 +1032,25 @@ inline void ML_BuildParameters(
         // code sitting on exactly these semantics. Writing it IS the observability
         // fix; no new state-flag bit, no new registry row.
         //
-        // Deliberately NOT written at the three NaN fall-throughs below: those
-        // already carry nan_feature_events_total, and one code covering both "no
-        // model — retrain" and "features went NaN — investigate the data" would
-        // conflate two different operator actions. A distinct code for them is a
-        // registry decision, not a drive-by.
+        // Deliberately NOT written at the FOUR code-less fall-throughs below (the
+        // NaN feature pack, both scaler-apply failures, and the !have_signal
+        // catch-all): those already carry nan_feature_events_total, and one code
+        // covering both "no model — retrain" and "features went NaN — investigate
+        // the data" would conflate two different operator actions. A distinct code
+        // for them is a registry decision, not a drive-by.
+        //
+        // COUNT CORRECTED 2026-09-01: this said "the three NaN fall-throughs" and
+        // there are four — the !have_signal catch-all at the end of the inference
+        // block was missed, and TECH_DEBT-306's cascade C6 independently enumerated
+        // the same set as four-of-five. That undercount is exactly why attribution
+        // is NOT keyed off this halt reason; see ML_FallThroughToSimpleDip.
         //
         // strategy_halt_reason is reset-per-rebuild (enforced by
         // tools/check_reset_before_producer.py), which is the right carrier here:
         // the condition clears itself the moment a usable model loads.
         if (mctx && mctx->out_strategy_halt_reason)
             *mctx->out_strategy_halt_reason = SHALT_ML_NO_PRED;
-        SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
-        out->strategy_id = STRATEGY_ML;
+        ML_FallThroughToSimpleDip(rolling, node_cfg, allocated_balance, out, rolling_long, mctx);
         return;
     }
 
@@ -1071,8 +1149,7 @@ inline void ML_BuildParameters(
                 "(nan_feature_events_total=%u)",
                 mctx->nan_feature_events_total ? *mctx->nan_feature_events_total : 0);
         }
-        SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
-        out->strategy_id = STRATEGY_ML;
+        ML_FallThroughToSimpleDip(rolling, node_cfg, allocated_balance, out, rolling_long, mctx);
         return;
     }
 
@@ -1094,8 +1171,7 @@ inline void ML_BuildParameters(
             if (mctx && mctx->nan_feature_events_total) {
                 (*mctx->nan_feature_events_total)++;
             }
-            SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
-            out->strategy_id = STRATEGY_ML;
+            ML_FallThroughToSimpleDip(rolling, node_cfg, allocated_balance, out, rolling_long, mctx);
             return;
         }
         // 3-class softmax: [0]=stable, [1]=peak, [2]=valley
@@ -1141,8 +1217,7 @@ inline void ML_BuildParameters(
             if (mctx && mctx->nan_feature_events_total) {
                 (*mctx->nan_feature_events_total)++;
             }
-            SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
-            out->strategy_id = STRATEGY_ML;
+            ML_FallThroughToSimpleDip(rolling, node_cfg, allocated_balance, out, rolling_long, mctx);
             return;
         }
         // v5.10.0a.G.5/G.7 — ensemble dispatch when active.
@@ -1711,8 +1786,7 @@ inline void ML_BuildParameters(
                 "(nan_prediction_events_total=%u)",
                 mctx->nan_prediction_events_total ? *mctx->nan_prediction_events_total : 0);
         }
-        SimpleDip_BuildParameters(rolling, node_cfg, allocated_balance, out, rolling_long);
-        out->strategy_id = STRATEGY_ML;
+        ML_FallThroughToSimpleDip(rolling, node_cfg, allocated_balance, out, rolling_long, mctx);
         return;
     }
 

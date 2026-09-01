@@ -1934,7 +1934,12 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // wins/losses/gross buckets from the FillEvents at slot-flat — NodeRowsBook).
         if (is_leg_a) {
             double realized = oms->last_realized_return[slot];
-            if (ctx.strategy_id == STRATEGY_ML) {
+            // TECH_DEBT-306 cascade C2 — gate on what RAN, not what was configured.
+            // A degraded node never reaches mctx->out_prediction, so staged_prediction stays
+            // at its 0.0 init; this gate firing on the CONFIGURED id pushed (0.0, realized)
+            // into the IC window on every degraded trade, and ConfidenceScorer_Update has no
+            // zero-guard. Past CONFIDENCE_MIN_SAMPLES those samples read as a measured IC.
+            if (ctx.resolved_strategy_id == STRATEGY_ML) {
                 // v5.14.1.B.1 (PARITY-002 + CLAUDE.md item 16 merge-scan):
                 // hoist clock_gettime once; serves both UpdateAndMark
                 // (composite freshness) + drift detection below. Saves
@@ -2902,6 +2907,12 @@ inline void EventLoop_RebuildOneCore(
         // get nullptr (the dispatcher passes it through and ML_BuildParameters
         // never runs anyway). Stack-allocated; ML_BuildParameters dereferences
         // and copies what it needs synchronously.
+        // TECH_DEBT-306 / S2 — the degrade signal, RESET every rebuild before its
+        // producer runs (same ordering rule as strategy_halt_reason, D-421). STRATEGY_NONE
+        // means "nothing degraded this pass"; ML_FallThroughToSimpleDip writes
+        // STRATEGY_SIMPLE_DIP at whichever of its five arms fires. Stack-local because the
+        // binding below is what persists — the node field, not this.
+        uint8_t degraded_to = STRATEGY_NONE;
         MLBuildContext ml_ctx{};
         void* dispatch_ctx = nullptr;
         if (effective_strategy_id == STRATEGY_ML) {
@@ -2916,6 +2927,7 @@ inline void EventLoop_RebuildOneCore(
             ml_ctx.confidence     = &state->nodes[tt::NodeIdx{(int16_t)slot}].confidence;
             ml_ctx.out_prediction = &state->nodes[tt::NodeIdx{(int16_t)slot}].staged_prediction;
             ml_ctx.out_confidence = &state->nodes[tt::NodeIdx{(int16_t)slot}].last_confidence;
+            ml_ctx.out_degraded_to_strategy_id = &degraded_to;   // TECH_DEBT-306 / S2
             // v4.0 train-serve parity: pass through ROR + EMA from engine
             // slow path so Regime_ComputeSignals can produce the full
             // feature set the backtest path produces during training.
@@ -3105,6 +3117,33 @@ inline void EventLoop_RebuildOneCore(
             NodeLatencyStats_Sample(
                 &state->display_meta[tt::NodeIdx{(int16_t)slot}].slow_path_breakdown[tt::SP_SECTION_ML_PREDICT],
                 tt::ml_predict_cycles, _ml_infer_t1);
+        }
+
+        // TECH_DEBT-306 / S2 — bind attribution to what actually RAN.
+        //
+        // strategy_id keeps the operator's CONFIGURED intent (ML). resolved_strategy_id is
+        // the "what is live right now" field, and every surface in the defect already reads
+        // it: the entry submit stamps cmd.strategy_id from it (EngineCommon), which carries
+        // into the trade CSV; the health log prints both columns; the GUI renders cfg-vs-live
+        // off it. So this ONE write fixes the CSV, the log, the panel and reward attribution
+        // together — no new field, no new registry row, no second source of truth about
+        // "which strategy is running" (that split-brain shape would be Class 47).
+        //
+        // It also closes cascade C1: original_tp re-derives through ResolvePerFillTpPct on
+        // resolved_strategy_id, which now agrees with the SimpleDip tp_pct the pack actually
+        // armed live_tp from. Those two silently disagreed the moment a node carrying a
+        // node_N_simpledip_tp_pct override degraded — one ordinary cfg edit from live.
+        //
+        // Placement is deliberate: this sits AFTER the dispatch because only the dispatch
+        // knows whether a fall-through happened. Nothing reads resolved_strategy_id between
+        // its write above and here (verified by enumerating the field's sites in this
+        // function — this and the stash above are the only two).
+        //
+        // effective_strategy_id is NOT touched, and must never be: it selects the state cast
+        // in Strategy_BuildParameters, where (SimpleDipState<F>*) is applied unguarded to
+        // memory allocated as MLStrategyState<F>.
+        if (degraded_to != STRATEGY_NONE) {
+            state->nodes[tt::NodeIdx{(int16_t)slot}].resolved_strategy_id = degraded_to;
         }
 
         // 2026-08-22 — SHALT_WARMING attribution (no-signal-investigation #6).

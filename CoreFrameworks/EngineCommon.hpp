@@ -855,8 +855,14 @@ inline int EngineCommon_DrainEventsAndSubmit(
                 // triggered the trade — not the latest rebuild's value.
                 // Only on leg A entry — leg B is part of the same trade,
                 // shouldn't double-stamp the prediction.
+                // TECH_DEBT-306 cascade C2 (sister of the IC gate in ControllerEventLoop) —
+                // key on what RAN. On a degraded node staged_prediction is still its 0.0
+                // init, so stamping it into active_prediction on the CONFIGURED id is what
+                // seeds the poisoned IC sample that the exit path later pairs with a real
+                // realized return. Both halves of that pair now move together; splitting
+                // them would leave the stamp writing a zero the gate no longer consumes.
                 if (is_entry && event.leg == PARTIAL_LEG_A &&
-                    state.nodes[tt::NodeIdx{(int16_t)slot}].strategy_id == STRATEGY_ML) {
+                    state.nodes[tt::NodeIdx{(int16_t)slot}].resolved_strategy_id == STRATEGY_ML) {
                     state.nodes[tt::NodeIdx{(int16_t)slot}].active_prediction =
                         state.nodes[tt::NodeIdx{(int16_t)slot}].staged_prediction;
                 }
