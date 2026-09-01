@@ -175,7 +175,7 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     // explicitly rather than inherited from a value-init default, so the choice
     // is visible; if this path is ever revived it must thread a real regime.
     auto ctx = FeatureComputeCtx_Build<F>(signals, rolling, REGIME_RANGING,
-                                          BucketRing_Empty());   // no ring in this signature; explicit, not defaulted
+                                          BucketRing_Empty(), FlowState_Empty());   // neither in this signature; explicit, not defaulted
     int n = Features_PackAll(&ctx, state->feature_buf);
     // v5.9.0 — NaN/Inf in feature pack → no entry (Features_PackAll returns
     // -1 sentinel; never pass garbage to XGBoost, never silently entry).

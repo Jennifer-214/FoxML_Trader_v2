@@ -296,7 +296,19 @@ static_assert((int)NUM_REGISTERED_FEATURES <= MODEL_MAX_FEATURES,
 //           the pre-existing `num_features > MODEL_NUM_FEATURES` oracle would
 //           NOT have caught it (34 > 40 is false), and expected_num_features
 //           is recorded in the stamp but never compared. Retrain required.
-#define MODEL_FORMAT_VERSION 7
+// v5.15.5.F.4d.1.E.1.2.G (re-gate H7) — 7 -> 8 for the feature-horizon ladder's
+// 40 -> 60 count. Bumped for EXACTLY the reason 6 -> 7 was: the vector width
+// changed, and TreeWalker_Predict never checks feature count. A stale 40-feature
+// model handed a 60-wide vector reads slots 0..39 and returns a PLAUSIBLE answer —
+// no crash, no NaN, just a confident prediction from the wrong columns.
+//
+// FEATURE_REGISTRY_HASH also moves (it always does when rows change) and D-464 now
+// makes a hash mismatch refuse structurally, so this is the second of two
+// independent gates rather than the only one. Both are kept deliberately: the hash
+// catches a model trained against a different registry, the format version catches
+// an artifact whose stamp cannot be read at all — TECH_DEBT-290's vacuous
+// attribute check is precisely that hole.
+#define MODEL_FORMAT_VERSION 8
 
 // v5.15.5.F.4d.1.B.3 Step 1.6.7.1-3 — SOFT version bump infrastructure per
 // DESIGN_SPECS/wire-format-patterns/wire-format-byte-preservation-discipline.md Layer 6b.

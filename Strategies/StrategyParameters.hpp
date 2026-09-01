@@ -1052,7 +1052,9 @@ inline void ML_BuildParameters(
     // PARITY-053 shape again (a field some sites populate and some silently do not).
     auto ctx = FeatureComputeCtx_Build<F>(
         &sig, rolling, mctx ? mctx->current_regime_id : 0,
-        (mctx && mctx->bucket_ring) ? mctx->bucket_ring : BucketRing_Empty());
+        (mctx && mctx->bucket_ring) ? mctx->bucket_ring : BucketRing_Empty(),
+        (mctx && mctx->flow_state) ? (const FlowState*)mctx->flow_state
+                                   : FlowState_Empty());
     const uint64_t* eff_mask = (mctx && mctx->feature_mask) ? mctx->feature_mask : nullptr;
     int n = Features_PackAll(&ctx, features, eff_mask);
     // v5.9.0 — NaN/Inf in feature pack → fall through to SimpleDip.

@@ -936,6 +936,15 @@ static inline const BucketRingState* BucketRing_Empty() {
     static const BucketRingState empty{};
     return &empty;
 }
+
+// The FlowState sibling of the above, for the same reason and with the same rule:
+// NAMED, never a nullptr. Zero-init is the honest empty here too — every
+// accumulator reads zero and last_us reads 0 ("no prior"), so a leaf sees an
+// unwarmed state rather than a plausible-looking one.
+static inline const FlowState* FlowState_Empty() {
+    static const FlowState empty{};
+    return &empty;
+}
 //======================================================================
 // [END_FUNCTION]_[BucketRing_Init]
 //======================================================================

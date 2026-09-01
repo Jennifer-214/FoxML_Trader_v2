@@ -516,7 +516,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 auto ctx = FeatureComputeCtx_Build<BACKTEST_FP>(
                     &sig, d->rolling,
                     d->state->nodes[tt::NodeIdx{BACKTEST_REGIME_SAMPLE_CORE}].regime_state.current_regime,
-                    (const BucketRingState*)d->bucket_ring);
+                    (const BucketRingState*)d->bucket_ring,
+                    (const FlowState*)d->flow_state);
                 int n = Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
                 if (n < 0) {

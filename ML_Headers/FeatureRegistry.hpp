@@ -93,6 +93,13 @@ struct FeatureComputeCtx {
     // would return zero at whichever seam forgot, silently.
     const BucketRingState*                bucket_ring;
 
+    // E.1.2.G — the node's FlowState, for the ladder's ten long-half-life
+    // accumulators. REQUIRED at FeatureComputeCtx_Build like its siblings: the
+    // rows that read it are the ship's entire payload, and a nullable pointer here
+    // would let one seam serve zeros while another trains on real values — which is
+    // PARITY-053 restated on the very features this ship adds.
+    const FlowState*                      flow_state;
+
     // v5.14.9.E — TECH_DEBT-015 close (infrastructure-only scaffold).
     // Per-feature staleness gate plumbing. Default values (0 / nullptr)
     // mean "no staleness checks fire" → preserves pre-v5.14.9.E behavior
@@ -163,12 +170,14 @@ inline FeatureComputeCtx<F> FeatureComputeCtx_Build(
         const RegimeSignals<F>*     signals,
         const RollingStats<F, 128>* short_rolling,
         int                         current_regime,
-        const BucketRingState*      bucket_ring) {
+        const BucketRingState*      bucket_ring,
+        const FlowState*            flow_state) {
     FeatureComputeCtx<F> ctx{};
     ctx.signals        = signals;
     ctx.short_rolling  = short_rolling;
     ctx.current_regime = current_regime;
     ctx.bucket_ring    = bucket_ring;
+    ctx.flow_state     = flow_state;
     // The staleness trio (now_us / feature_last_update_us /
     // stale_feature_events_total) stays at its inert defaults DELIBERATELY:
     // it is a scaffold with zero writers tree-wide, and the gate exists only
@@ -607,6 +616,191 @@ inline FPN_Binary<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ct
 }
 
 //----------------------------------------------------------------------
+// [SECTION]_[E.1.2.G — the feature-horizon ladder leaves]
+//----------------------------------------------------------------------
+// The rows that let the model see past ~17 seconds. Every one reads state the
+// slow path already maintains; none adds a feed.
+//
+// PRICE SOURCE: ctx->short_rolling->price_avg, the 128-tick window mean. Chosen
+// over threading a raw last-price through the ctx because it is ALREADY in reach,
+// deterministic, and identical on both seams — a new pointer would be one more
+// thing two paths could populate differently (PARITY-053's shape).
+//
+// (A)(4) GUARD PLACEMENT — every divisive leaf tests its denominator BEFORE
+// dividing and returns FPN_Zero, rather than letting FPN_DivNoAssert saturate to
+// FPN_MAX. That is not defensive style, it is required: a saturated value trips
+// FPN_IsValidFinite in Features_PackAll, and BOTH overloads then `return -1`,
+// discarding ALL 60 FEATURES rather than the one bad row. A guard at the pack
+// layer is too late by construction.
+#define LADDER_PRICE(ctx) ((ctx)->short_rolling->price_avg)
+
+// --- helper: (value - ref) / ref, guarded. The shape four rows share. -------
+template <unsigned F>
+inline FPN_Binary<F> LadderRelDev(FPN_Binary<F> value, FPN_Binary<F> ref) {
+    if (FPN_IsZero(ref)) return FPN_Zero<F>();
+    return FPN_DivNoAssert(FPN_Sub(value, ref), ref);
+}
+
+// --- T1: price momentum at four horizons ------------------------------------
+// (price - EMA)/EMA. The EMA is an AVERAGE accumulator (D-465), so it has a fixed
+// point at the price and this ratio is half-life-STABLE. Under a SUM it would pin
+// near -1.0 and carry tick rate instead of momentum.
+#define LADDER_RET_EMA(NAME, FIELD)                                              \
+    template <unsigned F>                                                        \
+    inline FPN_Binary<F> ML_Compute_##NAME(const FeatureComputeCtx<F>* ctx) {     \
+        if (!ctx || !ctx->short_rolling || !ctx->flow_state) return FPN_Zero<F>(); \
+        return LadderRelDev<F>(LADDER_PRICE(ctx), ctx->flow_state->FIELD.v);      \
+    }
+LADDER_RET_EMA(RetEma30m, ret_ema_30m)
+LADDER_RET_EMA(RetEma2h,  ret_ema_2h)
+LADDER_RET_EMA(RetEma8h,  ret_ema_8h)
+LADDER_RET_EMA(RetEma24h, ret_ema_24h)
+#undef LADDER_RET_EMA
+
+// --- T1: signed-volume flow at two horizons ---------------------------------
+// Read straight through: a decaying SUM's accumulated total IS the signal, so
+// there is nothing to normalise against.
+#define LADDER_FLOW(NAME, FIELD)                                                 \
+    template <unsigned F>                                                        \
+    inline FPN_Binary<F> ML_Compute_##NAME(const FeatureComputeCtx<F>* ctx) {     \
+        if (!ctx || !ctx->flow_state) return FPN_Zero<F>();                      \
+        return ctx->flow_state->FIELD.v;                                         \
+    }
+LADDER_FLOW(Flow30m, flow_30m)
+LADDER_FLOW(Flow2h,  flow_2h)
+LADDER_FLOW(Rvol1h,  rvol_1h)
+LADDER_FLOW(Rvol8h,  rvol_8h)
+#undef LADDER_FLOW
+
+// --- T1: realized-vol squeeze/expansion -------------------------------------
+// GUARDED DIVIDE (A)(4): rvol_8h is zero for the whole warm-up, so this is not a
+// rare edge — it is the state every cold start passes through.
+template <unsigned F>
+inline FPN_Binary<F> ML_Compute_RvolRatio(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx || !ctx->flow_state) return FPN_Zero<F>();
+    const FPN_Binary<F> num = ctx->flow_state->rvol_1h.v;
+    const FPN_Binary<F> den = ctx->flow_state->rvol_8h.v;
+    if (FPN_IsZero(den)) return FPN_Zero<F>();
+    return FPN_DivNoAssert(num, den);
+}
+
+// --- T2: VWAP deviation ------------------------------------------------------
+// vwap = EWMA(P*V)/EWMA(V), then (price - vwap)/vwap. TWO guarded divides. Both
+// legs are AVERAGE at the SAME half-life; a MIX of forms would inflate the ratio
+// ~432,000x, which is why the recurrence lives in the TYPE and not in a column.
+template <unsigned F>
+inline FPN_Binary<F> ML_Compute_VwapEma24hDev(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx || !ctx->short_rolling || !ctx->flow_state) return FPN_Zero<F>();
+    const FPN_Binary<F> v = ctx->flow_state->vwap_v_24h.v;
+    if (FPN_IsZero(v)) return FPN_Zero<F>();
+    const FPN_Binary<F> vwap = FPN_DivNoAssert(ctx->flow_state->vwap_pv_24h.v, v);
+    return LadderRelDev<F>(LADDER_PRICE(ctx), vwap);
+}
+
+// --- T2: 24h extrema, from the bucket ring ----------------------------------
+// A slot counts only when its 1-BASED stamp names a bucket within the last 288.
+// Zero-stamped slots are NEVER-WRITTEN and are skipped — without that, a cold or
+// gapped ring would fold zero-priced buckets into the extrema as if measured.
+template <unsigned F>
+inline bool LadderRingExtrema(const BucketRingState* r,
+                              FPN_Binary<F>* out_min, FPN_Binary<F>* out_max) {
+    if (!r) return false;
+    bool any = false;
+    FPN_Binary<F> lo = FPN_Zero<F>(), hi = FPN_Zero<F>();
+    const uint32_t cur1 = r->cur_ordinal + 1u;
+    for (int i = 0; i < BUCKET_SLOTS; i++) {
+        const uint32_t stamp = r->slot_bucket[i];
+        const uint32_t age   = cur1 - stamp;
+        if (stamp == 0u || age >= (uint32_t)BUCKET_SLOTS) continue;
+        if (!any) { lo = r->min[i]; hi = r->max[i]; any = true; continue; }
+        if (FPN_LessThan(r->min[i], lo)) lo = r->min[i];
+        if (FPN_LessThan(hi, r->max[i])) hi = r->max[i];
+    }
+    *out_min = lo; *out_max = hi;
+    return any;
+}
+
+template <unsigned F>
+inline FPN_Binary<F> ML_Compute_DistToHigh24h(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx || !ctx->short_rolling) return FPN_Zero<F>();
+    FPN_Binary<F> lo, hi;
+    if (!LadderRingExtrema<F>(ctx->bucket_ring, &lo, &hi)) return FPN_Zero<F>();
+    return LadderRelDev<F>(hi, LADDER_PRICE(ctx));
+}
+
+template <unsigned F>
+inline FPN_Binary<F> ML_Compute_DistToLow24h(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx || !ctx->short_rolling) return FPN_Zero<F>();
+    FPN_Binary<F> lo, hi;
+    if (!LadderRingExtrema<F>(ctx->bucket_ring, &lo, &hi)) return FPN_Zero<F>();
+    return LadderRelDev<F>(LADDER_PRICE(ctx), lo);
+}
+
+// GUARDED DIVIDE (A)(4): (max - min) is EXACTLY zero on a single-bucket ring,
+// which every cold start and every quiet 5-minute window produces.
+template <unsigned F>
+inline FPN_Binary<F> ML_Compute_RangePos24h(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx || !ctx->short_rolling) return FPN_Zero<F>();
+    FPN_Binary<F> lo, hi;
+    if (!LadderRingExtrema<F>(ctx->bucket_ring, &lo, &hi)) return FPN_Zero<F>();
+    const FPN_Binary<F> span = FPN_Sub(hi, lo);
+    if (FPN_IsZero(span)) return FPN_Zero<F>();
+    return FPN_DivNoAssert(FPN_Sub(LADDER_PRICE(ctx), lo), span);
+}
+
+// --- T3: fractional differencing over BARS ----------------------------------
+// FracDiffWalk over the ring's close[] at W=288. `available` is the count of
+// valid slots — a REQUIRED argument, which is what stops the guard vanishing at
+// exactly the seam where the ring has no `count` of its own.
+template <unsigned F>
+inline int LadderRingValidCount(const BucketRingState* r) {
+    if (!r) return 0;
+    int n = 0;
+    const uint32_t cur1 = r->cur_ordinal + 1u;
+    for (int i = 0; i < BUCKET_SLOTS; i++) {
+        const uint32_t stamp = r->slot_bucket[i];
+        if (stamp != 0u && (uint32_t)(cur1 - stamp) < (uint32_t)BUCKET_SLOTS) n++;
+    }
+    return n;
+}
+
+#define LADDER_FRACDIFF_BARS(NAME, COEFFS)                                        \
+    template <unsigned F>                                                         \
+    inline FPN_Binary<F> ML_Compute_##NAME(const FeatureComputeCtx<F>* ctx) {      \
+        if (!ctx || !ctx->bucket_ring) return FPN_Zero<F>();                      \
+        const int head = (int)((ctx->bucket_ring->cur_ordinal + 1u)               \
+                               % (uint32_t)BUCKET_SLOTS);                         \
+        return FracDiffWalk<F, BUCKET_SLOTS>(ctx->bucket_ring->close, head,       \
+                                             LadderRingValidCount<F>(ctx->bucket_ring), \
+                                             COEFFS);                             \
+    }
+LADDER_FRACDIFF_BARS(FracDiffBars_d04, kFracDiff_d04_Coeffs)
+LADDER_FRACDIFF_BARS(FracDiffBars_d05, kFracDiff_d05_Coeffs)
+LADDER_FRACDIFF_BARS(FracDiffBars_d06, kFracDiff_d06_Coeffs)
+#undef LADDER_FRACDIFF_BARS
+
+// --- T2/T3: cyclical phase rows ---------------------------------------------
+// Pure functions of the DATA timestamp — no feed, deterministic, and
+// backtest-reproducible by construction. FPN_Sin/FPN_Cos, never libm (H15).
+// The 8h row is the perp funding cycle's 3rd harmonic, which hour_sin/cos cannot
+// give a tree cheaply.
+#define LADDER_PHASE(NAME, PERIOD_US, FN)                                         \
+    template <unsigned F>                                                         \
+    inline FPN_Binary<F> ML_Compute_##NAME(const FeatureComputeCtx<F>* ctx) {      \
+        if (!ctx || !ctx->flow_state) return FPN_Zero<F>();                       \
+        const uint64_t phase = ctx->flow_state->last_us % (uint64_t)(PERIOD_US);   \
+        const FPN_Binary<F> frac =                                                \
+            FPN_DivNoAssert(FPN_FromInt<F>((int64_t)phase),                        \
+                            FPN_FromInt<F>((int64_t)(PERIOD_US)));                 \
+        return FN(FPN_Mul(FPN_FromDouble<F>(6.283185307179586), frac));            \
+    }
+LADDER_PHASE(DowSin,          604800000000ULL, FPN_Sin)   // 7d week
+LADDER_PHASE(DowCos,          604800000000ULL, FPN_Cos)
+LADDER_PHASE(FundingPhaseSin,  28800000000ULL, FPN_Sin)   // 8h funding cycle
+LADDER_PHASE(FundingPhaseCos,  28800000000ULL, FPN_Cos)
+#undef LADDER_PHASE
+
+//----------------------------------------------------------------------
 // [SECTION]_[FEATURE REGISTRY — the X-macro]
 //----------------------------------------------------------------------
 // (tuple column legend lives in the [COLUMN] lines of this registry's
@@ -682,7 +876,31 @@ inline FPN_Binary<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ct
     /*               Cold-start: returns 0 until rolling.count >= K=50.   */ \
     X(FRAC_DIFF_PRICE_D04, "frac_diff_price_d04", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d04, "fractional diff of price (d=0.4); long-memory removed", 0, 50, 0, 0) \
     X(FRAC_DIFF_PRICE_D05, "frac_diff_price_d05", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d05, "fractional diff of price (d=0.5); often the sweet spot", 0, 50, 0, 0) \
-    X(FRAC_DIFF_PRICE_D06, "frac_diff_price_d06", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d06, "fractional diff of price (d=0.6); near-stationary residual", 0, 50, 0, 0)
+    X(FRAC_DIFF_PRICE_D06, "frac_diff_price_d06", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d06, "fractional diff of price (d=0.6); near-stationary residual", 0, 50, 0, 0) \
+    /* ── E.1.2.G: the feature-horizon ladder (rows 40-59) ────────────────── */ \
+    /* min_history_us is ~3 half-lives per row — where an EWMA is within ~12% */ \
+    /* of its asymptote. lookback_ticks stays 0: an EWMA has no finite TICK   */ \
+    /* reach, which is precisely the distinction D-463's column split made.   */ \
+    X(RET_EMA_30M,        "ret_ema_30m",        1, FEATURE_ENABLED, ML_Compute_RetEma30m,        "(price-EMA)/EMA, HL 30m", 0, 0, 1800000000, 5400000000) \
+    X(RET_EMA_2H,         "ret_ema_2h",         1, FEATURE_ENABLED, ML_Compute_RetEma2h,         "(price-EMA)/EMA, HL 2h", 0, 0, 7200000000, 21600000000) \
+    X(RET_EMA_8H,         "ret_ema_8h",         1, FEATURE_ENABLED, ML_Compute_RetEma8h,         "(price-EMA)/EMA, HL 8h", 0, 0, 28800000000, 86400000000) \
+    X(RET_EMA_24H,        "ret_ema_24h",        1, FEATURE_ENABLED, ML_Compute_RetEma24h,        "(price-EMA)/EMA, HL 24h (T3)", 0, 0, 86400000000, 259200000000) \
+    X(FLOW_30M,           "flow_30m",           1, FEATURE_ENABLED, ML_Compute_Flow30m,          "signed-volume EWMA, HL 30m", 0, 0, 1800000000, 5400000000) \
+    X(FLOW_2H,            "flow_2h",            1, FEATURE_ENABLED, ML_Compute_Flow2h,           "signed-volume EWMA, HL 2h", 0, 0, 7200000000, 21600000000) \
+    X(RVOL_1H,            "rvol_1h",            1, FEATURE_ENABLED, ML_Compute_Rvol1h,           "EWMA of squared simple returns, HL 1h", 0, 0, 3600000000, 10800000000) \
+    X(RVOL_8H,            "rvol_8h",            1, FEATURE_ENABLED, ML_Compute_Rvol8h,           "EWMA of squared simple returns, HL 8h", 0, 0, 28800000000, 86400000000) \
+    X(RVOL_RATIO,         "rvol_ratio",         1, FEATURE_ENABLED, ML_Compute_RvolRatio,        "rvol_1h/rvol_8h — vol squeeze vs expansion", 0, 0, 28800000000, 86400000000) \
+    X(VWAP_EMA_24H_DEV,   "vwap_ema_24h_dev",   1, FEATURE_ENABLED, ML_Compute_VwapEma24hDev,    "(price-vwap)/vwap, EWMA legs at HL 24h", 0, 0, 86400000000, 259200000000) \
+    X(DIST_TO_HIGH_24H,   "dist_to_high_24h",   1, FEATURE_ENABLED, ML_Compute_DistToHigh24h,    "(max24h-price)/price, from the bucket ring", 0, 0, 0, 86400000000) \
+    X(DIST_TO_LOW_24H,    "dist_to_low_24h",    1, FEATURE_ENABLED, ML_Compute_DistToLow24h,     "(price-min24h)/price, from the bucket ring", 0, 0, 0, 86400000000) \
+    X(RANGE_POS_24H,      "range_pos_24h",      1, FEATURE_ENABLED, ML_Compute_RangePos24h,      "(price-min)/(max-min) — position in the 24h range", 0, 0, 0, 86400000000) \
+    X(FRAC_DIFF_BARS_D04, "frac_diff_bars_d04", 1, FEATURE_ENABLED, ML_Compute_FracDiffBars_d04, "frac diff (d=0.4) over 5min bar closes; 50 taps = 4.2h", 0, 0, 0, 15000000000) \
+    X(FRAC_DIFF_BARS_D05, "frac_diff_bars_d05", 1, FEATURE_ENABLED, ML_Compute_FracDiffBars_d05, "frac diff (d=0.5) over 5min bar closes", 0, 0, 0, 15000000000) \
+    X(FRAC_DIFF_BARS_D06, "frac_diff_bars_d06", 1, FEATURE_ENABLED, ML_Compute_FracDiffBars_d06, "frac diff (d=0.6) over 5min bar closes", 0, 0, 0, 15000000000) \
+    X(DOW_SIN,            "dow_sin",            1, FEATURE_ENABLED, ML_Compute_DowSin,           "day-of-week cyclical (sin); pure fn of the data timestamp", 0, 0, 0, 0) \
+    X(DOW_COS,            "dow_cos",            1, FEATURE_ENABLED, ML_Compute_DowCos,           "day-of-week cyclical (cos)", 0, 0, 0, 0) \
+    X(FUNDING_PHASE_SIN,  "funding_phase_sin",  1, FEATURE_ENABLED, ML_Compute_FundingPhaseSin,  "8h perp funding-cycle phase (sin); 3rd harmonic of the 24h cycle", 0, 0, 0, 0) \
+    X(FUNDING_PHASE_COS,  "funding_phase_cos",  1, FEATURE_ENABLED, ML_Compute_FundingPhaseCos,  "8h perp funding-cycle phase (cos)", 0, 0, 0, 0)
 
 // Auto-generated FEATURE_<ID> enum constants. Order matches FOREACH_FEATURE.
 enum FeatureId : uint16_t {

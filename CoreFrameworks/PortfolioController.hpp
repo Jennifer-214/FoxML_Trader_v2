@@ -1799,7 +1799,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       // rather than defaulting a pointer — see BucketRing_Empty()'s comment.
       auto ctx = FeatureComputeCtx_Build<F>(
           &signals, &ctrl->rolling, ctrl->regime.current_regime,
-          BucketRing_Empty());
+          BucketRing_Empty(), FlowState_Empty());
       int n = Features_PackAll(&ctx, feat_buf);
       // v5.9.3b — apply scaler. Identity no-op when not loaded.
       if (n >= 0 && tt::FeatureStandardizer_Apply(
@@ -1968,7 +1968,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // LEGACY path (E.1.3 P4.5(b) deletes this file) — see the sibling above.
     auto ctx = FeatureComputeCtx_Build<F>(
         &ctrl->last_signals, &ctrl->rolling, ctrl->regime.current_regime,
-        BucketRing_Empty());
+        BucketRing_Empty(), FlowState_Empty());
     int n = Features_PackAll(&ctx, features);
     // v5.9.3b — apply scaler ONCE before both peak + valley predictions
     // share the same features buffer. Use peak_model's scaler (peak +
