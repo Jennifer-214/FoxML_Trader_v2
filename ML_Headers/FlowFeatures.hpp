@@ -372,6 +372,13 @@ struct alignas(64) FlowState {
     // accumulator, which is why it carries no half-life and no Ewma* type.
     FPN_Binary<64> prev_price;
 
+    // E.1.2.G (D-467) — when this node's data STARTS. `last_us - first_us` is the
+    // data span the min_history_us gate compares against, and keeping it HERE
+    // rather than in the ctx means there is exactly one source: a second copy is
+    // how train and serve would come to disagree about whether a row is warm.
+    // Taken from the padding (48 -> 40), so sizeof stays 256.
+    uint64_t first_us;
+
     // ── H12 explicit padding ─────────────────────────────────────────────────
     // The literal is DERIVED, not copied: `static_assert(sizeof == 256)` below is
     // the authority, and it is there precisely because the two decisions that
@@ -384,7 +391,8 @@ struct alignas(64) FlowState {
     // which zeroes padding before any ctor runs), but a stack-declared
     // `FlowState f;` in a test would otherwise leave it indeterminate. With the
     // initializer the implicit default ctor zeroes it in both cases.
-    uint8_t _padding[48] = {};
+    // 48 -> 40 at D-467: first_us took 8 B from here, so sizeof stays 256.
+    uint8_t _padding[40] = {};
 };
 //======================================================================
 // [END_CODE]
@@ -616,6 +624,7 @@ static inline void FlowState_Init(FlowState *s) {
     s->rvol_1h.v     = z;  s->rvol_8h.v     = z;
     s->vwap_pv_24h.v = z;  s->vwap_v_24h.v  = z;
     s->prev_price    = z;
+    s->first_us      = 0;
 }
 
 // v5.10.0b.2.5.C: decay computation goes through FPN_Exp (bytewise-
@@ -657,6 +666,7 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
         EwmaAvg_Seed(&s->vwap_pv_24h, FPN_Mul(price, volume));
         EwmaAvg_Seed(&s->vwap_v_24h,  volume);
         s->prev_price = price;
+        s->first_us   = timestamp_us;   // D-467: the span clock starts here
         return;
     }
     if (timestamp_us <= s->last_us) {
@@ -941,6 +951,14 @@ static inline const BucketRingState* BucketRing_Empty() {
 // NAMED, never a nullptr. Zero-init is the honest empty here too — every
 // accumulator reads zero and last_us reads 0 ("no prior"), so a leaf sees an
 // unwarmed state rather than a plausible-looking one.
+// The data span this node has accumulated, in microseconds. 0 when unseeded, so
+// FlowState_Empty() reports NO history and every gated row is suppressed — the
+// honest answer for a path that has no flow state at all.
+static inline uint64_t FlowState_DataSpanUs(const FlowState *s) {
+    if (!s || s->first_us == 0 || s->last_us <= s->first_us) return 0;
+    return s->last_us - s->first_us;
+}
+
 static inline const FlowState* FlowState_Empty() {
     static const FlowState empty{};
     return &empty;

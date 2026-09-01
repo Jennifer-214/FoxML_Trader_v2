@@ -1077,7 +1077,20 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
     do { \
         if (!(enabled)) break; \
         bool _stale_skip = false; \
-        if (ctx && (staleness) > 0 && ctx->now_us > 0 && \
+        /* E.1.2.G (D-467) — MIN-HISTORY GATE. A row whose warm-up floor is unmet is \
+           NOT MEASURED and must not be served as if it were: a 24h EWMA seeded at \
+           first price reads a near-zero deviation for a full day — a plausible \
+           number carrying no information. Compared HERE because the walker is the \
+           ONLY site holding both the row's COLUMN and its FEATURE_##id INDEX; a leaf \
+           gets no row identity and would hardcode its own index, so a copy-pasted \
+           leaf citing a sibling's index would gate on the wrong threshold silently. */ \
+        if (ctx && (min_history_us) > 0 && \
+            FlowState_DataSpanUs(ctx->flow_state) < (uint64_t)(min_history_us)) { \
+            out[FEATURE_##id] = 0.0f; \
+            ++n; \
+            _stale_skip = true; \
+        } \
+        if (!_stale_skip && ctx && (staleness) > 0 && ctx->now_us > 0 && \
             ctx->feature_last_update_us != nullptr && \
             ctx->feature_last_update_us[FEATURE_##id] > 0) { \
             uint64_t _age_us = ctx->now_us - ctx->feature_last_update_us[FEATURE_##id]; \
@@ -1157,7 +1170,16 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out,
     int n = 0;
 #define X(id, name, version, enabled, fn, note, staleness, lookback_ticks, half_life_us, min_history_us) \
     if ((enabled)) { \
-        if (m & (1ULL << FEATURE_##id)) { \
+        /* E.1.2.G (D-467) — the SAME min-history gate, in the MASK overload too. \
+           This is not duplication for its own sake: the pre-existing `staleness` \
+           gate lives ONLY in the no-mask overload, and LIVE SERVE uses THIS one — \
+           so a gate modelled on staleness would fire at TRAIN and stay silent at \
+           SERVE, inverting the very M5 contract this ship declares BINDING. A \
+           masked-off row and an unwarmed row both write 0.0f, so one condition \
+           covers both reasons. */ \
+        const bool _mh_ok = !(ctx && (min_history_us) > 0 && \
+            FlowState_DataSpanUs(ctx->flow_state) < (uint64_t)(min_history_us)); \
+        if ((m & (1ULL << FEATURE_##id)) && _mh_ok) { \
             FPN_Binary<F> _fpn = fn(ctx); \
             if (!FPN_IsValidFinite(_fpn)) { return -1; } \
             float _v = (float)FPN_ToDouble(_fpn); \
