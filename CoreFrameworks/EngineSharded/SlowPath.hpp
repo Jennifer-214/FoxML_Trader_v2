@@ -105,7 +105,10 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         int node_id = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_on);
         int leg     = partial_on ? (slot & 1)  : 0;
         if (node_id < 0 || node_id >= state.registered_count) continue;
-        uint8_t strategy_id = state.nodes[tt::NodeIdx{(int16_t)node_id}].strategy_id;
+        // D-470 (cascade C3) — RESOLVED, not configured. The entry submit binds
+        // resolved_strategy_id (EngineCommon), so an exit binding the configured id
+        // puts two different strategy labels on the two halves of ONE trade.
+        uint8_t strategy_id = state.nodes[tt::NodeIdx{(int16_t)node_id}].resolved_strategy_id;
         // Use latest tick price as fill price for paper mode. Live
         // mode would route to a real adapter SELL — same Submit call.
         Tick<F> _latest{};

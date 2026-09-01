@@ -1536,8 +1536,9 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
                 }
                 // v5.15.5.C.4 Phase D5 — Class-18 helper
                 // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit
+                // D-470 (cascade C3) — RESOLVED, matching the entry submit above.
                 tt::OMS_PushExitForSlot(&oms, (int16_t)pidx,
-                    qty, state.nodes[tt::NodeIdx{(int16_t)c}].strategy_id, price_fpn,
+                    qty, state.nodes[tt::NodeIdx{(int16_t)c}].resolved_strategy_id, price_fpn,
                     /*leg*/(uint8_t)0, &cfg.nodes[tt::NodeIdx{(int16_t)c}]);
             }
             state.nodes[tt::NodeIdx{(int16_t)c}].strategy_halt_reason =

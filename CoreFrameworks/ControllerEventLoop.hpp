@@ -3777,8 +3777,9 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit.
         Money qty       = oms->portfolio.positions[slot].quantity;
         Money price_fpn = Money{ money_from_double_payload(current_price) };  // D-103 ingress bridge
+        // D-470 (cascade C3) — RESOLVED, matching the entry submit.
         tt::OMS_PushExitForSlot(oms, (int16_t)slot,
-                                qty, state->nodes[tt::NodeIdx{(int16_t)node_id}].strategy_id, price_fpn,
+                                qty, state->nodes[tt::NodeIdx{(int16_t)node_id}].resolved_strategy_id, price_fpn,
                                 /*leg*/(uint8_t)0, &cfg.nodes[tt::NodeIdx{(int16_t)node_id}]);
 
         fprintf(stderr,
@@ -3854,7 +3855,8 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         // partial_on ∈ {0,1}; no cmov — the accessor is THE single source, D-294/D-295).
         int logical_core = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_on);
         Money qty = oms->portfolio.positions[slot].quantity;
-        uint8_t sid = state->nodes[tt::NodeIdx{(int16_t)logical_core}].strategy_id;
+        // D-470 (cascade C3) — RESOLVED, matching the entry submit.
+        uint8_t sid = state->nodes[tt::NodeIdx{(int16_t)logical_core}].resolved_strategy_id;
         // A8 (.E.0.10): the leg index is meaningful ONLY under partials (even slot = leg A,
         // odd = leg B); without partials there is no leg, so gate on partial_on (branchless
         // ALU; 0 or 1). NOTE: corrects the bare `slot&1` first proposed for A8 — that would

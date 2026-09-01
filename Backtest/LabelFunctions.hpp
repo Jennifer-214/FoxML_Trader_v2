@@ -104,7 +104,11 @@ struct HistoricalTick {
     /* E.1.2.G — 3-class sister of VOL_BARRIER. APPENDED, never inserted: LABEL_* */ \
     /*            values are persisted via label_registry_hash, so the position   */ \
     /*            of every existing row is frozen (H21).                          */ \
-    X(VOL_BARRIER_3C,     "vol_barrier_3c",     "Vol Barrier 3-Class","3-class k*sigma: 0=stable, 1=down-first(peak), 2=up-first(valley)", Label_VolBarrier3C, 3, TP_SIGMA_K)
+    X(VOL_BARRIER_3C,     "vol_barrier_3c",     "Vol Barrier 3-Class","3-class k*sigma: 0=stable, 1=down-first(peak), 2=up-first(valley) — NO time barrier, scans to end-of-corpus; prefer VOL_BARRIER_3C_TIMED", Label_VolBarrier3C, 3, TP_SIGMA_K) \
+    /* APPENDED: the vol-scaled geometry WITH the vertical barrier its sister    */ \
+    /*           lacks. sl_pct slot carries the sigma window (dead in this       */ \
+    /*           family); extra_param is the HORIZON, as everywhere else.        */ \
+    X(VOL_BARRIER_3C_TIMED, "vol_barrier_3c_timed", "Vol Barrier 3-Class (timed)","3-class k*sigma with a TIME barrier: 0=stable/timeout, 1=down-first(peak), 2=up-first(valley). tp=sigma-k, sl=vol-window, horizon=forward ticks", Label_VolBarrier3CTimed, 3, TP_SIGMA_K)
 
 // Auto-generated LABEL_* constants. Order matches FOREACH_TARGET.
 // Trailing LABEL_COUNT_AUTO acts as the count (one past the last value).
@@ -351,6 +355,76 @@ static inline float Label_VolBarrier3C(const HistoricalTick *ticks, int tick_idx
         if (ticks[j].price <= down_barrier) return 1.0f;  // down first = peak  = bad entry
     }
     return 0.0f; // neither = stable
+}
+
+//----------------------------------------------------------------------
+// [SECTION]_[VOL_BARRIER_3C_TIMED — the actual triple barrier]
+//----------------------------------------------------------------------
+// VOL_BARRIER_3C's vol-scaled geometry, plus the VERTICAL (time) barrier it
+// never had. This is the label the ladder ship wanted and could not express.
+//
+// WHY THE SISTER IS NOT SIMPLY FIXED IN PLACE: its forward scan runs to
+// `total_ticks`, so a TRAINING sample's label reads prices arbitrarily far
+// ahead — through any fold boundary, into the eval set. No purge gap can bound
+// that, because the label's reach IS the remaining corpus. Its walk-forward
+// numbers are therefore contaminated in a way the purge work cannot fix. That
+// makes it a different label, not a buggy version of this one, and LABEL_*
+// values are persisted via label_registry_hash (H21) — so this APPENDS a row
+// and leaves the old one's meaning frozen rather than silently redefining a
+// code that stamps already carry.
+//
+// PARAMETER SLOTS — read this before wiring anything:
+//   tp_pct     -> barrier_k    : the sigma multiplier (TP_SIGMA_K), as the sister
+//   sl_pct     -> vol_window   : the sigma ESTIMATION window, in ticks. The
+//                                sister family ignores sl_pct entirely (its
+//                                parameter is literally `double /* sl_pct */`),
+//                                so this is a dead slot being put to work, not
+//                                an overload of a live one. <=0 takes the default.
+//   extra_param-> forward_ticks: the HORIZON. Universal across the registry.
+//
+// That last line is the whole point. In the sister, extra_param is consumed as
+// the vol window, so a multi-horizon collect of "30000,60000,90000" silently
+// produces one label three times with three different sigma estimates — not
+// three horizons — while each scan runs to end-of-corpus. Here the horizons are
+// horizons, the scan is bounded by them, and the cost stops being quadratic.
+//
+// Class 0 absorbs BOTH "insufficient history for sigma" and "neither barrier hit
+// before the horizon expired", matching the sister's convention deliberately:
+// under softmax 0.5 is not a valid class index, so a timeout must fold into a
+// real class. The two are distinguishable in the data (a timeout has a full
+// forward window; insufficient history sits at the corpus head), and separating
+// them into 4 classes is a modelling decision, not a defect fix.
+//----------------------------------------------------------------------
+
+// Sigma-estimation window used when the operator leaves the slot at 0. Short
+// relative to any realistic horizon ON PURPOSE: the barrier should scale with
+// CURRENT volatility, not with volatility averaged over the whole forecast
+// window (which would smear a regime change into the barrier that is supposed
+// to detect it).
+#define LABEL_VOL_WINDOW_DEFAULT 500
+
+static inline float Label_VolBarrier3CTimed(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                             double sample_price, double barrier_k, double vol_window_in,
+                                             int forward_ticks) {
+    if (barrier_k <= 0.0) barrier_k = 0.5;
+    int vol_window = (vol_window_in > 0.0) ? (int)vol_window_in : LABEL_VOL_WINDOW_DEFAULT;
+
+    double vol = 0.0;
+    if (!LabelVol_RollingSigma(ticks, tick_idx, vol_window, &vol)) return 0.0f;  // class 0 = stable
+
+    double up_barrier   = sample_price * (1.0 + barrier_k * vol);
+    double down_barrier = sample_price * (1.0 - barrier_k * vol);
+
+    // THE VERTICAL BARRIER — the whole reason this row exists.
+    int lookahead = (forward_ticks > 0) ? forward_ticks : 500;
+    int end = tick_idx + lookahead;
+    if (end > total_ticks) end = total_ticks;
+
+    for (int j = tick_idx + 1; j < end; j++) {
+        if (ticks[j].price >= up_barrier)   return 2.0f;  // up first  = valley = GOOD entry
+        if (ticks[j].price <= down_barrier) return 1.0f;  // down first = peak  = bad entry
+    }
+    return 0.0f; // horizon expired with neither hit = stable
 }
 
 //----------------------------------------------------------------------
@@ -706,6 +780,14 @@ static inline const char* Training_ResolveRole(int label_type, int training_side
     // does NOT follow its binary namesake VOL_BARRIER -> "buy_signal": the role
     // follows the CLASS STRUCTURE, not the barrier geometry.
     if (label_type == LABEL_VOL_BARRIER_3C)     return "barrier";
+    // D-471 — the TIMED sister carries the identical 3-class stable/peak/valley
+    // encoding (it differs only by having the vertical barrier its sister lacks),
+    // so it produces the SAME role file. Added HERE and not left to fall through:
+    // this dispatch is a hand-listed id check against the registry, so a new row
+    // does NOT auto-flow — it would silently resolve to "buy_signal" and write the
+    // wrong role file. The C.3g coverage char catches the COUNT drift; only this
+    // line makes the VALUE right.
+    if (label_type == LABEL_VOL_BARRIER_3C_TIMED) return "barrier";
     if (label_type == LABEL_REGIME)             return "regime";
     return "buy_signal";
 }
@@ -737,7 +819,13 @@ static inline int Training_SideLabelGate(int label_type, int training_side) {
         // model trained on it inverts (fires at valleys). Separating "stable"
         // into its own class is precisely what makes the 3-class form a valid
         // exit target.
-        case LABEL_VOL_BARRIER_3C:     return 2;
+        case LABEL_VOL_BARRIER_3C:
+        // D-471 — the timed sister joins the same arm for the same reason: the
+        // D-b rule is "does the label carry a genuine PEAK class?", and its
+        // class 1 (down-barrier first) is that peak, bounded horizon or not.
+        // The vertical barrier changes WHEN the label stops looking, not WHAT
+        // the classes mean.
+        case LABEL_VOL_BARRIER_3C_TIMED: return 2;
         // D-b (2026-08-22, operator-decided): WILL_VALLEY + VOL_BARRIER moved
         // WARN -> REFUSE, unifying every ENTRY-DIRECTION label under the
         // default arm. The BARRIER/VOL_BARRIER asymmetry (structural twins,
