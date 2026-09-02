@@ -184,7 +184,7 @@ static inline void DataPanel_Scan(DataPanelState *state) {
 struct SamplesSnapshot {
     int sample_count;        // 0 = no completed run yet
     int label_type;          // LABEL_* id used during the run
-    // TECH_DEBT-302b — WHICH horizon this distribution belongs to. The snapshot is computed from
+    // TECH_DEBT-302 (b) — WHICH horizon this distribution belongs to. The snapshot is computed from
     // the single results->labels[] array, which under a multi-horizon collect holds whatever the
     // LAST loop iteration wrote. The code always knew that (see the collect worker's comment);
     // the PANEL did not say so, and presented one horizon's class split as if it were the run's.
@@ -317,7 +317,7 @@ static inline void RunControl_Init(RunControlState *state) {
 // E.1.2.G — the array-taking core. The BacktestResults overload below delegates
 // here; the per-horizon collect table calls this directly with each horizon's
 // own label vector (results->labels only ever holds the LAST horizon's — the
-// TECH_DEBT-302b footnote this refactor exists to retire from the display).
+// TECH_DEBT-302 (b) footnote this refactor exists to retire from the display).
 static inline void SamplesSnapshot_ComputeFromLabels(SamplesSnapshot *snap,
                                                      const float *labels, int n,
                                                      int label_type) {
@@ -618,7 +618,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
     //    iteration's distribution).
     SamplesSnapshot_Compute(&rc->stats_snapshot, &rc->results,
                               rc->run_config.label_type);
-    // TECH_DEBT-302b — stamp WHICH horizon that was, so the panel can stop implying the
+    // TECH_DEBT-302 (b) — stamp WHICH horizon that was, so the panel can stop implying the
     // distribution describes the whole run. Multi-horizon only; a single-horizon collect leaves
     // it 0 and the panel omits the qualifier.
     rc->stats_snapshot.horizon_ticks =
@@ -6011,7 +6011,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                     ? 100.0f * snap->class_counts[k] / snap->sample_count : 0.0f);
             }
             ImGui::TextUnformatted(buf);
-            // TECH_DEBT-302b — say WHOSE distribution this is. Under a multi-horizon collect the
+            // TECH_DEBT-302 (b) — say WHOSE distribution this is. Under a multi-horizon collect the
             // snapshot is computed from the single results->labels[] array, which holds whatever
             // the LAST loop iteration wrote — so these counts describe ONE horizon, not the run.
             // The other horizons' splits exist only as [collect-mh] stderr lines. Presenting them
