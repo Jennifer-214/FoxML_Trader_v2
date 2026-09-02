@@ -2453,6 +2453,26 @@ inline bool ControllerConfig_IsLiveCapital(const ControllerConfig<F>& cfg) {
 //======================================================================
 // [CODE]
 //======================================================================
+// D-477 (2026-09-02) — the ONE parser for a 64-bit feature mask, shared by the cfg key
+// `node_<N>_feature_mask` and the Training panel's collect-time mask field, so both spell
+// the same value the same way. Accepts `0xHEX` / `0XHEX` (any case) or plain decimal.
+// Returns 1 and writes *out on success; 0 on empty / no digits / trailing junk / ERANGE —
+// the CALLER decides the fallback and the warning (the cfg parser falls back to all-on,
+// the panel shows the error in red). A trailing newline is tolerated (cfg lines carry one).
+static inline int Cfg_ParseU64Mask(const char* val, uint64_t* out) {
+    if (!val || !out || val[0] == '\0') return 0;
+    const int hex = (val[0] == '0' && (val[1] == 'x' || val[1] == 'X'));
+    const char* digits = hex ? val + 2 : val;
+    char* end = nullptr;
+    errno = 0;
+    uint64_t parsed = strtoull(digits, &end, hex ? 16 : 10);
+    if (end == digits) return 0;                                   // no digits at all
+    if (end != nullptr && *end != '\0' && *end != '\n') return 0;  // trailing junk
+    if (errno == ERANGE) return 0;                                 // does not fit 64 bits
+    *out = parsed;
+    return 1;
+}
+
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   ControllerConfig<F> cfg = ControllerConfig_Default<F>();
@@ -3418,16 +3438,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         // with a WARN — never silently zero-out the mask, which would
         // disable ALL features for that core.
         if (strcmp(suffix, "feature_mask") == 0) {
-            char* end = nullptr;
-            errno = 0;
             uint64_t parsed;
-            if ((val[0] == '0' && (val[1] == 'x' || val[1] == 'X'))) {
-                parsed = strtoull(val + 2, &end, 16);
-            } else {
-                parsed = strtoull(val, &end, 10);
-            }
-            if (end == val || (end != nullptr && *end != '\0' && *end != '\n')
-                    || errno == ERANGE) {
+            // D-477 — ONE parser, shared with the Training panel's collect-time mask.
+            if (!Cfg_ParseU64Mask(val, &parsed)) {
                 fprintf(stderr, "[cfg] node_%d_feature_mask='%s' unparseable; "
                         "expected 0xHEX or decimal. Falling back to all-on "
                         "(0xFFFFFFFFFFFFFFFF).\n", node_idx, val);

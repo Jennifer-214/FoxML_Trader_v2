@@ -249,6 +249,13 @@ struct BacktestRunConfig {
     // rail). Recorded in the run summary + the model stamp (label_params group).
     double label_roundtrip_fee_pct;
     int label_forward_ticks; // forward window for forward_pnl label (e.g. 1000)
+    // D-477 (2026-09-02) — the collect-time FEATURE MASK: the collector packs every
+    // sample through the mask-aware Features_PackAll overload (masked columns are
+    // 0.0f, shape kept — exactly what the serve side does with node_<N>_feature_mask),
+    // and the stamp records it so a deploying node's cfg must match at load. 0 = all-on
+    // (the memset-zero default; `feature_mask == 0` is normalized to all-ones at every
+    // consumer — a genuine all-masked model has no features and is refused at the panel).
+    uint64_t feature_mask;
     // v5.10.0a.next.1 — operator-explicit bandit state prior. When set,
     // BacktestSharded_Run loads bandit weights from this path AFTER the
     // default <node_model_dir>/bandit_state.json load, overriding it.
@@ -263,10 +270,10 @@ struct BacktestRunConfig {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-20]
-// [SIZE]_[577856B]
+// [UPDATED]_[2026-09-02]
+// [SIZE]_[577920B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9029]
+// [CACHE_LINES]_[9030]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestRunConfig]
@@ -1645,6 +1652,9 @@ struct FullValidationResults {
     int       req_label_lookahead_ticks;
     double    req_label_tp_pct;
     double    req_label_sl_pct;
+    // D-477 — the collect-time feature mask the labels' feature rows were packed under
+    // (0 = all-on). Both stamp seams populate it; the stamp carries it as `feature_mask`.
+    uint64_t  req_feature_mask;
     // v5.14.2.E.2.B — model-architectural fields for stamp body migration.
     // Populated by caller (Train Model / Train Multi-Horizon worker) BEFORE
     // calling Backtest_RunFullValidation. Zero-default = skip emit (legacy
@@ -1673,8 +1683,8 @@ struct FullValidationResults {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[11552B]
+// [UPDATED]_[2026-09-02]
+// [SIZE]_[11560B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[181]
 // [STRADDLE]_[none]
@@ -1748,6 +1758,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     int  saved_req_label_lookahead_ticks = out->req_label_lookahead_ticks;
     double saved_req_label_tp_pct = out->req_label_tp_pct;
     double saved_req_label_sl_pct = out->req_label_sl_pct;
+    uint64_t saved_req_feature_mask = out->req_feature_mask;   // D-477 — preserved across the reset like its siblings
     memcpy(saved_auto_stamp_path,   out->auto_stamp_path,   sizeof(saved_auto_stamp_path));
     memcpy(saved_auto_stamp_secret, out->auto_stamp_secret, sizeof(saved_auto_stamp_secret));
     memset(out, 0, sizeof(*out));
@@ -1757,6 +1768,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->req_label_lookahead_ticks = saved_req_label_lookahead_ticks;
     out->req_label_tp_pct = saved_req_label_tp_pct;
     out->req_label_sl_pct = saved_req_label_sl_pct;
+    out->req_feature_mask = saved_req_feature_mask;
     out->gap_threshold = gap_threshold;
 
     // Refuse if split is locked (caller MUST unlock with token first)
@@ -1952,6 +1964,10 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         args.horizon_ticks  = out->req_label_lookahead_ticks;
         args.horizon_tp_pct = out->req_label_tp_pct;
         args.horizon_sl_pct = out->req_label_sl_pct;
+        // D-477 — the mask the feature rows were collected under; 0 = all-on. This is the
+        // VALUE the stamp's `feature_mask` field carries, and the loading node compares its
+        // own node_<N>_feature_mask against it (verify_model_stamp expected_feature_mask).
+        args.feature_mask = out->req_feature_mask ? out->req_feature_mask : 0xFFFFFFFFFFFFFFFFULL;
 
         // PARITY-021 close — grid identification (mh_run_one_horizon_fv
         // populates req_grid_*; single-horizon callers leave at defaults).

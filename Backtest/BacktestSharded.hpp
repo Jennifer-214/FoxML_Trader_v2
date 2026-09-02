@@ -441,12 +441,16 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // PortfolioController.hpp.
         uint32_t          warmup_ticks;
         uint32_t          min_warmup_samples;
+        // D-477 — the collect-time feature mask (all-ones = unmasked). Packed through
+        // the SAME mask-aware overload the live seam serves from (M5).
+        uint64_t          feature_mask;
     };
     FeatureCollectCtx fc_ctx{};
     fc_ctx.results            = results;
     fc_ctx.cfg                = &cfg;
     fc_ctx.warmup_ticks       = cfg.warmup_ticks;
     fc_ctx.min_warmup_samples = cfg.min_warmup_samples;
+    fc_ctx.feature_mask       = run_cfg->feature_mask ? run_cfg->feature_mask : 0xFFFFFFFFFFFFFFFFULL;   // D-477
     // Train-serve regime parity via per-core read (PARITY-031 closure):
     // EngineCommon_SlowPathCycleAllCores fires Regime_Classify per-core
     // before this callback runs (ShardedBacktestDriver tick ordering);
@@ -518,8 +522,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                     d->state->nodes[tt::NodeIdx{BACKTEST_REGIME_SAMPLE_CORE}].regime_state.current_regime,
                     (const BucketRingState*)d->bucket_ring,
                     (const FlowState*)d->flow_state);
+                // D-477 — pack under the run's feature mask through the SAME overload the
+                // serve side uses (masked columns 0.0f, shape kept). All-ones delegates to
+                // the no-mask overload, bytewise-identical to the pre-D-477 path.
                 int n = Features_PackAll(&ctx,
-                    &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
+                    &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES],
+                    &fc->feature_mask);
                 if (n < 0) {
                     // Skip this sample entirely — don't bump sample_count.
                     // Per-feature breakdown logged once (rate-limit by global

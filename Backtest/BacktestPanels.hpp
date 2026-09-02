@@ -269,10 +269,10 @@ struct RunControlState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-01]
-// [SIZE]_[632704B]
+// [UPDATED]_[2026-09-02]
+// [SIZE]_[632768B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9886]
+// [CACHE_LINES]_[9887]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
@@ -2882,10 +2882,10 @@ struct OptimizerPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-20]
-// [SIZE]_[959104B]
+// [UPDATED]_[2026-09-02]
+// [SIZE]_[959168B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[14986]
+// [CACHE_LINES]_[14987]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OptimizerPanelState]
@@ -3210,7 +3210,7 @@ struct TrainingPanelState {
     // WF/HeldOut paths read from cfg directly.
     float ui_subsample;          // 0.5-1.0
     float ui_colsample_bytree;   // 0.5-1.0
-    int   ui_min_child_weight;   // 1-50
+    int   ui_min_child_weight;   // clamped to the cfg registry's INT(...) bound for xgb_min_child_weight (read at render)
     int   ui_seed;               // any int
     int   ui_tree_method_idx;    // 0=hist, 1=exact, 2=approx, 3=auto
     int label_type;
@@ -3403,17 +3403,22 @@ struct TrainingPanelState {
     char            ui_label_kind_csv[64];
     alignas(64) int ui_label_kind_per_horizon[PANEL_HORIZON_MAX];   // parsed (broadcast or positional); H6-aligned (Stage-5.5 straddle)
     int             ui_label_kind_per_horizon_count; // 0=empty; 1=broadcast; N=positional
+    // D-477 — the collect-time feature mask (hex text + its parsed value; 0 = all-on).
+    // At the TAIL on purpose: inserting it mid-struct shifted `ui_tp_per_horizon` onto a
+    // 64B line boundary on this [THREAD]-tagged struct (the strict layout gate caught it).
+    char     ui_feature_mask_hex[24];
+    uint64_t ui_feature_mask;
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-26]
-// [SIZE]_[501120B]
+// [UPDATED]_[2026-09-02]
+// [SIZE]_[501248B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[7830]
-// [STRADDLE]_[run_name@12705 · tm_phase_msg@24904 · ui_tp_pct_csv@406148 · ui_sl_pct_csv@406212 · ui_sl_per_horizon@406308 · ui_label_kind_csv@500932]
+// [CACHE_LINES]_[7832]
+// [STRADDLE]_[run_name@12705 · tm_phase_msg@24912 · ui_horizon_list@406120 · ui_tp_pct_csv@406156 · ui_sl_pct_csv@406220 · ui_sl_per_horizon@406316 · ui_label_kind_csv@500996]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3558,6 +3563,8 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->ui_min_child_weight   = 5;
     state->ui_seed               = 42;
     state->ui_tree_method_idx    = 0;  // 0 = "hist"
+    state->ui_feature_mask_hex[0] = '\0';   // D-477 — empty = all features
+    state->ui_feature_mask        = 0;
     state->label_type = LABEL_WIN_LOSS;
     state->label_tp_pct = 1.5f;
     state->label_sl_pct = 1.0f;
@@ -3904,6 +3911,7 @@ struct FullValidationWorkerArgs {
     // this seam stamped the fee-blind tp while the multi-horizon seam stamped tp+fee —
     // a served bracket narrower than the trained barrier (PARITY-065 residual (3)).
     double  snap_label_roundtrip_fee_pct;
+    uint64_t snap_feature_mask;   // D-477 — the collect-time mask (0 = all-on)
     // E.1.2.C — the remaining fields RFV was reading LIVE off `state->` from the
     // worker thread. `snap_label_type` is deliberately sourced from
     // run_control->run_config (the field that actually produced results->labels[]),
@@ -3939,7 +3947,7 @@ struct FullValidationWorkerArgs {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-09-02]
-// [SIZE]_[440B]
+// [SIZE]_[448B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[7]
 // [STRADDLE]_[snap_fv_auto_stamp_secret@272]
@@ -3982,6 +3990,7 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     tt::XGBHyperparams snap_hp       = args->snap_hp;   // E.1.2.C follow-up
     double snap_label_sl_pct        = args->snap_label_sl_pct;
     double snap_label_roundtrip_fee_pct = args->snap_label_roundtrip_fee_pct;   // D-476
+    uint64_t snap_feature_mask          = args->snap_feature_mask;               // D-477
     {
         size_t n = strnlen(args->snap_model_path,
                            sizeof(args->snap_model_path));
@@ -4073,6 +4082,7 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     state->fv_results.req_label_tp_pct = Label_StampTpPct(snap_label_type, snap_label_tp_pct,
                                                           snap_label_roundtrip_fee_pct);
     state->fv_results.req_label_sl_pct = Label_StampSlPct(snap_label_type, snap_label_sl_pct);
+    state->fv_results.req_feature_mask = snap_feature_mask;   // D-477
 
     // E.1.2.C — every argument here is now the CLICK-TIME snapshot. These were
     // live `state->` reads from a worker thread; the label_type one needed no
@@ -4443,6 +4453,7 @@ static inline void mh_run_one_horizon_fv(
                                         label_type, (double)tp_pct,
                                         local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
     fv->req_label_sl_pct          = Label_StampSlPct(label_type, (double)sl_pct);
+    fv->req_feature_mask          = local_run_cfg ? local_run_cfg->feature_mask : 0;   // D-477 — the mask the rows were collected under
     // v5.15.3.B.2 — PARITY-021 close. Grid identification plumbed from
     // multi-horizon worker through FullValidationResults → StampArgs.
     // grid_member_count = horizon_count (total horizons), member_idx = h
@@ -5709,6 +5720,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->run_config.label_sl_pct = state->label_sl_pct;
         // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
         run_control->run_config.label_roundtrip_fee_pct = state->label_roundtrip_fee_pct;
+        run_control->run_config.feature_mask = state->ui_feature_mask;   // D-477 — 0 = all-on
         run_control->run_config.label_forward_ticks = state->label_forward_ticks;
 
         // start the run
@@ -5801,6 +5813,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->run_config.label_sl_pct = state->label_sl_pct;
         // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
         run_control->run_config.label_roundtrip_fee_pct = state->label_roundtrip_fee_pct;
+        run_control->run_config.feature_mask = state->ui_feature_mask;   // D-477 — 0 = all-on
         run_control->run_config.label_forward_ticks = state->label_forward_ticks;
 
         run_control->progress_pct = 0;
@@ -6295,12 +6308,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::SetItemTooltip("Column subsample per tree (0.5-1.0)\n"
                               "Lower = less feature-importance bias\n"
                               "Default 0.8 (matches pre-v5.9.5h hardcoded)");
-        ImGui::InputInt("Min Child Weight", &state->ui_min_child_weight, 1, 5);
-        if (state->ui_min_child_weight < 1) state->ui_min_child_weight = 1;
-        if (state->ui_min_child_weight > 50) state->ui_min_child_weight = 50;
-        ImGui::SetItemTooltip("Min sum-of-weights per leaf (1-50)\n"
-                              "Higher = more regularization\n"
-                              "Default 5 (matches pre-v5.9.5h hardcoded)");
+        // 2026-09-02 (operator find) — the bound is the cfg REGISTRY's clamp, read here
+        // rather than re-typed: the old hardcoded 50 was an arbitrary GUI bound, not an
+        // XGBoost limit, and it capped the E3 experiment (100-200 at the 1000-tick
+        // horizon, where an independent event is ~10 rows). One number, one home.
+        {
+            const auto& _mcw = g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_xgb_min_child_weight].payload.as_int;
+            const int _mcw_lo = (int)_mcw.clamp_min, _mcw_hi = (int)_mcw.clamp_max;
+            ImGui::InputInt("Min Child Weight", &state->ui_min_child_weight, 1, 5);
+            if (state->ui_min_child_weight < _mcw_lo) state->ui_min_child_weight = _mcw_lo;
+            if (state->ui_min_child_weight > _mcw_hi) state->ui_min_child_weight = _mcw_hi;
+            ImGui::SetItemTooltip("Min sum of hessians per leaf (%d-%d; the cfg registry's clamp).\n"
+                                  "For classification the hessian is p(1-p) per row, so this is\n"
+                                  "roughly ROWS x 0.25 at the margin — size it to the independent\n"
+                                  "events in a leaf, not to rows (at ~10 rows per event, 100-200\n"
+                                  "spans 10-20 events at the 1000-tick horizon).\n"
+                                  "Higher = more regularization. No XGBoost upper bound.\n"
+                                  "Default 5 (matches pre-v5.9.5h hardcoded)", _mcw_lo, _mcw_hi);
+        }
         ImGui::InputInt("Seed", &state->ui_seed, 1, 100);
         ImGui::SetItemTooltip("RNG seed for reproducible runs\n"
                               "Same seed + same data + same hyperparams = same model\n"
@@ -6314,6 +6339,54 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "exact: slow but precise (small datasets only)\n"
                               "approx: histogram alternative\n"
                               "auto: XGBoost picks (varies by version)");
+
+        // D-477 (2026-09-02, operator find) — the trainer's half of the feature mask.
+        // The serve side has packed through the mask-aware Features_PackAll under
+        // node_<N>_feature_mask, the stamp has carried `feature_mask`, and load time
+        // has compared the two — but nothing under Backtest/ applied a mask at COLLECT,
+        // so "drop the day-reach features" after an E4 refusal could not be run from
+        // the suite. This field IS that mask: the collect packs through the SAME
+        // overload (masked columns are 0.0f, shape kept), the stamp records it, and a
+        // deploying node's node_<N>_feature_mask must match at load. Parsed by the
+        // same Cfg_ParseU64Mask the cfg key uses. Empty = all features.
+        ImGui::InputText("Feature mask (hex; empty = all)", state->ui_feature_mask_hex,
+                         sizeof(state->ui_feature_mask_hex));
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(
+                "Bit i SET = feature i is collected; CLEAR = column i is 0.0f at collect\n"
+                "(the shape is kept, so the model sees a constant). Applies to Collect\n"
+                "(single + multi-horizon); the stamp records it; a deploying node's\n"
+                "node_<N>_feature_mask must equal it or the load is refused (strict).\n"
+                "0xHEX (any case) or decimal. Empty = all features. 0x0 = every feature\n"
+                "masked = refused here (treated as all-on).\n\n"
+                "Feature bits (auto-synced from FOREACH_FEATURE):");
+            ImGui::Separator();
+            for (int i = 0; i < NUM_REGISTERED_FEATURES; i++)
+                ImGui::Text("  bit %2d  %s", i, FEATURE_NAMES[i]);
+            ImGui::EndTooltip();
+        }
+        {
+            uint64_t parsed = 0; int ok = 1;
+            if (state->ui_feature_mask_hex[0] != '\0')
+                ok = Cfg_ParseU64Mask(state->ui_feature_mask_hex, &parsed);
+            state->ui_feature_mask = ok ? parsed : 0;   // unparseable → all-on, and say so
+            const uint64_t valid_bits = (NUM_REGISTERED_FEATURES >= 64)
+                ? 0xFFFFFFFFFFFFFFFFULL : ((1ULL << NUM_REGISTERED_FEATURES) - 1ULL);
+            if (!ok) {
+                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
+                    "⚠ Feature mask unparseable — expected 0xHEX or decimal; collecting with ALL "
+                    "features until fixed.");
+            } else if (state->ui_feature_mask_hex[0] != '\0' && parsed == 0) {
+                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
+                    "⚠ 0x0 would mask EVERY feature — treated as all-on; clear the field or set bits.");
+            } else if (parsed != 0 && (parsed & valid_bits) != valid_bits) {
+                const int masked = NUM_REGISTERED_FEATURES - __builtin_popcountll(parsed & valid_bits);
+                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                    "masking %d of %d features at collect — the stamp records the mask; a deploying "
+                    "node's node_<N>_feature_mask must match it.", masked, NUM_REGISTERED_FEATURES);
+            }
+        }
     }
 
     // v5.11.48 — only show Model Path in single-horizon mode. In multi-mode
@@ -7529,6 +7602,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fv_args->snap_label_tp_pct        = run_control->run_config.label_tp_pct;
                 fv_args->snap_label_sl_pct        = run_control->run_config.label_sl_pct;
                 fv_args->snap_label_roundtrip_fee_pct = run_control->run_config.label_roundtrip_fee_pct;   // D-476
+                fv_args->snap_feature_mask        = run_control->run_config.feature_mask;               // D-477
                 // E.1.2.C — label_type from run_config (the labels' own source), the
                 // rest from the panel at click time. See the struct comment.
                 fv_args->snap_label_type          = run_control->run_config.label_type;

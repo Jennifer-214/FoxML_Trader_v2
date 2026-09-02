@@ -63,7 +63,7 @@ struct XGBHyperparams {
     // Regularization (subsample fractions; lower = more variance reduction)
     float  subsample         = 0.8f;     // row subsample per tree (0.5-1.0)
     float  colsample_bytree  = 0.8f;     // column subsample per tree (0.5-1.0)
-    int    min_child_weight  = 5;        // min sum-of-weights per leaf (1-50)
+    int    min_child_weight  = 5;        // min sum-of-hessians per leaf (>=1; the cfg registry's clamp is the GUI bound — no XGBoost upper limit)
     // Reproducibility + speed
     int    seed              = 42;       // RNG seed for reproducible runs
     char   tree_method[16]   = "hist";   // hist | exact | approx | auto

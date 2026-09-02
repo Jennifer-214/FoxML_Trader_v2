@@ -97,6 +97,10 @@ struct StampArgs {
     int    horizon_ticks       = 0;
     double horizon_tp_pct      = 0.0;
     double horizon_sl_pct      = 0.0;
+    // D-477 — the feature subset the model was TRAINED on (the collect-time mask; all-ones
+    // = the full registered set). Default all-ones keeps every pre-D-477 caller and fixture
+    // bytewise-identical.
+    uint64_t feature_mask      = 0xFFFFFFFFFFFFFFFFULL;
 
     // Grid identification (single-horizon: count=1, idx=0; multi: caller sets)
     int    grid_member_count   = 1;
@@ -150,8 +154,8 @@ struct StampArgs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[200B]
+// [UPDATED]_[2026-09-02]
+// [SIZE]_[208B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[4]
 // [STRADDLE]_[none]
@@ -276,29 +280,20 @@ inline StampWriteResult Stamp_AssembleAndEmit(
 
     // feature_mask — the feature subset this model was TRAINED on.
     //
-    // 2026-08-16 — this had no producer, so no stamp ever carried the key, so the
-    // parity gate at ModelInference.hpp:1880-1893 always took its WARN arm and the
-    // `r.valid = 0` REFUSE had never fired. That WARN text blames "pre-v5.11.18a"
-    // stamps, pointing every reader at stamp age rather than at the missing emit.
+    // 2026-08-16: this had no producer, so no stamp ever carried the key and the parity
+    // gate at verify_model_stamp always took its WARN arm. It was then emitted as the
+    // all-features sentinel, truthfully, because the trainer had no feature-subset
+    // concept (`rg feature_mask Backtest/` was empty).
     //
-    // The value is NOT ambiguous, despite the mask being a per-NODE runtime cfg:
-    // the stamp is a MODEL document, so the field means "what this model was trained
-    // with", and the trainer has no feature-subset concept at all (`rg feature_mask
-    // Backtest/` is empty) — it always trains on the full registered set. So the
-    // truthful value is the all-features sentinel, matching the convention cfg uses
-    // for the same idea (ControllerConfig.hpp:2202). Reading it as "which node's
-    // mask?" is a category error: that is the RUNTIME half of the comparison, which
-    // the loading node supplies as expected_feature_mask.
-    //
-    // Blast radius today: ZERO. A node with no mask resolves expected_feature_mask
-    // to 0 (EngineCommon.hpp:312-313 maps the all-on sentinel to 0) and the consumer
-    // is gated `if (expected_feature_mask != 0)`, so it is skipped entirely — and no
-    // cfg on disk sets a mask. The change matters the first time someone DOES mask a
-    // node: stamp(all) vs expected(subset) mismatches and REFUSES, which is correct.
-    // A model trained on the full feature set must not be served a subset — the
-    // registry pins input shape (FeatureRegistry.hpp), so a masked feed is drift, not
-    // a smaller model. Previously that operator got a WARN and an unverified load.
-    STAMP_PUT(inf, feature_mask, 0xFFFFFFFFFFFFFFFFULL);  // NB: the registry row's get_value says `inf->feature_mask_train`, a member that does NOT exist — a dead column that only compiles because AUTOPOPULATE is quarantined (PARITY-022)
+    // D-477 (2026-09-02): the trainer HAS the concept now — the collector packs through
+    // the mask-aware Features_PackAll under BacktestRunConfig::feature_mask, and both
+    // stamp seams carry it here via StampArgs::feature_mask (all-ones when unmasked, so
+    // every pre-D-477 stamp and fixture is bytewise-identical). The stamp is a MODEL
+    // document: this is "what the model was trained with"; the RUNTIME half is the
+    // loading node's node_<N>_feature_mask, supplied as expected_feature_mask, and the
+    // two must match — a model trained on a subset must not be served the full set and
+    // vice versa (the registry pins input SHAPE; a masked feed is a different model).
+    STAMP_PUT(inf, feature_mask, args.feature_mask);
 
     // Training wall-clock (μs since unix epoch).
     //

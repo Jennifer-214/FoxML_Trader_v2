@@ -391,7 +391,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
         "Auto-delete tick + depth CSVs older than this many days. 30 = ~1-2GB cap on disk usage.",                                                                                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Training (9) === */                                                                                                                                                                                        \
-    X(int,                  KIND_INT,        xgb_min_child_weight,        "Min Child Weight",     "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 50),                                  \
+    X(int,                  KIND_INT,        xgb_min_child_weight,        "Min Child Weight",     "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 10000),                                  \
         "Min sum-of-weights per leaf (1-50). Higher = more regularization.\nDefault 5. Match deployed model's training value or expect WARN.",                                                                      \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(int,                  KIND_INT,        xgb_seed,                    "Seed",                 "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(42, 0, 2147483647),                         \
