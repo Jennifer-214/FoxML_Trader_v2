@@ -3899,6 +3899,11 @@ struct FullValidationWorkerArgs {
     int     snap_label_forward_ticks;
     double  snap_label_tp_pct;
     double  snap_label_sl_pct;
+    // D-476 (2026-09-02) — the round-trip fee, so the single-horizon stamp records the
+    // SAME effective TP the label walk used (tp+fee for a percent barrier). Without it
+    // this seam stamped the fee-blind tp while the multi-horizon seam stamped tp+fee —
+    // a served bracket narrower than the trained barrier (PARITY-065 residual (3)).
+    double  snap_label_roundtrip_fee_pct;
     // E.1.2.C — the remaining fields RFV was reading LIVE off `state->` from the
     // worker thread. `snap_label_type` is deliberately sourced from
     // run_control->run_config (the field that actually produced results->labels[]),
@@ -3933,8 +3938,8 @@ struct FullValidationWorkerArgs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-22]
-// [SIZE]_[432B]
+// [UPDATED]_[2026-09-02]
+// [SIZE]_[440B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[7]
 // [STRADDLE]_[snap_fv_auto_stamp_secret@272]
@@ -3976,6 +3981,7 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     float  snap_fv_held_out_fraction = args->snap_fv_held_out_fraction;
     tt::XGBHyperparams snap_hp       = args->snap_hp;   // E.1.2.C follow-up
     double snap_label_sl_pct        = args->snap_label_sl_pct;
+    double snap_label_roundtrip_fee_pct = args->snap_label_roundtrip_fee_pct;   // D-476
     {
         size_t n = strnlen(args->snap_model_path,
                            sizeof(args->snap_model_path));
@@ -4062,11 +4068,10 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     // forensic horizon record.
     state->fv_results.req_label_lookahead_ticks = snap_label_forward_ticks;
     // D-476 — the single-horizon twin of the multi-horizon stamp seam: the same
-    // kind-aware rule (Label_Stamp*Pct). RESIDUAL, homed at PARITY-065: this path
-    // snaps no round-trip fee, so a TP_PCT single-horizon stamp records the fee-
-    // blind tp while the multi-horizon seam records tp+fee (a worker-args growth,
-    // not a same-day edit).
-    state->fv_results.req_label_tp_pct = Label_StampTpPct(snap_label_type, snap_label_tp_pct, 0.0);
+    // kind-aware rule (Label_Stamp*Pct), with the click-time fee so a percent TP
+    // stamps tp+fee here exactly as the multi-horizon seam does (PARITY-065 (3)).
+    state->fv_results.req_label_tp_pct = Label_StampTpPct(snap_label_type, snap_label_tp_pct,
+                                                          snap_label_roundtrip_fee_pct);
     state->fv_results.req_label_sl_pct = Label_StampSlPct(snap_label_type, snap_label_sl_pct);
 
     // E.1.2.C — every argument here is now the CLICK-TIME snapshot. These were
@@ -7523,6 +7528,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fv_args->snap_label_forward_ticks = run_control->run_config.label_forward_ticks;
                 fv_args->snap_label_tp_pct        = run_control->run_config.label_tp_pct;
                 fv_args->snap_label_sl_pct        = run_control->run_config.label_sl_pct;
+                fv_args->snap_label_roundtrip_fee_pct = run_control->run_config.label_roundtrip_fee_pct;   // D-476
                 // E.1.2.C — label_type from run_config (the labels' own source), the
                 // rest from the panel at click time. See the struct comment.
                 fv_args->snap_label_type          = run_control->run_config.label_type;
