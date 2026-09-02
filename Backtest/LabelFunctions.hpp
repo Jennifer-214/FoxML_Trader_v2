@@ -289,10 +289,24 @@ static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick
 // VOL_BARRIER. Returns 1 with *out_vol written, or 0 for "insufficient history
 // or degenerate vol" — the caller supplies its own neutral class, because the
 // binary encoding (0.5 = neutral) and the 3-class encoding (0 = stable) differ.
+// Sigma-estimation window used when a caller supplies none. Short relative to any
+// realistic horizon ON PURPOSE: the barrier should scale with CURRENT volatility, not
+// with volatility averaged over the whole forecast window (which would smear a regime
+// change into the barrier meant to detect it).
+#define LABEL_VOL_WINDOW_DEFAULT 500
+
+// The smallest window that can produce a sigma AT ALL. Below this,
+// LabelVol_RollingSigma refuses (n_returns < min_periods) and every sample falls to
+// class 0 — so a vol_window under this floor is not a small window, it is a
+// GUARANTEED-DEGENERATE label. Named so the resolver and the sigma kernel cannot drift
+// on what "too small" means, and declared HERE, ahead of first use, rather than beside
+// its sibling further down (D-473 residual, 2026-09-01).
+#define LABEL_VOL_MIN_PERIODS 5
+
 static inline int LabelVol_RollingSigma(const HistoricalTick *ticks, int tick_idx,
                                         int vol_window, double *out_vol) {
     // need at least min_periods returns to compute vol (FoxML: min_periods = 5)
-    int min_periods = 5;
+    int min_periods = LABEL_VOL_MIN_PERIODS;
     if (tick_idx < min_periods + 1) return 0;
 
     int start = tick_idx - vol_window;
@@ -426,18 +440,18 @@ static inline float Label_VolBarrier3C(const HistoricalTick *ticks, int tick_idx
 // them into 4 classes is a modelling decision, not a defect fix.
 //----------------------------------------------------------------------
 
-// Sigma-estimation window used when the operator leaves the slot at 0. Short
-// relative to any realistic horizon ON PURPOSE: the barrier should scale with
-// CURRENT volatility, not with volatility averaged over the whole forecast
-// window (which would smear a regime change into the barrier that is supposed
-// to detect it).
-#define LABEL_VOL_WINDOW_DEFAULT 500
-
 static inline float Label_VolBarrier3CTimed(const HistoricalTick *ticks, int tick_idx, int total_ticks,
                                              double sample_price, double barrier_k, double vol_window_in,
                                              int forward_ticks) {
     if (barrier_k <= 0.0) barrier_k = 0.5;
-    int vol_window = (vol_window_in > 0.0) ? (int)vol_window_in : LABEL_VOL_WINDOW_DEFAULT;
+    // Floored at the VIABILITY threshold, not at 0 — a window below LABEL_VOL_MIN_PERIODS
+    // cannot produce a sigma, so accepting it would mean returning class 0 for every
+    // sample. Defence in depth WITH the resolver rather than instead of it: the leaf is
+    // reachable from callers that never pass through Label_ResolveEffectiveSl (tests,
+    // and any future direct consumer), and this defect has already shipped once because
+    // one layer trusted another to have sanitised the value.
+    int vol_window = (vol_window_in >= (double)LABEL_VOL_MIN_PERIODS)
+                       ? (int)vol_window_in : LABEL_VOL_WINDOW_DEFAULT;
 
     double vol = 0.0;
     if (!LabelVol_RollingSigma(ticks, tick_idx, vol_window, &vol)) return 0.0f;  // class 0 = stable
@@ -778,11 +792,44 @@ static inline int LabelType_IsMulticlass(int label_type) {
 // is where that constant lives and where its rationale is written.
 static inline double Label_ResolveEffectiveSl(int label_type, double sl_pct) {
     if (label_type < 0 || label_type >= LABEL_COUNT) return sl_pct > 0 ? sl_pct : 1.0;
-    if (sl_pct > 0) return sl_pct;                       // operator-supplied wins, whatever the kind
-    switch (label_table[label_type].sl_kind) {
-        case SL_PCT:              return 1.0;            // the historical percent default
-        case SL_VOL_WINDOW_TICKS: return 0.0;            // let the leaf apply its own named default
-        default:                  return 0.0;            // SL_UNUSED — the leaf ignores it
+    const int kind = label_table[label_type].sl_kind;
+
+    // ⚠️ A DEFAULT IS NOT OPERATOR INPUT, and v1 of this function could not tell them
+    // apart. It said "sl_pct > 0 wins, whatever the kind" — but the training panel
+    // initialises label_sl_pct to 1.0f, so a PERCENT-SHAPED DEFAULT arrived here
+    // looking exactly like a deliberate choice, was passed straight through to a
+    // TICK-WINDOW slot, and reproduced the original defect in full: vol_window = 1,
+    // sigma refuses, every sample class 0. Fixing the resolver while leaving this hole
+    // fixed nothing, and the operator hit it on the next run.
+    //
+    // The durable discriminator is not provenance (unknowable here) but VIABILITY: a
+    // window below LABEL_VOL_MIN_PERIODS cannot produce a sigma BY CONSTRUCTION, so it
+    // is not a small window — it is a guaranteed-degenerate label. No operator means
+    // that, whatever they typed. Substitute the named default and say so LOUDLY, since
+    // silently honouring it is what made this invisible the first time.
+    if (kind == SL_VOL_WINDOW_TICKS) {
+        if (sl_pct >= (double)LABEL_VOL_MIN_PERIODS) return sl_pct;   // a usable window
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr,
+                "[label] NOTE: this label's SL slot is a SIGMA WINDOW IN TICKS, not a "
+                "percent.\n"
+                "        Got %.4f, which is below the %d-tick floor that can produce a "
+                "sigma at all —\n"
+                "        every sample would fall to class 0. Using the %d-tick default "
+                "instead.\n"
+                "        Set the SL field to a TICK COUNT (hundreds) or leave it 0 to "
+                "take this default.\n",
+                sl_pct, LABEL_VOL_MIN_PERIODS, LABEL_VOL_WINDOW_DEFAULT);
+        }
+        return (double)LABEL_VOL_WINDOW_DEFAULT;
+    }
+
+    if (sl_pct > 0) return sl_pct;                       // percent kinds: caller value wins
+    switch (kind) {
+        case SL_PCT: return 1.0;                         // the historical percent default
+        default:     return 0.0;                         // SL_UNUSED — the leaf ignores it
     }
 }
 //======================================================================
