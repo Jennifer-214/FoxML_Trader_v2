@@ -4061,8 +4061,13 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     // Closes pre-existing schema gap so single-horizon stamps also gain
     // forensic horizon record.
     state->fv_results.req_label_lookahead_ticks = snap_label_forward_ticks;
-    state->fv_results.req_label_tp_pct = snap_label_tp_pct;
-    state->fv_results.req_label_sl_pct = snap_label_sl_pct;
+    // D-476 — the single-horizon twin of the multi-horizon stamp seam: the same
+    // kind-aware rule (Label_Stamp*Pct). RESIDUAL, homed at PARITY-065: this path
+    // snaps no round-trip fee, so a TP_PCT single-horizon stamp records the fee-
+    // blind tp while the multi-horizon seam records tp+fee (a worker-args growth,
+    // not a same-day edit).
+    state->fv_results.req_label_tp_pct = Label_StampTpPct(snap_label_type, snap_label_tp_pct, 0.0);
+    state->fv_results.req_label_sl_pct = Label_StampSlPct(snap_label_type, snap_label_sl_pct);
 
     // E.1.2.C — every argument here is now the CLICK-TIME snapshot. These were
     // live `state->` reads from a worker thread; the label_type one needed no
@@ -4420,10 +4425,19 @@ static inline void mh_run_one_horizon_fv(
     // labels carried tp+fee, and the served bracket inherited the stamp's
     // value — an M5 train-serve parity break with no observable symptom
     // (the fee is not in the stamp body either, so nothing could catch it).
-    fv->req_label_tp_pct          = Label_ResolveEffectiveTp(
+    // D-476 (2026-09-02) — and record it BY KIND. The sl line here used to copy the
+    // raw slot (the s5-F12 fix landed on tp and not its sibling), so a sigma-window
+    // row stamped its TICK COUNT into a field the serve side reads as a price
+    // bracket and tt::barrier_is_corrupt refused as >100%. Label_Stamp*Pct is the
+    // ONE rule for both stamp seams (this one + the single-horizon twin): price-
+    // percent kinds → the effective resolver; sigma-quantities (TP_SIGMA_K,
+    // SL_VOL_WINDOW_TICKS) → 0, which the serve side defines as "use the cfg
+    // bracket" (GateParameters.hpp tp_pct / sl_pct). PARITY-065 carries the future
+    // tier, where the kind itself travels in the stamp body.
+    fv->req_label_tp_pct          = Label_StampTpPct(
                                         label_type, (double)tp_pct,
                                         local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
-    fv->req_label_sl_pct          = (double)sl_pct;
+    fv->req_label_sl_pct          = Label_StampSlPct(label_type, (double)sl_pct);
     // v5.15.3.B.2 — PARITY-021 close. Grid identification plumbed from
     // multi-horizon worker through FullValidationResults → StampArgs.
     // grid_member_count = horizon_count (total horizons), member_idx = h
@@ -5292,14 +5306,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (state->ui_training_side != prev_training_side) {
         if (state->ui_training_side == 1) state->label_type = LABEL_WILL_PEAK;
         // E.1.2.C — CLEAR the per-horizon Label-Kind CSV on a side flip, or the
-        // retarget above is a lie on the multi-horizon path. The MH click reads
-        // `bcast_lk = (ui_label_kind_per_horizon_count > 0)
-        //             ? ui_label_kind_per_horizon[0] : state->label_type`
-        // (see the snap block below), so a NON-EMPTY CSV makes `state->label_type`
-        // unreachable — the combo would display "Will Peak" while every horizon
-        // trained on the buy-side kind the CSV still held. The single-horizon
-        // click reads the combo directly and was never affected, which is why
-        // this only bit the multi-horizon path.
+        // retarget above is a lie. Every click resolves its kind through
+        // Label_ResolveKindForHorizon (D-476: a NON-EMPTY CSV wins over the combo
+        // at every position, single-horizon included), so with the CSV left in
+        // place the combo would display "Will Peak" while every horizon trained on
+        // the buy-side kind the CSV still held. Pre-D-476 the single-horizon click
+        // read the combo directly and dodged this; it no longer does, so the clear
+        // now covers all four paths.
         //
         // Clearing (rather than retargeting) is the honest choice: a per-horizon
         // label set typed for the ENTRY side carries no meaning on the exit side,
@@ -5413,25 +5426,50 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                      "%.3f", state->label_sl_pct);
         }
 
-        ImGui::InputText("TP Barrier %",
-                         state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv));
-        ImGui::SetItemTooltip("UNIT: percent of price — 0.5 = 0.5%% (= 50 bps).\n"
-                              "Take-profit barrier as %% of price\n"
-                              "label = 1 (or VALLEY for 3-class) if price moves up this much before SL is hit\n"
-                              "wider = fewer but higher-confidence labels\n"
-                              "tip: 0.050 = 5 bps. For short horizons (~1k ticks) at BTC scale,\n"
-                              "0.05-0.10%% gives balanced labels; 0.3+ usually = 99%% \"stable\".\n\n"
-                              "v5.11.40 multi-horizon: comma-separated values map positionally\n"
-                              "to Horizons (CSV), e.g. '0.020,0.030,0.040' for 3 horizons.\n"
-                              "A single value (e.g. '0.030') broadcasts to all horizons.");
-        ImGui::InputText("SL Barrier %",
-                         state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv));
-        ImGui::SetItemTooltip("UNIT: percent of price — 0.5 = 0.5%% (= 50 bps).\n"
-                              "Stop-loss barrier as %% of price\n"
-                              "label = 0 (or PEAK for 3-class) if price drops this much before TP is hit\n"
-                              "wider = fewer but higher-confidence labels\n\n"
-                              "v5.11.40 multi-horizon: same CSV format as TP — single value\n"
-                              "broadcasts; N values map positionally to Horizons (CSV).");
+        // 2026-09-02 (operator find) — captions + tooltips follow the row's tp_kind /
+        // sl_kind. D-473 made the fields APPEAR for the sigma-window row but left them
+        // percent-shaped, so the one row whose units differ was the one the panel
+        // misdescribed. `###` pins the ImGui id while the visible caption changes.
+        char tp_cap[64], sl_cap[64];
+        snprintf(tp_cap, sizeof(tp_cap), "%s###label_tp_slot", Label_TpKindCaption(_tp_kind));
+        snprintf(sl_cap, sizeof(sl_cap), "%s###label_sl_slot", Label_SlKindCaption(_sl_kind));
+        ImGui::InputText(tp_cap, state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv));
+        if (_tp_kind == TP_SIGMA_K) {
+            ImGui::SetItemTooltip("UNIT: SIGMAS — k, a multiplier of the sigma of the typical HORIZON move\n"
+                                  "(barrier = k * sigma_tick * sqrt(H), D-475). NOT a percent of price.\n"
+                                  "Larger k = wider barriers = more timeouts (class 0).\n\n"
+                                  "Multi-horizon: comma-separated values map positionally to\n"
+                                  "Horizons (CSV); a single value broadcasts. With a Label Kind CSV,\n"
+                                  "each position's unit follows THAT horizon's kind.");
+        } else {
+            ImGui::SetItemTooltip("UNIT: percent of price — 0.5 = 0.5%% (= 50 bps).\n"
+                                  "Take-profit barrier as %% of price\n"
+                                  "label = 1 (or VALLEY for 3-class) if price moves up this much before SL is hit\n"
+                                  "wider = fewer but higher-confidence labels\n"
+                                  "tip: 0.050 = 5 bps. For short horizons (~1k ticks) at BTC scale,\n"
+                                  "0.05-0.10%% gives balanced labels; 0.3+ usually = 99%% \"stable\".\n\n"
+                                  "v5.11.40 multi-horizon: comma-separated values map positionally\n"
+                                  "to Horizons (CSV), e.g. '0.020,0.030,0.040' for 3 horizons.\n"
+                                  "A single value (e.g. '0.030') broadcasts to all horizons.");
+        }
+        ImGui::InputText(sl_cap, state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv));
+        if (_sl_kind == SL_VOL_WINDOW_TICKS) {
+            ImGui::SetItemTooltip("UNIT: TICKS — the sigma-estimation window: how many PRIOR ticks the\n"
+                                  "rolling sigma is measured over. NOT a stop-loss, NOT a percent.\n"
+                                  "0 = the default (%d ticks). Below %d ticks no sigma can be produced,\n"
+                                  "so such a window is floored to the default (D-473).\n"
+                                  "Up to %d ticks is accepted, so a window that scales with the\n"
+                                  "horizon can be set here.\n\n"
+                                  "Multi-horizon: CSV maps positionally; a single value broadcasts.",
+                                  LABEL_VOL_WINDOW_DEFAULT, LABEL_VOL_MIN_PERIODS, LABEL_VOL_WINDOW_MAX);
+        } else {
+            ImGui::SetItemTooltip("UNIT: percent of price — 0.5 = 0.5%% (= 50 bps).\n"
+                                  "Stop-loss barrier as %% of price\n"
+                                  "label = 0 (or PEAK for 3-class) if price drops this much before TP is hit\n"
+                                  "wider = fewer but higher-confidence labels\n\n"
+                                  "v5.11.40 multi-horizon: same CSV format as TP — single value\n"
+                                  "broadcasts; N values map positionally to Horizons (CSV).");
+        }
         // s5 leaf-15 — the round-trip cost the WIN threshold must clear.
         ImGui::InputFloat("Round-trip Fee %", &state->label_roundtrip_fee_pct,
                           0.01f, 0.05f, "%.3f");
@@ -5447,27 +5485,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "realized loss but do not move where it fires.\n"
                               "Recorded in the run summary + the model stamp for lineage.");
 
-        // Parse CSVs every render frame (cheap; max 8 entries, bounded loop).
-        // Same shape as the horizons-CSV parser. After parsing, sync
-        // ui_*_per_horizon[] arrays + index-0 → label_*_pct floats.
-        auto parse_pct_csv = [](const char* csv, float* out, int* n_out) {
-            int n = 0;
-            const char* p = csv;
-            while (*p && n < 8) {
-                while (*p == ' ' || *p == '\t' || *p == ',') p++;
-                if (!*p) break;
-                char* end = nullptr;
-                float v = strtof(p, &end);
-                if (end == p) break;
-                if (v >= 0.0f && v <= 100.0f) out[n++] = v;
-                p = end;
-            }
-            *n_out = n;
-        };
-        parse_pct_csv(state->ui_tp_pct_csv,
-                      state->ui_tp_per_horizon, &state->ui_tp_per_horizon_count);
-        parse_pct_csv(state->ui_sl_pct_csv,
-                      state->ui_sl_per_horizon, &state->ui_sl_per_horizon_count);
 
         // v5.13.1.B — per-horizon label_kind CSV input. Mirrors TP/SL
         // CSV pattern: empty → broadcast state->label_type combo;
@@ -5535,6 +5552,57 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         parse_int_csv(state->ui_label_kind_csv,
                       state->ui_label_kind_per_horizon,
                       &state->ui_label_kind_per_horizon_count);
+        // Parse the TP/SL CSVs AFTER the kind CSV so each position's legal range
+        // follows THAT horizon's kind: a barrier is a percent (no-margin cap 100), a
+        // sigma window is a TICK COUNT (up to LABEL_VOL_WINDOW_MAX). The old flat
+        // `<= 100` dropped any window over 100 ticks AND shifted every later value
+        // onto the wrong horizon (operator find, 2026-09-02). An out-of-range value
+        // now STOPS the parse at its position and is reported in red below — never
+        // silently dropped. NaN parses as out-of-range (Class 60). Bounded loop,
+        // max 8 entries, every frame (cheap).
+        struct SlotCsvBad { int pos; float val; double max; };
+        auto parse_slot_csv = [&](const char* csv, float* out, int* n_out,
+                                  int is_tp) -> SlotCsvBad {
+            SlotCsvBad bad{-1, 0.0f, 0.0};
+            int n = 0;
+            const char* p = csv;
+            while (*p && n < 8) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char* end = nullptr;
+                float v = strtof(p, &end);
+                if (end == p) break;
+                const int kind_h = Label_ResolveKindForHorizon(
+                    state->ui_label_kind_per_horizon,
+                    state->ui_label_kind_per_horizon_count, state->label_type, n);
+                const int k_ok = (kind_h >= 0 && kind_h < LABEL_COUNT);
+                const double vmax = is_tp
+                    ? Label_TpSlotMax(k_ok ? label_table[kind_h].tp_kind : TP_PCT)
+                    : Label_SlSlotMax(k_ok ? label_table[kind_h].sl_kind : SL_PCT);
+                if (!(v >= 0.0f && (double)v <= vmax)) {
+                    bad.pos = n; bad.val = v; bad.max = vmax;
+                    break;
+                }
+                out[n++] = v;
+                p = end;
+            }
+            *n_out = n;
+            return bad;
+        };
+        const SlotCsvBad tp_bad = parse_slot_csv(state->ui_tp_pct_csv,
+            state->ui_tp_per_horizon, &state->ui_tp_per_horizon_count, 1);
+        const SlotCsvBad sl_bad = parse_slot_csv(state->ui_sl_pct_csv,
+            state->ui_sl_per_horizon, &state->ui_sl_per_horizon_count, 0);
+        if (tp_bad.pos >= 0)
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
+                "⚠ TP CSV position %d: %g is outside [0, %g] for that horizon's label kind"
+                " — NOT applied, and the values after it are ignored.",
+                tp_bad.pos + 1, (double)tp_bad.val, tp_bad.max);
+        if (sl_bad.pos >= 0)
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
+                "⚠ SL CSV position %d: %g is outside [0, %g] for that horizon's label kind"
+                " — NOT applied, and the values after it are ignored.",
+                sl_bad.pos + 1, (double)sl_bad.val, sl_bad.max);
         // Keep label_tp_pct / _sl_pct in sync with index 0 — the
         // backward-compat path for single-horizon Train Model.
         if (state->ui_tp_per_horizon_count > 0)
@@ -5627,7 +5695,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         strncpy(run_control->run_config.config_path, run_control->config_path, 255);
         run_control->run_config.use_config_override = 0;
         run_control->run_config.collect_features = 1;
-        run_control->run_config.label_type = state->label_type;
+        // D-476 — the single-horizon click obeys the Label Kind CSV like every other
+        // click (position 0), as the field's own warning promises (TECH_DEBT-323).
+        run_control->run_config.label_type = Label_ResolveKindForHorizon(
+            state->ui_label_kind_per_horizon,
+            state->ui_label_kind_per_horizon_count, state->label_type, 0);
         run_control->run_config.label_tp_pct = state->label_tp_pct;
         run_control->run_config.label_sl_pct = state->label_sl_pct;
         // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
@@ -5715,7 +5787,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         strncpy(run_control->run_config.config_path, run_control->config_path, 255);
         run_control->run_config.use_config_override = 0;
         run_control->run_config.collect_features = 1;
-        run_control->run_config.label_type = state->label_type;
+        // D-476 — the single-horizon click obeys the Label Kind CSV like every other
+        // click (position 0), as the field's own warning promises (TECH_DEBT-323).
+        run_control->run_config.label_type = Label_ResolveKindForHorizon(
+            state->ui_label_kind_per_horizon,
+            state->ui_label_kind_per_horizon_count, state->label_type, 0);
         run_control->run_config.label_tp_pct = state->label_tp_pct;
         run_control->run_config.label_sl_pct = state->label_sl_pct;
         // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
@@ -5748,8 +5824,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // the TRAIN click uses. Collect previously labelled every horizon with
         // the dropdown while train obeyed the CSV — the panel could summarize
         // a label training never consumed (measured 2026-09-01).
-        int bcast_lk = (state->ui_label_kind_per_horizon_count > 0)
-            ? state->ui_label_kind_per_horizon[0] : state->label_type;
         for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
             args->snap_horizons[i] = (i < mh_collect_horizon_count)
                 ? state->ui_horizon_list[i] : 0;
@@ -5759,9 +5833,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
                                     && i < state->ui_sl_per_horizon_count)
                 ? state->ui_sl_per_horizon[i] : bcast_sl;
-            args->snap_label_kind[i] = (state->ui_label_kind_per_horizon_count > 1
-                                        && i < state->ui_label_kind_per_horizon_count)
-                ? state->ui_label_kind_per_horizon[i] : bcast_lk;
+            // D-476 — ONE kind rule for every click (Label_ResolveKindForHorizon).
+            args->snap_label_kind[i] = Label_ResolveKindForHorizon(
+                state->ui_label_kind_per_horizon,
+                state->ui_label_kind_per_horizon_count, state->label_type, i);
         }
         pthread_t tid;
         pthread_create(&tid, NULL, collect_multi_horizon_worker_fn, args);
@@ -6427,7 +6502,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 memcpy(mh_args->snap_model_path, state->model_path, n);
                 mh_args->snap_model_path[n] = '\0';
             }
-            mh_args->snap_label_type     = state->label_type;
+            mh_args->snap_label_type     = Label_ResolveKindForHorizon(   // D-476: CSV position 0 wins
+                state->ui_label_kind_per_horizon,
+                state->ui_label_kind_per_horizon_count, state->label_type, 0);
             mh_args->snap_max_depth      = state->max_depth;
             mh_args->snap_learning_rate  = state->learning_rate;
             mh_args->snap_n_estimators   = state->n_estimators;
@@ -6446,8 +6523,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 // per_horizon[] uninitialized → undefined label_type
                 // passed to mh_run_one_horizon_fv. Single-horizon click
                 // mirrors broadcast: label_type combo for h=0, 0 elsewhere.
+                // D-476 — h=0 takes the Label Kind CSV's position 0 (else the combo),
+                // the same rule every other click uses (TECH_DEBT-323).
                 mh_args->snap_label_kind_per_horizon[i] =
-                    (i == 0) ? state->label_type : 0;
+                    (i == 0) ? Label_ResolveKindForHorizon(
+                                   state->ui_label_kind_per_horizon,
+                                   state->ui_label_kind_per_horizon_count,
+                                   state->label_type, 0)
+                             : 0;
             }
             // v5.13.5.A — single-horizon training_side. Operator's UI
             // toggle applies even in single-horizon mode (lets them
@@ -6607,7 +6690,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 memcpy(mh_args->snap_model_path, state->model_path, n);
                 mh_args->snap_model_path[n] = '\0';
             }
-            mh_args->snap_label_type     = state->label_type;
+            mh_args->snap_label_type     = Label_ResolveKindForHorizon(   // D-476: CSV position 0 wins
+                state->ui_label_kind_per_horizon,
+                state->ui_label_kind_per_horizon_count, state->label_type, 0);
             mh_args->snap_max_depth      = state->max_depth;
             mh_args->snap_learning_rate  = state->learning_rate;
             mh_args->snap_n_estimators   = state->n_estimators;
@@ -6630,8 +6715,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             // Empty CSV / single value → broadcast state->label_type
             // (which is the existing UI Label Type combo). N values map
             // positional. Mirrors TP/SL CSV pattern.
-            int bcast_lk = (state->ui_label_kind_per_horizon_count > 0)
-                ? state->ui_label_kind_per_horizon[0] : state->label_type;
             for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
                 mh_args->snap_horizons[i] = (i < eff_horizon_count)
                     ? eff_horizons[i] : 0;
@@ -6641,10 +6724,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 mh_args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
                                            && i < state->ui_sl_per_horizon_count)
                     ? state->ui_sl_per_horizon[i] : bcast_sl;
-                mh_args->snap_label_kind_per_horizon[i] =
-                    (state->ui_label_kind_per_horizon_count > 1
-                     && i < state->ui_label_kind_per_horizon_count)
-                        ? state->ui_label_kind_per_horizon[i] : bcast_lk;
+                // D-476 — ONE kind rule for every click (Label_ResolveKindForHorizon).
+                mh_args->snap_label_kind_per_horizon[i] = Label_ResolveKindForHorizon(
+                    state->ui_label_kind_per_horizon,
+                    state->ui_label_kind_per_horizon_count, state->label_type, i);
             }
             // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
             // per-horizon results table (arrays sized PANEL_HORIZON_MAX =

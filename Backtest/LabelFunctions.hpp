@@ -303,6 +303,21 @@ static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick
 // its sibling further down (D-473 residual, 2026-09-01).
 #define LABEL_VOL_MIN_PERIODS 5
 
+// The largest σ-estimation window the GUI accepts for an SL_VOL_WINDOW_TICKS slot.
+// A window is a TICK COUNT: the percent-shaped `<= 100` the TP/SL CSV parser applied
+// to price barriers silently discarded any window over 100 ticks — and shifted every
+// later CSV value onto the wrong horizon — so a window that scales with the horizon
+// (the natural experiment at the long ladder) could not be set at all. 2^20 ticks is
+// above any horizon the ladder expresses; the σ kernel walks the window per sample, so
+// an operator who picks a huge one pays in time, not correctness (operator find,
+// 2026-09-02, at the E.1.2.G post-close pickup; D-476).
+#define LABEL_VOL_WINDOW_MAX (1 << 20)
+
+// The percent-of-price TP the label walk substitutes for an unset TP_PCT slot. Lived
+// inline in the batch resolver until the stamp seam needed the SAME value — a second
+// copy of "1.5" is exactly the drift the resolver exists to prevent (D-476).
+#define LABEL_TP_PCT_DEFAULT 1.5
+
 static inline int LabelVol_RollingSigma(const HistoricalTick *ticks, int tick_idx,
                                         int vol_window, double *out_vol) {
     // need at least min_periods returns to compute vol (FoxML: min_periods = 5)
@@ -867,6 +882,127 @@ static inline double Label_ResolveEffectiveTp(int label_type, double tp_pct,
     if (!(roundtrip_fee_pct > 0.0))                  return tp_pct;
     return tp_pct + roundtrip_fee_pct;
 }
+
+//======================================================================
+// [FUNCTION]_[Label_ResolveKindForHorizon]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE broadcast-or-positional rule mapping the Label Kind CSV + the combo onto horizon h — every collect/train click and the CSV range check call this, so they cannot drift (TECH_DEBT-323)]
+// [REFERENCE]_[DECISION]_[[D-476] [D-473]]
+//======================================================================
+// [CODE]
+//======================================================================
+// WHY THIS EXISTS. The rule lived as two inline copies (the multi-horizon
+// collect click and the multi-horizon train click) while the two single-horizon
+// clicks copied the combo and ignored the CSV entirely — so the panel's own
+// mismatch warning ("CSV overrides Label Type") was true for two of four
+// buttons. One function, four callers, one char (Class 18 at the fixed surface).
+//
+// Rule: an empty CSV broadcasts the combo; a single value broadcasts itself;
+// N values map positionally, and a horizon past the CSV's end takes csv[0].
+static inline int Label_ResolveKindForHorizon(const int *csv_kinds, int csv_count,
+                                              int combo_kind, int h) {
+    const int bcast = (csv_count > 0) ? csv_kinds[0] : combo_kind;
+    return (csv_count > 1 && h >= 0 && h < csv_count) ? csv_kinds[h] : bcast;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Label_ResolveKindForHorizon]
+
+//======================================================================
+// [FUNCTION]_[Label_TpSlotMax]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the largest value the GUI accepts in the tp slot for a given tp_kind (+ the sl twin below) — the CSV parser's range follows the KIND, not a flat percent cap]
+// [REFERENCE]_[DECISION]_[[D-476] [D-221]]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline double Label_TpSlotMax(int tp_kind) {
+    (void)tp_kind;          // TP_PCT: the CSV's long-standing 100; TP_SIGMA_K: k ≤ 100 is generous
+    return 100.0;
+}
+static inline double Label_SlSlotMax(int sl_kind) {
+    // SL_PCT keeps the no-margin cap (a spot long cannot lose more than 100%, D-221);
+    // a σ-window is a tick count with its own ceiling.
+    return (sl_kind == SL_VOL_WINDOW_TICKS) ? (double)LABEL_VOL_WINDOW_MAX : 100.0;
+}
+// Caption + unit words for the two slots, by kind — the GUI field label, its
+// tooltip lead, and the label-summary log line all read these, so a row whose
+// slot means something other than a percent is described the same way everywhere.
+static inline const char *Label_TpKindCaption(int tp_kind) {
+    switch (tp_kind) {
+        case TP_SIGMA_K: return "TP k (sigma multiplier)";
+        case TP_PCT:     return "TP Barrier %";
+        default:         return "TP (unused by this label)";
+    }
+}
+static inline const char *Label_SlKindCaption(int sl_kind) {
+    switch (sl_kind) {
+        case SL_VOL_WINDOW_TICKS: return "Sigma window (ticks)";
+        case SL_PCT:              return "SL Barrier %";
+        default:                  return "SL (unused by this label)";
+    }
+}
+static inline const char *Label_TpUnitSuffix(int tp_kind) {
+    return (tp_kind == TP_SIGMA_K) ? " sigma" : (tp_kind == TP_PCT) ? "%" : " (unused)";
+}
+static inline const char *Label_SlUnitSuffix(int sl_kind) {
+    return (sl_kind == SL_VOL_WINDOW_TICKS) ? " ticks" : (sl_kind == SL_PCT) ? "%" : " (unused)";
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Label_TpSlotMax]
+
+//======================================================================
+// [FUNCTION]_[Label_StampTpPct]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE rule for what a label slot means to the STAMP (and so to the served bracket): price-percent kinds → the effective resolver; σ-quantities → 0 (serve takes the cfg bracket); unused → raw (D-476 tactical tier; PARITY-065 carries the kind-in-stamp tier)]
+// [REFERENCE]_[DECISION]_[[D-476] [D-473] [D-221]]
+//======================================================================
+// [CODE]
+//======================================================================
+// WHY THIS EXISTS. The multi-horizon stamp seam routed tp through the effective
+// resolver (s5-F12) and copied sl RAW one line below — the sister-trap. For the
+// σ-window row that stamped a TICK COUNT into label_sl_pct, which the serve side
+// reads as a price bracket and tt::barrier_is_corrupt refuses above 100%: the
+// resolver's own NOTE ("set the SL field to a tick count") steered the operator
+// into an un-stampable model, and the panel default certified a value the label
+// never used. A σ-multiplier k had the twin problem on the tp side since D-471.
+//
+// The serve side already defines a ZERO bracket as "use the cfg bracket"
+// (GateParameters.hpp tp_pct / sl_pct), so 0 is the honest stamp for a quantity
+// that is not a price distance. UNUSED slots pass through raw on purpose: a
+// served bracket built from a slot the label ignores is today's behaviour, and
+// changing it is the kind-in-stamp decision (PARITY-065), not this one.
+static inline double Label_StampTpPct(int label_type, double tp_pct, double roundtrip_fee_pct) {
+    if (label_type < 0 || label_type >= LABEL_COUNT) return tp_pct;
+    switch (label_table[label_type].tp_kind) {
+        case TP_SIGMA_K: return 0.0;
+        case TP_PCT:     return Label_ResolveEffectiveTp(
+                             label_type, tp_pct > 0 ? tp_pct : LABEL_TP_PCT_DEFAULT,
+                             roundtrip_fee_pct);
+        default:         return tp_pct;
+    }
+}
+static inline double Label_StampSlPct(int label_type, double sl_pct) {
+    if (label_type < 0 || label_type >= LABEL_COUNT) return sl_pct;
+    switch (label_table[label_type].sl_kind) {
+        case SL_VOL_WINDOW_TICKS: return 0.0;
+        case SL_PCT:              return Label_ResolveEffectiveSl(label_type, sl_pct);
+        default:                  return sl_pct;
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Label_StampTpPct]
 
 // Display name for the kind itself ("binary" / "regression" / "multiclass").
 // Used in log lines and tooltips.

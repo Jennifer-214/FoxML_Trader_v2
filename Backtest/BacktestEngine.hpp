@@ -1067,7 +1067,7 @@ static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
         // narrower than the model was trained on.
         rt[t].tp  = Label_ResolveEffectiveTp(
                         targets[t].label_type,
-                        targets[t].tp_pct > 0 ? targets[t].tp_pct : 1.5,
+                        targets[t].tp_pct > 0 ? targets[t].tp_pct : LABEL_TP_PCT_DEFAULT,
                         run_cfg->label_roundtrip_fee_pct);
         // D-473 — KIND-AWARE. The old `sl_pct > 0 ? sl_pct : 1.0` substituted a
         // PERCENT default into whatever the slot meant, which for
@@ -1315,15 +1315,29 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     // the ACCUMULATED counters — exactly what the pre-batch body printed).
     results->stats.nan_labels_total   += t.nan_total;
     results->stats.nan_labels_dropped += t.nan_dropped;
-    double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
-    double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
+    const int lt    = run_cfg->label_type;
+    const int lt_ok = (lt >= 0 && lt < LABEL_COUNT);
+    const int tpk   = lt_ok ? label_table[lt].tp_kind : TP_PCT;
+    const int slk   = lt_ok ? label_table[lt].sl_kind : SL_PCT;
+    double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : LABEL_TP_PCT_DEFAULT;
+    // Print what the batch RESOLVED for sl (the same pure call it made), not the
+    // raw panel field — a σ-window row read "sl=1.000%" here for a label that
+    // used a 500-tick window (a-class R6, 2026-09-02 pickup; D-473).
+    double sl = Label_ResolveEffectiveSl(lt, run_cfg->label_sl_pct);
     double rtf = run_cfg->label_roundtrip_fee_pct > 0 ? run_cfg->label_roundtrip_fee_pct : 0.0;
     // s5 rider (2026-08-23, operator find): %.1f rounded 0.35f (0.34999… in
     // binary32) down to "0.3" — read as truncation, wasn't. %.3f matches the
     // multi-horizon collect emit (BacktestPanels ~:533). Display-only.
     // s5 leaf-15: the fee term the win threshold clears is printed beside tp.
-    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.3f%%+%.3f%%fee, sl=%.3f%%)",
-            labeled, run_cfg->label_type, tp, rtf, sl);
+    if (tpk == TP_PCT && slk == SL_PCT) {
+        fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.3f%%+%.3f%%fee, sl=%.3f%%)",
+                labeled, lt, tp, rtf, sl);
+    } else {
+        // Kind-shaped units: k is in sigmas, a window is in ticks, an unused slot
+        // says so — the fee applies to a percent barrier only.
+        fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.3f%s, sl=%.3f%s)",
+                labeled, lt, tp, Label_TpUnitSuffix(tpk), sl, Label_SlUnitSuffix(slk));
+    }
     if (results->stats.nan_labels_total > 0) {
         fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",
                 results->stats.nan_labels_total,
