@@ -248,6 +248,17 @@ struct RunControlState {
     CandleAccumulator *candle_acc;
     TUISnapshot *snapshot;       // populated by worker after run completes
     SamplesSnapshot stats_snapshot; // distribution stats — see comment above struct
+    // E.1.2.G — per-horizon collect distributions (operator ask 2026-09-01: "can
+    // we display the breakdown per horizon instead of just the last one"). The
+    // collect worker fills [0..count) then writes mh_collect_snap_count LAST;
+    // the GUI reads only when running==0 — the same happens-before edge
+    // stats_snapshot already rides. tp/sl are the click-time echo for the
+    // table; the label KIND rides inside each snapshot (heterogeneous under a
+    // Label Kind CSV override).
+    SamplesSnapshot mh_collect_snap[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float mh_collect_tp[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float mh_collect_sl[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    volatile int mh_collect_snap_count;   // 0 = none yet / single-horizon collect
     char config_path[256];
 };
 //======================================================================
@@ -300,30 +311,34 @@ static inline void RunControl_Init(RunControlState *state) {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
-                                             const BacktestResults *r,
-                                             int label_type) {
+// E.1.2.G — the array-taking core. The BacktestResults overload below delegates
+// here; the per-horizon collect table calls this directly with each horizon's
+// own label vector (results->labels only ever holds the LAST horizon's — the
+// TECH_DEBT-302b footnote this refactor exists to retire from the display).
+static inline void SamplesSnapshot_ComputeFromLabels(SamplesSnapshot *snap,
+                                                     const float *labels, int n,
+                                                     int label_type) {
     memset(snap, 0, sizeof(*snap));
     snap->label_type = label_type;
     int K = LabelType_NumClasses(label_type);
     snap->num_classes = K;
     snap->label_kind  = (K == 0) ? 0 : (K == 1 ? 1 : 2);
 
-    if (r->sample_count <= 0 || !r->labels) return;
-    snap->sample_count = r->sample_count;
+    if (n <= 0 || !labels) return;
+    snap->sample_count = n;
 
     if (snap->label_kind == 1) {
         // regression: range / mean / σ
-        float lmin = r->labels[0], lmax = r->labels[0];
+        float lmin = labels[0], lmax = labels[0];
         double sum = 0.0, sum_sq = 0.0;
-        for (int i = 0; i < r->sample_count; i++) {
-            float v = r->labels[i];
+        for (int i = 0; i < n; i++) {
+            float v = labels[i];
             sum += v; sum_sq += (double)v * v;
             if (v < lmin) lmin = v;
             if (v > lmax) lmax = v;
         }
-        double mean = sum / r->sample_count;
-        double var  = (sum_sq / r->sample_count) - mean * mean;
+        double mean = sum / n;
+        double var  = (sum_sq / n) - mean * mean;
         snap->lmin    = lmin;
         snap->lmax    = lmax;
         snap->lmean   = (float)mean;
@@ -334,19 +349,26 @@ static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
         // close — previously the multiclass histogram was open-coded here and
         // binary left class_counts all-zero, so the panel's binary baseline
         // degenerated to a flat 0.5 while the gate refused against the real one).
-        snap->baseline_total = Backtest_LabelClassCounts(r->labels, r->sample_count,
+        snap->baseline_total = Backtest_LabelClassCounts(labels, n,
                                                          label_type, snap->class_counts);
         if (snap->label_kind == 0) {
             // binary display counters: +/-/neutral over ALL samples (the
             // neutral share is exactly what the panel must show)
-            for (int i = 0; i < r->sample_count; i++) {
-                float v = r->labels[i];
+            for (int i = 0; i < n; i++) {
+                float v = labels[i];
                 if (v > 0.5f) snap->pos_count++;
                 else if (v < 0.5f) snap->neg_count++;
                 else snap->neutral_count++;
             }
         }
     }
+}
+
+static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
+                                             const BacktestResults *r,
+                                             int label_type) {
+    SamplesSnapshot_ComputeFromLabels(snap, r ? r->labels : NULL,
+                                      r ? r->sample_count : 0, label_type);
 }
 //======================================================================
 // [END_CODE]
@@ -427,6 +449,13 @@ struct CollectMultiHorizonWorkerArgs {
     // wide; aligned 1:1 with snap_horizons.
     float snap_tp_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     float snap_sl_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    // E.1.2.G — per-horizon label KIND, snapped at click with the same
+    // broadcast-or-positional resolution the TRAIN click uses. Before this the
+    // collect labelled every horizon with the DROPDOWN kind while train obeyed
+    // the Label Kind CSV — so the panel's collect summary could describe a
+    // different label than training consumed (measured 2026-09-01: collect
+    // said 1.5/49.6/48.8 under kind 12 while train shipped kind 7).
+    int snap_label_kind[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
 //======================================================================
 // [END_CODE]
@@ -459,10 +488,16 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
     int horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     float tp_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     float sl_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    int label_kinds[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     memcpy(horizons, args->snap_horizons, sizeof(horizons));
     memcpy(tp_pcts,  args->snap_tp_pct,   sizeof(tp_pcts));
     memcpy(sl_pcts,  args->snap_sl_pct,   sizeof(sl_pcts));
+    memcpy(label_kinds, args->snap_label_kind, sizeof(label_kinds));
     free(args);
+
+    // E.1.2.G — stale per-horizon table from a previous collect must not
+    // outlive this one; count returns non-zero only after [0..count) refill.
+    rc->mh_collect_snap_count = 0;
 
     // 1. Collect features ONCE. label_forward_ticks at this point is
     //    whatever was set when the button was clicked — we'll overwrite
@@ -488,7 +523,9 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
         int bt_ok = 1;
         for (int h = 0; h < horizon_count; ++h) {
             bt[h] = LabelBatchTarget{};
-            bt[h].label_type    = rc->run_config.label_type;
+            // E.1.2.G — the CSV override reaches COLLECT exactly as it reaches
+            // TRAIN. One kind source, two consumers, no divergence.
+            bt[h].label_type    = label_kinds[h];
             bt[h].tp_pct        = (double)tp_pcts[h];
             bt[h].sl_pct        = (double)sl_pcts[h];
             bt[h].forward_ticks = horizons[h];
@@ -520,6 +557,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
             rc->results.stats.nan_labels_total   += bt[h].nan_total;
             rc->results.stats.nan_labels_dropped += bt[h].nan_dropped;
         }
+        int snaps_filled = 0;
         for (int h = 0; h < horizon_count; ++h) {
             if (rc->cancel_flag) {
                 fprintf(stderr, "[collect-mh] cancelled at horizon %d/%d\n",
@@ -527,34 +565,45 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
                 break;
             }
             if (!bt_ok && h < horizon_count - 1) continue;  // no buffer to read
-            const float *labs = bt[h].out_labels;
-            int n_valid = 0, n_pos = 0, n_neg = 0;
-            int n_stable = 0, n_peak = 0, n_valley = 0;   // 3-class (PVS) view
-            for (int s = 0; s < rc->results.sample_count; ++s) {
-                float lab = labs[s];
-                if (isnan(lab) || isinf(lab)) continue;
-                n_valid++;
-                if (lab > 0.5f) n_pos++;
-                else if (lab < 0.5f) n_neg++;
-                if      (lab < 0.5f) n_stable++;
-                else if (lab < 1.5f) n_peak++;
-                else                 n_valley++;
-            }
-            // E.1.2.C GUI polish (c) — the binary pos/neg split lumped peak(1)
-            // + valley(2) together as "pos" and printed stable as "neg" for the
-            // 3-class PVS label; print per-class counts for that kind instead.
-            if (rc->run_config.label_type == LABEL_PEAK_VALLEY_STABLE) {
-                fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
-                                "%d valid samples (%d stable, %d peak, %d valley) of %d total\n",
-                        horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_stable,
-                        n_peak, n_valley, rc->results.sample_count);
+
+            // E.1.2.G — the per-horizon DISPLAY snapshot, from THIS horizon's
+            // own vector (results->labels only ever holds the last horizon's).
+            // Kind-aware via the same SSoT the single-horizon panel line uses,
+            // which also retires the hand-listed PVS special case that used to
+            // live here (Class-19 shape: registry consumer enumerated by hand).
+            SamplesSnapshot *hs = &rc->mh_collect_snap[h];
+            SamplesSnapshot_ComputeFromLabels(hs, bt[h].out_labels,
+                                              rc->results.sample_count,
+                                              bt[h].label_type);
+            hs->horizon_ticks = horizons[h];
+            rc->mh_collect_tp[h] = tp_pcts[h];
+            rc->mh_collect_sl[h] = sl_pcts[h];
+            snaps_filled = h + 1;
+
+            // stderr line, registry-driven for ANY kind (engine.log → LogViewer)
+            char cls[192]; cls[0] = '\0'; size_t coff = 0;
+            if (hs->label_kind == 2) {
+                int K = hs->num_classes > 16 ? 16 : hs->num_classes;
+                for (int k = 0; k < K && coff < sizeof(cls) - 24; ++k)
+                    coff += snprintf(cls + coff, sizeof(cls) - coff, "%sc%d=%d",
+                                     k ? ", " : "", k, hs->class_counts[k]);
+            } else if (hs->label_kind == 0) {
+                snprintf(cls, sizeof(cls), "%d pos, %d neg, %d neutral",
+                         hs->pos_count, hs->neg_count, hs->neutral_count);
             } else {
-                fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
-                                "%d valid samples (%d pos, %d neg, %d neutral) of %d total\n",
-                        horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_pos, n_neg,
-                        n_valid - n_pos - n_neg, rc->results.sample_count);
+                snprintf(cls, sizeof(cls), "mean=%.4f sigma=%.4f range=[%.4f, %.4f]",
+                         hs->lmean, hs->lstddev, hs->lmin, hs->lmax);
             }
+            fprintf(stderr, "[collect-mh] horizon=%d ticks kind=%s tp=%.3f sl=%.3f: "
+                            "%d samples (%s)\n",
+                    horizons[h],
+                    (bt[h].label_type >= 0 && bt[h].label_type < LABEL_COUNT)
+                        ? label_table[bt[h].label_type].name : "?",
+                    tp_pcts[h], sl_pcts[h], hs->sample_count, cls);
         }
+        // count LAST — the GUI's read gate is running==0, but a torn mid-loop
+        // count would still describe half-filled rows to the first frame.
+        rc->mh_collect_snap_count = snaps_filled;
         for (int h = 0; h < horizon_count; ++h) free(tmp_bufs[h]);
     } else if (rc->cancel_flag) {
         fprintf(stderr, "[collect-mh] cancelled at horizon 0/%d\n", horizon_count);
@@ -5231,6 +5280,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // where the engine's ensemble loader already looks. No cfg pointing step.
     static const char* side_names[2] = {"Buy (entry signals)", "Exit (sell signals)"};
     int prev_training_side = state->ui_training_side;
+    ImGui::SeparatorText("Label & Collect");   // E.1.2.G — "this screen could be organized better"
     ImGui::Combo("Training Side", &state->ui_training_side, side_names, 2);
     // E.1.2.C 3-role (b) — flipping to the exit side defaults the label to
     // WILL_PEAK (P(peak) is exactly what the exit_threshold consumer wants);
@@ -5444,6 +5494,25 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ImGui::Text("  %2d  %s", i, label_table[i].display_name);
             ImGui::EndTooltip();
         }
+        // E.1.2.G — mismatch warning. A stale value here silently overrides the
+        // Label Type combo for BOTH collect and train (2026-09-01: a leftover
+        // "7" trained Peak/Valley/Stable for a full multi-horizon run while the
+        // combo read "Vol Barrier 3-Class (timed)"; caught only by the no-skill
+        // REFUSE). Say so IN the panel, at the field, in color.
+        if (state->ui_label_kind_per_horizon_count > 0) {
+            int mm = 0;
+            for (int i = 0; i < state->ui_label_kind_per_horizon_count; ++i)
+                if (state->ui_label_kind_per_horizon[i] != state->label_type) mm = 1;
+            if (mm) {
+                const int k0 = state->ui_label_kind_per_horizon[0];
+                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                    "⚠ CSV overrides Label Type: trains %s%s — not %s. Clear the field to use the combo.",
+                    (k0 >= 0 && k0 < LABEL_COUNT) ? label_table[k0].display_name : "?",
+                    state->ui_label_kind_per_horizon_count > 1 ? " (+ per-horizon kinds)" : "",
+                    (state->label_type >= 0 && state->label_type < LABEL_COUNT)
+                        ? label_table[state->label_type].display_name : "?");
+            }
+        }
 
         // Parse the label_kind CSV (same pattern as TP/SL CSV).
         auto parse_int_csv = [](const char* csv, int* out, int* n_out) {
@@ -5567,6 +5636,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->cancel_flag = 0;
         run_control->complete = 0;
         memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
+        run_control->mh_collect_snap_count = 0;   // E.1.2.G — single collect: retire any stale per-horizon table
         run_control->running = 1;
 
         if (run_control->candle_acc)
@@ -5653,6 +5723,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->cancel_flag = 0;
         run_control->complete = 0;
         memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
+        run_control->mh_collect_snap_count = 0;   // E.1.2.G — worker refills
         run_control->running = 1;
 
         if (run_control->candle_acc)
@@ -5670,6 +5741,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
         float bcast_sl = (state->ui_sl_per_horizon_count > 0)
             ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
+        // E.1.2.G — kinds snap with the SAME broadcast-or-positional resolution
+        // the TRAIN click uses. Collect previously labelled every horizon with
+        // the dropdown while train obeyed the CSV — the panel could summarize
+        // a label training never consumed (measured 2026-09-01).
+        int bcast_lk = (state->ui_label_kind_per_horizon_count > 0)
+            ? state->ui_label_kind_per_horizon[0] : state->label_type;
         for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
             args->snap_horizons[i] = (i < mh_collect_horizon_count)
                 ? state->ui_horizon_list[i] : 0;
@@ -5679,6 +5756,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
                                     && i < state->ui_sl_per_horizon_count)
                 ? state->ui_sl_per_horizon[i] : bcast_sl;
+            args->snap_label_kind[i] = (state->ui_label_kind_per_horizon_count > 1
+                                        && i < state->ui_label_kind_per_horizon_count)
+                ? state->ui_label_kind_per_horizon[i] : bcast_lk;
         }
         pthread_t tid;
         pthread_create(&tid, NULL, collect_multi_horizon_worker_fn, args);
@@ -5756,7 +5836,104 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // frame. Iterating millions of labels every frame was wasteful even
     // when it didn't crash.
     const SamplesSnapshot *snap = &run_control->stats_snapshot;
-    if (snap->sample_count > 0) {
+    // E.1.2.G — per-horizon breakdown table (operator ask: "display the
+    // breakdown per horizon instead of just the last one"). When a
+    // multi-horizon collect has filled the per-horizon snapshots, render ALL
+    // of them and retire the single-line-plus-footnote view; the legacy line
+    // stays for single-horizon runs (count==0).
+    int mh_n = (!run_control->running) ? run_control->mh_collect_snap_count : 0;
+    if (mh_n > 0) {
+        const ImVec4 vg = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+        const ImVec4 vy = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
+        const ImVec4 vr = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+        ImGui::TextColored(FoxmlColors::comment, "Per-horizon label distribution (collect)");
+        if (ImGui::BeginTable("mh_collect_tbl", 7,
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("Horizon");
+            ImGui::TableSetupColumn("Label");
+            ImGui::TableSetupColumn("TP");
+            ImGui::TableSetupColumn("SL");
+            ImGui::TableSetupColumn("Samples");
+            ImGui::TableSetupColumn("Breakdown", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Verdict", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+            for (int h = 0; h < mh_n; ++h) {
+                const SamplesSnapshot *hs = &run_control->mh_collect_snap[h];
+                if (hs->sample_count <= 0) continue;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::Text("%d", hs->horizon_ticks);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(
+                    (hs->label_type >= 0 && hs->label_type < LABEL_COUNT)
+                        ? label_table[hs->label_type].display_name : "?");
+                ImGui::TableNextColumn(); ImGui::Text("%.3g", run_control->mh_collect_tp[h]);
+                ImGui::TableNextColumn(); ImGui::Text("%.3g", run_control->mh_collect_sl[h]);
+                ImGui::TableNextColumn(); ImGui::Text("%d", hs->sample_count);
+
+                // Breakdown cell, kind-aware
+                char bd[256]; bd[0] = '\0'; size_t off = 0;
+                if (hs->label_kind == 2) {
+                    int K = hs->num_classes > 16 ? 16 : hs->num_classes;
+                    for (int k = 0; k < K && off < sizeof(bd) - 32; ++k)
+                        off += snprintf(bd + off, sizeof(bd) - off, "%sc%d %.1f%%",
+                                        k ? "  ·  " : "", k,
+                                        hs->baseline_total > 0
+                                            ? 100.0 * hs->class_counts[k] / hs->baseline_total
+                                            : 0.0);
+                } else if (hs->label_kind == 0) {
+                    snprintf(bd, sizeof(bd), "pos %d  ·  neg %d  ·  neutral %d",
+                             hs->pos_count, hs->neg_count, hs->neutral_count);
+                } else {
+                    snprintf(bd, sizeof(bd), "mean %.4f  σ %.4f  [%.4f, %.4f]",
+                             hs->lmean, hs->lstddev, hs->lmin, hs->lmax);
+                }
+                ImGui::TableNextColumn(); ImGui::TextUnformatted(bd);
+
+                // Verdict cell — SAME thresholds as the single-snapshot
+                // diagnosis (fair-share ratio 0.15 red / 0.5 yellow; 70%
+                // dominance; TECH_DEBT-302a rarest-class rule).
+                ImGui::TableNextColumn();
+                if (hs->label_kind == 2 && hs->baseline_total > 0) {
+                    int K = hs->num_classes > 16 ? 16 : hs->num_classes;
+                    int used = 0, minc = 0, mincls = 0, maxc = 0, maxcls = 0;
+                    for (int k = 0; k < K; ++k) {
+                        int c = hs->class_counts[k];
+                        if (c > maxc) { maxc = c; maxcls = k; }
+                        if (c > 0) { if (!used || c < minc) { minc = c; mincls = k; } used++; }
+                    }
+                    float fair = 100.0f / (K > 0 ? K : 1);
+                    float minp = 100.0f * minc / hs->baseline_total;
+                    float maxp = 100.0f * maxc / hs->baseline_total;
+                    if (used <= 1)
+                        ImGui::TextColored(vr, "one class only — degenerate");
+                    else if (minp < fair * 0.15f)
+                        ImGui::TextColored(vr, "c%d starved (%.1f%% of %.0f%% fair)", mincls, minp, fair);
+                    else if (maxp > 70.0f)
+                        ImGui::TextColored(vy, "c%d dominates at %.1f%%", maxcls, maxp);
+                    else if (minp < fair * 0.5f)
+                        ImGui::TextColored(vy, "c%d under-represented (%.1f%%)", mincls, minp);
+                    else
+                        ImGui::TextColored(vg, "balanced");
+                } else if (hs->label_kind == 0) {
+                    if (hs->pos_count == 0 || hs->neg_count == 0)
+                        ImGui::TextColored(vr, "one-sided — unlearnable");
+                    else
+                        ImGui::TextColored(vg, "two-sided");
+                } else {
+                    ImGui::TextColored(vg, "—");
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::SetItemTooltip(
+            "Every horizon's OWN class distribution from the last multi-horizon\n"
+            "collect — the label kind shown is what training will actually use\n"
+            "(the Label Kind CSV override reaches collect and train identically).\n"
+            "Verdict thresholds match the single-run diagnosis: rarest class under\n"
+            "15%% of fair share = starved; under 50%% = under-represented; one\n"
+            "class >70%% = dominance.");
+    } else if (snap->sample_count > 0) {
         // FoxML colors for diagnostics
         const ImVec4 diag_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 diag_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
@@ -6008,7 +6185,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     ImGui::Separator();
 
     // XGBoost hyperparameters
-    ImGui::Text("XGBoost Parameters");
+    ImGui::SeparatorText("XGBoost Parameters");
     ImGui::InputInt("Max Depth", &state->max_depth, 1, 2);
     ImGui::SetItemTooltip("Max tree depth — controls model complexity\n"
                           "lower = simpler model, less overfitting\n"
@@ -6551,7 +6728,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // Empty when no Multi-Horizon run has fired yet.
         if (state->mh_total > 0) {
             ImGui::Separator();
-            ImGui::TextDisabled("Per-horizon results");
+            ImGui::SeparatorText("Per-horizon results");
             if (ImGui::BeginTable("mh_horizons", 4,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                 ImGui::TableSetupColumn("Horizon");
@@ -6612,7 +6789,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // WALK-FORWARD VALIDATION (Phase 6A — the REAL performance metric)
     //==================================================================
     ImGui::Separator();
-    ImGui::Text("Walk-Forward Validation");
+    ImGui::SeparatorText("Walk-Forward Validation");
     ImGui::SetItemTooltip("Tests if the model generalizes to unseen data\n"
                           "splits data chronologically into train/test folds\n"
                           "trains a fresh model per fold and measures accuracy on the test portion\n\n"
@@ -7008,7 +7185,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // they found via sweep). Disabled when no features collected yet.
     // ============================================================
     ImGui::Separator();
-    ImGui::Text("Hyperparam Sweep (XGBoost grid search over training)");
+    ImGui::SeparatorText("Hyperparam Sweep (XGBoost grid search over training)");
     ImGui::SetItemTooltip(
         "Trains N XGBoost models with different hyperparam values,\n"
         "runs walk-forward on each, picks the best by val accuracy.\n\n"
