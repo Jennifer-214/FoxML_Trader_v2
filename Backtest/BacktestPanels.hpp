@@ -256,7 +256,10 @@ struct RunControlState {
     // table; the label KIND rides inside each snapshot (heterogeneous under a
     // Label Kind CSV override).
     SamplesSnapshot mh_collect_snap[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    float mh_collect_tp[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    // alignas: the tp/sl echo pair fills exactly one 64B line (8+8 floats) —
+    // H6 on a [THREAD]-tagged struct; the layout gate flagged the unaligned
+    // first cut straddling 9879→9880.
+    alignas(64) float mh_collect_tp[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     float mh_collect_sl[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     volatile int mh_collect_snap_count;   // 0 = none yet / single-horizon collect
     char config_path[256];
@@ -266,10 +269,10 @@ struct RunControlState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-26]
-// [SIZE]_[631680B]
+// [UPDATED]_[2026-09-01]
+// [SIZE]_[632704B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9870]
+// [CACHE_LINES]_[9886]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
@@ -462,11 +465,11 @@ struct CollectMultiHorizonWorkerArgs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-22]
-// [SIZE]_[112B]
+// [UPDATED]_[2026-09-01]
+// [SIZE]_[144B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[2]
-// [STRADDLE]_[snap_tp_pct@44]
+// [CACHE_LINES]_[3]
+// [STRADDLE]_[snap_tp_pct@44 · snap_label_kind@108]
 //======================================================================
 // [END_STRUCT]_[CollectMultiHorizonWorkerArgs]
 //======================================================================
