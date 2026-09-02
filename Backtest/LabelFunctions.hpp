@@ -108,7 +108,7 @@ struct HistoricalTick {
     /* APPENDED: the vol-scaled geometry WITH the vertical barrier its sister    */ \
     /*           lacks. sl_pct slot carries the sigma window (dead in this       */ \
     /*           family); extra_param is the HORIZON, as everywhere else.        */ \
-    X(VOL_BARRIER_3C_TIMED, "vol_barrier_3c_timed", "Vol Barrier 3-Class (timed)","3-class k*sigma with a TIME barrier: 0=stable/timeout, 1=down-first(peak), 2=up-first(valley). tp=sigma-k, sl=vol-window, horizon=forward ticks", Label_VolBarrier3CTimed, 3, TP_SIGMA_K, SL_VOL_WINDOW_TICKS)
+    X(VOL_BARRIER_3C_TIMED, "vol_barrier_3c_timed", "Vol Barrier 3-Class (timed)","3-class k*sigma*sqrt(H) with a TIME barrier: 0=stable/timeout, 1=down-first(peak), 2=up-first(valley). tp=k (sigmas of the typical HORIZON move), sl=vol-window ticks, horizon=forward ticks", Label_VolBarrier3CTimed, 3, TP_SIGMA_K, SL_VOL_WINDOW_TICKS)
 
 // Auto-generated LABEL_* constants. Order matches FOREACH_TARGET.
 // Trailing LABEL_COUNT_AUTO acts as the count (one past the last value).
@@ -315,26 +315,34 @@ static inline int LabelVol_RollingSigma(const HistoricalTick *ticks, int tick_id
     if (n_returns < min_periods) return 0;
 
     double sum = 0.0, sum_sq = 0.0;
+    int n = 0;                              // returns actually accumulated (a skipped
+                                            // bad-price row must not deflate the divisor)
     for (int j = start; j < tick_idx; j++) {
         if (ticks[j - 1].price <= 0.0) continue;
         double r = (ticks[j].price - ticks[j - 1].price) / ticks[j - 1].price;
         sum += r;
         sum_sq += r * r;
+        n++;
     }
+    if (n < min_periods) return 0;
 
-    double mean = sum / n_returns;
-    double variance = (sum_sq / n_returns) - (mean * mean);
+    double mean = sum / n;
+    double variance = (sum_sq / n) - (mean * mean);
     if (variance <= 0.0) return 0;          // zero vol = no signal
 
-    // manual sqrt to avoid pulling in math.h just for this (Newton, 8 iters)
-    double x = variance;
-    double guess = x * 0.5;
-    if (guess <= 0.0) guess = 1e-10;
-    for (int iter = 0; iter < 8; iter++)
-        guess = 0.5 * (guess + x / guess);
-    if (guess <= 1e-15) return 0;           // degenerate
+    // __builtin_sqrt, NOT a hand-rolled Newton. The previous 8-iteration Newton
+    // seeded at x/2 was measured returning ~0.008 for a true sigma of ~1e-5 on a
+    // real BTCUSDT session (per-tick return variance ~1e-10: the first iteration
+    // overshoots to ~1.0 and the rest only halve) — inflating sigma ~800x, pushing
+    // every barrier ~1%% away, and labelling 100%% of 2016 real samples class 0
+    // while the synthetic char tapes (variance ~1e-4, the one regime where 8
+    // iterations lands) stayed green. IEEE-754 requires sqrt to be CORRECTLY
+    // ROUNDED, so the builtin is bit-deterministic across platforms and needs no
+    // math.h; it compiles to a single sqrtsd.
+    double sigma = __builtin_sqrt(variance);
+    if (sigma <= 1e-15) return 0;           // degenerate
 
-    *out_vol = guess;
+    *out_vol = sigma;
     return 1;
 }
 
@@ -456,13 +464,27 @@ static inline float Label_VolBarrier3CTimed(const HistoricalTick *ticks, int tic
     double vol = 0.0;
     if (!LabelVol_RollingSigma(ticks, tick_idx, vol_window, &vol)) return 0.0f;  // class 0 = stable
 
-    double up_barrier   = sample_price * (1.0 + barrier_k * vol);
-    double down_barrier = sample_price * (1.0 - barrier_k * vol);
-
-    // THE VERTICAL BARRIER — the whole reason this row exists.
+    // THE VERTICAL BARRIER — the whole reason this row exists. Hoisted above the
+    // barrier computation because the barriers now depend on it.
     int lookahead = (forward_ticks > 0) ? forward_ticks : 500;
     int end = tick_idx + lookahead;
     if (end > total_ticks) end = total_ticks;
+
+    // HORIZON-SCALED barriers: k * sigma_tick * sqrt(H), not k * sigma_tick.
+    // sigma from LabelVol_RollingSigma is PER-TICK return vol; under a random walk
+    // the H-tick move distribution has sigma_tick*sqrt(H), so k is in units of
+    // "sigmas of the typical HORIZON move" — k=1.5 ~ a ~25%% touch rate, k=0.5
+    // (the FoxML default) a majority-touch rate, both tunable and horizon-
+    // consistent across the multi-horizon ladder (each collect's barrier matches
+    // its own reach). Without sqrt(H) the barrier sits ~1.5 TICK-sigmas out
+    // (~$6 at 63k / 0.43s spacing): bid-ask bounce crosses it within seconds and
+    // the label is a microstructure coin flip — measured on the same real session
+    // that exposed the sqrt defect, c0~0%% with c1/c2 a 50/50 split. The bar-based
+    // FoxML original never met this because its horizons were a few BARS: sqrt(H)
+    // of a handful folded into the default k. At H=30000 ticks it is fatal.
+    double horizon_scale = __builtin_sqrt((double)lookahead);
+    double up_barrier   = sample_price * (1.0 + barrier_k * vol * horizon_scale);
+    double down_barrier = sample_price * (1.0 - barrier_k * vol * horizon_scale);
 
     for (int j = tick_idx + 1; j < end; j++) {
         if (ticks[j].price >= up_barrier)   return 2.0f;  // up first  = valley = GOOD entry
