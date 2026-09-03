@@ -1156,6 +1156,17 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                         ezoo_ptr->exit_predictor_count);
                 EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, c,
                                                    cfg.node_model_dir[c]);
+                // PARITY-046 close (2026-09-03) — the ensemble's strict-mode refusal, the SAME
+                // shape the single-zoo path has above (Free + null handle + LOAD_FAILED): the
+                // verify_expected post-load row counts the per-horizon expected-record
+                // mismatches, and the registry walk is void, so the refusal lives HERE.
+                if (cfg.model_verify_strict > 0 && ezoo_ptr->expected_mismatches > 0) {
+                    fprintf(stderr, "[sharded] node %d: ensemble UNLOADED due to strict verify "
+                                    "failure (%d expected-record mismatch(es) across the horizon dirs)\n",
+                            c, ezoo_ptr->expected_mismatches);
+                    EnsembleModelZoo_Free(ezoo_ptr);
+                    state.nodes[tt::NodeIdx{(int16_t)c}].ensemble_handle = nullptr;
+                } else {
                 // v5.15.5.E.0.10 A6 ingress (D-221) — post-load corrupt finalize: union corrupt
                 // arms into disabled_horizon_mask + the per-node majority-corrupt verdict. Runs
                 // AFTER PostLoadSetup (incl. SetDisabledHorizons) so the disabled-union can't be
@@ -1170,6 +1181,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                 }
                 state.nodes[tt::NodeIdx{(int16_t)c}].ensemble_handle = ezoo_ptr;
                 ensemble_loaded = 1;
+                }
             } else {
                 state.nodes[tt::NodeIdx{(int16_t)c}].ensemble_handle = nullptr;
             }

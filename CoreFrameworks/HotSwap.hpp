@@ -206,10 +206,21 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // verify_model_stamp checks). Future: add post-load drift gate.
     // ────────────────────────────────────────────────────────────────────
     if (cfg.model_verify_strict > 0) {
-        // Reserve hook for future v5.X+ stricter validation.
-        // Today: LoadFromCfg with held_out_gate_strict=1 already refused
-        // if any per-role HMAC / drift check failed, so we'd have
-        // returned at (3). This block is a no-op placeholder.
+        // PARITY-046 close (2026-09-03) — the hook has its first body: the
+        // verify_expected post-load row (step 4) counted the per-horizon
+        // expected-record mismatches on the NEW zoo; strict mode refuses the
+        // swap and keeps the pre-swap zoo serving, the same "Free new; pre-swap
+        // untouched" shape (3) uses. (Per-role HMAC / drift refusals still
+        // return at (3) — this is the cfg-vs-training-record leg.)
+        if (new_ezoo->expected_mismatches > 0) {
+            fprintf(stderr,
+                "[hot_swap] ensemble node %d REFUSED (strict): %d expected-record "
+                "mismatch(es) across the horizon dirs under %s; pre-swap state preserved\n",
+                node_idx, new_ezoo->expected_mismatches, new_path);
+            EnsembleModelZoo_Free(new_ezoo);
+            free(new_ezoo);
+            return -4;
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────

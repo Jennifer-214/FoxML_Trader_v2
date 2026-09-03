@@ -123,6 +123,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                         TUISnapshot *out_snapshot = NULL) {
     // Reset results — preserve dynamic allocations like the legacy path does
     BacktestResults_Reset(results);
+    // 2026-09-03 — the corpus-selection record rides the results from the ONE site
+    // that consumes run_cfg->data_paths (count / first / last / list sha256), so the
+    // training summary can say which files the samples came from.
+    BacktestResults_RecordCorpus(results, run_cfg);
 
     // Load config (or use override)
     ControllerConfig<BACKTEST_FP> cfg;

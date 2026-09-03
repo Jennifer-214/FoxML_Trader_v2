@@ -109,8 +109,8 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                 ImGui::SetItemTooltip(
                     "Multi-horizon ensemble is active. Single-zoo handle is\n"
                     "unset (no buy_signal.json at base path) but ezoo->primary\n"
-                    "is wired to whichever role file was found in the _horizon_<H>\n"
-                    "siblings (priority: buy_signal > barrier > regime). The\n"
+                    "is wired to whichever role file was found in the family's\n"
+                    "horizon_<H> children (priority: buy_signal > barrier > regime). The\n"
                     "strategy uses ezoo->primary_handles for predictions.");
             } else {
                 ImGui::TextColored(FoxmlColors::sand, "model: (none configured)");

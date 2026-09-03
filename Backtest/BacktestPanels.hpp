@@ -23,6 +23,7 @@
 #include "BacktestEngine.hpp"
 #include "BacktestSharded.hpp"  // phase 13: per-core sharded backtest path
 #include "../ML_Headers/ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT
+#include <errno.h>   // 2026-09-03 — the data-file sidecar writer fails LOUD with errno (path-schema discipline 5)
 #include "../MemHeaders/DirCreate.hpp"        // D-431 — FoxDir_CreateParents (family+horizon chain)
 #include "Fingerprint.hpp"
 #include <dirent.h>
@@ -269,10 +270,10 @@ struct RunControlState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-02]
-// [SIZE]_[632768B]
+// [UPDATED]_[2026-09-03]
+// [SIZE]_[633344B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9887]
+// [CACHE_LINES]_[9896]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
@@ -1078,6 +1079,11 @@ struct PastRun {
     // signed stamp present + matches current build).
     float held_out_metric;
     int   has_held_out;
+    // 2026-09-03 — the gate metric (balanced accuracy, %) when the summary carries
+    // it; has_balanced=0 for pre-2026-09-03 summaries → the row colors by plain
+    // accuracy with the old bands (an old record is scored the way it was gated).
+    float val_balanced_accuracy;
+    int   has_balanced;
     int   has_stamp;             // 1 = .stamp file exists in run dir
     char  stamp_verify_msg[128]; // populated by Verify Stamp button — empty if not verified yet
     int   stamp_verify_state;    // 0=unverified, 1=ok, -1=fail
@@ -1321,6 +1327,12 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         // v5.8.9 — held-out + auto-stamp summary fields (optional, missing
         // for older runs).
         else if (strcmp(k, "held_out_metric") == 0)    { r->held_out_metric = (float)atof(v); r->has_held_out = 1; }
+        // 2026-09-03 — the gate metric (percent, like val_accuracy); absent on older summaries.
+        // tt::parse_double_fast, NOT the atof its siblings use: the locale-determinism
+        // baseline (tools/locale_determinism_known_pending.txt) is SHRINK-ONLY per file and
+        // pre-commit Check F refused the 25th raw parse here — the same rule the E.1.2.C
+        // expected_label_type key followed in NodeModelZoo.hpp.
+        else if (strcmp(k, "val_balanced_accuracy") == 0) { r->val_balanced_accuracy = (float)tt::parse_double_fast(v); r->has_balanced = 1; }
         // v5.15.5 — training data scale; missing on older runs = 0.
         else if (strcmp(k, "n_train_samples") == 0)      r->n_train_samples = atoi(v);
     }
@@ -1371,9 +1383,13 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         (void)src_ext;
     }
 
-    // expected.cfg (optional; older runs may not have all fields)
-    snprintf(path, sizeof(path), "%s/expected.cfg", run_dir);
-    f = fopen(path, "r");
+    // expected record (optional; older runs may not have all fields). 2026-09-03:
+    // side-addressed — the row shows the ENTRY record unless only an exit
+    // summary exists (summary_side), so the expected record follows the same
+    // side; the legacy shared expected.cfg is the fallback the resolver owns.
+    f = NULL;
+    if (ModelPath_ExpectedCfgResolve(run_dir, r->summary_side, path, sizeof(path)) != 0)
+        f = fopen(path, "r");
     if (f) {
         while (fgets(line, sizeof(line), f)) {
             if (line[0] == '#') continue;
@@ -2031,15 +2047,33 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
 
                     ImGui::TableNextColumn();
                     if (r->has_wf_results) {
-                        // Color thresholds depend on chance level: 3-class
-                        // baseline ~33%, binary ~50%, plus majority-class
-                        // dominance can shift these. Keep simple bands.
-                        float thresh_low  = (r->expected_num_classes >= 2) ? 35.0f : 50.0f;
-                        float thresh_good = (r->expected_num_classes >= 2) ? 50.0f : 60.0f;
-                        ImVec4 vcol = (r->val_accuracy < thresh_low)  ? FoxmlColors::red
-                                    : (r->val_accuracy < thresh_good) ? FoxmlColors::yellow
-                                                                        : FoxmlColors::green;
+                        // 2026-09-03 — a summary that carries the gate metric
+                        // (val_balanced_accuracy) is colored by it against the
+                        // balanced floor (1/K; no class counts here, so the
+                        // uniform floor) + the diagnosis bands (+1pp marginal,
+                        // +3pp fee) — the SAME pair the gate and the Training
+                        // panel use. Older summaries keep the pre-fix plain
+                        // accuracy bands (they were gated that way).
+                        ImVec4 vcol;
+                        if (r->has_balanced) {
+                            const int   K     = r->expected_num_classes >= 2 ? r->expected_num_classes : 2;
+                            const float floor = 100.0f * multiclass_balanced_baseline(K, NULL, 0);
+                            vcol = (r->val_balanced_accuracy <= floor + 1.0f) ? FoxmlColors::red
+                                 : (r->val_balanced_accuracy <  floor + 3.0f) ? FoxmlColors::yellow
+                                                                              : FoxmlColors::green;
+                        } else {
+                            // pre-2026-09-03 record: chance-level bands on plain accuracy
+                            // (3-class baseline ~33%, binary ~50%; majority dominance shifts these)
+                            float thresh_low  = (r->expected_num_classes >= 2) ? 35.0f : 50.0f;
+                            float thresh_good = (r->expected_num_classes >= 2) ? 50.0f : 60.0f;
+                            vcol = (r->val_accuracy < thresh_low)  ? FoxmlColors::red
+                                 : (r->val_accuracy < thresh_good) ? FoxmlColors::yellow
+                                                                     : FoxmlColors::green;
+                        }
                         ImGui::TextColored(vcol, "%.1f%%", r->val_accuracy);
+                        if (r->has_balanced)
+                            ImGui::SetItemTooltip("balanced accuracy (the gate metric): %.1f%%",
+                                                  r->val_balanced_accuracy);
                     } else {
                         ImGui::TextDisabled("-");
                     }
@@ -3414,11 +3448,11 @@ struct TrainingPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-02]
-// [SIZE]_[501248B]
+// [UPDATED]_[2026-09-03]
+// [SIZE]_[517760B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[7832]
-// [STRADDLE]_[run_name@12705 · tm_phase_msg@24912 · ui_horizon_list@406120 · ui_tp_pct_csv@406156 · ui_sl_pct_csv@406220 · ui_sl_per_horizon@406316 · ui_label_kind_csv@500996]
+// [CACHE_LINES]_[8090]
+// [STRADDLE]_[run_name@14241 · tm_phase_msg@28112 · ui_horizon_list@409320 · ui_tp_pct_csv@409356 · ui_sl_pct_csv@409420 · ui_sl_per_horizon@409516 · ui_label_kind_csv@517508]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -4609,12 +4643,26 @@ static inline void mh_run_one_horizon_fv(
         : fv->walkforward.mean_val_accuracy;
     double ho_metric = LabelType_IsRegression(label_type)
         ? fv->held_out_correlation : fv->held_out_metric;
+    // 2026-09-03 — the per-horizon row shows the GATE metric + direction recall
+    // next to the plain pair (E.2/E.3): "bal=0.412 rec c0/c1/c2=0.31/0.47/0.45".
+    // Built once, appended to every classification verdict below; empty for
+    // regression (the buffer is 256 B — the recall list stays compact).
+    char bal_buf[96] = "";
+    if (!LabelType_IsRegression(label_type)) {
+        const int Kp = (fv->walkforward.num_classes >= 2)
+                     ? (fv->walkforward.num_classes > 6 ? 6 : fv->walkforward.num_classes) : 2;
+        int off = snprintf(bal_buf, sizeof(bal_buf), " bal=%.3f rec",
+                           (double)fv->walkforward.mean_val_balanced_accuracy);
+        for (int k = 0; k < Kp && off > 0 && off < (int)sizeof(bal_buf); ++k)
+            off += snprintf(bal_buf + off, sizeof(bal_buf) - (size_t)off, "%s%.2f",
+                            k == 0 ? " " : "/", (double)fv->walkforward.mean_val_class_recall[k]);
+    }
 
     if (fv->auto_stamp_attempted && fv->auto_stamp_ok) {
         snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f stamped",
+                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f stamped%s",
                  horizon_ticks, wf_metric, ho_metric,
-                 fv->wf_to_held_out_gap);
+                 fv->wf_to_held_out_gap, bal_buf);
     } else if (fv->ran_held_out && fv->auto_stamp_attempted) {
         // Class-62 close — a run the gate REFUSED (or whose stamp write failed)
         // is NOT "OK". The old format labeled the refuse branch
@@ -4622,8 +4670,8 @@ static inline void mh_run_one_horizon_fv(
         // reason clipped at 128B. auto_stamp_error carries the gate's verdict
         // (skill floor / gap gate) or the writer's error.
         snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d REFUSED: WF=%.3f HO=%.3f gap=%.3f — %s",
-                 horizon_ticks, wf_metric, ho_metric, fv->wf_to_held_out_gap,
+                 "h=%d REFUSED: WF=%.3f HO=%.3f gap=%.3f%s — %s",
+                 horizon_ticks, wf_metric, ho_metric, fv->wf_to_held_out_gap, bal_buf,
                  fv->auto_stamp_error[0] ? fv->auto_stamp_error
                                          : "unknown write error");
     } else if (fv->ran_held_out) {
@@ -4631,9 +4679,9 @@ static inline void mh_run_one_horizon_fv(
         // in cfg, OR snap was 0 at click time, OR Run Control hasn't loaded a
         // cfg) — validation itself completed; only the stamp was never asked for.
         snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f (no stamp requested: auto_stamp_on_held_out=0)",
+                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f%s (no stamp requested: auto_stamp_on_held_out=0)",
                  horizon_ticks, wf_metric, ho_metric,
-                 fv->wf_to_held_out_gap);
+                 fv->wf_to_held_out_gap, bal_buf);
     } else if (state->mh_cancel) {
         snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
                  "h=%d CANCELLED mid-validation", horizon_ticks);
@@ -4696,6 +4744,22 @@ static inline void mh_run_one_horizon_fv(
                     100.0 * (double)fv->walkforward.mean_val_accuracy);
             fprintf(sf, "val_stddev: %.2f\n",
                     100.0 * (double)fv->walkforward.std_val_accuracy);
+            // 2026-09-03 — the gate metric + per-class recall (E.2/E.3). Percent
+            // like val_accuracy so Past Runs reads them with the same rule.
+            fprintf(sf, "val_balanced_accuracy: %.2f\n",
+                    100.0 * (double)fv->walkforward.mean_val_balanced_accuracy);
+            {
+                const int Kp = (fv->walkforward.num_classes >= 2)
+                             ? (fv->walkforward.num_classes > 16 ? 16 : fv->walkforward.num_classes) : 2;
+                for (int k = 0; k < Kp; ++k)
+                    fprintf(sf, "val_recall_c%d: %.2f\n", k,
+                            100.0 * (double)fv->walkforward.mean_val_class_recall[k]);
+                fprintf(sf, "held_out_balanced_accuracy: %.4f\n",
+                        (double)fv->held_out_balanced_accuracy);
+                for (int k = 0; k < Kp; ++k)
+                    fprintf(sf, "held_out_recall_c%d: %.4f\n", k,
+                            (double)fv->held_out_class_recall[k]);
+            }
         }
         fprintf(sf, "train_val_gap: %.4f\n",
                 (double)fv->wf_to_held_out_gap);
@@ -4719,7 +4783,68 @@ static inline void mh_run_one_horizon_fv(
         } else if (fv->auto_stamp_attempted) {
             fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
         }
+        // 2026-09-03 — the CORPUS SELECTION record (what-to-do-next.md: "today the
+        // selection is not recorded anywhere"). Sourced from `results` — the record
+        // the corpus walk wrote at collect time (BacktestResults_RecordCorpus), NOT
+        // the Data panel's live selection: the operator can reselect between
+        // Collect and Train, and the samples this model trained on are the
+        // collect-time set. The tick-time span is the DATA's own timestamps (UTC),
+        // the same two scalars the purge gap's time reach reads (D-474).
+        {
+            fprintf(sf, "data_files: %d\n", results->data_file_count);
+            if (results->data_file_count > 0) {
+                fprintf(sf, "data_first_file: %s\n", results->data_first_file);
+                fprintf(sf, "data_last_file: %s\n",  results->data_last_file);
+            }
+            if (results->data_list_sha256[0])
+                fprintf(sf, "data_list_sha256: %s\n", results->data_list_sha256);
+            if (results->first_tick_us > 0 && results->last_tick_us >= results->first_tick_us) {
+                char d0[16] = "", d1[16] = "";
+                struct tm tm0, tm1;
+                time_t t0 = (time_t)(results->first_tick_us / 1000000ULL);
+                time_t t1 = (time_t)(results->last_tick_us  / 1000000ULL);
+                if (gmtime_r(&t0, &tm0)) strftime(d0, sizeof(d0), "%Y-%m-%d", &tm0);
+                if (gmtime_r(&t1, &tm1)) strftime(d1, sizeof(d1), "%Y-%m-%d", &tm1);
+                fprintf(sf, "data_first_tick_utc: %s\n", d0);
+                fprintf(sf, "data_last_tick_utc: %s\n",  d1);
+                fprintf(sf, "data_first_tick_us: %llu\n", (unsigned long long)results->first_tick_us);
+                fprintf(sf, "data_last_tick_us: %llu\n",  (unsigned long long)results->last_tick_us);
+            }
+        }
         fclose(sf);
+    }
+
+    // 2026-09-03 — the full data-file list, side-addressed like its summary
+    // (model-artifact-path-schema-discipline #6). Written from the run cfg the
+    // trainer holds (the Data panel selection at CLICK time) and stamped with
+    // BOTH hashes, so a selection changed between Collect and Train is visible
+    // in the file itself instead of silently listing the wrong corpus.
+    if (local_run_cfg) {
+        char dst_list[400];
+        snprintf(dst_list, sizeof(dst_list), "%s/%s", horizon_dir,
+                 training_side == 1 ? MODEL_SIDECAR_DATA_FILES_EXIT
+                                    : MODEL_SIDECAR_DATA_FILES_ENTRY);
+        FILE *lf = fopen(dst_list, "w");
+        if (lf) {
+            char sel_sha[65] = "";
+            BacktestRunConfig_DataListSha256(local_run_cfg, sel_sha, sizeof(sel_sha));
+            const int same = (results->data_list_sha256[0] && sel_sha[0] &&
+                              strcmp(results->data_list_sha256, sel_sha) == 0);
+            fprintf(lf, "# data files selected at Train click (%d) — the %s record\n",
+                    local_run_cfg->num_data_files, training_side == 1 ? "EXIT" : "ENTRY");
+            fprintf(lf, "# selection_list_sha256 = %s\n", sel_sha[0] ? sel_sha : "(unknown)");
+            fprintf(lf, "# corpus_list_sha256 = %s   (the Collect-time list the samples came from)\n",
+                    results->data_list_sha256[0] ? results->data_list_sha256 : "(unknown)");
+            fprintf(lf, "# %s\n", same ? "MATCH — this list IS the training corpus"
+                                       : "MISMATCH — the selection changed since Collect; the corpus is the "
+                                         "Collect-time list (see summary data_first_file / data_last_file)");
+            for (int i = 0; i < local_run_cfg->num_data_files && i < MAX_DATA_FILES; ++i)
+                fprintf(lf, "%s\n", local_run_cfg->data_paths[i]);
+            fclose(lf);
+        } else {
+            fprintf(stderr, "[mh] h=%d: could not write %s (errno %d)\n",
+                    horizon_ticks, dst_list, errno);
+        }
     }
 
     // D-d (2026-08-22, operator-decided) — expected.cfg gains its FIRST live
@@ -4729,14 +4854,24 @@ static inline void mh_run_one_horizon_fv(
     // NEW-8 dies in the port: num_classes comes from label_table (computed
     // above), never a hand-switch; hyperparams record the CLICK-TIME SNAPSHOT
     // (the dead writer recorded live panel state).
+    // 2026-09-03 — SIDE-ADDRESSED (model-artifact-path-schema-discipline #6, the
+    // summary_{entry,exit}.txt shape): one shared expected.cfg per horizon dir
+    // meant the exit run OVERWROTE the entry record (role=exit, label 5,
+    // 0 classes) on every horizon of the operator's best family — the barrier
+    // record was gone and nothing said so. entry runs write expected_entry.cfg,
+    // exit runs expected_exit.cfg; every reader resolves through
+    // ModelPath_ExpectedCfgResolve (side file first, legacy shared name once).
     {
         char dst_expected[400];
-        snprintf(dst_expected, sizeof(dst_expected), "%s/expected.cfg", horizon_dir);
+        snprintf(dst_expected, sizeof(dst_expected), "%s/%s", horizon_dir,
+                 ModelPath_ExpectedCfgName(training_side));
         FILE *ef = fopen(dst_expected, "w");
         if (ef) {
             fprintf(ef, "# auto-generated by foxml_suite multi-horizon train — DO NOT EDIT\n");
             fprintf(ef, "# the engine compares these against engine.cfg at load time.\n");
-            fprintf(ef, "# mismatch → warning (default) or failure (model_verify_strict=1).\n\n");
+            fprintf(ef, "# mismatch → warning (default) or failure (model_verify_strict=1).\n");
+            fprintf(ef, "# side-addressed: this is the %s record; the other side's record is its sibling file.\n\n",
+                    training_side == 1 ? "EXIT" : "ENTRY");
             fprintf(ef, "expected_role = %s\n", role);
             fprintf(ef, "expected_label_type = %d\n", label_type);
             fprintf(ef, "expected_num_classes = %d\n", num_classes);
@@ -6401,8 +6536,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "Output path for Run Full Validation auto-stamp.\n"
             "Single-horizon mode only.\n\n"
             "NOT used by Train Model / Train Multi-Horizon — those auto-generate\n"
-            "save paths from Run Name + horizon dir naming convention\n"
-            "(models/<class>/<run_name>_horizon_<H>/<role>.json).");
+            "save paths from Run Name + the nested family layout (D-431)\n"
+            "(models/<class>/<run_name>/horizon_<H>/<role>.json).");
     }
 
     // v5.11.48 — Run Name prefix input rendered HERE (before Train buttons)
@@ -6412,11 +6547,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // state->run_name buffer.
     ImGui::InputText("Run Name (prefix)", state->run_name, sizeof(state->run_name));
     ImGui::SetItemTooltip(
-        "Prefix for save paths. Worker auto-appends \"_horizon_<H>\" per horizon.\n\n"
+        "Family name. The worker creates ONE family dir and a horizon_<H> child\n"
+        "per horizon inside it (D-431 nested layout).\n\n"
         "Example: Run Name \"btc_5min\" + horizons 1000,7500,15000 →\n"
-        "  models/<class>/btc_5min_horizon_1000/barrier.json\n"
-        "  models/<class>/btc_5min_horizon_7500/barrier.json\n"
-        "  models/<class>/btc_5min_horizon_15000/barrier.json\n\n"
+        "  models/<class>/btc_5min/horizon_1000/barrier.json\n"
+        "  models/<class>/btc_5min/horizon_7500/barrier.json\n"
+        "  models/<class>/btc_5min/horizon_15000/barrier.json\n\n"
         "Re-running with the same prefix overwrites previous results — pick\n"
         "a unique name per experiment (e.g. btc_5min_v1, btc_5min_v2, ...).");
     // Live preview of what dirs will be created
@@ -6437,8 +6573,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         const int nclass_preview = (state->label_type >= 0 && state->label_type < LABEL_COUNT)
                                  ? label_table[state->label_type].num_classes : 0;
         const char* class_preview = (nclass_preview == 1) ? "regression" : "classification";
-        ImGui::TextDisabled("Will write to: models/%s/%s_horizon_<%s>/%s.json",
-                            class_preview, state->run_name,
+        // D-431 nested layout — the preview spells the SAME grammar the writer
+        // builds via ModelPath_HorizonDir ("<family>/horizon_<N>"); the retired
+        // flat "<run>_horizon_<H>" form lied to the operator for a month after
+        // the writer moved (what-to-do-next 2026-09-02 gotcha).
+        ImGui::TextDisabled("Will write to: models/%s/%s/%s<%s>/%s.json",
+                            class_preview, state->run_name, MODEL_HORIZON_PREFIX,
                             state->ui_horizon_count == 1 ? "H" : "H1,H2,...",
                             role_preview);
     }
@@ -6863,8 +7003,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::SetItemTooltip(
             "Trains N XGBoost models, one per horizon in 'Horizons (CSV)' above.\n"
             "Each horizon recomputes labels with that label_forward_ticks value,\n"
-            "trains a separate model, saves to:\n"
-            "  models/<class>/<run_name>_horizon_<H>/<role>.json\n\n"
+            "trains a separate model, saves to (D-431 nested family layout):\n"
+            "  models/<class>/<run_name>/horizon_<H>/<role>.json\n\n"
             "Operator manually picks which horizon to deploy (or relies on\n"
             "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
             "Runs panel treats each horizon as a separate row for\n"
@@ -7179,14 +7319,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 // PEAK_VALLEY_STABLE 5.9/47.4/46.7 distribution from
                 // 2026-05-02 paper test). Diagnosis was misleading for
                 // multiclass; now uses actual majority-class baseline.
-                float val_acc = wf->mean_val_accuracy;
-                float train_acc = wf->mean_train_accuracy;
+                // 2026-09-03 — the diagnosis reads BALANCED accuracy against the
+                // balanced floor (1 / present classes), the SAME pair the stamp
+                // gate refuses against (Backtest_BalancedSkillFloor): training is
+                // class-weighted, so plain accuracy vs the majority share was the
+                // wrong score for it (TECH_DEBT-313 lesser bullet). Plain accuracy
+                // stays visible in the table above; the bands key on balanced.
+                float val_acc = wf->mean_val_balanced_accuracy;
+                float train_acc = wf->mean_train_balanced_accuracy;
                 int K = (wf->num_classes >= 2) ? wf->num_classes : 2;
                 // baseline_total, not sample_count: the counts are over the
                 // baseline population (binary excludes neutrals) — same SSoT
                 // route as the stamp gate's skill floor, so this diagnosis and
                 // that gate can never disagree (F4 close).
-                float baseline = multiclass_baseline_accuracy(
+                float baseline = multiclass_balanced_baseline(
                     K, snap->class_counts, snap->baseline_total);
                 // "fee-overhead" threshold: 3 percentage points above
                 // baseline. Empirical — covers ~0.1% × 2 sides for

@@ -1038,79 +1038,92 @@ inline int NodeModelZoo_HasAny(const NodeModelZoo<F> *zoo) {
 //======================================================================
 
 //======================================================================
+// [STRUCT]_[ModelExpectedCfg]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the parsed expected_{entry,exit}.cfg record (2026-09-03, PARITY-046 close) — one field per sidecar key; -1 / -1.0 / "" = key ABSENT = NO OPINION (an absent key must never refuse a model); filled by ModelExpected_ReadFile, compared by ModelExpected_Compare — the ONE comparator both load paths share]
+//======================================================================
+// [CODE]
+//======================================================================
+// The parsed expected record. -1 / -1.0 / "" = key absent in the file, which
+// means NO OPINION: an absent key must never refuse a model (E.1.2.C rule).
+struct ModelExpectedCfg {
+    int    barrier_gate;
+    double threshold;
+    int    num_classes;
+    char   role[64];
+    double held_out_fraction;   // informational (logged, not compared)
+    double gap_threshold;       // informational (logged, not compared)
+    int    poll_interval;
+    int    feature_format_ver;
+    int    num_features;
+    int    label_type;          // E.1.2.C — the operator's training-time LABEL row
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-09-03]
+// [SIZE]_[120B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[role@20]
+//======================================================================
+// [END_STRUCT]_[ModelExpectedCfg]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[NodeModelZoo_VerifyExpected]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the STUPID-PROOF verify — expected.cfg (written per horizon dir by the mh trainer since D-d; the Save Run producer is deleted) vs live ML cfg; cadence + feature-format + gate/threshold/class mismatches; strict_mode fails the load. NOTE: consumed on the SINGLE-ZOO load path only — the ensemble post-load chain has no verify_expected step (PARITY-ledgered)]
+// [OVERVIEW]_[the STUPID-PROOF verify — the side-addressed expected_{entry,exit}.cfg records (written per horizon dir by the mh trainer since D-d; legacy shared expected.cfg read once as fallback) vs live ML cfg; cadence + feature-format + gate/threshold/class + exit-label-direction mismatches; strict_mode fails the load. ONE comparator (ModelExpected_Compare) shared with the ensemble's per-horizon verify_expected post-load row (PARITY-046 closed 2026-09-03)]
 //======================================================================
 // [CODE]
 //======================================================================
-// reads <dir>/expected.cfg (written per horizon dir by mh_run_one_horizon_fv
-// since D-d — the Save Run producer was deleted) and verifies
-// the live ML config matches what the model was trained against. mismatches
-// are logged as warnings; if strict_mode is set, returns 0 to fail load.
+// reads the SIDE-ADDRESSED expected records under <dir> — expected_entry.cfg /
+// expected_exit.cfg (written per horizon dir by mh_run_one_horizon_fv; the
+// shared expected.cfg is the pre-2026-09-03 legacy name, read-only fallback,
+// consumed at most ONCE per dir because it carries whichever role wrote last)
+// and verifies the live ML config matches what the model was trained against.
+// mismatches are logged as warnings; if strict_mode is set, returns 0 to fail load.
 //
 // returns:
-//   1 = no expected.cfg present (silent pass — backward compat with old runs)
-//   1 = expected.cfg present and all fields match
-//   1 = expected.cfg present, mismatches exist, strict_mode=0 (warn but ok)
-//   0 = expected.cfg present, mismatches exist, strict_mode=1 (fail load)
+//   1 = no expected record present (silent pass — backward compat with old runs)
+//   1 = record(s) present and all fields match
+//   1 = record(s) present, mismatches exist, strict_mode=0 (warn but ok)
+//   0 = record(s) present, mismatches exist, strict_mode=1 (fail load)
 //
 // also runs a structural check — if any model in the zoo has 3+ outputs
 // (multiclass softmax) but barrier_gate_enabled=0, warn that the engine
 // will only use one class and the model is being underutilized.
-template <unsigned F>
-// v4.3.1 — extended signature to also verify slow-path cadence + feature
-// pack version. live_poll_interval and live_feature_format_version are
-// the engine's runtime values; the loader compares them against what
-// expected.cfg recorded at training time. Mismatch on cadence = silent
-// train-serve drift; mismatch on feature format = wrong number of
-// features in the pack, model crashes or produces garbage.
-inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *dir,
-                                       int live_barrier_gate_enabled,
-                                       double live_ml_buy_threshold,
-                                       int strict_mode, int node_id,
-                                       unsigned live_poll_interval = 0,
-                                       unsigned live_feature_format_version = 0) {
-    // structural check: multiclass model + barrier_gate_enabled=0 → warn
-    int has_multiclass = (zoo->loaded_mask & NODE_MODEL_BARRIER) && zoo->barrier.num_outputs >= 2;
-    if (has_multiclass && !live_barrier_gate_enabled) {
-        fprintf(stderr, "[ML] node %d: WARNING — model has %d output classes (multiclass softmax)\n"
-                        "                  but barrier_gate_enabled=0. only P(valley) used,\n"
-                        "                  P(peak)/P(stable) ignored. set barrier_gate_enabled=1\n"
-                        "                  to use the full model.\n",
-                node_id, zoo->barrier.num_outputs);
-    }
+//
+// ONE comparator (ModelExpected_Compare) serves BOTH load paths — the single
+// zoo below and the ensemble's per-horizon row (EnsembleModelZoo_VerifyExpected,
+// PARITY-046 close). A second comparator is the drift class this closes.
 
-    // read expected.cfg if present
-    if (!dir || dir[0] == '\0') return 1;
-    char path[512];
-    snprintf(path, sizeof(path), "%s/expected.cfg", dir);
+static inline void ModelExpectedCfg_Init(ModelExpectedCfg* e) {
+    e->barrier_gate       = -1;
+    e->threshold          = -1.0;
+    e->num_classes        = -1;
+    e->role[0]            = '\0';
+    e->held_out_fraction  = -1.0;
+    e->gap_threshold      = -1.0;
+    e->poll_interval      = -1;
+    e->feature_format_ver = -1;
+    e->num_features       = -1;
+    e->label_type         = -1;
+}
+
+// Parse one expected record. Returns 1 = file opened + parsed (fields the file
+// lacks stay at their NO-OPINION defaults), 0 = absent / unreadable.
+static inline int ModelExpected_ReadFile(const char* path, ModelExpectedCfg* e) {
+    ModelExpectedCfg_Init(e);
+    if (!path || path[0] == '\0') return 0;
     FILE *f = fopen(path, "r");
-    if (!f) {
-        // no expected.cfg = old run bundle, silent pass for backward compat
-        return 1;
-    }
-
-    int expected_barrier_gate = -1;       // -1 = not specified in file
-    double expected_threshold = -1.0;
-    int expected_num_classes = -1;
-    char expected_role[64] = "";
-    // Phase 7 prep — informational (logged, not mismatch-checked against live
-    // cfg). Discipline values the model was trained under. -1 = not in file.
-    double expected_held_out_fraction = -1.0;
-    double expected_gap_threshold     = -1.0;
-    // v4.3.1 — train-serve cadence + feature pack version (-1 = old format)
-    int expected_poll_interval        = -1;
-    int expected_feature_format_ver   = -1;
-    int expected_num_features         = -1;
-    // E.1.2.C — the operator's training-time LABEL row. -1 = absent (older
-    // expected.cfg, or a producer that never wrote it) and absent means NO
-    // OPINION: this must never refuse a model for a key it does not carry.
-    int expected_label_type           = -1;
-    int mismatches = 0;
-
+    if (!f) return 0;
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         // strip leading whitespace + skip comments + blank
@@ -1134,18 +1147,18 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
         // trim trailing whitespace on val
         while (vend > val && (*(vend-1) == ' ' || *(vend-1) == '\t')) { *(--vend) = '\0'; }
 
-        if (strcmp(key, "barrier_gate_enabled") == 0)        expected_barrier_gate = atoi(val);
-        else if (strcmp(key, "ml_buy_threshold") == 0)       expected_threshold = tt::parse_double_fast(val);
-        else if (strcmp(key, "expected_num_classes") == 0)   expected_num_classes = atoi(val);
+        if (strcmp(key, "barrier_gate_enabled") == 0)        e->barrier_gate = atoi(val);
+        else if (strcmp(key, "ml_buy_threshold") == 0)       e->threshold = tt::parse_double_fast(val);
+        else if (strcmp(key, "expected_num_classes") == 0)   e->num_classes = atoi(val);
         else if (strcmp(key, "expected_role") == 0) {
-            strncpy(expected_role, val, sizeof(expected_role) - 1);
-            expected_role[sizeof(expected_role) - 1] = '\0';
+            strncpy(e->role, val, sizeof(e->role) - 1);
+            e->role[sizeof(e->role) - 1] = '\0';
         }
-        else if (strcmp(key, "held_out_fraction") == 0)        expected_held_out_fraction = tt::parse_double_fast(val);
-        else if (strcmp(key, "gap_acceptable_threshold") == 0) expected_gap_threshold     = tt::parse_double_fast(val);
-        else if (strcmp(key, "expected_poll_interval") == 0)         expected_poll_interval = atoi(val);
-        else if (strcmp(key, "expected_feature_format_version") == 0) expected_feature_format_ver = atoi(val);
-        else if (strcmp(key, "expected_num_features") == 0)          expected_num_features = atoi(val);
+        else if (strcmp(key, "held_out_fraction") == 0)        e->held_out_fraction = tt::parse_double_fast(val);
+        else if (strcmp(key, "gap_acceptable_threshold") == 0) e->gap_threshold     = tt::parse_double_fast(val);
+        else if (strcmp(key, "expected_poll_interval") == 0)         e->poll_interval = atoi(val);
+        else if (strcmp(key, "expected_feature_format_version") == 0) e->feature_format_ver = atoi(val);
+        else if (strcmp(key, "expected_num_features") == 0)          e->num_features = atoi(val);
         // E.1.2.C — deliberately tt::parse_double_fast, NOT the atoi its siblings
         // use. `tools/locale_determinism_known_pending.txt` is a SHRINK-ONLY
         // baseline of raw atof/strtod/atoi per file, and this key would have been
@@ -1153,61 +1166,79 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
         // locale-immune by construction (std::from_chars) and exact for the small
         // integers a label enum holds, so the new key is cleaner than the rows
         // around it instead of adding to the debt they represent.
-        else if (strcmp(key, "expected_label_type") == 0)            expected_label_type = (int)tt::parse_double_fast(val);
+        else if (strcmp(key, "expected_label_type") == 0)            e->label_type = (int)tt::parse_double_fast(val);
     }
     fclose(f);
+    return 1;
+}
+
+// THE comparator: one parsed record vs the live cfg + the loaded model of the
+// record's role. `record` names the file in every line (the operator has to
+// know WHICH sidecar disagreed now that a dir carries two). `loaded_num_outputs`
+// = the loaded handle's output count for the record's role, or -1 = no model
+// of that role loaded (the class-count leg is skipped, never failed).
+// Returns the mismatch count.
+static inline int ModelExpected_Compare(const ModelExpectedCfg* e, const char* record,
+                                        int node_id,
+                                        int live_barrier_gate_enabled,
+                                        double live_ml_buy_threshold,
+                                        unsigned live_poll_interval,
+                                        unsigned live_feature_format_version,
+                                        int loaded_num_outputs) {
+    int mismatches = 0;
 
     // v4.3.1 — slow-path cadence mismatch is silent train-serve drift.
     // Model was trained at training-cadence; serving at sharded-cadence.
     // If they differ, all RollingStats-derived features (slope, R², etc.)
     // describe different time windows than the model expects. Always warn.
-    if (expected_poll_interval > 0 && live_poll_interval > 0 &&
-        (unsigned)expected_poll_interval != live_poll_interval) {
+    if (e->poll_interval > 0 && live_poll_interval > 0 &&
+        (unsigned)e->poll_interval != live_poll_interval) {
         fprintf(stderr,
-            "[ML] node %d: MISMATCH — model trained at poll_interval=%d, "
+            "[ML] node %d: MISMATCH — %s: model trained at poll_interval=%d, "
             "engine running at poll_interval=%u\n"
             "                  RollingStats time-windows differ %.1f×; "
             "predictions will diverge from training distribution.\n"
             "                  Set engine.cfg poll_interval=%d to match.\n",
-            node_id, expected_poll_interval, live_poll_interval,
-            (double)live_poll_interval / (double)expected_poll_interval,
-            expected_poll_interval);
+            node_id, record, e->poll_interval, live_poll_interval,
+            (double)live_poll_interval / (double)e->poll_interval,
+            e->poll_interval);
         mismatches++;
     }
     // v4.3 — feature format version mismatch = pack contents differ.
     // FEAT_* indices change → the model interprets feature N as something
     // it wasn't trained on. Hard fail.
-    if (expected_feature_format_ver > 0 && live_feature_format_version > 0 &&
-        (unsigned)expected_feature_format_ver != live_feature_format_version) {
+    if (e->feature_format_ver > 0 && live_feature_format_version > 0 &&
+        (unsigned)e->feature_format_ver != live_feature_format_version) {
         fprintf(stderr,
-            "[ML] node %d: FATAL — model trained with feature_format=v%d "
+            "[ML] node %d: FATAL — %s: model trained with feature_format=v%d "
             "but engine runtime is v%u. Feature indices differ; model "
             "would interpret inputs as wrong features.\n"
             "                  Retrain the model on the current engine.\n",
-            node_id, expected_feature_format_ver, live_feature_format_version);
+            node_id, record, e->feature_format_ver, live_feature_format_version);
         mismatches++;
     }
 
     // compare each field, log mismatches
-    if (expected_barrier_gate >= 0 && expected_barrier_gate != live_barrier_gate_enabled) {
-        fprintf(stderr, "[ML] node %d: MISMATCH — expected.cfg says barrier_gate_enabled=%d, "
+    if (e->barrier_gate >= 0 && e->barrier_gate != live_barrier_gate_enabled) {
+        fprintf(stderr, "[ML] node %d: MISMATCH — %s says barrier_gate_enabled=%d, "
                         "engine.cfg has %d\n",
-                node_id, expected_barrier_gate, live_barrier_gate_enabled);
+                node_id, record, e->barrier_gate, live_barrier_gate_enabled);
         mismatches++;
     }
-    if (expected_threshold >= 0.0 &&
-        (live_ml_buy_threshold < expected_threshold - 0.001 ||
-         live_ml_buy_threshold > expected_threshold + 0.001)) {
-        fprintf(stderr, "[ML] node %d: MISMATCH — expected.cfg says ml_buy_threshold=%.3f, "
+    if (e->threshold >= 0.0 &&
+        (live_ml_buy_threshold < e->threshold - 0.001 ||
+         live_ml_buy_threshold > e->threshold + 0.001)) {
+        fprintf(stderr, "[ML] node %d: MISMATCH — %s says ml_buy_threshold=%.3f, "
                         "engine.cfg has %.3f\n",
-                node_id, expected_threshold, live_ml_buy_threshold);
+                node_id, record, e->threshold, live_ml_buy_threshold);
         mismatches++;
     }
-    if (expected_num_classes >= 2 && (zoo->loaded_mask & NODE_MODEL_BARRIER) &&
-        zoo->barrier.num_outputs != expected_num_classes) {
-        fprintf(stderr, "[ML] node %d: MISMATCH — expected.cfg says %d classes, "
-                        "loaded model has %d outputs\n",
-                node_id, expected_num_classes, zoo->barrier.num_outputs);
+    if (e->num_classes >= 2 && loaded_num_outputs >= 0 &&
+        loaded_num_outputs != e->num_classes) {
+        fprintf(stderr, "[ML] node %d: MISMATCH — %s says %d classes, "
+                        "loaded %s model has %d outputs\n",
+                node_id, record, e->num_classes,
+                e->role[0] ? e->role : "?", loaded_num_outputs);
         mismatches++;
     }
 
@@ -1222,50 +1253,132 @@ inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *d
     // (Training_SideLabelGate, LabelFunctions.hpp) rather than a fourth copy —
     // one rule, both ends, so they cannot drift apart.
     //
-    // DELIBERATELY WEAK, and the weakness is the point: expected.cfg is UNSIGNED
+    // DELIBERATELY WEAK, and the weakness is the point: the record is UNSIGNED
     // and operator-editable, so this is a courtesy check, not a security control.
     // It counts a mismatch (WARN in non-strict, REFUSE in strict, same as its
     // siblings) rather than hard-failing on its own. An absent key is NO OPINION.
-    if (expected_label_type >= 0 && strcmp(expected_role, "exit") == 0 &&
-        Training_SideLabelGate(expected_label_type, /*training_side=*/1) == 0) {
+    if (e->label_type >= 0 && strcmp(e->role, "exit") == 0 &&
+        Training_SideLabelGate(e->label_type, /*training_side=*/1) == 0) {
         fprintf(stderr,
-                "[ML] node %d: expected.cfg says this EXIT model was trained on label "
+                "[ML] node %d: %s says this EXIT model was trained on label "
                 "kind %d, which is an ENTRY-goodness objective — inverted as an exit "
                 "signal (high output would fire a SELL exactly when entry looks good). "
                 "Retrain the exit side on Will Peak or Peak/Valley/Stable.\n",
-                node_id, expected_label_type);
+                node_id, record, e->label_type);
         mismatches++;
     }
 
     // Phase 7 prep — log discipline values informationally so the user knows
     // what validation regime the model was trained under. Not compared to
     // live cfg (yet); add comparison if drift becomes a real concern.
-    if (expected_held_out_fraction >= 0.0 || expected_gap_threshold >= 0.0) {
-        fprintf(stderr, "[ML] node %d: validation discipline — held_out=%.2f gap_threshold=%.3f\n",
-                node_id,
-                expected_held_out_fraction >= 0.0 ? expected_held_out_fraction : 0.0,
-                expected_gap_threshold     >= 0.0 ? expected_gap_threshold     : 0.0);
+    if (e->held_out_fraction >= 0.0 || e->gap_threshold >= 0.0) {
+        fprintf(stderr, "[ML] node %d: %s: validation discipline — held_out=%.2f gap_threshold=%.3f\n",
+                node_id, record,
+                e->held_out_fraction >= 0.0 ? e->held_out_fraction : 0.0,
+                e->gap_threshold     >= 0.0 ? e->gap_threshold     : 0.0);
     }
 
     if (mismatches == 0) {
-        fprintf(stderr, "[ML] node %d: expected.cfg verified (role=%s, %d classes) ✓\n",
-                node_id, expected_role[0] ? expected_role : "?",
-                expected_num_classes >= 0 ? expected_num_classes : 0);
-        return 1;
+        fprintf(stderr, "[ML] node %d: %s verified (role=%s, %d classes) ✓\n",
+                node_id, record, e->role[0] ? e->role : "?",
+                e->num_classes >= 0 ? e->num_classes : 0);
+    }
+    return mismatches;
+}
+
+// One dir, both sides: resolve each side's record through the schema helper,
+// read it, compare it against the loaded model OF THE RECORD'S ROLE. The
+// legacy shared file is consumed at most once and its own expected_role picks
+// the model it is compared to — the clobbered-entry case (an exit run wrote
+// the shared name) must compare the exit record to the EXIT model, not to the
+// entry model it happened to sit beside. Returns the mismatch count (0 when
+// no record exists — an old bundle is NO OPINION). `entry_num_outputs` /
+// `exit_num_outputs` = the loaded handles' output counts, -1 = not loaded.
+static inline int ModelExpected_VerifyDir(const char* dir, int node_id,
+                                          int live_barrier_gate_enabled,
+                                          double live_ml_buy_threshold,
+                                          unsigned live_poll_interval,
+                                          unsigned live_feature_format_version,
+                                          int entry_num_outputs,
+                                          int exit_num_outputs) {
+    if (!dir || dir[0] == '\0') return 0;
+    int mismatches = 0;
+    int legacy_consumed = 0;
+    for (int side = 0; side < 2; ++side) {
+        char path[640];
+        const int how = ModelPath_ExpectedCfgResolve(dir, side, path, sizeof(path));
+        if (how == 0) continue;                       // no record for this side
+        if (how == 2) {                               // the legacy shared name
+            if (legacy_consumed) continue;            // one record, read once
+            legacy_consumed = 1;
+        }
+        ModelExpectedCfg e;
+        if (!ModelExpected_ReadFile(path, &e)) continue;   // raced away / unreadable = silent pass
+        // The record's own role decides which loaded model it describes. A
+        // side-addressed file without an expected_role key (a hand-edited one)
+        // falls back to the side it was resolved under.
+        const int record_is_exit = e.role[0] ? (strcmp(e.role, "exit") == 0) : (side == 1);
+        const int loaded_outputs = record_is_exit ? exit_num_outputs : entry_num_outputs;
+        // Name the file in every line — a dir now carries two records.
+        const char* record = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+        mismatches += ModelExpected_Compare(&e, record, node_id,
+                                            live_barrier_gate_enabled, live_ml_buy_threshold,
+                                            live_poll_interval, live_feature_format_version,
+                                            loaded_outputs);
+    }
+    return mismatches;
+}
+
+// The strict/warn verdict on a mismatch count — shared by both load paths so
+// the two never phrase the same refusal differently. Returns 1 = load may
+// proceed, 0 = strict refuse.
+static inline int ModelExpected_Verdict(int mismatches, int strict_mode, int node_id,
+                                        const char* what) {
+    if (mismatches == 0) return 1;
+    if (strict_mode > 0) {
+        fprintf(stderr, "[ML] node %d: %d MISMATCH(ES) in %s — STRICT MODE refusing to load.\n"
+                        "                update engine.cfg to match the expected record(s), or set\n"
+                        "                model_verify_strict=0 to override.\n",
+                node_id, mismatches, what);
+        return 0;
+    }
+    fprintf(stderr, "[ML] node %d: %d mismatch(es) in %s — model may not behave as trained.\n"
+                    "                fix engine.cfg to silence these warnings.\n",
+            node_id, mismatches, what);
+    return 1;
+}
+
+template <unsigned F>
+// v4.3.1 — extended signature to also verify slow-path cadence + feature
+// pack version. live_poll_interval and live_feature_format_version are
+// the engine's runtime values; the loader compares them against what
+// the expected record recorded at training time. Mismatch on cadence = silent
+// train-serve drift; mismatch on feature format = wrong number of
+// features in the pack, model crashes or produces garbage.
+inline int NodeModelZoo_VerifyExpected(const NodeModelZoo<F> *zoo, const char *dir,
+                                       int live_barrier_gate_enabled,
+                                       double live_ml_buy_threshold,
+                                       int strict_mode, int node_id,
+                                       unsigned live_poll_interval = 0,
+                                       unsigned live_feature_format_version = 0) {
+    // structural check: multiclass model + barrier_gate_enabled=0 → warn
+    int has_multiclass = (zoo->loaded_mask & NODE_MODEL_BARRIER) && zoo->barrier.num_outputs >= 2;
+    if (has_multiclass && !live_barrier_gate_enabled) {
+        fprintf(stderr, "[ML] node %d: WARNING — model has %d output classes (multiclass softmax)\n"
+                        "                  but barrier_gate_enabled=0. only P(valley) used,\n"
+                        "                  P(peak)/P(stable) ignored. set barrier_gate_enabled=1\n"
+                        "                  to use the full model.\n",
+                node_id, zoo->barrier.num_outputs);
     }
 
-    if (strict_mode > 0) {
-        fprintf(stderr, "[ML] node %d: %d MISMATCH(ES) — STRICT MODE refusing to load.\n"
-                        "                update engine.cfg to match expected.cfg, or set\n"
-                        "                model_verify_strict=0 to override.\n",
-                node_id, mismatches);
-        return 0;
-    } else {
-        fprintf(stderr, "[ML] node %d: %d mismatch(es) — model may not behave as trained.\n"
-                        "                fix engine.cfg to silence these warnings.\n",
-                node_id, mismatches);
-        return 1;
-    }
+    if (!dir || dir[0] == '\0') return 1;
+    const int entry_outputs = (zoo->loaded_mask & NODE_MODEL_BARRIER) ? zoo->barrier.num_outputs : -1;
+    const int exit_outputs  = (zoo->loaded_mask & NODE_MODEL_EXIT)    ? zoo->exit.num_outputs    : -1;
+    const int mismatches = ModelExpected_VerifyDir(dir, node_id,
+                                                   live_barrier_gate_enabled, live_ml_buy_threshold,
+                                                   live_poll_interval, live_feature_format_version,
+                                                   entry_outputs, exit_outputs);
+    return ModelExpected_Verdict(mismatches, strict_mode, node_id, "the expected record(s)");
 }
 //======================================================================
 // [END_CODE]
@@ -1444,6 +1557,12 @@ struct alignas(64) EnsembleModelZoo {
     int regime_count;
     int exit_predictor_count;
     int buy_signal_count;
+    // PARITY-046 close (2026-09-03): the per-horizon expected-record verify's
+    // mismatch total, written by the verify_expected post-load row. Boot +
+    // hot-swap read it for the strict-mode refusal (the row itself cannot
+    // refuse — PostLoadSetup is a void walk). 0 = every record agreed or none
+    // exists. Cold: written once per load.
+    int expected_mismatches;
     int horizon_ticks_at_idx[ENSEMBLE_HORIZON_MAX];
     // v5.15.5.A.2.c — init flags bit-pack via FOREACH_EZOO_INIT_FLAG registry.
     // 4 bits used (ACTIVE, BANDITS_READY, EXIT_BANDITS_READY, THOMPSON_READY);
@@ -1712,6 +1831,7 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     // those Init helpers set the appropriate MASK_EZOO_*_READY bits on
     // completion.
     ezoo->init_flags = 0;
+    ezoo->expected_mismatches = 0;   // PARITY-046: set by the verify_expected post-load row
     // v5.10.0a.G.7 — bandit state zero-init (full bandit init happens in
     // _InitBandits AFTER LoadFromCfg / AutoDetect populates buy_signal_count
     // so we know how many arms).
@@ -3960,6 +4080,49 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
 // Each entry: X(step_name, call_expression). Expression invoked with
 // (ezoo, cfg, node_id, base_run_path) in scope from helper body.
 // Adding a new step: 1 line here. Boot, backtest, hot-swap inherit.
+// PARITY-046 close (2026-09-03) — the ensemble's per-horizon expected-record
+// verify. The mh trainer writes expected_{entry,exit}.cfg into EVERY horizon
+// dir; until this row the nested-family load path never read them (the
+// single-zoo row was the only consumer — Class 12, wired-but-unexercised on
+// the verify layer). Walks the BARRIER arms (horizon_ticks_at_idx is
+// barrier-indexed; the exit arms' index mapping is not guaranteed when a
+// horizon lacks exit.json, so the exit record is checked for label direction
+// only — its class-count leg is skipped by passing -1). ONE comparator with
+// the single-zoo path (ModelExpected_VerifyDir → ModelExpected_Compare).
+//
+// Writes ezoo->expected_mismatches; the strict-mode REFUSAL belongs to the
+// caller (boot 5d frees + unloads; hot-swap step 5 frees the NEW zoo and
+// keeps the pre-swap one) because the registry walk is void. Returns 1 =
+// proceed, 0 = strict refuse, for symmetry with the single-zoo row.
+template <unsigned F>
+inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
+                                           const char* base_run_path,
+                                           int live_barrier_gate_enabled,
+                                           double live_ml_buy_threshold,
+                                           int strict_mode, int node_id,
+                                           unsigned live_poll_interval = 0,
+                                           unsigned live_feature_format_version = 0) {
+    if (!ezoo) return 0;
+    ezoo->expected_mismatches = 0;
+    if (!base_run_path || base_run_path[0] == '\0') return 1;
+    int mismatches = 0;
+    char per_horizon_dir[512];
+    for (int h = 0; h < ezoo->barrier_count && h < ENSEMBLE_HORIZON_MAX; ++h) {
+        const int H = ezoo->horizon_ticks_at_idx[h];
+        if (H <= 0) continue;
+        ModelPath_HorizonDir(per_horizon_dir, sizeof(per_horizon_dir),
+                             base_run_path, (long)H);
+        mismatches += ModelExpected_VerifyDir(per_horizon_dir, node_id,
+                                              live_barrier_gate_enabled, live_ml_buy_threshold,
+                                              live_poll_interval, live_feature_format_version,
+                                              /*entry_num_outputs=*/ezoo->barrier[h].num_outputs,
+                                              /*exit_num_outputs=*/-1);
+    }
+    ezoo->expected_mismatches = mismatches;
+    return ModelExpected_Verdict(mismatches, strict_mode, node_id,
+                                 "the ensemble's per-horizon expected record(s)");
+}
+
 #define FOREACH_ENSEMBLE_POST_LOAD(X)                                          \
     X(init_bandits,        EnsembleModelZoo_InitBandits(ezoo,                   \
                                cfg.ensemble_bandit_eta,                          \
@@ -3997,11 +4160,21 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
                                FPN_ToDouble(cfg.thompson_precision_obs),                              \
                                cfg.thompson_rng_seed))                                                \
     X(load_exit_thompson_state, EnsembleModelZoo_LoadExitThompsonState(ezoo,                          \
-                               base_run_path))
+                               base_run_path))                                                        \
+    /* PARITY-046 close (2026-09-03) — the per-horizon expected-record verify, the SAME comparator */ \
+    /* the single-zoo row runs (ModelExpected_Compare); LAST so its mismatch total is the final   */ \
+    /* word the strict-mode caller reads (the walk is void; the row cannot refuse by itself).     */ \
+    X(verify_expected,     EnsembleModelZoo_VerifyExpected(ezoo, base_run_path,                       \
+                               BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED), \
+                               FPN_ToDouble(cfg.ml_buy_threshold),                                   \
+                               cfg.model_verify_strict, node_id,                                      \
+                               cfg.poll_interval,                                                     \
+                               (unsigned)MODEL_FORMAT_VERSION))
 
 // Compile-time count for tests. Update when adding entries.
 // v5.15.5.F.4d: 9 → 11 (added init_exit_thompson_bandits + load_exit_thompson_state for exit-side mirror).
-#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 11
+// 2026-09-03: 11 → 12 (verify_expected — PARITY-046 close; the ensemble path gains the stupid-proof check).
+#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 12
 
 // Canonical post-load setup for ensemble. All registry steps in one place
 // (count = FOREACH_ENSEMBLE_POST_LOAD_COUNT).
@@ -4046,6 +4219,10 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
     // - LoadThompsonState (v5.14.10.C): no boolean to check; idempotent overlay (skipped silently when the READY bit is unset)
     // - InitExitThompsonBandits (.F.4d): MASK_EZOO_EXIT_THOMPSON_READY set when exit_predictor_count>=2 (checked below since s5)
     // - LoadExitThompsonState (.F.4d): no boolean to check; idempotent overlay
+    // - VerifyExpected (2026-09-03, PARITY-046): writes expected_mismatches (any value valid —
+    //   0 is "agreed or no record"); the strict-mode REFUSAL is the caller's (boot 5d / hot-swap
+    //   step 5), so readiness does not gate on it — a warn-mode ensemble with mismatches is
+    //   still inference-ready by design (the operator chose warn).
     if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (ezoo->exit_predictor_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
     if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) return 0;

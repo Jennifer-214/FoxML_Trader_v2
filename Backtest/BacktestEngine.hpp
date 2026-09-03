@@ -48,6 +48,7 @@
 #include "ValidationSplit.hpp"
 #include "OverfitDetection.hpp"
 #include "HeldOutSplit.hpp"  // Phase 7prep — locked held-out test set discipline
+#include "../MemHeaders/HmacSha256.hpp"  // 2026-09-03 — tt::sha256_bytes_hex for the corpus-selection record
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -376,6 +377,18 @@ struct BacktestResults {
     // reach function was correct (D-469); nobody had wired its input.
     uint64_t first_tick_us;    // 0 = unknown (the reach falls back to window-only)
     uint64_t last_tick_us;
+    // 2026-09-03 — the CORPUS SELECTION record (what-to-do-next.md: "the selection is
+    // not recorded anywhere"). Written at the ONE site that consumes run_cfg->data_paths
+    // (BacktestSharded_Run, before the corpus walk), so it describes the files these
+    // samples came from — not whatever the Data panel shows at train time (the operator
+    // can reselect between collect and train; the summary writer compares the two).
+    // Compact on purpose: count + the first/last basenames + a SHA-256 over the
+    // newline-joined path list (the Data panel sorts the list, so equal selections hash
+    // equal). The full list goes to the data_files_<side>.txt sidecar at train time.
+    int      data_file_count;          // 0 = unknown (a results struct filled by a non-corpus path)
+    char     data_first_file[256];     // basename of data_paths[0]
+    char     data_last_file[256];      // basename of data_paths[n-1]
+    char     data_list_sha256[65];     // hex; "" = unknown
     // config used (for comparison)
     ControllerConfig<BACKTEST_FP> config_used;
 };
@@ -477,6 +490,60 @@ static inline void BacktestResults_Reset(BacktestResults *r) {
     r->equity_capacity     = eq_cap;
 }
 
+// 2026-09-03 — the data-file LIST hash: SHA-256 over the newline-joined
+// data_paths (in list order; the Data panel sorts the list, so equal selections
+// hash equal). A comparison key ("same corpus?" is one string compare), not a
+// wire body. hex_out >= 65 B; "" on an empty list or an EVP failure.
+// Heap-joined on purpose: n <= 2048 paths x <= 256 B is up to 512 KB — never a
+// stack frame (H1 keeps fixtures on the stack; ASan already measures it tight).
+static inline void BacktestRunConfig_DataListSha256(const BacktestRunConfig *run_cfg,
+                                                    char *hex_out, size_t hex_cap) {
+    if (!hex_out || hex_cap == 0) return;
+    hex_out[0] = '\0';
+    if (!run_cfg || run_cfg->num_data_files <= 0 || hex_cap < 65) return;
+    const int n = run_cfg->num_data_files > MAX_DATA_FILES ? MAX_DATA_FILES
+                                                            : run_cfg->num_data_files;
+    size_t total = 0;
+    for (int i = 0; i < n; ++i) total += strlen(run_cfg->data_paths[i]) + 1;   // + '\n'
+    char *joined = (char *)malloc(total + 1);
+    if (!joined) return;                       // "" = unknown, never a wrong hash
+    size_t off = 0;
+    for (int i = 0; i < n; ++i) {
+        const size_t len = strlen(run_cfg->data_paths[i]);
+        memcpy(joined + off, run_cfg->data_paths[i], len);
+        off += len;
+        joined[off++] = '\n';
+    }
+    joined[off] = '\0';
+    if (!tt::sha256_bytes_hex(joined, off, hex_out, hex_cap)) hex_out[0] = '\0';
+    free(joined);
+}
+
+// 2026-09-03 — record WHICH files the corpus about to be collected comes from
+// (count + first/last basename + the list hash above). Called by the corpus
+// walk right after Reset, at the ONE site that consumes run_cfg->data_paths, so
+// the record can never describe a different selection than the samples do.
+static inline void BacktestResults_RecordCorpus(BacktestResults *r,
+                                                const BacktestRunConfig *run_cfg) {
+    if (!r) return;
+    r->data_file_count     = 0;
+    r->data_first_file[0]  = '\0';
+    r->data_last_file[0]   = '\0';
+    r->data_list_sha256[0] = '\0';
+    if (!run_cfg || run_cfg->num_data_files <= 0) return;
+    const int n = run_cfg->num_data_files > MAX_DATA_FILES ? MAX_DATA_FILES
+                                                            : run_cfg->num_data_files;
+    r->data_file_count = n;
+    // basenames: the operator reads a date off "aggTrades_2026-08-16.csv", not a path
+    auto base_of = [](const char *p) -> const char * {
+        const char *s = strrchr(p, '/');
+        return s ? s + 1 : p;
+    };
+    snprintf(r->data_first_file, sizeof(r->data_first_file), "%s", base_of(run_cfg->data_paths[0]));
+    snprintf(r->data_last_file,  sizeof(r->data_last_file),  "%s", base_of(run_cfg->data_paths[n - 1]));
+    BacktestRunConfig_DataListSha256(run_cfg, r->data_list_sha256, sizeof(r->data_list_sha256));
+}
+
 // grow sample buffers by 2x when full
 static inline int BacktestResults_EnsureCapacity(BacktestResults *r, int needed) {
     if (needed <= r->sample_capacity) return 1;
@@ -525,10 +592,10 @@ static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int n
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-20]
-// [SIZE]_[53312B]
+// [UPDATED]_[2026-09-03]
+// [SIZE]_[53888B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[833]
+// [CACHE_LINES]_[842]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestResults]
@@ -1474,6 +1541,14 @@ struct WalkForwardFoldResult {
     // classification metrics — populated for binary + multiclass label kinds
     float train_accuracy;     // [0..1]
     float val_accuracy;       // [0..1]
+    // 2026-09-03 — balanced accuracy (mean per-class recall over present classes)
+    // + the per-class val recall vector. The gate metric for class-weighted
+    // training (what-to-do-next.md E.3); the recall vector is E.2. Plain
+    // accuracy above STAYS — it is what the stamp body records (H21: a persisted
+    // field keeps its meaning; the gate switched, the record did not).
+    float train_balanced_accuracy;   // [0..1]
+    float val_balanced_accuracy;     // [0..1]
+    float val_class_recall[16];      // recall per truth class; 0 for absent classes
     // regression metrics — populated for regression label kind
     float train_mse;
     float val_mse;
@@ -1490,11 +1565,11 @@ struct WalkForwardFoldResult {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[452B]
+// [UPDATED]_[2026-09-03]
+// [SIZE]_[524B]
 // [ALIGN]_[4]
-// [CACHE_LINES]_[8]
-// [STRADDLE]_[none]
+// [CACHE_LINES]_[9]
+// [STRADDLE]_[val_class_recall@16]
 //======================================================================
 // [END_STRUCT]_[WalkForwardFoldResult]
 //======================================================================
@@ -1508,6 +1583,13 @@ struct WalkForwardResults {
     float mean_val_accuracy;       // binary/multiclass
     float std_val_accuracy;        // binary/multiclass
     float mean_train_accuracy;     // binary/multiclass
+    // 2026-09-03 — the balanced-accuracy aggregates (the stamp GATE's metric; the
+    // panel diagnosis + Past Runs read the same pair) and the mean per-class val
+    // recall across counted folds (E.2 — "c1-vs-c2 recall is the number that
+    // matters for a barrier model"). Same fold population as mean_val_accuracy.
+    float mean_val_balanced_accuracy;    // binary/multiclass
+    float mean_train_balanced_accuracy;  // binary/multiclass
+    float mean_val_class_recall[16];     // per truth class; 0 for classes absent from every fold
     float mean_val_mse;            // regression
     float mean_val_correlation;    // regression — load-bearing: signal vs noise
     float mean_train_correlation;  // regression
@@ -1516,6 +1598,12 @@ struct WalkForwardResults {
     int num_classes;        // ≥2 for multiclass; 0 for binary; 1 for regression
     double elapsed_ms;
     char fingerprint[65];   // SHA256 of config + data (empty if not computed)
+    // 2026-09-03 — explicit tail pad so this struct's GROWTH (the balanced-accuracy +
+    // per-class-recall aggregates here + the per-fold fields, +1512 B) is a multiple of
+    // 64 B (+1536). TrainingPanelState embeds `wf_results` mid-struct and is [THREAD]-
+    // tagged; an unaligned growth walked `ui_tp_per_horizon` across a cache line (the
+    // strict layout gate caught it — the D-477 tail-placement note's straddle). Never read.
+    int32_t _padding_layout_2026_09_03[6] = {0, 0, 0, 0, 0, 0};
 };
 //======================================================================
 // [END_CODE]
@@ -1566,17 +1654,22 @@ struct HeldOutTrainEvalResult {
     float mse;           // regression only; 0 for classification
     float correlation;   // regression only; 0 for classification
     float train_metric;  // training-fold metric (sanity check — should exceed `metric`)
+    // 2026-09-03 — balanced accuracy + per-class recall on the held-out slice
+    // (classification only; 0 for regression). The panel shows them beside
+    // `metric`; the gate keys on the WF pair, this is the out-of-sample echo.
+    float balanced_accuracy;
+    float class_recall[16];
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[28B]
+// [UPDATED]_[2026-09-03]
+// [SIZE]_[96B]
 // [ALIGN]_[4]
-// [CACHE_LINES]_[1]
-// [STRADDLE]_[none]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[class_recall@32]
 //======================================================================
 // [END_STRUCT]_[HeldOutTrainEvalResult]
 //======================================================================
@@ -1616,6 +1709,8 @@ struct FullValidationResults {
     // held-out eval — populated by Phase 7 finalize; framework only in 7prep
     int held_out_count;                    // size of held-out portion actually evaluated
     float held_out_metric;                 // accuracy or Pearson r per label_kind
+    float held_out_balanced_accuracy;      // 2026-09-03 — classification only (mean per-class recall)
+    float held_out_class_recall[16];       // 2026-09-03 — per truth class on the held-out slice
     float held_out_mse;                    // regression only
     float held_out_correlation;            // regression only
     OverfitReport held_out_overfit;        // train_metric (from WF) vs val (from held-out)
@@ -1677,17 +1772,25 @@ struct FullValidationResults {
     int       req_grid_member_count = 1;
     int       req_grid_member_idx   = 0;
     int       req_horizon_count     = 1;
+    // 2026-09-03 — explicit tail pad so this struct's GROWTH (the balanced-accuracy +
+    // per-class-recall fields: the padded walkforward growth (+1536) + the held-out echo
+    // (+68)) is a multiple of 64 B (+1664). TrainingPanelState embeds `fv_results` mid-
+    // struct and is [THREAD]-tagged; an unaligned growth walked `ui_tp_per_horizon` onto a
+    // cache-line boundary and the strict layout gate caught it — the SAME straddle the
+    // D-477 tail-placement note in BacktestPanels.hpp records. Padding here (not exempting
+    // the GUI field) keeps every existing offset mod 64 exactly where it was. Never read.
+    int32_t   _padding_layout_2026_09_03[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-02]
-// [SIZE]_[11560B]
+// [UPDATED]_[2026-09-03]
+// [SIZE]_[13224B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[181]
-// [STRADDLE]_[none]
+// [CACHE_LINES]_[207]
+// [STRADDLE]_[held_out_class_recall@11356 · _padding_layout_2026_09_03@13164]
 //======================================================================
 // [END_STRUCT]_[FullValidationResults]
 //======================================================================
@@ -1716,6 +1819,10 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 // family further down (it composes multiclass_baseline_accuracy, which is
 // defined there). Backtest_RunFullValidation's stamp gate refuses against it.
 static inline double Backtest_SkillFloorBaseline(const float *labels, int count,
+                                                   int label_type);
+// 2026-09-03 — the balanced-accuracy floor the gate uses now (same forward-decl
+// reason: it composes the counts builder defined with the WF metric family).
+static inline double Backtest_BalancedSkillFloor(const float *labels, int count,
                                                    int label_type);
 
 //======================================================================
@@ -1770,6 +1877,10 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->req_label_sl_pct = saved_req_label_sl_pct;
     out->req_feature_mask = saved_req_feature_mask;
     out->gap_threshold = gap_threshold;
+    // 2026-09-03 — Class 62: the held-out balanced accuracy + per-class recall are
+    // written ABOVE the refuse returns below (0 = never computed, stated at the top).
+    out->held_out_balanced_accuracy = 0.0f;
+    for (int k = 0; k < 16; ++k) out->held_out_class_recall[k] = 0.0f;
 
     // Refuse if split is locked (caller MUST unlock with token first)
     if (!split || split->locked) {
@@ -1807,6 +1918,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->ran_held_out         = he.ok;
     out->held_out_count       = he.eval_count;
     out->held_out_metric      = he.metric;
+    out->held_out_balanced_accuracy = he.balanced_accuracy;   // 2026-09-03
+    for (int k = 0; k < 16; ++k) out->held_out_class_recall[k] = he.class_recall[k];
     out->held_out_mse         = he.mse;
     out->held_out_correlation = he.correlation;
 
@@ -1875,28 +1988,39 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     if (out->ran_held_out && out->auto_stamp_path[0] != '\0') {
         double skill_floor = 0.0;
         const char *floor_kind = "regression: Pearson r > 0";
+        // 2026-09-03 — the classification gate scores BALANCED accuracy against
+        // the balanced floor (1 / present classes), NOT plain accuracy against
+        // the majority share: training optimises an inverse-frequency-weighted
+        // loss (cap 5), so plain-accuracy-vs-majority disagreed with the
+        // objective BY CONSTRUCTION on a skewed split (TECH_DEBT-313's "lesser"
+        // bullet — it decided 2 of 3 horizons on 2026-09-02 and made Will Peak
+        // un-stampable). The stamp body still records the plain pair
+        // (wf_metric / held_out_metric — H21, persisted meaning unchanged); the
+        // GATE is what switched. Same SSoT pair as the panel diagnosis + Past
+        // Runs (Backtest_LabelClassCounts + multiclass_balanced_baseline) so the
+        // three can never disagree — the F3/F4 discipline, kept.
         if (!LabelType_IsRegression(label_type)) {
-            skill_floor = Backtest_SkillFloorBaseline(data->labels, data->sample_count,
+            skill_floor = Backtest_BalancedSkillFloor(data->labels, data->sample_count,
                                                       label_type);
-            floor_kind = "classification: always-predict-best over the WF population";
+            floor_kind = "classification: balanced accuracy vs 1/present-classes over the WF population";
         }
-        // Mirror the metric selection the stamp emit itself uses (see the wf value passed below),
-        // so the floor is applied to the SAME number the gate will compare.
         const double wf_metric = LabelType_IsRegression(label_type)
             ? (double)out->walkforward.mean_val_correlation
-            : (double)out->walkforward.mean_val_accuracy;
+            : (double)out->walkforward.mean_val_balanced_accuracy;
         if (wf_metric <= skill_floor) {
             snprintf(out->auto_stamp_error, sizeof(out->auto_stamp_error),
-                     "REFUSE: no skill — wf %.4f <= baseline %.4f (%s). The gap check "
+                     "REFUSE: no skill — wf %.4f <= baseline %.4f (%s; plain acc %.4f). The gap check "
                      "measures agreement, not skill; a uniformly-bad model agrees with itself.",
-                     wf_metric, skill_floor, floor_kind);
+                     wf_metric, skill_floor, floor_kind,
+                     (double)out->walkforward.mean_val_accuracy);
             fprintf(stderr, "[fullvalidation] STAMP REFUSED — %s\n", out->auto_stamp_error);
             out->auto_stamp_attempted = 1;
             out->auto_stamp_ok        = 0;
             stamp_refused_no_skill    = 1;
         } else {
-            fprintf(stderr, "[fullvalidation] skill floor OK — wf %.4f > baseline %.4f (%s)\n",
-                    wf_metric, skill_floor, floor_kind);
+            fprintf(stderr, "[fullvalidation] skill floor OK — wf %.4f > baseline %.4f (%s; plain acc %.4f)\n",
+                    wf_metric, skill_floor, floor_kind,
+                    (double)out->walkforward.mean_val_accuracy);
         }
     }
 
@@ -2094,6 +2218,26 @@ static inline float multiclass_baseline_accuracy(int num_classes,
     return majority;
 }
 
+// 2026-09-03 — the BALANCED-accuracy skill floor: 1 / (classes PRESENT in the
+// population), the always-predict-one-class score of that metric whatever the
+// skew (recall 1 on the predicted class, 0 on every other present class). This
+// is the floor the stamp gate, the Training-panel diagnosis and Past Runs
+// compare against now — the same SSoT-pair discipline as
+// multiclass_baseline_accuracy (counts builder + this), so the three cannot
+// disagree. Clamped to K>=2 (binary floor 0.5); with no counts, uniform 1/K.
+static inline float multiclass_balanced_baseline(int num_classes,
+                                                   const int* class_counts,
+                                                   int sample_count) {
+    if (num_classes < 2) num_classes = 2;
+    int present = 0;
+    if (class_counts && sample_count > 0) {
+        int K = num_classes > 16 ? 16 : num_classes;
+        for (int k = 0; k < K; ++k) if (class_counts[k] > 0) present++;
+    }
+    if (present < 2) present = num_classes;   // degenerate/absent counts: the uniform floor
+    return 1.0f / (float)present;
+}
+
 // Class-62/TD-301c close (2026-08-26) — THE label-population rule for baseline
 // computation, shared by the stamp gate's skill floor AND the Training panel's
 // WF diagnosis (via SamplesSnapshot_Compute), so gate and panel can never
@@ -2142,6 +2286,18 @@ static inline double Backtest_SkillFloorBaseline(const float *labels, int count,
     return (double)multiclass_baseline_accuracy(K, cls_counts, cls_total);
 }
 
+// 2026-09-03 — the floor the stamp gate refuses against NOW: the balanced-
+// accuracy floor over the SAME population (counts builder + the balanced
+// baseline). Plain accuracy vs the majority share (the function above) stays
+// for the record + the summary, but a class-weighted model is not scored by it.
+static inline double Backtest_BalancedSkillFloor(const float *labels, int count,
+                                                   int label_type) {
+    int cls_counts[16];
+    const int cls_total = Backtest_LabelClassCounts(labels, count, label_type, cls_counts);
+    const int K = LabelType_IsMulticlass(label_type) ? LabelType_NumClasses(label_type) : 2;
+    return (double)multiclass_balanced_baseline(K, cls_counts, cls_total);
+}
+
 // multiclass accuracy: predictions is count × num_classes flat array (softmax probs).
 // argmax over each row, compare to integer truth (rounded from label float).
 static inline float WalkForward_ComputeMulticlassAccuracy(const float *predictions,
@@ -2160,6 +2316,83 @@ static inline float WalkForward_ComputeMulticlassAccuracy(const float *predictio
         if (best == truth) correct++;
     }
     return (float)correct / count;
+}
+
+// 2026-09-03 — PER-CLASS confusion counts (what-to-do-next.md E.2/E.3): argmax
+// accuracy hides the number a barrier model lives or dies by — c1-vs-c2
+// (direction) RECALL — and it is the wrong score for a model trained under
+// inverse-frequency sample weights (the training objective trades majority
+// accuracy for minority recall on purpose, so plain accuracy vs the majority
+// share disagrees with it BY CONSTRUCTION — TECH_DEBT-313's "lesser" bullet,
+// which decided 2 of 3 horizons on 2026-09-02). ONE counting pass feeds both
+// the per-class recall line and the balanced-accuracy gate metric below.
+// K <= 16 (the label-table cap); rows whose truth class is out of range are
+// skipped, exactly as Backtest_LabelClassCounts skips them.
+#define WF_MAX_CLASSES 16
+static inline void WalkForward_ClassCountsMulticlass(const float *predictions,
+                                                       const float *labels,
+                                                       int count, int num_classes,
+                                                       int correct_out[WF_MAX_CLASSES],
+                                                       int total_out[WF_MAX_CLASSES]) {
+    for (int k = 0; k < WF_MAX_CLASSES; ++k) { correct_out[k] = 0; total_out[k] = 0; }
+    if (!predictions || !labels || count <= 0 || num_classes < 2) return;
+    const int K = num_classes > WF_MAX_CLASSES ? WF_MAX_CLASSES : num_classes;
+    for (int i = 0; i < count; i++) {
+        int best = 0;
+        float best_p = predictions[i * num_classes];
+        for (int k = 1; k < num_classes; k++) {
+            float p = predictions[i * num_classes + k];
+            if (p > best_p) { best_p = p; best = k; }
+        }
+        const int truth = (int)(labels[i] + 0.5f);
+        if (truth < 0 || truth >= K) continue;
+        total_out[truth]++;
+        if (best == truth) correct_out[truth]++;
+    }
+}
+
+// binary sibling: class 1 = P >= threshold; truth = label > 0.5 (the same rule
+// WalkForward_ComputeAccuracy scores by). Neutral 0.5 labels are already
+// compacted out of the WF population upstream; here they land in class 0 the
+// way the accuracy function counts them — one rule, both metrics.
+static inline void WalkForward_ClassCountsBinary(const float *predictions,
+                                                   const float *labels,
+                                                   int count, float threshold,
+                                                   int correct_out[WF_MAX_CLASSES],
+                                                   int total_out[WF_MAX_CLASSES]) {
+    for (int k = 0; k < WF_MAX_CLASSES; ++k) { correct_out[k] = 0; total_out[k] = 0; }
+    if (!predictions || !labels || count <= 0) return;
+    for (int i = 0; i < count; i++) {
+        const int pred_class = (predictions[i] >= threshold) ? 1 : 0;
+        const int true_class = (labels[i] > 0.5f) ? 1 : 0;
+        total_out[true_class]++;
+        if (pred_class == true_class) correct_out[true_class]++;
+    }
+}
+
+// Balanced accuracy = the mean of the per-class recalls over the classes
+// PRESENT in the truth (total[k] > 0). An absent class contributes no term:
+// averaging a 0 in would punish the model for the SPLIT, not for the model
+// (a fold whose test window holds no c0 rows cannot have c0 recall).
+// recall_out[k] = correct/total per class, 0 for absent classes. Returns 0
+// when no class is present. The always-predict-one-class floor of this metric
+// is exactly 1 / (present classes) whatever the skew — see
+// multiclass_balanced_baseline, the gate's floor.
+static inline float WalkForward_BalancedAccuracy(const int correct[WF_MAX_CLASSES],
+                                                   const int total[WF_MAX_CLASSES],
+                                                   int num_classes,
+                                                   float recall_out[WF_MAX_CLASSES]) {
+    const int K = num_classes > WF_MAX_CLASSES ? WF_MAX_CLASSES : num_classes;
+    double sum = 0.0;
+    int present = 0;
+    for (int k = 0; k < WF_MAX_CLASSES; ++k) recall_out[k] = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        if (total[k] <= 0) continue;
+        recall_out[k] = (float)correct[k] / (float)total[k];
+        sum += recall_out[k];
+        present++;
+    }
+    return present > 0 ? (float)(sum / present) : 0.0f;
 }
 
 // regression: mean squared error. Lower = better. Sensitive to outliers.
@@ -2244,6 +2477,12 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     int is_multiclass  = LabelType_IsMulticlass(label_type);
     wf->label_kind   = num_classes_lt;
     wf->num_classes  = num_classes_lt;
+    // 2026-09-03 — Class 62: the balanced-accuracy / per-class-recall aggregates are
+    // written ABOVE every early return below (0 = never computed is stated here, at the
+    // top, so no refuse path strands them at whatever the caller's buffer held).
+    wf->mean_val_balanced_accuracy   = 0.0f;
+    wf->mean_train_balanced_accuracy = 0.0f;
+    for (int k = 0; k < WF_MAX_CLASSES; ++k) wf->mean_val_class_recall[k] = 0.0f;
 
 #ifndef USE_XGBOOST
     fprintf(stderr, "[walkforward] XGBoost not compiled in — cannot train. "
@@ -2445,6 +2684,10 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     ValidationSplit_Print(wf->splits, n_splits);
 
     float sum_val = 0.0f, sum_val_sq = 0.0f, sum_train = 0.0f;
+    // 2026-09-03 — balanced-accuracy + per-class-recall accumulators (same
+    // counted_folds / counted_train populations as the plain-accuracy sums).
+    float sum_val_bal = 0.0f, sum_train_bal = 0.0f;
+    float sum_val_recall[WF_MAX_CLASSES] = {0};
     // counted_folds = folds contributing to the VAL mean (the number the stamp gate and
     // the skill floor key on). counted_train is tracked separately because train and val
     // predicts fail independently — one divisor for two populations is how a partial
@@ -2746,6 +2989,11 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 if (pred_tr_ok && (int)out_len_tr == n_train * K) {
                     fr->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_tr, train_labels, n_train, K);
+                    {   // 2026-09-03 — balanced accuracy on the train fold (the overfit pair's twin)
+                        int cc[WF_MAX_CLASSES], ct[WF_MAX_CLASSES]; float rc[WF_MAX_CLASSES];
+                        WalkForward_ClassCountsMulticlass(pred_tr, train_labels, n_train, K, cc, ct);
+                        fr->train_balanced_accuracy = WalkForward_BalancedAccuracy(cc, ct, K, rc);
+                    }
                     train_ok = 1;
 #ifdef FOXML_DEBUG_LOGS
                     {
@@ -2787,6 +3035,12 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 if (pred_te_ok && (int)out_len_te == n_test * K) {
                     fr->val_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_te, test_labels, n_test, K);
+                    {   // 2026-09-03 — per-class recall + balanced accuracy (E.2 / E.3)
+                        int cc[WF_MAX_CLASSES], ct[WF_MAX_CLASSES];
+                        WalkForward_ClassCountsMulticlass(pred_te, test_labels, n_test, K, cc, ct);
+                        fr->val_balanced_accuracy =
+                            WalkForward_BalancedAccuracy(cc, ct, K, fr->val_class_recall);
+                    }
                     val_ok = 1;
 #ifdef FOXML_DEBUG_LOGS
                     {
@@ -2833,6 +3087,11 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
                     fr->train_accuracy = WalkForward_ComputeAccuracy(
                         pred_tr, train_labels, n_train, 0.5f);
+                    {   // 2026-09-03 — balanced accuracy on the train fold (binary: 2 classes)
+                        int cc[WF_MAX_CLASSES], ct[WF_MAX_CLASSES]; float rc[WF_MAX_CLASSES];
+                        WalkForward_ClassCountsBinary(pred_tr, train_labels, n_train, 0.5f, cc, ct);
+                        fr->train_balanced_accuracy = WalkForward_BalancedAccuracy(cc, ct, 2, rc);
+                    }
                     train_ok = 1;
                 } else {
                     tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
@@ -2843,6 +3102,12 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 if (pred_te_ok && (int)out_len_te == n_test) {
                     fr->val_accuracy = WalkForward_ComputeAccuracy(
                         pred_te, test_labels, n_test, 0.5f);
+                    {   // 2026-09-03 — per-class recall + balanced accuracy (binary: 2 classes)
+                        int cc[WF_MAX_CLASSES], ct[WF_MAX_CLASSES];
+                        WalkForward_ClassCountsBinary(pred_te, test_labels, n_test, 0.5f, cc, ct);
+                        fr->val_balanced_accuracy =
+                            WalkForward_BalancedAccuracy(cc, ct, 2, fr->val_class_recall);
+                    }
                     val_ok = 1;
                 } else {
                     tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
@@ -2890,6 +3155,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             } else {
                 sum_val    += fr->val_accuracy;
                 sum_val_sq += fr->val_accuracy * fr->val_accuracy;
+                sum_val_bal += fr->val_balanced_accuracy;
+                for (int k = 0; k < WF_MAX_CLASSES; ++k) sum_val_recall[k] += fr->val_class_recall[k];
             }
             counted_folds++;
         }
@@ -2899,6 +3166,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 wf->mean_train_correlation += fr->train_correlation;
             } else {
                 sum_train += fr->train_accuracy;
+                sum_train_bal += fr->train_balanced_accuracy;
             }
             counted_train++;
         }
@@ -2916,8 +3184,9 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                     f + 1, n_splits, fr->train_mse, fr->val_mse,
                     fr->train_correlation, fr->val_correlation);
         } else {
-            fprintf(stderr, "[walkforward] fold %d/%d: train_acc=%.4f, val_acc=%.4f%s\n",
+            fprintf(stderr, "[walkforward] fold %d/%d: train_acc=%.4f, val_acc=%.4f | balanced train=%.4f val=%.4f%s\n",
                     f + 1, n_splits, fr->train_accuracy, fr->val_accuracy,
+                    fr->train_balanced_accuracy, fr->val_balanced_accuracy,
                     fr->overfit.is_overfit ? " [OVERFIT]" : "");
         }
     }
@@ -2937,11 +3206,17 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             wf->mean_val_accuracy = sum_val / counted_folds;
             float var = (sum_val_sq / counted_folds) - (wf->mean_val_accuracy * wf->mean_val_accuracy);
             wf->std_val_accuracy = (var > 0.0f) ? (float)sqrt((double)var) : 0.0f;
+            wf->mean_val_balanced_accuracy = sum_val_bal / counted_folds;
+            for (int k = 0; k < WF_MAX_CLASSES; ++k)
+                wf->mean_val_class_recall[k] = sum_val_recall[k] / counted_folds;
         }
     }
     if (counted_train > 0) {
         if (is_regression) wf->mean_train_correlation /= counted_train;
-        else               wf->mean_train_accuracy    = sum_train / counted_train;
+        else {
+            wf->mean_train_accuracy          = sum_train / counted_train;
+            wf->mean_train_balanced_accuracy = sum_train_bal / counted_train;
+        }
     }
 
     gettimeofday(&t_end, NULL);
@@ -2958,6 +3233,17 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     fprintf(stderr, "  mean train accuracy: %.4f\n", wf->mean_train_accuracy);
     fprintf(stderr, "  train/val gap:       %.4f\n",
             wf->mean_train_accuracy - wf->mean_val_accuracy);
+    if (!is_regression) {
+        // 2026-09-03 — the gate metric + the per-class val recall (E.2/E.3).
+        // Direction recall (c1 vs c2 on a 3-class barrier) is the number a
+        // barrier model is read by; argmax accuracy hides it.
+        fprintf(stderr, "  mean val BALANCED:   %.4f (train %.4f) — the stamp gate's metric\n",
+                wf->mean_val_balanced_accuracy, wf->mean_train_balanced_accuracy);
+        const int Kp = wf->num_classes >= 2 ? (wf->num_classes > WF_MAX_CLASSES ? WF_MAX_CLASSES : wf->num_classes) : 2;
+        fprintf(stderr, "  mean val recall/class:");
+        for (int k = 0; k < Kp; ++k) fprintf(stderr, " c%d=%.4f", k, wf->mean_val_class_recall[k]);
+        fprintf(stderr, "\n");
+    }
     fprintf(stderr, "  overfit folds:       %d/%d\n", wf->overfit_count, counted_folds);
     fprintf(stderr, "  elapsed:             %.1f ms\n", wf->elapsed_ms);
     fprintf(stderr, "==============================\n\n");
@@ -3247,6 +3533,9 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
             }
             if (pr_ev_ok && (int)out_len_ev == n_eval * K) {
                 r.metric = WalkForward_ComputeMulticlassAccuracy(pred_ev, eval_labels, n_eval, K);
+                int cc[WF_MAX_CLASSES], ct[WF_MAX_CLASSES];   // 2026-09-03 — held-out balanced + recall
+                WalkForward_ClassCountsMulticlass(pred_ev, eval_labels, n_eval, K, cc, ct);
+                r.balanced_accuracy = WalkForward_BalancedAccuracy(cc, ct, K, r.class_recall);
             }
         } else {
             if (pr_tr_ok && (int)out_len_tr == n_train) {
@@ -3254,6 +3543,9 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
             }
             if (pr_ev_ok && (int)out_len_ev == n_eval) {
                 r.metric = WalkForward_ComputeAccuracy(pred_ev, eval_labels, n_eval, 0.5f);
+                int cc[WF_MAX_CLASSES], ct[WF_MAX_CLASSES];   // 2026-09-03 — held-out balanced + recall
+                WalkForward_ClassCountsBinary(pred_ev, eval_labels, n_eval, 0.5f, cc, ct);
+                r.balanced_accuracy = WalkForward_BalancedAccuracy(cc, ct, 2, r.class_recall);
             }
         }
 

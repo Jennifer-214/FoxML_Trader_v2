@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <sys/stat.h>   // ModelPath_ExpectedCfgResolve — stat, never a probing fopen
 
 //======================================================================
 // [SECTION]_[horizon-child grammar]
@@ -148,5 +149,54 @@ static const char MODEL_STATE_FILE_BANDIT[]         = "bandit_state.json";
 static const char MODEL_STATE_FILE_EXIT_BANDIT[]    = "exit_bandit_state.json";
 static const char MODEL_STATE_FILE_BUY_THOMPSON[]   = "buy_thompson_state.json";
 static const char MODEL_STATE_FILE_EXIT_THOMPSON[]  = "exit_thompson_state.json";
+
+//======================================================================
+// [SECTION]_[side-addressed sidecar records at the horizon dir]
+//----------------------------------------------------------------------
+// Discipline 6 of model-artifact-path-schema-discipline.md: a record shared
+// across roles is a COLLISION class. summary_{entry,exit}.txt closed it for
+// the summaries (E.1.2.D D-e); expected.cfg kept the shared name and the
+// exit run overwrote the entry record of every horizon of the operator's
+// best family on 2026-09-02 (what-to-do-next.md, "writer clobber, one file
+// two roles"). The writer now addresses the file by side; readers prefer the
+// side file and fall back to the legacy shared name ONCE (an old bundle
+// carries one record, of whichever role wrote last — the legacy file's own
+// expected_role says which).
+//
+// data_files_{entry,exit}.txt is the corpus list the same run trained on —
+// the selection the summary only hashes + brackets (first / last / count).
+//======================================================================
+static const char MODEL_SIDECAR_EXPECTED_ENTRY[]    = "expected_entry.cfg";
+static const char MODEL_SIDECAR_EXPECTED_EXIT[]     = "expected_exit.cfg";
+static const char MODEL_SIDECAR_EXPECTED_LEGACY[]   = "expected.cfg";   // pre-2026-09-03 shared name (read-only)
+static const char MODEL_SIDECAR_DATA_FILES_ENTRY[]  = "data_files_entry.txt";
+static const char MODEL_SIDECAR_DATA_FILES_EXIT[]   = "data_files_exit.txt";
+
+// The side-addressed expected-record NAME for a training side (0 = entry,
+// 1 = exit). The writer's ONE spelling; the readers resolve through the
+// helper below so the fallback rule lives in exactly one place.
+static inline const char* ModelPath_ExpectedCfgName(int training_side) {
+    return training_side == 1 ? MODEL_SIDECAR_EXPECTED_EXIT
+                              : MODEL_SIDECAR_EXPECTED_ENTRY;
+}
+
+// Resolve the expected-record PATH a reader should open for `training_side`
+// under `dir`. Returns 1 = the side file exists (path filled), 2 = only the
+// legacy shared file exists (path filled — the caller must treat its
+// expected_role as the record's own side, not the requested one), 0 = no
+// record (path emptied; readers silent-pass — an old bundle without one).
+// `stat`, not `fopen`: a resolve must not open a handle the caller then
+// re-opens (two opens of one file is the shape that leaks under early return).
+static inline int ModelPath_ExpectedCfgResolve(const char* dir, int training_side,
+                                               char* buf, size_t buf_size) {
+    if (!dir || dir[0] == '\0' || !buf || buf_size == 0) { if (buf && buf_size) buf[0] = '\0'; return 0; }
+    struct stat st;
+    snprintf(buf, buf_size, "%s/%s", dir, ModelPath_ExpectedCfgName(training_side));
+    if (stat(buf, &st) == 0) return 1;
+    snprintf(buf, buf_size, "%s/%s", dir, MODEL_SIDECAR_EXPECTED_LEGACY);
+    if (stat(buf, &st) == 0) return 2;
+    buf[0] = '\0';
+    return 0;
+}
 
 #endif // MODEL_PATH_SCHEMA_HPP

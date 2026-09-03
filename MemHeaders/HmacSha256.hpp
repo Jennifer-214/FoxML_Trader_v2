@@ -194,6 +194,39 @@ static inline int sha256_bytes(const void* data, size_t n, unsigned char out[32]
 // [END_FUNCTION]_[sha256_bytes]
 //======================================================================
 
+//======================================================================
+// [FUNCTION]_[sha256_bytes_hex]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[SHA-256 of an in-memory buffer -> 64 lowercase hex digits + NUL (hex_out >= 65 B) — the display/record form of sha256_bytes, one hex loop shared with the file + HMAC variants; 1 on success]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int sha256_bytes_hex(const void* data, size_t n, char* hex_out, size_t hex_cap) {
+    if (!hex_out || hex_cap < 65) return 0;
+    unsigned char raw[32];
+    if (!sha256_bytes(data, n, raw)) { hex_out[0] = '\0'; return 0; }
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 32; ++i) {
+        hex_out[2*i  ] = hex[raw[i] >> 4];
+        hex_out[2*i+1] = hex[raw[i] & 0x0F];
+    }
+    hex_out[64] = '\0';
+    return 1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// 2026-09-03 — first consumer: the training corpus-selection record
+// (BacktestResults_RecordCorpus hashes the newline-joined data-file list so
+// two runs' summaries can be compared for "same corpus" by one string).
+//======================================================================
+// [END_FUNCTION]_[sha256_bytes_hex]
+//======================================================================
+
 } // namespace tt
 
 #endif // HMAC_SHA256_HPP
