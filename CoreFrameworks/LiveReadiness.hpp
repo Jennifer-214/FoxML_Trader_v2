@@ -121,10 +121,19 @@ inline bool check_secret_nonempty(const ControllerConfig<F>& cfg,
 
 // E.1.3 3b(ii) commit 1 (D-479) — the durable ring-full fatal record is a Health_Log line;
 // an empty health_log_path makes it a stderr line only. Live capital needs the channel.
+// Commit 2 (AR-8 N-3; Class 51 / AR-24): "set" is not "usable" — a mis-pointed or unwritable
+// path passed the old non-empty test and failed at the FATAL moment, when Health_Log's fopen
+// returned 0 and the stderr fallback blamed an "empty" path. Probe the channel the way its
+// consumer uses it (fopen "a" + fclose — creates the file if absent, as
+// Health_LogConfigureWithRotation's best-effort mkdir intends). Boot-time only.
 template <unsigned F>
 inline bool check_health_log_path_set(const ControllerConfig<F>& cfg,
                                       const EventLoopState<F>&) {
-    return cfg.health_log_path[0] != '\0';
+    if (cfg.health_log_path[0] == '\0') return false;
+    FILE* f = fopen(cfg.health_log_path, "a");
+    if (!f) return false;
+    fclose(f);
+    return true;
 }
 
 template <unsigned F>
@@ -315,7 +324,7 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
     /* health_log_path empty (the cfg default) Health_Log returns 0 and the decoded fill exists  */ \
     /* on stderr only. Live capital REFUSES to boot without the durable channel.                 */ \
     X(health_log_path_set,         check_health_log_path_set,         LR_SEV_REFUSE, \
-      "set health_log_path (e.g. logging/health.jsonl) — the ring-full fatal record needs a durable channel")
+      "set a WRITABLE health_log_path (e.g. logging/health.jsonl; probed with fopen at boot) — the ring-full fatal record needs a durable channel")
 
 #define FOREACH_LIVE_READINESS_CHECK_COUNT_ONE(name, fn_ptr, sev, hint) +1
 #define FOREACH_LIVE_READINESS_CHECK_COUNT \

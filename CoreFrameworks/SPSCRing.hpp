@@ -12,6 +12,7 @@
 //   - [STRUCT]_[SPSCRing]
 //   - [FUNCTION]_[SPSCRing_Init]
 //   - [FUNCTION]_[SPSCRing_TryPush]
+//   - [FUNCTION]_[SPSCRing_TryPushBounded]
 //   - [FUNCTION]_[SPSCRing_TryPop]
 //   - [FUNCTION]_[SPSCRing_Depth]
 //======================================================================================================
@@ -128,12 +129,18 @@ struct SPSCRing {
 //----------------------------------------------------------------------
 // Backpressure policy: NOT enforced by the ring. TryPush returns false on full,
 // TryPop returns false on empty. Caller decides what to do — drop, spin, retry,
-// crash, etc. Different rings in the engine have different policies:
+// crash, etc. The engine runs FOUR policies today; the per-site table that decides
+// which ring gets which is D-479 (as amended by gate #3, 2026-09-02):
 //   - Tick rings (market → execution cores): drop policy. Losing one tick is
 //     acceptable, latency matters more than completeness.
-//   - Event rings (execution cores → controller): spin policy. We cannot lose
-//     trade events. Sized large enough that brief controller stalls don't cause
-//     execution-core blocking.
+//   - FillEvent / audit rings (never-drop class, composer-consumed): inline-drain on
+//     full (the producer drains the consumer's ring itself under central topology).
+//   - Never-drop fill rings pushed from a venue PRODUCER thread (WS / REST results):
+//     SPSCRing_TryPushBounded below — a clock-bounded, abort-aware pause-spin, then
+//     LOUD-FATAL through the kill-trip word (the NAMED Rule-3 exception).
+//   - Count-only rings (calib, reconcile): drop + counter.
+// (The 2026-05 worked examples here named "tick = drop, event = spin" — two of the
+//  four; re-pointed 2026-09-04 so a reader reaches the deciding table, not a subset.)
 //======================================================================
 // [DERIVED]   (tool-refreshed — do NOT hand-edit; layout facts are PER-INSTANTIATION for this
 //              generic template and live tool-owned at each consumer struct, D-318/D-327)
@@ -243,6 +250,66 @@ static inline bool SPSCRing_TryPush(SPSCRing<T, N>* r, const T& item) {
 // answer for SPSC ring fast paths.
 //======================================================================
 // [END_FUNCTION]_[SPSCRing_TryPush]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[SPSCRing_TryPushBounded]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CONCURRENCY] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [REFERENCE]_[DECISION]_[D-479]
+// [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-326] [TECH_DEBT-160]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the NAMED Rule-3 exception (latency-path-discipline Rule 3 § Named exceptions; DESIGN_PHILOSOPHY § 6 STRONG row): a CLOCK-bounded, ABORT-aware pause-spin push for a capital-bearing never-drop ring pushed from a NON-latency venue producer thread — true on success; false when the budget (raw TSC cycles) is exhausted or the abort flag is set, the item NOT pushed, and the caller goes LOUD-FATAL (OMS_RingFullFatalRecord). Never for a hot/slow-path thread]
+//======================================================================
+// [CODE]
+//======================================================================
+// WHY this exists and why it is an EXCEPTION, not a new rule: Rule 3 ("ring failure →
+// counter, never retry inline") protects the HOT/SLOW path from coupling its latency to
+// the drainer's responsiveness. The WS user-data parser and the REST adapter worker are
+// neither — venue producer threads whose only job is to hand a fill to the engine — and
+// the rings they push are the never-drop class (a dropped fill is venue money the ledger
+// never books, D-479). So on a full ring they wait, BOUNDED, and if the consumer does not
+// drain inside the budget they hand the decoded fill to the durable record and request a
+// GLOBAL kill — never a silent drop, never an unbounded wait.
+//
+// Generalizes the shape shipping since v5.11.3.C at OrderEventLog_Append (unbounded retry
+// + counter + usleep back-off) and REPLACES the count-bounded shape (BinanceAdapter's
+// SPIN_BUDGET idle spin) for new producer-side code: a pause COUNT is not a TIME budget —
+// one pause spans ~10x across parts and a descheduled consumer is measured in ms — so the
+// bound is a CLOCK. __builtin_ia32_rdtsc keeps this header include-free (raw cycles are the
+// unit every engine rdtsc site and the drainer histogram already use); it is sampled every
+// 64 pauses so the spin body stays a pause, not a serializing read.
+//
+// BURST vs STUCK: this covers a consumer that is SLOW (a burst clears inside the budget).
+// A consumer that is STUCK is the watchdog's problem (TECH_DEBT-326) — a trip word nobody
+// consumes cannot halt anything, and this function does not pretend otherwise.
+//
+// `abort` is the PRODUCER's own std::atomic<int> (shutdown_requested / keepalive_failed) by
+// pointer; NULL = no abort source (the harness). It cannot be g_engine_sharded_shutdown:
+// that is a volatile sig_atomic_t, not an atomic. Policy stays OUT of this header — the
+// budget constant lives with the rings it governs (OMS_RING_PUSH_BUDGET_CYCLES beside
+// OMS_RESULT_RING_PER_NODE in OrderManager.hpp). TECH_DEBT-160: inlining TryPush here may
+// re-surface the eight GUI-lane -Wstringop-overflow KNOWN-FPs under new .isra clone names
+// — do not chase them; a stringop warning at ANY OTHER site is still real signal.
+template <typename T, size_t N>
+static inline bool SPSCRing_TryPushBounded(SPSCRing<T, N>* r, const T& item,
+                                           uint64_t budget_cycles,
+                                           const std::atomic<int>* abort) {
+    if (SPSCRing_TryPush(r, item)) return true;          // the common case: no wait at all
+    const uint64_t t0 = (uint64_t)__builtin_ia32_rdtsc();
+    for (;;) {
+        for (int i = 0; i < 64; ++i) {
+            __builtin_ia32_pause();
+            if (SPSCRing_TryPush(r, item)) return true;
+        }
+        if (abort && abort->load(std::memory_order_relaxed) != 0) return false;
+        if ((uint64_t)__builtin_ia32_rdtsc() - t0 >= budget_cycles) return false;
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SPSCRing_TryPushBounded]
 //======================================================================
 
 //======================================================================

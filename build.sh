@@ -179,6 +179,13 @@ build_pgo() {
     echo "[pgo] OK — optimized engine binary at build_pgo/engine"
 }
 
+# BUILD-TYPE POLICY (TECH_DEBT-329, E.1.3 3b(ii) commit 2): EVERY lane pins CMAKE_BUILD_TYPE
+# explicitly — CMakeLists.txt has no default-when-empty, so an unpinned lane silently differed
+# on -DNDEBUG (assert() live in the GUI binaries, dead in build/ — a Class-51 hole where the
+# suite runs). Release for the production / GUI / suite / latency lanes, RelWithDebInfo for
+# build_debug (debug INFO, not asserts-on; Debug would be -O0), Debug for the sanitizer lanes.
+# assert() is a DEBUG-LANE aid only; an always-on invariant uses the LOUD family
+# (Health_Log CRITICAL + a counter — see Composer_AssertIdentity), never assert().
 build_gui() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_gui
     # Default GUI build = "everything on": ImGui + Latency profiling + XGBoost.
@@ -186,7 +193,7 @@ build_gui() {
     # engine_mode=sharded). Slight per-tick instrumentation cost from
     # LATENCY_PROFILING (~10-20ns) — acceptable for observation/dev. For
     # raw production performance use `./build.sh gui-lite` instead.
-    cmake -B build_gui -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
+    cmake -B build_gui -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON -DCMAKE_BUILD_TYPE=Release
     cmake --build build_gui -j"$JOBS"
     link_cfg build_gui
     emit_asm_for_dir build_gui
@@ -198,7 +205,7 @@ build_gui_lite() {
     # Minimal GUI: ImGui only, no profiling instrumentation, no XGBoost.
     # No Latency panel, no ML training paths. Use when production perf
     # is the goal and you've already validated latency in build_lat.
-    cmake -B build_gui_lite -DUSE_IMGUI_GUI=ON
+    cmake -B build_gui_lite -DUSE_IMGUI_GUI=ON -DCMAKE_BUILD_TYPE=Release
     cmake --build build_gui_lite -j"$JOBS"
     link_cfg build_gui_lite
     emit_asm_for_dir build_gui_lite
@@ -221,7 +228,7 @@ build_debug() {
     # separate cache line). Switch back to `./build.sh gui` for normal
     # work after diagnosing.
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_debug
-    cmake -B build_debug -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON \
+    cmake -B build_debug -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                           -DUSE_XGBOOST=ON \
                           -DCMAKE_CXX_FLAGS="-DFOXML_DEBUG_LOGS=ON"
     cmake --build build_debug -j"$JOBS"
@@ -237,7 +244,7 @@ build_debug() {
 build_suite() {
     # Backward-compat alias — build_suite is now the same as build_gui.
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_suite
-    cmake -B build_suite -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
+    cmake -B build_suite -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON -DCMAKE_BUILD_TYPE=Release
     cmake --build build_suite -j"$JOBS" --target foxml_suite
     link_cfg build_suite
     emit_asm_for_dir build_suite
@@ -246,7 +253,7 @@ build_suite() {
 
 build_latency() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_lat
-    cmake -B build_lat -DLATENCY_PROFILING=ON
+    cmake -B build_lat -DLATENCY_PROFILING=ON -DCMAKE_BUILD_TYPE=Release
     cmake --build build_lat -j"$JOBS"
     link_cfg build_lat
     emit_asm_for_dir build_lat

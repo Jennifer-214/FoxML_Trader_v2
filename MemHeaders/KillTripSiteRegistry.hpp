@@ -89,10 +89,14 @@ static inline const char* KillTripSite_Name(uint8_t site) {
 }
 
 // Lane masks over the uint32 trip word. NODE lanes: bit n. GLOBAL lanes: bit 16 + site.
-// Both index arguments are masked to their 16-lane half BEFORE the shift: a corrupt index
-// (a node >= 16, a site >= 16) lands in a lane inside the word instead of being a >= 32-bit
-// shift (UB). The consumer ignores an unregistered node lane and names an unknown site
-// UNKNOWN_SITE — a corrupt request is loud, never undefined (V-1 L-4).
+// Both index arguments are masked to their 16-lane half BEFORE the shift so a corrupt index
+// (a node >= 16, a site >= 16) can never become a >= 32-bit shift (UB). What the mask does
+// NOT give you is attribution: a corrupt site whose low 4 bits collide with a registered row
+// (17 → REST_RING_FULL) is consumed AS that row, and KillTripSite_Name names the UNMASKED
+// value at the record but the MASKED lane at the marker. The producer passes a typed
+// KillTripSite, so a corrupt value has no live source; the consumer consumes an unregistered
+// NODE lane with a stderr line, and an out-of-range SITE lane names UNKNOWN_SITE
+// (V-1 L-4; wording corrected 2026-09-04 — AR-8 N-5 refuted "loud, never undefined").
 #define KILL_TRIP_SHIFT_GLOBAL      16u
 #define KILL_TRIP_MASK_NODES        0x0000FFFFu
 #define KILL_TRIP_MASK_GLOBAL       0xFFFF0000u

@@ -227,6 +227,10 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
     while (state->shutdown_requested.load(std::memory_order_acquire) == 0) {
         PendingSubmission p;
         if (!SPSCRing_TryPop(&state->submission_queue, &p)) {
+            // Count-bounded IDLE spin (SPIN_BUDGET pauses, then a 50 us sleep) — the consumer's
+            // idle-wait, not a Rule-3 push retry. Named at latency-path-discipline Rule 3 § Named
+            // exceptions only as the COUNT-bounded shape G3-13 refuted for NEW producer-side code
+            // (a pause count is not a time budget; SPSCRing_TryPushBounded uses the clock).
             if (idle_spins < SPIN_BUDGET) {
                 __builtin_ia32_pause();
                 idle_spins++;

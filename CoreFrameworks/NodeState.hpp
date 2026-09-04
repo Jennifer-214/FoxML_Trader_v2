@@ -476,7 +476,22 @@ struct alignas(64) AggregatorState {
     // Composer-written: how many GLOBAL fatal lanes it has consumed (the OEVT_RING_FULL_FATAL
     // marker row's qty = this sequence, so the log can be read as "the Nth fatal"). Never reset.
     uint32_t kill_trip_fatal_seq = 0;
-    uint64_t _pad_line0[2] = {};        // H12: explicit pad to the line boundary (24 B before; 16 B now)
+    // E.1.3 3b(ii) commit 2 (D-478 as amended, gate #3 G3-9) — the composer-thread IDENTITY, bound
+    // UNCONDITIONALLY at both composer entries (the live drainer lambda; the backtest driver's
+    // compose call) by AggregatorState_BindComposer and checked by Composer_AssertIdentity at the
+    // top of every compose (+ at every composer-only step that lands later: the composer-direct
+    // Append, OMS_AccountRingsDrain). 0 = UNBOUND (a unit harness that never bound — tolerant);
+    // a foreign tid = LOUD (a rate-limited Health_Log CRITICAL line + the counter below) — never
+    // assert(), which is dead in the Release lane (TECH_DEBT-329). WHY line 0: this is the request
+    // line the composer already holds Modified at step 0/0a (the kill_reset_mask / kill_trip_request
+    // exchanges), so the identity read costs nothing — not a fallback placement. std::atomic<uint64_t>
+    // holding (uint64_t)pthread_self(): always lock-free on x86-64 (std::atomic<pthread_t> is not
+    // guaranteed to be).
+    std::atomic<uint64_t> composer_tid{0};
+    // Wrong-thread calls seen by Composer_AssertIdentity — written by the OFFENDING thread (relaxed;
+    // a telemetry counter, never a sync point). Never reset.
+    std::atomic<uint32_t> composer_identity_violations{0};
+    uint32_t _pad_line0_tail = 0;       // H12: explicit pad to the line boundary (16 B → 4 B at commit 2)
 
     // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
     //      from Phase 1). applied_seq[n] = last FillEvent.seq applied from node n's ring —
@@ -551,6 +566,10 @@ static_assert(offsetof(AggregatorState<64>, kill_trip_request) + sizeof(uint32_t
               offsetof(AggregatorState<64>, kill_trip_fatal_seq) + sizeof(uint32_t) <= 64,
               "the kill-TRIP request word + its fatal sequence ride line 0 with the other request "
               "atomics (D-479 G3-1: zero growth — they replaced pad words)");
+static_assert(offsetof(AggregatorState<64>, composer_tid) == 48 &&
+              offsetof(AggregatorState<64>, composer_identity_violations) == 56,
+              "the composer identity rides line 0 — the request line the composer already holds at "
+              "step 0/0a (D-478 as amended, 3b(ii) commit 2: zero growth — it replaced the last pad words)");
 static_assert(offsetof(AggregatorState<64>, applied_seq) == 64,  "apply cursors at lines 1-2");
 static_assert(offsetof(AggregatorState<64>, publish)     == 192, "publish port after the state lines (D-444: led_* line retired; re-pinned 256->192)");
 static_assert(offsetof(AggregatorState<64>, fill_rings)  == 192 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),

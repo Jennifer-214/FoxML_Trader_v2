@@ -93,6 +93,7 @@
 
 #include <cstdint>      // uint64_t (used in slow-path-cycle helper signatures for ts_us)
 #include <cstdio>       // fprintf (used in ApplyBnbDiscount stderr message)
+#include <pthread.h>    // pthread_self — the composer-thread identity (AggregatorState_BindComposer / Composer_AssertIdentity, 3b(ii) commit 2)
 #include <x86intrin.h>  // __rdtsc (slow-path latency sampling — sister to the run loop's rdtsc bracketing in EngineSharded/Run.hpp)
 
 // Phase B includes (added as helper bodies land; sister-convention relative paths):
@@ -339,6 +340,67 @@ inline void AggregatorState_Seed(AggregatorState<F>& agg, const Portfolio<F>& pf
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[AggregatorState_BindComposer]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CONCURRENCY] [BOOT_TIME]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [REFERENCE]_[DECISION]_[D-478]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[bind the CALLING thread as THE composer (design row 2's single writer) — an UNCONDITIONAL relaxed store of pthread_self() into AggregatorState::composer_tid, called at BOTH composer entries: the live drainer lambda before its loop, and the backtest driver's compose call (per tick). Never bind-on-first-call — the first wrong thread would define itself as the composer (Class 51)]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline void AggregatorState_BindComposer(AggregatorState<F>& agg) {
+    agg.composer_tid.store((uint64_t)pthread_self(), std::memory_order_relaxed);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[AggregatorState_BindComposer]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Composer_AssertIdentity]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CONCURRENCY] [CAPITAL_BEARING]]
+// [REFERENCE]_[DECISION]_[D-478]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-329]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the always-on LOUD composer-identity pin (gate #3 G3-9): UNBOUND (tid 0) is tolerant — a harness that never bound; the bound thread passes; any other thread is a design-row-2 violation → the offending thread bumps composer_identity_violations, writes a rate-limited Health_Log CRITICAL "composer_identity" line + a stderr line, and returns 0 (production callers proceed — a wrong-thread call is a development mis-wiring, not venue money, so no kill-trip site). Never assert(): dead in the Release lane (TECH_DEBT-329, Class 51)]
+//======================================================================
+// [CODE]
+//======================================================================
+// Returns 1 when the calling thread is the bound composer (or nothing is bound), 0 on a
+// violation — a char branches on it; production callers ignore it and proceed (halting a
+// live engine because a maintainer mis-threaded a call would be the disproportionate
+// response; the CRITICAL line + the counter are the operator-visible evidence).
+template <unsigned F>
+inline int Composer_AssertIdentity(AggregatorState<F>& agg, const char* site) {
+    const uint64_t bound = agg.composer_tid.load(std::memory_order_relaxed);
+    if (bound == 0) return 1;                                   // UNBOUND: tolerant (harness)
+    const uint64_t self = (uint64_t)pthread_self();
+    if (bound == self) return 1;
+    const uint32_t n = agg.composer_identity_violations.fetch_add(1, std::memory_order_relaxed) + 1;
+    // Per-process rate-limit storage (HealthLog.hpp's documented per-process form): a double
+    // emit on a race is acceptable; a per-call fopen inside a drain loop is not.
+    static uint64_t s_last_emit_us = 0;
+    Health_LogCriticalRateLimited(&s_last_emit_us, /*gate_us=*/10000000ULL, /*node_id=*/-1,
+                                  "composer_identity",
+                                  "%s called on a NON-composer thread (bound=%llu self=%llu violation_n=%u) — "
+                                  "design row 2 (the composer is the sole writer) is violated by the caller",
+                                  site, (unsigned long long)bound, (unsigned long long)self, (unsigned)n);
+    fprintf(stderr, "[composer] IDENTITY VIOLATION at %s: bound=%llu self=%llu (violation_n=%u)\n",
+            site, (unsigned long long)bound, (unsigned long long)self, (unsigned)n);
+    return 0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Composer_AssertIdentity]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineCommon_ComposeAndKillEval]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [CAPITAL_BEARING]]
@@ -360,6 +422,9 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
                                              Money current_price,
                                              uint64_t publish_tick) {
     AggregatorState<F>& agg = state.agg;
+    // 3b(ii) commit 2 (G3-9): the identity pin's FIRST live caller — every compose, both drivers
+    // (M5). Tolerant while unbound (unit fixtures); LOUD on a foreign thread; never a halt here.
+    (void)Composer_AssertIdentity(agg, "EngineCommon_ComposeAndKillEval");
 
     // ── 0-pre. Apply pending FillEvents (D-444: the composer books the global ledger — the
     //    apply runs BEFORE MtM/eval/pack so every step below sees the booked state; A-2 T1
@@ -403,7 +468,12 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
         while (node_lanes) {
             const int c = __builtin_ctz(node_lanes);
             node_lanes &= node_lanes - 1;
-            if (c >= state.registered_count || c >= MAX_EXECUTION_NODES) continue;   // lane names no node
+            if (c >= state.registered_count || c >= MAX_EXECUTION_NODES) {           // lane names no node
+                fprintf(stderr, "[sharded] kill_trip_request: NODE lane %d names no registered node "
+                                "(registered=%d) — consumed and IGNORED (a flip-ready lane, or a corrupt request)\n",
+                        c, state.registered_count);
+                continue;
+            }
             const tt::NodeIdx nn{(int16_t)c};
             if (NODE_STATE_FLAG_IS_SET(state.nodes[nn], KILL_TRIPPED)) continue;    // idempotent
             NODE_STATE_FLAG_SET(state.nodes[nn], KILL_TRIPPED);

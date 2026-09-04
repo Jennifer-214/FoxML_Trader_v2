@@ -3722,7 +3722,8 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 // (D-481 / TECH_DEBT-328): EventLoop_Unpause was dead code (zero callers since the
 // sharded flip) and a D-479 fatal is restart-only by design. Per-NODE resets ride
 // AggregatorState::kill_reset_mask (the composer clears the node lane + re-grants
-// that node's permission at its next rebuild); nothing clears the OMS-wide bit.
+// that node's permission at its next rebuild); in LIVE nothing clears the OMS-wide bit — in
+// PAPER the composer-executed paper reset does, as a DO_RESET row (D-481 paper clause, 2026-09-04).
 //------------------------------------------------------------------------------
 
 //======================================================================

@@ -1565,6 +1565,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // DrainIntoBuckets). NOT added to OmsState (transient per-cycle scratch).
         tt::OmsDrainBuckets drain_buckets;
         EngineSharded_PinThread(state.registered_count + 1);
+        // E.1.3 3b(ii) commit 2 (D-478 as amended, G3-9) — THIS thread is the composer: bind its
+        // identity before the first compose (unconditional; the backtest driver binds at its own
+        // compose call). Composer_AssertIdentity fires at the top of every compose from here on.
+        AggregatorState_BindComposer(state.agg);
         while (!g_engine_sharded_shutdown) {
             // E.1.3 P3-c (D-445) — the P2-d drainer PARK is SUPERSEDED: the drainer/composer
             // now EXECUTES the paper reset itself at its cycle tail (see below), so there is

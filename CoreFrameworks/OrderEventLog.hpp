@@ -553,6 +553,9 @@ inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
         // CANNOT fall back to inline ApplyEvent here — that would race
         // with the writer thread's ApplyEvent on log->entries / disk_file
         // (they're SPSC-disciplined to be writer-thread-only post-Start).
+        // NAMED Rule-3 exception #2 (latency-path-discipline Rule 3 § Named exceptions; D-479 2026-09-04):
+        // an UNBOUNDED retry + counter + usleep back-off — the shape SPSCRing_TryPushBounded generalizes
+        // safely; migration to the bounded helper is homed at gate-#3 G3-30.
         for (int spin = 0; !SPSCRing_TryPush(&log->async_ring, event); ++spin) {
             log->ring_full_spins.fetch_add(1, std::memory_order_relaxed);
             if (spin < 64) {
@@ -851,6 +854,7 @@ inline void OrderEventLog_RequestTruncate(OrderEventLog<F>* log) {
     }
     OrderEvent<F> ctrl{};
     ctrl.type = OEVT_CTRL_TRUNCATE;        // never persisted — the writer intercepts
+    // NAMED Rule-3 exception #2 (twin of the Append spin above; same disposition, G3-30).
     for (int spin = 0; !SPSCRing_TryPush(&log->async_ring, ctrl); ++spin) {
         log->ring_full_spins.fetch_add(1, std::memory_order_relaxed);
         if (spin < 64) { __builtin_ia32_pause(); } else { usleep(100); }

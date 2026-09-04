@@ -470,6 +470,10 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         // this driver used to make is absorbed; single kill authority, both paths).
         // oms is OPTIONAL on this driver (nullptr = no OMS harness) — no OMS, no money/kill.
         if (drv->oms) {
+            // 3b(ii) commit 2 (G3-9): the driver's thread IS the backtest composer — bind at the
+            // compose entry (a per-tick relaxed store; backtest-only cost; the GUI's per-run worker
+            // thread + its per-run local state make a bind-once-at-init the wrong shape).
+            AggregatorState_BindComposer(drv->state->agg);
             EngineCommon_ComposeAndKillEval(*drv->state, *drv->oms, *drv->config,
                                             tick.price, (uint64_t)tick_index);
         } else {

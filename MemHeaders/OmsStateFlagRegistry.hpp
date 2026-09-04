@@ -49,9 +49,11 @@
 //   - KILL_SWITCH_TRIPPED:  set by the composer only — the per-OMS drawdown
 //                            gate (EventLoop_KillSwitchEvaluate) or a consumed
 //                            GLOBAL lane of AggregatorState::kill_trip_request
-//                            (EventLoop_KillSwitchTrip; D-479). NEVER cleared at
-//                            runtime: restart-only by design (D-481 / TD-328;
-//                            EventLoop_Unpause was deleted at 3b(ii) commit 1).
+//                            (EventLoop_KillSwitchTrip; D-479). In LIVE never cleared
+//                            at runtime — restart-only by design (D-481 / TD-328;
+//                            EventLoop_Unpause was deleted at 3b(ii) commit 1). In PAPER
+//                            the composer-executed paper reset clears it as a DO_RESET
+//                            row (D-481 paper clause, 2026-09-04).
 //   - EVENT_LOG_MODE:       set ONCE at OrderManager_Init from
 //                            cfg.oms_event_log_mode; read by drainer +
 //                            backtest hot paths (single thread per OMS).
@@ -118,7 +120,8 @@ namespace tt {
     X(PARTIAL_EXIT_ENABLED,                                                                             \
       "partials enabled: 0 = slot==node_id; 1 = slot = 2*node_id+leg (leg A/B per core)")               \
     /* Kill switch trip state. Set by the composer only (the drawdown gate, or a consumed GLOBAL     */ \
-    /* lane of kill_trip_request — D-479); NEVER cleared at runtime (restart-only, D-481/TD-328).   */ \
+    /* lane of kill_trip_request — D-479). LIVE: never cleared at runtime (restart-only, D-481/   */ \
+    /* TD-328). PAPER: the composer-executed paper reset clears it (DO_RESET; D-481 paper clause). */ \
     /* Tripping clears every registered core's permission with RELEASE; idempotent. Persisted as   */ \
     /* int (4 bytes) in snapshot — wire format preserved.                                           */ \
     X(KILL_SWITCH_TRIPPED,                                                                              \

@@ -176,6 +176,23 @@ static_assert(OMS_RESULT_RING_PER_NODE * MAX_EXECUTION_NODES == OMS_RESULT_QUEUE
 static_assert(OMS_RESULT_RING_PER_NODE >= 4,
               "per-node result depth floor: a node owns <=2 slots but bursts (partial ladders + "
               "a disposition re-submit) must not wedge against its own ring");
+// D-479 as amended (2026-09-04) — the bounded-push budget for the never-drop fill rings
+// (SPSCRing_TryPushBounded on the WS / REST producer threads). RAW TSC CYCLES: the unit
+// every rdtsc site + the drainer histogram already use, so no calibration constant exists
+// to drift. INTERIM: no build lane can produce the drainer-cycle p100 this was meant to be
+// derived from (the LATENCY_BENCH histogram is compiled out of every lane), so the number
+// is reasoned, not measured — the composer's worst KNOWN stall is the usleep(100) back-off
+// inside OrderEventLog_Append (the drainer cycle exceeds 100us by construction), and the
+// binding term is OS descheduling of the consumer (ms), so k=10 → ~10 ms ≈ 25,000,000
+// cycles at a nominal 2.5 GHz: far above any burst that clears, far below a stuck consumer's
+// minutes. TECH_DEBT-292 records that H8's <=100us slow budget is itself unmet — this
+// constant is measured against that reality, not the invariant's letter. RE-DERIVE when a
+// -DLATENCY_BENCH=ON lane records a real max_observed. The STUCK case is the watchdog's
+// (TECH_DEBT-326), never this budget's.
+constexpr uint64_t OMS_RING_PUSH_BUDGET_CYCLES = 25000000ULL;
+static_assert(OMS_RING_PUSH_BUDGET_CYCLES >= 1000000ULL,
+              "the bounded push must outlast a page-fault / preemption blip (>= 1M cycles) — "
+              "a smaller budget turns a healthy consumer's hiccup into a capital halt");
 
 //======================================================================
 // [STRUCT]_[SubmitCommand]
@@ -1186,7 +1203,7 @@ inline bool OMS_ResultPush(OrderManagerState<F>* oms, const Command& cmd) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [LIVE_TRADING] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[D-479 as amended (gate #3 G3-2) — the DURABLE fatal record a PRODUCER thread writes when a fill ring stays full past its bounded push: the DECODED fill (venue id, our id, command type, price, qty, commission, commission asset, complete/terminal, reason — SIDE is not carried by Command/OrderResult: the WS "S" field is unparsed, ACC-7) as a Health_Log CRITICAL line, a bump of the producer's OWN counter, then the GLOBAL lane of kill_trip_request. Non-template on purpose: the WS parser is F-independent code. Fatal-path-only latency; every ring stays one-producer; H3-clean (Health_Log is per-call fopen/fprintf/fclose, any-thread-safe). The channel's presence is a live-readiness REFUSE check (health_log_path_set)]
+// [OVERVIEW]_[D-479 as amended (gate #3 G3-2) — the DURABLE fatal record a PRODUCER thread writes when a fill ring stays full past its bounded push: the DECODED fill (venue id, our id, command type, price, qty, commission, commission asset, complete/terminal, reason — SIDE is not carried by Command/OrderResult: the WS "S" field is unparsed, ACC-7) — the producer's OWN counter bumped FIRST (its value rides in the record as fatal_n), the decoded fill written as a Health_Log CRITICAL line SECOND, the GLOBAL lane of kill_trip_request set LAST. Non-template on purpose: the WS parser is F-independent code. Fatal-path-only latency; every ring stays one-producer; H3-clean (Health_Log is per-call fopen/fprintf/fclose, any-thread-safe). The channel's presence is a live-readiness REFUSE check (health_log_path_set)]
 // [REFERENCE]_[DECISION]_[D-479]
 //======================================================================
 // [CODE]
@@ -1197,8 +1214,10 @@ inline bool OMS_ResultPush(OrderManagerState<F>* oms, const Command& cmd) {
 // already read by the GUI and outlives the process. E.1.4's venue-truth reconcile re-derives
 // the fill from GetMyTrades; this line is what tells the operator WHICH fill to look for.
 //
-// ORDER matters: record FIRST (durable), counter SECOND (the producer's own telemetry, relaxed),
-// trip LAST — so by the time the composer consumes the lane the evidence already exists on disk.
+// ORDER matters: counter FIRST (the producer's own telemetry, relaxed — its value rides in the
+// record as fatal_n), record SECOND (durable), trip LAST — so by the time the composer consumes
+// the lane the evidence already exists on disk. (Comment corrected 2026-09-04, AR-8 N-1: the
+// 2026-09-03 wording had the first two swapped; the code was always counter-first.)
 // `trip_word` = &agg.kill_trip_request (the producer stores the pointer at init — it cannot name
 // AggregatorState<F> from non-template code); NULL is tolerated so a harness can exercise the
 // record half alone. `own_counter` = the producer's relaxed atomic (ws_push_fatal / rest_push_fatal
@@ -1239,7 +1258,7 @@ static inline void OMS_RingFullFatalRecord(std::atomic<uint32_t>* trip_word,
                  cmd.result.commission_asset[0] ? cmd.result.commission_asset : "(asset?)",
                  cmd.result.error_message[0] ? cmd.result.error_message : "(none)",
                  durable ? "The health log holds the durable record."
-                         : "HEALTH LOG DISABLED (health_log_path empty) — this line is the ONLY record.");
+                         : "HEALTH LOG UNAVAILABLE (health_log_path empty, or unwritable — a LIVE boot refuses the latter at check_health_log_path_set) — this line is the ONLY record.");
     if (trip_word) trip_word->fetch_or(KILL_TRIP_LANE_GLOBAL(site), std::memory_order_release);
 }
 //======================================================================
