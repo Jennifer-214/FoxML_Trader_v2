@@ -473,7 +473,7 @@ static const CfgFieldDef field_defs[] = {
     // v5.15.5.F.4c — record_ticks + record_depth migrated to FOREACH_CFG_FIELD (KIND_BOOL;
     // HIGH-6 tooltip byte-identity preserved via single-string-literal concatenation).
     {"record_max_days",       "Max Days",     "Tick Recording",  CFG_FLOAT, "%.0f",
-        "Auto-delete tick + depth CSVs older than this many days\n30 = ~1-2GB cap on disk usage (more if depth recording is on)"},
+        "Auto-delete tick (_staging) + depth CSVs older than this many days\n0 = never prune (the depth dir is the backtest replay corpus)\n30 = ~1-2GB cap on disk usage (more if depth recording is on)"},
     // Operational Monitoring (Phase 8b) — alerts on kill switch, orphans, disconnects
     // notify_enabled migrated to FOREACH_OPS_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     {"notify_backend",        "Backend",      "Operational Monitoring", CFG_INT,   "%d",
