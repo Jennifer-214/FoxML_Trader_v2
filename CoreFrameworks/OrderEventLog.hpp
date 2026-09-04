@@ -100,7 +100,28 @@ enum OrderEventType : uint8_t {
                               // only, so FIFO guarantees every pre-reset event lands in the OLD
                               // file first — the ack-free property). H21: append-only code; the
                               // value is enum-space-reserved even though no record carries it.
+    OEVT_RING_FULL_FATAL = 9, // E.1.3 3b(ii) commit 1 (D-479 as amended, gate #3 G3-2): the
+                              // ledger-side MARKER the composer appends when it consumes a GLOBAL
+                              // lane of AggregatorState::kill_trip_request — a producer thread
+                              // found a fill ring full past its bounded push and wrote the
+                              // DECODED fill to the Health_Log CRITICAL record (the durable half;
+                              // it cannot Append — the composer is the sole appender). This row
+                              // says WHEN, in log order, the ledger stopped being complete:
+                              // node_id = -1, order_id = 0, qty = the composer's fatal sequence
+                              // (the Nth fatal), reason = "FATAL:<site>" (KillTripSiteRegistry.hpp
+                              // names; the fit in reason[32] is static_assert-pinned per row at
+                              // the append site). PERSISTED. H21: append-only.
 };
+// TECH_DEBT-330 — the codes are PERSISTED (OMSEL02 rows) and this is a plain enum the H21 guard
+// could not see until the identifier tool grew its plain-enum kind (enum:OrderEventType in
+// tools/identifier_ledger.txt). Belt: the values are pinned here too, so a renumber is a compile
+// error before it is a ledger red. Append below; never renumber; a retired code keeps its number.
+static_assert(OEVT_SUBMITTED == 0 && OEVT_ACKNOWLEDGED == 1 && OEVT_PARTIAL_FILL == 2 &&
+              OEVT_FULL_FILL == 3 && OEVT_REJECTED == 4 && OEVT_CANCELED == 5 &&
+              OEVT_RECONCILED == 6 && OEVT_CTRL_TRUNCATE == 7 && OEVT_TERMINAL_INCOMPLETE == 8 &&
+              OEVT_RING_FULL_FATAL == 9,
+              "OrderEventType codes are PERSISTED (OMSEL02) — H21 append-only; a renumber replays "
+              "old logs with the wrong meaning. Append a new code; never move one.");
 //======================================================================
 // [END_CODE]
 //======================================================================

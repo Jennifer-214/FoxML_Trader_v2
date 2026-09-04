@@ -89,6 +89,7 @@
 #include "Portfolio.hpp"
 #include "ShardedTradeLog.hpp"
 #include "SPSCRing.hpp"
+#include "../MemHeaders/HealthLog.hpp"   // D-479 — OMS_RingFullFatalRecord's durable CRITICAL line (any-thread-safe)
 #include "NodeState.hpp"   // P3-b (D-444) — FillEvent/EmitRecord/AggregatorState for the leaf emit path (leaf includes only; cycle-free)
 #include "../DataStream/CalibLogColRegistry.hpp"   // v5.14.10.D — FOREACH_CALIB_LOG_COL registry (closes TECH_DEBT-010)
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — FOREACH_OMS_STATE_FLAG bitmap cohort
@@ -700,7 +701,9 @@ struct OrderManagerState {
     // Configured by EventLoopState_ConfigureKillSwitch (which now writes
     // here through the OMS pointer). Disabled by default (both thresholds
     // zero). Tripping clears every registered core's permission with
-    // RELEASE; resume via EventLoop_Unpause.
+    // RELEASE. There is NO runtime resume: the GLOBAL kill is restart-only by
+    // design (D-481 / TECH_DEBT-328 — EventLoop_Unpause was dead code and was
+    // deleted at E.1.3 3b(ii) commit 1; the GUI reset clears NODE lanes only).
     // kill_switch_tripped bit lives in oms_state_flags above (v5.15.5.C.2).
     Money  ks_min_balance;       // trip if balance < this
     Money  ks_max_drawdown_pct;  // trip if (peak - balance) / peak > this (0 = disabled)
@@ -1176,6 +1179,73 @@ inline bool OMS_ResultPush(OrderManagerState<F>* oms, const Command& cmd) {
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[OMS_ResultPush]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OMS_RingFullFatalRecord]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[D-479 as amended (gate #3 G3-2) — the DURABLE fatal record a PRODUCER thread writes when a fill ring stays full past its bounded push: the DECODED fill (venue id, our id, command type, price, qty, commission, commission asset, complete/terminal, reason — SIDE is not carried by Command/OrderResult: the WS "S" field is unparsed, ACC-7) as a Health_Log CRITICAL line, a bump of the producer's OWN counter, then the GLOBAL lane of kill_trip_request. Non-template on purpose: the WS parser is F-independent code. Fatal-path-only latency; every ring stays one-producer; H3-clean (Health_Log is per-call fopen/fprintf/fclose, any-thread-safe). The channel's presence is a live-readiness REFUSE check (health_log_path_set)]
+// [REFERENCE]_[DECISION]_[D-479]
+//======================================================================
+// [CODE]
+//======================================================================
+// WHY the record is a Health_Log line and not a ring/mailbox/file: every in-memory carrier is
+// unread by construction in the one case this exists for (a stuck consumer), and the rejected
+// overflow side-ring argument applies to each of them verbatim. The house durable channel is
+// already read by the GUI and outlives the process. E.1.4's venue-truth reconcile re-derives
+// the fill from GetMyTrades; this line is what tells the operator WHICH fill to look for.
+//
+// ORDER matters: record FIRST (durable), counter SECOND (the producer's own telemetry, relaxed),
+// trip LAST — so by the time the composer consumes the lane the evidence already exists on disk.
+// `trip_word` = &agg.kill_trip_request (the producer stores the pointer at init — it cannot name
+// AggregatorState<F> from non-template code); NULL is tolerated so a harness can exercise the
+// record half alone. `own_counter` = the producer's relaxed atomic (ws_push_fatal / rest_push_fatal
+// land with their producers in 3b(ii) commit 4); NULL skips the bump.
+static inline void OMS_RingFullFatalRecord(std::atomic<uint32_t>* trip_word,
+                                           KillTripSite site,
+                                           std::atomic<uint64_t>* own_counter,
+                                           const Command& cmd) {
+    const unsigned long long n =
+        own_counter ? (unsigned long long)(own_counter->fetch_add(1, std::memory_order_relaxed) + 1) : 0ULL;
+    // node_id -1: the record is account-level — the id lane is the only routing the composer will
+    // reconstruct, and it rides in our_id below. Display-only doubles: OrderResult carries them.
+    const int durable = tt::Health_Log(tt::HEALTH_CRITICAL, "ring_full_fatal", -1,
+                   "site=%s fatal_n=%llu FILL NOT BOOKED — venue_id=%s our_id=%llu cmd_type=%u "
+                   "success=%d price=%.8f qty=%.8f commission=%.8f %s complete=%u terminal=%u "
+                   "reason=%s (GLOBAL kill requested; restart-only — reconcile from venue truth)",
+                   tt::KillTripSite_Name((uint8_t)site), n,
+                   cmd.result.exchange_id[0] ? cmd.result.exchange_id : "(none)",
+                   (unsigned long long)cmd.order_id, (unsigned)cmd.type,
+                   cmd.result.success, cmd.result.avg_fill_price, cmd.result.fill_qty,
+                   cmd.result.commission,
+                   cmd.result.commission_asset[0] ? cmd.result.commission_asset : "(asset?)",
+                   (unsigned)cmd.result.order_complete, (unsigned)cmd.result.venue_terminal,
+                   cmd.result.error_message[0] ? cmd.result.error_message : "(none)");
+    // The stderr line carries the SAME decoded fill so an operator without a health log path
+    // still has the recovery input in the terminal scrollback. Health_Log returns 0 when
+    // health_log_path is empty (the cfg default) — that is a live-readiness REFUSE
+    // (health_log_path_set), so live capital never reaches this line without the channel;
+    // paper/shadow says so loudly instead of pretending the record was durable (V-1 M-3).
+    std::fprintf(stderr,
+                 "[OMS] RING FULL FATAL at %s (fatal_n=%llu): fill NOT booked — venue_id=%s our_id=%llu "
+                 "cmd_type=%u qty=%.8f @ %.8f commission=%.8f %s reason=%s; GLOBAL kill requested "
+                 "(restart-only). %s\n",
+                 tt::KillTripSite_Name((uint8_t)site), n,
+                 cmd.result.exchange_id[0] ? cmd.result.exchange_id : "(none)",
+                 (unsigned long long)cmd.order_id, (unsigned)cmd.type,
+                 cmd.result.fill_qty, cmd.result.avg_fill_price, cmd.result.commission,
+                 cmd.result.commission_asset[0] ? cmd.result.commission_asset : "(asset?)",
+                 cmd.result.error_message[0] ? cmd.result.error_message : "(none)",
+                 durable ? "The health log holds the durable record."
+                         : "HEALTH LOG DISABLED (health_log_path empty) — this line is the ONLY record.");
+    if (trip_word) trip_word->fetch_or(KILL_TRIP_LANE_GLOBAL(site), std::memory_order_release);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_RingFullFatalRecord]
 //======================================================================
 
 //======================================================================

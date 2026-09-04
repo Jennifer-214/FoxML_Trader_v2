@@ -392,7 +392,8 @@ static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHAL
     X(WARMUP,       "warmup",       "reserved — warmup state via permission=0 instead") \
     X(NODE_BUDGET,  "node-budget",  "node open_notional >= allocated") \
     X(NODE_KILL,    "node-kill",    "per-node kill switch tripped") \
-    X(IMBALANCE,    "imbalance",    "book imbalance below threshold (Track E.3)")
+    X(IMBALANCE,    "imbalance",    "book imbalance below threshold (Track E.3)") \
+    X(GLOBAL_KILL,  "global-kill",  "OMS-wide kill switch tripped (restart-only; D-481) — the slow path mirrors the published kill_word's GLOBAL bit")
 
 // Auto-generated HALT_<id> constants. Underlying type uint8_t — matches
 // the existing `halt_reason` field width on EventLoopState::nodes[].

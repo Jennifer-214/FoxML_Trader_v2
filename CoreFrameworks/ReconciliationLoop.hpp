@@ -78,7 +78,9 @@ struct ReconciliationLoopState {
     // Thread
     std::thread thread;
     std::atomic<int> shutdown_requested;
-    std::atomic<int> trigger_now;  // set externally (e.g. WS reconnect)
+    // (trigger_now DELETED at E.1.3 3b(ii) commit 1 — D-481 / TECH_DEBT-328: its only writer,
+    //  ReconciliationLoop_TriggerNow, had ZERO callers; H21 rule 3 removes dead capital-path
+    //  code. A future "reconcile now" hook re-adds the word WITH its caller.)
 
     // Observability (atomic for TUI reads)
     std::atomic<uint64_t> total_polls;
@@ -235,14 +237,11 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
 template <unsigned F>
 static inline void reconcile_thread_body(ReconciliationLoopState<F>* s) {
     while (s->shutdown_requested.load(std::memory_order_acquire) == 0) {
-        // Sleep for interval_secs, checking shutdown and trigger_now every 100ms.
+        // Sleep for interval_secs, checking shutdown every 100ms. (The trigger_now
+        // early-out was deleted with its never-called writer — D-481 / TECH_DEBT-328.)
         int wait_cycles = s->interval_secs * 10;
         for (int i = 0; i < wait_cycles; ++i) {
             if (s->shutdown_requested.load(std::memory_order_acquire)) return;
-            if (s->trigger_now.load(std::memory_order_relaxed)) {
-                s->trigger_now.store(0, std::memory_order_relaxed);
-                break;  // immediate reconcile
-            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
@@ -281,7 +280,6 @@ static inline int ReconciliationLoop_Init(ReconciliationLoopState<F>* s,
     s->balance_tolerance = balance_tolerance;
     s->qty_tolerance     = 1e-6;
     s->shutdown_requested.store(0, std::memory_order_relaxed);
-    s->trigger_now.store(0, std::memory_order_relaxed);
     s->total_polls.store(0, std::memory_order_relaxed);
     s->drift_corrections.store(0, std::memory_order_relaxed);
     s->last_drift_usdt.store(0.0, std::memory_order_relaxed);
@@ -300,19 +298,16 @@ static inline int ReconciliationLoop_Init(ReconciliationLoopState<F>* s,
 //======================================================================
 
 //----------------------------------------------------------------------
-// [SECTION]_[start / trigger-now — thread launch + external immediate-pass hook]
+// [SECTION]_[start — thread launch]
 //----------------------------------------------------------------------
+// (ReconciliationLoop_TriggerNow — "external callers can force an immediate pass" — was
+//  DELETED at E.1.3 3b(ii) commit 1 with its trigger_now word: zero callers since it was
+//  written; D-481 / TECH_DEBT-328, H21 rule 3.)
 template <unsigned F>
 static inline void ReconciliationLoop_Start(ReconciliationLoopState<F>* s) {
     s->thread = std::thread(reconcile_thread_body<F>, s);
     fprintf(stderr, "[Reconciler] thread started (interval=%ds tolerance=$%.4f)\n",
             s->interval_secs, s->balance_tolerance);
-}
-
-// External callers (e.g. WS reconnect) can force an immediate pass.
-template <unsigned F>
-static inline void ReconciliationLoop_TriggerNow(ReconciliationLoopState<F>* s) {
-    s->trigger_now.store(1, std::memory_order_relaxed);
 }
 
 //======================================================================

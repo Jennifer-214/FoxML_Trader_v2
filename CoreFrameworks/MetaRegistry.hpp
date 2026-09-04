@@ -143,7 +143,8 @@
     X(FOREACH_SLOW_PATH_GATE                    , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Slow-path gate registry (cfg-flag eligibility canon).") \
     X(FOREACH_SP_SECTION                        , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Slow-path section enum (regime/rebuild/etc.).") \
     X(FOREACH_PANEL                             , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "GUI panel registry.") \
-    X(FOREACH_ROLLING_WINDOW                    , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Rolling window template variant registry.")
+    X(FOREACH_ROLLING_WINDOW                    , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Rolling window template variant registry.") \
+    X(FOREACH_KILL_TRIP_SITE                    , 1,      FOREACH_REGISTRY                 , "SSOT",              "GLOBAL fatal-trip sites of AggregatorState::kill_trip_request (D-479 as amended; the KTS_* enum + name table the OEVT_RING_FULL_FATAL marker + the Health_Log CRITICAL record persist; enum:KillTripSite in the H21 ledger).")
 
 #undef ROOT_NONE
 //======================================================================

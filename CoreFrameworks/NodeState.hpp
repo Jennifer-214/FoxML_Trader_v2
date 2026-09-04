@@ -58,6 +58,7 @@
 #include "IndexSpaces.hpp"
 #include "ParameterSlot.hpp"
 #include "SPSCRing.hpp"
+#include "../MemHeaders/KillTripSiteRegistry.hpp"  // D-479 — the GLOBAL lanes of AggregatorState::kill_trip_request
 
 //======================================================================================================
 // [STRUCT]_[FillEvent]
@@ -457,7 +458,25 @@ struct alignas(64) AggregatorState {
     // paper_reset_seq — consumers stay GUI-agnostic per blindspot punch 9).
     std::atomic<uint32_t> reset_request{0};
     uint32_t reset_seq = 0;
-    uint64_t _pad_line0[3] = {};        // H12: explicit pad to the line boundary
+    // D-479 as amended (gate #3 G3-1, 3b(ii) commit 1) — the kill-TRIP request word, the sibling
+    // of kill_reset_mask above and the (L)(2) drift-trip->command vehicle landed early. Bits 0..15
+    // = per-NODE trip lanes; bits 16..31 = GLOBAL trip lanes, one per FOREACH_KILL_TRIP_SITE row
+    // (KillTripSiteRegistry.hpp). ANY thread fetch_or(release)s a lane (a venue producer that found
+    // a fill ring full past its bounded push; a node's drift latch); ONLY the composer consumes
+    // (exchange(0, acq_rel)) at compose step 0a and applies — node lanes replay the per-node trip
+    // body, GLOBAL lanes are EventLoop_KillSwitchTrip's first live caller + the OEVT_RING_FULL_FATAL
+    // marker row. Design row 2 holds: the composer stays the SOLE writer of the KILL bits and of
+    // kill_word — this word is design row 3's "manual trip = INPUT". A GLOBAL lane is RESTART-ONLY
+    // (D-481: the global kill bit has no runtime reset path, on purpose — an unbooked fill has
+    // already corrupted the ledger every node reads). Cluster-external-capable by construction
+    // (D-480): any holder of this struct's pointer can request; a cross-cluster mediator needs no
+    // second word. On line 0 with the other request atomics — fatal-path-only writes, so the
+    // fetch_or never contends with the hot threads' relaxed kill_word loads in steady state.
+    std::atomic<uint32_t> kill_trip_request{0};
+    // Composer-written: how many GLOBAL fatal lanes it has consumed (the OEVT_RING_FULL_FATAL
+    // marker row's qty = this sequence, so the log can be read as "the Nth fatal"). Never reset.
+    uint32_t kill_trip_fatal_seq = 0;
+    uint64_t _pad_line0[2] = {};        // H12: explicit pad to the line boundary (24 B before; 16 B now)
 
     // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
     //      from Phase 1). applied_seq[n] = last FillEvent.seq applied from node n's ring —
@@ -528,6 +547,10 @@ static_assert(offsetof(NodeState<64>, _kill_mirror_reserved)   == 128, "cluster 
 static_assert(offsetof(NodeState<64>, _binding_reserved)       == 192, "cluster line 3 anchor");
 static_assert(sizeof(ClusterState<64>) == 64,    "ClusterState<64> Phase-0 shell: 1 x 64B line");
 static_assert(offsetof(AggregatorState<64>, kill_word)   == 0,   "kill word owns line 0 (SSoT, H6)");
+static_assert(offsetof(AggregatorState<64>, kill_trip_request) + sizeof(uint32_t) <= 64 &&
+              offsetof(AggregatorState<64>, kill_trip_fatal_seq) + sizeof(uint32_t) <= 64,
+              "the kill-TRIP request word + its fatal sequence ride line 0 with the other request "
+              "atomics (D-479 G3-1: zero growth — they replaced pad words)");
 static_assert(offsetof(AggregatorState<64>, applied_seq) == 64,  "apply cursors at lines 1-2");
 static_assert(offsetof(AggregatorState<64>, publish)     == 192, "publish port after the state lines (D-444: led_* line retired; re-pinned 256->192)");
 static_assert(offsetof(AggregatorState<64>, fill_rings)  == 192 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),

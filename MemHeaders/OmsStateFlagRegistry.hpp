@@ -46,9 +46,12 @@
 //   - LIVE_TRADING:         set ONCE at engine init from cfg.live_trading.
 //   - PARTIAL_EXIT_ENABLED: set ONCE at engine init from cfg lifecycle
 //                            flags; toggle requires snapshot v3 reload.
-//   - KILL_SWITCH_TRIPPED:  set by per-OMS drawdown gate (drainer thread,
-//                            single writer); cleared by EventLoop_Unpause
-//                            (same thread on resume path).
+//   - KILL_SWITCH_TRIPPED:  set by the composer only — the per-OMS drawdown
+//                            gate (EventLoop_KillSwitchEvaluate) or a consumed
+//                            GLOBAL lane of AggregatorState::kill_trip_request
+//                            (EventLoop_KillSwitchTrip; D-479). NEVER cleared at
+//                            runtime: restart-only by design (D-481 / TD-328;
+//                            EventLoop_Unpause was deleted at 3b(ii) commit 1).
 //   - EVENT_LOG_MODE:       set ONCE at OrderManager_Init from
 //                            cfg.oms_event_log_mode; read by drainer +
 //                            backtest hot paths (single thread per OMS).
@@ -114,9 +117,10 @@ namespace tt {
     /* uses it for slot→node_id mapping (Sharded_LegSlot). Toggle requires snapshot v3 reload.      */ \
     X(PARTIAL_EXIT_ENABLED,                                                                             \
       "partials enabled: 0 = slot==node_id; 1 = slot = 2*node_id+leg (leg A/B per core)")               \
-    /* Kill switch trip state. Set by per-OMS drawdown gate (drainer thread); cleared by             */ \
-    /* EventLoop_Unpause (same thread). Tripping clears every registered core's permission with      */ \
-    /* RELEASE; idempotent. Persisted as int (4 bytes) in snapshot — wire format preserved.          */ \
+    /* Kill switch trip state. Set by the composer only (the drawdown gate, or a consumed GLOBAL     */ \
+    /* lane of kill_trip_request — D-479); NEVER cleared at runtime (restart-only, D-481/TD-328).   */ \
+    /* Tripping clears every registered core's permission with RELEASE; idempotent. Persisted as   */ \
+    /* int (4 bytes) in snapshot — wire format preserved.                                           */ \
     X(KILL_SWITCH_TRIPPED,                                                                              \
       "OMS-wide kill switch tripped; entries blocked until manual resume")
 

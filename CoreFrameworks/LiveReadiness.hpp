@@ -119,6 +119,14 @@ inline bool check_secret_nonempty(const ControllerConfig<F>& cfg,
     return cfg.held_out_stamp_secret[0] != '\0';
 }
 
+// E.1.3 3b(ii) commit 1 (D-479) — the durable ring-full fatal record is a Health_Log line;
+// an empty health_log_path makes it a stderr line only. Live capital needs the channel.
+template <unsigned F>
+inline bool check_health_log_path_set(const ControllerConfig<F>& cfg,
+                                      const EventLoopState<F>&) {
+    return cfg.health_log_path[0] != '\0';
+}
+
 template <unsigned F>
 inline bool check_mlockall_required(const ControllerConfig<F>& cfg,
                                     const EventLoopState<F>&) {
@@ -301,7 +309,13 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
     X(no_build_flags_drift,        check_no_build_flags_drift,        LR_SEV_WARN, \
       "rebuild engine with same flags as training, OR accept divergence") \
     X(all_stamps_hmac_verified,    check_all_stamps_hmac_verified,    LR_SEV_REFUSE, \
-      "set held_out_stamp_secret + model_verify_strict=1")
+      "set held_out_stamp_secret + model_verify_strict=1") \
+    /* E.1.3 3b(ii) commit 1 (D-479 G3-2; V-1 finding M-3): the ring-full fatal record is a   */ \
+    /* Health_Log CRITICAL line — the DURABLE half of "a fill is never dropped silently". With  */ \
+    /* health_log_path empty (the cfg default) Health_Log returns 0 and the decoded fill exists  */ \
+    /* on stderr only. Live capital REFUSES to boot without the durable channel.                 */ \
+    X(health_log_path_set,         check_health_log_path_set,         LR_SEV_REFUSE, \
+      "set health_log_path (e.g. logging/health.jsonl) — the ring-full fatal record needs a durable channel")
 
 #define FOREACH_LIVE_READINESS_CHECK_COUNT_ONE(name, fn_ptr, sev, hint) +1
 #define FOREACH_LIVE_READINESS_CHECK_COUNT \

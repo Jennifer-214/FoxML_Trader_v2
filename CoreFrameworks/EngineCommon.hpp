@@ -387,6 +387,81 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
         }
     }
 
+    // ── 0a. Apply pending kill-TRIP requests (D-479 as amended, gate #3 G3-1; 3b(ii) commit 1;
+    //        single consumer: this thread — design row 2 holds, the composer stays the SOLE
+    //        writer of every KILL bit; the word is design row 3's "manual trip = INPUT"). ──
+    //        NODE lanes replay the per-node trip body (the (L)(2) drift-trip vehicle, landed
+    //        early). GLOBAL lanes are EventLoop_KillSwitchTrip's FIRST live caller: one fatal
+    //        site per lane, each consumed lane = one OEVT_RING_FULL_FATAL marker row (the
+    //        producer already wrote the DECODED fill to the Health_Log CRITICAL record —
+    //        OMS_RingFullFatalRecord — the composer's row says WHEN in log order the ledger
+    //        stopped being complete). Restart-only: no lane here ever clears the global bit.
+    //        Ordering: BEFORE step 1/2 so a request lands in THIS compose's kill_word (step 3).
+    {
+        uint32_t tr = agg.kill_trip_request.exchange(0, std::memory_order_acq_rel);
+        uint32_t node_lanes = tr & KILL_TRIP_MASK_NODES;
+        while (node_lanes) {
+            const int c = __builtin_ctz(node_lanes);
+            node_lanes &= node_lanes - 1;
+            if (c >= state.registered_count || c >= MAX_EXECUTION_NODES) continue;   // lane names no node
+            const tt::NodeIdx nn{(int16_t)c};
+            if (NODE_STATE_FLAG_IS_SET(state.nodes[nn], KILL_TRIPPED)) continue;    // idempotent
+            NODE_STATE_FLAG_SET(state.nodes[nn], KILL_TRIPPED);
+            state.nodes[nn].node_ks_trips_total++;
+            fprintf(stderr, "[sharded] NODE KILL: node %d tripped BY REQUEST (kill_trip_request lane %d)\n", c, c);
+            if (g_notify) {
+                char body[160];
+                snprintf(body, sizeof(body),
+                         "Node %d kill tripped by request (trip word lane %d). Entries halted on "
+                         "this node until manual reset.", c, c);
+                Notify_Send(g_notify, NOTIFY_ALERT, NK_NODE_KILL_TRIP,
+                            "Per-node kill switch tripped (requested)", body);
+            }
+        }
+        uint32_t global_lanes = (tr & KILL_TRIP_MASK_GLOBAL) >> KILL_TRIP_SHIFT_GLOBAL;
+        while (global_lanes) {
+            const int site = __builtin_ctz(global_lanes);
+            global_lanes &= global_lanes - 1;
+            agg.kill_trip_fatal_seq++;
+            EventLoop_KillSwitchTrip(&state);   // idempotent on the flag; clears every permission
+            fprintf(stderr, "[sharded] GLOBAL KILL: fatal site %s (fatal_n=%u) — RESTART-ONLY; "
+                            "an unbooked fill is on the health log; reconcile from venue truth\n",
+                    tt::KillTripSite_Name((uint8_t)site), agg.kill_trip_fatal_seq);
+            if (g_notify) {
+                char body[200];
+                snprintf(body, sizeof(body),
+                         "GLOBAL kill tripped by fatal site %s (fatal #%u): a fill was NOT booked "
+                         "(ring full past the bounded push). Restart-only; reconcile from venue truth.",
+                         tt::KillTripSite_Name((uint8_t)site), agg.kill_trip_fatal_seq);
+                Notify_Send(g_notify, NOTIFY_ALERT, NK_KILL_TRIGGER, "GLOBAL kill switch tripped", body);
+            }
+            // The ledger-side marker (mode-gated like every append — D-441). Composer-direct on
+            // purpose: this thread IS the sole appender (OMS_EventFunnelDrain's caller); a funnel
+            // push here would take the slot<0 -> ring-0 convention V11 condemns.
+            if (MBS_EQ_U8(oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                          tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
+                OrderEvent<F> marker;
+                std::memset(&marker, 0, sizeof(marker));
+                marker.type       = OEVT_RING_FULL_FATAL;
+                marker.order_type = ORDER_MARKET_BUY;   // placeholder, as OEVT_RECONCILED
+                marker.node_id    = -1;                 // account-level: the ledger, not a node
+                marker.qty        = Money_FromInt((int64_t)agg.kill_trip_fatal_seq);
+                // reason[32] holds 31 chars: "FATAL:" + the longest site name (21) = 27. The
+                // fit is PINNED per registry row below — a longer site name is a compile error,
+                // never a silently truncated persisted reason (the first cut used a 16-char
+                // prefix and would have truncated PAPER_SYNTH_RING_FULL on disk).
+#define X_KTS_REASON_FITS(name, val, doc)                                                      \
+                static_assert(sizeof("FATAL:" #name) <= sizeof(OrderEvent<F>::reason),          \
+                              "OEVT_RING_FULL_FATAL reason must hold FATAL:<site> untruncated");
+                FOREACH_KILL_TRIP_SITE(X_KTS_REASON_FITS)
+#undef X_KTS_REASON_FITS
+                snprintf(marker.reason, sizeof(marker.reason), "FATAL:%s",
+                         tt::KillTripSite_Name((uint8_t)site));
+                (void)OrderEventLog_Append(&oms.event_log, marker);
+            }
+        }
+    }
+
     // ── 0b. Apply GUI-drag commands (P2-c): the composer owns positions; the producer only
     //        packages requests now. Hot re-arm from these values is Phase 5 (TD-184). ──
     {
@@ -1604,9 +1679,19 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
         _sec_t_tail - _sec_t_tsl_start, _sec_t_tail);
 
     // === Warmup permission grant (per-core check) ===
+    // D-481 (V-1 H-2, 2026-09-03): the grant is gated on the published kill_word's GLOBAL bit.
+    // Before this, EventLoop_KillSwitchTrip cleared every permission and THIS line re-granted
+    // it one slow cycle later — the OMS-wide kill held for the bit and for nothing else, since
+    // the sharded flip. A relaxed 8-B load of the composer's coherent word (the reason it is one
+    // uint64): ~1 ns on the slow path, H22-pure (the cluster's published truth, not another
+    // node's state). Per-NODE kills keep their own read-side mirror (HALT_NODE_KILL); the
+    // GLOBAL mirror for the gates + halt reason sits in EventLoop_RebuildOneCore.
+    const bool global_kill =
+        (state.agg.kill_word.load(std::memory_order_relaxed) & KILLWORD_MASK_GLOBAL) != 0;
     uint32_t min_samples = cfg.min_warmup_samples > 0
         ? cfg.min_warmup_samples : 64;
-    if (sst->rolling_short.count >= (int)min_samples &&
+    if (!global_kill &&
+        sst->rolling_short.count >= (int)min_samples &&
         state.nodes[tt::NodeIdx{(int16_t)c}].strategy_id != STRATEGY_NONE) {
         // Original LIVE used producer-thread static `` array
         // address; helper uses the pointer stored on EventLoopState via

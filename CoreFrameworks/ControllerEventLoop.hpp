@@ -31,7 +31,7 @@
 //   - [FUNCTION]_[EventLoop_FlattenAll] (+ CheckWsStaleness / TryClearRecovery)
 //   - [FUNCTION]_[EventLoop_TrailingSLRatchetOneCore]
 //   - [FUNCTION]_[EventLoop_BreakevenOnProfitOneCore]
-//   - [FUNCTION]_[EventLoop_Unpause] (+ SlowPath / RunController)
+//   - [FUNCTION]_[EventLoop_SlowPath] (+ RunController; Unpause DELETED 3b(ii) commit 1 — D-481, restart-only)
 //======================================================================================================
 // Per-core sharded engine controller-side. Reads TradeEvents from each
 // registered execution core's event ring, processes entries and exits into
@@ -3329,6 +3329,16 @@ inline void EventLoop_RebuildOneCore(
         if (NODE_STATE_FLAG_IS_SET(state->nodes[tt::NodeIdx{(int16_t)slot}], KILL_TRIPPED)) {
             zero_gate(HALT_NODE_KILL);
         }
+        // D-481 (V-1 H-2, 2026-09-03) — the GLOBAL mirror the per-node one always had: the
+        // OMS-wide kill (the drawdown gate, or a consumed GLOBAL lane of kill_trip_request —
+        // D-479) is read here from the composer's published kill_word (one relaxed 8-B load of
+        // the coherent word; H22-pure) and zero-gates entries with its own halt reason, so the
+        // panel says WHY and the entry block holds past the next slow cycle regardless of the
+        // permission bit. Restart-only: nothing clears the bit at runtime. The warmup grant in
+        // EngineCommon_SlowPathCycleOneCore reads the same bit and withholds permission.
+        if ((state->agg.kill_word.load(std::memory_order_relaxed) & KILLWORD_MASK_GLOBAL) != 0) {
+            zero_gate(HALT_GLOBAL_KILL);
+        }
 
         // SL COOLDOWN: decrement counter; if still active, zero-gate.
         if (state->nodes[tt::NodeIdx{(int16_t)slot}].sl_cooldown_remaining > 0) {
@@ -3625,8 +3635,13 @@ inline void EventLoop_ClearAllPermissions(EventLoopState<F>* state) {
     }
 }
 
-// manual trip — used by external monitors (e.g. orphan recovery, operator
-// command) that need to halt trading without going through the threshold check.
+// manual trip — halts trading without going through the threshold check.
+// FIRST LIVE CALLER (E.1.3 3b(ii) commit 1, D-479 as amended): the composer,
+// consuming a GLOBAL lane of AggregatorState::kill_trip_request at compose
+// step 0a (a producer thread found a fill ring full past its bounded push).
+// Composer-thread ONLY — the KILL bit + every permission store stay single-
+// writer (design row 2); any other thread REQUESTS via the trip word, never
+// calls this. Restart-only: nothing clears the bit at runtime (D-481).
 // idempotent: trips_total only bumps on a state transition.
 template <unsigned F>
 inline void EventLoop_KillSwitchTrip(EventLoopState<F>* state) {
@@ -3648,14 +3663,18 @@ inline void EventLoop_KillSwitchTrip(EventLoopState<F>* state) {
 //      drawdown = (ks_peak_balance - balance) / ks_peak_balance
 //
 // the function is idempotent: once tripped, subsequent calls return 0 even if
-// the conditions still hold. caller must call _Unpause to reset and re-arm.
+// the conditions still hold. There is NO runtime re-arm: the OMS-wide kill is
+// RESTART-ONLY (D-481 / TECH_DEBT-328; _Unpause was deleted at E.1.3 3b(ii)
+// commit 1). The per-core slow path mirrors the GLOBAL bit of the published
+// kill_word (HALT_GLOBAL_KILL + no warmup re-grant) so the halt holds past the
+// next slow cycle — the bit alone never gated a single entry (V-1 H-2).
 //
 // pitfall P9.2: caller drains events BEFORE evaluating so any in-flight exits
 // are folded into balance first. the EventLoop_RunController loop already does
 // this via DrainEvents → KillSwitchEvaluate ordering.
 //
 // pitfall P9.4: when permission is cleared, future Set/Restore must be paired
-// with a valid strategy assignment. _Unpause enforces this.
+// with a valid strategy assignment (the warmup grant checks strategy_id).
 //======================================================================================================
 template <unsigned F>
 inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
@@ -3699,20 +3718,12 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 //======================================================================
 
 //------------------------------------------------------------------------------
-// UNPAUSE — restore permission on cores with assigned strategies
-// (doc for EventLoop_Unpause, defined below after the exit-mechanism family)
+// (no UNPAUSE) — the GLOBAL kill has NO runtime resume since E.1.3 3b(ii) commit 1
+// (D-481 / TECH_DEBT-328): EventLoop_Unpause was dead code (zero callers since the
+// sharded flip) and a D-479 fatal is restart-only by design. Per-NODE resets ride
+// AggregatorState::kill_reset_mask (the composer clears the node lane + re-grants
+// that node's permission at its next rebuild); nothing clears the OMS-wide bit.
 //------------------------------------------------------------------------------
-// reset the tripped flag and grant permission to every core that has a valid
-// strategy assignment. cores with strategy_id == STRATEGY_NONE stay paused
-// (pitfall P9.7 — they were never authorized to trade).
-//
-// the caller is expected to have re-pushed fresh parameters via
-// EventLoop_PushParameters BEFORE calling this. setting permission=1 against a
-// stale parameter pack is the bug pitfall P9.4 warns about; the safe sequence
-// is RebuildAllParameters → PushParameters → Unpause.
-//
-// returns the number of cores that had permission restored.
-//======================================================================================================
 
 //======================================================================
 // [FUNCTION]_[EventLoop_TimeExitOneCore]
@@ -4218,28 +4229,14 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[EventLoop_Unpause]
+// [FUNCTION]_[EventLoop_SlowPath]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[reset the trip + re-grant permission to strategy-assigned nodes (doc block above the exit family; safe sequence: Rebuild -> Push -> Unpause per P9.4); SlowPath (no-op hook) + RunController (controller main loop) share the section]
+// [OVERVIEW]_[SlowPath (no-op hook) + RunController (controller main loop) share the section. EventLoop_Unpause — the only runtime CLR of the GLOBAL kill bit — was DELETED here at E.1.3 3b(ii) commit 1 (D-481 / TECH_DEBT-328): it had ZERO production callers since the sharded flip, and a D-479 GLOBAL fatal is RESTART-ONLY by design — an unbooked fill has already corrupted the ledger every node reads; the GUI reset clears NODE lanes only (kill_reset_mask). H21 rule 3: dead capital-path code is removed, not left compiled-in]
 //======================================================================
 // [CODE]
 //======================================================================
-template <unsigned F>
-inline int EventLoop_Unpause(EventLoopState<F>* state) {
-    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-    BITMAP_CLR(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
-    int resumed = 0;
-    for (int slot = 0; slot < state->registered_count; ++slot) {
-        ExecutionCore<F>* core = state->nodes[tt::NodeIdx{(int16_t)slot}].core;
-        if (!core) continue;
-        if (state->nodes[tt::NodeIdx{(int16_t)slot}].strategy_id == STRATEGY_NONE) continue;
-        ExecutionCore_SetPermission(core, 1);
-        ++resumed;
-    }
-    return resumed;
-}
 
 //------------------------------------------------------------------------------
 // [SECTION]_[SLOW PATH HOOK]
@@ -4303,7 +4300,7 @@ inline void EventLoop_RunController(EventLoopState<F>* state,
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [END_FUNCTION]_[EventLoop_Unpause]
+// [END_FUNCTION]_[EventLoop_SlowPath]
 //======================================================================
 
 }  // namespace tt

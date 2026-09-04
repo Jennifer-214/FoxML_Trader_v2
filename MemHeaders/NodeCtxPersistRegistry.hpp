@@ -259,8 +259,10 @@ static_assert(FOREACH_NODE_PERSIST_FIELD_COUNT == 29,
     X(intended_tp,       DERIVED_BEFORE_ARM,                                                         \
       "Written ControllerEventLoop.hpp:3501 every full rebuild. The arming flag is the core's "      \
       "PERMISSION bit: the only capital consumer (handle_buy_fill) is unreachable until it is 1, "   \
-      "and its ONLY grant site is ExecutionCore_SetPermission(.., 1) at EngineCommon.hpp:809, "      \
-      "which runs after the boot rebuild. The two other writers are boot/plumbing, not competing "   \
+      "and its grant sites are ExecutionCore_SetPermission(.., 1) in the per-core warmup grant of "  \
+      "EngineCommon_SlowPathCycleOneCore (gated on the GLOBAL kill since D-481) and the backtest "   \
+      "boot grant in BacktestSharded.hpp, both after the boot rebuild (cite re-resolved 2026-09-03). "\
+      "The two other writers are boot/plumbing, not competing "                                     \
       "derives: :1286 seeds it inside EventLoopState_RegisterCore and :1608 is the "                 \
       "EventLoopState_SetIntendedParams setter. Note TECH_DEBT-276: these three are also "           \
       "unenumerated cross-thread multi-word reads -- a separate concern from persistence, "          \
