@@ -303,7 +303,10 @@ static inline void ExecutionCore_Init(
     core->live_sl_b     = Money_Zero();
     core->node_id    = node_id;
     core->tick_ring  = tick_ring;
-    GateParameters<F> initial;
+    // TECH_DEBT-340 (H12): value-init — the seed pack is copied into param_slot AND cached_params
+    // below, so any byte Init does not set would ride into the hot path's cache and the first
+    // published pack. Init now zeroes every field; the {} is the belt at this ONE construction site.
+    GateParameters<F> initial{};
     GateParameters_Init(&initial);
     ParameterSlot_Init(&core->param_slot, initial);
     // Cache starts as a copy of the initial pack with cached_seq = sentinel

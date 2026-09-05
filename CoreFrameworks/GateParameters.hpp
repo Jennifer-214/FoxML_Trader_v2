@@ -19,6 +19,7 @@
 #pragma once
 
 #include "../FixedPoint/FixedPointN.hpp"
+#include <cstddef>   // offsetof — the TECH_DEBT-340 tail-pad pin
 #include "../Strategies/StrategyInterface.hpp"
 #include "Tick.hpp"
 #include <cstdint>
@@ -150,7 +151,20 @@ struct alignas(64) GateParameters {
     // off bg_fires when stale. Filled by EventLoop_RebuildOneCore from
     // cfg.param_max_age_ticks. Branchless mask compute on hot path; ~3-5ns.
     uint64_t param_max_age_ticks;
+    // TECH_DEBT-340 (H12): the struct is alignas(64) — 176 B of fields round up to 192 B, and the
+    // 16 B tail was IMPLICIT padding no field-level Init could reach (the 2026-09-05 char caught it:
+    // Init over 0xFF != Init over 0x00 bytewise). Explicit + zeroed in Init, so an Init-only pack
+    // is byte-reproducible for the seqlock publish, the snapshot persist and any memcmp/HMAC.
+    // If a field is added, re-derive this width so the pin below still holds.
+    uint8_t _tail_pad[16];
 };
+// [ASSERT]_[LAYOUT_LOCK]_[sizeof(GateParameters<64>) == 192 && the explicit tail pad fills the alignas(64) rounding exactly]
+static_assert(sizeof(GateParameters<64>) == 192,
+              "GateParameters is alignas(64): 176 B of fields + the 16 B explicit _tail_pad = 192 B. A new field "
+              "must re-derive _tail_pad so NO implicit padding exists (H12, TECH_DEBT-340).");
+static_assert(offsetof(GateParameters<64>, _tail_pad) + sizeof(GateParameters<64>::_tail_pad) == sizeof(GateParameters<64>),
+              "_tail_pad must be the LAST field and end exactly at sizeof — otherwise an implicit pad byte "
+              "survives Init and the pack is not byte-reproducible (H12, TECH_DEBT-340).");
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -285,7 +299,7 @@ static inline bool SG_Evaluate(const Money& current_price, const Money& entry_pr
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[safe defaults — zero thresholds + STRATEGY_NONE; with permission=0 the core will not trade]
+// [OVERVIEW]_[safe defaults — zero thresholds + STRATEGY_NONE + flags 0 + param_max_age_ticks 0 + _pad + the explicit alignas(64) _tail_pad zeroed (TECH_DEBT-340, H12: an Init-only pack is byte-reproducible); with permission=0 the core will not trade]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -303,6 +317,14 @@ static inline void GateParameters_Init(GateParameters<F>* params) {
     params->ratchet_tp = Money_Zero();  // v5.4.0 Phase 3.3 — TP ratchet channel
     params->strategy_id = STRATEGY_NONE;
     params->flags = 0;
+    // TECH_DEBT-340 (2026-09-05, D-484 rider; H12): these two were the ONLY fields Init left
+    // indeterminate. The pack is seqlock-published (slow -> hot) and persisted in snapshots,
+    // so an Init-only pack must be byte-reproducible — and Phase 5 borrows _pad[] for the
+    // generation / flat-confirm token, where an indeterminate byte can EQUAL a real
+    // generation. Boot-time only; a fixed loop, no <cstring> dependency in this leaf header.
+    params->param_max_age_ticks = 0;
+    for (size_t i = 0; i < sizeof(params->_pad); ++i)      params->_pad[i] = 0;
+    for (size_t i = 0; i < sizeof(params->_tail_pad); ++i) params->_tail_pad[i] = 0;
 }
 //======================================================================
 // [END_CODE]
