@@ -758,6 +758,15 @@ static inline void TUI_CopySnapshotSharded(
                         snap->per_node[i].failure_flags |=
                             ezoo_drift->exit_predictor[h].drift_flags_at_load;
                     }
+                    // D-483 C — the state-dir bind outcome → the panel's failure bit
+                    // (display↔execution: a node whose learned state is not persisting
+                    // must SAY so on the panel; stderr + health.jsonl are not the
+                    // operator's surface during a session). Both bits map to one
+                    // YELLOW panel bit; the boot log says which.
+                    if (BITMAP_IS_SET(ezoo_drift->init_flags, MASK_EZOO_STATE_DIR_CONTENDED) ||
+                        BITMAP_IS_SET(ezoo_drift->init_flags, MASK_EZOO_STATE_DIR_UNWRITABLE)) {
+                        snap->per_node[i].failure_flags |= FAILURE_MASK_bandit_state_persist_off;
+                    }
                     // Adopt representative training_timestamp_us from arm 0
                     // (buy_signal) if zoo didn't set one above.
                     if (snap->per_node[i].handle_training_timestamp_us == 0 &&

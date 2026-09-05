@@ -11,6 +11,8 @@
 // [CONTAINS]
 //   - [ENUM]_[LiveReadinessSeverity]
 //   - [FUNCTION]_[aggregate_zoo_drift]
+//   - [FUNCTION]_[check_no_state_dir_contention]
+//   - [FUNCTION]_[check_state_dir_writable]
 //   - [FUNCTION]_[check_live_capital_gated_until_e]
 //   - [REGISTRY]_[FOREACH_LIVE_READINESS_CHECK]
 //   - [FUNCTION]_[LiveReadiness_Verify]
@@ -22,6 +24,7 @@
 #include <stdint.h>
 #include "../MemHeaders/BitmapMacros.hpp"
 #include "../MemHeaders/FailureModeRegistry.hpp"
+#include "../MemHeaders/HealthLog.hpp"          // D-483 C — the walker's durable line per failed row
 #include "ControllerConfig.hpp"
 #include "ControllerEventLoop.hpp"      // EventLoopState
 #include "../ML_Headers/NodeModelZoo.hpp"  // NodeModelZoo + ModelHandle.drift_flags_at_load
@@ -135,6 +138,74 @@ inline bool check_health_log_path_set(const ControllerConfig<F>& cfg,
     fclose(f);
     return true;
 }
+
+//======================================================================
+// [FUNCTION]_[check_no_state_dir_contention]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[D-483 C — no ACTIVE ML node's bandit state dir is HELD by another node or process (the STATE_DIR_CONTENDED bind outcome); reads the bind's verdict, never re-derives a pairwise dir compare]
+// [REFERENCE]_[DECISION]_[D-483]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-331]
+// [REFERENCE]_[INVARIANT]_[H22]
+//======================================================================
+// [CODE]
+//======================================================================
+// The state-dir BIND (EnsembleModelZoo_BindStateDir — the bind_state_dir post-load row) has
+// ALREADY run for every ML node when this gate walks (per-node boot precedes it), and the
+// kernel performed the identity test at flock time. So the rows below read the bind OUTCOME
+// from the ezoo's init flags rather than re-deriving an O(N²) string compare of cfg dirs —
+// which could not see a second PROCESS on the dir, nor "x" vs "x/". TWO rows, not one:
+// CONTENDED (give each node its own dir) and UNWRITABLE (fix permissions / disk) are
+// different operator actions; a shared bit would mislabel one as the other (Class 51 mode C).
+// Both are REFUSE in live: a node trading with persistence OFF silently loses every session's
+// learning — and until the E.1.5 node-owned home lands, "shared dir" also means the OTHER
+// node's learned weights are what this node loaded.
+template <unsigned F>
+inline bool check_no_state_dir_contention(const ControllerConfig<F>& cfg,
+                                          const EventLoopState<F>& state) {
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        if (cfg.node_strategies[i] != STRATEGY_ML) continue;
+        const EnsembleModelZoo<F>* ez =
+            (const EnsembleModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle;
+        if (ez && BITMAP_IS_SET(ez->init_flags, MASK_EZOO_ACTIVE) &&
+            BITMAP_IS_SET(ez->init_flags, MASK_EZOO_STATE_DIR_CONTENDED)) return false;
+    }
+    return true;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[check_no_state_dir_contention]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[check_state_dir_writable]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [BOOT_TIME] [PERSISTENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[D-483 C — every ACTIVE ML node's bandit state dir accepted its lock file (no STATE_DIR_UNWRITABLE bind outcome); the sibling of the contention row with the other operator action]
+// [REFERENCE]_[DECISION]_[D-483]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline bool check_state_dir_writable(const ControllerConfig<F>& cfg,
+                                     const EventLoopState<F>& state) {
+    for (uint16_t i = 0; i < cfg.num_execution_nodes && i < 16; ++i) {
+        if (cfg.node_strategies[i] != STRATEGY_ML) continue;
+        const EnsembleModelZoo<F>* ez =
+            (const EnsembleModelZoo<F>*)state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle;
+        if (ez && BITMAP_IS_SET(ez->init_flags, MASK_EZOO_ACTIVE) &&
+            BITMAP_IS_SET(ez->init_flags, MASK_EZOO_STATE_DIR_UNWRITABLE)) return false;
+    }
+    return true;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[check_state_dir_writable]
+//======================================================================
 
 template <unsigned F>
 inline bool check_mlockall_required(const ControllerConfig<F>& cfg,
@@ -324,7 +395,15 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
     /* health_log_path empty (the cfg default) Health_Log returns 0 and the decoded fill exists  */ \
     /* on stderr only. Live capital REFUSES to boot without the durable channel.                 */ \
     X(health_log_path_set,         check_health_log_path_set,         LR_SEV_REFUSE, \
-      "set a WRITABLE health_log_path (e.g. logging/health.jsonl; probed with fopen at boot) — the ring-full fatal record needs a durable channel")
+      "set a WRITABLE health_log_path (e.g. logging/health.jsonl; probed with fopen at boot) — the ring-full fatal record needs a durable channel") \
+    /* D-483 C (2026-09-04) — the bind-outcome rows (TECH_DEBT-331). The state-dir bind ran at    */ \
+    /* per-node boot; these read its verdict. A node whose learned state is not persisting must    */ \
+    /* not go LIVE silently: CONTENDED = the other node's (or a backtest process's) weights are     */ \
+    /* what it loaded + nothing carries over; UNWRITABLE = nothing carries over. Paper WARNs.       */ \
+    X(no_state_dir_contention,     check_no_state_dir_contention,     LR_SEV_REFUSE, \
+      "another node or process holds an ML node's bandit state dir — give each ML node its own node_<N>_model_dir, and never run a backtest on the paper engine's dir (TECH_DEBT-331 / D-483); persistence is OFF for the contended node until then") \
+    X(state_dir_writable,          check_state_dir_writable,          LR_SEV_REFUSE, \
+      "an ML node's bandit state dir is UNWRITABLE (its lock file could not be created) — fix the dir's permissions / free disk; persistence is OFF for that node until then")
 
 #define FOREACH_LIVE_READINESS_CHECK_COUNT_ONE(name, fn_ptr, sev, hint) +1
 #define FOREACH_LIVE_READINESS_CHECK_COUNT \
@@ -336,8 +415,9 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
 //----------------------------------------------------------------------
 // Pattern: curve-registry-pattern.md (X-macro + fn-pointer dispatch).
 // Same shape as FOREACH_DEGRADATION_CURVE (v5.14.9.A) +
-// FOREACH_BANDIT_ALGORITHM (v5.14.10.A). Boot-only path; ~10us total for
-// 9 checks; well below operator-perceptible threshold.
+// FOREACH_BANDIT_ALGORITHM (v5.14.10.A). Boot-only path; ~10us total (the
+// row COUNT auto-derives — FOREACH_LIVE_READINESS_CHECK_COUNT; the test pins
+// it); well below operator-perceptible threshold.
 //
 // Adding a new pre-flight check (1 row):
 //   1. Add X(name, fn_ptr, severity, fix_hint) to FOREACH_LIVE_READINESS_CHECK
@@ -383,18 +463,28 @@ inline int LiveReadiness_Verify(const ControllerConfig<F>& cfg,
         "[live_readiness] mode=%s; checking %d pre-flight items\n",
         mode_str, FOREACH_LIVE_READINESS_CHECK_COUNT);
 
+    // D-483 C (2026-09-04): every failed row ALSO lands one durable line in the health log
+    // (Health_LogConfigure precedes this gate at boot; the health_log_path_set row makes the
+    // channel a live REFUSE-precondition, so in live it is there when it matters). A pre-flight
+    // failure the operator only ever saw scroll past on stderr was the Class-12 shape: a
+    // guard that fires into the void. `warned` now counts PAPER failures too — the summary
+    // below used to print "all pre-flight checks PASSED" under a column of paper WARN lines.
     #define X(name_id, fn_ptr, severity, fix_hint)                                              \
         if (!fn_ptr<F>(cfg, state)) {                                                            \
             if (live && (severity) == LR_SEV_REFUSE) {                                           \
                 fprintf(stderr,                                                                  \
                     "[live_readiness] LIVE REFUSE: %s failed. Fix: %s\n",                        \
                     #name_id, fix_hint);                                                         \
+                Health_Log(HEALTH_CRITICAL, "live_readiness", -1,                               \
+                           "LIVE REFUSE: %s failed: %s", #name_id, fix_hint);                    \
                 refused++;                                                                       \
             } else {                                                                             \
                 fprintf(stderr,                                                                  \
                     "[live_readiness] %s mode WARN: %s failed. Fix: %s\n",                       \
                     mode_str, #name_id, fix_hint);                                               \
-                if (live) warned++;                                                              \
+                Health_Log(HEALTH_WARN, "live_readiness", -1,                                   \
+                           "%s mode WARN: %s failed: %s", mode_str, #name_id, fix_hint);         \
+                warned++;                                                                        \
             }                                                                                    \
         }
     FOREACH_LIVE_READINESS_CHECK(X)
@@ -413,6 +503,11 @@ inline int LiveReadiness_Verify(const ControllerConfig<F>& cfg,
     }
     if (refused == 0 && warned == 0) {
         fprintf(stderr, "[live_readiness] all pre-flight checks PASSED\n");
+    } else {
+        // paper / shadow: failures are WARN-only by contract (return 0), but SAY so —
+        // never "PASSED" over a list of failed rows.
+        fprintf(stderr, "[live_readiness] %s mode: %d pre-flight WARN(s); engine proceeding\n",
+                mode_str, warned);
     }
     return 0;
 }

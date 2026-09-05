@@ -271,6 +271,21 @@ enum FailureModeGroupId : int {
       "a MISSING model (which degrades to SimpleDip): a corrupt capital artifact\n"                      \
       "is more alarming than an absent one.\n"                                                           \
       "Operator action: RETRAIN the model (the on-disk stamp is corrupt).",                             \
+      tt::GROUP_STANDALONE)                                                                            \
+    /* D-483 C (2026-09-04) — the node's learned bandit state is NOT being persisted: its state dir  */ \
+    /* is HELD by another node or process (STATE_DIR_CONTENDED) or its lock file could not be       */ \
+    /* created (STATE_DIR_UNWRITABLE). Set by the ShardedSnapshot publisher from the ezoo's         */ \
+    /* bind-outcome bits. YELLOW: the node still trades on its in-memory weights; what is lost is   */ \
+    /* the carry-over at shutdown (and, when contended, the weights it LOADED were another node's). */ \
+    /* 1 hand-placed MLStatusPanel render_bit (the Model Health header; sibling pattern).           */ \
+    X(bandit_state_persist_off, BIT_FLAG,    SEV_YELLOW, "bandit state: PERSISTENCE OFF",              \
+      "This node's Exp3 / Thompson learned state is NOT being saved or loaded:\n"                       \
+      "its state dir (node_<N>_model_dir) is either HELD by another node or\n"                          \
+      "process (two nodes on one dir, or a backtest on the paper engine's dir —\n"                      \
+      "TECH_DEBT-331 / D-483) or UNWRITABLE (the lock file could not be created).\n"                    \
+      "The node trades on its in-memory weights; nothing carries over at shutdown.\n"                   \
+      "Operator action: give each ML node its own node_<N>_model_dir, or fix the\n"                     \
+      "dir's permissions; the boot log + health.jsonl 'bandit_state' line say which.",                  \
       tt::GROUP_STANDALONE)
 
 //------------------------------------------------------------------

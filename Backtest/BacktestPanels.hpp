@@ -264,16 +264,21 @@ struct RunControlState {
     float mh_collect_sl[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     volatile int mh_collect_snap_count;   // 0 = none yet / single-horizon collect
     char config_path[256];
+    // D-483 C (2026-09-04) — the Run Control PRODUCER for BacktestRunConfig::bandit_state_prior_path
+    // (the field existed since v5.10.0a.next.1 with a test-only writer — Class 12). With the backtest
+    // now fresh-only (it binds no state dir, loads no learned state from the model tree), an explicit
+    // prior FILE is its only learned-state input. Empty = start uniform.
+    char bandit_state_prior_path[400];
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-03]
-// [SIZE]_[633344B]
+// [UPDATED]_[2026-09-04]
+// [SIZE]_[633728B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9896]
+// [CACHE_LINES]_[9902]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
@@ -662,6 +667,11 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
     if (state->run_config.num_data_files == 0) return;
 
     strncpy(state->run_config.config_path, state->config_path, 255);
+    // D-483 C — the operator's explicit bandit prior (buy-side Exp3 file; bundle-id check skipped
+    // by design at the consumer — transfer learning between sibling bundles). "" = start uniform.
+    strncpy(state->run_config.bandit_state_prior_path, state->bandit_state_prior_path,
+            sizeof(state->run_config.bandit_state_prior_path) - 1);
+    state->run_config.bandit_state_prior_path[sizeof(state->run_config.bandit_state_prior_path) - 1] = '\0';
     state->run_config.use_config_override = 0;
     state->run_config.collect_features = 0;
 
@@ -820,6 +830,16 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
     ImGui::Begin("Run Control");
 
     ImGui::InputText("Config", state->config_path, sizeof(state->config_path));
+    // D-483 C — the backtest is FRESH-ONLY: it never loads learned bandit state from a model dir
+    // (and never writes any). This file is the one way to start a run from learned weights.
+    ImGui::InputText("Bandit prior (optional)", state->bandit_state_prior_path,
+                     sizeof(state->bandit_state_prior_path));
+    ImGui::SetItemTooltip("Optional path to a bandit_state.json whose buy-side Exp3 weights seed every\n"
+                          "ML node at boot (bundle-id check skipped — transfer learning between sibling\n"
+                          "bundles). Empty = uniform priors.\n\n"
+                          "A backtest binds NO state dir: it loads nothing from the model tree and saves\n"
+                          "nothing at completion (D-483 C, 2026-09-04) — a run is reproducible from its\n"
+                          "cfg + data + this prior. Exit / Thompson bandits always start uniform.");
 
     if (state->running) {
         // progress bar
@@ -1451,6 +1471,23 @@ static inline int past_runs_unlink_cb(const char *fpath, const struct stat *sb,
 // [CODE]
 //======================================================================
 static inline int PastRuns_DeleteDir(const char *path) {
+    // D-483 C (2026-09-04) — a run dir IS a family dir (D-431: `models/<class>/<run>/horizon_<N>/`),
+    // so a running engine or backtest may have it BOUND: its `.foxml_state.lock` is held. Deleting
+    // it would orphan the lock (a fresh open() then acquires on a NEW inode) and the bound ezoo's
+    // next save would recreate the dir UNLOCKED — two writers again, one delete later. Probe with
+    // LOCK_NB: held elsewhere ⇒ REFUSE (-2). Probe only an EXISTING dir — the probe provisions its
+    // target, and a delete must never create what it is about to remove.
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        int probe_fd = -1;
+        int lrc = FoxDir_LockExclusive(path, MODEL_STATE_LOCK_FILE, &probe_fd);
+        if (lrc == 0) {
+            fprintf(stderr, "[past-runs] REFUSED delete of %s: its bandit state dir is held by a "
+                            "running engine or backtest (D-483)\n", path);
+            return -2;
+        }
+        FoxDir_Unlock(&probe_fd);   // we held it (1) or could not create it (-1): proceed either way
+    }
     // FTW_DEPTH = post-order traversal so files deleted before parent dir
     // FTW_PHYS = don't follow symlinks (avoid accidentally walking into other
     //            dirs if operator has bizarre symlink configuration)
@@ -2341,6 +2378,11 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                 if (rc == 0) {
                     snprintf(s->status_msg, sizeof(s->status_msg),
                              "deleted: %s", dr->full_path);
+                } else if (rc == -2) {
+                    // D-483 C — a bound (lock-held) family dir is not deletable while it is in use
+                    snprintf(s->status_msg, sizeof(s->status_msg),
+                             "delete REFUSED: %s is in use by a running engine or backtest "
+                             "(bandit state dir lock held)", dr->full_path);
                 } else {
                     snprintf(s->status_msg, sizeof(s->status_msg),
                              "delete FAILED: %s (errno=%d)",

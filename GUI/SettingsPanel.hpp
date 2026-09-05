@@ -44,6 +44,7 @@
 // v5.15.5.E.1.2.C 3G-ii — ImGui-free bundle scanner for the Model Dir picker
 // (families via the loader's own sibling matcher + resolution preview)
 #include "ModelBundleScan.hpp"
+#include "../MemHeaders/DirCreate.hpp"   // D-483 C — FoxDir_SameDir: the picker's shared-dir refusal compares inodes, not spellings
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -849,16 +850,26 @@ struct SettingsState {
     int   bundle_preview_entry;                   // index into model_bundles; -1 = none
     char  bundle_preview[1408];
     char  bundle_stamp_verdicts[1024];
+    // D-483 C (2026-09-04) — the picker's shared-dir refusal state. Two ML nodes on one
+    // node_model_dir share + clobber their learned bandit state (TECH_DEBT-331); the engine
+    // refuses at boot (persistence OFF + a live REFUSE row) — this is the pre-flight version.
+    // mdir_conflict_node_plus1[n] = 1 + the node whose dir the last REFUSED write for node n
+    // collided with (0 = none; render-only). mdir_edit_prev = the Model Dir text captured when
+    // the fallback InputText was ACTIVATED, so a refused edit can be reverted to what it replaced.
+    // alignas(64): 16 ints = exactly one line; the unaligned first cut straddled 118068→118080
+    // (the layout gate's STRICT-NEW row) — same fix RunControlState's tp/sl echo pair took.
+    alignas(64) int mdir_conflict_node_plus1[MAX_GUI_NODES];
+    char  mdir_edit_prev[256];
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-20]
-// [SIZE]_[118080B]
+// [UPDATED]_[2026-09-04]
+// [SIZE]_[118400B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[1845]
+// [CACHE_LINES]_[1850]
 // [STRADDLE]_[per_node_strategy@86688 · per_node_risk_pct@86752]
 //======================================================================
 // [END_STRUCT]_[SettingsState]
@@ -1132,6 +1143,7 @@ static inline void Settings_Load(SettingsState *s) {
         s->per_node_strategy[c] = -1;
         s->per_node_risk_pct[c] = 0.0f;
         s->per_node_model_path[c][0] = '\0';
+        s->mdir_conflict_node_plus1[c] = 0;   // D-483 C — no refused picker write yet
         s->per_node_model_dir[c][0]  = '\0';
     }
 
@@ -1696,6 +1708,29 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         ImGui::SetItemTooltip("Single model file. Used by STRATEGY_ML nodes. "
                               "Use Model Dir below for a NodeModelZoo with role auto-discovery.");
 
+        // D-483 C (2026-09-04) — a dir already bound to ANOTHER ML node is not selectable
+        // for this ML node: two ML nodes on one node_model_dir share + clobber their learned
+        // bandit state (TECH_DEBT-331). The engine REFUSES at boot (persistence OFF + a live
+        // REFUSE row); this is the pre-flight version, and it is advisory only — the engine's
+        // bind (an exclusive lock on the dir) is the authority. Gated on BOTH nodes being ML:
+        // a non-ML node's model_dir is inert (no ezoo, no bind), so refusing it would be a
+        // false refusal (the operator's own cfg has two non-ML nodes on one dir today).
+        // Identity, not spelling: FoxDir_SameDir compares inodes when both dirs exist.
+        // Returns the colliding node, or -1.
+        auto mdir_bound_elsewhere = [&](const char* candidate) -> int {
+            if (!candidate || !candidate[0]) return -1;
+            if (s->per_node_strategy[node_id] != STRATEGY_ML) return -1;
+            const int n_nodes = s->gui_engine_cfg.num_execution_nodes;
+            for (int n = 0; n < n_nodes && n < MAX_GUI_NODES; ++n) {
+                if (n == node_id) continue;
+                if (s->per_node_strategy[n] != STRATEGY_ML) continue;
+                if (!s->per_node_model_dir[n][0]) continue;
+                if (strcmp(s->per_node_model_dir[n], candidate) == 0 ||
+                    FoxDir_SameDir(s->per_node_model_dir[n], candidate)) return n;
+            }
+            return -1;
+        };
+
         // E.1.2.C 3G-ii — the Model Dir picker over the BUNDLE scan:
         // `_horizon_` families are ONE entry each (selection writes the
         // BASE path = Shape A auto-detect), single-zoo dirs list as-is.
@@ -1731,6 +1766,9 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                 for (int i = 0; i < mb->count; ++i) {
                     bool is_selected = (i == cur_sel);
                     ImGui::PushID(i);
+                    // D-483 C — an entry bound to another ML node is shown but NOT selectable.
+                    const int bound_by = mdir_bound_elsewhere(mb->entries[i].cfg_path);
+                    if (bound_by >= 0) ImGui::BeginDisabled();
                     if (ImGui::Selectable(mb->entries[i].label, is_selected)) {
                         size_t n = strnlen(mb->entries[i].cfg_path,
                                             sizeof(s->per_node_model_dir[node_id]) - 1);
@@ -1747,7 +1785,16 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                                                   s->bundle_preview,
                                                   sizeof(s->bundle_preview));
                         s->bundle_stamp_verdicts[0] = '\0';
+                        s->mdir_conflict_node_plus1[node_id] = 0;
                         changed = true;
+                    }
+                    if (bound_by >= 0) {
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                            ImGui::SetTooltip("bound to node %d — two ML nodes on one model dir share and\n"
+                                              "clobber their learned bandit state (TECH_DEBT-331 / D-483).\n"
+                                              "Give each ML node its own node_<N>_model_dir.", bound_by);
+                        }
                     }
                     ImGui::PopID();
                     if (is_selected) ImGui::SetItemDefaultFocus();
@@ -1765,12 +1812,31 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
             // operator concluded exactly that; Class-24-adjacent).
             ImGui::TextDisabled("(scan found no bundles under models/ — click ↻ after training, or type a path)");
             ImGui::InputText("Model Dir", s->per_node_model_dir[node_id], 256);
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                char key[64];
-                snprintf(key, sizeof(key), "node_%d_model_dir", node_id);
-                cfg_write_field(s->cfg_path, key, s->per_node_model_dir[node_id]);
-                changed = true;
+            // D-483 C — capture the pre-edit text at ACTIVATION (the buffer is edited live
+            // across frames, so a same-frame copy would already hold the new text).
+            if (ImGui::IsItemActivated()) {
+                memcpy(s->mdir_edit_prev, s->per_node_model_dir[node_id], sizeof(s->mdir_edit_prev));
             }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                const int bound_by = mdir_bound_elsewhere(s->per_node_model_dir[node_id]);
+                if (bound_by >= 0) {
+                    // REFUSE: revert to what the operator replaced; nothing reaches the cfg file.
+                    memcpy(s->per_node_model_dir[node_id], s->mdir_edit_prev, sizeof(s->mdir_edit_prev));
+                    s->mdir_conflict_node_plus1[node_id] = bound_by + 1;
+                } else {
+                    s->mdir_conflict_node_plus1[node_id] = 0;
+                    char key[64];
+                    snprintf(key, sizeof(key), "node_%d_model_dir", node_id);
+                    cfg_write_field(s->cfg_path, key, s->per_node_model_dir[node_id]);
+                    changed = true;
+                }
+            }
+        }
+        if (s->mdir_conflict_node_plus1[node_id] > 0) {
+            ImGui::TextColored(FoxmlColors::red,
+                "refused: that dir is bound to node %d — two ML nodes on one model dir share "
+                "their bandit state (TECH_DEBT-331 / D-483)",
+                s->mdir_conflict_node_plus1[node_id] - 1);
         }
         ImGui::PopID();
         ImGui::SetItemTooltip("Model bundle for this node. Takes precedence over Model Path.\n\n"
@@ -1795,9 +1861,13 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
         // the handle. Mirrors the strategy hot-swap pattern elsewhere
         // in this panel.
         ImGui::SameLine();
+        // D-483 C — the same shared-dir refusal gates the live swap (the engine's HotSwap
+        // refuses a swap INTO a held dir on its own — rc -5 — this keeps the button honest).
+        const int swap_bound_by = mdir_bound_elsewhere(s->per_node_model_dir[node_id]);
         bool can_swap = (shared != nullptr) &&
                         (s->per_node_model_dir[node_id][0] != '\0') &&
-                        (node_id < 16);
+                        (node_id < 16) &&
+                        (swap_bound_by < 0);
         uint8_t pending_swap = (shared && node_id < 16)
             ? __atomic_load_n(&shared->swap_model_path_requested[node_id],
                               __ATOMIC_ACQUIRE)
@@ -1817,7 +1887,9 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
             ImGui::SetItemTooltip(
                 shared == nullptr
                     ? "Hot-swap unavailable (no shared state)"
-                    : "Set Model Dir first");
+                    : (swap_bound_by >= 0
+                        ? "Model Dir is bound to another ML node — pick a different dir (TECH_DEBT-331 / D-483)"
+                        : "Set Model Dir first"));
         } else {
             ImGui::PushID("mdir_apply_live");
             if (ImGui::Button("Apply (live)")) {

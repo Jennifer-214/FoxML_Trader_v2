@@ -478,7 +478,8 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             FAILURE_MASK_scaler_drift           |
             FAILURE_MASK_cfg_binding_drift      |
             FAILURE_MASK_stamp_hmac_not_verified|
-            FAILURE_MASK_model_age_warn;
+            FAILURE_MASK_model_age_warn         |
+            FAILURE_MASK_bandit_state_persist_off;   // D-483 C — not drift, but the same "this node's health" header
         static constexpr uint16_t MODEL_HEALTH_DRIFT_RED_MASK =
             FAILURE_MASK_feature_hash_drift |
             FAILURE_MASK_label_hash_drift   |
@@ -551,6 +552,18 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                                "different training session?).\n"
                                "Operator action: retrain scaler with current model + features.",
                                FoxmlColors::red);
+                    // D-483 C (2026-09-04) — the bind-outcome bit (TECH_DEBT-331): the ONE panel
+                    // surface for "this node's learned state is not persisting". Yellow: it trades on.
+                    render_bit(FAILURE_MASK_bandit_state_persist_off,
+                               "bandit state: PERSISTENCE OFF",
+                               "This node's Exp3 / Thompson learned state is NOT being saved or loaded.\n"
+                               "Its state dir (node_<N>_model_dir) is HELD by another node or process\n"
+                               "(two nodes on one dir, or a backtest on the paper engine's dir) or is\n"
+                               "UNWRITABLE. The node trades on its in-memory weights; nothing carries\n"
+                               "over at shutdown. The boot log / health.jsonl 'bandit_state' line says which.\n"
+                               "Operator action: give each ML node its own node_<N>_model_dir\n"
+                               "(TECH_DEBT-331 / D-483), or fix the dir's permissions.",
+                               FoxmlColors::yellow);
                     render_bit(FAILURE_MASK_build_flags_drift,
                                "build: FLAG DRIFT",
                                "Model's stamp-bound build_flags_hash does not match the current\n"
