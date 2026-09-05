@@ -372,9 +372,38 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     const auto& cs = snap->per_node[i];
                     if (!cs.ensemble_active) continue;
 
+                    // D-485 (2026-09-04) — the family NAME leads the header: the basename of the
+                    // node's BOUND state dir (follows Apply (live)), else of its boot cfg dir.
+                    // Two nodes on two bundles — or the D-483 finding, two nodes on ONE — are now
+                    // distinguishable at a glance. Full dir + training age ride the tooltip.
                     ImGui::TextColored(FoxmlColors::sand,
-                        "node %d: %d horizons (mode: %s)",
-                        i, (int)cs.ensemble_n_horizons, cs.ensemble_blend_mode);
+                        "node %d: %s%s%d horizons (mode: %s)",
+                        i,
+                        cs.ensemble_name[0] ? cs.ensemble_name : "",
+                        cs.ensemble_name[0] ? " · " : "",
+                        (int)cs.ensemble_n_horizons, cs.ensemble_blend_mode);
+                    if (cs.ensemble_name[0] && ImGui::IsItemHovered()) {
+                        if (cs.handle_training_timestamp_us > 0) {
+                            struct timespec ts;
+                            clock_gettime(CLOCK_REALTIME, &ts);
+                            uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL +
+                                              (uint64_t)ts.tv_nsec / 1000ULL;
+                            uint64_t age_h = now_us > cs.handle_training_timestamp_us
+                                ? (now_us - cs.handle_training_timestamp_us) / (3600ULL * 1000000ULL)
+                                : 0;
+                            ImGui::SetTooltip("family: %s\n"
+                                              "(the basename of the node's bound state dir — the dir a live\n"
+                                              "swap moved it to; else its boot node_<N>_model_dir)\n"
+                                              "representative training age: %llu h",
+                                              cs.ensemble_name, (unsigned long long)age_h);
+                        } else {
+                            ImGui::SetTooltip("family: %s\n"
+                                              "(the basename of the node's bound state dir — the dir a live\n"
+                                              "swap moved it to; else its boot node_<N>_model_dir)\n"
+                                              "training timestamp: unknown (stampless bundle)",
+                                              cs.ensemble_name);
+                        }
+                    }
                     // "Last predicted" callout — useful when bandit weights
                     // look noisy: shows what the dispatcher actually picked.
                     if (cs.ensemble_last_predicted_horizon_idx >= 0 &&

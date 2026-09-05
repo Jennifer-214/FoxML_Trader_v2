@@ -9,6 +9,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the sharded TUISnapshot populator — EventLoopState + OMS -> the same fields the GUI panels already read]
 // [CONTAINS]
+//   - [FUNCTION]_[Snapshot_FamilyBasename]
 //   - [FUNCTION]_[TUI_CopySnapshotSharded]
 //======================================================================================================
 // Populates TUISnapshot from the sharded engine's EventLoopState + OMS.
@@ -39,6 +40,42 @@
 #include "MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 
 #include <cmath>
+
+namespace tt {
+//======================================================================
+// [FUNCTION]_[Snapshot_FamilyBasename]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [MONITORING_PLANE] [HELPER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[D-485 — the family NAME of a model dir = its last path component (trailing slashes ignored), truncated to the caller's field; 1 = named, 0 = no name (empty / null / root)]
+// [REFERENCE]_[DECISION]_[D-485]
+//======================================================================
+// [CODE]
+//======================================================================
+// The dir basename (`HFT_0`, `LONGEST`, `2-2.5-2.5`) is what the suite's summary_entry.txt
+// already calls the run — one vocabulary across the trainer and the live panel. Pure; the
+// publisher calls it once per ACTIVE ensemble per publish (producer slow-path cadence).
+static inline int Snapshot_FamilyBasename(const char* dir, char* out, size_t out_sz) {
+    if (!out || out_sz == 0) return 0;
+    out[0] = '\0';
+    if (!dir || !dir[0]) return 0;
+    size_t len = strlen(dir);
+    while (len > 0 && dir[len - 1] == '/') --len;          // "models/x/" -> "models/x"; "/" -> ""
+    if (len == 0) return 0;
+    size_t start = len;
+    while (start > 0 && dir[start - 1] != '/') --start;    // the last component
+    size_t n = len - start;
+    if (n >= out_sz) n = out_sz - 1;
+    memcpy(out, dir + start, n);
+    out[n] = '\0';
+    return 1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Snapshot_FamilyBasename]
+//======================================================================
+}  // namespace tt
 
 //======================================================================
 // [FUNCTION]_[TUI_CopySnapshotSharded]
@@ -805,6 +842,18 @@ static inline void TUI_CopySnapshotSharded(
                         sizeof(es.ensemble_blend_mode) - 1);
                 es.ensemble_blend_mode[sizeof(es.ensemble_blend_mode) - 1] = '\0';
                 es.ensemble_disabled_horizon_mask = ezoo->disabled_horizon_mask;
+                // D-485 — the family NAME: the basename of the BOUND state dir (the path the
+                // D-483 bind set — it FOLLOWS an "Apply (live)" swap), else of the boot cfg
+                // dir (frozen for the session; unbound = persistence OFF or the backtest).
+                // Empty when neither names a dir. The dir basename is what the suite's
+                // summary_entry.txt already calls the run — one vocabulary.
+                {
+                    char dir_buf[sizeof(ezoo->bandit_save_path)];
+                    const char* dir = nullptr;
+                    if (EnsembleModelZoo_DeriveStateDir(ezoo, dir_buf, sizeof(dir_buf))) dir = dir_buf;
+                    else if (cfg->node_model_dir[i][0]) dir = cfg->node_model_dir[i];
+                    (void)tt::Snapshot_FamilyBasename(dir, es.ensemble_name, sizeof(es.ensemble_name));
+                }
                 // Per-regime probability matrix (preferred over raw weights —
                 // probabilities are normalized so the heatmap is interpretable).
                 for (int r = 0; r < 5; ++r) {
@@ -877,6 +926,7 @@ static inline void TUI_CopySnapshotSharded(
             } else {
                 snap->per_node[i].ensemble_active = 0;
                 snap->per_node[i].ensemble_n_horizons = 0;
+                snap->per_node[i].ensemble_name[0] = '\0';   // D-485 — no family for a single-zoo node
                 // Thompson cluster also zeroed when ezoo is not active
                 snap->per_node[i].thompson_state = 0;
                 for (int a = 0; a < 8; ++a) {

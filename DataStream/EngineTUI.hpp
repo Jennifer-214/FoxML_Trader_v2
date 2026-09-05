@@ -1424,6 +1424,12 @@ struct TUISnapshot {
         // added to ModelHandle as runtime-only fields (not in stamp body
         // registry). Drift bits + tooltips give enough operator signal today.
         uint64_t handle_training_timestamp_us;                    // 8 B (representative role; 0 if no timestamp)
+        // D-485 (2026-09-04) — the family NAME the node runs: the basename of its BOUND
+        // state dir (the D-483 bind's path — it FOLLOWS a hot-swap), else of the boot cfg
+        // dir. TAIL of the bandit cluster so the alignas(64) LAYOUT_LOCK on ensemble_active
+        // is untouched (a tail add moves nothing before it). Display-only; empty for a
+        // single-zoo node. Not persisted / not wire (the TUISnapshot is the GUI seqlock copy).
+        char     ensemble_name[32];                               // 32 B
     };
     //==================================================================
     // [END_CODE]
