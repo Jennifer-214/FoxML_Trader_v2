@@ -491,7 +491,18 @@ struct alignas(64) AggregatorState {
     // Wrong-thread calls seen by Composer_AssertIdentity — written by the OFFENDING thread (relaxed;
     // a telemetry counter, never a sync point). Never reset.
     std::atomic<uint32_t> composer_identity_violations{0};
-    uint32_t _pad_line0_tail = 0;       // H12: explicit pad to the line boundary (16 B → 4 B at commit 2)
+    // E.1.3 3b(ii) commit 3 (gate #3 G3-5 / plan §4.3; the plan's `drainer_stop`) — the MAIN-set
+    // stop request for the composer thread (today the drainer lambda; post-flip the composer proper).
+    // Main stores 1 (release) ONLY after every producer of the composer's inputs is joined (order
+    // sources, then the venue producers: reconciler / REST workers / WS); the composer polls it
+    // (acquire) at its loop head and, on 1, runs the shutdown TAIL UNCONDITIONALLY (16 book passes +
+    // one final compose) before exiting. Never the raw `g_engine_sharded_shutdown` — that flag is set
+    // by the signal handler while every producer is still live, so a composer that exits on it
+    // strands whatever lands in the rings afterwards (verification NEW-1: the old producer_done-gated
+    // tail was DEAD on every real exit path). Last pad word of line 0: zero growth (the request-atomics
+    // family — save_request / reset_request / kill_reset_mask / kill_trip_request). The backtest never
+    // sets it (single-threaded; runs to completion with its own inline final flush).
+    std::atomic<uint32_t> composer_stop_request{0};
 
     // ---- lines 1-2 · per-node FillEvent apply cursors (Phase 3 goes production; unit-exercised
     //      from Phase 1). applied_seq[n] = last FillEvent.seq applied from node n's ring —
@@ -570,6 +581,10 @@ static_assert(offsetof(AggregatorState<64>, composer_tid) == 48 &&
               offsetof(AggregatorState<64>, composer_identity_violations) == 56,
               "the composer identity rides line 0 — the request line the composer already holds at "
               "step 0/0a (D-478 as amended, 3b(ii) commit 2: zero growth — it replaced the last pad words)");
+static_assert(offsetof(AggregatorState<64>, composer_stop_request) == 60 &&
+              offsetof(AggregatorState<64>, composer_stop_request) + sizeof(uint32_t) == 64,
+              "the composer STOP request is line 0's last word (3b(ii) commit 3, gate #3 G3-5: zero growth — "
+              "it replaced the final pad word); line 0 is now FULL — the next request atomic grows the struct deliberately");
 static_assert(offsetof(AggregatorState<64>, applied_seq) == 64,  "apply cursors at lines 1-2");
 static_assert(offsetof(AggregatorState<64>, publish)     == 192, "publish port after the state lines (D-444: led_* line retired; re-pinned 256->192)");
 static_assert(offsetof(AggregatorState<64>, fill_rings)  == 192 + sizeof(tt::ParameterSlot<MoneySnapshot<64>>),

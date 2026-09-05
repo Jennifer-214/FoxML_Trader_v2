@@ -7,10 +7,12 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[drainer slow-path hoisted helpers — post-fill bookkeeping + GUI manual-close funnel]
+// [OVERVIEW]_[drainer slow-path hoisted helpers — the GUI manual-close funnel + the drainer/composer BOOK pass and its UNCONDITIONAL shutdown tail (E.1.3 3b(ii) commit 3)]
 // [CONTAINS]
 //   - (EngineSharded_SlowPath_DrainPostFill DELETED E.1.2.C leg 0 -> tt::EngineCommon_DrainPostFill)
 //   - [FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]
+//   - [FUNCTION]_[EngineSharded_Drainer_BookPass]
+//   - [FUNCTION]_[EngineSharded_Drainer_ShutdownTail]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
@@ -38,6 +40,10 @@
 #include "../ExecutionCore.hpp"               // EventLoopState
 #include "../ControllerConfig.hpp"            // ControllerConfig
 #include "../Tick.hpp"                        // Tick<F>
+#include "../EngineCommon.hpp"                // E.1.3 c3 — EngineCommon_DrainEventsAndSubmit / _DrainPostFill / _ComposeAndKillEval (the book pass)
+#include "../../MemHeaders/OmsPhasedDrain.hpp"   // E.1.3 c3 — OmsDrainBuckets + OrderManager_DrainIntoBuckets / ProcessBucket_*
+#include "../../MemHeaders/DrainerConstants.hpp" // E.1.3 c3 — DrainerConstants_Init (per-pass drain count)
+#include "../../MemHeaders/HealthLog.hpp"        // E.1.3 c3 — the shutdown tail's durable summary line
 #include "../ParameterSlot.hpp"               // ParameterSlot<Tick<F>> — latest-tick seqlock (PARITY-047)
 #include "../../MemHeaders/OmsPushExitHelper.hpp"  // OMS_PushExitForSlot
 #include "../../MemHeaders/BitmapMacros.hpp"  // BITMAP_IS_SET
@@ -183,6 +189,119 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
 // Body's #ifdef gate guarantees shared_ptr is only dereferenced when valid.
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_SlowPath_DrainManualCloses]
+//======================================================================
+
+// E.1.3 3b(ii) commit 3 — how many book passes the composer's shutdown tail runs over the rings
+// its (already joined) producers left behind. 16 was the pre-commit-3 figure (the producer_done-
+// gated loop that never ran on SIGINT); kept, named. Each pass drains every ring once; a pass
+// that books nothing costs a few hundred ns — the number bounds the WORK, not a wait.
+constexpr int ENGINE_SHUTDOWN_TAIL_PASSES = 16;
+
+//======================================================================
+// [FUNCTION]_[EngineSharded_Drainer_BookPass]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[ONE booking pass of the live drainer/composer cycle — pump TradeEvents + GUI manual closes into the submit queues, OMS_DrainSubmit, then the phase-separated drain (closes -> post-fill -> opens -> reconciles); returns the pump's drained count (the idle-yield signal). The main loop AND the shutdown tail run this SAME body — extracted at E.1.3 3b(ii) commit 3 so the tail is a named, testable unit instead of a copy of the loop inside a lambda]
+// [REFERENCE]_[DECISION]_[[D-440] [D-478]]
+// [REFERENCE]_[DESIGN_SPEC]_[phase-separated-drainer-for-safe-cross-temporal-derives]
+//======================================================================
+// [CODE]
+//======================================================================
+// Buckets by POINTER: the caller owns the ~147 KB OmsDrainBuckets scratch (the drainer lambda's
+// stack local); a second instance here would double the working set for nothing. `now_tick` is
+// the producer's tick count at the pass (the pump's cooldown/spacing clock). NOT the compose:
+// the money-flag drain, EngineCommon_ComposeAndKillEval, the composer-executed paper reset and
+// the BENCH bracket stay in the caller — they are per-CYCLE, this is the per-cycle BOOKING.
+template<unsigned F>
+inline int EngineSharded_Drainer_BookPass(
+    EventLoopState<F>& state,
+    OrderManagerState<F>& oms,
+    const ControllerConfig<F>& cfg,
+    uint64_t now_tick,
+    ParameterSlot<Tick<F>>& latest_tick,
+    TUISharedState* shared_ptr,          // nullable (ANSI build / harness)
+    OmsDrainBuckets* buckets             // the caller's per-thread scratch — by pointer, never a second instance
+) {
+    // DrainerConstants cache (drainer-thread-stable cfg + state predicates) — one init per pass;
+    // state may shift between passes (the tail runs several).
+    const DrainerConstants dc = DrainerConstants_Init(state.registered_count, cfg, oms);
+    const int total_drained = EngineCommon_DrainEventsAndSubmit<F>(state, oms, now_tick, cfg);
+    EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, latest_tick, shared_ptr);
+    OMS_DrainSubmit(&oms, dc.drain_count);
+    // Phase-separated drain (replaces the unified OrderManager_Tick on the live path): A closes ->
+    // A.5 EngineCommon_DrainPostFill (reads CLOSE-form Position state — unlocks the Phase G+H
+    // derives) -> B opens (Portfolio_OpenSlot fires here) -> C reconciles (phase-invariant safe).
+    OrderManager_DrainIntoBuckets(&oms, buckets);
+    OrderManager_ProcessBucket_Closes(&oms, buckets);
+    EngineCommon_DrainPostFill(state, oms, cfg);
+    OrderManager_ProcessBucket_Opens(&oms, buckets);
+    OrderManager_ProcessBucket_Reconciles(&oms, buckets);
+    return total_drained;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_Drainer_BookPass]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineSharded_Drainer_ShutdownTail]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [BOOT_TIME]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[E.1.3 3b(ii) commit 3 (gate #3 G3-5) — the composer's UNCONDITIONAL shutdown tail: ENGINE_SHUTDOWN_TAIL_PASSES book passes over whatever the already-joined producers left in the rings, then ONE final coherent compose + kill eval so the saves on main see the last books + flags; prints + Health_Logs what it booked. Returns the number of fills booked]
+// [REFERENCE]_[DECISION]_[[D-420] [D-440] [D-478]]
+//======================================================================
+// [CODE]
+//======================================================================
+// Runs on the composer thread AFTER main has joined every producer of its inputs (order
+// sources, then the venue producers — reconciler / REST workers / WS) and set
+// agg.composer_stop_request. Until commit 3 this body lived inside the drainer lambda behind
+// `if (producer_done)` — a gate the producer could only satisfy after seeing the very flag the
+// lambda had already exited on, so the tail never ran on SIGINT / SIGTERM / GUI close
+// (verification NEW-1) and a fill landing after the drainer join was stranded. The backtest
+// does not call this: it is single-threaded and runs to completion with its own inline final
+// flush (the phased-vs-unified asymmetry is homed at §4.4 / E.1.4-slim, not here).
+template<unsigned F>
+inline int EngineSharded_Drainer_ShutdownTail(
+    EventLoopState<F>& state,
+    OrderManagerState<F>& oms,
+    const ControllerConfig<F>& cfg,
+    uint64_t now_tick,
+    ParameterSlot<Tick<F>>& latest_tick,
+    TUISharedState* shared_ptr,
+    OmsDrainBuckets* buckets
+) {
+    const uint64_t filled_before = OrderManager_TotalFilled(&oms);
+    for (int k = 0; k < ENGINE_SHUTDOWN_TAIL_PASSES; ++k) {
+        (void)EngineSharded_Drainer_BookPass<F>(state, oms, cfg, now_tick, latest_tick, shared_ptr, buckets);
+    }
+    // E.1.3 P2-a — one final coherent compose + eval after the tail drains, so shutdown consumers
+    // (the owner-side saves) see the last books + flags. MtM price = the producer-published
+    // seqlock tick (the ONE safe read; the producer is joined, so it is the last tick it saw).
+    {
+        Tick<F> _lt{};
+        ParameterSlot_Read(&latest_tick, &_lt);
+        EngineCommon_ComposeAndKillEval(state, oms, cfg, _lt.price, now_tick);
+    }
+    const uint64_t booked   = OrderManager_TotalFilled(&oms) - filled_before;
+    const int      inflight = OrderManager_InflightCount(&oms);
+    std::fprintf(stderr,
+        "[sharded] composer shutdown tail: %d pass(es), %llu fill(s) booked, %d order(s) still in flight%s\n",
+        ENGINE_SHUTDOWN_TAIL_PASSES, (unsigned long long)booked, inflight,
+        inflight ? " (wire-in-flight residual — reconciled at the next boot; E.1.4 A20)" : "");
+    Health_Log(HEALTH_INFO, "shutdown", -1,
+               "composer tail: passes=%d booked=%llu inflight=%d",
+               ENGINE_SHUTDOWN_TAIL_PASSES, (unsigned long long)booked, inflight);
+    return (int)booked;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_Drainer_ShutdownTail]
 //======================================================================
 
 } // namespace tt

@@ -451,6 +451,17 @@ static inline int BinanceAdapter_SubmitMarketBuy(void* ctx, uint64_t client_id,
                                                   double qty,
                                                   OrderCallback cb, void* user) {
     BinanceAdapterState* state = (BinanceAdapterState*)ctx;
+    // E.1.3 3b(ii) commit 3 — the guard the query twins (GetBalances / QueryOrder) always had and
+    // the submit twins lacked: once the workers are joined (shutdown) a push lands in a queue with
+    // NO consumer and the OMS would hold the order ORDER_SUBMITTED forever — a phantom in-flight.
+    // Return 0 → OrderManager_Submit marks it REJECTED + frees the slot, loud. Never silent.
+    if (state->shutdown_requested.load(std::memory_order_acquire) || state->worker_count < 1) {
+        std::fprintf(stderr,
+                     "[BinanceAdapter] REFUSED BUY client_id=%llu: workers are down (shutdown in progress) "
+                     "— the OMS rejects the order instead of holding a phantom in-flight\n",
+                     (unsigned long long)client_id);
+        return 0;
+    }
     PendingSubmission p;
     p.client_id = client_id;
     p.type      = ORDER_MARKET_BUY;
@@ -494,6 +505,14 @@ static inline int BinanceAdapter_SubmitMarketSell(void* ctx, uint64_t client_id,
                                                    double qty,
                                                    OrderCallback cb, void* user) {
     BinanceAdapterState* state = (BinanceAdapterState*)ctx;
+    // E.1.3 3b(ii) commit 3 — see the BUY twin: no push into a consumer-less queue after the workers join.
+    if (state->shutdown_requested.load(std::memory_order_acquire) || state->worker_count < 1) {
+        std::fprintf(stderr,
+                     "[BinanceAdapter] REFUSED SELL client_id=%llu: workers are down (shutdown in progress) "
+                     "— the OMS rejects the order instead of holding a phantom in-flight\n",
+                     (unsigned long long)client_id);
+        return 0;
+    }
     PendingSubmission p;
     p.client_id = client_id;
     p.type      = ORDER_MARKET_SELL;

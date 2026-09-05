@@ -2764,8 +2764,11 @@ inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
     // P4-pre-2: flush any calib rows still in the funnel BEFORE the file closes. The live
     // shutdown path does reach a final apply (which drains) before OMS shutdown, but that is
     // a property of the CALLER's ordering — this makes tail-row survival a property of the
-    // OWNER instead, for every current and future shutdown path. Safe here by construction:
-    // shutdown runs after the trading-thread joins, so this is single-threaded. Idempotent
+    // OWNER instead, for every current and future shutdown path. Single-threaded here BY
+    // ORDERING since E.1.3 3b(ii) commit 3: EngineSharded_Run joins every OMS writer — the
+    // order sources, then the venue producers (reconciler / REST workers / WS), then the
+    // composer after its unconditional tail — BEFORE this call (until commit 3 the venue
+    // producers were still live at this point; the claim was true only by luck). Idempotent
     // (empty rings = no-op) and nullptr-safe (the render is a no-op on a null FILE*).
     (void)OMS_CalibFunnelDrain(oms);
     OrderEventLog_Free(&oms->event_log);

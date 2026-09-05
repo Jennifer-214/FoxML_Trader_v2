@@ -1558,11 +1558,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // EngineCommon.hpp as tt::EngineCommon_DrainEventsAndSubmit<F>() — the ONE
     // pump both drivers call (P4-pre-3c; the backtest had none).
     // Call sites below pass (state, oms, ticks_produced, cfg) explicitly.
-    std::thread drainer([&state, &oms, &ticks_produced, &producer_done,
+    std::thread drainer([&state, &oms, &ticks_produced,
                          &cfg, &latest_tick, &paper_reset_in_progress, shared_ptr] {
         // v5.15.5.C.4 Phase T1: &cfg added to capture list for DrainerConstants_Init
         // v5.15.5.C.4 Phase F — drainer-local bucket arrays for phase-separated
-        // dispatch. ~7 KB stack allocation; reused per cycle (Reset at top of
+        // dispatch. ~147 KB stack allocation (OmsDrainBuckets [SIZE]; the "~7 KB" this
+        // comment carried was the pre-.E.1.3 figure); reused per cycle (Reset at top of
         // DrainIntoBuckets). NOT added to OmsState (transient per-cycle scratch).
         tt::OmsDrainBuckets drain_buckets;
         EngineSharded_PinThread(state.registered_count + 1);
@@ -1570,7 +1571,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // identity before the first compose (unconditional; the backtest driver binds at its own
         // compose call). Composer_AssertIdentity fires at the top of every compose from here on.
         AggregatorState_BindComposer(state.agg);
-        while (!g_engine_sharded_shutdown) {
+        // E.1.3 3b(ii) commit 3 (gate #3 G3-5 / §4.3) — the composer exits on the MAIN-set
+        // agg.composer_stop_request, never the raw signal flag: main stores it only after every
+        // producer of this thread's inputs is joined (order sources, then reconciler / REST
+        // workers / WS), so whatever those threads pushed on the way out is still in the rings
+        // when the tail below runs. The old `while (!g_engine_sharded_shutdown)` + producer_done-
+        // gated tail was DEAD on every real exit (verification NEW-1): the producer stores
+        // producer_done only after it has seen the flag this loop had already exited on.
+        while (!state.agg.composer_stop_request.load(std::memory_order_acquire)) {
             // E.1.3 P3-c (D-445) — the P2-d drainer PARK is SUPERSEDED: the drainer/composer
             // now EXECUTES the paper reset itself at its cycle tail (see below), so there is
             // no concurrent drainer to park — the quiesce hole is closed by construction
@@ -1584,40 +1592,24 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if constexpr (BENCH) {
                 _bench_t0 = (uint64_t)__rdtsc();
             }
-            // Sequence per cycle:
+            // Sequence per cycle — the BOOK pass (E.1.3 3b(ii) commit 3 extracted it into
+            // tt::EngineSharded_Drainer_BookPass so the shutdown tail is a named, testable unit):
             //   1. drain_with_submit / drain_manual_closes — these push
             //      SubmitCommands into oms.submit_queues (v4.7.37; was direct
             //      OrderManager_Submit calls before Phase B).
             //   2. OMS_DrainSubmit — drainer (sole Submit caller) pops the
             //      queues and calls Submit serially. Preserves OMS contract.
-            //   3. OrderManager_Tick — drains result_queue / ws_result_queue
-            //      / reconcile_queue, calls HandleFill on completed orders.
-            //   4. drain_post_fill — applies per-core NodeContext updates
-            //      from FillRecords.
-            //
-            // v5.15.5.C.4 Phase T1 — DrainerConstants cache (drainer-thread-
-            // stable cfg + state predicates). One init per cycle; consumers
-            // read fields directly. Replaces prior 6× scattered
-            // BITMAP_IS_SET(oms_state_flags, PARTIAL_EXIT_ENABLED) reads.
-            const tt::DrainerConstants dc =
-                tt::DrainerConstants_Init(state.registered_count, cfg, oms);
-
-            int total_drained = tt::EngineCommon_DrainEventsAndSubmit<F>(state, oms, ticks_produced.load(std::memory_order_relaxed), cfg);
-            EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, latest_tick, shared_ptr);
-            OMS_DrainSubmit(&oms, dc.drain_count);  // v4.7.37; v5.15.5.C.4 T1 uses cached dc.drain_count
-
-            // v5.15.5.C.4 Phase F — phase-separated drain (replaces unified
-            // OrderManager_Tick). Drain commands into per-direction buckets;
-            // process Phase A (closes) → Phase A.5 (DrainPostFill consumer
-            // pass; reads CLOSE-form Position state — unlocks Phase G+H
-            // derives) → Phase B (opens; Portfolio_OpenSlot fires here) →
-            // Phase C (reconciles; phase-invariant safe). See
-            // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
-            tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
-            tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);  // Phase A
-            EngineCommon_DrainPostFill(state, oms, cfg);  // E.1.2.C leg 0 — the shared binder (was EngineSharded_SlowPath_DrainPostFill)                                              // Phase A.5
-            tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);   // Phase B
-            tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);  // Phase C
+            //   3. OrderManager_DrainIntoBuckets + ProcessBucket_{Closes, Opens, Reconciles}
+            //      — the phase-separated drain of result_rings / ws_result_queue /
+            //      reconcile_queue (v5.15.5.C.4 Phase F; the unified OrderManager_Tick
+            //      this comment used to name is the BACKTEST driver's pump today).
+            //   4. EngineCommon_DrainPostFill — applies per-node NodeContext updates
+            //      from FillRecords (Phase A.5, between closes and opens).
+            // then, still here: the money-flag drain, the compose + kill evals, the
+            // composer-executed paper reset, the BENCH bracket.
+            int total_drained = tt::EngineSharded_Drainer_BookPass<F>(
+                state, oms, cfg, ticks_produced.load(std::memory_order_relaxed),
+                latest_tick, shared_ptr, &drain_buckets);
 
             // ── Ship-B P3 (S-17): sticky money-flag drain — drainer cycle tail ──
             // Observational only (never feeds back into math; replay runs the same
@@ -1658,36 +1650,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             }
 
             if (total_drained == 0) std::this_thread::yield();
-            if (producer_done.load(std::memory_order_acquire)) {
-                for (int k = 0; k < 16; ++k) {
-                    tt::EngineCommon_DrainEventsAndSubmit<F>(state, oms, ticks_produced.load(std::memory_order_relaxed), cfg);
-                    EngineSharded_SlowPath_DrainManualCloses(state, oms, cfg, latest_tick, shared_ptr);
-                    // v5.4.1 Bug B2: same partials-aware drain count as the
-                    // main loop above. v5.15.5.C.4 Phase T1: per-iter dc
-                    // recompute (state may have shifted across k iterations).
-                    const tt::DrainerConstants dc_shutdown =
-                        tt::DrainerConstants_Init(state.registered_count, cfg, oms);
-                    OMS_DrainSubmit(&oms, dc_shutdown.drain_count);  // v4.7.37
-                    // v5.15.5.C.4 Phase F — phase-separated drain (shutdown
-                    // path mirrors main loop). drain_buckets is the drainer-
-                    // thread-local bucket array declared at lambda entry.
-                    tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
-                    tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);
-                    EngineCommon_DrainPostFill(state, oms, cfg);  // E.1.2.C leg 0 — the shared binder (was EngineSharded_SlowPath_DrainPostFill)
-                    tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);
-                    tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);
-                }
-                // E.1.3 P2-a — one final coherent compose+eval after the tail drains, so
-                // shutdown consumers (and the owner-side save) see the last books + flags.
-                {
-                    Tick<F> _lt{};
-                    tt::ParameterSlot_Read(&latest_tick, &_lt);
-                    EngineCommon_ComposeAndKillEval(state, oms, cfg, _lt.price,
-                        ticks_produced.load(std::memory_order_relaxed));
-                }
-                break;
-            }
         }
+        // E.1.3 3b(ii) commit 3 — the shutdown TAIL, UNCONDITIONAL at exit (was gated on
+        // producer_done and therefore dead on every real exit path — NEW-1): ENGINE_SHUTDOWN_TAIL_PASSES
+        // book passes over whatever the (already joined) producers left in the rings, then ONE final
+        // coherent compose + eval so the saves that follow on main see the last books + flags. The
+        // helper prints + Health_Logs what it booked (the dogfood row for this commit).
+        (void)tt::EngineSharded_Drainer_ShutdownTail<F>(
+            state, oms, cfg, ticks_produced.load(std::memory_order_relaxed),
+            latest_tick, shared_ptr, &drain_buckets);
     });
 
     // Spawn N per-core slow-path threads. Each runs OneCore helpers
@@ -2388,11 +2359,155 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     fprintf(stderr, "[sharded] shutdown requested, joining threads...\n");
 
-    // E.1.3 P2-d (D-420 / gate parity F1) — the final save MOVED to after the joins: every
-    // thread has fully tail-drained and exited, so the persisted bytes are the true final
-    // books (the old save-here raced the drainer's tail drains). Force-close stays disabled
-    // by default (Class 9), so the old "save before force-close" rationale is preserved
-    // trivially — nothing mutates between the joins and the save.
+    // E.1.3 3b(ii) COMMIT 3 (gate #3 G3-5 / plan §4.3) — THE SHUTDOWN ORDER. Until this commit
+    // every engine thread exited on the raw signal flag on its own schedule, the drainer was
+    // joined FIRST and the three venue producers (reconciler / REST workers / WS) TENTH — a fill
+    // landing after the drainer join was stranded in a ring nobody drained, and the drainer's own
+    // 16-pass tail never ran on Ctrl-C (gated on producer_done, which the producer stores only
+    // after seeing the same flag the drainer had already exited on — verification NEW-1). Order:
+    //   1. order sources stop      — depth, producer, executors, slow paths, GUI: every producer
+    //                                of the composer's inputs (TradeEvent rings, submit queues,
+    //                                manual-close flags, the DragCmd ring)
+    //   2. one composer cycle      — wait until the composer has pumped + submitted what step 1
+    //                                left in its rings (published generation +2; bounded), so
+    //                                nothing is still headed for the venue when the workers join
+    //   3. venue producers quiesce — reconciler -> REST workers (an in-flight call still fires its
+    //                                callback INTO result_rings before the join returns) -> WS
+    //                                bounded grace -> WS join
+    //   4. composer stop           — main sets agg.composer_stop_request; the composer runs its
+    //                                tail UNCONDITIONALLY (ENGINE_SHUTDOWN_TAIL_PASSES book passes +
+    //                                one final compose) and exits; main joins it
+    //   5. saves                   — snapshot (paper) + bandit state, with EVERY writer joined
+    //   6. recorders -> Notify worker (every Notify_Send caller is now joined) -> OrderManager_Shutdown
+    //                                (single-threaded by ORDERING, not by luck) -> stats -> frees
+    // The wire-in-flight residual (a venue order acknowledged but not yet reported when the WS
+    // grace expires) is E.1.4 A20's — reconciled at the next boot. Shutdown timing bounds are
+    // named constants, not cfg: an operator never tunes them.
+    constexpr int ENGINE_SHUTDOWN_COMPOSER_CYCLE_WAIT_MS = 2000;   // step 2: one composer cycle after the last order source joins
+    constexpr int ENGINE_SHUTDOWN_WS_QUIET_MS            = 250;    // step 3: "the user-data stream went quiet"
+    constexpr int ENGINE_SHUTDOWN_WS_GRACE_MAX_MS        = 2000;   // step 3: the cap on that wait
+
+    // Per-stage shutdown logging — when the process refuses to exit on close,
+    // these tell us WHICH thread is hung. Without them every shutdown bug
+    // looks the same from outside ("the engine doesn't die"). Each stage
+    // also signals its dedicated quit flag BEFORE joining so the thread has
+    // a chance to see it on its next loop iteration. v4.0.1 added per-stage
+    // signals after observing producer+depth could be in mid-reconnect with
+    // their dedicated flags not yet set.
+
+    // ── 1. order sources stop ──
+    fprintf(stderr, "[sharded]   joining depth thread...\n");
+    if (g_depth_tid != 0) {
+        __atomic_store_n(&g_depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
+        pthread_join(g_depth_tid, NULL);
+    }
+    fprintf(stderr, "[sharded]   joining producer...\n");
+    producer.join();
+    fprintf(stderr, "[sharded]   joining executors (%d)...\n", num_nodes);
+    for (auto& e : executors) e.join();
+    if (!slow_paths.empty()) {
+        fprintf(stderr, "[sharded]   joining slow-paths (%zu)...\n", slow_paths.size());
+        for (auto& sp : slow_paths) sp.join();
+    }
+#ifdef USE_IMGUI_GUI
+    // The GUI thread is a PRODUCER of the composer's inputs (manual-close flags, the DragCmd
+    // ring) — it joins with the order sources, before the composer stop (it was joined AFTER
+    // the drainer before commit 3). Its loop exits on quit_requested (the signal handler set it).
+    fprintf(stderr, "[sharded]   joining GUI...\n");
+    g_shared.quit_requested = 1;
+    pthread_join(gui_tid, NULL);
+#endif
+
+    // ── 2. one full composer cycle after the last order source joined ──
+    // The composer bumps the published generation once per cycle; wait for +2 (a cycle that
+    // STARTED after the joins has certainly pumped + submitted everything they left behind).
+    // Sanctioned cross-thread read: the seqlock'd pack (the reconciler reads it the same way).
+    {
+        MoneySnapshot<F> _ms{};
+        tt::ParameterSlot_Read(&state.agg.publish, &_ms);
+        const uint64_t g0 = _ms.generation;
+        const auto t_start = std::chrono::steady_clock::now();
+        for (;;) {
+            tt::ParameterSlot_Read(&state.agg.publish, &_ms);
+            if (_ms.generation >= g0 + 2) break;
+            if (std::chrono::steady_clock::now() - t_start >=
+                std::chrono::milliseconds(ENGINE_SHUTDOWN_COMPOSER_CYCLE_WAIT_MS)) {
+                fprintf(stderr, "[sharded]   composer did not complete a cycle within %d ms "
+                                "(generation %llu -> %llu) — continuing shutdown; anything still "
+                                "in its rings reaches the venue only if the workers are up\n",
+                        ENGINE_SHUTDOWN_COMPOSER_CYCLE_WAIT_MS,
+                        (unsigned long long)g0, (unsigned long long)_ms.generation);
+                break;
+            }
+            std::this_thread::yield();
+        }
+    }
+
+    // ── 3. venue producers quiesce (live only) ──
+    if (live_trading) {
+        // Reconciler first: it reads the composer's pack + pushes CMD_RECONCILE — no cross-struct
+        // dependency on the adapter (each owns its own BinanceOrderAPI instance).
+        fprintf(stderr, "[sharded]   quiescing venue producers: reconciler...\n");
+        ReconciliationLoop_Shutdown(&g_reconciler);
+        // REST workers: the worker checks shutdown_requested only at its loop head, so an
+        // in-flight REST call still fires its callback (OMS_ResultPush into result_rings)
+        // BEFORE the join returns — and the composer is still running to book it.
+        fprintf(stderr, "[sharded]   quiescing venue producers: REST workers...\n");
+        BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
+        // WS bounded grace: the last venue reports for the orders above ride the user-data
+        // stream; wait until it has been QUIET for ENGINE_SHUTDOWN_WS_QUIET_MS (no event), capped
+        // at ENGINE_SHUTDOWN_WS_GRACE_MAX_MS. yield-spin against a steady clock (no sleep_for).
+        // NOTE: the pre-commit-3 `ws_active.store(0)` that stood here is DELETED — with the
+        // composer live at this point it would have re-armed the adapter's REST full-fill
+        // fallback for an in-flight call whose TRADE legs the still-connected WS also
+        // delivers: a double-book (scout F-3). The keepalive circuit breaker's own ws_active
+        // writer is a different site and is untouched.
+        {
+            uint64_t last_ev = g_user_data.events_received.load(std::memory_order_relaxed);
+            const auto t_start = std::chrono::steady_clock::now();
+            auto t_quiet = t_start;
+            for (;;) {
+                const uint64_t now_ev = g_user_data.events_received.load(std::memory_order_relaxed);
+                const auto now = std::chrono::steady_clock::now();
+                if (now_ev != last_ev) { last_ev = now_ev; t_quiet = now; }
+                if (now - t_quiet >= std::chrono::milliseconds(ENGINE_SHUTDOWN_WS_QUIET_MS)) break;
+                if (now - t_start >= std::chrono::milliseconds(ENGINE_SHUTDOWN_WS_GRACE_MAX_MS)) {
+                    fprintf(stderr, "[sharded]   WS grace cap reached (%d ms) with the stream still "
+                                    "active — the wire-in-flight residual is the next boot's "
+                                    "reconcile (E.1.4 A20)\n", ENGINE_SHUTDOWN_WS_GRACE_MAX_MS);
+                    break;
+                }
+                std::this_thread::yield();
+            }
+        }
+        fprintf(stderr, "[sharded]   quiescing venue producers: user-data WS...\n");
+        BinanceUserData_Shutdown(&g_user_data);
+    }
+
+    // ── 4. composer stop: the MAIN-set word, the UNCONDITIONAL tail, the join ──
+    fprintf(stderr, "[sharded]   stopping composer (unconditional tail drain)...\n");
+    state.agg.composer_stop_request.store(1, std::memory_order_release);
+    drainer.join();
+
+    // ── 5. saves — every writer is joined ──
+    // E.1.3 P2-d — final snapshot save AFTER all joins (moved from the pre-join site; see the
+    // pre-close state so a restart can resume regime hysteresis +
+    // pnl_feeder + kill switch peak. Force-close mutates portfolio +
+    // realized_pnl; we save first so the persisted state matches the
+    // engine's "intent" rather than an in-progress liquidation.
+    // Paper mode only — live mode treats exchange state as truth.
+    // (Commit 3 also closed the P2-d brace slip that had nested this save inside the
+    // slow-paths `if`, and moved the bandit-state save below it — that save had run BEFORE
+    // any join, while the slow threads and the composer were still writing bandit weights.)
+    if (!live_trading) {
+        // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
+        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
+                                      BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED))) {
+            fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
+        } else {
+            fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
+        }
+    }
 
     // v5.10.0a.G.9 — final bandit state save. Each active ensemble core
     // flushes to its own <node_model_dir>/bandit_state.json. Survives
@@ -2453,52 +2568,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 still_open);
         }
     }
-    // Per-stage shutdown logging — when the process refuses to exit on close,
-    // these tell us WHICH thread is hung. Without them every shutdown bug
-    // looks the same from outside ("the engine doesn't die"). Each stage
-    // also signals its dedicated quit flag BEFORE joining so the thread has
-    // a chance to see it on its next loop iteration. v4.0.1 added per-stage
-    // signals after observing producer+depth could be in mid-reconnect with
-    // their dedicated flags not yet set.
-    fprintf(stderr, "[sharded]   joining depth thread...\n");
-    if (g_depth_tid != 0) {
-        __atomic_store_n(&g_depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
-        pthread_join(g_depth_tid, NULL);
-    }
-    fprintf(stderr, "[sharded]   joining producer...\n");
-    producer.join();
-    fprintf(stderr, "[sharded]   joining executors (%d)...\n", num_nodes);
-    for (auto& e : executors) e.join();
-    fprintf(stderr, "[sharded]   joining drainer...\n");
-    drainer.join();
-    if (!slow_paths.empty()) {
-        fprintf(stderr, "[sharded]   joining slow-paths (%zu)...\n", slow_paths.size());
-        for (auto& sp : slow_paths) sp.join();
 
-    // E.1.3 P2-d — final snapshot save AFTER all joins (moved from the pre-join site; see the
-    // pre-close state so a restart can resume regime hysteresis +
-    // pnl_feeder + kill switch peak. Force-close mutates portfolio +
-    // realized_pnl; we save first so the persisted state matches the
-    // engine's "intent" rather than an in-progress liquidation.
-    // Paper mode only — live mode treats exchange state as truth.
-    if (!live_trading) {
-        // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
-        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
-                                      BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED))) {
-            fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
-        } else {
-            fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
-        }
-    }
-    }
-#ifdef USE_IMGUI_GUI
-    fprintf(stderr, "[sharded]   joining GUI...\n");
-    g_shared.quit_requested = 1;
-    pthread_join(gui_tid, NULL);
-#endif
+    // ── 6. recorders -> Notify -> OMS ──
     fprintf(stderr, "[sharded]   closing recorders...\n");
     DepthRecorder_Close(&g_depth_rec);
     TickRecorder_Close(&g_tick_rec);  // Phase 8a (post-coding c7)
+    // Every Notify_Send caller thread (WS included — it fires one on disconnect) is joined
+    // above, so the worker's mutex/condvar teardown here has no live caller (scout F-5).
     fprintf(stderr, "[sharded]   shutting down notify worker...\n");
     if (g_notify) {
         NotifyState_Shutdown(g_notify);
@@ -2567,25 +2643,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         fprintf(stderr, "================================================================\n");
     }
 
-    // Shut down the reconciler first (it queries balances via REST — needs
-    // to stop before the REST instances are cleaned up).
-    if (live_trading) {
-        ReconciliationLoop_Shutdown(&g_reconciler);
-    }
-
-    // Shut down the user data websocket BEFORE the adapter (the WS thread
-    // may still be issuing REST calls for listen key refresh).
-    if (live_trading) {
-        g_sharded_binance_adapter.ws_active.store(0, std::memory_order_relaxed);
-        BinanceUserData_Shutdown(&g_user_data);
-    }
-
-    // Tear down the BinanceAdapter (joins worker threads, cleans up each
-    // worker's BinanceOrderAPI instance). No-op if live_trading was 0
-    // since BinanceAdapter_Init was never called — worker_count stays 0.
-    if (live_trading) {
-        BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
-    }
+    // E.1.3 3b(ii) commit 3 — the reconciler / user-data WS / BinanceAdapter shutdowns that
+    // stood here MOVED UP to step 3 of the shutdown order (venue producers quiesce BEFORE the
+    // composer's stop + tail, so a late fill is booked, not stranded). Nothing venue-side
+    // remains to tear down at this point.
 
     // v5.4.0 Phase 1.3 — release per-strategy state. Symmetric with the
     // Strategy_InitPerCore call above. Pre-v5.4 this was missing because
