@@ -17,7 +17,8 @@
 // runs on its own thread, writes to double-buffered BookSnapshot
 // engine reads snapshot on slow path — zero hot-path impact
 //
-// uses shared WebSocketUtil.hpp for TCP/SSL/framing (same as BinanceCrypto)
+// uses the shared WebSocketUtil.hpp frame family (TCP / SSL / handshake / reader / pong / close) — the ONE
+// RFC 6455 client body; BinanceCrypto + BinanceUserData migrate onto it in the 2026-09-05 depth leaf
 //======================================================================================================
 #ifndef BINANCE_DEPTH_HPP
 #define BINANCE_DEPTH_HPP
@@ -307,7 +308,7 @@ static inline int DepthStream_Init(DepthSharedState<F> *shared, const char *symb
     DepthStream *ds = &shared->stream;
     memset(ds, 0, sizeof(DepthStream));
 
-    ds->sockfd = ws_tcp_connect(host, port);
+    ds->sockfd = ws_tcp_connect(host, port, 0);   // 0 = no SO_RCVTIMEO yet — the lifecycle commit sets it
     if (ds->sockfd < 0) return -1;
     if (ws_ssl_setup(&ds->ssl_ctx, &ds->ssl, ds->sockfd, host) < 0) {
         close(ds->sockfd); return -1;
@@ -366,9 +367,12 @@ static inline void *depth_thread_fn(void *arg) {
         }
         if (!ready) continue;
 
-        int opcode;
-        int plen = ws_read_frame(ds->ssl, frame_buf, sizeof(frame_buf) - 1, &opcode);
+        int opcode, fin;
+        WsSslIo io{ds->ssl};
+        int plen = ws_read_frame(io, frame_buf, (int)sizeof(frame_buf) - 1, &opcode, &fin);
         if (plen < 0) {
+            // WS_READ_ERR = the peer went away; WS_READ_TOO_LARGE = the stream is DESYNCED (the oversize
+            // payload was not consumed) — both mean disconnect, never "skip and continue".
             // Phase 8a c5: log explicit gap on disconnect. _LogGap zeros
             // last_seen_id so the post-reconnect first _Write skips its
             // internal gap check (no double-flagging).
@@ -389,7 +393,10 @@ static inline void *depth_thread_fn(void *arg) {
             continue;
         }
 
-        if (opcode == 0x9) { ws_send_pong(ds->ssl); continue; }
+        // The pong ECHOES the ping payload, MASKED (RFC 6455 §5.1 + §5.5.3). Before 2026-09-05 this sent
+        // an empty unmasked {0x8A,0x00}; Binance answered it with a 1008 "Pong timeout" close ~90 s after
+        // every connect — the depth-stream stall. Write failure = the next read reports the dead peer.
+        if (opcode == 0x9) { ws_send_pong(io, frame_buf, plen); continue; }
         if (opcode == 0x8) { ds->connected = 0; continue; }
         if (opcode != 0x1) continue;
 

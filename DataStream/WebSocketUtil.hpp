@@ -5,12 +5,18 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[shared TCP + SSL + WebSocket plumbing under the venue streams (BinanceCrypto / BinanceDepth) — connect, SNI, RFC-6455 handshake/frame-read/close/pong]
+// [OVERVIEW]_[the ONE WebSocket frame family (reader / pong / close) + the shared TCP / SSL / handshake plumbing under the venue streams — RFC 6455 client side: partial-read loops on EVERY field, a 64-bit length compared BEFORE any int cast, a MASKED payload-echo pong, a masked close; the reader is a template over a Reader seam (WsSslReader in production, a byte cursor in the suite). Consumers: BinanceDepth (the 2026-09-05 depth-stall leaf, commit 1); BinanceCrypto + BinanceUserData migrate onto it in that leaf's commits 3-4 (their private copies carry the (int)pay_len length-cast hole this family closes)]
 // [CONTAINS]
-//   - [FUNCTION]_[ws_read_frame]   (+ base64 / tcp_connect / ssl_setup / handshake / close / send_pong family)
+//   - [FUNCTION]_[ws_read_frame]   (+ base64 / tcp_connect / ssl_setup / handshake / read_exact / build_pong / build_close / send_pong / send_close / close / stale / planned_reconnect_due family)
 //======================================================================================================
-// shared TCP, SSL, and WebSocket functions used by both BinanceCrypto and BinanceDepth
-// extracted to avoid duplicating connection/framing code across stream types
+// HISTORY. Until 2026-09-05 this file's reader did a single 2-byte SSL_read on the header (no partial-read
+// loop), folded a 64-bit length into an `int`, and its pong was `{0x8A, 0x00}` — EMPTY and UNMASKED
+// (RFC 6455 §5.1 requires client→server frames masked, §5.5.3 requires the pong to echo the ping
+// payload). Binance answered that pong with a 1008 "Pong timeout" close 74-102 s after every connect —
+// the depth-stream stall proven at plans/v5.15-live-readiness/plan_checks/2026-09-05-depth-ws-stall-proof/.
+// The trade client (BinanceCrypto.hpp) and the user-data client (BinanceUserData.hpp) had CORRECT private
+// copies of the same reader + pong — three parallel frame implementations, one drifted (Class 18); this
+// file is now the single body all three consume.
 //======================================================================================================
 #ifndef WEBSOCKET_UTIL_HPP
 #define WEBSOCKET_UTIL_HPP
@@ -22,13 +28,45 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/tcp.h>
+
+//======================================================================
+// [STRUCT]_[WsSslIo]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the production transport for the ws_* frame family — binds the SSL* at the call site, stores nothing else. An Io is any struct with `int read(unsigned char* dst, int want)` (bytes read >0, or <=0 on EOF/error) and `int write(const unsigned char* src, int len)` (bytes written); the suite's byte cursor with a chunk size + a write-capture buffer drives the SAME templates, so the parse is proven invariant to how the bytes arrive (a TLS record boundary can fall inside the 2-byte header, the extended length, or the mask) and the pong that would go on the wire is asserted byte-for-byte]
+//======================================================================
+// [CODE]
+//======================================================================
+struct WsSslIo {
+    SSL *ssl;
+    int read (unsigned char *dst, int want)      { return SSL_read (ssl, dst, want); }
+    int write(const unsigned char *src, int len) { return SSL_write(ssl, src, len); }
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-09-05]
+// [SIZE]_[8B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[WsSslIo]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[ws_read_frame]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the WS utility family (base64 / tcp_connect / ssl_setup / handshake / close / send_pong ride) — frame reader handles 7/16/64-bit payload lengths + masking; handshake strstr is once-per-connect (not an inner loop; H5-compatible)]
+// [OVERVIEW]_[the WS utility family (base64 / tcp_connect / ssl_setup / handshake / read_exact / build_pong / build_close / send_pong / send_close / close / stale / planned_reconnect_due ride) — the frame reader loops every field to completion, handles the 7/16/64-bit length forms, compares the 64-bit length against the buffer BEFORE any int cast (WS_READ_TOO_LARGE, the stream is then DESYNCED and the caller must disconnect), unmasks a masked frame, NUL-terminates; the reader + the senders are templated over the Io transport (WsSslIo in production; the suite's byte cursor + write capture) so TLS-record fragmentation is deterministic and the wire bytes are assertable — no fn-pointer, no virtual (H1/H2)]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -55,7 +93,10 @@ static inline void ws_base64_encode(const unsigned char *in, int len, char *out)
 //------------------------------------------------------------------
 // [SECTION]_[TCP CONNECT]
 //------------------------------------------------------------------
-static inline int ws_tcp_connect(const char *host, int port) {
+// rcv_timeout_ms > 0 sets SO_RCVTIMEO: a blocking SSL_read inside a frame then returns after that long
+// instead of parking the thread forever on a peer that stopped mid-record — the hole a poll-timeout
+// watchdog cannot see (2026-09-05 depth leaf). 0 = no timeout (the pre-2026-09-05 behaviour).
+static inline int ws_tcp_connect(const char *host, int port, uint32_t rcv_timeout_ms) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
     struct addrinfo hints = {}, *res;
@@ -68,6 +109,14 @@ static inline int ws_tcp_connect(const char *host, int port) {
         close(fd); freeaddrinfo(res); return -1;
     }
     freeaddrinfo(res);
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));   // parity with the trade client
+    if (rcv_timeout_ms > 0) {
+        struct timeval tv;
+        tv.tv_sec  = (time_t)(rcv_timeout_ms / 1000u);
+        tv.tv_usec = (suseconds_t)((rcv_timeout_ms % 1000u) * 1000u);
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
     return fd;
 }
 
@@ -120,48 +169,131 @@ static inline int ws_handshake(SSL *ssl, const char *host, const char *path) {
 }
 
 //------------------------------------------------------------------
+// [SECTION]_[READER RETURN CODES]
+//------------------------------------------------------------------
+// The transport seam itself is the WsSslIo struct block above this family.
+enum : int {
+    WS_READ_ERR       = -1,   // EOF / transport error mid-frame (the peer went away) — disconnect
+    WS_READ_TOO_LARGE = -2,   // the 64-bit payload length exceeds the buffer; the payload was NOT consumed — the
+                              // stream is DESYNCED from here, the caller MUST disconnect (never "skip and continue")
+};
+
+// Read exactly `want` bytes (loops over partial reads). 1 = done, 0 = EOF/error before `want`.
+template <class Io>
+static inline int ws_read_exact(Io &r, unsigned char *dst, int want) {
+    int got = 0;
+    while (got < want) {
+        int n = r.read(dst + got, want - got);
+        if (n <= 0) return 0;
+        got += n;
+    }
+    return 1;
+}
+
+//------------------------------------------------------------------
 // [SECTION]_[WEBSOCKET FRAME READER]
 //------------------------------------------------------------------
-static inline int ws_read_frame(SSL *ssl, char *out, int max_len, int *opcode) {
+// Returns the payload length (>= 0; out[len] = '\0') with *opcode / *fin set, or WS_READ_ERR /
+// WS_READ_TOO_LARGE. Every field is read to completion; the length is compared as uint64_t against
+// max_len BEFORE any narrowing (a 127-form length >= 2^31 cast to int is NEGATIVE and would pass a
+// signed guard, skip the payload loop, and NUL-terminate at out[len] — out of bounds).
+template <class Io>
+static inline int ws_read_frame(Io &r, char *out, int max_len, int *opcode, int *fin) {
     unsigned char hdr[2];
-    int r = SSL_read(ssl, hdr, 2);
-    if (r <= 0) return -1;
+    if (!ws_read_exact(r, hdr, 2)) return WS_READ_ERR;
+    *fin    = (hdr[0] >> 7) & 1;
     *opcode = hdr[0] & 0x0F;
-    int masked = (hdr[1] >> 7) & 1;
-    int plen = hdr[1] & 0x7F;
+    const int masked = (hdr[1] >> 7) & 1;
+    uint64_t plen = hdr[1] & 0x7F;
 
     if (plen == 126) {
         unsigned char ext[2];
-        if (SSL_read(ssl, ext, 2) != 2) return -1;
-        plen = (ext[0] << 8) | ext[1];
+        if (!ws_read_exact(r, ext, 2)) return WS_READ_ERR;
+        plen = ((uint64_t)ext[0] << 8) | (uint64_t)ext[1];
     } else if (plen == 127) {
         unsigned char ext[8];
-        if (SSL_read(ssl, ext, 8) != 8) return -1;
+        if (!ws_read_exact(r, ext, 8)) return WS_READ_ERR;
         plen = 0;
-        for (int i = 0; i < 8; i++) plen = (plen << 8) | ext[i];
+        for (int i = 0; i < 8; i++) plen = (plen << 8) | (uint64_t)ext[i];
     }
 
-    unsigned char mask[4] = {};
-    if (masked && SSL_read(ssl, mask, 4) != 4) return -1;
-    if (plen > max_len) return -1;
+    unsigned char mask[4] = {0, 0, 0, 0};
+    if (masked && !ws_read_exact(r, mask, 4)) return WS_READ_ERR;
 
-    int total = 0;
-    while (total < plen) {
-        r = SSL_read(ssl, out + total, plen - total);
-        if (r <= 0) return -1;
-        total += r;
+    if (max_len < 0 || plen > (uint64_t)max_len) return WS_READ_TOO_LARGE;   // BEFORE any int cast
+    const int n = (int)plen;
+
+    if (n > 0 && !ws_read_exact(r, (unsigned char *)out, n)) return WS_READ_ERR;
+    if (masked) for (int i = 0; i < n; i++) out[i] = (char)((unsigned char)out[i] ^ mask[i & 3]);
+    out[n] = '\0';
+    return n;
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[FRAME BUILDERS — pure, mask injected]
+//------------------------------------------------------------------
+// Client→server frames MUST be masked (RFC 6455 §5.1). The builders take the mask so the suite can
+// assert the exact bytes; the senders draw it from RAND_bytes. Returns the frame length, or 0 if it
+// does not fit `cap`.
+static inline int ws_build_pong(const char *payload, int len, const unsigned char mask[4],
+                                unsigned char *frame, int cap) {
+    if (len < 0 || len > 0xFFFF) return 0;
+    const int hdr = (len < 126) ? 2 : 4;
+    if (hdr + 4 + len > cap) return 0;
+    int pos = 0;
+    frame[pos++] = 0x8A;                                        // FIN + pong
+    if (len < 126) {
+        frame[pos++] = (unsigned char)(0x80 | len);             // mask bit + 7-bit length
+    } else {
+        frame[pos++] = (unsigned char)(0x80 | 126);
+        frame[pos++] = (unsigned char)((len >> 8) & 0xFF);
+        frame[pos++] = (unsigned char)(len & 0xFF);
     }
-    if (masked) for (int i = 0; i < plen; i++) out[i] ^= mask[i & 3];
-    out[plen] = '\0';
-    return plen;
+    memcpy(frame + pos, mask, 4); pos += 4;
+    for (int i = 0; i < len; i++) frame[pos++] = (unsigned char)((unsigned char)payload[i] ^ mask[i & 3]);
+    return pos;
+}
+
+// A masked close frame with an empty payload (6 bytes). RFC 6455 §5.5.1 allows the empty body.
+static inline int ws_build_close(const unsigned char mask[4], unsigned char *frame) {
+    frame[0] = 0x88;        // FIN + close
+    frame[1] = 0x80;        // mask bit, length 0
+    memcpy(frame + 2, mask, 4);
+    return 6;
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[SENDERS]
+//------------------------------------------------------------------
+// The pong ECHOES the ping payload (RFC 6455 §5.5.3) — Binance closes a session whose pong does not
+// (code 1008 "Pong timeout"; proven 2026-09-05). Ping payloads are tiny (Binance sends ~13 B); a
+// payload that would not fit the 256 B stack frame is refused (0) rather than truncated (a truncated
+// echo is a wrong echo). Returns 1 when the whole frame was written.
+template <class Io>
+static inline int ws_send_pong(Io &io, const char *payload, int len) {
+    unsigned char frame[256];
+    unsigned char mask[4];
+    RAND_bytes(mask, 4);
+    const int n = ws_build_pong(payload, len, mask, frame, (int)sizeof(frame));
+    if (n <= 0) return 0;
+    return (io.write(frame, n) == n) ? 1 : 0;
+}
+
+template <class Io>
+static inline int ws_send_close(Io &io) {
+    unsigned char frame[8];
+    unsigned char mask[4];
+    RAND_bytes(mask, 4);
+    const int n = ws_build_close(mask, frame);
+    return (io.write(frame, n) == n) ? 1 : 0;
 }
 
 //------------------------------------------------------------------
 // [SECTION]_[WEBSOCKET CLOSE]
 //------------------------------------------------------------------
 static inline void ws_close(SSL *ssl, SSL_CTX *ctx, int sockfd) {
-    unsigned char close_frame[6] = {0x88, 0x80, 0, 0, 0, 0};
-    SSL_write(ssl, close_frame, 6);
+    WsSslIo io{ssl};
+    ws_send_close(io);
     SSL_shutdown(ssl);
     SSL_free(ssl);
     SSL_CTX_free(ctx);
@@ -169,11 +301,20 @@ static inline void ws_close(SSL *ssl, SSL_CTX *ctx, int sockfd) {
 }
 
 //------------------------------------------------------------------
-// [SECTION]_[PONG RESPONSE]
+// [SECTION]_[LIVENESS — pure helpers the client loops consume]
 //------------------------------------------------------------------
-static inline void ws_send_pong(SSL *ssl) {
-    unsigned char pong[2] = {0x8A, 0x00};
-    SSL_write(ssl, pong, 2);
+// Stale = no frame for more than threshold_us. last_us == 0 means "no frame yet on this connection"
+// (the pre-warmup window is the connect's own timeout, not staleness). Monotonic microseconds.
+static inline int ws_stale(uint64_t now_us, uint64_t last_us, uint64_t threshold_us) {
+    return (last_us != 0 && now_us > last_us && (now_us - last_us) > threshold_us) ? 1 : 0;
+}
+
+// Binance drops every WebSocket session at 24 h; reconnect proactively at 23 h 30 m (a 30-min buffer)
+// so the cut lands at a moment the client chooses. The SSoT for the number — the trade client's
+// literal (BinanceCrypto.hpp BinanceStream_ShouldReconnect) is to be pointed here.
+static const uint64_t WS_PLANNED_RECONNECT_S = 23ULL * 3600ULL + 30ULL * 60ULL;   // 84600
+static inline int ws_planned_reconnect_due(uint64_t now_s, uint64_t connect_s) {
+    return (connect_s != 0 && now_s >= connect_s && (now_s - connect_s) >= WS_PLANNED_RECONNECT_S) ? 1 : 0;
 }
 //======================================================================
 // [END_CODE]
