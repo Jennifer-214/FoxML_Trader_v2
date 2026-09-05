@@ -1667,6 +1667,13 @@ struct alignas(64) EnsembleModelZoo {
     // its next cycle and clears it. See EnsembleModelZoo_MaybeSaveBanditPeriodic.
     int      bandit_save_pending;
     uint64_t bandit_update_count;              // monotonic; modulo'd against interval
+    // D-483 C (2026-09-04) — the exclusive lock on the BOUND state dir
+    // (<dir>/.foxml_state.lock; flock LOCK_EX|LOCK_NB, O_CLOEXEC). -1 = unbound.
+    // Held for the ezoo's lifetime, released in _Free. The lock lives on the
+    // open file description, so a same-dir hot-swap hands the successor a
+    // dup'd descriptor rather than re-acquiring (two open()s on one lock file
+    // conflict even inside ONE process). Cold: touched at bind / swap / free only.
+    int      state_lock_fd;
 
     char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
 
@@ -1696,12 +1703,12 @@ struct alignas(64) EnsembleModelZoo {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-31]
+// [UPDATED]_[2026-09-04]
 //----------------------------------------------------------------------
-// [SIZE]_[277056B]
+// [SIZE]_[277120B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[4329]
-// [STRADDLE]_[unverified: barrier regime exit_predictor buy_signal]
+// [CACHE_LINES]_[4330]
+// [STRADDLE]_[primary_role_name@274484 · unverified: barrier regime exit_predictor buy_signal]
 //======================================================================
 // [END_STRUCT]_[EnsembleModelZoo]
 //======================================================================
@@ -1882,10 +1889,18 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->exit_predict_call_count = 0;
     ezoo->predict_call_count = 0;
     memset(ezoo->drift, 0, sizeof(ezoo->drift));
-    // v5.10.0a.G.9 — persistence config init (caller fills via _SetSavePath)
+    // v5.10.0a.G.9 — persistence config init. The path has exactly ONE writer:
+    // the D-483 C bind row (EnsembleModelZoo_BindStateDir) — nothing else may
+    // fill it (the pre-2026-09-04 comment named a `_SetSavePath` that never existed;
+    // the load's side-effect had become the de-facto setter).
     ezoo->bandit_save_path[0] = '\0';
     ezoo->bandit_save_interval = 0;
     ezoo->bandit_update_count = 0;
+    // 2026-09-04 (A-2 F2.9) — was NEVER initialized: heap ezoos (aligned_alloc at
+    // the LIVE boot + the hot-swap shadow load) started with garbage here, so a
+    // spurious first-cycle _FlushPendingBanditSave was possible.
+    ezoo->bandit_save_pending = 0;
+    ezoo->state_lock_fd = -1;         // D-483 C — unbound until the bind row runs
     // v5.11.62 — primary-role indirection (set at end of LoadFromCfg /
     // AutoDetectFromDir; nullptr until a load populates it).
     ezoo->primary_handles = nullptr;
@@ -2475,6 +2490,14 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
     ezoo->exit_predictor_count = 0;
     ezoo->buy_signal_count = 0;
     BITMAP_CLR(ezoo->init_flags, MASK_EZOO_ACTIVE);
+    // D-483 C — release the state dir (the lock ends with the LAST descriptor of
+    // its open file description: a hot-swap successor holding a dup keeps it) and
+    // forget the bound path, so a freed ezoo derives NO state dir and the two
+    // bind-outcome bits do not outlive the binding they describe.
+    FoxDir_Unlock(&ezoo->state_lock_fd);
+    ezoo->bandit_save_path[0] = '\0';
+    BITMAP_CLR(ezoo->init_flags, MASK_EZOO_STATE_DIR_CONTENDED);
+    BITMAP_CLR(ezoo->init_flags, MASK_EZOO_STATE_DIR_UNWRITABLE);
     // v5.14.2.D — clear v5.14.1.E exit-side state for semantic completeness.
     // Init compensates in the hot-swap Free→Init→Load path, but Free called
     // outside that path (process exit, future error-recovery code) shouldn't
@@ -3142,8 +3165,11 @@ inline int EnsembleModelZoo_SaveExitBanditState(
 // success (overlays weights/cum_reward/pulls onto pre-initialized
 // bandits), 0 on missing/corrupt/mismatched file.
 //
-// Also captures base_dir into ezoo->bandit_save_path so periodic +
-// shutdown save can find it without re-deriving from cfg later.
+// D-483 C (2026-09-04): this loader NO LONGER writes ezoo->bandit_save_path.
+// Until then its side-effect was the de-facto path setter, which made "load
+// from dir X" and "save into dir X" one inseparable act — a refused/unbound
+// node still saved. The bind row (EnsembleModelZoo_BindStateDir) is the ONE
+// writer; every loader is passed the BOUND dir (empty when unbound ⇒ no load).
 //
 // Caller must call EnsembleModelZoo_InitBandits FIRST to set up the
 // uniform priors + arm count + gamma. This function only overlays.
@@ -3154,9 +3180,6 @@ inline int EnsembleModelZoo_LoadBanditState(
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
     snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
-    // Capture path for periodic + shutdown save triggers.
-    strncpy(ezoo->bandit_save_path, path, sizeof(ezoo->bandit_save_path) - 1);
-    ezoo->bandit_save_path[sizeof(ezoo->bandit_save_path) - 1] = '\0';
     char expected_id[65];
     EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
     int loaded = Bandit_LoadJSON(ezoo->bandits, NUM_REGIMES, path,
@@ -3729,9 +3752,10 @@ inline int EnsembleModelZoo_LoadExitThompsonState(
 // is allowed (typical when transferring between sibling models).
 // skip_bundle_check=0 → normal path; behaves like _LoadBanditState.
 //
-// Does NOT update ezoo->bandit_save_path — caller's _LoadBanditState
-// (if it ran first) wins for periodic-save destination, OR caller can
-// set bandit_save_path explicitly via _LoadBanditState before this.
+// Does NOT touch ezoo->bandit_save_path — only the D-483 C bind row
+// (EnsembleModelZoo_BindStateDir) writes it. A prior overlay is a READ of
+// someone else's file; it never makes that file this ezoo's save target
+// (the backtest passes an explicit prior with NO bound state dir at all).
 template <unsigned F>
 inline int EnsembleModelZoo_LoadBanditStateFromPath(
     EnsembleModelZoo<F>* ezoo, const char* path, int skip_bundle_check) {
@@ -3768,17 +3792,86 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
 }
 
 //======================================================================
+// [FUNCTION]_[EnsembleModelZoo_BindStateDir]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [ML_INFERENCE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[D-483 C — the ONE writer of bandit_save_path: take the state dir's exclusive lock, then bind. Contended or unwritable ⇒ persistence OFF for this ezoo (bind-outcome bit + stderr + Health_Log; no load, no save) — never a second writer on one dir, across nodes or processes]
+// [REFERENCE]_[DECISION]_[D-483]
+// [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-331]
+// [REFERENCE]_[INVARIANT]_[H22]
+//======================================================================
+// [CODE]
+//======================================================================
+// Returns 1 bound (path set, lock held) / 0 not bound. Not bound is THREE
+// distinct states, told apart by the flags: (a) no dir requested (empty
+// state_base_path — the backtest's fresh-only mode; no bit set), (b)
+// STATE_DIR_CONTENDED — another node or process holds the dir's lock, the
+// TECH_DEBT-331 two-writers hazard, (c) STATE_DIR_UNWRITABLE — the lock file
+// could not be created (a different operator action, so a different bit).
+// Guarded on ACTIVE + BANDITS_READY exactly like every saver and loader: an
+// ezoo that never loaded a bundle owns no state dir (and the tests' bare
+// PostLoadSetup ezoos never contend on their shared /tmp dirs).
+// A pre-held descriptor (state_lock_fd >= 0 — the hot-swap same-dir handover)
+// binds WITHOUT a second flock: two open()s on one lock file conflict even
+// inside ONE process (per-open-file-description semantics), so the successor
+// inherits the holder's dup'd descriptor instead of re-acquiring.
+template <unsigned F>
+inline int EnsembleModelZoo_BindStateDir(EnsembleModelZoo<F>* ezoo, const char* dir, int node_id) {
+    if (!ezoo) return 0;
+    if (!dir || dir[0] == '\0') return 0;   // (a) no state dir requested
+    if (!BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) ||
+        !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
+    if (ezoo->state_lock_fd < 0) {
+        int rc = FoxDir_LockExclusive(dir, MODEL_STATE_LOCK_FILE, &ezoo->state_lock_fd);
+        if (rc != 1) {
+            const int contended = (rc == 0);
+            BITMAP_SET(ezoo->init_flags, contended ? MASK_EZOO_STATE_DIR_CONTENDED
+                                                   : MASK_EZOO_STATE_DIR_UNWRITABLE);
+            ezoo->bandit_save_path[0] = '\0';   // persistence OFF: no load, no save
+            const char* why = contended
+                ? "held by another node or process — two writers on one state dir (TECH_DEBT-331 / D-483)"
+                : "lock file cannot be created (unwritable dir / no space / bad path)";
+            fprintf(stderr, "[ensemble] node %d: bandit state dir '%s' NOT bound — %s; "
+                            "persistence OFF for this node (no state load, no state save)\n",
+                    node_id, dir, why);
+            tt::Health_Log(tt::HEALTH_WARN, "bandit_state", node_id,
+                           "state dir '%s' not bound: %s; persistence OFF", dir, why);
+            return 0;
+        }
+    }
+    int n = snprintf(ezoo->bandit_save_path, sizeof(ezoo->bandit_save_path),
+                     "%s/%s", dir, MODEL_STATE_FILE_BANDIT);
+    if (n <= 0 || n >= (int)sizeof(ezoo->bandit_save_path)) {
+        // A dir too long to name its own state file cannot be a save target.
+        ezoo->bandit_save_path[0] = '\0';
+        FoxDir_Unlock(&ezoo->state_lock_fd);
+        BITMAP_SET(ezoo->init_flags, MASK_EZOO_STATE_DIR_UNWRITABLE);
+        fprintf(stderr, "[ensemble] node %d: bandit state dir path too long (%d chars); "
+                        "persistence OFF\n", node_id, n);
+        return 0;
+    }
+    return 1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_BindStateDir]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EnsembleModelZoo_DeriveStateDir]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[s5 BT-7 — the LIVE state directory: derived from bandit_save_path (where the last LOAD ran), not the boot cfg dir]
+// [OVERVIEW]_[s5 BT-7 — the LIVE state directory: derived from bandit_save_path (the BOUND dir), never the boot cfg dir; 0 = not bound = NOWHERE to write (D-483 C)]
 //======================================================================
 // [CODE]
 //======================================================================
-// bandit_save_path is built as "<base_dir>/bandit_state.json" at the load site,
-// so truncating at the final '/' recovers the base dir as an INVARIANT of its
-// construction rather than a guess about path shapes.
+// bandit_save_path is built as "<base_dir>/bandit_state.json" at the bind
+// (EnsembleModelZoo_BindStateDir), so truncating at the final '/' recovers the
+// base dir as an INVARIANT of its construction rather than a guess about path
+// shapes.
 //
 // WHY this matters (BT-7): the shutdown saver used cfg.node_model_dir[i] — the
 // BOOT directory — while the periodic saver used bandit_save_path — the dir the
@@ -3791,11 +3884,14 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
 // its own — cross-family contamination, unguarded because the bundle-id check is
 // vacuous (BT-8) and every family here is 3-arm.
 //
-// Falls back to `fallback_dir` when no load has run (path empty) — that is the
-// honest answer for an ezoo that never loaded state.
+// D-483 C (2026-09-04): the `fallback_dir` arm is GONE. An ezoo that is not
+// bound has NOWHERE to write — by design. The fallback to the caller's cfg dir
+// was dead for every bound ezoo and LIVE for exactly the state the bind creates
+// on refusal (persistence OFF): the shutdown save and the hot-swap flush would
+// have written all four files, unlocked, into the contended dir — the very
+// clobber the D-483 process amendment was written from.
 template <unsigned F>
 inline int EnsembleModelZoo_DeriveStateDir(const EnsembleModelZoo<F>* ezoo,
-                                            const char* fallback_dir,
                                             char* out, size_t out_sz) {
     if (!out || out_sz == 0) return 0;
     out[0] = '\0';
@@ -3809,16 +3905,11 @@ inline int EnsembleModelZoo_DeriveStateDir(const EnsembleModelZoo<F>* ezoo,
             if (tmp[0] != '\0') {
                 strncpy(out, tmp, out_sz - 1);
                 out[out_sz - 1] = '\0';
-                return 1;   // derived from the LIVE path
+                return 1;   // derived from the BOUND path
             }
         }
     }
-    if (fallback_dir && fallback_dir[0] != '\0') {
-        strncpy(out, fallback_dir, out_sz - 1);
-        out[out_sz - 1] = '\0';
-        return 2;           // fell back to the caller's dir
-    }
-    return 0;               // nowhere to write
+    return 0;               // not bound — nowhere to write
 }
 //======================================================================
 // [END_CODE]
@@ -3962,8 +4053,9 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
     // since `ensemble_bandit_save_interval` reads as "the bandit save cadence".
     //
     // base_dir is DERIVED, not stored: bandit_save_path is constructed exactly as
-    // "<base_dir>/bandit_state.json" at :2694 in this same file, so truncating at the
-    // final '/' is an invariant of its construction rather than a guess about paths.
+    // "<base_dir>/bandit_state.json" at the bind (EnsembleModelZoo_BindStateDir), so
+    // truncating at the final '/' is an invariant of its construction rather than a
+    // guess about paths.
     // That is why this needs no new ezoo field -- and adding one would have moved a
     // 400-byte array into a struct whose layout is cache-tuned.
     //
@@ -3978,7 +4070,7 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
     // harmless re-write of what was just written, avoided by keeping the split.
     {
         char base_dir[sizeof(ezoo->bandit_save_path)];
-        if (EnsembleModelZoo_DeriveStateDir(ezoo, nullptr, base_dir, sizeof(base_dir))) {
+        if (EnsembleModelZoo_DeriveStateDir(ezoo, base_dir, sizeof(base_dir))) {
             EnsembleModelZoo_SaveExitBanditState(ezoo, base_dir, nullptr);
             EnsembleModelZoo_SaveThompsonState(ezoo, base_dir, nullptr);
             EnsembleModelZoo_SaveExitThompsonState(ezoo, base_dir, nullptr);
@@ -4011,7 +4103,7 @@ inline void EnsembleModelZoo_FlushPendingBanditSave(EnsembleModelZoo<F>* ezoo) {
     if (!BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) ||
         !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     char base_dir[sizeof(ezoo->bandit_save_path)];
-    if (!EnsembleModelZoo_DeriveStateDir(ezoo, nullptr, base_dir, sizeof(base_dir))) return;
+    if (!EnsembleModelZoo_DeriveStateDir(ezoo, base_dir, sizeof(base_dir))) return;
     // Quiet on the happy path: a periodic flush is routine and this fires on
     // every node. The savers already shout on failure.
     EnsembleModelZoo_SaveBanditState(ezoo, base_dir, nullptr);
@@ -4032,7 +4124,7 @@ inline void EnsembleModelZoo_FlushPendingBanditSave(EnsembleModelZoo<F>* ezoo) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the canonical ensemble post-load setup steps — boot/backtest/hot-swap all expand THIS registry (the PARITY-009..012 Class-18 structural close); PostLoadSetup + IsReadyForInference contract ride]
 // [COLUMN]_[step_name]_[registry-row identifier for the setup step]
-// [COLUMN]_[call_expression]_[the invocation — (ezoo, cfg, node_id, base_run_path) in scope from the helper body]
+// [COLUMN]_[call_expression]_[the invocation — (ezoo, cfg, node_id, base_run_path, state_base_path, state_dir) in scope from the helper body; base_run_path = the MODEL dir (verify_expected), state_dir = the BOUND state dir (the four load rows; empty when unbound)]
 // [REFERENCE]_[DESIGN_SPEC]_[postloadsetup-registry-pattern]
 // [REFERENCE]_[CLASS]_[18]
 // [REFERENCE]_[PARITY]_[[PARITY-9] [PARITY-10] [PARITY-11] [PARITY-12]]
@@ -4076,9 +4168,29 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
     ezoo->blend_mode[sizeof(ezoo->blend_mode) - 1] = '\0';
 }
 
+// D-483 C (2026-09-04) — the bind row's body: bind (lock + path), then publish
+// the BOUND dir into the helper-scope `state_dir` the four load rows consume.
+// Unbound ⇒ state_dir stays empty ⇒ every loader early-returns — which is how
+// "persistence OFF" and "fresh-only" become one mechanism instead of five
+// guards. Extracted so the X-macro tuple stays a single expression.
+template <unsigned F>
+inline void ensemble_post_load_bind_state_dir(EnsembleModelZoo<F>* ezoo,
+                                              const char* state_base_path,
+                                              int node_id,
+                                              char* state_dir, size_t state_dir_sz) {
+    if (state_dir && state_dir_sz) state_dir[0] = '\0';
+    if (EnsembleModelZoo_BindStateDir(ezoo, state_base_path, node_id)) {
+        (void)EnsembleModelZoo_DeriveStateDir(ezoo, state_dir, state_dir_sz);
+    }
+}
+
 // Canonical post-load setup steps for ensemble.
 // Each entry: X(step_name, call_expression). Expression invoked with
-// (ezoo, cfg, node_id, base_run_path) in scope from helper body.
+// (ezoo, cfg, node_id, base_run_path, state_base_path, state_dir) in scope from
+// the helper body — base_run_path is the MODEL dir, state_base_path the dir the
+// caller wants learned state bound to ("" = none: the backtest), state_dir the
+// dir the bind row actually BOUND (empty when unbound; the four load rows read
+// it, so an unbound ezoo loads nothing — D-483 C).
 // Adding a new step: 1 line here. Boot, backtest, hot-swap inherit.
 // PARITY-046 close (2026-09-03) — the ensemble's per-horizon expected-record
 // verify. The mh trainer writes expected_{entry,exit}.cfg into EVERY horizon
@@ -4134,12 +4246,19 @@ inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
                                node_id))                                          \
     X(disabled_horizons,   EnsembleModelZoo_SetDisabledHorizons(ezoo,            \
                                cfg.node_disabled_horizons[node_id]))             \
+    /* D-483 C (2026-09-04) — BIND the state dir (exclusive lock; the ONE writer of         */ \
+    /* bandit_save_path) BEFORE any state loader runs. The four load rows below read        */ \
+    /* state_dir — the BOUND dir, empty when unbound — so a refused node loads NOTHING of    */ \
+    /* another node's state (not just buy-Exp3) and the backtest ("" state_base_path: no    */ \
+    /* bind, no load, no save) is a pure function of its inputs + the explicit prior overlay. */ \
+    X(bind_state_dir,      ensemble_post_load_bind_state_dir(ezoo, state_base_path, \
+                               node_id, state_dir, sizeof(state_dir)))           \
     X(load_bandit_state,   EnsembleModelZoo_LoadBanditState(ezoo,                \
-                               base_run_path))                                    \
+                               state_dir))                                        \
     X(save_interval,       EnsembleModelZoo_SetBanditSaveInterval(ezoo,          \
                                cfg.ensemble_bandit_save_interval))               \
     X(load_exit_bandit,    EnsembleModelZoo_LoadExitBanditState(ezoo,            \
-                               base_run_path))                                    \
+                               state_dir))                                        \
     /* v5.14.10.C — Thompson sampling bandit init + load (parallel to bandits[] init/load above). */ \
     /* Class 18 mirror prevention via PostLoadSetup registry (per /trace-deps BLOCKING amendment). */ \
     /* Init unconditional (so cfg-flip mid-run sees pre-initialized state); Load idempotent overlay. */ \
@@ -4149,7 +4268,7 @@ inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
                                FPN_ToDouble(cfg.thompson_precision_obs),           \
                                cfg.thompson_rng_seed))                             \
     X(load_thompson_state,   EnsembleModelZoo_LoadThompsonState(ezoo,             \
-                               base_run_path))                                     \
+                               state_dir))                                         \
     /* v5.15.5.F.4d — exit-side Thompson mirror per FOREACH_BANDIT_SIDE (§ G of merged plan body). */ \
     /* Init unconditional (parallel to buy-side; cfg-flip mid-run sees pre-initialized state); */     \
     /* Load idempotent overlay (missing file → uniform priors stay). Closes pre-.F.4d asymmetry */    \
@@ -4160,7 +4279,7 @@ inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
                                FPN_ToDouble(cfg.thompson_precision_obs),                              \
                                cfg.thompson_rng_seed))                                                \
     X(load_exit_thompson_state, EnsembleModelZoo_LoadExitThompsonState(ezoo,                          \
-                               base_run_path))                                                        \
+                               state_dir))                                                            \
     /* PARITY-046 close (2026-09-03) — the per-horizon expected-record verify, the SAME comparator */ \
     /* the single-zoo row runs (ModelExpected_Compare); LAST so its mismatch total is the final   */ \
     /* word the strict-mode caller reads (the walk is void; the row cannot refuse by itself).     */ \
@@ -4174,11 +4293,17 @@ inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
 // Compile-time count for tests. Update when adding entries.
 // v5.15.5.F.4d: 9 → 11 (added init_exit_thompson_bandits + load_exit_thompson_state for exit-side mirror).
 // 2026-09-03: 11 → 12 (verify_expected — PARITY-046 close; the ensemble path gains the stupid-proof check).
-#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 12
+// 2026-09-04: 12 → 13 (bind_state_dir — D-483 C; the state-dir lock + the ONE bandit_save_path writer).
+#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 13
 
 // Canonical post-load setup for ensemble. All registry steps in one place
 // (count = FOREACH_ENSEMBLE_POST_LOAD_COUNT).
 // Boot, backtest, hot-swap call this; never inline the steps directly.
+//
+// base_run_path  = the MODEL dir (verify_expected reads the horizon dirs under it).
+// state_base_path = the dir learned state is BOUND to (D-483 C): LIVE/paper pass the
+//                   node's model dir (E.1.5 B re-homes it); the BACKTEST passes "" —
+//                   no bind, no state load, no state save (fresh-only). nullptr = "".
 //
 // Returns: void. Does NOT call ValidateAgainstCfg — that's the caller's
 // responsibility (it takes both zoo + ezoo as combined check).
@@ -4189,8 +4314,12 @@ template <unsigned F>
 inline void EnsembleModelZoo_PostLoadSetup(EnsembleModelZoo<F>* ezoo,
                                              const ControllerConfig<F>& cfg,
                                              int node_id,
-                                             const char* base_run_path) {
+                                             const char* base_run_path,
+                                             const char* state_base_path) {
     if (!ezoo || !base_run_path) return;
+    if (!state_base_path) state_base_path = "";
+    char state_dir[sizeof(ezoo->bandit_save_path)];   // filled by the bind_state_dir row
+    state_dir[0] = '\0';
 #define X(name, expr) expr;
     FOREACH_ENSEMBLE_POST_LOAD(X)
 #undef X
@@ -4212,7 +4341,11 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
     // - InitExitBandits: MASK_EZOO_EXIT_BANDITS_READY set (or no exit models — exit_predictor_count<2)
     // - blend_mode: non-empty (defaults to global cfg.ensemble_blend_mode)
     // - SetDisabledHorizons: disabled_horizon_mask written (any value valid)
-    // - LoadBanditState: no boolean to check; idempotent overlay
+    // - BindStateDir (D-483 C): no boolean to check — bound ⇒ bandit_save_path set +
+    //   state_lock_fd >= 0; unbound ⇒ path empty (+ STATE_DIR_CONTENDED/UNWRITABLE
+    //   when a dir was requested); readiness does not gate on it (a persistence-OFF
+    //   node still serves — loudly)
+    // - LoadBanditState: no boolean to check; idempotent overlay (from the BOUND dir)
     // - SetBanditSaveInterval: bandit_save_interval set if cfg.ensemble_bandit_save_interval>0
     // - LoadExitBanditState: no boolean to check; idempotent overlay
     // - InitThompsonBandits (v5.14.10.C): MASK_EZOO_BUY_THOMPSON_READY set when primary_count>=2

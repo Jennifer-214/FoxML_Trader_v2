@@ -48,6 +48,7 @@
 
 #include <stdlib.h>     // aligned_alloc, free
 #include <stdio.h>
+#include <fcntl.h>      // D-483 C — fcntl(F_DUPFD_CLOEXEC): the same-dir state-lock handover
 #include "ControllerConfig.hpp"
 #include "ControllerEventLoop.hpp"   // EventLoopState<F> struct
 #include "../ML_Headers/NodeModelZoo.hpp"
@@ -124,10 +125,12 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // path is the sole ezoo owner and is the thread running this swap, the same
     // one that performs periodic saves.
     // ────────────────────────────────────────────────────────────────────
+    // D-483 C (2026-09-04): BOUND dir only — an unbound outgoing ezoo (persistence
+    // OFF) flushes nothing; the cfg-dir fallback that stood here would have written
+    // all four files, unlocked, into a dir another node or process holds.
     {
         char state_dir[sizeof(pre_swap_ezoo->bandit_save_path)];
-        if (EnsembleModelZoo_DeriveStateDir(pre_swap_ezoo, cfg.node_model_dir[node_idx],
-                                             state_dir, sizeof(state_dir))) {
+        if (EnsembleModelZoo_DeriveStateDir(pre_swap_ezoo, state_dir, sizeof(state_dir))) {
             EnsembleModelZoo_SaveAllBanditState(pre_swap_ezoo, state_dir,
                                                  "hot_swap pre-swap", node_idx);
         }
@@ -194,10 +197,48 @@ inline int HotSwap_ShadowLoad_Ensemble(
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // (4) Canonical post-load setup (X-macro registry FOREACH_ENSEMBLE_POST_LOAD).
-    // Same shape as boot + legacy in-place hot-swap; just on new_ezoo.
+    // (3b) D-483 C — same-dir re-apply: the OUTGOING ezoo holds the state dir's
+    // exclusive lock, and two open()s on one lock file conflict even inside one
+    // process (per-open-file-description semantics), so the successor cannot
+    // re-acquire — it INHERITS a dup'd descriptor. The lock lives on the open
+    // file description, which stays held while EITHER descriptor is open: (7)'s
+    // Free of the old ezoo closes one, the new ezoo keeps the other; on any
+    // early return below, Free(new) closes the dup and the old keeps its own.
+    // F_DUPFD_CLOEXEC preserves the no-inheritance-across-exec property.
     // ────────────────────────────────────────────────────────────────────
-    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, node_idx, new_path);
+    if (pre_swap_ezoo->state_lock_fd >= 0) {
+        char old_state_dir[sizeof(pre_swap_ezoo->bandit_save_path)];
+        if (EnsembleModelZoo_DeriveStateDir(pre_swap_ezoo, old_state_dir, sizeof(old_state_dir)) &&
+            FoxDir_SameDir(old_state_dir, new_path)) {
+            new_ezoo->state_lock_fd = fcntl(pre_swap_ezoo->state_lock_fd, F_DUPFD_CLOEXEC, 0);
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // (4) Canonical post-load setup (X-macro registry FOREACH_ENSEMBLE_POST_LOAD).
+    // Same shape as boot + legacy in-place hot-swap; just on new_ezoo. The
+    // state dir binds to new_path (LIVE/paper semantics — the same dir the boot
+    // sister binds; E.1.5 B re-homes both).
+    // ────────────────────────────────────────────────────────────────────
+    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, node_idx, new_path, new_path);
+
+    // ────────────────────────────────────────────────────────────────────
+    // (4b) D-483 C — a swap INTO a state dir another node or process holds is
+    // REFUSED: Free the new (its dup, if any, closes; the old keeps its lock and
+    // keeps serving). UNWRITABLE is NOT a refusal — it proceeds loud with
+    // persistence OFF, exactly as the boot sister does.
+    // ────────────────────────────────────────────────────────────────────
+    if (BITMAP_IS_SET(new_ezoo->init_flags, MASK_EZOO_STATE_DIR_CONTENDED)) {
+        fprintf(stderr,
+            "[hot_swap] ensemble node %d REFUSED: the state dir under %s is held by "
+            "another node or process (D-483 / TECH_DEBT-331); pre-swap state preserved\n",
+            node_idx, new_path);
+        Health_Log(HEALTH_WARN, "hot_swap", node_idx,
+                   "swap into %s REFUSED: state dir held by another node or process", new_path);
+        EnsembleModelZoo_Free(new_ezoo);
+        free(new_ezoo);
+        return -5;
+    }
 
     // ────────────────────────────────────────────────────────────────────
     // (5) Strict validate. In strict mode + failure → Free new; pre-swap
@@ -263,7 +304,9 @@ inline int HotSwap_ShadowLoad_Ensemble(
 //    0  = success (new ezoo active in slot)
 //   -1  = aligned_alloc OOM
 //   -2  = load failed (no roles found OR no horizons cached)
-//   -3  = strict validate failed
+//   -3  = (reserved — the pre-PARITY-046 strict-validate code; never emitted today)
+//   -4  = strict validate failed (expected-record mismatches; PARITY-046)
+//   -5  = REFUSED: the new_path state dir is held by another node or process (D-483 C)
 //
 // Reclamation strategy A (single-owner): per-core slow-path thread is
 // the SOLE caller (writer = reader). Hot-path uses seqlock-cached cycle

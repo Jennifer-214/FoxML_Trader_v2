@@ -306,15 +306,25 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         // ML branch (load/init/post-load/validate/overlay/ConfidenceScorer + NEW
         // BindCompositeCfg + NEW RollingTurnover_Init) + NEW Strategy_InitPerCore +
         // SetPermission.
+        // D-483 C (2026-09-04, the process dimension): state_base_path is "" — the
+        // backtest binds NO state dir, so it loads NO learned state from the model
+        // tree and saves NONE (the periodic saver, the pending flush and the old
+        // completion save below all key off the bound path, which stays empty).
+        // A backtest is a pure function of its inputs + the explicit prior below;
+        // until this line a foxml_suite run wrote <node_model_dir>/bandit_state.json
+        // every ~5,000 updates and made replay learning the LIVE node's priors
+        // (TESTING_00, 2026-09-04 — TECH_DEBT-331 extended).
         EngineCommon_BootPerCore(cfg, i, state, tick_rings[tt::NodeIdx{(int16_t)i}], nodes[tt::NodeIdx{(int16_t)i}],
                                   zoo_ptr, ezoo_ptr,
-                                  Money{ money_from_double_payload(node_balance) });
+                                  Money{ money_from_double_payload(node_balance) },
+                                  /*state_base_path=*/"");
 
         // Post-helper BACKTEST-only operator override (Decision B external wrapper).
-        // v5.10.0a.next.1 — operator-explicit prior path overrides the default
-        // LoadBanditState the helper just ran. Skips bundle-id check (operator may
-        // be transferring weights from a sibling bundle deliberately for
-        // transfer-learning experiments).
+        // v5.10.0a.next.1 — operator-explicit prior path. With D-483 C this is the
+        // backtest's ONLY state input (the default load no longer runs). Skips the
+        // bundle-id check (operator may be transferring weights from a sibling bundle
+        // deliberately for transfer-learning experiments). Buy-side Exp3 only — the
+        // exit/Thompson twins start uniform (their dir-shaped prior is E.1.5 B's).
         if (state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle != nullptr && run_cfg && run_cfg->bandit_state_prior_path[0]) {
             EnsembleModelZoo_LoadBanditStateFromPath(
                 &ml_ensemble_zoos[tt::NodeIdx{(int16_t)i}],
@@ -924,30 +934,14 @@ done:
     free(ticks);
     free(file_tick_counts);
 
-    // v5.10.0a.G.9 — save bandit state on backtest completion. Each
-    // core writes to its own <node_model_dir>/bandit_state.json. This
-    // is the "save at shutdown" trigger from the G.9 plan; periodic
-    // saves (cfg.ensemble_bandit_save_interval) cover the in-flight
-    // case but final flush ensures end-state is persisted even if
-    // total updates < interval.
-    for (int i = 0; i < num_nodes; ++i) {
-        const tt::NodeIdx ni{(int16_t)i};   // node-loop var; the ensemble zoos are typed per-NODE
-        if (BITMAP_IS_SET(ml_ensemble_zoos[ni].init_flags, MASK_EZOO_ACTIVE) &&
-            BITMAP_IS_SET(ml_ensemble_zoos[ni].init_flags, MASK_EZOO_BANDITS_READY) &&
-            cfg.node_model_dir[i][0]) {
-            // s5 BT-6 — ONE call for all four families. E.1.2.C leg 0
-            // (2026-08-20) had to hand-add three of them here after backtest
-            // completion was found dropping them; the shared helper is what
-            // stops the next site from re-learning that lesson. NOTE unchanged:
-            // state files in the model dir carry across runs BY DESIGN (delete
-            // them between A/B arms for a fresh arm).
-            char state_dir[sizeof(ml_ensemble_zoos[ni].bandit_save_path)];
-            EnsembleModelZoo_DeriveStateDir(&ml_ensemble_zoos[ni], cfg.node_model_dir[i],
-                                             state_dir, sizeof(state_dir));
-            EnsembleModelZoo_SaveAllBanditState(&ml_ensemble_zoos[ni], state_dir,
-                                                 "backtest sharded", i);
-        }
-    }
+    // D-483 C (2026-09-04) — the v5.10.0a.G.9 completion save that stood here
+    // (every node → <node_model_dir>/bandit_state.json + the three twins; "state
+    // files in the model dir carry across runs BY DESIGN") is DELETED. The
+    // backtest binds no state dir (see the BootPerCore call above), so it has
+    // nowhere to write and nothing to carry: a run is reproducible from its cfg,
+    // its data and its explicit prior. Per-run learned-state output, if it is
+    // ever wanted, lands with a per-run output dir (the decoupling roadmap's
+    // per-run artifacts), never in a live model dir.
 
     fprintf(stderr, "[backtest sharded] completed: %d ticks in %.1fms, %u trades (%u/%u W/L), P&L $%.2f\n",
             total_processed, elapsed,

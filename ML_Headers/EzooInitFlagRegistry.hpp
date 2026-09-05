@@ -18,10 +18,11 @@
 //   4. Consumers read via BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_<NAME>)
 //      and write via BITMAP_SET / BITMAP_CLR per bitmap-flag-api
 //
-// STORAGE: single uint8_t bitmap on EnsembleModelZoo. 4 bits used today
-// (ACTIVE, BANDITS_READY, EXIT_BANDITS_READY, THOMPSON_READY); 4 bits
-// free for future init flags (e.g., RIDGE_INITIALIZED,
-// CALIB_LOG_READY, SHADOW_RING_INITIALIZED, etc.).
+// STORAGE: single uint8_t bitmap on EnsembleModelZoo. 7 bits used
+// (ACTIVE, BANDITS_READY, EXIT_BANDITS_READY, BUY_THOMPSON_READY,
+// EXIT_THOMPSON_READY, STATE_DIR_CONTENDED, STATE_DIR_UNWRITABLE); 1 bit
+// free — an 8th row widens the field to uint16_t (the static_assert below
+// is the tripwire).
 //
 // MIGRATION (v5.15.5.A.2.bcd):
 //   - Removes 4 separate `int` fields from EnsembleModelZoo:
@@ -66,7 +67,7 @@
 // [TAG]_[[ENGINE] [ML_INFERENCE] [BITMAP_PACKED]]
 // [REFERENCE]_[DESIGN_SPEC]_[bitmap-flag-api]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[X(NAME, doc) rows -> enum + MASK_EZOO_* + ToString + overflow assert; 4/8 bits used]
+// [OVERVIEW]_[X(NAME, doc) rows -> enum + MASK_EZOO_* + ToString + overflow assert; 7/8 bits used (5 READY bits + the two D-483 C bind-outcome bits)]
 // [COLUMN]_[NAME]_[uppercase token -> MASK_EZOO_<NAME>]
 // [COLUMN]_[doc]_[audit string]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-84]
@@ -80,7 +81,14 @@
     /* v5.15.5.F.4d TECH_DEBT-084 — renamed THOMPSON_READY → BUY_THOMPSON_READY for symmetric naming with EXIT_THOMPSON_READY (FOREACH_BANDIT_SIDE first canonical) */ \
     X(BUY_THOMPSON_READY,      "Thompson posterior bandits wired (buy-side; post-LoadFromCfg + _InitBuyThompsonBandits)") \
     /* v5.15.5.F.4d — exit-side Thompson mirror per FOREACH_BANDIT_SIDE auto-mirror (§ G of merged plan body) */ \
-    X(EXIT_THOMPSON_READY,     "Exit-side Thompson posterior bandits wired (post-LoadFromCfg + _InitExitThompsonBandits)")
+    X(EXIT_THOMPSON_READY,     "Exit-side Thompson posterior bandits wired (post-LoadFromCfg + _InitExitThompsonBandits)") \
+    /* D-483 C (2026-09-04) — the state-dir BIND outcome (EnsembleModelZoo_BindStateDir). Either bit set   */ \
+    /* ⇒ persistence OFF for this ezoo: bandit_save_path stays EMPTY, no state loader runs, no saver writes. */ \
+    /* CONTENDED = another node or process holds the dir's lock (the TECH_DEBT-331 two-writers hazard);      */ \
+    /* UNWRITABLE = the lock file could not be created (EACCES / ENOSPC / bad path) — a DIFFERENT operator   */ \
+    /* action, so a different bit (a live-readiness row per bit; a shared bit would mislabel one as the other). */ \
+    X(STATE_DIR_CONTENDED,     "State dir lock held by another node/process — persistence OFF (D-483 C)") \
+    X(STATE_DIR_UNWRITABLE,    "State dir lock file could not be created — persistence OFF (D-483 C)")
 
 //======================================================================================================
 // AUTO-GENERATED ENUM
@@ -102,9 +110,11 @@ enum {
 // MASK_EZOO_ACTIVE              = BITMAP_BIT_U8(0) = 0x01
 // MASK_EZOO_BANDITS_READY       = BITMAP_BIT_U8(1) = 0x02
 // MASK_EZOO_EXIT_BANDITS_READY  = BITMAP_BIT_U8(2) = 0x04
-// MASK_EZOO_BUY_THOMPSON_READY      = BITMAP_BIT_U8(3) = 0x08
-// 4 bits used; 4 bits free for future init flags (RIDGE_INITIALIZED,
-// CALIB_LOG_READY, SHADOW_RING_INITIALIZED, etc.).
+// MASK_EZOO_BUY_THOMPSON_READY  = BITMAP_BIT_U8(3) = 0x08
+// MASK_EZOO_EXIT_THOMPSON_READY = BITMAP_BIT_U8(4) = 0x10
+// MASK_EZOO_STATE_DIR_CONTENDED = BITMAP_BIT_U8(5) = 0x20   (D-483 C)
+// MASK_EZOO_STATE_DIR_UNWRITABLE= BITMAP_BIT_U8(6) = 0x40   (D-483 C)
+// 7 bits used; 1 bit free.
 #define X(id, doc) constexpr uint8_t MASK_EZOO_##id = BITMAP_BIT_U8(EZOO_INIT_FLAG_##id);
 FOREACH_EZOO_INIT_FLAG(X)
 #undef X
@@ -127,8 +137,8 @@ static inline const char* EzooInitFlag_ToString(int flag_enum) {
 // COMPILE-TIME SANITY CHECKS
 //======================================================================================================
 // Asserts the registry stays within uint8_t storage (8 bits max).
-// At 4 entries today + future growth, will fit comfortably; if a 9th
-// flag is ever proposed, widen to uint16_t and update this assertion.
+// 7 entries today (D-483 C took bits 5-6); an 8th fits, a 9th widens
+// ezoo->init_flags to uint16_t and updates this assertion.
 static_assert(EZOO_INIT_FLAG_COUNT <= 8,
               "FOREACH_EZOO_INIT_FLAG count exceeds uint8_t storage (8 bits); "
               "widen ezoo->init_flags to uint16_t and update this assertion");

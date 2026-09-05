@@ -249,26 +249,14 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
         Regime_Init(&state.nodes[tt::NodeIdx{(int16_t)i}].regime_state, (int)cfg.nodes[tt::NodeIdx{(int16_t)i}].regime_hysteresis);
     }
 
-    // 4. E.1.2.D (scan-2 NEW-3) — duplicate node_model_dir across ML nodes.
-    //    All four bandit/Thompson state savers key ONLY by path, so two nodes
-    //    sharing one dir silently overwrite each other's learning state (last
-    //    writer wins; on reload BOTH nodes then run the survivor's posteriors)
-    //    — H22 coupling through the filesystem, invisible until the state
-    //    files disagree with the trades. Boot-time WARN (cold path; O(N²)
-    //    over MAX_EXECUTION_NODES is trivial); the layout decision (D-a)
-    //    owns the structural close.
-    for (int i = 0; i < MAX_EXECUTION_NODES; ++i) {
-        if (cfg.node_strategies[i] != STRATEGY_ML || !cfg.node_model_dir[i][0]) continue;
-        for (int j = i + 1; j < MAX_EXECUTION_NODES; ++j) {
-            if (cfg.node_strategies[j] != STRATEGY_ML || !cfg.node_model_dir[j][0]) continue;
-            if (strcmp(cfg.node_model_dir[i], cfg.node_model_dir[j]) == 0) {
-                fprintf(stderr, "[boot] WARN: nodes %d and %d share node_model_dir "
-                        "'%s' — their bandit/Thompson state files will OVERWRITE "
-                        "each other (last writer wins)\n",
-                        i, j, cfg.node_model_dir[i]);
-            }
-        }
-    }
+    // 4. (2026-09-04, D-483 C) The E.1.2.D scan-2 NEW-3 duplicate-node_model_dir
+    //    strcmp WARN that lived here was ABSORBED by the state-dir BIND
+    //    (EnsembleModelZoo_BindStateDir, the bind_state_dir post-load row): the
+    //    second binder of one dir REFUSES — persistence OFF + a Health_Log line —
+    //    instead of warning and then clobbering. A string compare could see two
+    //    NODES; the exclusive lock also sees a second PROCESS (a foxml_suite
+    //    backtest on the paper engine's dir — the TESTING_00 2026-09-04 case) and
+    //    spellings a strcmp calls different ("x" vs "x/", symlinks).
 }
 //======================================================================
 // [END_CODE]
@@ -1141,8 +1129,8 @@ inline void EngineCommon_FillEmitSink(OrderManagerState<F>* oms, const FillEvent
 // [TAG]_[[ENGINE] [BOOT_TIME] [ML_INFERENCE]]
 // [REFERENCE]_[INVARIANT]_[H22]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[per-node boot — ring/core init, register, strategy wire, full ML branch (zoo load + validate + confidence + turnover), Strategy_InitPerCore, permission=0; PARITY-027/028/029 closure]
-// [REFERENCE]_[DECISION]_[D-221]
+// [OVERVIEW]_[per-node boot — ring/core init, register, strategy wire, full ML branch (zoo load + validate + confidence + turnover; the ensemble's learned state BINDS to state_base_path — D-483 C: LIVE/paper = the model dir, backtest = "" for fresh-only), Strategy_InitPerCore, permission=0; PARITY-027/028/029 closure]
+// [REFERENCE]_[DECISION]_[[D-221] [D-483]]
 // [REFERENCE]_[PARITY]_[[PARITY-3] [PARITY-12] [PARITY-27] [PARITY-28] [PARITY-29]]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
 //======================================================================
@@ -1156,7 +1144,8 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                                       ExecutionCore<F>& core,
                                       NodeModelZoo<F>* zoo_ptr,        // nullable: non-ML OR alloc-failed
                                       EnsembleModelZoo<F>* ezoo_ptr,   // nullable: same
-                                      Money node_balance) {           // caller-precomputed (O2 bytewise-identical)
+                                      Money node_balance,             // caller-precomputed (O2 bytewise-identical)
+                                      const char* state_base_path) {  // D-483 C: dir learned state BINDS to ("" = none — the backtest)
     // -------- Step 1-4: unconditional per-core init (per Step A.4 CSV ordering) --------
     //   LIVE :909, BACKTEST :252 — SPSC ring init for producer→hot path
     SPSCRing_Init(&tick_ring);
@@ -1300,7 +1289,8 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                         ezoo_ptr->primary_count, n_loaded,
                         ezoo_ptr->exit_predictor_count);
                 EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, c,
-                                                   cfg.node_model_dir[c]);
+                                                   cfg.node_model_dir[c],
+                                                   state_base_path);   // D-483 C — LIVE: the model dir; BACKTEST: ""
                 // PARITY-046 close (2026-09-03) — the ensemble's strict-mode refusal, the SAME
                 // shape the single-zoo path has above (Free + null handle + LOAD_FAILED): the
                 // verify_expected post-load row counts the per-horizon expected-record

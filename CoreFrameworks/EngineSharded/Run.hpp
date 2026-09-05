@@ -1030,7 +1030,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // inline at LIVE :908-1177.
         EngineCommon_BootPerCore(cfg, i, state, tick_rings[tt::NodeIdx{(int16_t)i}], nodes[tt::NodeIdx{(int16_t)i}],
                                   zoo_ptr, ezoo_ptr,
-                                  Money{ money_from_double_payload(node_balance) });
+                                  Money{ money_from_double_payload(node_balance) },
+                                  /*state_base_path=*/cfg.node_model_dir[i]);   // D-483 C — LIVE/paper bind learned state to the node's model dir (E.1.5 B re-homes it)
 
         // Post-helper LIVE-only wires (M5 persistence + threading observability;
         // Decision B + Decision G — STAY in caller post-helper return).
@@ -2404,8 +2405,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     for (int i = 0; i < num_nodes; ++i) {
         auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
             state.nodes[tt::NodeIdx{(int16_t)i}].ensemble_handle);
-        if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
-            cfg.node_model_dir[i][0]) {
+        if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
             // s5 BT-6/BT-7 — ONE call for all four families (the hand-written
             // 4-block that lived here broke twice in four days), and the
             // destination is DERIVED from the ezoo's live save path rather than
@@ -2414,10 +2414,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // the PREVIOUS family's directory — where the next boot of that
             // bundle loaded them as its own (the bundle-id guard that should
             // have caught it is vacuous, BT-8).
+            // D-483 C (2026-09-04): the BOUND dir is the ONLY destination. An
+            // unbound ezoo (persistence OFF — its dir was held by another node or
+            // process, or unwritable) writes NOTHING: the cfg-dir fallback that
+            // stood here was the shutdown clobber the process amendment was
+            // written from (the paper engine's 16:24:38 save over the backtest's).
             char state_dir[sizeof(ezoo->bandit_save_path)];
-            EnsembleModelZoo_DeriveStateDir(ezoo, cfg.node_model_dir[i],
-                                             state_dir, sizeof(state_dir));
-            EnsembleModelZoo_SaveAllBanditState(ezoo, state_dir, "sharded", i);
+            if (EnsembleModelZoo_DeriveStateDir(ezoo, state_dir, sizeof(state_dir))) {
+                EnsembleModelZoo_SaveAllBanditState(ezoo, state_dir, "sharded", i);
+            }
         }
     }
 

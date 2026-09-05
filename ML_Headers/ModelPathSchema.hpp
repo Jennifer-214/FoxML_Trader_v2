@@ -149,6 +149,15 @@ static const char MODEL_STATE_FILE_BANDIT[]         = "bandit_state.json";
 static const char MODEL_STATE_FILE_EXIT_BANDIT[]    = "exit_bandit_state.json";
 static const char MODEL_STATE_FILE_BUY_THOMPSON[]   = "buy_thompson_state.json";
 static const char MODEL_STATE_FILE_EXIT_THOMPSON[]  = "exit_thompson_state.json";
+// D-483 C (2026-09-04, the process dimension) — the state dir's exclusive-lock
+// file. Held (flock LOCK_EX|LOCK_NB on an O_CLOEXEC descriptor) by the ONE
+// process+node that owns the four state files above, for as long as its ezoo is
+// bound; a second binder REFUSES (persistence OFF, loud) instead of the
+// last-writer-wins clobber TECH_DEBT-331 recorded. A dotfile, so the bundle
+// scanner never lists it (ModelBundleScan skips '.'-leading entries). H21
+// on-disk identifier: ledgered in tools/identifier_ledger.txt — rename by
+// tombstone + new name, never in place.
+static const char MODEL_STATE_LOCK_FILE[]           = ".foxml_state.lock";
 
 //======================================================================
 // [SECTION]_[side-addressed sidecar records at the horizon dir]
