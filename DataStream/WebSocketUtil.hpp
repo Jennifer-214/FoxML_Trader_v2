@@ -15,7 +15,7 @@
 // payload). Binance answered that pong with a 1008 "Pong timeout" close 74-102 s after every connect —
 // the depth-stream stall proven at plans/v5.15-live-readiness/plan_checks/2026-09-05-depth-ws-stall-proof/.
 // The trade client (BinanceCrypto.hpp) and the user-data client (BinanceUserData.hpp) had CORRECT private
-// copies of the same reader + pong — three parallel frame implementations, one drifted (Class 18); this
+// copies of the same reader + pong — three parallel frame implementations, one drifted (Class 21); this
 // file is now the single body all three consume.
 //======================================================================================================
 #ifndef WEBSOCKET_UTIL_HPP
