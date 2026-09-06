@@ -107,6 +107,12 @@ struct BinanceUserDataState {
 
     // Output: SPSC ring for fill events → OMS drainer
     OmsCmdRings* ws_rings;          // the OMS's per-node WS fill rings (3b(ii) commit 4)
+    // D-479: the GLOBAL kill-trip request word (&agg.kill_trip_request). Stored as a pointer at
+    // init because this file is F-independent and cannot name the aggregator's template type.
+    std::atomic<uint32_t>* kill_trip_word;
+    std::atomic<uint64_t> foreign_fills;    // executionReports for orders that are not ours
+    std::atomic<uint64_t> ws_push_retries;  // pushes that needed the bounded wait to clear
+    std::atomic<uint64_t> ws_push_fatal;    // bounded pushes that gave up -> LOUD-FATAL
 
     // Threads
     std::thread ws_thread;
@@ -125,8 +131,8 @@ struct BinanceUserDataState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
-// [SIZE]_[848B]
+// [UPDATED]_[2026-09-06]
+// [SIZE]_[880B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[14]
 // [STRADDLE]_[ws_host@656 · rest_host@720]
@@ -262,6 +268,11 @@ static inline int ud_keepalive_listen_key(BinanceUserDataState* s) {
 //======================================================================
 // [CODE]
 //======================================================================
+// (f) D-479 / gate #3 G3-39. The parser's return becomes a THREE-valued code so the push site can
+// tell "not for us" from "not a fill". The 8 existing `== 0` / `== 1` call sites stay valid by
+// construction: DROP is 0 and OURS is 1, exactly what they already test.
+enum UdParseRc { UD_PARSE_DROP = 0, UD_PARSE_OURS = 1, UD_PARSE_FOREIGN = 2 };
+
 static inline int ud_parse_execution_report(const char* json, int len,
                                              Command* cmd_out,
                                              uint64_t* trade_id_out) {
@@ -383,7 +394,12 @@ static inline int ud_parse_execution_report(const char* json, int len,
     strncpy(cmd_out->result.commission_asset, comm_asset,
             sizeof(cmd_out->result.commission_asset) - 1);
 
-    return 1;
+    // A TRADE we fully decoded but whose clientOrderId is not an `oms_<id>` of ours: the venue is
+    // reporting someone ELSE's fill on this account (a manual web order, another bot). The Command
+    // is returned DECODED anyway so the router can log what actually happened — pushing it would
+    // book a stranger's fill into our ledger, and dropping it silently would hide that the account
+    // is being traded from elsewhere. Both are wrong; naming it is right.
+    return (oms_order_id == 0) ? UD_PARSE_FOREIGN : UD_PARSE_OURS;
 }
 //======================================================================
 // [END_CODE]
@@ -427,6 +443,70 @@ static inline int ud_parse_execution_report(const char* json, int len,
 // block is the at-site pointer, the disposition register is the SSoT.
 //======================================================================
 // [END_FUNCTION]_[ud_parse_execution_report]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ud_route_command]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the WS fill push site as an explicit ROUTER: SWITCHES on the parser's UdParseRc so a FOREIGN report can never be pushed, and sends OURS through the never-drop bounded push that goes LOUD-FATAL + requests the GLOBAL kill rather than dropping a fill]
+// [REFERENCE]_[DECISION]_[D-479]
+//======================================================================
+// [CODE]
+//======================================================================
+// A SWITCH, not a truthiness test — and that is the whole reason this is a named function. Both
+// OURS(1) and FOREIGN(2) are truthy, so `if (parse(...))` would push a stranger's fill into our
+// ledger. The shape makes the mistake unrepresentable rather than merely discouraged.
+static inline void ud_route_command(BinanceUserDataState* s, int rc, const Command& cmd,
+                                    uint64_t trade_id, const char* raw_json, int raw_len) {
+    if (rc == UD_PARSE_FOREIGN) {
+        s->foreign_fills.fetch_add(1, std::memory_order_relaxed);
+        // Re-extract the RAW "c" on this rare path so `web_abc` (a manual order from the Binance
+        // web UI) and `oms_garbage` (our own id scheme, malformed) are DISTINGUISHABLE in the log.
+        // The parsed Command cannot carry it: it zeroed the id precisely because it did not match.
+        char raw_c[64] = {};
+        binance_json_extract_str(raw_json, "c", raw_c, sizeof(raw_c));
+        (void)raw_len;
+        tt::Health_Log(tt::HEALTH_WARN, "ws_foreign_fill", -1,
+                       "clientOrderId=%s venue_id=%s price=%.8f qty=%.8f commission=%.8f %s "
+                       "trade_id=%llu — this account is being traded from OUTSIDE this engine; "
+                       "the fill was NOT booked (it is not ours to book)",
+                       raw_c[0] ? raw_c : "(none)",
+                       cmd.result.exchange_id[0] ? cmd.result.exchange_id : "(none)",
+                       cmd.result.avg_fill_price, cmd.result.fill_qty, cmd.result.commission,
+                       cmd.result.commission_asset[0] ? cmd.result.commission_asset : "(none)",
+                       (unsigned long long)trade_id);
+        return;
+    }
+    // OURS. Written FLIP-READY (g): at commit 4 there is deliberately NO lane divert — the interim
+    // central walk drains all 16 rings and ProcessFillCommand's verify ignores an unregistered lane,
+    // so `registered_count` is not read here. At the flip, a report on an unregistered lane is OUR
+    // PRIOR SESSION's order reaching its terminal, which gets its own `stale_lane_fills` counter —
+    // never `foreign_fills`, because it IS ours. (G3-39's "boot-stable int" premise was false by
+    // ordering: BinanceUserData_Start precedes the registration loop.)
+    //
+    // The double-probe gives the retry counter without a `waited` out-param on the commit-2
+    // primitive — an out-param there would be a stranded write on every fast-path push (Class 62).
+    if (OMS_CmdRingsPush(s->ws_rings, cmd)) {
+        s->fills_received.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    s->ws_push_retries.fetch_add(1, std::memory_order_relaxed);
+    if (OMS_CmdRingsPushOrTrip(s->ws_rings, cmd, OMS_RING_PUSH_BUDGET_CYCLES,
+                               /*abort=*/nullptr, s->kill_trip_word,
+                               KTS_WS_RING_FULL, &s->ws_push_fatal)) {
+        s->fills_received.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    // The record is already durable (OMS_CmdRingsPushOrTrip wrote it and requested the GLOBAL kill).
+    // Nothing further here: the fill is unbooked, the engine is stopping, and reconciliation from
+    // venue truth is the only correct recovery.
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ud_route_command]
 //======================================================================
 
 //======================================================================
@@ -485,22 +565,9 @@ static inline int ud_consume_frame(BinanceUserDataState* s, Io& io, char* frame_
 
     Command cmd;
     uint64_t trade_id = 0;
-    if (ud_parse_execution_report(frame_buf, payload_len, &cmd, &trade_id)) {
-        // Routed onto the OWNING node's ring by the id's node lane (OMS_CmdRingsPush) — the same
-        // arithmetic the REST side uses, called rather than re-derived: a second copy of a lane
-        // computation on a venue thread is the parallel-implementation shape that produced
-        // PARITY-071 one directory over.
-        if (!OMS_CmdRingsPush(s->ws_rings, cmd)) {
-            // CAPITAL-VISIBLE: the venue told us about a fill and we could not hand it to the OMS. The
-            // position is already open at the venue; this log line is the only record. Loud on purpose.
-            // Still a plain drop at this commit — the bounded push + GLOBAL kill trip is commit 4's
-            // producer leaf, which is also where this stops being a drop at all.
-            fprintf(stderr, "[UserData] ws_rings[node %d] full, dropping fill "
-                             "for order %llu\n", OMS_OrderIdNode(cmd.order_id),
-                             (unsigned long long)cmd.order_id);
-        } else {
-            s->fills_received.fetch_add(1, std::memory_order_relaxed);
-        }
+    const int rc = ud_parse_execution_report(frame_buf, payload_len, &cmd, &trade_id);
+    if (rc != UD_PARSE_DROP) {
+        ud_route_command(s, rc, cmd, trade_id, frame_buf, payload_len);
     }
     return 1;
 }
@@ -703,7 +770,8 @@ static inline int BinanceUserData_Init(BinanceUserDataState* s,
                                         const char* api_key,
                                         const char* api_secret,
                                         const char* symbol,
-                                        OmsCmdRings* ws_rings) {
+                                        OmsCmdRings* ws_rings,
+                                        std::atomic<uint32_t>* kill_trip_word) {
     s->sockfd    = -1;
     s->ssl_ctx   = NULL;
     s->ssl       = NULL;
@@ -714,6 +782,10 @@ static inline int BinanceUserData_Init(BinanceUserDataState* s,
     strncpy(s->rest_host, rest_host, sizeof(s->rest_host)-1);
     s->rest_host[sizeof(s->rest_host)-1] = '\0';
     s->ws_rings = ws_rings;
+    s->kill_trip_word = kill_trip_word;
+    s->foreign_fills.store(0, std::memory_order_relaxed);
+    s->ws_push_retries.store(0, std::memory_order_relaxed);
+    s->ws_push_fatal.store(0, std::memory_order_relaxed);
 
     s->shutdown_requested.store(0, std::memory_order_relaxed);
     s->keepalive_failed.store(0, std::memory_order_relaxed);
@@ -762,6 +834,8 @@ static inline void BinanceUserData_Shutdown(BinanceUserDataState* s) {
 //          "stream.binance.com" for production)
 // rest_host: the REST host for listen key calls (same as adapter REST host)
 // ws_rings: pointer to the OMS's per-node WS fill rings (routed by the id's node lane)
+// kill_trip_word: &agg.kill_trip_request — APPENDED at the signature TAIL per TD-288 (a
+//   mid-signature insertion silently re-binds every existing positional argument)
 //======================================================================
 // [END_FUNCTION]_[BinanceUserData_Init]
 //======================================================================

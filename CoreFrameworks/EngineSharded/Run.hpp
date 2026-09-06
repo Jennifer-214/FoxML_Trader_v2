@@ -849,7 +849,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ? "testnet.binance.vision" : "api.binance.us";
         if (BinanceUserData_Init(&g_user_data, ws_host, rest_host,
                                   ud_api_key, ud_api_secret, bcfg.symbol,
-                                  &oms.ws_rings)) {
+                                  &oms.ws_rings, &state.agg.kill_trip_request)) {
             BinanceUserData_Start(&g_user_data);
             g_sharded_binance_adapter.ws_active.store(1, std::memory_order_release);
             fprintf(stderr, "[sharded] user data websocket started\n");

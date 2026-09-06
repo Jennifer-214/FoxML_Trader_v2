@@ -298,6 +298,10 @@ struct OmsResetCtx {
     /* ============================================================================================ */                                                  \
     X(flatten_pending,        int,                0,                            0,                            SKIP_RESET, ATOMIC,    SKIP_PERSIST, 0)    \
     X(recovery_until_us,      uint64_t,           0,                            0,                            SKIP_RESET, ATOMIC,    SKIP_PERSIST, 0)    \
+    /*     ring_full_fatal SKIP_RESET (D-481): a fatal is RESTART-ONLY. A paper reset must not      */                                                  \
+    /*     erase the record that a fill went unbooked — the engine it describes is the one that     */                                                  \
+    /*     must be restarted, and a zeroed counter would disagree with its own durable log line.    */                                                  \
+    X(ring_full_fatal,        uint64_t,           0,                            0,                            SKIP_RESET, ATOMIC,    SKIP_PERSIST, 0)    \
     X(total_submitted,        uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
     X(total_filled,           uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
     X(total_rejected,         uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \

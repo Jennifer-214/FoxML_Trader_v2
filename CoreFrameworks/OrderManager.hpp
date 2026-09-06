@@ -818,6 +818,12 @@ struct OrderManagerState {
     alignas(64) std::atomic<uint64_t> total_submitted;
     std::atomic<uint64_t> total_filled;
     std::atomic<uint64_t> total_rejected;
+    // D-479 — how many times a producer gave up on a never-drop fill ring and went LOUD-FATAL.
+    // Its value rides IN the durable record as `fatal_n`, so the log line and this counter agree.
+    // NOT total_rejected: that is the VENUE-reject counter, and conflating an unbooked fill with a
+    // venue rejection would misreport capital. Restart-only (SKIP_RESET, D-481) — a fatal survives
+    // a paper reset by design, because the engine it describes is the one that must be restarted.
+    std::atomic<uint64_t> ring_full_fatal;
 
     //------------------------------------------------------------------
     // [SECTION]_[CROSS-THREAD SAFETY CAS CLUSTER — alignas(64) cluster (NC1 ND1)]
@@ -1226,7 +1232,7 @@ static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
               "and ks_min_balance. Re-check _pad_osf[7] explicit pad.");
 
 //======================================================================
-// [FUNCTION]_[OMS_ResultPush]
+// [FUNCTION]_[OMS_CmdRingsPush]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [SUPPORTIVE]]
 // [SCHEMA]_[v1.0]
@@ -1257,15 +1263,10 @@ static inline bool OMS_CmdRingsPop(OmsCmdRings* rings, int* cursor, Command* out
     }
     return false;
 }
-
-template <unsigned F>
-inline bool OMS_ResultPush(OrderManagerState<F>* oms, const Command& cmd) {
-    return OMS_CmdRingsPush(&oms->result_rings, cmd);
-}
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [END_FUNCTION]_[OMS_ResultPush]
+// [END_FUNCTION]_[OMS_CmdRingsPush]
 //======================================================================
 
 //======================================================================
@@ -1338,6 +1339,41 @@ static inline void OMS_RingFullFatalRecord(std::atomic<uint32_t>* trip_word,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[OMS_CmdRingsPushOrTrip]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the NEVER-DROP push for a venue producer thread: try, then pause-spin within a raw-TSC budget, and on exhaustion go LOUD-FATAL (durable record + GLOBAL kill request) rather than drop a fill. Defined AFTER OMS_RingFullFatalRecord because it calls it]
+// [REFERENCE]_[DECISION]_[D-479]
+//======================================================================
+// [CODE]
+//======================================================================
+// The NEVER-DROP push for a venue producer thread: try, then pause-spin within a raw-TSC budget,
+// and on exhaustion go LOUD-FATAL (durable record + GLOBAL kill request) rather than drop a fill.
+// Non-template for the same reason as the family: the WS producer is F-independent code.
+//
+// `abort` is nullptr at BOTH venue sites (A-2 F-1, orchestrator-confirmed): shutdown joins the WS
+// producer BEFORE it stops the composer, so the consumer is live through the join and the <=10 ms
+// budget already bounds the wait. An abort wired here would manufacture a false restart-only fatal
+// at a clean shutdown — the one outcome worse than waiting.
+static inline bool OMS_CmdRingsPushOrTrip(OmsCmdRings* rings, const Command& cmd,
+                                          uint64_t budget_cycles,
+                                          const std::atomic<int>* abort,
+                                          std::atomic<uint32_t>* trip_word,
+                                          KillTripSite site,
+                                          std::atomic<uint64_t>* own_counter) {
+    const tt::NodeIdx nn{(int16_t)OMS_OrderIdNode(cmd.order_id)};
+    if (SPSCRing_TryPushBounded(&(*rings)[nn], cmd, budget_cycles, abort)) return true;
+    OMS_RingFullFatalRecord(trip_word, site, own_counter, cmd);
+    return false;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_CmdRingsPushOrTrip]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[OMS_ResultPop]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [SUPPORTIVE]]
@@ -1384,11 +1420,13 @@ static void OrderManager_FillResultCallback(void* user_ctx,
     cmd.type     = (uint8_t)CMD_FILL_RESULT;
     cmd.order_id = client_id;
     cmd.result   = *result;
-    if (!OMS_ResultPush(oms, cmd)) {
-        std::fprintf(stderr,
-                     "[OMS] result ring full for node %d, dropping fill result for order %llu\n",
-                     OMS_OrderIdNode(client_id), (unsigned long long)client_id);
-    }
+    // D-479: the REST worker never DROPS a fill. It waits within the budget, and if the ring is
+    // still full it writes the durable record and requests the GLOBAL kill — an unbooked fill is a
+    // capital divergence from venue truth, so the engine stops rather than continues wrong.
+    (void)OMS_CmdRingsPushOrTrip(&oms->result_rings, cmd, OMS_RING_PUSH_BUDGET_CYCLES,
+                                 /*abort=*/nullptr,
+                                 oms->agg ? &oms->agg->kill_trip_request : nullptr,
+                                 KTS_REST_RING_FULL, &oms->ring_full_fatal);
 }
 //======================================================================
 // [END_CODE]
@@ -1633,10 +1671,24 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
         cmd.result.order_complete = 1;
         std::strncpy(cmd.result.exchange_id, "PAPER",
                      sizeof(cmd.result.exchange_id) - 1);
-        if (!OMS_ResultPush(oms, cmd)) {
-            std::fprintf(stderr,
-                         "[OMS] result ring full for node %d on paper submit for order %llu\n",
-                         OMS_OrderIdNode(id), (unsigned long long)id);
+        // PAPER: the plain push, never the bounded one. The producer here IS the consumer thread,
+        // so a spin would be a self-wait that can never clear — the one place where waiting is
+        // strictly worse than failing. The full is structurally unreachable while the pin above
+        // holds (OMS_RESULT_RING_PER_NODE >= MAX_INFLIGHT_ORDERS + drain-to-empty before
+        // DrainSubmit + a pool-full submit pushing nothing), so this arm is the pin's guard, not an
+        // expected path — and if it ever runs, the pin's premise is broken and the record says so.
+        if (!OMS_CmdRingsPush(&oms->result_rings, cmd)) {
+            // The pin's premise is broken if we are here. Record it durably and FREE THE SLOT: the
+            // synthetic fill never reached the drainer, so nothing downstream will ever complete
+            // this order, and leaving the slot allocated leaks it out of a 16-deep pool for the
+            // life of the process.
+            OMS_RingFullFatalRecord(oms->agg ? &oms->agg->kill_trip_request : nullptr,
+                                    KTS_PAPER_SYNTH_RING_FULL, &oms->ring_full_fatal, cmd);
+            Order_SetState(&oms->orders[slot], ORDER_REJECTED);
+            oms->order_bitmap &= (uint16_t)~(1u << slot);
+            // NOT total_rejected: that counter means "the VENUE rejected this order". Booking an
+            // engine-side ring failure there would misreport capital as a venue outcome.
+            return 0;
         }
         return id;
     }
