@@ -838,7 +838,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     // Phase 04: start the user data websocket for real-time fills.
     // Uses its own BinanceOrderAPI instance for listen key REST calls.
-    // The ws_result_queue is a dedicated SPSC ring inside the OMS.
+    // The ws_rings are the OMS's dedicated per-node WS SPSC rings (one producer, one consumer).
     static BinanceUserDataState g_user_data;
     if (live_trading) {
         char ud_api_key[128] = {}, ud_api_secret[128] = {};
@@ -849,7 +849,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ? "testnet.binance.vision" : "api.binance.us";
         if (BinanceUserData_Init(&g_user_data, ws_host, rest_host,
                                   ud_api_key, ud_api_secret, bcfg.symbol,
-                                  &oms.ws_result_queue)) {
+                                  &oms.ws_rings)) {
             BinanceUserData_Start(&g_user_data);
             g_sharded_binance_adapter.ws_active.store(1, std::memory_order_release);
             fprintf(stderr, "[sharded] user data websocket started\n");

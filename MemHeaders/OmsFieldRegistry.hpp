@@ -827,7 +827,9 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
         for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                       \
             SPSCRing_Init(&(_oms_target)->result_rings[tt::NodeIdx{(int16_t)_i}]);               \
         }                                                                                        \
-        SPSCRing_Init(&(_oms_target)->ws_result_queue);                                              \
+        for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                           \
+            SPSCRing_Init(&(_oms_target)->ws_rings[tt::NodeIdx{(int16_t)_i}]);                       \
+        }                                                                                            \
         SPSCRing_Init(&(_oms_target)->reconcile_queue);                                              \
         for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                           \
             SPSCRing_Init(&(_oms_target)->submit_queues[tt::SlotIdx{(int16_t)_i}]);                  \

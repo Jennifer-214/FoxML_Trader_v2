@@ -287,8 +287,10 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
         g_rest_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 
-    // 2. WS user-data result_queue — branchless dispatch via fn pointer table.
-    while (SPSCRing_TryPop(&oms->ws_result_queue, &cmd)) {
+    // 2. WS user-data RINGS, per-node — branchless dispatch via fn pointer table.
+    //    Cursor-held so the walk is O(nodes + items), not O(nodes) per item.
+    int ws_cursor = 0;
+    while (tt::OMS_CmdRingsPop(&oms->ws_rings, &ws_cursor, &cmd)) {
         g_ws_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 
@@ -304,7 +306,7 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
 //----------------------------------------------------------------------
 // Drain all 3 SPSC rings into per-direction buckets.
 //
-// Pass 1 — REST result_queue + WS ws_result_queue: each fill command's
+// Pass 1 — REST result_rings + WS ws_rings (both per-node): each fill command's
 // Order.type determines whether it routes to close_bucket or open_bucket.
 // Order.type is STABLE between drain time + process time (set at order
 // creation; never mutated during fills); safe to classify at drain time.

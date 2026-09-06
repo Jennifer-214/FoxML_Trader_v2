@@ -106,7 +106,7 @@ struct BinanceUserDataState {
     char     rest_host[64];        // "testnet.binance.vision" or "api.binance.us"
 
     // Output: SPSC ring for fill events → OMS drainer
-    SPSCRing<Command, OMS_RESULT_QUEUE_SIZE>* ws_result_queue;
+    OmsCmdRings* ws_rings;          // the OMS's per-node WS fill rings (3b(ii) commit 4)
 
     // Threads
     std::thread ws_thread;
@@ -486,11 +486,18 @@ static inline int ud_consume_frame(BinanceUserDataState* s, Io& io, char* frame_
     Command cmd;
     uint64_t trade_id = 0;
     if (ud_parse_execution_report(frame_buf, payload_len, &cmd, &trade_id)) {
-        if (!SPSCRing_TryPush(s->ws_result_queue, cmd)) {
+        // Routed onto the OWNING node's ring by the id's node lane (OMS_CmdRingsPush) — the same
+        // arithmetic the REST side uses, called rather than re-derived: a second copy of a lane
+        // computation on a venue thread is the parallel-implementation shape that produced
+        // PARITY-071 one directory over.
+        if (!OMS_CmdRingsPush(s->ws_rings, cmd)) {
             // CAPITAL-VISIBLE: the venue told us about a fill and we could not hand it to the OMS. The
             // position is already open at the venue; this log line is the only record. Loud on purpose.
-            fprintf(stderr, "[UserData] ws_result_queue full, dropping fill "
-                             "for order %llu\n", (unsigned long long)cmd.order_id);
+            // Still a plain drop at this commit — the bounded push + GLOBAL kill trip is commit 4's
+            // producer leaf, which is also where this stops being a drop at all.
+            fprintf(stderr, "[UserData] ws_rings[node %d] full, dropping fill "
+                             "for order %llu\n", OMS_OrderIdNode(cmd.order_id),
+                             (unsigned long long)cmd.order_id);
         } else {
             s->fills_received.fetch_add(1, std::memory_order_relaxed);
         }
@@ -696,7 +703,7 @@ static inline int BinanceUserData_Init(BinanceUserDataState* s,
                                         const char* api_key,
                                         const char* api_secret,
                                         const char* symbol,
-                                        SPSCRing<Command, OMS_RESULT_QUEUE_SIZE>* ws_result_queue) {
+                                        OmsCmdRings* ws_rings) {
     s->sockfd    = -1;
     s->ssl_ctx   = NULL;
     s->ssl       = NULL;
@@ -706,7 +713,7 @@ static inline int BinanceUserData_Init(BinanceUserDataState* s,
     s->ws_host[sizeof(s->ws_host)-1] = '\0';
     strncpy(s->rest_host, rest_host, sizeof(s->rest_host)-1);
     s->rest_host[sizeof(s->rest_host)-1] = '\0';
-    s->ws_result_queue = ws_result_queue;
+    s->ws_rings = ws_rings;
 
     s->shutdown_requested.store(0, std::memory_order_relaxed);
     s->keepalive_failed.store(0, std::memory_order_relaxed);
@@ -754,7 +761,7 @@ static inline void BinanceUserData_Shutdown(BinanceUserDataState* s) {
 // ws_host: the websocket host ("stream.binance.vision" for testnet,
 //          "stream.binance.com" for production)
 // rest_host: the REST host for listen key calls (same as adapter REST host)
-// ws_result_queue: pointer into the OMS's dedicated WS SPSC ring
+// ws_rings: pointer to the OMS's per-node WS fill rings (routed by the id's node lane)
 //======================================================================
 // [END_FUNCTION]_[BinanceUserData_Init]
 //======================================================================

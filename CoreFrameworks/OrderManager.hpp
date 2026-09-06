@@ -173,9 +173,40 @@ constexpr size_t OMS_RESULT_RING_PER_NODE = OMS_RESULT_QUEUE_SIZE / MAX_EXECUTIO
 static_assert(OMS_RESULT_RING_PER_NODE * MAX_EXECUTION_NODES == OMS_RESULT_QUEUE_SIZE,
               "per-node result depth must PARTITION the old total exactly (capacity conserved, "
               "struct does not grow) — a non-divisor silently changes the OMS stack footprint");
-static_assert(OMS_RESULT_RING_PER_NODE >= 4,
-              "per-node result depth floor: a node owns <=2 slots but bursts (partial ladders + "
-              "a disposition re-submit) must not wedge against its own ring");
+// The floor is MAX_INFLIGHT_ORDERS, not a hand-picked small number, and it is EXACT today:
+// 256 / 16 nodes = 16 per node, and the order pool is 16. Zero margin is the point — it is the
+// conjunction that makes a paper-synth ring-full UNREACHABLE, so the pin must break the build the
+// moment any of the three constants moves rather than let the paper path acquire a live fatal arm:
+//   (1) the pool bound — at most MAX_INFLIGHT_ORDERS orders can be in flight at once, so at most
+//       that many synthetic results can exist before one is consumed;
+//   (2) every consumer drains its rings to EMPTY before its OMS_DrainSubmit, so a cycle starts
+//       with room for the whole pool; and
+//   (3) a pool-full submit pushes NOTHING (it is rejected before a result is synthesized).
+// Was `>= 4` (a floor argued from "a node owns <=2 slots + bursts"), which is true but far weaker
+// than what the paper path actually relies on.
+static_assert(OMS_RESULT_RING_PER_NODE >= MAX_INFLIGHT_ORDERS,
+              "per-node ring depth must cover the WHOLE order pool: with (1) at most "
+              "MAX_INFLIGHT_ORDERS in flight, (2) every consumer draining to empty before its "
+              "DrainSubmit, and (3) a pool-full submit pushing nothing, a paper-synth ring-full is "
+              "structurally unreachable — and ONLY while this holds. Raising MAX_INFLIGHT_ORDERS or "
+              "MAX_EXECUTION_NODES, or lowering OMS_RESULT_QUEUE_SIZE, makes it reachable again.");
+
+//======================================================================
+// [STRUCT]_[OmsCmdRings]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-node Command ring family, as ONE F-INDEPENDENT concrete type — the venue producer threads (WS user-data, REST worker) are non-template code and cannot name OrderManagerState<F>, so the helpers below take THIS rather than the OMS. Both `result_rings` and `ws_rings` are this type; each ring stays strictly SPSC (one producer thread, one consumer)]
+// [REFERENCE]_[DECISION]_[D-448]
+//======================================================================
+// [CODE]
+//======================================================================
+using OmsCmdRings = tt::NodeArray<SPSCRing<Command, OMS_RESULT_RING_PER_NODE>, MAX_EXECUTION_NODES>;
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_STRUCT]_[OmsCmdRings]
+//======================================================================
 // D-479 as amended (2026-09-04) — the bounded-push budget for the never-drop fill rings
 // (SPSCRing_TryPushBounded on the WS / REST producer threads). RAW TSC CYCLES: the unit
 // every rdtsc site + the drainer histogram already use, so no calibration constant exists
@@ -420,11 +451,13 @@ struct OrderManagerState {
     alignas(64) tt::NodeArray<SPSCRing<Command, OMS_RESULT_RING_PER_NODE>,
                               MAX_EXECUTION_NODES> result_rings;
 
-    // WS fill queue (phase 04): user data websocket thread is the sole
-    // producer, drainer is the sole consumer. Separate ring preserves
-    // the SPSC contract — no MPSC needed. OrderManager_Tick drains
-    // this after the REST result rings.
-    alignas(64) SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> ws_result_queue;
+    // WS fill rings (phase 04; PARTITIONED per node at 3b(ii) commit 4). The user-data
+    // websocket thread is the sole producer and the drainer the sole consumer, so every ring
+    // stays strictly SPSC — the partition changes WHICH ring a fill lands in (the id's node
+    // lane), never how many threads touch one. Capacity is partitioned exactly as
+    // `result_rings` was: 16 nodes x 16 deep = the old single ring's 256, never replicated.
+    // Drained after the REST result rings by both consumers.
+    alignas(64) OmsCmdRings ws_rings;
 
     // Reconcile queue (phase 05): reconciler thread is the sole producer,
     // drainer is the sole consumer. Carries CMD_RECONCILE commands with
@@ -947,11 +980,11 @@ struct OrderManagerState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-29]
+// [UPDATED]_[2026-09-06]
 //----------------------------------------------------------------------
-// [SIZE]_[456064B]
+// [SIZE]_[457984B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[7126]
+// [CACHE_LINES]_[7156]
 // [STRADDLE]_[unverified: orders last_exit_fill_price last_exit_fee last_trade_net last_trade_notional]
 //======================================================================
 // [END_STRUCT]_[OrderManagerState]
@@ -1137,6 +1170,17 @@ static_assert(sizeof(tt::NodeArray<SPSCRing<Command, OMS_RESULT_RING_PER_NODE>, 
               <= sizeof(SPSCRing<Command, OMS_RESULT_QUEUE_SIZE>) + 64 * 2 * MAX_EXECUTION_NODES,
               "per-node result rings must stay within the old single-ring payload + per-ring "
               "head/tail line overhead (capacity is PARTITIONED, never replicated)");
+// HOT cluster — second SPSCRing anchor (the WS family; same partition, same reasoning).
+// [ASSERT]_[LAYOUT_LOCK]_[offsetof(ws_rings) % 64 == 0]
+static_assert(offsetof(OrderManagerState<64>, ws_rings) % 64 == 0,
+              "ws_rings (HOT cluster ring 2) MUST start at a cache-line boundary. "
+              "See spsc-ring-embedded-in-hot-struct-cluster-discipline.md.");
+// The WS family is the SAME type as result_rings, so the partition pin above covers its size too;
+// this one pins that they did not silently DIVERGE (a depth change to one and not the other would
+// break the shared OmsCmdRings helpers' node arithmetic in a way no call site would show).
+static_assert(sizeof(OrderManagerState<64>::ws_rings) == sizeof(OrderManagerState<64>::result_rings),
+              "the WS and REST families must stay the SAME shape — the OmsCmdRings helpers derive "
+              "the node lane identically for both, so a divergent depth silently mis-routes one");
 // WARM cluster — Portfolio anchor (per-fill bookkeeping cluster start).
 // [ASSERT]_[LAYOUT_LOCK]_[offsetof(portfolio) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, portfolio) % 64 == 0,
@@ -1183,14 +1227,32 @@ static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
 //======================================================================
 // [CODE]
 //======================================================================
+// The lane is stamped at Submit (P4-pre-3a). Deriving the node any other way here — decoding the
+// slot and reading orders[slot].portfolio_slot — would be a cross-thread read at the flip AND
+// slot-reuse-racy (the slot can belong to another node by the time the venue's report arrives).
+// Takes the RINGS, not the OMS: the WS user-data producer is non-template code and cannot name
+// OrderManagerState<F>, and a second copy of this arithmetic living over there is exactly the
+// parallel-implementation shape that produced PARITY-071 one directory over.
+static inline bool OMS_CmdRingsPush(OmsCmdRings* rings, const Command& cmd) {
+    const tt::NodeIdx nn{(int16_t)OMS_OrderIdNode(cmd.order_id)};
+    return SPSCRing_TryPush(&(*rings)[nn], cmd);
+}
+
+// The INTERIM central drain: one consumer walks every node's ring, which keeps each ring SPSC.
+// The CURSOR is caller-held so a drain-to-empty loop is O(nodes + items) — it finishes node n
+// before moving to n+1 and never revisits. The restart-at-0 forwarder below is O(nodes) PER ITEM,
+// which is fine for a test popping one command and wrong for a live drain of a burst.
+// RETIRES at the flip, when each node drains only its own ring.
+static inline bool OMS_CmdRingsPop(OmsCmdRings* rings, int* cursor, Command* out) {
+    for (; *cursor < MAX_EXECUTION_NODES; ++(*cursor)) {
+        if (SPSCRing_TryPop(&(*rings)[tt::NodeIdx{(int16_t)*cursor}], out)) return true;
+    }
+    return false;
+}
+
 template <unsigned F>
 inline bool OMS_ResultPush(OrderManagerState<F>* oms, const Command& cmd) {
-    // The lane is stamped at Submit (P4-pre-3a). Deriving the node any other way here —
-    // decoding the slot and reading orders[slot].portfolio_slot — would be a cross-thread
-    // read at the flip AND slot-reuse-racy (the slot can belong to another node by the time
-    // the venue's report arrives).
-    const tt::NodeIdx nn{(int16_t)OMS_OrderIdNode(cmd.order_id)};
-    return SPSCRing_TryPush(&oms->result_rings[nn], cmd);
+    return OMS_CmdRingsPush(&oms->result_rings, cmd);
 }
 //======================================================================
 // [END_CODE]
@@ -1277,17 +1339,18 @@ static inline void OMS_RingFullFatalRecord(std::atomic<uint32_t>* trip_word,
 //======================================================================
 // [CODE]
 //======================================================================
+// INTERIM restart-at-0 forwarder, kept for its TEST callers only — it re-walks from node 0 on
+// every call, so a drain-to-empty loop over it is O(nodes) per item. Both PRODUCTION consumers
+// take the cursor form `OMS_CmdRingsPop(rings, &cursor, out)` instead.
+// ORDER NOTE (deliberate, measured): the old single ring drained in PUSH order across all nodes;
+// this drains NODE-MAJOR. Per-node FIFO — the only order a node's own accounting depends on — is
+// preserved exactly. Cross-node interleaving changes, which is the same reordering the flip makes
+// permanent and PARITY-052 already pins as schedule-defined (totals are order-invariant; peaks and
+// emit ids are not).
 template <unsigned F>
 inline bool OMS_ResultPop(OrderManagerState<F>* oms, Command* out) {
-    // ORDER NOTE (deliberate, measured): the old single ring drained in PUSH order across all
-    // nodes; this drains NODE-MAJOR. Per-node FIFO — the only order a node's own accounting
-    // depends on — is preserved exactly. Cross-node interleaving changes, which is the same
-    // reordering the flip makes permanent and PARITY-052 already pins as schedule-defined
-    // (totals are order-invariant; peaks and emit ids are not).
-    for (int n = 0; n < MAX_EXECUTION_NODES; ++n) {
-        if (SPSCRing_TryPop(&oms->result_rings[tt::NodeIdx{(int16_t)n}], out)) return true;
-    }
-    return false;
+    int cursor = 0;
+    return OMS_CmdRingsPop(&oms->result_rings, &cursor, out);
 }
 //======================================================================
 // [END_CODE]
@@ -2690,8 +2753,10 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
             OrderManager_ProcessFillCommand(oms, cmd);
     }
 
-    // 2. WS fills (user data websocket thread)
-    while (SPSCRing_TryPop(&oms->ws_result_queue, &cmd)) {
+    // 2. WS fills (user data websocket thread) — per-node rings, node-major interim drain.
+    //    The cursor advances across nodes and never revisits: node-major, drain-to-empty.
+    int ws_cursor = 0;
+    while (OMS_CmdRingsPop(&oms->ws_rings, &ws_cursor, &cmd)) {
         if (cmd.type == (uint8_t)CMD_WS_FILL)
             OrderManager_ProcessFillCommand(oms, cmd);
     }
