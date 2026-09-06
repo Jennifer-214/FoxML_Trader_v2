@@ -11,7 +11,6 @@
 // [CONTAINS]
 //   - [STRUCT]_[BinanceConfig]   (POLL_* flags ride)
 //   - [STRUCT]_[BinanceStream]
-//   - [FUNCTION]_[binance_ws_read_frame]   (+ base64 / tcp_connect / tls_setup / handshake / pong / close-frame layer family)
 //   - [FUNCTION]_[binance_parse_trade]
 //   - [FUNCTION]_[BinanceStream_Init]   (+ Close / Reconnect + the g_binance_shutdown_flag hook)
 //   - [FUNCTION]_[BinanceStream_Poll]
@@ -29,8 +28,9 @@
 // to consume one frame. poll checks SSL_pending FIRST to avoid the SSL-internal-buffer
 // vs poll() mismatch - if SSL has buffered data, we return immediately without calling poll()
 //
-// ping/pong handled transparently inside the frame reader - binance sends a ping every ~3 min
-// and disconnects if you dont pong back
+// ping/pong handled transparently inside BinanceStream_ReadTick's frame loop - binance sends a
+// ping every ~3 min and kills the session (1008 "Pong timeout") if the masked payload echo does
+// not come back; the reader returns the opcode, the loop answers it. Invisible to the caller.
 //
 // 24-hour session lifecycle: connect -> warmup -> trade -> wind down -> close all -> reconnect
 // no positions carry across sessions
@@ -44,9 +44,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <netdb.h>
-#include <netinet/tcp.h>  // v5.11.0.C — TCP_NODELAY / IPPROTO_TCP
-#include <errno.h>        // v5.11.0.C — strerror(errno) on setsockopt fail
+// netdb.h / netinet/tcp.h / errno.h left with the connect layer when it moved to WebSocketUtil.hpp
+// (leaf commit 3) — getaddrinfo, TCP_NODELAY and the setsockopt strerror all live there now.
 #include <poll.h>
 #include <time.h>
 #include <csignal>
@@ -57,6 +56,7 @@
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 
+#include "WebSocketUtil.hpp"          // the ONE RFC 6455 frame family (PARITY-071 / D-487)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
@@ -147,352 +147,30 @@ struct BinanceStream {
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[binance_ws_read_frame]
+// [SECTION]_[THE WS LAYER FAMILY — NOW SHARED (WebSocketUtil.hpp)]
 //----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [LIVE_TRADING]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the WS layer family (base64 / L1 tcp_connect / L2 tls_setup / L3 handshake / L4 frame reader / pong / close-frame ride) — fragment-accumulating reader null-terminates every frame]
-//======================================================================
-// [CODE]
-//======================================================================
-//------------------------------------------------------------------
-// [SECTION]_[BASE64 ENCODER]
-//------------------------------------------------------------------
-// fixed-size base64 for the 16-byte websocket key - no general purpose encoder needed
-// input: 16 bytes, output: 24 chars + null terminator
-// we need this for the Sec-WebSocket-Key header in the HTTP upgrade request
-//======================================================================================================
-static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static inline void binance_base64_encode(const unsigned char *input, int input_len, char *output) {
-    int i = 0, j = 0;
-    while (i < input_len) {
-        uint32_t octet_a = (i < input_len) ? input[i++] : 0;
-        uint32_t octet_b = (i < input_len) ? input[i++] : 0;
-        uint32_t octet_c = (i < input_len) ? input[i++] : 0;
-
-        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
-
-        output[j++] = b64_table[(triple >> 18) & 0x3F];
-        output[j++] = b64_table[(triple >> 12) & 0x3F];
-        output[j++] = b64_table[(triple >> 6)  & 0x3F];
-        output[j++] = b64_table[triple         & 0x3F];
-    }
-    // pad - for 16 bytes input (16 % 3 == 1), last group has 1 real byte, 2 padding
-    int pad = (3 - (input_len % 3)) % 3;
-    for (int p = 0; p < pad; p++) {
-        output[j - 1 - p] = '=';
-    }
-    output[j] = '\0';
-}
-
-//======================================================================================================
-// [LAYER 1: TCP CONNECT]
-//======================================================================================================
-// standard POSIX socket connect - getaddrinfo resolves the hostname, then we connect
-// returns the socket fd or -1 on failure
-//======================================================================================================
-static inline int binance_tcp_connect(const char *host, const char *port) {
-    struct addrinfo hints, *res, *rp;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    int err = getaddrinfo(host, port, &hints, &res);
-    if (err != 0) {
-        fprintf(stderr, "[BINANCE] getaddrinfo failed: %s\n", gai_strerror(err));
-        return -1;
-    }
-
-    int sockfd = -1;
-    for (rp = res; rp != NULL; rp = rp->ai_next) {
-        sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sockfd == -1) continue;
-
-        if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) break; // success
-
-        close(sockfd);
-        sockfd = -1;
-    }
-
-    freeaddrinfo(res);
-
-    if (sockfd != -1) {
-        // v5.11.0.C — Disable Nagle's algorithm. Without this, TCP can
-        // buffer outgoing packets up to 40ms waiting to coalesce — fine
-        // for bulk transfers, catastrophic for HFT order submit.
-        // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.1.
-        // Not fatal if this fails — log it and continue (some interfaces
-        // are TCP_NODELAY-by-default at the NIC level).
-        int one = 1;
-        if (setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
-            fprintf(stderr, "[BINANCE] setsockopt(TCP_NODELAY) failed: %s\n",
-                    strerror(errno));
-        }
-    }
-
-    if (sockfd == -1) {
-        fprintf(stderr, "[BINANCE] TCP connect failed to %s:%s\n", host, port);
-    }
-    return sockfd;
-}
-
-//======================================================================================================
-// [LAYER 2: TLS SETUP]
-//======================================================================================================
-// OpenSSL TLS handshake over the existing TCP socket
-// sets SNI hostname (required by binance) and verifies the handshake completes
-// returns 1 on success, 0 on failure
-//======================================================================================================
-static inline int binance_tls_setup(BinanceStream *bs, const char *host) {
-    bs->ssl_ctx = SSL_CTX_new(TLS_client_method());
-    if (!bs->ssl_ctx) {
-        fprintf(stderr, "[BINANCE] SSL_CTX_new failed\n");
-        return 0;
-    }
-
-    bs->ssl = SSL_new(bs->ssl_ctx);
-    if (!bs->ssl) {
-        fprintf(stderr, "[BINANCE] SSL_new failed\n");
-        SSL_CTX_free(bs->ssl_ctx);
-        bs->ssl_ctx = NULL;
-        return 0;
-    }
-
-    SSL_set_fd(bs->ssl, bs->sockfd);
-
-    // SNI - binance requires this or the handshake fails
-    SSL_set_tlsext_host_name(bs->ssl, host);
-
-    int ret = SSL_connect(bs->ssl);
-    if (ret != 1) {
-        fprintf(stderr, "[BINANCE] SSL_connect failed: %d\n", SSL_get_error(bs->ssl, ret));
-        SSL_free(bs->ssl);
-        SSL_CTX_free(bs->ssl_ctx);
-        bs->ssl     = NULL;
-        bs->ssl_ctx = NULL;
-        return 0;
-    }
-
-    return 1;
-}
-
-//======================================================================================================
-// [LAYER 3: WEBSOCKET HANDSHAKE]
-//======================================================================================================
-// HTTP upgrade request over TLS - sends the Upgrade: websocket headers and verifies
-// the server responds with 101 Switching Protocols
+// base64 / tcp_connect / ssl_setup / handshake / frame reader / pong / close USED to live here as a
+// PRIVATE copy — one of three hand-written implementations of RFC 6455 client framing in this dir
+// (depth, trade, user-data). Nothing compared them, so they drifted in both directions: the depth
+// copy answered pings with an empty UNMASKED pong and Binance killed every session after ~90 s,
+// while THIS copy got the pong right but carried two holes of its own. Both are closed by consuming
+// the ONE body (PARITY-071; D-487; 2026-09-05 leaf commit 3):
 //
-// the Sec-WebSocket-Key is 16 random bytes base64-encoded - server echoes back a hash
-// of it but we dont bother verifying the accept hash (we trust the connection at this point)
-//======================================================================================================
-static inline int binance_ws_handshake(BinanceStream *bs, const char *path, const char *host) {
-    // generate 16 random bytes for the websocket key
-    unsigned char key_bytes[16];
-    RAND_bytes(key_bytes, 16);
-
-    char key_b64[32];
-    binance_base64_encode(key_bytes, 16, key_b64);
-
-    // build the HTTP upgrade request
-    char request[512];
-    int req_len = snprintf(request, sizeof(request),
-        "GET %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Key: %s\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "\r\n",
-        path, host, key_b64);
-
-    int written = SSL_write(bs->ssl, request, req_len);
-    if (written != req_len) {
-        fprintf(stderr, "[BINANCE] SSL_write handshake failed\n");
-        return 0;
-    }
-
-    // read response - we just need to verify "101" is in the status line
-    // the full response is small (< 512 bytes), read it all
-    char response[1024];
-    int total = 0;
-
-    // read until we see the \r\n\r\n that ends the HTTP headers
-    while (total < (int)sizeof(response) - 1) {
-        int n = SSL_read(bs->ssl, response + total, sizeof(response) - 1 - total);
-        if (n <= 0) {
-            fprintf(stderr, "[BINANCE] SSL_read handshake response failed\n");
-            return 0;
-        }
-        total += n;
-        response[total] = '\0';
-
-        // check if we have the complete headers
-        if (strstr(response, "\r\n\r\n")) break;
-    }
-
-    // verify 101 Switching Protocols
-    if (!strstr(response, "101")) {
-        fprintf(stderr, "[BINANCE] WebSocket upgrade failed - no 101 in response\n");
-        fprintf(stderr, "[BINANCE] Response: %.200s\n", response);
-        return 0;
-    }
-
-    return 1;
-}
-
-//======================================================================================================
-// [LAYER 4: WEBSOCKET FRAME READER]
-//======================================================================================================
-// reads one complete websocket frame from SSL, handling partial reads
+//   - `if ((int)pay_len > buf_size - 1)` narrowed the 64-bit length BEFORE the bounds check, and
+//     then wrote `buf[pay_len] = '\0'` with the WIDE value. A 127-form length of 2^32+5 casts to 5,
+//     passes the guard, consumes 5 bytes of a 4-billion-byte frame, and NUL-writes ~4 GB past the
+//     buffer. `ws_read_frame` compares as uint64_t before any narrowing.
+//   - `binance_ws_send_pong` built into a 256-byte stack frame with NO capacity check while the
+//     reader handed it payloads from a 4096-byte buffer — a ping over ~250 bytes smashed the
+//     producer thread's stack. `ws_build_pong` refuses what will not fit, and `ws_read_frame` now
+//     rejects an oversize control frame at the reader (RFC 6455 §5.5) so the length never arrives.
 //
-// websocket frame format (RFC 6455):
-//   byte 0: [FIN:1][RSV:3][opcode:4]
-//   byte 1: [MASK:1][payload_len:7]
-//   if payload_len == 126: next 2 bytes are the real length (big-endian)
-//   if payload_len == 127: next 8 bytes are the real length (big-endian)
-//   if MASK bit set: next 4 bytes are the masking key
-//   then: payload data
+// The migration also went the other way: this file's private copy was BETTER than the shared family
+// in four places (padded base64, multi-address connect, non-dangling ssl out-params, a whole-request
+// handshake write). Those were fixed IN WebSocketUtil.hpp first — a shared body is only a fix if it
+// is a superset of every copy it replaces.
 //
-// server-to-client frames are NOT masked (per RFC 6455)
-// returns payload length, sets *opcode, fills buf with payload
-// returns -1 on error
-//======================================================================================================
-static inline int binance_ws_read_frame(BinanceStream *bs, char *buf, int buf_size, int *opcode) {
-    unsigned char header[2];
-    int n;
-
-    // read the 2-byte header - loop handles partial reads
-    int hdr_read = 0;
-    while (hdr_read < 2) {
-        n = SSL_read(bs->ssl, header + hdr_read, 2 - hdr_read);
-        if (n <= 0) return -1;
-        hdr_read += n;
-    }
-
-    *opcode          = header[0] & 0x0F;
-    int masked       = (header[1] >> 7) & 1;
-    uint64_t pay_len = header[1] & 0x7F;
-
-    // extended payload length
-    if (pay_len == 126) {
-        unsigned char ext[2];
-        int ext_read = 0;
-        while (ext_read < 2) {
-            n = SSL_read(bs->ssl, ext + ext_read, 2 - ext_read);
-            if (n <= 0) return -1;
-            ext_read += n;
-        }
-        pay_len = __builtin_bswap16(*(uint16_t *)ext);
-    } else if (pay_len == 127) {
-        unsigned char ext[8];
-        int ext_read = 0;
-        while (ext_read < 8) {
-            n = SSL_read(bs->ssl, ext + ext_read, 8 - ext_read);
-            if (n <= 0) return -1;
-            ext_read += n;
-        }
-        pay_len = __builtin_bswap64(*(uint64_t *)ext);
-    }
-
-    // masking key (server frames shouldn't be masked, but handle it anyway)
-    unsigned char mask_key[4] = {0, 0, 0, 0};
-    if (masked) {
-        int mk_read = 0;
-        while (mk_read < 4) {
-            n = SSL_read(bs->ssl, mask_key + mk_read, 4 - mk_read);
-            if (n <= 0) return -1;
-            mk_read += n;
-        }
-    }
-
-    // clamp to buffer size
-    if ((int)pay_len > buf_size - 1) {
-        fprintf(stderr, "[BINANCE] frame too large: %lu bytes\n", (unsigned long)pay_len);
-        return -1;
-    }
-
-    // read payload - loop until we have all pay_len bytes
-    int payload_read = 0;
-    while (payload_read < (int)pay_len) {
-        n = SSL_read(bs->ssl, buf + payload_read, (int)pay_len - payload_read);
-        if (n <= 0) return -1;
-        payload_read += n;
-    }
-
-    // unmask if needed
-    if (masked) {
-        for (int i = 0; i < (int)pay_len; i++) {
-            buf[i] ^= mask_key[i & 3];
-        }
-    }
-
-    buf[pay_len] = '\0';
-    return (int)pay_len;
-}
-
-//======================================================================================================
-// [WEBSOCKET PONG]
-//======================================================================================================
-// client-to-server frames MUST be masked (RFC 6455 section 5.1)
-// pong echoes the same payload back with opcode 0xA
-//======================================================================================================
-static inline int binance_ws_send_pong(BinanceStream *bs, const char *payload, int len) {
-    // frame: [0x8A] [0x80 | len] [4-byte mask] [masked payload]
-    // max pong payload from binance is tiny (usually empty or a few bytes)
-    unsigned char frame[256];
-    int pos = 0;
-
-    frame[pos++] = 0x8A;  // FIN + pong opcode
-
-    // payload length with mask bit set
-    if (len < 126) {
-        frame[pos++] = 0x80 | (unsigned char)len;
-    } else {
-        // pong payloads should never be this big, but handle it
-        frame[pos++] = 0x80 | 126;
-        uint16_t be_len = __builtin_bswap16((uint16_t)len);
-        memcpy(frame + pos, &be_len, 2);
-        pos += 2;
-    }
-
-    // generate masking key
-    unsigned char mask_key[4];
-    RAND_bytes(mask_key, 4);
-    memcpy(frame + pos, mask_key, 4);
-    pos += 4;
-
-    // masked payload
-    for (int i = 0; i < len; i++) {
-        frame[pos++] = payload[i] ^ mask_key[i & 3];
-    }
-
-    int written = SSL_write(bs->ssl, frame, pos);
-    return (written == pos) ? 1 : 0;
-}
-
-//======================================================================================================
-// [WEBSOCKET CLOSE FRAME]
-//======================================================================================================
-// sends a clean close frame (opcode 0x8) - masked, no payload
-//======================================================================================================
-static inline int binance_ws_send_close(BinanceStream *bs) {
-    unsigned char frame[8];
-    frame[0] = 0x88;  // FIN + close opcode
-    frame[1] = 0x80;  // masked, zero length
-
-    unsigned char mask_key[4];
-    RAND_bytes(mask_key, 4);
-    memcpy(frame + 2, mask_key, 4);
-
-    int written = SSL_write(bs->ssl, frame, 6);
-    return (written == 6) ? 1 : 0;
-}
-
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [END_FUNCTION]_[binance_ws_read_frame]
+// Logging stays HERE, at the call sites: the shared bodies are I/O-free so the suite can drive them.
 //======================================================================
 
 //======================================================================
@@ -564,9 +242,12 @@ static inline int binance_parse_trade(const char *json, int len, char *price_str
 //
 // v5.11.16 (2026-05-07) — DataStream parsing audit. The strstr/strchr calls
 // are safe to use without explicit length bounds because the caller
-// (binance_ws_read_frame) writes `buf[pay_len] = '\0'` after
-// every frame read AND clamps pay_len <= buf_size-1, so the null terminator
-// is guaranteed to land within the buffer. v5.11.4.A locale-immune parsing
+// (`ws_read_frame`, WebSocketUtil.hpp — was the private `binance_ws_read_frame`
+// until the 2026-09-05 leaf commit 3) writes `out[len] = '\0'` after every frame
+// read AND refuses any payload longer than the max_len it was given, so the null
+// terminator is guaranteed to land within the buffer. That bound is now compared
+// as uint64_t BEFORE any narrowing — the private reader compared `(int)pay_len`,
+// which a 127-form length of 2^32+5 slipped past as 5. v5.11.4.A locale-immune parsing
 // covered the actual number-extraction (FPN_FromString is digit-by-digit;
 // out->price_d / out->volume_d use tt::parse_double_fast). Audit verdict:
 // no behavior change needed; using the `len` parameter (previously unused)
@@ -598,24 +279,30 @@ static inline int BinanceStream_Init(BinanceStream *bs, const BinanceConfig *con
     // binance.us: port 9443
     // production: port 9443 (geo-restricted in some regions)
     const char *host;
-    const char *port;
+    int port;
     if (config->use_testnet) {
         host = "testnet.binance.vision";
-        port = "443";
+        port = 443;
     } else if (config->use_binance_us) {
         host = "stream.binance.us";
-        port = "9443";
+        port = 9443;
     } else {
         host = "data-stream.binance.vision";
-        port = "443";
+        port = 443;
     }
 
-    // layer 1: TCP
-    bs->sockfd = binance_tcp_connect(host, port);
-    if (bs->sockfd < 0) return 0;
+    // layer 1: TCP. rcv_timeout 0 = block indefinitely inside a read, which is the behaviour this
+    // producer has always had; giving the trade socket an SO_RCVTIMEO is its own tracked item, kept
+    // out of a migration whose whole claim is that the producer's behaviour did not change.
+    bs->sockfd = ws_tcp_connect(host, port, 0);
+    if (bs->sockfd < 0) {
+        fprintf(stderr, "[BINANCE] TCP connect failed to %s:%d\n", host, port);
+        return 0;
+    }
 
     // layer 2: TLS
-    if (!binance_tls_setup(bs, host)) {
+    if (ws_ssl_setup(&bs->ssl_ctx, &bs->ssl, bs->sockfd, host) < 0) {
+        fprintf(stderr, "[BINANCE] TLS setup failed for %s\n", host);
         close(bs->sockfd);
         bs->sockfd = -1;
         return 0;
@@ -626,11 +313,10 @@ static inline int BinanceStream_Init(BinanceStream *bs, const BinanceConfig *con
     char path[128];
     snprintf(path, sizeof(path), "/ws/%s@trade", config->symbol);
 
-    if (!binance_ws_handshake(bs, path, host)) {
-        SSL_shutdown(bs->ssl);
-        SSL_free(bs->ssl);
-        SSL_CTX_free(bs->ssl_ctx);
-        close(bs->sockfd);
+    WsSslIo hio{bs->ssl};
+    if (ws_handshake(hio, host, path) < 0) {
+        fprintf(stderr, "[BINANCE] WebSocket upgrade failed (no 101) for %s%s\n", host, path);
+        ws_close(bs->ssl, bs->ssl_ctx, bs->sockfd);   // close frame + shutdown + free + close(fd)
         bs->ssl     = NULL;
         bs->ssl_ctx = NULL;
         bs->sockfd  = -1;
@@ -649,7 +335,7 @@ static inline int BinanceStream_Init(BinanceStream *bs, const BinanceConfig *con
     bs->read_pos     = 0;
     bs->read_len     = 0;
 
-    fprintf(stderr, "[BINANCE] connected to %s - %s@trade\n", host, config->symbol);
+    fprintf(stderr, "[BINANCE] connected to %s:%d - %s@trade\n", host, port, config->symbol);
     return 1;
 }
 
@@ -660,19 +346,14 @@ static inline int BinanceStream_Init(BinanceStream *bs, const BinanceConfig *con
 static inline void BinanceStream_Close(BinanceStream *bs) {
     if (!bs->connected) return;
 
-    // try to send a clean close frame - if it fails thats fine, were closing anyway
-    binance_ws_send_close(bs);
-
+    // ws_close sends the masked close frame, then SSL_shutdown / SSL_free / SSL_CTX_free / close(fd).
+    // If it fails thats fine, were closing anyway.
     if (bs->ssl) {
-        SSL_shutdown(bs->ssl);
-        SSL_free(bs->ssl);
-        bs->ssl = NULL;
-    }
-    if (bs->ssl_ctx) {
-        SSL_CTX_free(bs->ssl_ctx);
+        ws_close(bs->ssl, bs->ssl_ctx, bs->sockfd);
+        bs->ssl     = NULL;
         bs->ssl_ctx = NULL;
-    }
-    if (bs->sockfd >= 0) {
+        bs->sockfd  = -1;
+    } else if (bs->sockfd >= 0) {
         close(bs->sockfd);
         bs->sockfd = -1;
     }
@@ -809,19 +490,34 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
     if (!bs->connected) return 0;
 
     char frame_buf[4096];
-    int opcode;
+    int opcode = 0, fin = 0;
+    WsSslIo io{bs->ssl};
 
     while (1) {
-        int payload_len = binance_ws_read_frame(bs, frame_buf, sizeof(frame_buf), &opcode);
+        // sizeof-1: ws_read_frame bounds the payload at max_len and NUL-terminates at out[len], so the
+        // terminator of a maximal frame lands on the last byte of frame_buf (the same 4095-byte
+        // effective capacity the private reader had, which compared against buf_size - 1).
+        int payload_len = ws_read_frame(io, frame_buf, (int)sizeof(frame_buf) - 1, &opcode, &fin);
         if (payload_len < 0) {
-            fprintf(stderr, "[BINANCE] frame read error - connection lost\n");
+            // Every negative return leaves the stream DESYNCED (the payload was not consumed), so the
+            // only correct response to any of them is to drop the connection — never skip and continue.
+            const char *why = (payload_len == WS_READ_TOO_LARGE) ? "frame larger than the 4095-byte buffer"
+                            : (payload_len == WS_READ_PROTOCOL)  ? "RFC 6455 control-frame violation (>125 B or fragmented)"
+                                                                 : "read error / EOF mid-frame";
+            fprintf(stderr, "[BINANCE] %s - connection lost\n", why);
             bs->connected = 0;
             return 0;
         }
 
         if (opcode == 0x9) {
-            // ping - respond with pong immediately, then read next frame
-            binance_ws_send_pong(bs, frame_buf, payload_len);
+            // ping - respond with a MASKED payload-echo pong immediately, then read the next frame.
+            // A failed write means the peer is gone; the venue kills a session whose pong does not
+            // echo (code 1008 "Pong timeout" — the 2026-09-05 depth stall).
+            if (!ws_send_pong(io, frame_buf, payload_len)) {
+                fprintf(stderr, "[BINANCE] pong write failed - connection lost\n");
+                bs->connected = 0;
+                return 0;
+            }
             continue;
         }
 
@@ -912,9 +608,9 @@ static inline int BinanceStream_InWindDown(BinanceStream *bs, uint32_t wind_down
     uint64_t now     = (uint64_t)time(NULL);
     uint64_t elapsed = now - bs->connect_time;
 
-    // wind down starts at 23h30m - wind_down_minutes
+    // wind down starts at the planned reconnect minus wind_down_minutes
     // e.g. with wind_down_minutes=5: wind down at 23h25m = 84300 seconds
-    uint64_t wind_down_start = (23 * 3600 + 30 * 60) - (wind_down_minutes * 60);
+    uint64_t wind_down_start = WS_PLANNED_RECONNECT_S - (uint64_t)(wind_down_minutes * 60);
 
     return (elapsed >= wind_down_start) ? 1 : 0;
 }
@@ -922,11 +618,11 @@ static inline int BinanceStream_InWindDown(BinanceStream *bs, uint32_t wind_down
 static inline int BinanceStream_ShouldReconnect(BinanceStream *bs) {
     if (!bs->connected) return 0;
 
-    uint64_t now     = (uint64_t)time(NULL);
-    uint64_t elapsed = now - bs->connect_time;
-
-    // reconnect at 23h30m = 84600 seconds (30 min buffer before 24h cutoff)
-    return (elapsed >= 84600) ? 1 : 0;
+    // WS_PLANNED_RECONNECT_S (23h30m = 84600 s, a 30-min buffer before Binance's 24 h cutoff) is the
+    // SSoT this file used to spell as its own literal. The helper also guards the two cases the bare
+    // `now - connect_time` subtraction got wrong: connect_time 0 (never connected) and a backwards
+    // wall clock, both of which underflow unsigned into a huge elapsed and force a spurious reconnect.
+    return ws_planned_reconnect_due((uint64_t)time(NULL), bs->connect_time);
 }
 
 //------------------------------------------------------------------
