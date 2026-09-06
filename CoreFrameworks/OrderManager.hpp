@@ -205,6 +205,14 @@ using OmsCmdRings = tt::NodeArray<SPSCRing<Command, OMS_RESULT_RING_PER_NODE>, M
 //======================================================================
 // [END_CODE]
 //======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-09-06]
+// [SIZE]_[67584B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[1056]
+// [STRADDLE]_[none]
+//======================================================================
 // [END_STRUCT]_[OmsCmdRings]
 //======================================================================
 // D-479 as amended (2026-09-04) — the bounded-push budget for the never-drop fill rings
