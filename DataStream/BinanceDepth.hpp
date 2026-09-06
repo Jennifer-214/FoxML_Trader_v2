@@ -382,7 +382,8 @@ static inline int DepthStream_Connect(DepthStream *ds, const char *host, int por
     }
     char path[160];
     snprintf(path, sizeof(path), "/ws/%s@depth5@100ms", symbol);
-    if (ws_handshake(ds->ssl, host, path) < 0) {
+    WsSslIo hio{ds->ssl};
+    if (ws_handshake(hio, host, path) < 0) {
         ws_close(ds->ssl, ds->ssl_ctx, ds->sockfd);
         ds->sockfd = -1; ds->ssl = NULL; ds->ssl_ctx = NULL;
         ds->last_connect_step = 3; return 3;
@@ -448,6 +449,15 @@ static inline int depth_consume_frame(DepthSharedState<F> *shared, Io &io, char 
         // The stream is DESYNCED (the oversize payload was not consumed) — never "skip and continue".
         fprintf(stderr, "[depth] oversize frame (> %d B) — disconnecting\n", frame_cap);
         DepthStream_Disconnect(shared, DEPTH_GAP_REASON_FRAME_TOO_LARGE, wall_now_us);
+        return 0;
+    }
+    if (plen == WS_READ_PROTOCOL) {
+        // RFC 6455 §5.5 violated (an oversize or fragmented control frame). Same desync contract as
+        // TOO_LARGE. Logged distinctly because the wire cause differs from a plain EOF — the reason
+        // code stays DISCONNECT so no new persisted identifier is minted for a peer-broken case (H21).
+        fprintf(stderr, "[depth] protocol violation: control frame > %d B or fragmented — disconnecting\n",
+                WS_CONTROL_MAX_PAYLOAD);
+        DepthStream_Disconnect(shared, DEPTH_GAP_REASON_DISCONNECT, wall_now_us);
         return 0;
     }
     if (plen < 0) {                         // WS_READ_ERR: EOF / transport error / SO_RCVTIMEO inside a frame

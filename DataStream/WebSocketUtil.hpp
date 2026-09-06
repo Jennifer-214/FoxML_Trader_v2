@@ -5,7 +5,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ONE WebSocket frame family (reader / pong / close) + the shared TCP / SSL / handshake plumbing under the venue streams — RFC 6455 client side: partial-read loops on EVERY field, a 64-bit length compared BEFORE any int cast, a MASKED payload-echo pong, a masked close; the reader is a template over a Reader seam (WsSslReader in production, a byte cursor in the suite). Consumers: BinanceDepth (the 2026-09-05 depth-stall leaf, commit 1); BinanceCrypto + BinanceUserData migrate onto it in that leaf's commits 3-4 (their private copies carry the (int)pay_len length-cast hole this family closes)]
+// [OVERVIEW]_[the ONE WebSocket frame family (reader / pong / close) + the shared TCP / SSL / handshake plumbing under the venue streams — RFC 6455 client side: partial-read loops on EVERY field, a 64-bit length compared BEFORE any int cast, control-frame limits enforced at the reader (§5.5), a MASKED payload-echo pong, a masked close, padded base64 for the upgrade key (§4.1); the reader is a template over an Io seam (WsSslIo in production, a byte cursor in the suite). Consumers: BinanceDepth (the 2026-09-05 depth-stall leaf, commit 1); BinanceCrypto + BinanceUserData migrate onto it in that leaf's commits 3-4 (their private copies carry the (int)pay_len length-cast hole and the uncapped pong builder this family closes)]
 // [CONTAINS]
 //   - [FUNCTION]_[ws_read_frame]   (+ base64 / tcp_connect / ssl_setup / handshake / read_exact / build_pong / build_close / send_pong / send_close / close / stale / planned_reconnect_due family)
 //======================================================================================================
@@ -17,6 +17,15 @@
 // The trade client (BinanceCrypto.hpp) and the user-data client (BinanceUserData.hpp) had CORRECT private
 // copies of the same reader + pong — three parallel frame implementations, one drifted (Class 21); this
 // file is now the single body all three consume.
+//
+// 2026-09-05 leaf commit 3 (the BinanceCrypto migration) found FOUR places where this shared family
+// was WEAKER than the trade client's private copy it was about to replace — a shared body is only a
+// fix if it is a superset, so each was closed here BEFORE the migration: the base64 encoder emitted
+// no '=' padding (an RFC-invalid Sec-WebSocket-Key that Binance happens to tolerate); ws_tcp_connect
+// stopped at the first resolved address instead of walking them; ws_ssl_setup left DANGLING out-params
+// on every failure path; ws_handshake accepted a partial or truncated upgrade write. The control-frame
+// limit (§5.5) went in at the same time — the trade client's uncapped pong builder was a reachable
+// stack overflow, and enforcing the limit at the reader is what closes the class rather than the case.
 //======================================================================================================
 #ifndef WEBSOCKET_UTIL_HPP
 #define WEBSOCKET_UTIL_HPP
@@ -87,6 +96,17 @@ static inline void ws_base64_encode(const unsigned char *in, int len, char *out)
         out[j++] = ws_b64_table[(triple >> 6)  & 0x3F];
         out[j++] = ws_b64_table[triple & 0x3F];
     }
+    // RFC 4648 §4 PADDING. The final group encodes 3 - (len % 3) bytes that were never
+    // there; each one turns the char it produced into '='. Without this the last group
+    // reads as data ('AA' for a 16-byte key instead of '=='), which is not base64 —
+    // RFC 6455 §4.1 requires Sec-WebSocket-Key to be the base64 of 16 bytes, and a server
+    // that validates it rejects the upgrade. Binance does not validate, which is the only
+    // reason the depth stream worked with this missing (2026-09-05 leaf commit 3): the
+    // trade client's private encoder had the padding and this shared one did not, so
+    // migrating BinanceCrypto onto this family without this fix would have REGRESSED a
+    // correct handshake into a tolerated-by-luck one.
+    const int pad = (3 - (len % 3)) % 3;
+    for (int p = 0; p < pad; p++) out[j - 1 - p] = '=';
     out[j] = '\0';
 }
 
@@ -99,16 +119,25 @@ static inline void ws_base64_encode(const unsigned char *in, int len, char *out)
 static inline int ws_tcp_connect(const char *host, int port, uint32_t rcv_timeout_ms) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
-    struct addrinfo hints = {}, *res;
+    struct addrinfo hints = {}, *res, *rp;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, port_str, &hints, &res) != 0) return -1;
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-        close(fd); freeaddrinfo(res); return -1;
+    // Walk EVERY resolved address, not just the first. Binance's stream hosts resolve to a
+    // rotating set of A records and any one of them can be refusing connections while its
+    // siblings serve; stopping at res->ai_addr turns a routine failover into an outage that
+    // looks like the venue is down. The trade client has iterated since v5.11 — this family
+    // did not, so the depth stream inherited the weaker behaviour (2026-09-05 leaf commit 3).
+    int fd = -1;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;   // this one answered
+        close(fd);                                                   // never leak the attempt
+        fd = -1;
     }
     freeaddrinfo(res);
+    if (fd < 0) return -1;
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));   // parity with the trade client
     if (rcv_timeout_ms > 0) {
@@ -123,23 +152,38 @@ static inline int ws_tcp_connect(const char *host, int port, uint32_t rcv_timeou
 //------------------------------------------------------------------
 // [SECTION]_[SSL SETUP]
 //------------------------------------------------------------------
+// The out-params are written ONLY on success, and NULLed up front. The previous shape assigned
+// them as it went and then freed on the failure paths, so a failed setup handed the caller two
+// DANGLING pointers and every caller had to remember to re-NULL them — a use-after-free that
+// only the caller's discipline prevented (Class 62: a stranded out-param write). Writing on
+// success alone makes the dangling state unrepresentable rather than merely discouraged, which
+// is the structural form of the fix (feedback_structural_fix_over_belt_and_suspenders).
 static inline int ws_ssl_setup(SSL_CTX **ctx_out, SSL **ssl_out, int sockfd, const char *host) {
-    *ctx_out = SSL_CTX_new(TLS_client_method());
-    if (!*ctx_out) return -1;
-    *ssl_out = SSL_new(*ctx_out);
-    if (!*ssl_out) { SSL_CTX_free(*ctx_out); return -1; }
-    SSL_set_fd(*ssl_out, sockfd);
-    SSL_set_tlsext_host_name(*ssl_out, host);  // SNI required by Binance
-    if (SSL_connect(*ssl_out) <= 0) {
-        SSL_free(*ssl_out); SSL_CTX_free(*ctx_out); return -1;
+    *ctx_out = NULL;
+    *ssl_out = NULL;
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) return -1;
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl) { SSL_CTX_free(ctx); return -1; }
+    SSL_set_fd(ssl, sockfd);
+    SSL_set_tlsext_host_name(ssl, host);  // SNI required by Binance
+    if (SSL_connect(ssl) <= 0) {
+        SSL_free(ssl); SSL_CTX_free(ctx); return -1;
     }
+    *ctx_out = ctx;
+    *ssl_out = ssl;
     return 0;
 }
 
 //------------------------------------------------------------------
 // [SECTION]_[WEBSOCKET HANDSHAKE]
 //------------------------------------------------------------------
-static inline int ws_handshake(SSL *ssl, const char *host, const char *path) {
+// Templated over the Io seam like the rest of the family. It was the ONE member left on a bare SSL*,
+// so it was the one member the suite could not drive — and that is precisely where the unpadded
+// base64 key sat undetected until 2026-09-05. A seam that stops short of a layer leaves that layer
+// untested by construction; extend it rather than accept the hole.
+template <class Io>
+static inline int ws_handshake(Io &io, const char *host, const char *path) {
     unsigned char key_bytes[16];
     RAND_bytes(key_bytes, 16);
     char key_b64[32];
@@ -154,18 +198,33 @@ static inline int ws_handshake(SSL *ssl, const char *host, const char *path) {
         "Sec-WebSocket-Key: %s\r\n"
         "Sec-WebSocket-Version: 13\r\n\r\n",
         path, host, key_b64);
-    if (SSL_write(ssl, req, n) <= 0) return -1;
+    // snprintf returns what it WOULD have written: a truncated request would otherwise be sent
+    // with a length past the buffer. Then insist the WHOLE request went out — `> 0` accepts a
+    // partial write, which puts a half upgrade request on the wire and hangs the handshake read.
+    if (n < 0 || n >= (int)sizeof(req)) return -1;
+    if (io.write((const unsigned char *)req, n) != n) return -1;
 
     char resp[1024];
     int total = 0;
+    int headers_complete = 0;
     while (total < (int)sizeof(resp) - 1) {
-        int r = SSL_read(ssl, resp + total, sizeof(resp) - 1 - total);
+        int r = io.read((unsigned char *)resp + total, (int)sizeof(resp) - 1 - total);
         if (r <= 0) return -1;
         total += r;
         resp[total] = '\0';
-        if (strstr(resp, "\r\n\r\n")) break;
+        if (strstr(resp, "\r\n\r\n")) { headers_complete = 1; break; }
     }
-    return strstr(resp, "101") ? 0 : -1;
+    // A response that filled the buffer without terminating its headers is not a successful
+    // upgrade — the old code fell out of this loop and went straight to the status test.
+    if (!headers_complete) return -1;
+    // Status-LINE, not "is 101 anywhere in the response". `strstr(resp, "101")` accepts
+    // `HTTP/1.1 400 Bad Request\r\nX-Request-Id: 101ab…` as a completed handshake, and then the
+    // frame reader parses an HTTP error body as WebSocket frames. RFC 6455 §4.1: the server
+    // MUST reply 101, and it is the first token after the version on the first line.
+    if (strncmp(resp, "HTTP/1.", 7) != 0) return -1;
+    const char *sp = strchr(resp, ' ');
+    if (!sp || strncmp(sp + 1, "101", 3) != 0) return -1;
+    return 0;
 }
 
 //------------------------------------------------------------------
@@ -176,7 +235,16 @@ enum : int {
     WS_READ_ERR       = -1,   // EOF / transport error mid-frame (the peer went away) — disconnect
     WS_READ_TOO_LARGE = -2,   // the 64-bit payload length exceeds the buffer; the payload was NOT consumed — the
                               // stream is DESYNCED from here, the caller MUST disconnect (never "skip and continue")
+    WS_READ_PROTOCOL  = -3,   // the peer broke RFC 6455 §5.5 (an oversize or fragmented CONTROL frame). Same
+                              // desync contract as TOO_LARGE: the payload was not consumed, so disconnect.
 };
+
+// RFC 6455 §5.5: a control frame (0x8 close / 0x9 ping / 0xA pong — the 0x08 bit of the opcode)
+// carries at most 125 bytes and MUST NOT be fragmented. Enforcing it AT THE READER is what makes
+// the pong path safe by construction: the reply builder no longer has to be the thing that
+// defends against a 4 KB "ping", and a peer that sends one is broken in a way that is legible
+// (a distinct return) rather than silent (a pong that never goes out, then a venue-side timeout).
+enum : int { WS_CONTROL_MAX_PAYLOAD = 125 };
 
 // Read exactly `want` bytes (loops over partial reads). 1 = done, 0 = EOF/error before `want`.
 template <class Io>
@@ -216,6 +284,11 @@ static inline int ws_read_frame(Io &r, char *out, int max_len, int *opcode, int 
         plen = 0;
         for (int i = 0; i < 8; i++) plen = (plen << 8) | (uint64_t)ext[i];
     }
+
+    // Checked before the mask + payload reads: the frame is already unusable, and consuming more
+    // of it would only make the desync harder to reason about.
+    if ((*opcode & 0x08) && (plen > (uint64_t)WS_CONTROL_MAX_PAYLOAD || *fin == 0))
+        return WS_READ_PROTOCOL;
 
     unsigned char mask[4] = {0, 0, 0, 0};
     if (masked && !ws_read_exact(r, mask, 4)) return WS_READ_ERR;
