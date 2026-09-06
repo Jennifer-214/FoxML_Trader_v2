@@ -14,9 +14,13 @@
 // (RFC 6455 §5.1 requires client→server frames masked, §5.5.3 requires the pong to echo the ping
 // payload). Binance answered that pong with a 1008 "Pong timeout" close 74-102 s after every connect —
 // the depth-stream stall proven at plans/v5.15-live-readiness/plan_checks/2026-09-05-depth-ws-stall-proof/.
-// The trade client (BinanceCrypto.hpp) and the user-data client (BinanceUserData.hpp) had CORRECT private
-// copies of the same reader + pong — three parallel frame implementations, one drifted (Class 21); this
-// file is now the single body all three consume.
+// The trade client (BinanceCrypto.hpp) and the user-data client (BinanceUserData.hpp) had private copies
+// of the same reader + pong whose PONG was correct — three parallel frame implementations, one drifted
+// (Class 21). "Correct" was only ever true of the pong half: both copies compared the 64-bit payload
+// length as `(int)pay_len` and then NUL-terminated at the WIDE offset (a 127-form 2^32+5 reads as 5 and
+// writes ~4 GB past the buffer), and both built their pong into an uncapped 256-byte stack frame while
+// their readers handed them 4096-byte payloads. Migrated at leaf commits 3 (`17e40fa`) and 4; this file
+// is now the single body all three consume.
 //
 // 2026-09-05 leaf commit 3 (the BinanceCrypto migration) found FOUR places where this shared family
 // was WEAKER than the trade client's private copy it was about to replace — a shared body is only a

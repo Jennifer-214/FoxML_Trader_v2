@@ -10,7 +10,8 @@
 // [OVERVIEW]_[the executionReport fill stream — WS + keepalive thread pair push CMD_WS_FILL into the OMS SPSC ring; KNOWN OPEN CAPITAL FINDINGS on the parser (TECH_DEBT-169/171, see the parse block)]
 // [CONTAINS]
 //   - [STRUCT]_[BinanceUserDataState]
-//   - [FUNCTION]_[ud_ws_read_frame]   (+ tcp_connect / tls_setup / handshake / send_pong / close ud_* family)
+//   - [FUNCTION]_[ud_ws_close]   (the ud_* state wrapper over the shared ws_* frame family)
+//   - [FUNCTION]_[ud_consume_frame]   (the per-frame body, templated over the Io seam — suite-drivable)
 //   - [FUNCTION]_[ud_obtain_listen_key]   (+ ud_keepalive_listen_key)
 //   - [FUNCTION]_[ud_parse_execution_report]
 //   - [FUNCTION]_[ud_ws_thread]
@@ -61,6 +62,7 @@
 #include "../CoreFrameworks/OrderManager.hpp"
 #include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
 #include "BinanceOrderAPI.hpp"
+#include "WebSocketUtil.hpp"          // the ONE RFC 6455 frame family (PARITY-071 / D-487)
 
 #include <atomic>
 #include <chrono>
@@ -133,150 +135,51 @@ struct BinanceUserDataState {
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[ud_ws_read_frame]
+// [FUNCTION]_[ud_ws_close]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ud_* WS protocol family (tcp_connect / tls_setup / handshake / send_pong / close ride) — duplicated from BinanceCrypto with the ud_ prefix (its versions are BinanceStream*-coupled)]
+// [OVERVIEW]_[the ud_* WS state wrapper over the SHARED frame family — closes the socket through ws_close and clears the state the shared body knows nothing about (connected + the ws_connected atomic the REST adapter's ACK arm reads); the private tcp_connect / tls_setup / handshake / reader / pong copies were DELETED at the 2026-09-05 leaf's commit 4, closing PARITY-071]
+//----------------------------------------------------------------------
+// tcp_connect / tls_setup / handshake / frame reader / pong USED to live here as a PRIVATE copy,
+// the THIRD hand-written RFC 6455 client in this directory. Its own header said so — "duplicated
+// from BinanceCrypto with the ud_ prefix". That duplication is PARITY-071, and it cost a
+// session-killing production stall when the depth copy drifted (D-487): three bodies, nothing
+// comparing them, each locally plausible. This is the last one; the family is now single-bodied.
+//
+// The two holes this copy carried, both closed by consuming the shared body:
+//
+//   - `if ((int)pay_len > buf_size-1) return -1;` narrowed the 64-bit length BEFORE the bounds
+//     check and then wrote `buf[pay_len] = '\0'` with the WIDE value. A 127-form length of
+//     2^32+5 casts to 5, passes the guard, consumes 5 bytes of a 4-billion-byte frame, and
+//     NUL-writes ~4 GB past a 4096-byte stack buffer. `ws_read_frame` compares as uint64_t
+//     before any narrowing. This is the CAPITAL path — the frame it mis-reads carries fills.
+//   - `ud_ws_send_pong` built into a 256-byte stack frame with NO capacity check while the
+//     reader handed it payloads from a 4096-byte buffer. `ws_build_pong` refuses what will not
+//     fit, and the reader now rejects an oversize control frame (RFC 6455 §5.5) first.
+//
+// `ud_ws_close` SURVIVES as a thin wrapper: it owns state the shared `ws_close` knows nothing
+// about (`connected`, the `ws_connected` atomic the REST adapter's ACK arm reads).
 //======================================================================
 // [CODE]
 //======================================================================
-static inline int ud_tcp_connect(const char* host, const char* port) {
-    struct addrinfo hints, *res, *rp;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    int err = getaddrinfo(host, port, &hints, &res);
-    if (err != 0) {
-        fprintf(stderr, "[UserData] getaddrinfo failed: %s\n", gai_strerror(err));
-        return -1;
-    }
-    int sockfd = -1;
-    for (rp = res; rp; rp = rp->ai_next) {
-        sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sockfd == -1) continue;
-        if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) break;
-        close(sockfd);
-        sockfd = -1;
-    }
-    freeaddrinfo(res);
-    if (sockfd == -1)
-        fprintf(stderr, "[UserData] TCP connect failed to %s:%s\n", host, port);
-    return sockfd;
-}
-
-static inline int ud_tls_setup(BinanceUserDataState* s, const char* host) {
-    s->ssl_ctx = SSL_CTX_new(TLS_client_method());
-    if (!s->ssl_ctx) return 0;
-    s->ssl = SSL_new(s->ssl_ctx);
-    if (!s->ssl) { SSL_CTX_free(s->ssl_ctx); s->ssl_ctx = NULL; return 0; }
-    SSL_set_fd(s->ssl, s->sockfd);
-    SSL_set_tlsext_host_name(s->ssl, host);
-    if (SSL_connect(s->ssl) != 1) {
-        SSL_free(s->ssl); SSL_CTX_free(s->ssl_ctx);
-        s->ssl = NULL; s->ssl_ctx = NULL;
-        return 0;
-    }
-    return 1;
-}
-
-static inline int ud_ws_handshake(BinanceUserDataState* s, const char* path, const char* host) {
-    unsigned char key_bytes[16];
-    RAND_bytes(key_bytes, 16);
-    // inline base64 for 16 bytes
-    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    char key_b64[32];
-    int i = 0, j = 0;
-    while (i < 16) {
-        uint32_t a = key_bytes[i++], b = (i<16)?key_bytes[i++]:0, c = (i<16)?key_bytes[i++]:0;
-        uint32_t t = (a<<16)|(b<<8)|c;
-        key_b64[j++]=b64[(t>>18)&0x3F]; key_b64[j++]=b64[(t>>12)&0x3F];
-        key_b64[j++]=b64[(t>>6)&0x3F];  key_b64[j++]=b64[t&0x3F];
-    }
-    int pad = (3 - (16 % 3)) % 3;
-    for (int p = 0; p < pad; p++) key_b64[j-1-p] = '=';
-    key_b64[j] = '\0';
-
-    char req[512];
-    int len = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\n"
-        "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
-        "Sec-WebSocket-Version: 13\r\n\r\n", path, host, key_b64);
-    if (SSL_write(s->ssl, req, len) != len) return 0;
-    char resp[1024]; int total = 0;
-    while (total < (int)sizeof(resp)-1) {
-        int n = SSL_read(s->ssl, resp+total, (int)sizeof(resp)-1-total);
-        if (n <= 0) return 0;
-        total += n; resp[total] = '\0';
-        if (strstr(resp, "\r\n\r\n")) break;
-    }
-    return strstr(resp, "101") ? 1 : 0;
-}
-
-static inline int ud_ws_read_frame(BinanceUserDataState* s, char* buf, int buf_size, int* opcode) {
-    unsigned char header[2];
-    int hdr_read = 0;
-    while (hdr_read < 2) {
-        int n = SSL_read(s->ssl, header+hdr_read, 2-hdr_read);
-        if (n <= 0) return -1;
-        hdr_read += n;
-    }
-    *opcode = header[0] & 0x0F;
-    int masked = (header[1]>>7)&1;
-    uint64_t pay_len = header[1] & 0x7F;
-    if (pay_len == 126) {
-        unsigned char ext[2]; int r=0;
-        while (r<2) { int n=SSL_read(s->ssl,ext+r,2-r); if(n<=0) return -1; r+=n; }
-        pay_len = __builtin_bswap16(*(uint16_t*)ext);
-    } else if (pay_len == 127) {
-        unsigned char ext[8]; int r=0;
-        while (r<8) { int n=SSL_read(s->ssl,ext+r,8-r); if(n<=0) return -1; r+=n; }
-        pay_len = __builtin_bswap64(*(uint64_t*)ext);
-    }
-    unsigned char mask_key[4] = {};
-    if (masked) {
-        int r=0;
-        while (r<4) { int n=SSL_read(s->ssl,mask_key+r,4-r); if(n<=0) return -1; r+=n; }
-    }
-    if ((int)pay_len > buf_size-1) return -1;
-    int pr=0;
-    while (pr<(int)pay_len) {
-        int n=SSL_read(s->ssl, buf+pr, (int)pay_len-pr);
-        if (n<=0) return -1; pr+=n;
-    }
-    if (masked) for (int i=0;i<(int)pay_len;i++) buf[i]^=mask_key[i&3];
-    buf[pay_len] = '\0';
-    return (int)pay_len;
-}
-
-static inline int ud_ws_send_pong(BinanceUserDataState* s, const char* payload, int len) {
-    unsigned char frame[256];
-    int pos = 0;
-    frame[pos++] = 0x8A;
-    if (len < 126) { frame[pos++] = 0x80|(unsigned char)len; }
-    else { frame[pos++]=0x80|126; uint16_t be=__builtin_bswap16((uint16_t)len); memcpy(frame+pos,&be,2); pos+=2; }
-    unsigned char mk[4]; RAND_bytes(mk,4); memcpy(frame+pos,mk,4); pos+=4;
-    for (int i=0;i<len;i++) frame[pos++]=payload[i]^mk[i&3];
-    return (SSL_write(s->ssl, frame, pos) == pos) ? 1 : 0;
-}
-
 static inline void ud_ws_close(BinanceUserDataState* s) {
     if (s->ssl) {
-        unsigned char frame[8] = {0x88, 0x80, 0,0,0,0};
-        RAND_bytes(frame+2, 4);
-        SSL_write(s->ssl, frame, 6);
-        SSL_shutdown(s->ssl); SSL_free(s->ssl); s->ssl = NULL;
+        ws_close(s->ssl, s->ssl_ctx, s->sockfd);      // masked close frame -> shutdown -> free -> close(fd)
+    } else {
+        // ws_ssl_setup writes its out-params only on success, so a NULL ssl implies a NULL ctx;
+        // the ctx branch is kept because this is also reached from paths that never called it.
+        if (s->ssl_ctx) SSL_CTX_free(s->ssl_ctx);
+        if (s->sockfd >= 0) close(s->sockfd);
     }
-    if (s->ssl_ctx) { SSL_CTX_free(s->ssl_ctx); s->ssl_ctx = NULL; }
-    if (s->sockfd >= 0) { close(s->sockfd); s->sockfd = -1; }
+    s->ssl = NULL; s->ssl_ctx = NULL; s->sockfd = -1;
     s->connected = 0;
     s->ws_connected.store(0, std::memory_order_relaxed);
 }
-
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [END_FUNCTION]_[ud_ws_read_frame]
+// [END_FUNCTION]_[ud_ws_close]
 //======================================================================
 
 //======================================================================
@@ -527,6 +430,80 @@ static inline int ud_parse_execution_report(const char* json, int len,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[ud_consume_frame]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-frame body of the fill stream, templated over the Io transport so the suite drives the SAME code the venue does — read one frame, answer a ping with the masked echo, disconnect on a close/desync, parse an executionReport and push CMD_WS_FILL into the OMS ring. Returns 1 = still connected, 0 = the caller must drop the connection and reconnect]
+//======================================================================
+// [CODE]
+//======================================================================
+// EXTRACTED at the 2026-09-05 leaf's commit 4, mirroring `depth_consume_frame` (commit 2). The reason is
+// the same and the stakes are higher: while this body was welded to a live `SSL*`, NOTHING here could be
+// tested — not the pong, not the desync arms, and not the ring push that BOOKS A FILL. A fill dropped
+// because the ring was full is a capital event, and it was reachable only in production. Now every arm is
+// suite-drivable through a byte cursor (`WsBufIo`), with the SSL handle NULL.
+//
+// Returns 1 = still connected, 0 = disconnect (the caller breaks its read loop, runs `ud_ws_close`, and
+// reconnects with its own backoff — the cleanup and retry policy stay in the thread where they belong).
+template <class Io>
+static inline int ud_consume_frame(BinanceUserDataState* s, Io& io, char* frame_buf, int frame_cap) {
+    int opcode = 0, fin = 0;
+    // frame_cap is sizeof(buf)-1: ws_read_frame bounds the payload at max_len and NUL-terminates at out[len].
+    const int payload_len = ws_read_frame(io, frame_buf, frame_cap, &opcode, &fin);
+    if (payload_len < 0) {
+        // Every negative return leaves the stream DESYNCED (the payload was not consumed), so the only
+        // correct response to any of them is to drop the connection — never "skip and continue".
+        fprintf(stderr, "[UserData] %s, reconnecting\n",
+                payload_len == WS_READ_TOO_LARGE ? "frame larger than the frame buffer"
+              : payload_len == WS_READ_PROTOCOL  ? "RFC 6455 control-frame violation (>125 B or fragmented)"
+                                                 : "frame read error");
+        return 0;
+    }
+
+    // ping -> MASKED payload-echo pong (RFC 6455 §5.1 + §5.5.3). A failed write means the peer is gone:
+    // keeping the loop alive on a dead socket is how the depth stream stalled for 40+ min looking healthy.
+    if (opcode == 0x9) {
+        if (!ws_send_pong(io, frame_buf, payload_len)) {
+            fprintf(stderr, "[UserData] pong write failed, reconnecting\n");
+            return 0;
+        }
+        return 1;
+    }
+    if (opcode == 0x8) {
+        // The server's close: a 2-byte big-endian code + a UTF-8 reason. Printed because a silent close
+        // arm is exactly what made the 2026-09-05 depth stall invisible for 40 minutes.
+        const int code = (payload_len >= 2)
+                       ? ((((unsigned char)frame_buf[0]) << 8) | (unsigned char)frame_buf[1]) : 0;
+        fprintf(stderr, "[UserData] server close code=%d reason=\"%.*s\"\n",
+                code, (payload_len > 2) ? payload_len - 2 : 0, (payload_len > 2) ? frame_buf + 2 : "");
+        return 0;
+    }
+    if (opcode != 0x1) return 1;                 // binary / pong / continuation: ignored
+
+    s->events_received.fetch_add(1, std::memory_order_relaxed);
+
+    Command cmd;
+    uint64_t trade_id = 0;
+    if (ud_parse_execution_report(frame_buf, payload_len, &cmd, &trade_id)) {
+        if (!SPSCRing_TryPush(s->ws_result_queue, cmd)) {
+            // CAPITAL-VISIBLE: the venue told us about a fill and we could not hand it to the OMS. The
+            // position is already open at the venue; this log line is the only record. Loud on purpose.
+            fprintf(stderr, "[UserData] ws_result_queue full, dropping fill "
+                             "for order %llu\n", (unsigned long long)cmd.order_id);
+        } else {
+            s->fills_received.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return 1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ud_consume_frame]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[ud_ws_thread]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
@@ -547,14 +524,16 @@ static inline void ud_ws_thread(BinanceUserDataState* s) {
         s->keepalive_failed.store(0, std::memory_order_relaxed);
 
         // 2. Connect WSS
-        s->sockfd = ud_tcp_connect(s->ws_host, "443");
+        // rcv_timeout 0 = the pre-migration blocking behaviour; a timeout on the FILL socket is a
+        // capital-path liveness decision, tracked as TECH_DEBT-345 with the trade socket, not slipped in here.
+        s->sockfd = ws_tcp_connect(s->ws_host, 443, 0);
         if (s->sockfd < 0) {
-            fprintf(stderr, "[UserData] TCP connect failed, retrying in 5s\n");
+            fprintf(stderr, "[UserData] TCP connect failed to %s:443, retrying in 5s\n", s->ws_host);
             for (int i = 0; i < 50 && !s->shutdown_requested.load(std::memory_order_acquire); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
-        if (!ud_tls_setup(s, s->ws_host)) {
+        if (ws_ssl_setup(&s->ssl_ctx, &s->ssl, s->sockfd, s->ws_host) < 0) {
             fprintf(stderr, "[UserData] TLS setup failed, retrying in 5s\n");
             close(s->sockfd); s->sockfd = -1;
             for (int i = 0; i < 50 && !s->shutdown_requested.load(std::memory_order_acquire); ++i)
@@ -564,8 +543,9 @@ static inline void ud_ws_thread(BinanceUserDataState* s) {
 
         char ws_path[256];
         snprintf(ws_path, sizeof(ws_path), "/ws/%s", s->listen_key);
-        if (!ud_ws_handshake(s, ws_path, s->ws_host)) {
-            fprintf(stderr, "[UserData] WS handshake failed, retrying in 5s\n");
+        WsSslIo hio{s->ssl};
+        if (ws_handshake(hio, s->ws_host, ws_path) < 0) {
+            fprintf(stderr, "[UserData] WS handshake failed (no 101), retrying in 5s\n");
             ud_ws_close(s);
             for (int i = 0; i < 50 && !s->shutdown_requested.load(std::memory_order_acquire); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -579,6 +559,7 @@ static inline void ud_ws_thread(BinanceUserDataState* s) {
 
         // 3. Read loop
         char frame_buf[4096];
+        WsSslIo io{s->ssl};
         while (s->shutdown_requested.load(std::memory_order_acquire) == 0) {
             // check if keepalive failed (forces reconnect)
             if (s->keepalive_failed.load(std::memory_order_relaxed)) {
@@ -603,39 +584,8 @@ static inline void ud_ws_thread(BinanceUserDataState* s) {
                 }
             }
 
-            int opcode = 0;
-            int payload_len = ud_ws_read_frame(s, frame_buf, sizeof(frame_buf), &opcode);
-            if (payload_len < 0) {
-                fprintf(stderr, "[UserData] frame read error, reconnecting\n");
-                break;
-            }
-
-            // ping → pong
-            if (opcode == 0x9) {
-                ud_ws_send_pong(s, frame_buf, payload_len);
-                continue;
-            }
-            // close frame
-            if (opcode == 0x8) {
-                fprintf(stderr, "[UserData] server sent close frame\n");
-                break;
-            }
-            // text frame (0x1) — JSON event
-            if (opcode != 0x1) continue;
-
-            s->events_received.fetch_add(1, std::memory_order_relaxed);
-
-            Command cmd;
-            uint64_t trade_id = 0;
-            if (ud_parse_execution_report(frame_buf, payload_len, &cmd, &trade_id)) {
-                if (!SPSCRing_TryPush(s->ws_result_queue, cmd)) {
-                    fprintf(stderr, "[UserData] ws_result_queue full, dropping fill "
-                                     "for order %llu\n",
-                                     (unsigned long long)cmd.order_id);
-                } else {
-                    s->fills_received.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
+            // The whole per-frame body lives in ud_consume_frame (above) so the SUITE can drive it.
+            if (!ud_consume_frame(s, io, frame_buf, (int)sizeof(frame_buf) - 1)) break;
         }
 
         // disconnected — clean up and loop back
