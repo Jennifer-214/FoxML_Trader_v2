@@ -1,58 +1,52 @@
 # FoxML Trader — Per-Node Sharded Engine
 
-**release v0.3** · pre-1.0 (live-trading + headless decoupling are the road to 1.0)
+**release v0.3** · pre-1.0 (live-trading hardening + headless decoupling are the road to 1.0)
 
-per-node risk-sharded crypto trading engine in C++17. one position per pinned CPU, branchless fixed-point math, lock-free queues, seqlock-cached parameters. the hot path runs at single-digit ns/tick algorithmic floor — the slow path can do whatever (ML inference, regression, regime detection) without the executors ever paying for it.
+per-node risk-sharded crypto trading engine in C++17. one position per pinned CPU, branchless fixed-point math, lock-free SPSC queues, seqlock-cached parameters. the executor cores do a fixed, tiny amount of work per tick — the slow path can do whatever it likes (ML inference, regression, regime detection) without the executors ever paying for it.
 
 ![per-core latency panel](assets/per-core-latency.png)
 
-> **measured live, GUI running, no isolcpus, no chrt, consumer hardware:**
-> p50 hot-path: **30-40 ns real** (after subtracting ~25-30 ns rdtsc bracket overhead) · p99: **400-570 ns** · slow path p50: **90-100 µs** · slow path p99: **115-220 µs**
->
-> single-thread cache-resident algorithmic floor: **11.56 ns/tick** (rdtsc-bracketed batch bench). sub-100ns p50 on consumer hardware is in the same neighborhood as colo-tier HFT engines for similar branchless dispatch logic.
+built from scratch, self-taught. reusable primitives were extracted into a separate C++20 header-only library (FoxLIB).
 
-built from scratch, self-taught. reusable primitives extracted as a public C++20 header-only library: [**FoxLIB**](https://github.com/Jennyfirrr/FoxLIB).
-
-**LOC breakdown** (the size that matters is the hot path, not the total):
-
-| component | code LOC |
-|---|---:|
-| **hot path** (executor per-tick math: ExecutionCore + OrderGates + ParameterSlot) | **389** |
-| engine (CoreFrameworks + Strategies + ML_Headers + DataStream + FixedPoint + MemHeaders) | 24,546 |
-| backtest + training pipeline | ~11,000 |
-| GUI (Dear ImGui panels) | ~7,400 |
-| tests (1879 assertions) | ~17,800 |
-| **total project** | **~89,000** |
-
-The hot path is **0.4% of the project**. The rest is supporting infrastructure — training pipeline (so models get the right features), parity tests (so train + serve produce bytewise-identical output), backtest harness (so strategies validate before paper), GUI (so the operator sees what's happening), invariants tests (so future changes don't silently break load-bearing rules). All in service of keeping the executor tiny and trustworthy.
+> **paper trading by default.** live trading via Binance REST API is implemented but has **not** been run with real capital — treat it as untested on that axis. set `trading_mode=live` and add API keys to `secrets.cfg`. no API key needed for market data feeds.
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
 
-> **paper trading by default.** live trading via Binance REST API is supported but experimental — use at your own risk. set `trading_mode=live` and add API keys to `secrets.cfg`. no API key needed for market data feeds.
+---
+
+## size
+
+the size that matters is the hot path, not the total. code lines below exclude blanks and comment-only lines:
+
+| component | code LOC |
+|---|---:|
+| **hot path** (executor per-tick math: ExecutionCore + OrderGates + ParameterSlot) | **406** |
+| engine (CoreFrameworks + Strategies + ML_Headers + DataStream + FixedPoint + MemHeaders) | 37,692 |
+| backtest + training pipeline | 8,759 |
+| GUI (Dear ImGui panels) | 6,428 |
+| tests | 29,086 |
+| **total** | **~82,000** |
+
+the hot path is well under 1% of the project. the rest is supporting infrastructure — training pipeline (so models get the right features), parity tests (so train and serve produce bytewise-identical output), backtest harness (so strategies validate before paper), GUI (so the operator sees what's happening), invariant tests (so future changes don't silently break load-bearing rules). all in service of keeping the executor tiny and trustworthy.
 
 ---
 
-## recent (v5.11.x)
+## measurement
 
-- 🔬 **slow path 30x faster.** v5.11 sprint (9 phases, 65 sub-ships) collapsed slow-path p99 from ~3000µs to ~220µs. AVX-512 Bandit_GetProbabilities, FPN_Binary<F=64> end-to-end determinism, locale-immune parsing, allocator eradication, mmap arenas, async log writer, branchless ring buffer commit.
-- 🤖 **multi-horizon ML ensemble.** Bandit-Exp3 weighted blend per regime over N horizons. Train multi-horizon at v5.11.41+; live engine auto-detects sibling `_horizon_<N>` dirs + per-regime bandit weights. Runtime IC drift detection auto-demotes degraded horizons.
-- 🎯 **role-agnostic strategy** (v5.11.62). Strategy code never touches role names — adding a new model role is a 5-step procedure that doesn't change the strategy at all. Trains barrier 3-class, regression, binary buy_signal — all work transparently.
-- 🛡 **train-serve parity locked** by FEATURE_REGISTRY_HASH + LABEL_REGISTRY_HASH + scaler_sha256 + HMAC stamp body. Cross-build / cross-cfg / cross-feature drift refused at engine load.
-- 🔄 **hot model swap** without engine restart, safety-gated by open-position semantics.
-- 1879 unit tests · 30+ snapshot parity tests · replay-determinism baseline
+per-call `rdtsc` has structural overhead — on a hot path this fast, the bracket costs more than the thing being measured. on this CPU the bracket is **~25-30 ns**, so a per-tick number that doesn't subtract it is wrong by a wide margin.
 
-[full version history → GitHub releases](https://github.com/Jennyfirrr/FoxML_Trader_v2/releases)
+the batch-floor bench brackets `rdtsc` **once** around N=1M iterations of `ExecutionCore_Tick` and divides, which amortizes the tax to ~0:
 
----
+| variant | ns/tick |
+|---|---:|
+| full 192B parameter memcpy every tick | 13.35 |
+| cached (skip memcpy on seq match) | 13.08 |
+| **floor (gates + permission load only)** | **11.56** |
+| **abs floor (1 cmp + 1 atomic load)** | **2.94** |
 
-## hire me
+**these figures were measured on v5.11.x (May 2026)** on consumer hardware with the GUI running, no `isolcpus`, no `chrt`. the same run put hot-path p50 at 30-40 ns after subtracting the bracket, and p99 in the hundreds of ns. **the current tree has not been re-benched** — the numbers above are a historical measurement, not a claim about HEAD. the design budget the code is held to is p99 ≤ 500 ns hot path and ≤ 100 µs slow path; a regression past those is treated as a ship blocker.
 
-built this from the ground up — branchless fixed-point math, lock-free SPSC plumbing, per-core sharding, ML inference pipeline, regime detection, multi-horizon Bandit-Exp3 ensemble, train-serve parity infrastructure. self-taught. if you're building HFT, low-latency, or quantitative systems, i'd love to talk.
-
-- email: jenn.lewis5789@gmail.com
-- phone: 205-413-7057
-
-— Jennifer Lewis
+for scale, on the same class of hardware: L3 hit ~10-15 ns, `mfence` 30-50 ns, cross-core cache line bounce 50-100 ns, `getpid()` 50-100 ns, local DRAM 80-100 ns, TCP loopback round trip ~10-20 µs, `recvmsg()` through the kernel network stack 1-5 µs. tail variance here comes from kernel preemption; pinning with `chrt -f 90 taskset -c 4-7` plus `isolcpus` would flatten it.
 
 ---
 
@@ -60,126 +54,93 @@ built this from the ground up — branchless fixed-point math, lock-free SPSC pl
 
 ![full GUI dashboard](assets/gui-dashboard.png)
 
-> 4 cores running different strategies (ML / DIP / AUTO / EMA), regime classifier active, partial exits paired across slots `#3.A` and `#3.B`, per-core latency panel, ML Ensemble panel showing per-horizon bandit weights per regime, account + risk panels with kill switch armed per core. all from a single tick stream fanned across SPSC rings.
-
----
-
-## why these numbers matter
-
-raw nanoseconds are abstract. context for what 500 ns p99 buys you:
-
-| operation | latency |
-|---|---:|
-| `getpid()` syscall | 50–100 ns |
-| memory barrier (`mfence`) | 30–50 ns |
-| cross-core cache line bounce (HITM) | 50–100 ns |
-| L3 cache hit | 10–15 ns |
-| local DRAM access | 80–100 ns |
-| **this engine, full gate eval p99** | **400–570 ns** |
-| TCP loopback round-trip | ~10–20 µs |
-| `recvmsg()` through kernel network stack | 1–5 µs |
-| DPDK userspace networking | 1–3 µs |
-| typical exchange round-trip (colocated) | 20–100 µs |
-
-end-to-end gate evaluation p99 in 400–570 ns on a consumer laptop with no kernel bypass is in the same neighborhood as commercial HFT engines for branchless dispatch logic. p99 tail variance comes from kernel preemption — `chrt -f 90 taskset -c 4-7` + isolcpus would flatten it into the low-100s.
+> 4 nodes running different strategies (ML / DIP / AUTO / EMA), regime classifier active, partial exits paired across slots `#3.A` and `#3.B`, per-node latency panel, ML Ensemble panel showing per-horizon bandit weights per regime, account + risk panels with kill switch armed per node. all from a single tick stream fanned across SPSC rings.
 
 ---
 
 ## architecture
 
 ```
-HOT PATH (every tick, per-core, ~30-40 ns measured work):
-  ExecutionCore_Tick (pinned to one CPU)
+HOT PATH (every tick, per node, pinned to one CPU):
+  ExecutionCore_Tick
     ↓ acquire-load: ParameterSlot.seq
     ↓ if cached_seq matches → skip the 192B parameter memcpy
-    ↓ branchless BG/SG evaluation (4 FPN comparisons)
+    ↓ branchless BG/SG evaluation (fixed-point comparisons)
     ↓ on entry/exit: push TradeEvent → SPSC ring
 
-SLOW PATH (per-core pthread, every poll_interval ticks):
+SLOW PATH (per-node pthread, every poll_interval ticks):
   ↓ RollingStats (least-squares regression, R², variance)
-  ↓ RegimeSignals (7 features → score-based classifier)
-  ↓ ML inference (XGBoost single-row predict, ~1-5 µs)
+  ↓ RegimeSignals (features → score-based classifier)
+  ↓ ML inference (XGBoost single-row predict)
   ↓ Strategy_BuildParameters → GateParameters
   ↓ ParameterSlot_Write (seqlock, wait-free producer)
 
 PRODUCER (single thread):
   ↓ tick read from Binance WS (or backtest replay)
-  ↓ fan_out across N per-core SPSC rings (one per engine)
-  ↓ ema_price replication to each engine's slow_state
+  ↓ fan out across N per-node SPSC rings
+  ↓ ema_price replication into each node's slow_state
   ↓ GUI snapshot publish
 
-DRAINER (single thread):
-  ↓ pops trade events from all cores' SPSC rings
-  ↓ drains per-core OMS submit queues (sole OMS_Submit caller)
-  ↓ routes through Order Management System
-  ↓ portfolio mutation via extracted fill handler
+COMPOSER / DRAINER (single thread):
+  ↓ pops trade events from every node's SPSC ring
+  ↓ drains per-node OMS submit queues (sole OMS_Submit caller)
+  ↓ routes through the Order Management System
+  ↓ portfolio mutation via the extracted fill handler
 
 GUI (Dear ImGui, SDL2/OpenGL3):
-  double-buffered TUISnapshot from producer thread
-  per-core buy gate overlays, ML Ensemble panel, settings hot-swap
+  double-buffered snapshot from the producer thread
+  per-node buy gate overlays, ML Ensemble panel, settings hot-swap
 ```
 
-**The key insight: the hot path is immune to model complexity.** XGBoost, LightGBM, transformer, no model — the executor cores see only the resulting `GateParameters` struct. swap the model, the per-tick cost is unchanged.
+**the hot path is immune to model complexity.** XGBoost, LightGBM, transformer, no model at all — the executor nodes see only the resulting `GateParameters` struct. swap the model and the per-tick cost is unchanged.
+
+money math is decimal fixed-point (`Money` = `FixedPoint<10,8>`, exact at the venue's 8dp) on every price, quantity, fee and balance; feature math is binary fixed-point (`FPN_Binary<64>`). no floats on either path.
 
 ---
 
 ## the seqlock story
 
-original design: triple buffer between the slow-path producer and per-core executors. wait-free, lock-free, three slots, atomic index swap. textbook.
+original design: triple buffer between the slow-path producer and the per-node executors. wait-free, lock-free, three slots, atomic index swap. textbook.
 
-stress test produced torn reads at high producer rate. switched to a [seqlock](https://en.wikipedia.org/wiki/Seqlock) — same pattern Linux kernel uses for `seqcount_t`. wait-free producer increments the seq counter, writes payload, increments again. lock-free consumer reads seq, payload, re-reads seq, retries on mismatch.
+the stress test produced torn reads at high producer rate. switched to a [seqlock](https://en.wikipedia.org/wiki/Seqlock) — the same pattern the Linux kernel uses for `seqcount_t`. wait-free producer increments the seq counter, writes the payload, increments again. lock-free consumer reads seq, payload, re-reads seq, retries on mismatch.
 
-cached the parameter snapshot in the executor itself — every tick does one acquire-load of `seq`, compares against `cached_seq`, skips the memcpy on match. steady-state cost: **~1 ns**. miss path: ~6 ns.
+the parameter snapshot is then cached in the executor itself — every tick does one acquire-load of `seq`, compares against `cached_seq`, and skips the memcpy on a match.
 
-trust the stress test over the plan. plan said triple buffer, test said torn reads, test won. full reasoning in `CoreFrameworks/ParameterSlot.hpp`.
-
----
-
-## measurement methodology
-
-per-call `rdtsc` has structural overhead — the bracket itself costs more than what you're measuring on a fast hot path. on this CPU, the rdtsc bracket overhead is **~25-30 ns**. a per-tick latency number that doesn't subtract this is wrong by 25-60%.
-
-the batch-floor bench brackets `rdtsc` ONCE around N=1M iterations of `ExecutionCore_Tick` and divides — amortizes the rdtsc tax to ~0:
-
-| variant | ns/tick (measured) |
-|---|---:|
-| orig (full 192B memcpy every tick) | 13.35 |
-| cached (skip memcpy on seq match) | 13.08 |
-| **floor (gates + permission load only)** | **11.56** |
-| **abs floor (1 cmp + 1 atomic load)** | **2.94** |
-
-the `floor` is the algorithmic limit — what gate evaluation costs without parameter caching. the `abs floor` is the loop infrastructure ceiling. the CPU isn't going to do this faster.
+trust the stress test over the plan. the plan said triple buffer, the test said torn reads, the test won. full reasoning in `CoreFrameworks/ParameterSlot.hpp`.
 
 ---
 
 ## ML pipeline
 
-cores running `node_N_strategy=ml` load XGBoost models via `node_N_model_dir=<base_path>`. engine auto-detects multi-horizon siblings (`<base>_horizon_<N>/`) and runs Bandit-Exp3 weighted blend per regime.
+nodes running `node_N_strategy=ml` load XGBoost models via `node_N_model_dir=<base_path>`. the engine auto-detects multi-horizon siblings (`<base>_horizon_<N>/`) and runs a Bandit-Exp3 weighted blend per regime, with runtime IC drift detection that demotes degraded horizons.
 
-**training:** foxml_suite GUI runs walk-forward CV + held-out validation + auto-stamp. label kinds: binary buy_signal, 3-class barrier (PEAK_VALLEY_STABLE), regression. multi-horizon training writes per-horizon model files; live engine auto-detects.
+**training:** the `foxml_suite` GUI runs walk-forward CV, held-out validation and auto-stamping. label kinds: binary buy_signal, 3-class barrier (PEAK/VALLEY/STABLE), regression. multi-horizon training writes per-horizon model files.
 
-**ML never runs on the hot path.** model produces gate parameters at slow-path cadence; executor consumes them in single-digit ns. swap model class entirely — hot path cost unchanged.
+**ML never runs on the hot path.** the model produces gate parameters at slow-path cadence; the executor consumes them. swap the model class entirely and the hot-path cost is unchanged.
 
-train-serve parity locked via:
+train-serve parity is locked by:
 - `FEATURE_REGISTRY_HASH` (FOREACH_FEATURE X-macro fingerprint)
 - `LABEL_REGISTRY_HASH` (FOREACH_TARGET X-macro fingerprint)
 - `scaler_sha256` (FeatureStandardizer sidecar binding)
-- HMAC-signed stamp body (cross-build / cross-cfg / cross-feature drift refused)
+- an HMAC-signed stamp body — cross-build / cross-cfg / cross-feature drift is refused at engine load
+
+strategy code is role-agnostic: adding a new model role doesn't change the strategy at all.
 
 ---
 
 ## build
 
 ```bash
-./build.sh test     # ANSI TUI engine + controller_test (1879 tests)
+./build.sh test     # ANSI TUI engine + controller_test
 ./build.sh gui      # ImGui GUI (engine_gui + foxml_suite)
-./build.sh suite    # GUI + XGBoost training (requires xgboost C lib)
-./build.sh tsan     # ThreadSanitizer build
+./build.sh suite    # GUI + XGBoost training (requires the xgboost C lib)
 ./build.sh asan     # AddressSanitizer build
+./build.sh ubsan    # UndefinedBehaviorSanitizer build
+./build.sh tsan     # ThreadSanitizer build
 ./build.sh all      # everything
 ```
 
-requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XGBoost C library (build from source).
+requires g++ (C++17), OpenSSL and CMake 3.14+. the GUI adds SDL2 + OpenGL3. ML adds the XGBoost C library (`-DUSE_XGBOOST=ON`, built from source; off by default).
 
 ## run
 
@@ -193,83 +154,85 @@ requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XG
 ## config
 
 ```ini
-# engine.cfg — minimal example
-engine_mode = sharded
-num_execution_cores = 4
-trading_mode = paper             # paper trading (default); 'live' = real orders via REST
+# engine.cfg — a few of the keys; see the shipped engine.cfg for the full annotated set
+symbol = btcusdt
+trading_mode = paper             # 'paper' (default, safe) or 'live' (real orders via REST)
+num_execution_nodes = 4          # 1-16
 
 starting_balance = 10000.00
-fee_rate_taker = 0.00100
-risk_pct = 5.00                  # per-core risk %
+fee_rate = 0.10                  # % per side
+risk_pct = 5.00                  # % of balance per position
 
-# per-core strategy + ML model
+# per-node strategy + ML model
 node_0_strategy = ml
 node_0_model_dir = models/classification/my_run
-node_0_disabled_horizons = 1000  # CSV; freeze underperforming horizons
+node_0_risk_pct = 25.00          # per-node override of any global knob
+
+# depth feed (top-of-book imbalance into the gates + ML features)
+depth_enabled = 1
+record_depth = 1
 
 # train-serve parity gate
-held_out_gate_strict = 0         # 0 = warn-only, 1 = refuse on stamp failure
+held_out_gate_strict = 0         # 0 = warn only, 1 = refuse on stamp failure
 held_out_stamp_secret =          # HMAC secret (empty = devmode)
 gap_acceptable_threshold = 0.05  # WF/held-out gap that fails the stamp
 ```
 
-hot-reloadable with `r` in the TUI. per-core strategy and risk can be changed at runtime via the Settings panel.
+press `r` in the TUI to hot-reload the config. per-node strategy and risk can also be changed at runtime from the GUI's Settings panel.
 
 ---
 
 ## tests
 
-1879 assertions cover engine + ML pipeline + OMS + reconcile + train-serve parity. a parity harness runs both engine paths on the same input and asserts byte-identical training data — pinning train-serve symmetry by construction. the seqlock test catches torn reads at high producer rate; that's how the original triple-buffer plan got rejected.
+`./build.sh test` builds `controller_test`, which currently runs **4446 assertions** across the engine, ML pipeline, OMS, reconcile and train-serve parity. `depth_recorder_test` covers the depth CSV + gap-marker contract. the suite includes snapshot parity tests and a replay-determinism baseline; the seqlock test catches torn reads at high producer rate, which is how the original triple-buffer plan got rejected.
 
-ThreadSanitizer build (`./build.sh tsan`) validates lock-free patterns. AddressSanitizer (`./build.sh asan`) catches memory hazards.
+sanitizer lanes (`asan`, `ubsan`, `tsan`) are part of the pre-ship gate, not an afterthought.
 
 ---
 
 ## order management system
 
-8 phases, all shipped:
-
 | phase | what |
 |---|---|
 | 01 | order state machine (PENDING → SUBMITTED → FILLED/REJECTED) |
-| 02 | async REST submission via BinanceAdapter (drainer never blocks) |
+| 02 | async REST submission via the Binance adapter (the drainer never blocks) |
 | 03 | order event log + portfolio fold (deterministic replay) |
-| 04 | user data websocket (real-time fills, 10–50 ms instead of REST 50–200 ms) |
-| 05 | reconciliation poller (self-healing balance verification) |
-| 06 | idempotency keys, error codes, rate limits, listen key hardening |
+| 04 | user-data websocket for real-time fills |
+| 05 | reconciliation poller (balance verification against the venue) |
+| 06 | idempotency keys, error codes, rate limits, listen-key hardening |
 | 07 | disk persistence (binary event log, survives restarts) |
-| 08 | per-core strategy config |
+| 08 | per-node strategy config |
 
-three concurrent SPSC rings feed the OMS drainer: REST results, WebSocket fills, reconciliation corrections. each has exactly one producer and one consumer. drainer drains all three sequentially in `OrderManager_Tick`.
+three concurrent SPSC rings feed the OMS drainer: REST results, WebSocket fills, and reconciliation corrections. each has exactly one producer and one consumer; the drainer drains all three in `OrderManager_Tick`.
 
 ---
 
 ## documentation
 
-the source is documented inline. detailed operator docs — configuration reference, deployment / kernel-tuning runbook, training pipeline, architecture invariants, sprint changelogs — are operator-private (they capture edge-case design history not relevant to public users). public per-version highlights are on [GitHub releases](https://github.com/Jennyfirrr/FoxML_Trader_v2/releases).
+the source is documented inline with a structured tag-block schema. detailed operator docs — configuration reference, deployment and kernel-tuning runbook, training pipeline, architecture invariants, sprint changelogs — are operator-private: they capture edge-case design history that isn't useful without the surrounding context.
 
 ---
 
 ## current state
 
-- ✅ engine architecture, hot path, slow path, OMS, ML pipeline, GUI — all stable
-- ✅ multi-horizon ensemble training + live deployment working end-to-end
-- ✅ train-serve parity infrastructure complete (v5.9 hardening sprint + v5.11.62 role-agnostic refactor)
-- ✅ paper trading on real Binance feed validated
-- 🚧 live capital deployment — gated on disconnect-flatten policy + latency staleness gate (deferred work, ~1.5 days when triggered)
-- 🚧 testnet 24-hour soak — pending before mainnet
+- ✅ engine architecture, hot path, slow path, OMS, ML pipeline and GUI are stable
+- ✅ multi-horizon ensemble training + live deployment work end to end
+- ✅ train-serve parity infrastructure complete
+- ✅ paper trading runs against the live Binance feed
+- 🚧 live capital deployment — not done; gated on the remaining live-readiness work (disconnect-flatten policy, latency staleness gate, a full soak)
+- 🚧 testnet soak — pending before any mainnet use
 
-unshipped roadmap items live in operator-private working notes. [GitHub releases](https://github.com/Jennyfirrr/FoxML_Trader_v2/releases) has the public per-version highlights.
+this is an actively developed personal project, not a product. there is no support commitment and no uptime claim.
 
 ---
 
 ## license
 
-dual-licensed: **AGPL-3.0-or-later** (see [LICENSE](LICENSE)) **or Commercial**.
+dual-licensed: **AGPL-3.0-or-later** (see [LICENSE](LICENSE)) **or commercial**.
 
-personal use, learning, and paper trading are welcome and encouraged. commercial use, network-accessible deployment, or use for profit requires a commercial license — contact [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
+personal use, learning and paper trading are welcome and encouraged. commercial use, network-accessible deployment, or use for profit requires a commercial license — contact [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
 
-unauthorized commercial use is enforced under AGPL-3.0 + standard copyright law. a finder's fee is available for credible reports of unlicensed commercial deployment that lead to a successful settlement — exact terms negotiated privately.
+unauthorized commercial use is enforced under AGPL-3.0 and standard copyright law. a finder's fee is available for credible reports of unlicensed commercial deployment that lead to a successful settlement — exact terms negotiated privately.
 
 **copyright (c) 2026 Jennifer Lewis. all rights reserved.**
 
