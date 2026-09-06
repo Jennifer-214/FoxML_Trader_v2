@@ -83,12 +83,37 @@ namespace tt {
 //======================================================================
 // [CODE]
 //======================================================================
+// Σ-SIZED (3b(ii) commit 4 leaf 3). One drain cycle empties BOTH per-node families — the REST
+// `result_rings` and the WS `ws_rings` — into these SAME buckets, so the worst case a bucket must
+// absorb is every command from both, all one direction. Deriving the depth from the families
+// themselves rather than writing 512 means the pin cannot drift when a family's depth changes.
+// The families a single cycle drains into these buckets. Stated as a NAMED count because that is
+// the one thing no compile-time check can notice changing: adding a third family is an edit to
+// OrderManager_DrainIntoBuckets, and nothing here can see it. If you add one, this number moves.
+constexpr int OMS_BUCKET_DRAIN_FAMILIES = 2;      // result_rings (REST) + ws_rings (WS user-data)
+constexpr int OMS_BUCKET_DEPTH =
+    OMS_BUCKET_DRAIN_FAMILIES * (int)(tt::OMS_RESULT_RING_PER_NODE * MAX_EXECUTION_NODES);
+
+// NO static_assert on the depth here, deliberately. The first version of this pin read
+// `static_assert(OMS_BUCKET_DEPTH >= 2 * RING_PER_NODE * NODES)` directly under a definition that
+// says `OMS_BUCKET_DEPTH = 2 * RING_PER_NODE * NODES` — tautologically true, green forever,
+// asserting its own left-hand side. A vacuous assert is worse than none: it reads as a guarded
+// invariant to everyone downstream (Class 51). What actually protects the depth here is DERIVATION
+// — change `OMS_RESULT_RING_PER_NODE`, `MAX_EXECUTION_NODES`, or the family count and the depth
+// follows arithmetically, so there is no drift for an assert to catch.
+// The two real hazards are guarded where they CAN be, and neither guard lives here:
+//   1. that the two families stay the SAME shape (what makes the multiply valid) is pinned at
+//      `OrderManagerState`'s declaration — `sizeof(ws_rings) == sizeof(result_rings)`;
+//   2. that the premise holds AT ALL is guarded at RUNTIME by the bound check below, which is now
+//      a LOUD-FATAL rather than a silent drop. That is the honest guard for this one: an assert
+//      restating the definition would only look like protection.
+
 struct OmsDrainBuckets {
-    // 256 × sizeof(Command) for close (SELL) fills
-    Command close_bucket[OMS_RESULT_QUEUE_SIZE];
+    // Σ(both ring families) × sizeof(Command) for close (SELL) fills
+    Command close_bucket[OMS_BUCKET_DEPTH];
     int     close_n;
-    // 256 × sizeof(Command) for open (BUY) fills
-    Command open_bucket[OMS_RESULT_QUEUE_SIZE];
+    // Σ(both ring families) × sizeof(Command) for open (BUY) fills
+    Command open_bucket[OMS_BUCKET_DEPTH];
     int     open_n;
     // 64 × sizeof(Command) for reconcile corrections
     Command reconcile_bucket[64];
@@ -112,11 +137,11 @@ struct OmsDrainBuckets {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
+// [UPDATED]_[2026-09-06]
 //----------------------------------------------------------------------
-// [SIZE]_[147480B]
+// [SIZE]_[278552B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[2305]
+// [CACHE_LINES]_[4353]
 // [STRADDLE]_[unverified: close_bucket open_bucket reconcile_bucket]
 //======================================================================
 // [END_STRUCT]_[OmsDrainBuckets]
@@ -205,18 +230,22 @@ inline void handle_drain_bucket_cmd(const Command& cmd,
     Command*   bucket_arr = is_close ? b->close_bucket : b->open_bucket;
     int*       n_ptr      = is_close ? &b->close_n     : &b->open_n;
     const int  n          = *n_ptr;
-    const bool in_bounds  = (n < OMS_RESULT_QUEUE_SIZE);
-    // Dummy-redirect: out-of-bounds writes land in a function-local static slot
-    // (single-drainer-thread guarantee — no race on DUMMY).
+    const bool in_bounds  = (n < OMS_BUCKET_DEPTH);
+    // The dummy-redirect keeps the write branchless; what CHANGED at leaf 3 is what happens after
+    // it. This used to be a silent drop in release (an fprintf and a debug-only assert), which
+    // meant a fill the venue had already executed could vanish between the ring and the bucket
+    // with nothing durable recording it. The buckets are now Σ-sized so out-of-bounds is
+    // structurally unreachable — and this arm is the PIN'S GUARD, so if the premise ever breaks it
+    // must be as loud as any other unbooked fill: the same durable record and GLOBAL kill request
+    // the ring-full sites use. Reaching here means the Σ pin's arithmetic is wrong, not that the
+    // engine hit a busy moment.
     static Command DUMMY;
     Command*   target     = in_bounds ? &bucket_arr[n] : &DUMMY;
     *target               = cmd;
     *n_ptr                = n + (in_bounds ? 1 : 0);
     if (__builtin_expect(!in_bounds, 0)) {
-        std::fprintf(stderr,
-            "[OMS] drain bucket overflow (size=%d): dropped cmd type=%u order_id=%llu\n",
-            OMS_RESULT_QUEUE_SIZE, (unsigned)cmd.type,
-            (unsigned long long)cmd.order_id);
+        tt::OMS_RingFullFatalRecord(oms->agg ? &oms->agg->kill_trip_request : nullptr,
+                                    tt::KTS_BUCKET_OVERFLOW, &oms->ring_full_fatal, cmd);
     }
 }
 
@@ -233,9 +262,14 @@ inline void handle_drain_reconcile_cmd(const Command& cmd,
     *target              = cmd;
     b->reconcile_n       = n + (in_bounds ? 1 : 0);
     if (__builtin_expect(!in_bounds, 0)) {
-        std::fprintf(stderr,
-            "[OMS] drain reconcile bucket overflow (size=64): dropped cmd order_id=%llu\n",
-            (unsigned long long)cmd.order_id);
+        // Same reasoning as the fill buckets, one severity down: a reconcile CORRECTION is not a
+        // fill, so losing one does not silently mis-book capital — the next pass re-detects the
+        // drift (`corrections_dropped`, char (9)). It is still an engine-side loss and still gets
+        // a durable line rather than only a stderr print that no post-mortem will ever see.
+        tt::Health_Log(tt::HEALTH_WARN, "drain_reconcile_overflow", -1,
+                       "reconcile bucket (size=64) full — correction for order %llu DROPPED; the "
+                       "next reconcile pass re-detects the drift",
+                       (unsigned long long)cmd.order_id);
     }
 }
 
@@ -314,14 +348,19 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
 // Pass 2 — reconcile_queue: all events route to reconcile_bucket (these
 // are balance adjustments; not direction-typed).
 //
-// Bucket overflow is IMPOSSIBLE BY DESIGN: bucket capacity matches ring
-// capacity. Worst-case all 256 events from one ring are the same direction
-// → close_bucket or open_bucket fills exactly. Combined cap from both rings
-// would overflow but we drain ONE ring's commands at a time; if both rings
-// were saturated, the second drain would still fit because ring capacity
-// is asymmetric to direction-per-ring distribution in practice. Defensive
-// bound check anyway (assert in debug; silently drop in release — same as
-// prior `OrderManager_Tick`).
+// Bucket overflow is structurally UNREACHABLE — and the previous version of this comment was not
+// entitled to that claim. It read "IMPOSSIBLE BY DESIGN: bucket capacity matches ring capacity",
+// then refuted itself two sentences later: "Combined cap from both rings WOULD overflow ... the
+// second drain would still fit because ring capacity is asymmetric to direction-per-ring
+// distribution IN PRACTICE." Both families drain into these same per-cycle buckets, so a burst
+// that is all one direction genuinely could exceed a 256-deep bucket, and the release build's
+// response was to drop it silently. A phantom invariant (Class 38) whose whole proof was the
+// phrase "in practice", guarding a capital loss.
+// It is now true by ARITHMETIC rather than by hope: OMS_BUCKET_DEPTH is Σ over both ring families
+// (see the static_assert at the struct), so every command a cycle can possibly drain has a home.
+// The bound check stays as the PIN'S GUARD and is now LOUD — the same durable record + GLOBAL kill
+// as the ring-full sites, because reaching it means the arithmetic is wrong, not that the engine
+// is busy.
 //======================================================================
 // [END_FUNCTION]_[OrderManager_DrainIntoBuckets]
 //======================================================================
