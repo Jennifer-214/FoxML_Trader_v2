@@ -11,7 +11,7 @@
 //   - [STRUCT]_[DepthStream]
 //   - [STRUCT]_[DepthSharedState]
 //   - [FUNCTION]_[depth_parse_json]
-//   - [FUNCTION]_[depth_thread_fn]   (+ DepthStream_Init rides; the DepthRecorder include-cycle break lives here)
+//   - [FUNCTION]_[depth_thread_fn]   (+ DepthShared_Configure / DepthStream_Connect / DepthStream_Disconnect / depth_consume_frame / depth_liveness_check / depth_backoff_s ride; the DepthRecorder include-cycle break lives here)
 //======================================================================================================
 // subscribes to Binance @depth5@100ms websocket for top-of-book bid/ask data
 // runs on its own thread, writes to double-buffered BookSnapshot
@@ -25,6 +25,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "WebSocketUtil.hpp"
+#include "DepthGapReasons.hpp"          // the "# GAP" reason vocabulary the ONE Disconnect names (include-order-proof)
 #include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
 #include <stdlib.h>
 #include <time.h>
@@ -94,24 +95,29 @@ template <unsigned F> inline BookSnapshot<F> BookSnapshot_Init() {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the connection handle — socket + SSL pair + connected flag + pollfd]
+// [OVERVIEW]_[the connection handle — socket + SSL pair + connected flag + pollfd + the thread-private liveness stamps (connect base / last frame / attempts / failing step) — the 2026-09-05 depth leaf]
 //======================================================================
 // [CODE]
 //======================================================================
 struct DepthStream {
-    int sockfd;
+    int sockfd;                    // -1 when closed (never 0: fd 0 is stdin)
     SSL_CTX *ssl_ctx;
     SSL *ssl;
     int connected;
     struct pollfd pfd;
+    // Liveness — depth-thread-PRIVATE (the watchdog runs on the thread that writes them; no cross-thread claim).
+    uint64_t connect_mono_s;       // CLOCK_MONOTONIC s at the last successful handshake — the planned-reconnect base
+    uint64_t last_frame_mono_us;   // CLOCK_MONOTONIC µs of the last well-formed frame (a control frame counts); Connect stamps it
+    uint32_t reconnect_attempts;   // consecutive failed connects = the backoff index; 0 after a success
+    uint32_t last_connect_step;    // 0 ok · 1 tcp · 2 tls · 3 handshake — where the last attempt failed
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[40B]
+// [UPDATED]_[2026-09-05]
+// [SIZE]_[64B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
@@ -127,7 +133,7 @@ struct DepthStream {
 // [STRADDLE_EXEMPT]_[symbol]_[init-only symbol string — written once at boot, read-shared thereafter — D-414 leaf-3 2026-08-10]
 // [STRADDLE_EXEMPT]_[snapshots]_[double-buffered BookSnapshot pair — access mediated by the atomic active_idx publish protocol (writer touches only the inactive buffer); element-uniform — D-414 leaf-3 2026-08-10]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[engine reads / depth thread writes — double-buffered snapshots + atomic active_idx + quit flag + connection cfg + nullable recorder]
+// [OVERVIEW]_[engine reads / depth thread writes — double-buffered snapshots + atomic active_idx + quit flag + boot-only connection cfg (DepthShared_Configure; the per-attempt DepthStream_Connect takes NO pointer to this struct — the 2026-09-05 leaf's type-level tooth) + nullable recorder]
 // [INSTANTIATION]_[[64]]
 //======================================================================
 // [CODE]
@@ -138,13 +144,12 @@ struct DepthRecorder;  // fwd decl for the recorder pointer field — full defin
 
 template <unsigned F> struct DepthSharedState {
     BookSnapshot<F> snapshots[2];
+    DepthStream stream;          // 64 B, depth-thread-private; sits right after the 16-aligned 832 B pair = its own line
     int active_idx;              // atomic: index the engine reads
     int quit_requested;          // atomic: signal thread to stop
-    DepthStream stream;
     char symbol[32];
     char host[128];
     int port;
-    int reconnect_delay;
     DepthRecorder *recorder;     // null = recording disabled (Phase 8a c5)
 };
 //======================================================================
@@ -152,11 +157,11 @@ template <unsigned F> struct DepthSharedState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-10]
-// [SIZE]_[1056B]
+// [UPDATED]_[2026-09-05]
+// [SIZE]_[1088B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[17]
-// [STRADDLE]_[symbol@880 · unverified: snapshots]
+// [STRADDLE]_[unverified: snapshots]
 //======================================================================
 // [END_STRUCT]_[DepthSharedState]
 //======================================================================
@@ -289,45 +294,12 @@ static inline int depth_parse_json(const char *json, int len, BookSnapshot<F> *s
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the depth thread (DepthStream_Init rides) — interruptible reconnect loop, back-buffer parse + RELEASE active_idx swap, disconnect gap-log + Notify alert, recorder write]
+// [OVERVIEW]_[the depth thread + its lifecycle family (DepthShared_Configure boot-only · DepthStream_Connect per attempt, no shared pointer · the ONE DepthStream_Disconnect: close → "# GAP" → Notify → ZERO-publish · depth_consume_frame over the Io seam · depth_liveness_check on the poll-timeout path · depth_backoff_s ride) — bounded-backoff reconnect loop, stale watchdog + the 23h30m planned reconnect, back-buffer parse + RELEASE active_idx swap, recorder write; the 2026-09-05 depth-stall leaf (D-487)]
 //======================================================================
 // [CODE]
 //======================================================================
-template <unsigned F>
-static inline int DepthStream_Init(DepthSharedState<F> *shared, const char *symbol,
-                                    const char *host, int port, int reconnect_delay) {
-    snprintf(shared->symbol, sizeof(shared->symbol), "%s", symbol);
-    snprintf(shared->host, sizeof(shared->host), "%s", host);
-    shared->port = port;
-    shared->reconnect_delay = reconnect_delay;
-    shared->active_idx = 0;
-    shared->quit_requested = 0;
-    shared->snapshots[0] = BookSnapshot_Init<F>();
-    shared->snapshots[1] = BookSnapshot_Init<F>();
-
-    DepthStream *ds = &shared->stream;
-    memset(ds, 0, sizeof(DepthStream));
-
-    ds->sockfd = ws_tcp_connect(host, port, 0);   // 0 = no SO_RCVTIMEO yet — the lifecycle commit sets it
-    if (ds->sockfd < 0) return -1;
-    if (ws_ssl_setup(&ds->ssl_ctx, &ds->ssl, ds->sockfd, host) < 0) {
-        close(ds->sockfd); return -1;
-    }
-
-    char path[128];
-    snprintf(path, sizeof(path), "/ws/%s@depth5@100ms", symbol);
-    if (ws_handshake(ds->ssl, host, path) < 0) {
-        ws_close(ds->ssl, ds->ssl_ctx, ds->sockfd); return -1;
-    }
-
-    ds->connected = 1;
-    ds->pfd.fd = ds->sockfd;
-    ds->pfd.events = POLLIN;
-    return 0;
-}
-
 //------------------------------------------------------------------
-// [SECTION]_[THREAD FUNCTION]
+// [SECTION]_[THE DepthRecorder INCLUDE — the cycle break]
 //------------------------------------------------------------------
 // DepthRecorder.hpp includes this header for BookSnapshot<F>. Including it
 // HERE (after BookSnapshot + DepthSharedState are fully defined, before
@@ -336,92 +308,266 @@ static inline int DepthStream_Init(DepthSharedState<F> *shared, const char *symb
 // is already in scope so DepthRecorder_Write's template body resolves.
 #include "DepthRecorder.hpp"
 
+//------------------------------------------------------------------
+// [SECTION]_[LIVENESS CONSTANTS + BACKOFF]
+//------------------------------------------------------------------
+// D-487 call 2: named constants, not cfg rows (promote if a second depth cadence ever ships).
+static const uint64_t DEPTH_STALE_THRESHOLD_US = 10ULL * 1000000ULL;   // >= 100 missed frames on the 100 ms stream
+static const uint32_t DEPTH_RCV_TIMEOUT_MS     = 10000;                 // SO_RCVTIMEO = the same 10 s: a wedge INSIDE SSL_read returns
+static const uint32_t DEPTH_BACKOFF_MIN_S      = 2;
+static const uint32_t DEPTH_BACKOFF_MAX_S      = 30;
+static const uint32_t DEPTH_LOUD_FIRST         = 3;                     // stderr on the first three failed attempts …
+static const uint32_t DEPTH_LOUD_EVERY         = 30;                    // … then every 30th (Notify keeps its own 60 s cooldown)
+
+// Bounded exponential backoff: attempt 0 (the first) is immediate; then 2, 4, 8, 16, 30, 30, … seconds.
+static inline uint32_t depth_backoff_s(uint32_t attempts) {
+    if (attempts == 0) return 0;
+    const uint32_t shift = (attempts - 1 < 4) ? (attempts - 1) : 4;
+    const uint32_t s = DEPTH_BACKOFF_MIN_S << shift;
+    return (s < DEPTH_BACKOFF_MAX_S) ? s : DEPTH_BACKOFF_MAX_S;
+}
+
+static inline uint64_t depth_wall_us(void) {
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+static inline uint64_t depth_mono_us(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[BOOT-ONLY CONFIGURE]
+//------------------------------------------------------------------
+// Called ONCE before the thread is spawned. The strings are copied into zeroed LOCALS first, so a caller
+// passing the struct's own fields (the pre-2026-09-05 reconnect arm did exactly that) cannot hit glibc's
+// overlapping-snprintf self-copy, which yields an EMPTY string. The per-attempt Connect cannot reach any
+// of these fields by construction (it takes no DepthSharedState*). The recorder pointer is the caller's.
+template <unsigned F>
+static inline void DepthShared_Configure(DepthSharedState<F> *shared, const char *symbol,
+                                         const char *host, int port) {
+    char sym_local[sizeof(shared->symbol)];  memset(sym_local,  0, sizeof(sym_local));
+    char host_local[sizeof(shared->host)];   memset(host_local, 0, sizeof(host_local));
+    snprintf(sym_local,  sizeof(sym_local),  "%s", symbol ? symbol : "");
+    snprintf(host_local, sizeof(host_local), "%s", host   ? host   : "");
+    memcpy(shared->symbol, sym_local,  sizeof(shared->symbol));
+    memcpy(shared->host,   host_local, sizeof(shared->host));
+    shared->port = port;
+    shared->active_idx = 0;
+    shared->quit_requested = 0;
+    shared->snapshots[0] = BookSnapshot_Init<F>();
+    shared->snapshots[1] = BookSnapshot_Init<F>();
+    memset(&shared->stream, 0, sizeof(DepthStream));
+    shared->stream.sockfd = -1;
+    shared->stream.pfd.fd = -1;
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[PER-ATTEMPT CONNECT]
+//------------------------------------------------------------------
+// Returns 0 on success, else the STEP that failed: 1 = tcp, 2 = tls, 3 = handshake. Every partial resource
+// is released on failure (sockfd = -1, ssl = ctx = NULL). Takes NO DepthSharedState*: the shared strings,
+// the quit flag and the snapshot buffers are UNREACHABLE from here — the type-level tooth for the
+// re-init-under-a-live-reader defect (-Werror=restrict stayed silent on the real self-copy, Class 51).
+// Stamps last_frame_mono_us at the handshake so staleness counts from the CONNECT: a session that
+// handshakes and never sends a frame trips the watchdog too. SO_RCVTIMEO bounds the handshake's reads as well.
+static inline int DepthStream_Connect(DepthStream *ds, const char *host, int port, const char *symbol) {
+    ds->connected = 0;
+    ds->ssl = NULL; ds->ssl_ctx = NULL;
+    ds->sockfd = ws_tcp_connect(host, port, DEPTH_RCV_TIMEOUT_MS);
+    if (ds->sockfd < 0) { ds->sockfd = -1; ds->last_connect_step = 1; return 1; }
+    if (ws_ssl_setup(&ds->ssl_ctx, &ds->ssl, ds->sockfd, host) < 0) {   // frees its own partial ssl/ctx
+        close(ds->sockfd); ds->sockfd = -1; ds->ssl = NULL; ds->ssl_ctx = NULL;
+        ds->last_connect_step = 2; return 2;
+    }
+    char path[160];
+    snprintf(path, sizeof(path), "/ws/%s@depth5@100ms", symbol);
+    if (ws_handshake(ds->ssl, host, path) < 0) {
+        ws_close(ds->ssl, ds->ssl_ctx, ds->sockfd);
+        ds->sockfd = -1; ds->ssl = NULL; ds->ssl_ctx = NULL;
+        ds->last_connect_step = 3; return 3;
+    }
+    ds->connected = 1;
+    ds->pfd.fd = ds->sockfd;
+    ds->pfd.events = POLLIN;
+    ds->pfd.revents = 0;
+    const uint64_t now_us = depth_mono_us();
+    ds->connect_mono_s = now_us / 1000000ULL;
+    ds->last_frame_mono_us = now_us;
+    ds->last_connect_step = 0;
+    return 0;
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[THE ONE DISCONNECT]
+//------------------------------------------------------------------
+// Every arm converges here: close the socket → ONE "# GAP" line (reason = the H21 string-const) → Notify
+// (its 60 s per-kind cooldown collapses storms) → ZERO-publish through the back-buffer RELEASE swap so the
+// slow path's book_imbalance gate fails CLOSED instead of reading a book from before the disconnect (the
+// 2026-09-05 session served a 13:29 book as live for 40+ min). The recorder is BYPASSED for the zero
+// snapshot — the gap line is the record; a zero row would poison replay. update_count is carried (monotonic).
+template <unsigned F>
+static inline void DepthStream_Disconnect(DepthSharedState<F> *shared, const char *reason, uint64_t wall_now_us) {
+    DepthStream *ds = &shared->stream;
+    if (ds->ssl) ws_close(ds->ssl, ds->ssl_ctx, ds->sockfd);
+    else if (ds->sockfd >= 0) close(ds->sockfd);
+    ds->ssl = NULL; ds->ssl_ctx = NULL; ds->sockfd = -1; ds->pfd.fd = -1;
+    ds->connected = 0;
+
+    if (shared->recorder) DepthRecorder_LogGap(shared->recorder, wall_now_us, reason);
+
+    if (g_notify) {
+        char body[256];
+        snprintf(body, sizeof(body),
+                 "reason=%s. The book_imbalance gate reads a ZERO book (fails closed) until the reconnect "
+                 "succeeds. Check if frequent or persistent.", reason);
+        Notify_Send(g_notify, NOTIFY_WARN, NK_DISCONNECT_DEPTH, "Binance depth WS disconnected", body);
+    }
+
+    const int active = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
+    const int back = 1 - active;
+    shared->snapshots[back] = BookSnapshot_Init<F>();
+    shared->snapshots[back].update_count = shared->snapshots[active].update_count;
+    shared->snapshots[back].timestamp_us = wall_now_us;
+    __atomic_store_n(&shared->active_idx, back, __ATOMIC_RELEASE);
+    fprintf(stderr, "[depth] disconnected (reason=%s)\n", reason);
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[ONE FRAME]
+//------------------------------------------------------------------
+// The per-frame body, templated over the Io transport so the suite drives it through a byte cursor with the
+// SSL* NULL (WsSslIo in production). Returns 1 = still connected, 0 = disconnected (the arm ran).
+template <unsigned F, class Io>
+static inline int depth_consume_frame(DepthSharedState<F> *shared, Io &io, char *frame_buf, int frame_cap,
+                                      uint64_t wall_now_us, uint64_t mono_now_us) {
+    DepthStream *ds = &shared->stream;
+    int opcode = 0, fin = 0;
+    const int plen = ws_read_frame(io, frame_buf, frame_cap, &opcode, &fin);
+    if (plen == WS_READ_TOO_LARGE) {
+        // The stream is DESYNCED (the oversize payload was not consumed) — never "skip and continue".
+        fprintf(stderr, "[depth] oversize frame (> %d B) — disconnecting\n", frame_cap);
+        DepthStream_Disconnect(shared, DEPTH_GAP_REASON_FRAME_TOO_LARGE, wall_now_us);
+        return 0;
+    }
+    if (plen < 0) {                         // WS_READ_ERR: EOF / transport error / SO_RCVTIMEO inside a frame
+        DepthStream_Disconnect(shared, DEPTH_GAP_REASON_DISCONNECT, wall_now_us);
+        return 0;
+    }
+    ds->last_frame_mono_us = mono_now_us;   // any well-formed frame is the peer alive (a ping counts)
+
+    if (opcode == 0x9) {
+        // The pong ECHOES the ping payload, MASKED (RFC 6455 §5.1 + §5.5.3) — the 2026-09-05 fix. A failed
+        // write = the peer is gone.
+        if (!ws_send_pong(io, frame_buf, plen)) {
+            DepthStream_Disconnect(shared, DEPTH_GAP_REASON_DISCONNECT, wall_now_us);
+            return 0;
+        }
+        return 1;
+    }
+    if (opcode == 0x8) {
+        // The server's close: a 2-byte big-endian code + a UTF-8 reason. Binance's 1008 "Pong timeout" was
+        // INVISIBLE before this line — the old arm was silent.
+        const int code = (plen >= 2) ? ((((unsigned char)frame_buf[0]) << 8) | (unsigned char)frame_buf[1]) : 0;
+        fprintf(stderr, "[depth] server close code=%d reason=\"%.*s\"\n",
+                code, (plen > 2) ? plen - 2 : 0, (plen > 2) ? frame_buf + 2 : "");
+        DepthStream_Disconnect(shared, DEPTH_GAP_REASON_DISCONNECT, wall_now_us);
+        return 0;
+    }
+    if (opcode != 0x1) return 1;            // binary / pong / continuation: ignored (liveness stamped above)
+
+    // parse into the back buffer, publish with a RELEASE swap (the pre-leaf body, unchanged)
+    const int active = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
+    const int back = 1 - active;
+    shared->snapshots[back] = shared->snapshots[active];
+    if (depth_parse_json<F>(frame_buf, plen, &shared->snapshots[back])) {
+        // CLOCK_REALTIME landing time — the recorder's gap thresholds are wallclock (>2 s silence = a real gap).
+        shared->snapshots[back].timestamp_us = wall_now_us;
+        __atomic_store_n(&shared->active_idx, back, __ATOMIC_RELEASE);
+        if (shared->recorder) DepthRecorder_Write(shared->recorder, &shared->snapshots[back]);
+    }
+    return 1;
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[LIVENESS CHECK — the poll-timeout path, never tick-gated]
+//------------------------------------------------------------------
+// Runs on the 200 ms idle branch (a stalled stream never ticks — the TD-338 trap). Returns 1 = fine, 0 = disconnected.
+template <unsigned F>
+static inline int depth_liveness_check(DepthSharedState<F> *shared, uint64_t wall_now_us, uint64_t mono_now_us) {
+    DepthStream *ds = &shared->stream;
+    if (!ds->connected) return 1;
+    if (ws_stale(mono_now_us, ds->last_frame_mono_us, DEPTH_STALE_THRESHOLD_US)) {
+        fprintf(stderr, "[depth] no frame for %llu ms — disconnecting (stale)\n",
+                (unsigned long long)((mono_now_us - ds->last_frame_mono_us) / 1000ULL));
+        DepthStream_Disconnect(shared, DEPTH_GAP_REASON_STALE, wall_now_us);
+        return 0;
+    }
+    if (ws_planned_reconnect_due(mono_now_us / 1000000ULL, ds->connect_mono_s)) {
+        fprintf(stderr, "[depth] planned reconnect at 23h30m of session\n");
+        DepthStream_Disconnect(shared, DEPTH_GAP_REASON_PLANNED_RECONNECT, wall_now_us);
+        return 0;
+    }
+    return 1;
+}
+
+//------------------------------------------------------------------
+// [SECTION]_[THREAD FUNCTION]
+//------------------------------------------------------------------
 template <unsigned F>
 static inline void *depth_thread_fn(void *arg) {
     DepthSharedState<F> *shared = (DepthSharedState<F> *)arg;
     DepthStream *ds = &shared->stream;
     char frame_buf[4096];
+    pthread_setname_np(pthread_self(), "depth-ws");   // `ps -L` / `top -H` name; 15 chars max
 
     while (!__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
         if (!ds->connected) {
-            // Interruptible sleep — checks shared->quit_requested every 100ms
-            // so engine shutdown isn't blocked for reconnect_delay seconds.
-            for (uint32_t s = 0; s < shared->reconnect_delay; ++s) {
+            // Bounded backoff (the first attempt is immediate); interruptible — checks quit_requested every
+            // 100 ms so engine shutdown is never blocked behind a reconnect wait.
+            const uint32_t wait_s = depth_backoff_s(ds->reconnect_attempts);
+            for (uint32_t s = 0; s < wait_s; ++s) {
                 for (int j = 0; j < 10; ++j) {
-                    if (__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE))
-                        return NULL;
+                    if (__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) return NULL;
                     struct timespec ts = {0, 100000000};
                     nanosleep(&ts, NULL);
                 }
             }
-            if (DepthStream_Init(shared, shared->symbol, shared->host,
-                                  shared->port, shared->reconnect_delay) < 0) continue;
-            ds = &shared->stream;
+            const int step = DepthStream_Connect(ds, shared->host, shared->port, shared->symbol);
+            if (step != 0) {
+                ds->reconnect_attempts++;
+                const uint32_t n = ds->reconnect_attempts;
+                if (n <= DEPTH_LOUD_FIRST || (n % DEPTH_LOUD_EVERY) == 0) {
+                    static const char *const step_name[4] = {"ok", "tcp", "tls", "handshake"};
+                    fprintf(stderr, "[depth] connect attempt %u failed at step %d (%s) — next in %u s\n",
+                            n, step, step_name[step & 3], depth_backoff_s(n));
+                }
+                continue;
+            }
+            ds->reconnect_attempts = 0;
+            fprintf(stderr, "[depth] connected (%s:%d %s@depth5@100ms)\n", shared->host, shared->port, shared->symbol);
         }
 
-        // SSL_pending optimization (same as BinanceCrypto)
+        // SSL_pending first (a TLS record can carry more than one frame), then poll with a 200 ms timeout.
         int ready = SSL_pending(ds->ssl) > 0;
         if (!ready) {
-            int ret = poll(&ds->pfd, 1, 200);
-            ready = (ret > 0 && (ds->pfd.revents & POLLIN));
+            ds->pfd.revents = 0;
+            const int ret = poll(&ds->pfd, 1, 200);
+            ready = (ret > 0 && (ds->pfd.revents & (POLLIN | POLLHUP | POLLERR)));   // a FIN/RST is readable too
         }
-        if (!ready) continue;
+        const uint64_t mono_now = depth_mono_us();
+        const uint64_t wall_now = depth_wall_us();
+        if (!ready) { depth_liveness_check(shared, wall_now, mono_now); continue; }
 
-        int opcode, fin;
         WsSslIo io{ds->ssl};
-        int plen = ws_read_frame(io, frame_buf, (int)sizeof(frame_buf) - 1, &opcode, &fin);
-        if (plen < 0) {
-            // WS_READ_ERR = the peer went away; WS_READ_TOO_LARGE = the stream is DESYNCED (the oversize
-            // payload was not consumed) — both mean disconnect, never "skip and continue".
-            // Phase 8a c5: log explicit gap on disconnect. _LogGap zeros
-            // last_seen_id so the post-reconnect first _Write skips its
-            // internal gap check (no double-flagging).
-            if (shared->recorder) {
-                struct timespec ts;
-                clock_gettime(CLOCK_REALTIME, &ts);
-                uint64_t at_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-                DepthRecorder_LogGap(shared->recorder, at_us, "disconnect");
-            }
-            // Phase 8b: alert. Cooldown collapses repeated disconnect storms.
-            if (g_notify) {
-                Notify_Send(g_notify, NOTIFY_WARN, NK_DISCONNECT_DEPTH,
-                            "Binance depth WS disconnected",
-                            "book_imbalance gate is reading stale data until "
-                            "reconnect succeeds. Check if frequent or persistent.");
-            }
-            ds->connected = 0;
-            continue;
-        }
-
-        // The pong ECHOES the ping payload, MASKED (RFC 6455 §5.1 + §5.5.3). Before 2026-09-05 this sent
-        // an empty unmasked {0x8A,0x00}; Binance answered it with a 1008 "Pong timeout" close ~90 s after
-        // every connect — the depth-stream stall. Write failure = the next read reports the dead peer.
-        if (opcode == 0x9) { ws_send_pong(io, frame_buf, plen); continue; }
-        if (opcode == 0x8) { ds->connected = 0; continue; }
-        if (opcode != 0x1) continue;
-
-        // parse into back buffer, swap atomically
-        int back = 1 - __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
-        shared->snapshots[back] = shared->snapshots[shared->active_idx];
-        if (depth_parse_json<F>(frame_buf, plen, &shared->snapshots[back])) {
-            // Stamp local landing time for the recorder (Phase 8a). CLOCK_REALTIME
-            // matches the wallclock used by gap-detection thresholds in
-            // DepthRecorder_Write (>2s wallclock silence = real gap).
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            shared->snapshots[back].timestamp_us =
-                (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-            __atomic_store_n(&shared->active_idx, back, __ATOMIC_RELEASE);
-
-            // Phase 8a c5: persist snapshot. Recorder does its own gap
-            // detection internally (backward last_update_id OR wallclock >2s).
-            if (shared->recorder) {
-                DepthRecorder_Write(shared->recorder, &shared->snapshots[back]);
-            }
-        }
+        depth_consume_frame(shared, io, frame_buf, (int)sizeof(frame_buf) - 1, wall_now, mono_now);
     }
 
-    if (ds->connected) ws_close(ds->ssl, ds->ssl_ctx, ds->sockfd);
+    // Quiet shutdown: no gap line / Notify / zero-publish — the slow paths are joined right after this thread.
+    if (ds->connected) {
+        ws_close(ds->ssl, ds->ssl_ctx, ds->sockfd);
+        ds->connected = 0; ds->sockfd = -1; ds->ssl = NULL; ds->ssl_ctx = NULL;
+    }
     return NULL;
 }
 //======================================================================

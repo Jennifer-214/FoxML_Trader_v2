@@ -17,12 +17,16 @@
 // CSV format: timestamp_us,last_update_id,bid_price,bid_qty,ask_price,ask_qty
 //   one row per parsed @depth5@100ms snapshot (top-of-book only initially).
 //
-// gap markers: a comment line "# GAP at_us=X reason=Y" inserted on:
-//   - last_update_id going BACKWARD between consecutive snapshots
+// gap markers: a comment line "# GAP at_us=X reason=Y" inserted on (reason = one of the
+// DEPTH_GAP_REASON_* H21 string-consts in DepthGapReasons.hpp — a persisted, replay-visible vocabulary):
+//   - id_backward: last_update_id going BACKWARD between consecutive snapshots
 //     (real signal of reconnect-to-stale-snapshot)
-//   - wallclock between consecutive snapshots > 2 seconds
+//   - wallclock_gap: wallclock between consecutive snapshots > 2 seconds
 //     (real signal of WS silence — connection dead but socket still open)
-//   - explicit DepthRecorder_LogGap call from disconnect site
+//   - disconnect / stale / frame_too_large / planned_reconnect: the depth thread's ONE
+//     DepthStream_Disconnect arm (EOF or the server's close frame / the 10 s watchdog / an
+//     oversize frame that desynced the stream / the 23h30m proactive reconnect) — the
+//     2026-09-05 depth-stall leaf (D-487). The zero snapshot it publishes is NOT recorded.
 //
 // what is NOT a gap: lastUpdateId jumping by 50-500 between consecutive
 // snapshots. That's normal — book updates much faster than the 10Hz feed.
@@ -50,6 +54,7 @@
 #include <dirent.h>
 #include <charconv>  // F-055/PARITY-036: std::to_chars locale-immune lossless emit
 #include "BinanceDepth.hpp" // BookSnapshot<F>
+#include "DepthGapReasons.hpp" // the DEPTH_GAP_REASON_* H21 string-consts (own header: include-order-proof under the cycle)
 
 //======================================================================
 // [STRUCT]_[DepthRecorder]
@@ -94,7 +99,7 @@ struct DepthRecorder {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the recorder family (MkdirP / DateInt / OpenFile / PruneOld / Init / LogGap / Close ride) — ~10Hz allocation-free row emit + internal gap detection (id backward / >2s silence)]
+// [OVERVIEW]_[the recorder family (MkdirP / DateInt / OpenFile / PruneOld / Init / LogGap / Close ride; the DEPTH_GAP_REASON_* H21 string-consts live in DepthGapReasons.hpp) — ~10Hz allocation-free row emit + internal gap detection (id backward / >2s silence)]
 // [REFERENCE]_[PARITY]_[PARITY-36]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-160]
 //======================================================================
@@ -280,7 +285,7 @@ static inline void DepthRecorder_Write(DepthRecorder *rec, const BookSnapshot<F>
         int wall_gap = (cur_us > rec->last_seen_wallclock_us &&
                         cur_us - rec->last_seen_wallclock_us > 2000000ULL);
         if (backward || wall_gap) {
-            DepthRecorder_LogGap(rec, cur_us, backward ? "id_backward" : "wallclock_gap");
+            DepthRecorder_LogGap(rec, cur_us, backward ? DEPTH_GAP_REASON_ID_BACKWARD : DEPTH_GAP_REASON_WALLCLOCK_GAP);
             // _LogGap zeroed last_seen_id — re-establish below from current snapshot
         }
     }

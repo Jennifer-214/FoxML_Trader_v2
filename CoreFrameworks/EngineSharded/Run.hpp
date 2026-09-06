@@ -476,6 +476,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     }
     auto prev_int  = std::signal(SIGINT,  EngineSharded_SignalHandler);
     auto prev_term = std::signal(SIGTERM, EngineSharded_SignalHandler);
+    // fix(depth) 2/4 (D-487 §6): OpenSSL writes with plain write(2); an SSL_write on a venue socket that has
+    // already taken an RST (a close after an EOF, a stale REST keep-alive) raises SIGPIPE, whose default
+    // action KILLS the process. Ignored for the process lifetime (never restored): the checked writes then
+    // see EPIPE and the next read reports the dead peer.
+    std::signal(SIGPIPE, SIG_IGN);
     // Wire the Binance reconnect helper to our shutdown flag so its delay
     // sleep is interruptible. Without this, closing the GUI during a
     // reconnect window blocks for up to cfg.reconnect_delay seconds.
@@ -913,17 +918,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         else if (bcfg.use_binance_us) { depth_host = "stream.binance.us";        depth_port = 9443; }
         else                          { depth_host = "data-stream.binance.vision"; depth_port = 443; }
 
-        if (DepthStream_Init<F>(&g_depth_shared, bcfg.symbol,
-                                 depth_host, depth_port,
-                                 /*reconnect_delay=*/2) == 0) {
-            g_depth_shared.recorder = cfg.record_depth ? &g_depth_rec : NULL;
-            pthread_create(&g_depth_tid, NULL, depth_thread_fn<F>, &g_depth_shared);
-            fprintf(stderr, "[sharded] depth feed active (%s:%d %s@depth5@100ms)%s\n",
-                    depth_host, depth_port, bcfg.symbol,
-                    cfg.record_depth ? " — recording" : "");
-        } else {
-            fprintf(stderr, "[sharded] depth feed init failed — continuing without depth\n");
-        }
+        // fix(depth) 2/4: boot-only Configure, then the thread owns every connect attempt (bounded backoff,
+        // the stale watchdog, the planned 23h30m reconnect). No "continuing without depth": until the first
+        // frame the gate reads a ZERO book (fails closed) — the honest state — and the retries are LOUD.
+        DepthShared_Configure<F>(&g_depth_shared, bcfg.symbol, depth_host, depth_port);
+        g_depth_shared.recorder = cfg.record_depth ? &g_depth_rec : NULL;
+        pthread_create(&g_depth_tid, NULL, depth_thread_fn<F>, &g_depth_shared);
+        fprintf(stderr, "[sharded] depth feed starting (%s:%d %s@depth5@100ms)%s — connecting in the background\n",
+                depth_host, depth_port, bcfg.symbol,
+                cfg.record_depth ? " — recording" : "");
     }
 
     // Phase 05: reconciliation poller — own REST instance, periodic
