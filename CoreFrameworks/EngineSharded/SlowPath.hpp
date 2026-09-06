@@ -238,6 +238,16 @@ inline int EngineSharded_Drainer_BookPass(
     EngineCommon_DrainPostFill(state, oms, cfg);
     OrderManager_ProcessBucket_Opens(&oms, buckets);
     OrderManager_ProcessBucket_Reconciles(&oms, buckets);
+    // The stale-inflight age sweep — THE LIVE CALLER (3b(ii) commit 4 leaf 4). Until now the
+    // detector lived only in OrderManager_Tick step 4, which the live engine never calls: the
+    // drainer runs this pass instead. So a transport-gap detector could only fire in a BACKTEST,
+    // the one place a transport gap cannot occur (Class 44 — a computed signal with a dead
+    // consumer; PARITY-068's residue).
+    //
+    // Placed AFTER the bucket passes, not inside DrainIntoBuckets, and the ordering is the point:
+    // a pre-bucket sweep would warn on an order whose fill is sitting in THIS cycle's bucket
+    // unapplied, and because the warn is once-per-order that false positive would be permanent.
+    OMS_StaleInflightSweep(&oms);
     return total_drained;
 }
 //======================================================================

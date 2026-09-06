@@ -1420,11 +1420,11 @@ template <unsigned F> struct ControllerConfig {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-20]
+// [UPDATED]_[2026-09-06]
 // [SIZE]_[52800B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[825]
-// [STRADDLE]_[horizon_list@4400 · node_time_exit_ticks@39568 · unverified: nodes node_risk_pct node_max_drawdown_pct node_overrides]
+// [STRADDLE]_[horizon_list@4400 · node_time_exit_ticks@39568 · unverified: node_risk_pct node_max_drawdown_pct node_overrides]
 //======================================================================
 // [END_STRUCT]_[ControllerConfig]
 //======================================================================

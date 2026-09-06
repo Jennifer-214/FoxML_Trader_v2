@@ -30,7 +30,8 @@
 //
 //   1. WS thread — obtains a listen key via POST /api/v3/userDataStream,
 //      connects WSS to /ws/<listenKey>, reads frames in a loop, parses
-//      executionReport JSON, pushes CMD_WS_FILL into ws_result_queue.
+//      executionReport JSON, routes it through ud_route_command, and pushes CMD_WS_FILL
+//      onto the OWNING node's ring in ws_rings (a FOREIGN report is diverted, never pushed).
 //      On disconnect: sleep, re-obtain key, reconnect.
 //
 //   2. Keepalive thread — every 25 minutes, PUTs /api/v3/userDataStream
@@ -43,7 +44,7 @@
 // header but NOT HMAC signing (Binance docs: userDataStream endpoints are
 // API-key-only, not signed).
 //
-// The ws_result_queue pointer is stored at init time. It points into the
+// The ws_rings pointer is stored at init time. It points into the
 // OMS's OrderManagerState. The WS thread is the sole producer; the drainer
 // thread is the sole consumer via OrderManager_Tick. SPSC contract holds.
 //
@@ -139,6 +140,17 @@ struct BinanceUserDataState {
 //======================================================================
 // [END_STRUCT]_[BinanceUserDataState]
 //======================================================================
+
+// SIZE PIN — amendment (m) asked for a `check_struct_size_budget.py` MANIFEST row here. Measured:
+// this header FAILS TO LINK a standalone probe (4 undefined simdjson refs), exactly like
+// `NodeSlowState<64>`, whose row that tool's manifest deliberately omits for the same reason —
+// adding it returns rc 2 and REDs the whole gate. So the coverage lands in the STRONGER form the
+// manifest itself prescribes (CLAUDE.md gradient: compile-time enforcement > CI check), and the
+// tool's blind spot for link-heavy headers stays homed as TECH_DEBT-309 rather than worked around.
+// Re-derive after a deliberate layout change; a surprise here is a silent growth.
+static_assert(sizeof(BinanceUserDataState) == 880,
+              "BinanceUserDataState size moved. Expected 880 B (3b(ii) commit 4 leaf 2 added the "
+              "kill-trip word pointer + three router counters: +32 B).");
 
 //======================================================================
 // [FUNCTION]_[ud_ws_close]

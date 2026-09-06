@@ -1603,7 +1603,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             //   2. OMS_DrainSubmit — drainer (sole Submit caller) pops the
             //      queues and calls Submit serially. Preserves OMS contract.
             //   3. OrderManager_DrainIntoBuckets + ProcessBucket_{Closes, Opens, Reconciles}
-            //      — the phase-separated drain of result_rings / ws_result_queue /
+            //      — the phase-separated drain of result_rings / ws_rings /
             //      reconcile_queue (v5.15.5.C.4 Phase F; the unified OrderManager_Tick
             //      this comment used to name is the BACKTEST driver's pump today).
             //   4. EngineCommon_DrainPostFill — applies per-node NodeContext updates
@@ -2453,7 +2453,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         fprintf(stderr, "[sharded]   quiescing venue producers: reconciler...\n");
         ReconciliationLoop_Shutdown(&g_reconciler);
         // REST workers: the worker checks shutdown_requested only at its loop head, so an
-        // in-flight REST call still fires its callback (OMS_ResultPush into result_rings)
+        // in-flight REST call still fires its callback (OMS_CmdRingsPushOrTrip into result_rings)
         // BEFORE the join returns — and the composer is still running to book it.
         fprintf(stderr, "[sharded]   quiescing venue producers: REST workers...\n");
         BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
@@ -2463,8 +2463,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // NOTE: the pre-commit-3 `ws_active.store(0)` that stood here is DELETED — with the
         // composer live at this point it would have re-armed the adapter's REST full-fill
         // fallback for an in-flight call whose TRADE legs the still-connected WS also
-        // delivers: a double-book (scout F-3). The keepalive circuit breaker's own ws_active
-        // writer is a different site and is untouched.
+        // delivers: a double-book (scout F-3).
+        // ⚠️ CORRECTION (TECH_DEBT-342, 3b(ii) commit 4): the sentence that stood here — "the
+        // keepalive circuit breaker's own ws_active writer is a different site and is untouched" —
+        // cited a writer that DOES NOT EXIST. Nothing clears `ws_active` when the keepalive breaker
+        // fires, so after a breaker trip the WS thread is dead while `ws_active` stays 1: the
+        // adapter keeps taking the ACK-only arm and TRADE legs never arrive, so every order sticks
+        // at ORDER_ACKNOWLEDGED. Tracked as TECH_DEBT-342; the structural fix (the adapter's ACK
+        // arm reading `ws_connected` instead) is E.1.4-adjacent. This commit corrects the comment
+        // only — a comment that invents a guard is worse than no comment, because it stops the
+        // next reader from looking.
         {
             uint64_t last_ev = g_user_data.events_received.load(std::memory_order_relaxed);
             const auto t_start = std::chrono::steady_clock::now();

@@ -1195,6 +1195,17 @@ static_assert(offsetof(OrderManagerState<64>, ws_rings) % 64 == 0,
 static_assert(sizeof(OrderManagerState<64>::ws_rings) == sizeof(OrderManagerState<64>::result_rings),
               "the WS and REST families must stay the SAME shape — the OmsCmdRings helpers derive "
               "the node lane identically for both, so a divergent depth silently mis-routes one");
+// SIZE PIN — amendment (m) asked for a `check_struct_size_budget.py` MANIFEST row here. Measured:
+// this header FAILS TO LINK a standalone probe (4 undefined simdjson refs), exactly like
+// `NodeSlowState<64>`, whose row that tool's manifest deliberately omits for the same reason —
+// adding it returns rc 2 and REDs the whole gate. So the coverage lands in the STRONGER form the
+// manifest itself prescribes (CLAUDE.md gradient: compile-time enforcement > CI check), and the
+// tool's blind spot for link-heavy headers stays homed as TECH_DEBT-309 rather than worked around.
+// Re-derive after a deliberate layout change; a surprise here is a silent growth.
+static_assert(sizeof(OrderManagerState<64>) == 457984,
+              "OrderManagerState<64> size moved. Expected 457,984 B (3b(ii) commit 4 leaf 1 added "
+              "the per-node ws_rings family: +1,920 B over the single ring it replaced).");
+
 // WARM cluster — Portfolio anchor (per-fill bookkeeping cluster start).
 // [ASSERT]_[LAYOUT_LOCK]_[offsetof(portfolio) % 64 == 0]
 static_assert(offsetof(OrderManagerState<64>, portfolio) % 64 == 0,
@@ -2792,6 +2803,71 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[OMS_StaleInflightSweep]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [LIVE_TRADING]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the stale-inflight AGE detector, extracted so the LIVE drainer and the backtest Tick run the identical body (M5): an order still working OMS_STALE_INFLIGHT_WARN_US after submit is a transport gap. DETECT-ONLY and warned once per order — no state change, no slot free]
+// [REFERENCE]_[DECISION]_[D-446]
+//======================================================================
+// [CODE]
+//======================================================================
+// EXTRACTED at 3b(ii) commit 4 leaf 4. It used to live only in OrderManager_Tick step 4 — which the
+// LIVE engine never calls (the drainer runs DrainIntoBuckets + the ProcessBucket_* passes), so the
+// detector existed but had no live caller: a diagnostic that could only ever fire in a backtest,
+// which is the one place a transport gap cannot happen. Class 44's shape (a computed signal whose
+// consumer is dead), and PARITY-068's residue.
+//
+// WHY NOT INSIDE DrainIntoBuckets: a pre-bucket sweep would warn-once on an order whose fill is
+// sitting in THIS cycle's bucket, unprocessed — the warning would fire for an order that is about
+// to complete normally, and because the warn is once-per-order that false positive is permanent.
+// The live caller is therefore a named step in EngineSharded_Drainer_BookPass AFTER
+// OrderManager_ProcessBucket_Reconciles, i.e. after this cycle's fills have actually been applied.
+// (3b(iii) re-homes it into OMS_AccountRingsDrain when that lands.)
+template <unsigned F>
+inline void OMS_StaleInflightSweep(OrderManagerState<F>* oms) {
+    // DETECT-ONLY, LOUD. Live only (paper synth results land same-cycle).
+    //    Live only (paper synth results land same-cycle). An order still working
+    //    OMS_STALE_INFLIGHT_WARN_US after submit = a transport gap (lost WS
+    //    terminal report / REST response never arrived). No state change, no
+    //    free: a guessed timeout while the venue actually filled books a phantom
+    //    at reconcile. E.1.4's authoritative GetStatus re-query owns recovery
+    //    (ORDER_TIMEOUT stays its landing pad). Warned ONCE per order (bit 26).
+    //    Branch shape: empty-bitmap short-circuit = zero cost in the common
+    //    no-inflight case; the per-order arms are rare-cold diagnostics
+    //    (branchless-dispatch decision matrix, __builtin_expect-rare tier).
+    if (oms->order_bitmap != 0 &&
+        BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING)) {
+        const uint64_t now_us = (uint64_t)
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        uint16_t bm = oms->order_bitmap;
+        while (bm) {
+            const int slot = __builtin_ctz(bm);
+            bm = (uint16_t)(bm & (bm - 1));
+            Order<F>* o = &oms->orders[slot];
+            if (Order_IsTerminal(o) || Order_GetStaleWarned(o)) continue;
+            if (__builtin_expect(now_us - o->submitted_at_us > OMS_STALE_INFLIGHT_WARN_US, 0)) {
+                Order_SetStaleWarned(o, true);
+                std::fprintf(stderr,
+                    "[OMS] STALE-INFLIGHT order %llu node=%d state=%d age=%.1fs "
+                    "filled=%.8f/%.8f — transport gap suspected (lost WS terminal or "
+                    "REST response); detect-only, E.1.4 GetStatus owns recovery\n",
+                    (unsigned long long)o->id, (int)o->portfolio_slot,
+                    (int)Order_GetState(o),
+                    (double)(now_us - o->submitted_at_us) / 1e6,
+                    Money_ToDouble(o->filled_qty), Money_ToDouble(o->requested_qty));
+            }
+        }
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_StaleInflightSweep]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[OrderManager_Tick]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CRITICAL]]
@@ -2827,40 +2903,10 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
             OrderManager_ProcessReconcile(oms, cmd);
     }
 
-    // 4. P3-e-ii (D-446 #5): stale-inflight AGE detector — DETECT-ONLY, LOUD.
-    //    Live only (paper synth results land same-cycle). An order still working
-    //    OMS_STALE_INFLIGHT_WARN_US after submit = a transport gap (lost WS
-    //    terminal report / REST response never arrived). No state change, no
-    //    free: a guessed timeout while the venue actually filled books a phantom
-    //    at reconcile. E.1.4's authoritative GetStatus re-query owns recovery
-    //    (ORDER_TIMEOUT stays its landing pad). Warned ONCE per order (bit 26).
-    //    Branch shape: empty-bitmap short-circuit = zero cost in the common
-    //    no-inflight case; the per-order arms are rare-cold diagnostics
-    //    (branchless-dispatch decision matrix, __builtin_expect-rare tier).
-    if (oms->order_bitmap != 0 &&
-        BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING)) {
-        const uint64_t now_us = (uint64_t)
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-        uint16_t bm = oms->order_bitmap;
-        while (bm) {
-            const int slot = __builtin_ctz(bm);
-            bm = (uint16_t)(bm & (bm - 1));
-            Order<F>* o = &oms->orders[slot];
-            if (Order_IsTerminal(o) || Order_GetStaleWarned(o)) continue;
-            if (__builtin_expect(now_us - o->submitted_at_us > OMS_STALE_INFLIGHT_WARN_US, 0)) {
-                Order_SetStaleWarned(o, true);
-                std::fprintf(stderr,
-                    "[OMS] STALE-INFLIGHT order %llu node=%d state=%d age=%.1fs "
-                    "filled=%.8f/%.8f — transport gap suspected (lost WS terminal or "
-                    "REST response); detect-only, E.1.4 GetStatus owns recovery\n",
-                    (unsigned long long)o->id, (int)o->portfolio_slot,
-                    (int)Order_GetState(o),
-                    (double)(now_us - o->submitted_at_us) / 1e6,
-                    Money_ToDouble(o->filled_qty), Money_ToDouble(o->requested_qty));
-            }
-        }
-    }
+    // 4. The stale-inflight age sweep — the SAME helper the live drainer calls
+    //    (OMS_StaleInflightSweep, above). Tick is the BACKTEST/test path; the live path reaches it
+    //    from EngineSharded_Drainer_BookPass. One body, two callers, M5-identical by construction.
+    OMS_StaleInflightSweep(oms);
 }
 //======================================================================
 // [END_CODE]
