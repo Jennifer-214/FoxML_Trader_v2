@@ -228,11 +228,7 @@ this is an actively developed personal project, not a product. there is no suppo
 
 ## license
 
-dual-licensed: **AGPL-3.0-or-later** (see [LICENSE](LICENSE)) **or commercial**.
-
-personal use, learning and paper trading are welcome and encouraged. commercial use, network-accessible deployment, or use for profit requires a commercial license — contact [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
-
-unauthorized commercial use is enforced under AGPL-3.0 and standard copyright law. a finder's fee is available for credible reports of unlicensed commercial deployment that lead to a successful settlement — exact terms negotiated privately.
+see [LICENSE](LICENSE). commercial use or licensing enquiries: [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
 
 **copyright (c) 2026 Jennifer Lewis. all rights reserved.**
 
