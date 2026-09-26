@@ -56,9 +56,10 @@
 // worst case at high event burst. Within slow-path 100μs budget by 3+
 // orders of magnitude.
 //
-// SIZE: OmsDrainBuckets struct is ~144 KB (576 slots × 256 B Command; sized
-// at OMS_RESULT_QUEUE_SIZE for each of close+open buckets + 64 for
-// reconciles). Stack-allocated once at drainer thread entry; reused per
+// SIZE: OmsDrainBuckets is 278,552 B (1,088 slots × 256 B Command: close + open
+// at OMS_BUCKET_DEPTH = 512 each — the Σ of both ring families since 3b(ii)
+// commit 4 leaf 3 — + 64 for reconciles; pinned by the static_assert under the
+// struct and the tool-owned [SIZE] tag). Stack-allocated once at drainer thread entry; reused per
 // cycle — fine on the default 8 MB thread stack, and per-cycle touch cost is
 // bounded by ACTUAL event count (Reset zeroes 3 ints; only written slots are
 // touched), not capacity. NOT added to OmsState (transient per-cycle
@@ -79,7 +80,7 @@ namespace tt {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[per-direction Command buckets (close/open at OMS_RESULT_QUEUE_SIZE, reconcile at 64) + counts — drainer-thread stack scratch, reset per cycle]
+// [OVERVIEW]_[per-direction Command buckets (close/open at OMS_BUCKET_DEPTH, the Σ of both ring families: 512; reconcile at 64) + counts — drainer-thread stack scratch, reset per cycle]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -119,6 +120,17 @@ struct OmsDrainBuckets {
     Command reconcile_bucket[64];
     int     reconcile_n;
 };
+// SIZE PIN — amendment (m)'s third row, landed 2026-09-26 at the post-commit-4 pickup. Leaf 4 pinned
+// its two siblings (`OrderManagerState<64>`, `BinanceUserDataState`) and the handoff counted this one
+// as landed when only the tool-owned [SIZE] tag was. Same reason the siblings are pins and not
+// `check_struct_size_budget.py` rows: this header cannot link the tool's standalone probe
+// (TECH_DEBT-309), so the coverage lands in the stronger form the manifest prescribes (compile-time
+// > CI). The figure is derived, not typed: 2 × OMS_BUCKET_DEPTH (512) × 256 B + 64 × 256 B + three
+// int counters, each padded to the struct's 8-byte alignment. Re-derive after a deliberate layout
+// change; a surprise here is a silent growth of the composer's stack scratch.
+static_assert(sizeof(OmsDrainBuckets) == 278552,
+              "OmsDrainBuckets size moved. Expected 278,552 B (3b(ii) commit 4 leaf 3 Σ-sized the "
+              "close/open buckets to OMS_BUCKET_DEPTH = 512 each; the 64-deep reconcile bucket stays).");
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -126,13 +138,15 @@ struct OmsDrainBuckets {
 //----------------------------------------------------------------------
 // Per-direction bucket arrays + counts.
 //
-// Sized at OMS_RESULT_QUEUE_SIZE (256) for close + open buckets — worst case
-// all 256 events from one ring are the same direction. Reconcile bucket sized
-// at 64 to match `reconcile_queue` ring capacity.
+// Sized at OMS_BUCKET_DEPTH (512 = the Σ of the REST result_rings + WS ws_rings
+// capacity, 3b(ii) commit 4 leaf 3) for close + open buckets — worst case every
+// command from BOTH families in one cycle is the same direction, so the bound
+// stage cannot overflow on a legitimate burst (its LOUD-FATAL is the pin's guard,
+// not an expected path). Reconcile bucket sized at 64 to match `reconcile_queue`.
 //
 // Stack-allocated by drainer thread at thread entry; reset per cycle by
-// DrainIntoBuckets. ~144 KB total (Command is 256 B; see the [DERIVED]
-// quartet) — within the default 8 MB thread stack; per-cycle touch cost is
+// DrainIntoBuckets. 278,552 B total (Command is 256 B; see the [DERIVED]
+// quartet + the static_assert) — within the default 8 MB thread stack; per-cycle touch cost is
 // bounded by actual event count, not capacity.
 //======================================================================
 // [DERIVED]
@@ -264,7 +278,7 @@ inline void handle_drain_reconcile_cmd(const Command& cmd,
     if (__builtin_expect(!in_bounds, 0)) {
         // Same reasoning as the fill buckets, one severity down: a reconcile CORRECTION is not a
         // fill, so losing one does not silently mis-book capital — the next pass re-detects the
-        // drift (`corrections_dropped`, char (9)). It is still an engine-side loss and still gets
+        // drift (the `corrections_dropped` counter + char (9) land with 3b(iii); neither exists at HEAD). It is still an engine-side loss and still gets
         // a durable line rather than only a stderr print that no post-mortem will ever see.
         tt::Health_Log(tt::HEALTH_WARN, "drain_reconcile_overflow", -1,
                        "reconcile bucket (size=64) full — correction for order %llu DROPPED; the "
