@@ -2528,8 +2528,10 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         o->filled_qty = Money_Add(o->filled_qty,
                                   Money{ money_from_double_payload(cmd.result.fill_qty) });
         // Phase 8: maker/taker flag from Binance executionReport, parsed in c3.
-        // Fee_Compute reads this for entry-fee math when the controller books
-        // the fill. is_maker stays at Order_Init's 0 (taker) for synchronous
+        // The fee triple buckets by this flag when the composer books the FillEvent
+        // (OrderManager_AccountMakerTakerFee); the fee AMOUNT is the venue's USDT
+        // commission or the pre-resolved rate × notional (D-173, HandleFill) —
+        // Fee_Compute is not on this path. is_maker stays at Order_Init's 0 (taker) for synchronous
         // REST fills (Phase 02 path) — Binance market orders are taker by def.
         Order_SetIsMaker(o, (bool)cmd.result.is_maker);
         // Phase 8: pick FILLED vs PARTIAL based on Binance "X" field (parsed

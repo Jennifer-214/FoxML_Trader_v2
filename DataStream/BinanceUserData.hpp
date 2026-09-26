@@ -274,7 +274,7 @@ static inline int ud_keepalive_listen_key(BinanceUserDataState* s) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[extract one executionReport into a Command — x==TRADE fills (price/qty/maker/status/commission) + P3-e-ii terminal non-TRADE pass-through (EXPIRED/CANCELED -> venue_terminal, REJECTED -> rejection arm); CARRIES the open .E.0.10 parser findings (A4 commission non-authoritative, A5 side uncrosschecked — see the findings block below)]
+// [OVERVIEW]_[extract one executionReport into a Command — x==TRADE fills (price/qty/maker/status/commission) + P3-e-ii terminal non-TRADE pass-through (EXPIRED/CANCELED -> venue_terminal, REJECTED -> rejection arm); CARRIES the open .E.0.10 parser findings (A4 = the non-USDT commission FALLBACK — a USDT commission IS booked authoritatively by OrderManager_HandleFill per D-173; A5 side uncrosschecked — see the findings block below)]
 // [REFERENCE]_[DECISION]_[D-123]
 // [REFERENCE]_[TECH_DEBT]_[[TECH_DEBT-169] [TECH_DEBT-171]]
 //======================================================================
@@ -383,8 +383,10 @@ static inline int ud_parse_execution_report(const char* json, int len,
     binance_json_extract_str(json, "X", order_status, sizeof(order_status));
     int order_complete = (strcmp(order_status, "FILLED") == 0) ? 1 : 0;
 
-    // Commission: "n" amount + "N" asset. Recorded for audit; not the
-    // authoritative fee number (Fee_Compute computes from cfg rates).
+    // Commission: "n" amount + "N" asset. Carried source-exact; OrderManager_HandleFill books it
+    // as THE fee when the asset is the quote (USDT) — D-173 authoritative — and falls back to the
+    // pre-resolved rate × notional otherwise (the A4 residue below, TECH_DEBT-169). Fee_Compute is
+    // NOT on this path (it has no production caller).
     double commission_amt = binance_json_extract_double(json, "n");
     char comm_asset[8] = {};
     binance_json_extract_str(json, "N", comm_asset, sizeof(comm_asset));
@@ -443,9 +445,10 @@ static inline int ud_parse_execution_report(const char* json, int len,
 //   multi-partial orders book whole. Venue "z" (cumulative) stays unparsed BY
 //   DESIGN on this WS path — "l" (the leg) is the increment the OMS wants; "z"
 //   re-enters at E.1.4's GetStatus reconcile as the cross-check total.
-// A4 (MED→HIGH on BNB-pay, TECH_DEBT-169): the "n"/"N" commission parsed
-//   here is recorded but NOT booked authoritatively (Fee_Compute fabricates
-//   notional×rate downstream); the reconcile path drops commission entirely.
+// A4 (MED→HIGH on BNB-pay, TECH_DEBT-169): a USDT commission parsed here IS
+//   booked authoritatively (OrderManager_HandleFill, D-173); a NON-USDT one
+//   (BNB-pay) falls back to the pre-resolved rate × notional — a fee the venue
+//   did not charge in that asset; the reconcile path drops commission entirely.
 //   Contract-to-be: carry venue commission + asset source-exact on BOTH
 //   the WS and reconcile paths (D-123).
 // A5 (MED, TECH_DEBT-171): venue "S" (side) is never parsed/cross-checked
