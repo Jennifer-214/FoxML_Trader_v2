@@ -14,7 +14,6 @@
 //   - [STRUCT]_[ControllerConfig]
 //   - [FUNCTION]_[ControllerConfig_CapitalRangeSweep] (+ cfg_compile_ok / cfg_capital_gate_ok /
 //       capital_value_out_of_range / cfg_capture_node_{money,raw}_override capital-fault family)
-//   - [FUNCTION]_[Fee_Compute]
 //   - [FUNCTION]_[ControllerConfig_ResolveForCore]
 //   - [FUNCTION]_[ControllerConfig_PopulateCoresFromFlat]
 //   - [FUNCTION]_[ControllerConfig_Default]
@@ -483,8 +482,6 @@ template <unsigned F> struct ControllerConfig {
   // payment in Binance UI (one-time account setting). Logged at boot so
   // the config is visible. 0 = disabled (default).
   uint32_t pay_fees_in_bnb;
-  // Fee_Compute helper — defined after the struct so all fee math sites
-  // share one implementation. See note in main file just below struct.
   Money risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
   // market microstructure filters (initial values - adapted at runtime by P&L
   // regression)
@@ -1641,59 +1638,6 @@ inline FPN_Binary<F> cfg_capture_node_raw_override(ControllerConfig<F>& cfg, con
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[ControllerConfig_CapitalRangeSweep]
-//======================================================================
-
-//======================================================================
-// [FUNCTION]_[Fee_Compute]
-//----------------------------------------------------------------------
-// [TAG]_[[ENGINE] [CFG_FLOW] [CAPITAL_BEARING]]
-// [REFERENCE]_[CLASS]_[26]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[maker/taker fee SSoT — GLOBAL-ONLY scope: per-node paths read o->pre_resolved.fee_rate instead (decision-time binding; Check 10 enforces)]
-//======================================================================
-// [CODE]
-//======================================================================
-template <unsigned F>
-inline Money Fee_Compute(const ControllerConfig<F>* cfg, Money notional, int is_maker) {
-    Money rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
-    return Money_Mul(notional, rate);
-}
-
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [COMMENT]
-//----------------------------------------------------------------------
-// Phase 8 — apply the correct fee rate based on whether the fill was a maker or taker.
-// Single source of truth for fee math on a per-fill basis.
-//
-// Caller-side discipline (CLAUDE.md "Maker/Taker Accuracy" invariant in c7):
-//   - ENTRY fees: pass order->is_maker from the matching fill
-//   - EXIT fees from market sells (TP/SL hits): pass is_maker=0 (always taker)
-//   - EXIT fees from limit sells (Phase 9 hybrid execution, deferred): pass
-//     order->is_maker from the matching exit fill
-//
-// Backtest path: pass is_maker=0 always — backtest simulates as all-taker
-// (documented divergence; backtest maker simulation is Phase 9 work).
-//
-// In legacy cfg mode (only fee_rate set, mirrored to maker+taker), both
-// branches return identical values → behavior matches pre-Phase-8.
-//
-// SCOPE — GLOBAL ONLY (v5.15.5.F.4d.1.B.8 annotation):
-// This helper reads cfg->fee_rate_{maker,taker} which are GLOBAL fields, NOT
-// per-core. Sharded per-core code paths MUST NOT call Fee_Compute() expecting
-// per-core fee rates — instead read from o->pre_resolved.fee_rate (decision-time
-// data binding pattern; captured at submit via Order_BindPreResolved in Order.hpp). Class 26
-// sub-shape B prevention. Fee_Compute() remains canonical for:
-//   - tests (the Phase 8 Maker/Taker Fee Accuracy invariant verification in
-//     tests/controller_test.cpp)
-//   - legacy single_core PortfolioController paths
-//   - global accounting display
-// New per-core consumer MUST NOT introduce a Fee_Compute() call site without
-// switching to o->pre_resolved.fee_rate. Check 10 detects via UNINDEXED-GLOBAL
-// pattern at per-core consumer sites.
-//======================================================================
-// [END_FUNCTION]_[Fee_Compute]
 //======================================================================
 
 //======================================================================

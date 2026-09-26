@@ -2531,7 +2531,8 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         // The fee triple buckets by this flag when the composer books the FillEvent
         // (OrderManager_AccountMakerTakerFee); the fee AMOUNT is the venue's USDT
         // commission or the pre-resolved rate × notional (D-173, HandleFill) —
-        // Fee_Compute is not on this path. is_maker stays at Order_Init's 0 (taker) for synchronous
+        // no separate fee helper is on this path (the global-rate one was deleted
+        // 2026-09-26, TECH_DEBT-349). is_maker stays at Order_Init's 0 (taker) for synchronous
         // REST fills (Phase 02 path) — Binance market orders are taker by def.
         Order_SetIsMaker(o, (bool)cmd.result.is_maker);
         // Phase 8: pick FILLED vs PARTIAL based on Binance "X" field (parsed

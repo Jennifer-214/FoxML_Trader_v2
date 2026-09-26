@@ -385,8 +385,8 @@ static inline int ud_parse_execution_report(const char* json, int len,
 
     // Commission: "n" amount + "N" asset. Carried source-exact; OrderManager_HandleFill books it
     // as THE fee when the asset is the quote (USDT) — D-173 authoritative — and falls back to the
-    // pre-resolved rate × notional otherwise (the A4 residue below, TECH_DEBT-169). Fee_Compute is
-    // NOT on this path (it has no production caller).
+    // pre-resolved rate × notional otherwise (the A4 residue below, TECH_DEBT-169). No separate
+    // fee helper is on this path (the global-rate `Fee_Compute` was deleted 2026-09-26, TECH_DEBT-349).
     double commission_amt = binance_json_extract_double(json, "n");
     char comm_asset[8] = {};
     binance_json_extract_str(json, "N", comm_asset, sizeof(comm_asset));
