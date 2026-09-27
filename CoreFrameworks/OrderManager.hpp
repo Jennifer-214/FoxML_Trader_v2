@@ -110,7 +110,7 @@ namespace tt {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[command-queue discriminator — external threads push Commands; OrderManager_Tick drains on the drainer]
+// [OVERVIEW]_[command-queue discriminator — external threads push Commands; the composer drains them: the phase-separated BookPass drain (live) / OrderManager_Tick (the backtest pump) for the two FILL families, OMS_AccountRingsDrain (compose step 0-acct, both drivers) for the reconcile ALERT ring — 3b(iii), D-489]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -170,6 +170,11 @@ constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 // P4-pre-3b: the per-node result ring depth. PARTITIONS the total above rather than
 // replicating it — see the sizing rationale at the `result_rings` declaration.
 constexpr size_t OMS_RESULT_RING_PER_NODE = OMS_RESULT_QUEUE_SIZE / MAX_EXECUTION_NODES;
+// 3b(iii) (D-478 (a) / D-489): the reconcile ALERT ring's depth. ONE ring, composer-owned — it stays
+// single at the flip (account-level rows have no node lane). Named here beside its siblings so the
+// declaration and its drain share one number; the dead RECONCILE_QUEUE_SIZE in ReconciliationLoop.hpp
+// sized a ring nothing read and retires with it (Leaf 3).
+constexpr size_t OMS_RECONCILE_RING_SIZE = 64;
 static_assert(OMS_RESULT_RING_PER_NODE * MAX_EXECUTION_NODES == OMS_RESULT_QUEUE_SIZE,
               "per-node result depth must PARTITION the old total exactly (capacity conserved, "
               "struct does not grow) — a non-divisor silently changes the OMS stack footprint");
@@ -467,10 +472,11 @@ struct OrderManagerState {
     // Drained after the REST result rings by both consumers.
     alignas(64) OmsCmdRings ws_rings;
 
-    // Reconcile queue (phase 05): reconciler thread is the sole producer,
-    // drainer is the sole consumer. Carries CMD_RECONCILE commands with
-    // drift amounts. OrderManager_Tick drains this third.
-    alignas(64) SPSCRing<Command, 64> reconcile_queue;
+    // Reconcile ALERT ring (phase 05; 3b(iii) D-478 (a) / D-489): the reconciler thread is the sole
+    // producer; the COMPOSER is the sole consumer — OMS_AccountRingsDrain, compose step 0-acct of
+    // EngineCommon_ComposeAndKillEval, both drivers. Carries CMD_RECONCILE advisory alerts (detect-only,
+    // D-216); stays ONE ring at the flip (account-level, no node lane).
+    alignas(64) SPSCRing<Command, OMS_RECONCILE_RING_SIZE> reconcile_queue;
 
     // v4.7.37: per-core submit queues. Producer threads (producer slow-path
     // + per-core slow-path threads in SHARDED per_node_slow execution mode
@@ -2277,7 +2283,7 @@ inline int OMS_EventFunnelDrain(OrderManagerState<F>* oms) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [SUPPORTIVE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the audit-append producer side (P3-c-ii / D-445): route an OrderEvent onto the emitting node's funnel ring (slot < 0 = the -1 non-node sentinel, e.g. reconcile audits — routed to ring 0). NEVER-DROP (audit records): full ring under central topology = inline-drain-then-repush (the emitter IS the drain thread). Null-agg harness = direct Append — Append IS the body either way, the ring is transport only]
+// [OVERVIEW]_[the audit-append producer side (P3-c-ii / D-445): route an OrderEvent onto the emitting node's funnel ring (slot = the emitting order's REAL portfolio slot; the -1 non-node sentinel's ring-0 route was RETIRED at 3b(iii), D-489 / V11 — account-level rows Append composer-direct; a negative slot is a caller bug, handled LOUD). NEVER-DROP (audit records): full ring under central topology = inline-drain-then-repush (the emitter IS the drain thread). Null-agg harness = direct Append — Append IS the body either way, the ring is transport only]
 // [REFERENCE]_[DECISION]_[[D-445]]
 //======================================================================
 // [CODE]
@@ -2290,7 +2296,18 @@ inline void OMS_EventFunnelPush(OrderManagerState<F>* oms, const OrderEvent<F>& 
     }
     const int partial_on = BITMAP_IS_SET(oms->oms_state_flags,
                                          tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
-    const tt::NodeIdx nn{(int16_t)(slot >= 0 ? BITMAP_SLOT_NODE(slot, partial_on) : 0)};
+    if (__builtin_expect(slot < 0, 0)) {
+        // CONTRACT (3b(iii), D-489 / V11): every producer passes a REAL portfolio slot. The -1 sentinel's
+        // ring-0 route is RETIRED — account-level rows Append composer-direct (the reconcile row inside
+        // OMS_AccountRingsDrain, the kill-fatal marker in compose step 0a). Reaching here is a caller BUG:
+        // do the account-level thing rather than index a ring with a negative lane, and say so LOUD.
+        tt::Health_Log(tt::HEALTH_CRITICAL, "oms_funnel_negative_slot", -1,
+                       "OMS_EventFunnelPush called with slot %d (event type %d) — the retired -1 sentinel; "
+                       "appended direct; fix the caller", slot, (int)ev.type);
+        (void)OrderEventLog_Append(&oms->event_log, ev);
+        return;
+    }
+    const tt::NodeIdx nn{(int16_t)BITMAP_SLOT_NODE(slot, partial_on)};
     if (__builtin_expect(tt::SPSCRing_TryPush(&oms->oe_rings[nn], ev), 1)) return;
     (void)OMS_EventFunnelDrain(oms);   // never-drop: drain the prefix inline, then re-push
     (void)tt::SPSCRing_TryPush(&oms->oe_rings[nn], ev);
@@ -2349,7 +2366,16 @@ inline void OMS_CalibFunnelPush(OrderManagerState<F>* oms, const CalibRecord& r,
     }
     const int partial_on = BITMAP_IS_SET(oms->oms_state_flags,
                                          tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
-    const tt::NodeIdx nn{(int16_t)(slot >= 0 ? BITMAP_SLOT_NODE(slot, partial_on) : 0)};
+    if (__builtin_expect(slot < 0, 0)) {
+        // CONTRACT (3b(iii), D-489 / V11): a REAL portfolio slot, always — the sole production caller's
+        // pslot is already a bitmap bit by the time it gets here. The retired -1 route is a caller BUG:
+        // render the row here (the null-agg arm's shape) and say so LOUD rather than index lane -1.
+        tt::Health_Log(tt::HEALTH_CRITICAL, "oms_calib_funnel_negative_slot", -1,
+                       "OMS_CalibFunnelPush called with slot %d — the retired -1 sentinel; rendered direct; fix the caller", slot);
+        CALIB_LOG_EMIT_ROW(oms->calibration_log_file, r);
+        return;
+    }
+    const tt::NodeIdx nn{(int16_t)BITMAP_SLOT_NODE(slot, partial_on)};
     if (__builtin_expect(tt::SPSCRing_TryPush(&oms->calib_rings[nn], r), 1)) return;
     // Full ring: DROP + count (never inline-drain — that would put a node thread on the
     // shared FILE* and on every node's ring). Loud once per occurrence; the counter is the
@@ -2795,8 +2821,11 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
         std::strncpy(recon_event.reason, cmd.result.error_message,
                      sizeof(recon_event.reason) - 1);
         recon_event.reason[sizeof(recon_event.reason) - 1] = '\0';
-        // P3-c-ii: rides the FUNNEL; -1 = the non-node sentinel (routed to ring 0).
-        OMS_EventFunnelPush(oms, recon_event, /*slot=*/-1);
+        // 3b(iii) (D-478 (b) / D-489): COMPOSER-DIRECT — the compose's own step-0a marker shape. This
+        // runs inside OMS_AccountRingsDrain on the composer thread, the sole appender, so a funnel push
+        // would take the slot<0 -> ring-0 convention V11 condemns (ring 0 belongs to node 0's leaves at
+        // the flip). The A21 harness (a bare OMS, no agg) reaches this same line: Append IS the body.
+        (void)OrderEventLog_Append(&oms->event_log, recon_event);
     }
 }
 //======================================================================
@@ -2824,9 +2853,11 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
 // WHY NOT INSIDE DrainIntoBuckets: a pre-bucket sweep would warn-once on an order whose fill is
 // sitting in THIS cycle's bucket, unprocessed — the warning would fire for an order that is about
 // to complete normally, and because the warn is once-per-order that false positive is permanent.
-// The live caller is therefore a named step in EngineSharded_Drainer_BookPass AFTER
-// OrderManager_ProcessBucket_Reconciles, i.e. after this cycle's fills have actually been applied.
-// (3b(iii) re-homes it into OMS_AccountRingsDrain when that lands.)
+// The live caller is therefore a named step in EngineSharded_Drainer_BookPass AFTER the bucket
+// passes, i.e. after this cycle's fills have actually been applied. D-489 (3b(iii)): it STAYS there —
+// a composer-side sweep would RMW Order::flags_packed against the per-node bucket passes post-flip;
+// at Phase 4 it goes per-node over the node's own slot mask, riding that body. Tick step 4 is the
+// backtest's caller; the compose step 0-acct (OMS_AccountRingsDrain) deliberately does NOT run it.
 template <unsigned F>
 inline void OMS_StaleInflightSweep(OrderManagerState<F>* oms) {
     // DETECT-ONLY, LOUD. Live only (paper synth results land same-cycle).
@@ -2870,20 +2901,61 @@ inline void OMS_StaleInflightSweep(OrderManagerState<F>* oms) {
 // [END_FUNCTION]_[OMS_StaleInflightSweep]
 //======================================================================
 
+// Composer_AssertIdentity is defined in EngineCommon.hpp, which sits ABOVE this header in the include
+// graph (it includes us). Declared here so OMS_AccountRingsDrain can carry its own site pin; the
+// definition (same signature) follows in every TU that instantiates the template.
+template <unsigned F>
+inline int Composer_AssertIdentity(AggregatorState<F>& agg, const char* site);
+
+//======================================================================
+// [FUNCTION]_[OMS_AccountRingsDrain]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [LIVE_TRADING] [CONCURRENCY]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the composer's ACCOUNT-level ring drain (3b(iii), D-478 as amended / D-489): pop the reconciler's alert ring to empty and hand each CMD_RECONCILE to OrderManager_ProcessReconcile, whose audit row Appends composer-direct. Compose step 0-acct — after the fill apply (log order = apply order), before the kill reset. ONE ring, ONE consumer, both drivers via the compose; the backtest's FINAL flush runs no compose (moot: no reconciler there). The identity pin inside guards FUTURE callers — a per-node call fires LOUD]
+// [REFERENCE]_[DECISION]_[[D-478] [D-489] [D-445]]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int OMS_AccountRingsDrain(OrderManagerState<F>* oms) {
+    // The pin sits HERE, not only at the compose top: the compose-top pin proves the COMPOSE ran on the
+    // composer; this one proves THIS function did — a future BookPass or node-thread caller would bypass
+    // the former and fire this one LOUD (H22: account-level rows are the composer's, never a node's).
+    // Harness-tolerant: a bare OMS (agg == nullptr, the A21 shape) skips it, as OMS_EventFunnelPush does.
+    if (oms->agg) (void)Composer_AssertIdentity(*oms->agg, "OMS_AccountRingsDrain");
+    int drained = 0;
+    Command cmd;
+    // LOOP-class (branchless-dispatch matrix exception): steady state is ONE empty TryPop; the reconcile
+    // arm is rare by nature (<= one alert per reconciler poll, D-479's table).
+    while (SPSCRing_TryPop(&oms->reconcile_queue, &cmd)) {
+        if (cmd.type == (uint8_t)CMD_RECONCILE) OrderManager_ProcessReconcile(oms, cmd);
+        ++drained;
+    }
+    return drained;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_AccountRingsDrain]
+//======================================================================
+
 //======================================================================
 // [FUNCTION]_[OrderManager_Tick]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CRITICAL]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[per-drain-pass command pump — drains REST/WS/reconcile SPSC rings through the unified dispatcher]
+// [OVERVIEW]_[per-drain-pass command pump (the BACKTEST/test path; the live drainer runs the phase-separated BookPass) — drains the REST + WS FILL families through the unified dispatcher, then the stale-inflight sweep; the reconcile ALERT ring is the composer's (OMS_AccountRingsDrain, compose step 0-acct — 3b(iii), D-489)]
 //======================================================================
 // [CODE]
 //======================================================================
 template <unsigned F>
 inline void OrderManager_Tick(OrderManagerState<F>* oms) {
-    // Drain all three command queues through the unified dispatcher, then run
-    // the stale-inflight age sweep (step 4). Adding a new command source: add
-    // one SPSCRing field, one drain call here, one handler function. No duplication.
+    // Drain the two FILL families (REST + WS) through the unified dispatcher, then run the
+    // stale-inflight age sweep (step 4). The reconcile ALERT ring is NOT drained here since 3b(iii):
+    // account-level rings belong to the composer (OMS_AccountRingsDrain, both drivers via the compose).
+    // Adding a new FILL source: one ring field, one drain call here, one handler function.
     Command cmd;
 
     // 1. REST fills (adapter worker thread)
@@ -2900,11 +2972,7 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
             OrderManager_ProcessFillCommand(oms, cmd);
     }
 
-    // 3. Reconciliation corrections (reconciler thread)
-    while (SPSCRing_TryPop(&oms->reconcile_queue, &cmd)) {
-        if (cmd.type == (uint8_t)CMD_RECONCILE)
-            OrderManager_ProcessReconcile(oms, cmd);
-    }
+    // (3. was the reconcile ring — moved to the composer's compose step 0-acct at 3b(iii), D-489.)
 
     // 4. The stale-inflight age sweep — the SAME helper the live drainer calls
     //    (OMS_StaleInflightSweep, above). Tick is the BACKTEST/test path; the live path reaches it
@@ -2916,10 +2984,10 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// Drainer thread calls this on every drain pass. Drains three SPSC rings
-// sequentially (REST fills, WS fills, reconcile corrections) and dispatches
-// each command to the appropriate handler. Adding a new command source is
-// one new SPSCRing field + one drain call here + one handler function.
+// The BACKTEST driver calls this per tick (the live drainer runs the phase-separated BookPass
+// instead). Drains the two FILL families (REST result_rings, WS ws_rings) and dispatches each
+// command to the fill handler; the reconcile ALERT ring is the composer's since 3b(iii) (D-489).
+// Adding a new FILL source is one ring field + one drain call here + one handler function.
 //======================================================================
 // [END_FUNCTION]_[OrderManager_Tick]
 //======================================================================

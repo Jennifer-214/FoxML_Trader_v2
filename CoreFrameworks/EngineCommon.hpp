@@ -422,6 +422,16 @@ inline void EngineCommon_ComposeAndKillEval(EventLoopState<F>& state,
     //    leaves emit — a no-op pop until then. ──
     (void)EngineCommon_FillRingsApply(state, oms);
 
+    // ── 0-acct. Drain the ACCOUNT-level rings (3b(iii), D-478 (b) / D-489): the reconciler's alert
+    //    ring → OrderManager_ProcessReconcile, whose audit row Appends composer-direct (the step-0a
+    //    marker's shape). AFTER 0-pre so the event log's order equals the apply order — this cycle's
+    //    fill + funnel rows, then the reconcile row, then any 0a marker (ACC-6) — and BEFORE the kill
+    //    reset/eval so the day E.1.4 books a correction it precedes the eval + pack. Both drivers reach
+    //    this compose (the live cycle tail + the shutdown tail; the backtest per slow cadence — its
+    //    FINAL flush runs no compose, moot while the backtest has no reconciler). The stale-inflight
+    //    sweep stays in BookPass (D-489), not here. ──
+    (void)OMS_AccountRingsDrain(&oms);
+
     // ── 0. Apply pending kill-RESET requests (single consumer: this thread) ──
     {
         uint32_t rm = agg.kill_reset_mask.exchange(0, std::memory_order_acq_rel);

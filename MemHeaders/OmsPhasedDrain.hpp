@@ -342,25 +342,24 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
         g_ws_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 
-    // 3. Reconcile_queue (reconciler thread) — branchless dispatch via fn pointer table.
-    while (SPSCRing_TryPop(&oms->reconcile_queue, &cmd)) {
-        g_reconcile_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
-    }
+    // (3. was the reconcile ring — the composer's since 3b(iii): OMS_AccountRingsDrain, compose step
+    //  0-acct, D-478 (a)/(b) / D-489. Phase C's bucket, handler and dispatch table are DEAD and go in
+    //  the next leaf.)
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// Drain all 3 SPSC rings into per-direction buckets.
+// Drain the two FILL ring families into per-direction buckets.
 //
 // Pass 1 — REST result_rings + WS ws_rings (both per-node): each fill command's
 // Order.type determines whether it routes to close_bucket or open_bucket.
 // Order.type is STABLE between drain time + process time (set at order
 // creation; never mutated during fills); safe to classify at drain time.
 //
-// Pass 2 — reconcile_queue: all events route to reconcile_bucket (these
-// are balance adjustments; not direction-typed).
+// (The reconcile ALERT ring is NOT drained here since 3b(iii) — it is the composer's, drained by
+// OMS_AccountRingsDrain at compose step 0-acct: D-478 (a)/(b), D-489.)
 //
 // Bucket overflow is structurally UNREACHABLE — and the previous version of this comment was not
 // entitled to that claim. It read "IMPOSSIBLE BY DESIGN: bucket capacity matches ring capacity",

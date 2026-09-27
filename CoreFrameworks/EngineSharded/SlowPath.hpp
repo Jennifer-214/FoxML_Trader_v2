@@ -203,7 +203,7 @@ constexpr int ENGINE_SHUTDOWN_TAIL_PASSES = 16;
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
 // [THREAD]_[[COMPOSER_WRITER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[ONE booking pass of the live drainer/composer cycle — pump TradeEvents + GUI manual closes into the submit queues, OMS_DrainSubmit, then the phase-separated drain (closes -> post-fill -> opens -> reconciles); returns the pump's drained count (the idle-yield signal). The main loop AND the shutdown tail run this SAME body — extracted at E.1.3 3b(ii) commit 3 so the tail is a named, testable unit instead of a copy of the loop inside a lambda]
+// [OVERVIEW]_[ONE booking pass of the live drainer/composer cycle — pump TradeEvents + GUI manual closes into the submit queues, OMS_DrainSubmit, then the phase-separated drain (closes -> post-fill -> opens; the reconcile ALERT ring is the compose step 0-acct's since 3b(iii), D-489); returns the pump's drained count (the idle-yield signal). The main loop AND the shutdown tail run this SAME body — extracted at E.1.3 3b(ii) commit 3 so the tail is a named, testable unit instead of a copy of the loop inside a lambda]
 // [REFERENCE]_[DECISION]_[[D-440] [D-478]]
 // [REFERENCE]_[DESIGN_SPEC]_[phase-separated-drainer-for-safe-cross-temporal-derives]
 //======================================================================
@@ -232,12 +232,12 @@ inline int EngineSharded_Drainer_BookPass(
     OMS_DrainSubmit(&oms, dc.drain_count);
     // Phase-separated drain (replaces the unified OrderManager_Tick on the live path): A closes ->
     // A.5 EngineCommon_DrainPostFill (reads CLOSE-form Position state — unlocks the Phase G+H
-    // derives) -> B opens (Portfolio_OpenSlot fires here) -> C reconciles (phase-invariant safe).
+    // derives) -> B opens (Portfolio_OpenSlot fires here). Phase C (the reconcile bucket) RETIRED at
+    // 3b(iii): the reconcile ALERT ring is drained by the compose step 0-acct (OMS_AccountRingsDrain, D-489).
     OrderManager_DrainIntoBuckets(&oms, buckets);
     OrderManager_ProcessBucket_Closes(&oms, buckets);
     EngineCommon_DrainPostFill(state, oms, cfg);
     OrderManager_ProcessBucket_Opens(&oms, buckets);
-    OrderManager_ProcessBucket_Reconciles(&oms, buckets);
     // The stale-inflight age sweep — THE LIVE CALLER (3b(ii) commit 4 leaf 4). Until now the
     // detector lived only in OrderManager_Tick step 4, which the live engine never calls: the
     // drainer runs this pass instead. So a transport-gap detector could only fire in a BACKTEST,
@@ -247,6 +247,8 @@ inline int EngineSharded_Drainer_BookPass(
     // Placed AFTER the bucket passes, not inside DrainIntoBuckets, and the ordering is the point:
     // a pre-bucket sweep would warn on an order whose fill is sitting in THIS cycle's bucket
     // unapplied, and because the warn is once-per-order that false positive would be permanent.
+    // D-489 (3b(iii)): it STAYS here — a composer-side sweep would RMW Order::flags_packed against the
+    // per-node bucket passes post-flip; at Phase 4 it goes per-node over the node's own slot mask.
     OMS_StaleInflightSweep(&oms);
     return total_drained;
 }

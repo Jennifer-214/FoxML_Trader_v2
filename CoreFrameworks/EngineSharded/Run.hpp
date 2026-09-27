@@ -1602,9 +1602,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             //      OrderManager_Submit calls before Phase B).
             //   2. OMS_DrainSubmit — drainer (sole Submit caller) pops the
             //      queues and calls Submit serially. Preserves OMS contract.
-            //   3. OrderManager_DrainIntoBuckets + ProcessBucket_{Closes, Opens, Reconciles}
-            //      — the phase-separated drain of result_rings / ws_rings /
-            //      reconcile_queue (v5.15.5.C.4 Phase F; the unified OrderManager_Tick
+            //   3. OrderManager_DrainIntoBuckets + ProcessBucket_{Closes, Opens}
+            //      — the phase-separated drain of result_rings / ws_rings (v5.15.5.C.4 Phase F;
+            //      the reconcile ALERT ring is the compose step 0-acct's since 3b(iii), D-489; the unified OrderManager_Tick
             //      this comment used to name is the BACKTEST driver's pump today).
             //   4. EngineCommon_DrainPostFill — applies per-node NodeContext updates
             //      from FillRecords (Phase A.5, between closes and opens).

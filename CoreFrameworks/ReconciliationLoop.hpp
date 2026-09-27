@@ -103,13 +103,14 @@ struct ReconciliationLoopState {
 //     seqlock read — the old direct oms->balance race is CLOSED, census #3)
 //   - Excludes in-flight orders from the comparison (SUBMITTED/ACKNOWLEDGED
 //     orders have committed capital that hasn't been confirmed yet)
-//   - On drift beyond tolerance: pushes CMD_RECONCILE into a dedicated
-//     SPSC ring. The drainer's OrderManager_Tick drains it and applies
-//     the correction.
+//   - On drift beyond tolerance: pushes CMD_RECONCILE into the OMS's reconcile ALERT
+//     ring. The COMPOSER drains it (OMS_AccountRingsDrain, compose step 0-acct, both
+//     drivers — 3b(iii), D-489) and OrderManager_ProcessReconcile raises the DETECT-ONLY
+//     alert + audit row (D-216; no correction is applied to the ledger).
 //
 // Threading:
-//   Reconciler thread is the sole producer of reconcile_queue.
-//   Drainer thread is the sole consumer. SPSC contract holds.
+//   Reconciler thread is the sole producer of oms->reconcile_queue.
+//   The composer thread is the sole consumer. SPSC contract holds.
 //
 // The reconciler's REST instance connects to the same host with the same
 // credentials as the adapter workers, but on its own socket/SSL session.
