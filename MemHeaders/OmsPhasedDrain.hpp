@@ -7,13 +7,13 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[phase-separated drainer foundation — drain 3 SPSC rings into per-direction buckets once, then CLOSE -> DrainPostFill -> OPEN -> reconcile phases; H20 fn-pointer dispatch per queue]
+// [OVERVIEW]_[phase-separated drainer foundation — drain the two per-node FILL ring families into per-direction buckets once, then CLOSE -> DrainPostFill -> OPEN phases; H20 fn-pointer dispatch per queue]
 // [CONTAINS]
 //   - [STRUCT]_[OmsDrainBuckets]
 //   - [FUNCTION]_[OmsDrainBuckets_Reset]
 //   - [FUNCTION]_[OrderType_IsClose]
-//   - [FUNCTION]_[OrderManager_DrainIntoBuckets]   (+ the 3 drain-cmd handlers + 3 dispatch tables ride)
-//   - [FUNCTION]_[OrderManager_ProcessBucket_Closes]   (+ Opens / Reconciles family)
+//   - [FUNCTION]_[OrderManager_DrainIntoBuckets]   (+ the 2 drain-cmd handlers (bucket / noop) + 2 dispatch tables ride)
+//   - [FUNCTION]_[OrderManager_ProcessBucket_Closes]   (+ Opens)
 // [REFERENCE]_[DESIGN_SPEC]_[[phase-separated-drainer-for-safe-cross-temporal-derives] [branchless-dispatch-discipline]]
 // [REFERENCE]_[INVARIANT]_[H20]
 //======================================================================================================
@@ -29,46 +29,48 @@
 // CLOSE form for safe derive-from-Position semantics (v5.15.5.C.4 Phase G+H).
 //
 // FIX: drain commands into per-direction buckets ONCE (preserving arrival
-// order WITHIN each direction), then process in 3 phases interleaved with
+// order WITHIN each direction), then process in phases interleaved with
 // consumer passes:
 //
 //   Phase A — process CLOSE bucket (all SELL fills)
 //   Phase A.5 — DrainPostFill (Position state is in CLOSE form; derive safe)
 //   Phase B — process OPEN bucket (all BUY fills; Portfolio_OpenSlot fires)
 //   Phase B.5 (optional) — DrainPostEntry for ENTRY-side derives
-//   Phase C — process Reconcile bucket (balance adjustments; phase-invariant
-//             safe since reconcile doesn't touch Position)
 //
-// Drainer thread uses these phased helpers; `OrderManager_Tick` is preserved
-// as a backward-compat wrapper for tests that don't need phase-separation
-// semantics (no DrainPostFill interleave required).
+// There is no reconcile phase since 3b(iii) (D-478 (a)/(b), D-489): the reconcile ALERT ring is the
+// composer's, drained by OMS_AccountRingsDrain at compose step 0-acct — detect-only (D-216) — so
+// Phase C (a 64-slot reconcile bucket + its handler + dispatch table) was cut at Leaf 2, 2026-09-26.
+//
+// Drainer thread uses these phased helpers; `OrderManager_Tick` stays the backtest driver's
+// per-tick consumer (`ShardedBacktestDriver.hpp`, + tests) — no phase separation there (no
+// DrainPostFill interleave required on that path).
 //
 // LATENCY (the latency-cost discipline):
-//   - Drain pass: 3 rings × ~few ns/event = ~10-20 ns per cycle at typical
+//   - Drain pass: 2 ring families × ~few ns/event = ~10-20 ns per cycle at typical
 //     1-5 events/cycle. Marginal vs prior single-pass.
 //   - Bucket-classification cost: 1 indexed read of `oms->orders[slot].type`
 //     per command + 1 bit-test (branchless `(type & 1) == 1` exploits the
 //     OrderType enum's even=BUY/odd=SELL invariant). ~2-3 cycles per command.
 //   - Process passes: identical instructions to prior `OrderManager_Tick`,
-//     just split into 3 mini-loops. Net same dispatch cost.
+//     just split into 2 mini-loops. Net same dispatch cost.
 //
 // HOT PATH UNTOUCHED. Drainer aggregate latency: net +10-20 ns per cycle
 // worst case at high event burst. Within slow-path 100μs budget by 3+
 // orders of magnitude.
 //
-// SIZE: OmsDrainBuckets is 278,552 B (1,088 slots × 256 B Command: close + open
+// SIZE: OmsDrainBuckets is 262,160 B (1,024 slots × 256 B Command: close + open
 // at OMS_BUCKET_DEPTH = 512 each — the Σ of both ring families since 3b(ii)
-// commit 4 leaf 3 — + 64 for reconciles; pinned by the static_assert under the
-// struct and the tool-owned [SIZE] tag). Stack-allocated once at drainer thread entry; reused per
+// commit 4 leaf 3; the 64-slot reconcile bucket left with Phase C at 3b(iii)
+// Leaf 2; pinned by the static_assert under the struct and the tool-owned [SIZE] tag). Stack-allocated once at drainer thread entry; reused per
 // cycle — fine on the default 8 MB thread stack, and per-cycle touch cost is
-// bounded by ACTUAL event count (Reset zeroes 3 ints; only written slots are
+// bounded by ACTUAL event count (Reset zeroes 2 ints; only written slots are
 // touched), not capacity. NOT added to OmsState (transient per-cycle
 // scratch; no need to persist or share across threads).
 //======================================================================================================
 
 #pragma once
 
-#include "../CoreFrameworks/OrderManager.hpp"  // OrderManagerState<F>, Command, OMS_RESULT_QUEUE_SIZE, ProcessFillCommand, ProcessReconcile
+#include "../CoreFrameworks/OrderManager.hpp"  // OrderManagerState<F>, Command, OMS_RESULT_QUEUE_SIZE, ProcessFillCommand
 #include "../CoreFrameworks/Order.hpp"          // OrderType enum (ORDER_MARKET_BUY/SELL/LIMIT_BUY/SELL)
 
 #include <cstdint>
@@ -80,7 +82,7 @@ namespace tt {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[per-direction Command buckets (close/open at OMS_BUCKET_DEPTH, the Σ of both ring families: 512; reconcile at 64) + counts — drainer-thread stack scratch, reset per cycle]
+// [OVERVIEW]_[per-direction Command buckets (close/open at OMS_BUCKET_DEPTH, the Σ of both ring families: 512) + counts — drainer-thread stack scratch, reset per cycle]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -116,21 +118,19 @@ struct OmsDrainBuckets {
     // Σ(both ring families) × sizeof(Command) for open (BUY) fills
     Command open_bucket[OMS_BUCKET_DEPTH];
     int     open_n;
-    // 64 × sizeof(Command) for reconcile corrections
-    Command reconcile_bucket[64];
-    int     reconcile_n;
 };
 // SIZE PIN — amendment (m)'s third row, landed 2026-09-26 at the post-commit-4 pickup. Leaf 4 pinned
 // its two siblings (`OrderManagerState<64>`, `BinanceUserDataState`) and the handoff counted this one
 // as landed when only the tool-owned [SIZE] tag was. Same reason the siblings are pins and not
 // `check_struct_size_budget.py` rows: this header cannot link the tool's standalone probe
 // (TECH_DEBT-309), so the coverage lands in the stronger form the manifest prescribes (compile-time
-// > CI). The figure is derived, not typed: 2 × OMS_BUCKET_DEPTH (512) × 256 B + 64 × 256 B + three
-// int counters, each padded to the struct's 8-byte alignment. Re-derive after a deliberate layout
-// change; a surprise here is a silent growth of the composer's stack scratch.
-static_assert(sizeof(OmsDrainBuckets) == 278552,
-              "OmsDrainBuckets size moved. Expected 278,552 B (3b(ii) commit 4 leaf 3 Σ-sized the "
-              "close/open buckets to OMS_BUCKET_DEPTH = 512 each; the 64-deep reconcile bucket stays).");
+// > CI). The figure is derived, not typed: 2 × OMS_BUCKET_DEPTH (512) × 256 B + two int counters,
+// each padded to the struct's 8-byte alignment (the 64 × 256 B reconcile bucket left with Phase C
+// at 3b(iii) Leaf 2 — the compiler re-derived the pin, 278,552 → 262,160). Re-derive after a
+// deliberate layout change; a surprise here is a silent growth of the composer's stack scratch.
+static_assert(sizeof(OmsDrainBuckets) == 262160,
+              "OmsDrainBuckets size moved. Expected 262,160 B (3b(ii) commit 4 leaf 3 Σ-sized the "
+              "close/open buckets to OMS_BUCKET_DEPTH = 512 each; the reconcile bucket is gone since 3b(iii)).");
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -142,21 +142,21 @@ static_assert(sizeof(OmsDrainBuckets) == 278552,
 // capacity, 3b(ii) commit 4 leaf 3) for close + open buckets — worst case every
 // command from BOTH families in one cycle is the same direction, so the bound
 // stage cannot overflow on a legitimate burst (its LOUD-FATAL is the pin's guard,
-// not an expected path). Reconcile bucket sized at 64 to match `reconcile_queue`.
+// not an expected path). No reconcile bucket since 3b(iii): the alert ring is the composer's.
 //
 // Stack-allocated by drainer thread at thread entry; reset per cycle by
-// DrainIntoBuckets. 278,552 B total (Command is 256 B; see the [DERIVED]
+// DrainIntoBuckets. 262,160 B total (Command is 256 B; see the [DERIVED]
 // quartet + the static_assert) — within the default 8 MB thread stack; per-cycle touch cost is
 // bounded by actual event count, not capacity.
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-06]
+// [UPDATED]_[2026-09-26]
 //----------------------------------------------------------------------
-// [SIZE]_[278552B]
+// [SIZE]_[262160B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[4353]
-// [STRADDLE]_[unverified: close_bucket open_bucket reconcile_bucket]
+// [CACHE_LINES]_[4097]
+// [STRADDLE]_[unverified: close_bucket open_bucket]
 //======================================================================
 // [END_STRUCT]_[OmsDrainBuckets]
 //======================================================================
@@ -166,14 +166,13 @@ static_assert(sizeof(OmsDrainBuckets) == 278552,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[zero the 3 bucket counts — top of DrainIntoBuckets each cycle]
+// [OVERVIEW]_[zero the 2 bucket counts — top of DrainIntoBuckets each cycle]
 //======================================================================
 // [CODE]
 //======================================================================
 inline void OmsDrainBuckets_Reset(OmsDrainBuckets* b) {
     b->close_n = 0;
     b->open_n = 0;
-    b->reconcile_n = 0;
 }
 //======================================================================
 // [END_CODE]
@@ -263,30 +262,6 @@ inline void handle_drain_bucket_cmd(const Command& cmd,
     }
 }
 
-// Reconcile-bucket handler.
-template <unsigned F>
-inline void handle_drain_reconcile_cmd(const Command& cmd,
-                                         OrderManagerState<F>* oms,
-                                         OmsDrainBuckets* b) {
-    (void)oms;
-    const int  n         = b->reconcile_n;
-    const bool in_bounds = (n < 64);
-    static Command DUMMY;
-    Command*   target    = in_bounds ? &b->reconcile_bucket[n] : &DUMMY;
-    *target              = cmd;
-    b->reconcile_n       = n + (in_bounds ? 1 : 0);
-    if (__builtin_expect(!in_bounds, 0)) {
-        // Same reasoning as the fill buckets, one severity down: a reconcile CORRECTION is not a
-        // fill, so losing one does not silently mis-book capital — the next pass re-detects the
-        // drift (the `corrections_dropped` counter + char (9) land with 3b(iii); neither exists at HEAD). It is still an engine-side loss and still gets
-        // a durable line rather than only a stderr print that no post-mortem will ever see.
-        tt::Health_Log(tt::HEALTH_WARN, "drain_reconcile_overflow", -1,
-                       "reconcile bucket (size=64) full — correction for order %llu DROPPED; the "
-                       "next reconcile pass re-detects the drift",
-                       (unsigned long long)cmd.order_id);
-    }
-}
-
 // Noop handler — wrong-type cmds land here per queue contract.
 template <unsigned F>
 inline void handle_drain_noop_cmd(const Command& cmd,
@@ -296,7 +271,8 @@ inline void handle_drain_noop_cmd(const Command& cmd,
 }
 
 // Per-queue dispatch tables — 16 entries (cmd.type & 0xF mask) for future enum-drift safety.
-// CommandType: 0=CMD_FILL_RESULT, 1=CMD_WS_FILL, 2=CMD_RECONCILE.
+// CommandType: 0=CMD_FILL_RESULT, 1=CMD_WS_FILL. (2=CMD_RECONCILE rides the composer's alert ring,
+// never a drainer queue — 3b(iii); a stray one here lands on the noop row by the mask contract.)
 template <unsigned F>
 inline const DrainCmdHandler<F> g_rest_queue_dispatch[16] = {
     handle_drain_bucket_cmd<F>,    // 0 CMD_FILL_RESULT
@@ -311,15 +287,6 @@ inline const DrainCmdHandler<F> g_ws_queue_dispatch[16] = {
     handle_drain_noop_cmd<F>,      // 0
     handle_drain_bucket_cmd<F>,    // 1 CMD_WS_FILL
     handle_drain_noop_cmd<F>,      // 2
-    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
-    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
-};
-
-template <unsigned F>
-inline const DrainCmdHandler<F> g_reconcile_queue_dispatch[16] = {
-    handle_drain_noop_cmd<F>,      // 0
-    handle_drain_noop_cmd<F>,      // 1
-    handle_drain_reconcile_cmd<F>, // 2 CMD_RECONCILE
     handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
     handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
 };
@@ -343,8 +310,8 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
     }
 
     // (3. was the reconcile ring — the composer's since 3b(iii): OMS_AccountRingsDrain, compose step
-    //  0-acct, D-478 (a)/(b) / D-489. Phase C's bucket, handler and dispatch table are DEAD and go in
-    //  the next leaf.)
+    //  0-acct, D-478 (a)/(b) / D-489. Phase C — its bucket, handler and dispatch table — left with
+    //  it at Leaf 2.)
 }
 //======================================================================
 // [END_CODE]
@@ -383,7 +350,7 @@ inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the phase-processor family (Opens / Reconciles ride) — Phase A closes BEFORE DrainPostFill, Phase B opens AFTER, Phase C reconciles phase-invariant]
+// [OVERVIEW]_[the phase-processor family (Opens rides) — Phase A closes BEFORE DrainPostFill, Phase B opens AFTER]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -411,18 +378,6 @@ inline void OrderManager_ProcessBucket_Opens(OrderManagerState<F>* oms,
     }
 }
 
-//------------------------------------------------------------------
-// Process reconcile corrections (Phase C). Balance adjustments only; no
-// Position mutation. Phase-invariant safe — can run before, between, or
-// after Phase A/A.5/B without affecting Phase F invariants.
-//------------------------------------------------------------------
-template <unsigned F>
-inline void OrderManager_ProcessBucket_Reconciles(OrderManagerState<F>* oms,
-                                                   OmsDrainBuckets* b) {
-    for (int i = 0; i < b->reconcile_n; ++i) {
-        OrderManager_ProcessReconcile(oms, b->reconcile_bucket[i]);
-    }
-}
 //======================================================================
 // [END_CODE]
 //======================================================================

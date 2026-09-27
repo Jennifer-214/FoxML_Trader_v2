@@ -1565,7 +1565,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                          &cfg, &latest_tick, &paper_reset_in_progress, shared_ptr] {
         // v5.15.5.C.4 Phase T1: &cfg added to capture list for DrainerConstants_Init
         // v5.15.5.C.4 Phase F — drainer-local bucket arrays for phase-separated
-        // dispatch. ~279 KB stack allocation (OmsDrainBuckets: 278,552 B, pinned; the "~7 KB" this
+        // dispatch. ~256 KB stack allocation (OmsDrainBuckets: 262,160 B, pinned; the "~7 KB" this
         // comment carried was the pre-.E.1.3 figure); reused per cycle (Reset at top of
         // DrainIntoBuckets). NOT added to OmsState (transient per-cycle scratch).
         tt::OmsDrainBuckets drain_buckets;

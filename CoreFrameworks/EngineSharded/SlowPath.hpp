@@ -209,7 +209,7 @@ constexpr int ENGINE_SHUTDOWN_TAIL_PASSES = 16;
 //======================================================================
 // [CODE]
 //======================================================================
-// Buckets by POINTER: the caller owns the ~279 KB (278,552 B, pinned) OmsDrainBuckets scratch (the drainer lambda's
+// Buckets by POINTER: the caller owns the ~256 KB (262,160 B, pinned) OmsDrainBuckets scratch (the drainer lambda's
 // stack local); a second instance here would double the working set for nothing. `now_tick` is
 // the producer's tick count at the pass (the pump's cooldown/spacing clock). NOT the compose:
 // the money-flag drain, EngineCommon_ComposeAndKillEval, the composer-executed paper reset and
