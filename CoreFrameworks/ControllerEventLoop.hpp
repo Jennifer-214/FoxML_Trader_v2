@@ -1026,10 +1026,10 @@ struct alignas(64) EventLoopState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-06]
-// [SIZE]_[791168B]
+// [UPDATED]_[2026-09-27]
+// [SIZE]_[799360B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[12362]
+// [CACHE_LINES]_[12490]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[EventLoopState]
@@ -3843,7 +3843,7 @@ template <unsigned F>
 inline int EventLoop_FlattenAll(EventLoopState<F>* state,
                                  OrderManagerState<F>* oms,
                                  const tt::NodeArray<PerNodeCfg<F>, MAX_EXECUTION_NODES>& nodes,   // E.1.3 P0/TD-299: typed (REQUIRED — ref, not nullable)
-                                 double current_price,
+                                 Money price,       // E.1.3 P4-pre-7 (D-490): Money end to end — the D-103 double ingress bridge lives at the DOUBLE ingress (CheckWsStaleness), not here
                                  int reason_code) {
     // v5.15.5.F.4c.3 WIP2d-1.B.1: `cores` REQUIRED — per-core array pointer (caller passes
     // `cfg.nodes`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core array."
@@ -3852,12 +3852,8 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
     // A3 (.E.0.10): snapshot the requested count BEFORE the loop consumes `bm`, so a
     // submit_queue-full shortfall (emergency + partials) is made visible, not silently lost.
     const int requested = __builtin_popcount((unsigned)bm);
-    // event_price is for log/audit (the actual market fill happens at
-    // exchange-side price). FPN_Zero on degenerate price preserves
-    // existing OMS conventions.
-    Money price_fpn = (current_price > 0.0)
-        ? Money{ money_from_double_payload(current_price) }
-        : Money_Zero();
+    // event_price is for log/audit (the actual market fill happens at exchange-side price); a
+    // degenerate price arrives as the caller's Money_Zero() — the OMS convention is unchanged.
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     while (bm) {
@@ -3866,7 +3862,6 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         // Branchless (H20): slot → owning node via the shared Sharded_SlotNode (pure ALU shift by
         // partial_on ∈ {0,1}; no cmov — the accessor is THE single source, D-294/D-295).
         int logical_core = (int)Sharded_SlotNode(tt::SlotIdx{(int16_t)slot}, partial_on);
-        Money qty = oms->portfolio.positions[slot].quantity;
         // D-470 (cascade C3) — RESOLVED, matching the entry submit.
         uint8_t sid = state->nodes[tt::NodeIdx{(int16_t)logical_core}].resolved_strategy_id;
         // A8 (.E.0.10): the leg index is meaningful ONLY under partials (even slot = leg A,
@@ -3875,14 +3870,17 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         // mislabel odd-numbered STANDALONE slots as leg B when partials are OFF. No
         // Order_GetLeg consumer reads this yet → correct-of-intent future-proofing, not a live fix.
         uint8_t leg = (uint8_t)((slot & 1) & partial_on);
-        // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
+        // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper; E.1.3 P4-pre-7 (D-490) —
+        // through the per-slot KERNEL OMS_PushExitResolvedQty (qty re-derived there + the F-096
+        // zero-qty guard: an ACTIVE zero-qty slot is a corrupt state and now shows as a SHORTFALL
+        // below, never as a zero-qty SELL).
         // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for Order_BindPreResolved at submit.
         // A3 (.E.0.10): count what ACTUALLY queued — OMS_PushExitForSlot forwards
         // OMS_PushSubmit's success bool. Under a full submit_queue this push can fail; the
         // prior unconditional `submitted++` reported it as flattened while the leg stayed
         // OPEN on the emergency path.
-        submitted += (int)tt::OMS_PushExitForSlot(oms, (int16_t)slot, qty, sid, price_fpn,
-                                                  leg, &nodes[tt::NodeIdx{(int16_t)logical_core}]);
+        submitted += (tt::OMS_PushExitResolvedQty(oms, (int16_t)slot, sid, price, leg,
+                                                  &nodes[tt::NodeIdx{(int16_t)logical_core}]) > 0);
     }
     if (submitted < requested) {
         // A3 (.E.0.10): the durable HONEST-COUNT half of the half-flatten fix — make the
@@ -3897,7 +3895,7 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         std::fprintf(stderr,
             "[OMS] FlattenAll: %d position(s) submitted "
             "(reason=%d, price=%.2f)\n",
-            submitted, reason_code, current_price);
+            submitted, reason_code, Money_ToDouble(price));
     }
     return submitted;
 }
@@ -3982,8 +3980,11 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
         (double)gap_us / 1.0e6,
         cfg.ws_dead_time_flatten_threshold_secs,
         cfg.recovery_delay_secs);
-    return EventLoop_FlattenAll(state, state->oms, cfg.nodes, current_price,
-                                 /*reason*/1);
+    // E.1.3 P4-pre-7 C1: FlattenAll takes Money — the D-103 ingress bridge moved here from its body.
+    // (C2 replaces this direct call with the winner's ExitReq; the bridge then lives at that site.)
+    const Money flatten_price = (current_price > 0.0) ? Money{ money_from_double_payload(current_price) }
+                                                      : Money_Zero();
+    return EventLoop_FlattenAll(state, state->oms, cfg.nodes, flatten_price, /*reason*/1);
 }
 
 //------------------------------------------------------------------------------

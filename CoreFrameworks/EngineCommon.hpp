@@ -11,6 +11,7 @@
 //   - [FUNCTION]_[EngineCommon_ApplyBnbDiscount]
 //   - [FUNCTION]_[EngineCommon_BootGlobal]
 //   - [FUNCTION]_[EngineCommon_BootPerCore]
+//   - [FUNCTION]_[EngineCommon_DrainExitRequests]
 //   - [FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
 //   - [FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
 //======================================================================================================
@@ -789,11 +790,85 @@ inline void EngineCommon_EmitTradeRow(OrderManagerState<F>& oms, const EmitRecor
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[EngineCommon_DrainExitRequests]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CONCURRENCY]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [SYNC]_[SPSC]
+// [REFERENCE]_[DECISION]_[[D-490]]
+// [REFERENCE]_[INVARIANT]_[H22]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[step 0 of the composer's event pump (E.1.3 P4-pre-7): pop every registered node's ExitReq ring IN RING ORDER n=0..N (FIFO within each) and push the SELL through the per-slot kernel — qty re-derived on the owner thread, sid/leg/price CARRIED; a FLATTEN element runs EventLoop_FlattenAll at the carried price; the H22 (slot belongs to node n) / active / identity (entry_timestamp_us) / zero-qty guards are COUNTED + skipped; the predictor trio is SET only after a successful push. The composer is thereby the SOLE submit_queues producer]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int EngineCommon_DrainExitRequests(EventLoopState<F>& state,
+                                          OrderManagerState<F>& oms,
+                                          const ControllerConfig<F>& cfg,
+                                          int partial_on) {
+    int pushed = 0;
+    for (int n = 0; n < state.registered_count; ++n) {
+        const tt::NodeIdx nn{(int16_t)n};
+        ExitReq req;
+        while (SPSCRing_TryPop(&state.agg.exit_req_rings[nn], &req)) {
+            if (req.reason == EXIT_REQ_FLATTEN_WS) {
+                // The whole-book flatten rides the CAS winner's own ring; its slot field is ignored.
+                // Dormant live (TD-338) + cfg-forbidden in the backtest; the mechanism is unit-pinned
+                // (char 3). flatten_pending / recovery_until_us stay the requester's (CheckWsStaleness)
+                // — the drain only EXECUTES.
+                pushed += EventLoop_FlattenAll(&state, &oms, cfg.nodes, req.price, (int)req.reason);
+                continue;
+            }
+            const int slot = (int)req.slot;
+            // H22 — node n requests ONLY its own slots. Anything else is a programming error:
+            // counted, LOUD, skipped (never sell a stranger's position off a mis-indexed ring).
+            if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS ||
+                (int)Sharded_SlotNode(req.slot, partial_on) != n) {
+                const uint64_t k = oms.exit_requests_foreign.fetch_add(1, std::memory_order_relaxed) + 1;
+                const int owner = (slot >= 0 && slot < MAX_PORTFOLIO_POSITIONS)
+                                ? (int)Sharded_SlotNode(req.slot, partial_on) : -1;
+                Health_Log(HEALTH_CRITICAL, "exit_request_foreign", n,
+                           "exit request on node %d's ring names slot %d (owner node %d) — H22 violation, SKIPPED (total %llu)",
+                           n, slot, owner, (unsigned long long)k);
+                fprintf(stderr, "[composer] exit request FOREIGN: node %d ring, slot %d (owner %d) — skipped (total %llu)\n",
+                        n, slot, owner, (unsigned long long)k);
+                continue;
+            }
+            // CC-2 — the request was decided against ONE position. If that slot closed (inactive)
+            // or closed + re-opened (the identity moved) underneath the request, it is STALE: skip,
+            // never sell the NEW position on the OLD decision. The requester reads the identity
+            // FIRST, so a re-open before its read makes every later input consistent with the new
+            // position, and a re-open after it lands here.
+            if (!BITMAP_IS_SET(oms.portfolio.active_bitmap, BITMAP_BIT_U16(slot)) ||
+                oms.portfolio.positions[slot].entry_timestamp_us != req.entry_timestamp_us) {
+                oms.exit_requests_stale.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            const int rc = tt::OMS_PushExitResolvedQty(&oms, (int16_t)slot, req.strategy_id, req.price, req.leg,
+                                                       &cfg.nodes[nn]);
+            if (rc == 0) { oms.exit_requests_stale.fetch_add(1, std::memory_order_relaxed); continue; }  // zero qty (F-096): the slot emptied under the request
+            if (rc < 0)  { continue; }   // submit queue full — counted at OMS_PushSubmit (submit_queue_full_drops); the trio stays UNSET
+            if (req.flags & EXIT_REQ_FLAG_PREDICTED) {
+                OMS_SET_PER_SLOT_EXIT_PREDICTOR(&oms, slot, req.p, req.meta);
+            }
+            ++pushed;
+        }
+    }
+    return pushed;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_DrainExitRequests]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineCommon_DrainEventsAndSubmit]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [CRITICAL]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[THE event pump, shared by BOTH drivers (M5): TradeEvent rings -> leg-split qty -> SubmitCommand -> OMS_PushSubmit. Moved here from EngineSharded/Async.hpp at P4-pre-3c because the backtest had NO pump — D-441 deleted the EventLoop_OnEvent booking body and wired only the LIVE converter, so backtest entries were popped and DISCARDED (zero trades). One body, both drivers, parity by construction]
+// [OVERVIEW]_[THE event pump, shared by BOTH drivers (M5): TradeEvent rings -> leg-split qty -> SubmitCommand -> OMS_PushSubmit. Moved here from EngineSharded/Async.hpp at P4-pre-3c because the backtest had NO pump — D-441 deleted the EventLoop_OnEvent booking body and wired only the LIVE converter, so backtest entries were popped and DISCARDED (zero trades). One body, both drivers, parity by construction — step 0 (E.1.3 P4-pre-7, D-490): the nodes' ExitReq rings drain FIRST (EngineCommon_DrainExitRequests), so the composer is the SOLE submit_queues producer]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -809,6 +884,11 @@ inline int EngineCommon_DrainEventsAndSubmit(
     // Drainer-thread-stable predicate; one read per drain_with_submit call
     // vs N events × 1 read. Saves ~16-32 cycles/cycle at typical burst.
     const int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    // E.1.3 P4-pre-7 (D-490) — step 0: the nodes' EXIT requests, drained BEFORE this pass's entry
+    // events. An exit decided at cadence T thereby books ahead of T+1's entries in the slot's FIFO —
+    // exactly where the slow thread's own push used to sit (the byte-identity argument of the C0
+    // golden). Result discarded like the pushes below.
+    (void)EngineCommon_DrainExitRequests(state, oms, cfg, partial_on);
     for (int slot = 0; slot < state.registered_count; ++slot) {
         ExecutionCore<F>* core = state.nodes[tt::NodeIdx{(int16_t)slot}].core;
         if (core == nullptr) continue;

@@ -10,6 +10,8 @@
 // [OVERVIEW]_[the 6-arg market-sell exit submit helper — 4-site Class-18 extraction wrapping OMS_PushSubmit with degenerate TP/SL + required node_cfg (the silent-zero-fee structural close)]
 // [CONTAINS]
 //   - [FUNCTION]_[OMS_PushExitForSlot]
+//   - [FUNCTION]_[OMS_PushExitResolvedQty]
+//   - [FUNCTION]_[Node_RequestExit]
 // [REFERENCE]_[DESIGN_SPEC]_[structural-fix-preferred-decision-framework]
 // [REFERENCE]_[CLASS]_[18]
 //======================================================================================================
@@ -55,6 +57,12 @@
 // the SAME instructions as the prior inline call (inline keyword + same
 // arg shape). Verified at code review; bench gate at v5.15.5.C.3 Phase 7.B
 // captures drainer p99 for spot-check post-ship.
+//
+// E.1.3 P4-pre-7 (D-490): OMS_PushExitResolvedQty is the per-slot KERNEL layered on this helper
+// (qty re-derived on the owner thread + the F-096 zero-qty guard); FlattenAll's loop, the manual
+// close and the composer's exit-request drain call the kernel. Node_RequestExit is the node-side
+// request push onto the node's own AggregatorState ring — the slow threads stop pushing
+// submit_queues directly at the leaf's capital commit (the composer is the sole producer).
 //======================================================================================================
 
 #pragma once
@@ -109,6 +117,73 @@ inline bool OMS_PushExitForSlot(OrderManagerState<F>* oms,
 // helper preserves the same contract).
 //======================================================================
 // [END_FUNCTION]_[OMS_PushExitForSlot]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OMS_PushExitResolvedQty]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING]]
+// [THREAD]_[[COMPOSER_WRITER]]
+// [REFERENCE]_[DECISION]_[[D-490]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the per-slot exit KERNEL (E.1.3 P4-pre-7): re-derive qty from the slot on the OWNER thread, the F-096 zero-qty guard, then OMS_PushExitForSlot with the CARRIED sid / leg / price — ONE body under FlattenAll's loop, the manual close and the exit-request drain. Returns 1 pushed / 0 zero-qty skip / -1 queue full]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int OMS_PushExitResolvedQty(OrderManagerState<F>* oms,
+                                   int16_t slot,
+                                   uint8_t strategy_id,
+                                   Money event_price,
+                                   uint8_t leg,
+                                   const ::PerNodeCfg<F>* node_cfg) {
+    // qty is the ONE derived byte of the command: read on the thread that owns positions, at
+    // push time — never carried across a ring (a carried qty can be stale by a partial fill).
+    const Money qty = oms->portfolio.positions[slot].quantity;
+    if (Money_IsZero(qty)) return 0;   // F-096: an emptied slot never becomes a zero-qty SELL (the manual-close / predictor guard, in ONE place)
+    return OMS_PushExitForSlot(oms, slot, qty, strategy_id, event_price, leg, node_cfg) ? 1 : -1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OMS_PushExitResolvedQty]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Node_RequestExit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [CONCURRENCY]]
+// [THREAD]_[[SLOW_WRITER]]
+// [SYNC]_[SPSC]
+// [REFERENCE]_[DECISION]_[[D-490]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the node-side half of the exit request (E.1.3 P4-pre-7): push ONE ExitReq onto the node's OWN ring (1 request = 1 push, never coalesced — the drain's FIFO IS the HEAD order); a FULL ring is COUNTED (exit_requests_dropped) + LOUD (Health_Log WARN) and the request is dropped — the predicate re-fires next cadence. Returns 1 posted / 0 dropped]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int Node_RequestExit(SPSCRing<ExitReq, EXIT_REQ_RING_SIZE>* ring,
+                            const ExitReq& req,
+                            OrderManagerState<F>* oms,
+                            int node_id) {
+    if (SPSCRing_TryPush(ring, req)) return 1;
+    // Producer-side drop: counted on the OMS atomic from the SLOW thread (the ring_full_fatal
+    // producer-thread precedent — relaxed fetch_add, display-only ordering). Per drop, not
+    // rate-limited: a full ring means the composer has not drained for EXIT_REQ_RING_SIZE
+    // cadences — that stall is the loud fact, and it is CRITICAL-visible elsewhere already.
+    const uint64_t dropped = oms->exit_requests_dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+    Health_Log(HEALTH_WARN, "exit_request_ring_full", node_id,
+               "exit-request ring (size=%d) full — request DROPPED (slot=%d reason=%u; total dropped %llu); "
+               "the next slow cadence re-fires the predicate",
+               (int)EXIT_REQ_RING_SIZE, (int)req.slot, (unsigned)req.reason, (unsigned long long)dropped);
+    fprintf(stderr, "[node %d] exit_req_ring full, dropping request slot=%d reason=%u (total dropped %llu)\n",
+            node_id, (int)req.slot, (unsigned)req.reason, (unsigned long long)dropped);
+    return 0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Node_RequestExit]
 //======================================================================
 
 }  // namespace tt

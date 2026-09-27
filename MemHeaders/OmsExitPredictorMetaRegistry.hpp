@@ -12,6 +12,7 @@
 //   - [REGISTRY]_[FOREACH_OMS_META_SLOT]   (auto-gen slot constants + layout asserts ride the block)
 //   - [MACRO]_[OMS_META_*]
 //   - [MACRO]_[OMS_RESET_PER_SLOT_EXIT_PREDICTOR]
+//   - [MACRO]_[OMS_SET_PER_SLOT_EXIT_PREDICTOR]
 // [REFERENCE]_[DESIGN_SPEC]_[multi-bit-state-encoding-pattern]
 // [REFERENCE]_[INVARIANT]_[H14]
 //======================================================================================================
@@ -216,6 +217,27 @@ static_assert((OMS_META_REGIME_MASK & OMS_META_VALID_MASK) == 0,
         BITMAP_CLR((oms)->last_exit_predicted_bitmap, BITMAP_BIT_U16(slot));                    \
         (oms)->last_exit_predicted_p[(slot)] = 0.0;                                             \
         OMS_META_CLEAR((oms)->last_exit_predicted_meta[(slot)]);                                \
+    } while (0)
+
+//----------------------------------------------------------------------
+// [MACRO]_[OMS_SET_PER_SLOT_EXIT_PREDICTOR]
+// [TAG]_[[ENGINE] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE]]
+// [REFERENCE]_[DECISION]_[[D-490]]
+// [REFERENCE]_[CLASS]_[18]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the SET twin of the RESET (E.1.3 P4-pre-7, D-490) — one chokepoint writing all 3 per-slot exit-predictor components (bitmap bit + p + packed meta byte); WRITER = the composer at the exit-request drain, AFTER a successful OMS_PushSubmit of the predictor's SELL]
+//----------------------------------------------------------------------
+// `meta_byte` arrives already PACKED (OMS_META_PACK at the request site) or 0 = cleared.
+// Same single-thread contract as the RESET: from the leaf's capital commit on, the composer
+// is the trio's ONLY writer (the slow-path SET + the composer's RESET used to be an N+1-writer
+// plain RMW on one uint16_t — PARITY-073), so the BITMAP_SET plain RMW is safe by construction.
+// SET only after a SUCCESSFUL push: a dropped SELL must not leave a phantom "predicted" mark
+// for the next fill to attribute.
+#define OMS_SET_PER_SLOT_EXIT_PREDICTOR(oms, slot, p_val, meta_byte)                          \
+    do {                                                                                       \
+        BITMAP_SET((oms)->last_exit_predicted_bitmap, BITMAP_BIT_U16(slot));                    \
+        (oms)->last_exit_predicted_p[(slot)] = (p_val);                                         \
+        (oms)->last_exit_predicted_meta[(slot)] = (uint8_t)(meta_byte);                         \
     } while (0)
 
 #endif  // OMS_EXIT_PREDICTOR_META_REGISTRY_HPP

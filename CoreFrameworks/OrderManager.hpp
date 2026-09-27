@@ -327,6 +327,12 @@ struct SubmitCommand {
 //======================================================================
 
 constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
+// E.1.3 P4-pre-7 (D-490) — per-pass occupancy of ONE slot's submit queue under the composer's pump:
+// <= MAX_EVENTS_PER_DRAIN_PER_NODE entry/exit events + <= EXIT_REQ_RING_SIZE drained exit requests
+// (every one may name the SAME slot) + 1 flatten element + 1 manual close; OMS_DrainSubmit pops
+// every queue to EMPTY each pass, so this is the bound.
+static_assert(MAX_EVENTS_PER_DRAIN_PER_NODE + EXIT_REQ_RING_SIZE + 2 <= OMS_SUBMIT_QUEUE_SIZE,
+              "a slot's submit queue must hold one pass's worst-case occupancy (pump + drained exit requests + flatten + manual close)");
 
 //======================================================================
 // [STRUCT]_[OrderManagerState]
@@ -830,6 +836,23 @@ struct OrderManagerState {
     // venue rejection would misreport capital. Restart-only (SKIP_RESET, D-481) — a fatal survives
     // a paper reset by design, because the engine it describes is the one that must be restarted.
     std::atomic<uint64_t> ring_full_fatal;
+    // E.1.3 P4-pre-7 (D-490) — the exit-request ring's forensics (session counters, DO_RESET):
+    //   exit_requests_dropped   — a node's ring was FULL at Node_RequestExit (producer side; the request
+    //                             is lost, the predicate re-fires next cadence). Written by the SLOW
+    //                             threads (fetch_add relaxed — the ring_full_fatal producer precedent).
+    //   exit_requests_stale     — the composer's drain skipped a request: slot inactive, identity
+    //                             (entry_timestamp_us) moved = closed + re-opened underneath (CC-2),
+    //                             or zero qty (F-096). Composer-written.
+    //   exit_requests_foreign   — the H22 pin: node n's ring named a slot that is NOT n's
+    //                             (Sharded_SlotNode) — a programming error, LOUD CRITICAL + skipped.
+    //   submit_queue_full_drops — OMS_PushSubmit found the slot's submit queue FULL (a starved
+    //                             drainer); the command is dropped (pre-existing behaviour, now COUNTED).
+    // 4 x 8 B: the observability line goes 32 -> 64 B used — FULL; the next counter grows the
+    // struct deliberately (the AggregatorState line-0 discipline).
+    std::atomic<uint64_t> exit_requests_dropped;
+    std::atomic<uint64_t> exit_requests_stale;
+    std::atomic<uint64_t> exit_requests_foreign;
+    std::atomic<uint64_t> submit_queue_full_drops;
 
     //------------------------------------------------------------------
     // [SECTION]_[CROSS-THREAD SAFETY CAS CLUSTER — alignas(64) cluster (NC1 ND1)]
@@ -1802,6 +1825,9 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     }
     bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.portfolio_slot], cmd);
     if (!pushed) {
+        // E.1.3 P4-pre-7 (D-490): the drop is COUNTED (it used to be stderr-only); the durable
+        // Health_Log line lands with the leaf's riders (P4-pre-4 F-5).
+        oms->submit_queue_full_drops.fetch_add(1, std::memory_order_relaxed);
         std::fprintf(stderr,
                      "[OMS] PushSubmit: queue full for node=%d type=%u "
                      "(drainer starved?)\n",
@@ -3096,6 +3122,24 @@ inline uint64_t OrderManager_TotalFilled(const OrderManagerState<F>* oms) {
 template <unsigned F>
 inline uint64_t OrderManager_TotalRejected(const OrderManagerState<F>* oms) {
     return oms->total_rejected.load(std::memory_order_relaxed);
+}
+
+// E.1.3 P4-pre-7 (D-490) — the exit-request ring forensics (dashboard + shutdown dump + chars).
+template <unsigned F>
+inline uint64_t OrderManager_ExitRequestsDropped(const OrderManagerState<F>* oms) {
+    return oms->exit_requests_dropped.load(std::memory_order_relaxed);
+}
+template <unsigned F>
+inline uint64_t OrderManager_ExitRequestsStale(const OrderManagerState<F>* oms) {
+    return oms->exit_requests_stale.load(std::memory_order_relaxed);
+}
+template <unsigned F>
+inline uint64_t OrderManager_ExitRequestsForeign(const OrderManagerState<F>* oms) {
+    return oms->exit_requests_foreign.load(std::memory_order_relaxed);
+}
+template <unsigned F>
+inline uint64_t OrderManager_SubmitQueueFullDrops(const OrderManagerState<F>* oms) {
+    return oms->submit_queue_full_drops.load(std::memory_order_relaxed);
 }
 
 template <unsigned F>

@@ -2311,6 +2311,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 "  " SH_DIM "inflight" SH_RESET " " SH_FG "%d" SH_RESET "\033[K\n",
                 (unsigned long)oms_sub, (unsigned long)oms_fill,
                 (unsigned long)oms_rej, oms_inflight);
+        // E.1.3 P4-pre-7 (D-490) — the exit-request ring forensics (paper + live; red when non-zero
+        // where non-zero means a LOST request or a programming error).
+        {
+            uint64_t er_drop = OrderManager_ExitRequestsDropped(&oms);
+            uint64_t er_stale = OrderManager_ExitRequestsStale(&oms);
+            uint64_t er_foreign = OrderManager_ExitRequestsForeign(&oms);
+            uint64_t er_qfull = OrderManager_SubmitQueueFullDrops(&oms);
+            fprintf(stdout, " " SH_BOLD SH_PEACH "EXITREQ" SH_RESET
+                    "      " SH_DIM "dropped" SH_RESET " %s%lu" SH_RESET
+                    "  " SH_DIM "stale" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "foreign" SH_RESET " %s%lu" SH_RESET
+                    "  " SH_DIM "queue-full" SH_RESET " %s%lu" SH_RESET "\033[K\n",
+                    er_drop ? SH_RED : SH_FG, (unsigned long)er_drop,
+                    (unsigned long)er_stale,
+                    er_foreign ? SH_RED : SH_FG, (unsigned long)er_foreign,
+                    er_qfull ? SH_RED : SH_FG, (unsigned long)er_qfull);
+        }
 
         // User data WS status line (phase 04)
         if (live_trading) {
@@ -2654,6 +2671,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         fprintf(stderr, "  total filled     : %lu\n", (unsigned long)oms_fill);
         fprintf(stderr, "  total rejected   : %lu\n", (unsigned long)oms_rej);
         fprintf(stderr, "  in-flight at end : %d\n", oms_inflight);
+        // E.1.3 P4-pre-7 (D-490) — the exit-request ring forensics.
+        fprintf(stderr, "  exit-req dropped : %lu\n", (unsigned long)OrderManager_ExitRequestsDropped(&oms));
+        fprintf(stderr, "  exit-req stale   : %lu\n", (unsigned long)OrderManager_ExitRequestsStale(&oms));
+        fprintf(stderr, "  exit-req foreign : %lu\n", (unsigned long)OrderManager_ExitRequestsForeign(&oms));
+        fprintf(stderr, "  submit-q full    : %lu\n", (unsigned long)OrderManager_SubmitQueueFullDrops(&oms));
         fprintf(stderr, "================================================================\n");
     }
 

@@ -17,6 +17,9 @@
 //   - [STRUCT]_[MoneySnapshotNodeRow]
 //   - [STRUCT]_[MoneySnapshot]
 //   - [MACRO]_[KILLWORD bit layout (SHIFT_/MASK_ per H14)]
+//   - [STRUCT]_[DragCmd]
+//   - [ENUM]_[ExitRequestReason]
+//   - [STRUCT]_[ExitReq]
 //   - [STRUCT]_[NodeState]
 //   - [STRUCT]_[ClusterState]
 //   - [STRUCT]_[AggregatorState]
@@ -346,6 +349,78 @@ static_assert(sizeof(DragCmd) == 32 && std::is_trivially_copyable<DragCmd>::valu
 //======================================================================================================
 
 //======================================================================================================
+// [ENUM]_[ExitRequestReason]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER]]
+// [REFERENCE]_[DECISION]_[[D-490]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[why a node asked the composer to close a slot (E.1.3 P4-pre-7, D-490) — rides ExitReq::reason; reaches stderr only today (NOT persisted / wire), so H21 append-only is NOT yet binding — the moment a code reaches Health_Log or a CSV it becomes append-only]
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+enum ExitRequestReason : uint8_t {
+    EXIT_REQ_NONE       = 0,
+    EXIT_REQ_TIME       = 1,  // EventLoop_TimeExitOneCore — max_hold_ticks elapsed with gain below the floor
+    EXIT_REQ_PREDICTOR  = 2,  // the ML exit-predictor submit arm (flags carry EXIT_REQ_FLAG_PREDICTED)
+    EXIT_REQ_FLATTEN_WS = 3,  // the EventLoop_CheckWsStaleness CAS winner — a whole-book flatten at the carried price (dormant live: TD-338)
+};
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [END_ENUM]_[ExitRequestReason]
+//======================================================================================================
+
+//======================================================================================================
+// [STRUCT]_[ExitReq]
+//------------------------------------------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CAPITAL_BEARING] [CONCURRENCY]]
+// [SYNC]_[SPSC]
+// [REFERENCE]_[DECISION]_[[D-490] [D-484]]
+// [REFERENCE]_[INVARIANT]_[[H12] [H22]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one slow-thread -> composer EXIT request (E.1.3 P4-pre-7, D-490): the node DECIDES, the composer pushes the SubmitCommand — the composer becomes the SOLE submit_queues producer (closes P4-pre-4 F-1 before the §4.1 flip). 48 B, trivially copyable; the decision inputs are CARRIED (sid / leg / price / meta / p), only qty is re-derived at the drain on the owner thread]
+// [DIAGRAM]
+//   @0 slot:2 | leg:1 reason:1 meta:1 flags:1 sid:1 pad:1 | @8 p:8 | @16 entry_timestamp_us:8 (IDENTITY) | @24 pad:8 | @32 price:16 (Money)
+//======================================================================================================
+// [CODE]
+//======================================================================================================
+constexpr size_t  EXIT_REQ_RING_SIZE      = 8;        // per-node ring depth — worst cadence = 2 legs x {TimeExit, predictor} + 1 flatten = 5 <= 8 (power of 2 per SPSCRing)
+constexpr uint8_t EXIT_REQ_FLAG_PREDICTED = 1u << 0;  // flags bit 0 — the composer SETs the per-slot predictor trio (bitmap + p + meta) AFTER a successful push
+
+struct ExitReq {
+    tt::SlotIdx slot;                // @0  the portfolio SLOT (never the node) — the RING INDEX is the node (H22: node n names only its own slots)
+    uint8_t     leg;                 // @2  CARRIED leg — TimeExit / predictor pass 0 even on an odd slot (byte-identity with the HEAD command)
+    uint8_t     reason;              // @3  ExitRequestReason
+    uint8_t     meta;                // @4  the packed OMS_META byte (predictor) or 0
+    uint8_t     flags;               // @5  EXIT_REQ_FLAG_*
+    uint8_t     strategy_id;         // @6  CARRIED resolved_strategy_id
+    uint8_t     _pad0[1] = {0};      // @7  H12: explicit
+    double      p;                   // @8  the predictor's p (0.0 otherwise)
+    uint64_t    entry_timestamp_us;  // @16 the position IDENTITY, read FIRST at the request site (before any decision input); a mismatch at the drain = the slot closed + re-opened underneath (CC-2) -> skipped
+    uint64_t    _pad1 = 0;           // @24 H12: align price to 16
+    Money       price;               // @32 the CARRIED event price — Money end to end, no double bridge at the drain
+};
+static_assert(sizeof(ExitReq) == 48 && alignof(ExitReq) == 16 && std::is_trivially_copyable<ExitReq>::value,
+              "ExitReq pinned at 48B (8B head + 8B p + 8B identity + 8B pad + 16B Money), SPSC-ridable");
+static_assert(offsetof(ExitReq, leg) == 2 && offsetof(ExitReq, reason) == 3 && offsetof(ExitReq, meta) == 4 &&
+              offsetof(ExitReq, flags) == 5 && offsetof(ExitReq, strategy_id) == 6 && offsetof(ExitReq, p) == 8 &&
+              offsetof(ExitReq, entry_timestamp_us) == 16 && offsetof(ExitReq, price) == 32,
+              "ExitReq head packs fully (2+1+1+1+1+1+1 = 8B, no hidden padding — H12); offsets pinned");
+//======================================================================================================
+// [END_CODE]
+//======================================================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-09-27]
+// [SIZE]_[48B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================================================
+// [END_STRUCT]_[ExitReq]
+//======================================================================================================
+
+//======================================================================================================
 // [STRUCT]_[NodeState]
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [DATA_ORIENTED_DESIGN] [CAPITAL_BEARING]]
@@ -547,6 +622,18 @@ struct alignas(64) AggregatorState {
     tt::SlotArray<Money, MAX_PORTFOLIO_POSITIONS> slot_notional = {};
     tt::SlotArray<Money, MAX_PORTFOLIO_POSITIONS> pending_trade_net = {};
 
+    // ---- E.1.3 P4-pre-7 (D-490): per-node EXIT-REQUEST rings — the node's slow thread DECIDES
+    //      (TimeExit / the exit-predictor arm / the WS-flatten winner) and pushes an ExitReq; the
+    //      composer DRAINS them as step 0 of its event pump (EngineCommon_DrainExitRequests) and is
+    //      thereby the SOLE pusher of submit_queues — closes the P4-pre-4 F-1 MPSC on that ring
+    //      BEFORE the §4.1 flip. True SPSC per ring: producer = node n's slow thread; consumer = the
+    //      composer. Self-init through the member initializers (both production EventLoopState
+    //      objects are constructed automatics — Run.hpp / BacktestSharded.hpp; a future arena
+    //      allocation without placement-new would break EVERY agg ring's self-init, not just this
+    //      one); NEVER reset (D-443): a request pending across a paper reset drains at the next pass
+    //      and stale-skips (the slot is inactive). Collapses at the flip (the node then owns its lane). ----
+    tt::NodeArray<tt::SPSCRing<ExitReq, EXIT_REQ_RING_SIZE>, MAX_EXECUTION_NODES> exit_req_rings;
+
     // NOTE (paper/live partition — D-441 #4): modes are separate PROCESSES; mixed-mode totals
     // cannot occur. If a mixed-mode deployment ever exists, the partition hook is a second
     // ledger line + row set HERE, keyed by mode — never in the fill leaves.
@@ -556,10 +643,10 @@ struct alignas(64) AggregatorState {
 //======================================================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-28]
-// [SIZE]_[467328B]
+// [UPDATED]_[2026-09-27]
+// [SIZE]_[475520B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[7302]
+// [CACHE_LINES]_[7430]
 // [STRADDLE]_[none]
 //======================================================================================================
 // [END_STRUCT]_[AggregatorState]
@@ -593,7 +680,11 @@ static_assert(sizeof(AggregatorState<64>) == 192 + sizeof(tt::ParameterSlot<Mone
               + sizeof(tt::NodeArray<tt::SPSCRing<FillEvent<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>)
               + sizeof(tt::SPSCRing<DragCmd, 8>)
               + sizeof(tt::NodeArray<tt::SPSCRing<EmitRecord<64>, FILL_EVENT_RING_SIZE>, MAX_EXECUTION_NODES>)
-              + 2 * sizeof(tt::SlotArray<Money, MAX_PORTFOLIO_POSITIONS>),
-              "AggregatorState<64> = 3 state lines + publish port + fill rings + drag ring + emit rings + 2 per-slot residual trackers (re-pin deliberately)");
+              + 2 * sizeof(tt::SlotArray<Money, MAX_PORTFOLIO_POSITIONS>)
+              + sizeof(tt::NodeArray<tt::SPSCRing<ExitReq, EXIT_REQ_RING_SIZE>, MAX_EXECUTION_NODES>),
+              "AggregatorState<64> = 3 state lines + publish port + fill rings + drag ring + emit rings + 2 per-slot residual trackers + exit-request rings (re-pin deliberately)");
+static_assert(offsetof(AggregatorState<64>, exit_req_rings) == 467328 && sizeof(AggregatorState<64>) == 475520,
+              "exit_req_rings is a TAIL append (E.1.3 P4-pre-7, D-490): the struct ended on an exact 64-multiple, so no existing "
+              "member moved and the 16 x 512B rings land with no gap (467,328 -> 475,520; the E.1.2.G bucket_ring precedent)");
 static_assert(alignof(NodeState<64>) == 64 && alignof(ClusterState<64>) == 64 &&
               alignof(AggregatorState<64>) == 64, "capital-plane types are cache-line aligned (H6)");

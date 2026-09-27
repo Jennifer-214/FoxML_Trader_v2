@@ -305,6 +305,11 @@ struct OmsResetCtx {
     X(total_submitted,        uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
     X(total_filled,           uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
     X(total_rejected,         uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
+    /*     E.1.3 P4-pre-7 (D-490) — the exit-request ring forensics; session counters like total_*.      */                                                  \
+    X(exit_requests_dropped,  uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
+    X(exit_requests_stale,    uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
+    X(exit_requests_foreign,  uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
+    X(submit_queue_full_drops, uint64_t,           0,                            0,                            DO_RESET,   ATOMIC,    SKIP_PERSIST, 0)    \
     /* ============================================================================================ */                                                  \
     /* [9] SKIP_PERSIST COLD pointers + last_seen_trade_id                                            */                                                  \
     /* ============================================================================================ */                                                  \
@@ -835,7 +840,8 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
             SPSCRing_Init(&(_oms_target)->ws_rings[tt::NodeIdx{(int16_t)_i}]);                       \
         }                                                                                            \
         SPSCRing_Init(&(_oms_target)->reconcile_queue);                                              \
-        for (int _i = 0; _i < MAX_EXECUTION_NODES; ++_i) {                                           \
+        /* P4-pre-4 F-12(i): submit_queues is a SlotArray — its bound is the SLOT cap (equal today) */   \
+        for (int _i = 0; _i < MAX_PORTFOLIO_POSITIONS; ++_i) {                                       \
             SPSCRing_Init(&(_oms_target)->submit_queues[tt::SlotIdx{(int16_t)_i}]);                  \
         }                                                                                            \
         /* Layer 4 — OrderEventLog conditional init + LoadFromDisk + replay (MUST RUN BEFORE L5) */  \
