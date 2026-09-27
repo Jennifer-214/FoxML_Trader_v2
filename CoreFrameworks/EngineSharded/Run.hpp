@@ -668,11 +668,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             return;
         }
         const char *rest_host = bcfg.use_testnet ? "testnet.binance.vision" : "api.binance.us";
-        // Phase 02 ships with worker_count = 1. Scale up to 2-4 in a
-        // follow-on commit after the back-to-back stress test passes.
+        // BINANCE_REST_WORKER_COUNT (pinned 1 — P4-pre-4 F-4): the per-node result_rings are SPSC; scaling
+        // workers needs the result path re-partitioned per worker first (the pin in Limits.hpp says so).
         if (!BinanceAdapter_Init(&g_sharded_binance_adapter, rest_host,
                                   api_key, api_secret, bcfg.symbol,
-                                  &g_sharded_order_lat, /*worker_count=*/1)) {
+                                  &g_sharded_order_lat, BINANCE_REST_WORKER_COUNT)) {
             fprintf(stderr, "[sharded] ERROR: failed to init BinanceAdapter at %s\n", rest_host);
             std::signal(SIGINT, prev_int);
             std::signal(SIGTERM, prev_term);

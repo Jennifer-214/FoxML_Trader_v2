@@ -516,8 +516,7 @@ inline bool EngineSharded_Async_FanOut(
         // model paths, starting_balance, fee_rate_maker/taker, exchange
         // routing, recording flags). Tunables are bulk-copied including
         // the per-core overrides array.
-        if (shared_ptr && __atomic_exchange_n(&shared_ptr->reload_requested, 0,
-                                              __ATOMIC_ACQ_REL)) {
+        if (shared_ptr && TUI_CONSUME_FLAG(shared_ptr->reload_requested)) {   // P4-pre-4 F-8: the ONE consume form
             ControllerConfig<F> new_cfg = ControllerConfig_Load<F>("engine.cfg");
             // boot-only: preserve fields that the running engine cannot
             // change live (would require thread restart, file I/O off
@@ -583,8 +582,7 @@ inline bool EngineSharded_Async_FanOut(
         // body — which wrote composer-owned Money fields cross-thread — is retired (gate punch 3).
         if (shared_ptr) {
             for (int c = 0; c < num_nodes; ++c) {
-                if (shared_ptr->kill_reset_per_node[c]) {
-                    shared_ptr->kill_reset_per_node[c] = 0;
+                if (TUI_CONSUME_FLAG(shared_ptr->kill_reset_per_node[c])) {   // P4-pre-4 F-8: atomic read-and-clear
                     state.agg.kill_reset_mask.fetch_or(1u << c, std::memory_order_release);
                 }
             }
@@ -809,8 +807,9 @@ inline bool EngineSharded_Async_FanOut(
         // composer/drainer executes the whole flow at its cycle tail (everything pending
         // drained + applied first; see EngineSharded_ExecutePaperReset above). The flag
         // parks the slow paths exactly as before; the COMPOSER clears it at completion.
-        if (shared_ptr && shared_ptr->paper_reset_requested && !ControllerConfig_IsLiveCapital(cfg)) { // NEW-1 — paper-reset interlock routes the single predicate
-            shared_ptr->paper_reset_requested = 0;
+        // P4-pre-4 F-8: the flag is consumed ATOMICALLY, and only when the live-capital guard passes (a live
+        // engine leaves it set — the pre-existing interlock semantics, unchanged).
+        if (shared_ptr && !ControllerConfig_IsLiveCapital(cfg) && TUI_CONSUME_FLAG(shared_ptr->paper_reset_requested)) { // NEW-1 — paper-reset interlock routes the single predicate
             paper_reset_in_progress.store(true, std::memory_order_release);
             std::this_thread::yield();   // let slow-paths observe + park before ticks resume
             state.agg.reset_request.store(1, std::memory_order_release);

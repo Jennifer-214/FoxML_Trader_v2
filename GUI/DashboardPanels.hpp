@@ -2599,7 +2599,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 ImGui::TableNextColumn();
                 ImGui::Text("%llu", (unsigned long long)pc->sp_cycles_total);
 
-                // Submit queue depth (capacity 32; warn if > 16)
+                // Submit queue depth (capacity 32; warn if > 16) — the composer-side backlog; a node's pending
+                // exit requests ride exit_req_rings (E.1.3 P4-pre-7) and are not counted here.
                 ImGui::TableNextColumn();
                 if (pc->sp_submit_q_depth > 16) {
                     ImGui::TextColored(FoxmlColors::yellow, "%u",

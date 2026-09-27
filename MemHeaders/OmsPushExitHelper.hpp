@@ -30,15 +30,11 @@
 // 6 args that actually vary across sites: slot/qty/strategy_id/event_price
 // (and optional leg).
 //
-// 4 production callers (post-extraction):
-//   1. `CoreFrameworks/EngineSharded.hpp` — drain_manual_closes
-//      (GUI-driven force-close; with explicit leg arg under partials)
-//   2. `CoreFrameworks/EngineSharded.hpp` — ML exit-predictor submit
-//      (slow-path strategy thread when exit_predictor fires)
-//   3. `CoreFrameworks/ControllerEventLoop.hpp` — TimeExitOneCore
-//      (max_hold_ticks expired)
-//   4. `CoreFrameworks/ControllerEventLoop.hpp` — FlattenAll
-//      (WS staleness / kill-switch flatten-all)
+// Production callers (E.1.3 P4-pre-7, D-490 — the four former direct sites route through ONE kernel):
+//   - OMS_PushExitResolvedQty (below) — the per-slot KERNEL; its callers are FlattenAll's loop, the
+//     manual close (EngineSharded/SlowPath.hpp) and the composer's exit-request drain
+//     (EngineCommon_DrainExitRequests). TimeExitOneCore and the exit-predictor arm no longer push:
+//     they POST ExitReqs (Node_RequestExit, below) that the drain turns into this helper's command.
 //
 // Site mismatched out (excluded from helper): EngineSharded's
 // drain_with_submit mixed

@@ -1348,7 +1348,9 @@ struct TUISnapshot {
         // sp_last_tick_us: monotonic us of last completed slow-path cycle
         // sp_cycles_total: monotonic count of completed slow-path cycles
         // sp_yield_count: monotonic count of cadence-or-park yields
-        // sp_submit_q_depth: live SPSC submit_queues[c] depth (informational)
+        // sp_submit_q_depth: live submit_queues depth over the node's slot(s) (informational). E.1.3 P4-pre-7:
+        // a node's PENDING exit requests no longer sit here — they ride AggregatorState::exit_req_rings until
+        // the composer's pump step 0 turns them into queue entries; this depth is the composer-side backlog only.
         uint64_t sp_last_tick_us;
         uint64_t sp_cycles_total;
         uint64_t sp_yield_count;

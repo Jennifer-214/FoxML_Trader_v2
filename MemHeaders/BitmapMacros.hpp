@@ -11,6 +11,7 @@
 // [CONTAINS]
 //   - [MACRO]_[BITMAP_* (single-thread)]
 //   - [MACRO]_[BITMAP_ATOMIC_*]
+//   - [MACRO]_[TUI_CONSUME_FLAG]
 //   - [MACRO]_[BITMAP_BIT_* + POPCOUNT + FIRST]
 //   - [MACRO]_[MBS_*]
 // [REFERENCE]_[DESIGN_SPEC]_[[bitmap-flag-api] [multi-bit-state-encoding-pattern]]
@@ -104,6 +105,19 @@
 // Toggle: flip the masked bit(s).
 //   Cost: 1 cycle (XOR + store).
 #define BITMAP_TOGGLE(field, mask)  ((field) ^= (mask))
+
+//----------------------------------------------------------------------
+// [MACRO]_[TUI_CONSUME_FLAG]
+// [TAG]_[[ENGINE] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[consume a GUI request flag ATOMICALLY — ONE read-and-clear RMW (__atomic_exchange_n, ACQ_REL), so a click landing between a plain read and the `= 0` store is never swallowed (P4-pre-4 F-8, Class 58-A'); LIGHT unit, no closer]
+//----------------------------------------------------------------------
+// Homed HERE (not in EngineTUI.hpp) because its consumers — EngineSharded/SlowPath.hpp (manual close) and
+// EngineSharded/Async.hpp (kill-reset / paper-reset / reload pickup) — include this header directly but only
+// forward-declare TUISharedState; a macro must be visible at PREPROCESS time. The `volatile sig_atomic_t`
+// storage and the GUI writer are unchanged; the CONSUMER side is the fix, and `reload_requested` already
+// used this exact form. Returns the pre-clear value (non-zero = a request was pending).
+#define TUI_CONSUME_FLAG(flag) __atomic_exchange_n(&(flag), 0, __ATOMIC_ACQ_REL)
 
 // Any: equivalent to IS_SET but spelled to emphasize multi-flag intent.
 //   Useful for "any failure?" / "any drift?" checks.

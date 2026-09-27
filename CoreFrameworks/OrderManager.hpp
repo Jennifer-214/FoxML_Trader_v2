@@ -820,13 +820,14 @@ struct OrderManagerState {
     //------------------------------------------------------------------
     // [SECTION]_[CROSS-THREAD OBSERVABILITY COUNTERS — alignas(64) cluster (NC1 ND1)]
     //------------------------------------------------------------------
-    // Writer = drainer thread (atomic_fetch_add per fill).
-    // Reader = snapshot publisher (GUI thread) at 60 Hz via .load(RELAXED).
-    // Isolation prevents publisher reads from invalidating cache lines of
-    // drainer's other write targets (warm fee_state / last_fill etc.).
-    // Observability counters. Atomic so the TUI render loop on a different
-    // core can read them without locks. Relaxed ordering throughout —
-    // these are display-only.
+    // Writers = the composer (total_* per fill; exit_requests_stale / _foreign at its exit-request drain;
+    //           submit_queue_full_drops at the funnel) + the SLOW threads (exit_requests_dropped at
+    //           Node_RequestExit) + the venue producer thread (ring_full_fatal) — each a relaxed fetch_add.
+    // Readers (E.1.3 P4-pre-7 truth — this used to claim "the GUI snapshot publisher at 60 Hz"; no GUI /
+    //           TUISnapshot reader exists, TECH_DEBT-350 owns that surface) = the ANSI dashboard (main
+    //           thread: the OMS + EXITREQ rows in Run.hpp) and the shutdown dump, both through the
+    //           OrderManager_* accessors. Relaxed throughout — display-only; the line is isolated so their
+    //           reads never invalidate the composer's warm write targets (fee_state / last_fill etc.).
     alignas(64) std::atomic<uint64_t> total_submitted;
     std::atomic<uint64_t> total_filled;
     std::atomic<uint64_t> total_rejected;
@@ -1837,9 +1838,14 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     }
     bool pushed = SPSCRing_TryPush(&oms->submit_queues[cmd.portfolio_slot], cmd);
     if (!pushed) {
-        // E.1.3 P4-pre-7 (D-490): the drop is COUNTED (it used to be stderr-only); the durable
-        // Health_Log line lands with the leaf's riders (P4-pre-4 F-5).
-        oms->submit_queue_full_drops.fetch_add(1, std::memory_order_relaxed);
+        // E.1.3 P4-pre-7 (D-490 / P4-pre-4 F-5): a dropped SubmitCommand is a dropped ORDER — COUNTED + a
+        // durable WARN (the D-479 count-only class). The bound `MAX_EVENTS_PER_DRAIN_PER_NODE +
+        // EXIT_REQ_RING_SIZE + 2 <= OMS_SUBMIT_QUEUE_SIZE` makes this unreachable under the composer's pump,
+        // so a non-zero count means a caller OUTSIDE the pump's bound — read it with the identity counter.
+        const uint64_t qf = oms->submit_queue_full_drops.fetch_add(1, std::memory_order_relaxed) + 1;
+        Health_Log(HEALTH_WARN, "submit_queue_full", /*node_id=*/-1,
+                   "submit queue for slot %d FULL — SubmitCommand DROPPED (type=%u; total %llu)",
+                   (int)cmd.portfolio_slot, (unsigned)cmd.order_type, (unsigned long long)qf);
         std::fprintf(stderr,
                      "[OMS] PushSubmit: queue full for node=%d type=%u "
                      "(drainer starved?)\n",

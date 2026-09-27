@@ -94,8 +94,8 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
     // call vs N slots × 1 read.
     const int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     for (int slot = 0; slot < MAX_PORTFOLIO_POSITIONS; ++slot) {
-        if (!shared_ptr->manual_close_requested[slot]) continue;
-        shared_ptr->manual_close_requested[slot] = 0;
+        // P4-pre-4 F-8: ONE atomic read-and-clear (a click landing between the plain read and the `= 0` was a swallowed close).
+        if (!TUI_CONSUME_FLAG(shared_ptr->manual_close_requested[slot])) continue;
         // Skip if no open position at this slot — defensive against
         // double-clicks or races with auto-close.
         if ((oms.portfolio.active_bitmap & (uint16_t)(1u << slot)) == 0) {

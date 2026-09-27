@@ -46,6 +46,12 @@
 // because BinanceOrderAPI is not thread-safe — see plans/oms/master.md.
 #define MAX_INFLIGHT_ORDERS 16
 #define MAX_BINANCE_WORKERS 4
+// E.1.3 P4-pre-7 C3 (P4-pre-4 F-4): the LIVE REST worker count the sharded runner boots with. The per-node
+// result_rings are SPSC — ONE producer (the REST worker) per ring — so this MUST stay 1 until the result
+// path is re-partitioned per worker; worker_count > 1 would be N producers on one SPSC ring (silent loss).
+#define BINANCE_REST_WORKER_COUNT 1
+static_assert(BINANCE_REST_WORKER_COUNT == 1,
+              "result_rings are SPSC (one REST worker per ring) — re-partition the result path before scaling workers (P4-pre-4 F-4)");
 // P3-e-ii (D-446 #5): stale-inflight AGE threshold for the detect-only warn
 // sweep (OrderManager_Tick step 4, live only). A MARKET order should reach a
 // terminal state within milliseconds; one still working after 10s means a

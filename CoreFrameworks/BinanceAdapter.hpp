@@ -356,6 +356,8 @@ static inline int BinanceAdapter_Init(BinanceAdapterState* state,
     state->latency = latency;
 
     if (worker_count < 1) worker_count = 1;
+    // P4-pre-4 F-4: the sharded runner passes BINANCE_REST_WORKER_COUNT (pinned 1) — N workers would be N
+    // producers on the per-node SPSC result_rings; this clamp bounds the POOL, it does not license N > 1.
     if (worker_count > MAX_BINANCE_WORKERS) worker_count = MAX_BINANCE_WORKERS;
     state->worker_count = worker_count;
 
