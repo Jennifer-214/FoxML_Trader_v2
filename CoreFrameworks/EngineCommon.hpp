@@ -12,6 +12,7 @@
 //   - [FUNCTION]_[EngineCommon_BootGlobal]
 //   - [FUNCTION]_[EngineCommon_BootPerCore]
 //   - [FUNCTION]_[EngineCommon_DrainExitRequests]
+//   - [FUNCTION]_[EngineCommon_PredictorSubmitArm]
 //   - [FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
 //   - [FUNCTION]_[EngineCommon_SlowPathCycleAllCores]
 //======================================================================================================
@@ -1536,6 +1537,87 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[EngineCommon_PredictorSubmitArm]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE] [CAPITAL_BEARING]]
+// [THREAD]_[[SLOW_WRITER]]
+// [REFERENCE]_[DECISION]_[[D-490]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the sell-side ML exit-prediction submit arm (v5.13.0.B), extracted at E.1.3 P4-pre-7: above threshold + open slot(s) on this node → ONE ExitReq per open slot onto THIS node's ring (identity read FIRST; p + the packed arm/regime meta CARRIED with the PREDICTED flag); the composer pushes the MARKET_SELL and SETs the per-slot attribution trio after a successful push. Returns the number of requests posted]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+inline int EngineCommon_PredictorSubmitArm(EventLoopState<F>& state,
+                                           OrderManagerState<F>& oms,
+                                           const ControllerConfig<F>& cfg,
+                                           int c,
+                                           double price_d) {
+    // RebuildOneCore wrote state..last_exit_prediction (when use_exit_model && exit_predictor models
+    // loaded). Default cfg path (use_exit_model=0): last_exit_prediction stays 0.0 → ~5ns flag check + skip.
+    const tt::NodeIdx nc{(int16_t)c};
+    if (!(BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
+          && state.nodes[nc].last_exit_prediction
+             > FPN_ToDouble(cfg.nodes[nc].exit_threshold)  // Class 25 scope-discipline: per-node read at per-node scope (value-equal to the flat field)
+          && price_d > 0.01)) {
+        return 0;
+    }
+    // Slot mask: under partials each node owns 2 slots (legs A + B); single-leg under partial_exit_enabled=0.
+    const int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    const uint16_t my_mask = BITMAP_NODE_SLOT_MASK(c, partial_on);
+    uint16_t bm = (uint16_t)(oms.portfolio.active_bitmap & my_mask);
+    if (!bm) return 0;
+    // v5.13.4 — the chosen arm + regime for HandleFill's exit_bandit Update, captured ONCE per cadence
+    // (node-level state: identical for every slot of this node). v5.13.6.C — defensive bounds (parity-check
+    // M.3 gap-close 2026-05-08): a trainer↔engine dimension mismatch or an out-of-range regime is caught at
+    // SUBMIT time — CRITICAL log + clamp to the -1 sentinel; the exit still fires (safety), the bandit skips
+    // later. v5.15.5.C.2.1 (LOW-2): the packed OMS_META byte sets the validity bit; EITHER side -1 → 0 =
+    // cleared, so the drainer's OMS_META_IS_VALID predicate returns false (no bandit Update).
+    int captured_arm    = state.nodes[nc].last_exit_dominant_horizon;
+    int captured_regime = state.nodes[nc].regime_state.current_regime;
+    EnsembleModelZoo<F>* ezoo_b = (EnsembleModelZoo<F>*)state.nodes[nc].ensemble_handle;
+    const int n_arms_b = (ezoo_b ? ezoo_b->exit_predictor_count : 0);
+    if (captured_arm < 0 || captured_arm >= n_arms_b) {
+        static uint64_t s_arm_log_us[16] = {0};
+        Health_LogCriticalRateLimited(&s_arm_log_us[c & 15], 60000000ULL, c, "ml",
+            "exit submit: captured arm %d out of range [0, %d) — bandit Update will skip; "
+            "trainer↔engine horizon count mismatch?", captured_arm, n_arms_b);
+        captured_arm = -1;  // -1 sentinel; HandleFill skips
+    }
+    if (captured_regime < 0 || captured_regime >= NUM_REGIMES) captured_regime = -1;
+    const uint8_t meta_byte = (captured_arm >= 0 && captured_regime >= 0)
+                            ? (uint8_t)OMS_META_PACK(captured_arm, captured_regime) : (uint8_t)0;
+    const Money price_fpn = Money{ money_from_double_payload(price_d) };   // D-103 ingress bridge — ONCE, at the request site
+    int posted = 0;
+    while (bm) {
+        const int pidx = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
+        // D-490 identity-read-FIRST: the position's identity BEFORE any decision input, so a slot that closes
+        // + re-opens under this cadence yields a STALE identity (the drain skips) rather than a fresh identity
+        // on a stale decision. (HEAD skipped a zero-qty slot here and left the trio UNSET; the drain's kernel
+        // does that now — F-096 in ONE place — with the same end state.)
+        ExitReq req{};
+        req.slot               = tt::SlotIdx{(int16_t)pidx};
+        req.leg                = 0;                          // the HEAD shape: leg 0 even on an odd slot
+        req.reason             = EXIT_REQ_PREDICTOR;
+        req.meta               = meta_byte;
+        req.flags              = EXIT_REQ_FLAG_PREDICTED;
+        req.strategy_id        = state.nodes[nc].resolved_strategy_id;   // D-470 (cascade C3) — RESOLVED, matching the entry submit
+        req.p                  = state.nodes[nc].last_exit_prediction;
+        req.entry_timestamp_us = oms.portfolio.positions[pidx].entry_timestamp_us;
+        req.price              = price_fpn;
+        posted += tt::Node_RequestExit(&state.agg.exit_req_rings[nc], req, &oms, c);
+    }
+    state.nodes[nc].strategy_halt_reason = SHALT_EXIT_PREDICTED;
+    return posted;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCommon_PredictorSubmitArm]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EngineCommon_SlowPathCycleOneCore]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [ML_INFERENCE]]
@@ -1690,98 +1772,10 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
         _sec_t_te_start - _sec_t_push_start, _sec_t_te_start);
 
     // === v5.13.0.B — sell-side ML exit-prediction submit ===
-    // RebuildOneCore wrote state..last_exit_prediction
-    // (when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor models loaded).
-    // If above threshold and any positions are open on this
-    // core's slot(s), fire MARKET_SELL via OMS_PushSubmit and
-    // mark per-slot last_exit_predicted_bitmap for v5.13.4 reward
-    // attribution. Default cfg path (use_exit_model=0): the
-    // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
-    if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
-        && state.nodes[tt::NodeIdx{(int16_t)c}].last_exit_prediction
-           > FPN_ToDouble(cfg.nodes[tt::NodeIdx{(int16_t)c}].exit_threshold)  // Class 25 scope-discipline: per-node read at per-node scope (value-equivalent via walker propagation; future-proofs against per-node override addition)
-        && price_d > 0.01) {
-        // Slot mask: under partials each core owns 2 slots
-        // (legs A + B); single-leg under partial_exit_enabled=0.
-        // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-        int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-        uint16_t my_mask = BITMAP_NODE_SLOT_MASK(c, partial_on);
-        uint16_t bm = (uint16_t)
-            (oms.portfolio.active_bitmap & my_mask);
-        if (bm) {
-            Money price_fpn = Money{ money_from_double_payload(price_d) };
-            while (bm) {
-                int pidx = __builtin_ctz(bm);
-                bm &= (uint16_t)(bm - 1);
-                Money qty =
-                    oms.portfolio.positions[pidx].quantity;
-                if (Money_IsZero(qty)) continue;
-                // Mark per-slot for v5.13.4 attribution + v5.13.0.B
-                // calibration log. Set BEFORE OMS_PushSubmit so the
-                // SPSC ring release-acquire makes it visible to drainer
-                // when the fill arrives.
-                // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
-                BITMAP_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(pidx));
-                oms.last_exit_predicted_p[pidx] =
-                    state.nodes[tt::NodeIdx{(int16_t)c}].last_exit_prediction;
-                // v5.13.4 — capture chosen arm + regime per-slot
-                // for HandleFill's exit_bandit Update.
-                // v5.13.6.C — defensive bounds (parity-check
-                // M.3 gap-close 2026-05-08). Catches trainer↔
-                // engine model dimension mismatch + regime
-                // out-of-range at SUBMIT time vs. silently
-                // skipping bandit update at attribution time.
-                // CRITICAL log + clamp; doesn't refuse submit
-                // (exit fires for safety; bandit skips later).
-                int captured_arm =
-                    state.nodes[tt::NodeIdx{(int16_t)c}].last_exit_dominant_horizon;
-                int captured_regime =
-                    state.nodes[tt::NodeIdx{(int16_t)c}].regime_state.current_regime;
-                EnsembleModelZoo<F>* ezoo_b = (EnsembleModelZoo<F>*)
-                    state.nodes[tt::NodeIdx{(int16_t)c}].ensemble_handle;
-                int n_arms_b = (ezoo_b
-                    ? ezoo_b->exit_predictor_count : 0);
-                if (captured_arm < 0 ||
-                    captured_arm >= n_arms_b) {
-                    static uint64_t s_arm_log_us[16] = {0};
-                    Health_LogCriticalRateLimited(
-                        &s_arm_log_us[c & 15], 60000000ULL,
-                        c, "ml",
-                        "exit submit: captured arm %d out of "
-                        "range [0, %d) — bandit Update will "
-                        "skip; trainer↔engine horizon count "
-                        "mismatch?",
-                        captured_arm, n_arms_b);
-                    captured_arm = -1;  // -1 sentinel; HandleFill skips
-                }
-                if (captured_regime < 0 ||
-                    captured_regime >= NUM_REGIMES) {
-                    captured_regime = -1;
-                }
-                // v5.15.5.C.2.1 (LOW-2) — bit-packed in
-                // last_exit_predicted_meta. OMS_META_PACK
-                // sets the validity bit (replaces pre-LOW-2
-                // -1 sentinel). If EITHER arm or regime is
-                // -1 (out-of-range above), clear the slot
-                // so drainer's OMS_META_IS_VALID predicate
-                // returns false (no bandit Update).
-                if (captured_arm >= 0 && captured_regime >= 0) {
-                    oms.last_exit_predicted_meta[pidx] =
-                        OMS_META_PACK(captured_arm, captured_regime);
-                } else {
-                    OMS_META_CLEAR(oms.last_exit_predicted_meta[pidx]);
-                }
-                // v5.15.5.C.4 Phase D5 — Class-18 helper
-                // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit
-                // D-470 (cascade C3) — RESOLVED, matching the entry submit above.
-                tt::OMS_PushExitForSlot(&oms, (int16_t)pidx,
-                    qty, state.nodes[tt::NodeIdx{(int16_t)c}].resolved_strategy_id, price_fpn,
-                    /*leg*/(uint8_t)0, &cfg.nodes[tt::NodeIdx{(int16_t)c}]);
-            }
-            state.nodes[tt::NodeIdx{(int16_t)c}].strategy_halt_reason =
-                SHALT_EXIT_PREDICTED;
-        }
-    }
+    // E.1.3 P4-pre-7 (D-490): extracted to EngineCommon_PredictorSubmitArm — the arm now POSTS ExitReqs
+    // onto this node's ring; the composer pushes the SELLs at its pump's step 0 and SETs the per-slot
+    // attribution trio after each successful push. Char (6) drives the arm directly.
+    (void)EngineCommon_PredictorSubmitArm(state, oms, cfg, c, price_d);
 
     // === Time exit + trailing SL ratchet (per-core) ===
     if (cfg.nodes[tt::NodeIdx{(int16_t)c}].max_hold_ticks > 0 && price_d > 0.01) {
@@ -1868,7 +1862,7 @@ inline void EngineCommon_SlowPathCycleOneCore(const ControllerConfig<F>& cfg,
         state.nodes[tt::NodeIdx{(int16_t)c}].sp_telemetry.cycles_total.fetch_add(1,
                                                   std::memory_order_relaxed);
         EventLoop_CheckWsStaleness(&state, cfg, price_d,
-                                    rebuild_ts_us);
+                                    rebuild_ts_us, /*node_id (D-490: the winner posts onto ITS ring)*/c);
     }
 
     // NOTE: DrainPostFill stays on the drainer thread (single

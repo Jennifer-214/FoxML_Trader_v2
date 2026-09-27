@@ -242,7 +242,7 @@ static_assert(OMS_RING_PUSH_BUDGET_CYCLES >= 1000000ULL,
 // [STRUCT]_[SubmitCommand]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [CONCURRENCY]]
-// [THREAD]_[[SLOW_WRITER] [DRAINER_READER]]
+// [THREAD]_[[COMPOSER_WRITER] [COMPOSER_READER]]
 // [SYNC]_[SPSC]
 // [REFERENCE]_[DESIGN_SPEC]_[orchestration-helper-with-pod-args-pattern]
 // [SCHEMA]_[v1.0]
@@ -484,15 +484,15 @@ struct OrderManagerState {
     // D-216); stays ONE ring at the flip (account-level, no node lane).
     alignas(64) SPSCRing<Command, OMS_RECONCILE_RING_SIZE> reconcile_queue;
 
-    // v4.7.37: per-core submit queues. Producer threads (producer slow-path
-    // + per-core slow-path threads in SHARDED per_node_slow execution mode
-    // since v5.0.0 default) push SubmitCommands here. The drainer thread pops
-    // them in OMS_DrainSubmit and calls OrderManager_Submit serially —
-    // preserving the documented "drainer is sole Submit caller" contract.
+    // v4.7.37: per-slot submit queues. E.1.3 P4-pre-7 (D-490): the COMPOSER is the SOLE producer — its
+    // event pump (entries + exits from the TradeEvent rings), its exit-request drain (the nodes' TimeExit /
+    // exit-predictor / WS-flatten requests, which ride AggregatorState::exit_req_rings) and the manual
+    // close all push here ON the composer; OMS_DrainSubmit pops them on the same thread and calls
+    // OrderManager_Submit serially. The slow threads no longer push these queues (P4-pre-4 F-1: three
+    // producers on one SPSC ring silently lost commands). OMS_PushSubmit carries the identity pin.
     //
-    // Why per-core (not one queue): when per-core slow-paths spawn (Phase C),
-    // each thread is the sole producer for its own ring. SPSC contract
-    // holds. With one shared queue, multiple producers would need MPSC.
+    // Why per-slot (not one queue): the §4.1 flip re-partitions submit into per-NODE lanes each owned by
+    // its node thread (D-448); the per-slot shape is the lane's ancestor. SPSC holds before and after.
     // SLOT-keyed, not node-keyed: OMS_PushSubmit indexes these by portfolio_slot (0..2N-1 under
     // partials) — pinned by tests/controller_test.cpp ("OMS_PushSubmit keys queues by
     // portfolio_slot"). Sized by MAX_PORTFOLIO_POSITIONS accordingly; it read
@@ -1803,6 +1803,13 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms, const SubmitComma
 // [END_FUNCTION]_[OrderManager_Submit]
 //======================================================================
 
+// Composer_AssertIdentity is defined in EngineCommon.hpp, which sits ABOVE this header in the include
+// graph (it includes us). Declared here so OMS_PushSubmit (the submit funnel — E.1.3 P4-pre-7, D-490)
+// and OMS_AccountRingsDrain can carry their own site pins; the definition (same signature) follows in
+// every TU that instantiates the template.
+template <unsigned F>
+inline int Composer_AssertIdentity(AggregatorState<F>& agg, const char* site);
+
 //======================================================================
 // [FUNCTION]_[OMS_PushSubmit]
 //----------------------------------------------------------------------
@@ -1817,6 +1824,11 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (l): SubmitCommand POD is canonical arg.
     // No internal assembly; caller constructs the cmd struct directly + we push it.
     // Eliminates the prior 9-field unpack/repack ceremony.
+    // E.1.3 P4-pre-7 (D-490): the ONE identity pin on the submit funnel — from this commit the composer is
+    // the SOLE producer of every submit queue (its pump, its exit-request drain, the manual close).
+    // Harness-tolerant: a bare OMS (agg == nullptr, the A21 shape) and an UNBOUND composer both pass; a
+    // bound composer + a foreign thread = LOUD (composer_identity_violations + CRITICAL), never a halt.
+    if (oms->agg) (void)Composer_AssertIdentity(*oms->agg, "OMS_PushSubmit");
     if ((int)cmd.portfolio_slot < 0 || (int)cmd.portfolio_slot >= MAX_PORTFOLIO_POSITIONS) {
         std::fprintf(stderr,
                      "[OMS] PushSubmit: invalid portfolio_slot=%d (max=%d)\n",
@@ -1840,15 +1852,15 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms, const SubmitCommand<F>& cm
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// v4.7.37 (Phase B reordered): producer threads call OMS_PushSubmit instead
-// of OrderManager_Submit. Drainer thread pops from submit_queues and calls
-// OrderManager_Submit serially, preserving the documented "drainer is sole
-// Submit caller" OMS contract.
+// v4.7.37 (Phase B reordered): callers push SubmitCommands here instead of calling
+// OrderManager_Submit; OMS_DrainSubmit pops the queues and calls OrderManager_Submit
+// serially, preserving the documented "drainer is sole Submit caller" OMS contract.
 //
-// Per-core SPSC: each node_id has its own queue. Today's caller (producer
-// slow-path) is the sole producer for ALL queues — still SPSC per ring.
-// When Phase C spawns per-core slow-paths, each thread is the sole producer
-// for its own ring. SPSC contract holds in both modes.
+// E.1.3 P4-pre-7 (D-490): the COMPOSER is the sole caller — the pump, the exit-request
+// drain and the manual close all run on it; the slow threads post ExitReqs instead
+// (Node_RequestExit). The identity pin above makes any other caller LOUD. Per-SLOT
+// queues (keyed by portfolio_slot) — a same-thread FIFO stage until the §4.1 flip
+// re-partitions submit into per-node lanes.
 //
 // Returns false if the queue is full (caller should consider this an error
 // — slow-path submission backlog suggests drainer is starved). Returns true
@@ -2927,11 +2939,8 @@ inline void OMS_StaleInflightSweep(OrderManagerState<F>* oms) {
 // [END_FUNCTION]_[OMS_StaleInflightSweep]
 //======================================================================
 
-// Composer_AssertIdentity is defined in EngineCommon.hpp, which sits ABOVE this header in the include
-// graph (it includes us). Declared here so OMS_AccountRingsDrain can carry its own site pin; the
-// definition (same signature) follows in every TU that instantiates the template.
-template <unsigned F>
-inline int Composer_AssertIdentity(AggregatorState<F>& agg, const char* site);
+// (Composer_AssertIdentity's forward declaration was HOISTED above OMS_PushSubmit at E.1.3 P4-pre-7 —
+//  the submit funnel pins too; OMS_AccountRingsDrain still uses it.)
 
 //======================================================================
 // [FUNCTION]_[OMS_AccountRingsDrain]

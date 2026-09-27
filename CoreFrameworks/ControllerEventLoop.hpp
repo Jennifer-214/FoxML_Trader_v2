@@ -3731,7 +3731,7 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [SLOW_PATH] [CAPITAL_BEARING]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[force-close legs held past max_hold_ticks with gain below the floor (v4.7.17 extract — one site for live + backtest); future-stamp underflow guard]
+// [OVERVIEW]_[force-close legs held past max_hold_ticks with gain below the floor (v4.7.17 extract — one site for live + backtest); future-stamp underflow guard — since E.1.3 P4-pre-7 (D-490) it POSTS an ExitReq onto the node's ring; the composer pushes the SELL]
 // [REFERENCE]_[DECISION]_[D-103]
 //======================================================================
 // [CODE]
@@ -3752,6 +3752,9 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
+        // D-490 identity-read-FIRST — the position's identity BEFORE any decision input (the drain's CC-2 guard
+        // compares it; a slot that closes + re-opens after this read yields a STALE request, never a fresh one).
+        const uint64_t entry_identity_us = oms->portfolio.positions[slot].entry_timestamp_us;
 
         // Note: state->nodes[] is indexed by node_id, not slot. With partials,
         // both leg-A (slot 2c) and leg-B (slot 2c+1) share the same NodeContext
@@ -3784,15 +3787,18 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
         double min_gain = Money_ToDouble(cfg.min_hold_gain_pct);
         if (gain_pct >= min_gain) continue;  // still profitable enough; keep it
 
-        // Force-close via OMS_PushSubmit (drainer is sole Submit caller).
-        // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit.
-        Money qty       = oms->portfolio.positions[slot].quantity;
-        Money price_fpn = Money{ money_from_double_payload(current_price) };  // D-103 ingress bridge
-        // D-470 (cascade C3) — RESOLVED, matching the entry submit.
-        tt::OMS_PushExitForSlot(oms, (int16_t)slot,
-                                qty, state->nodes[tt::NodeIdx{(int16_t)node_id}].resolved_strategy_id, price_fpn,
-                                /*leg*/(uint8_t)0, &cfg.nodes[tt::NodeIdx{(int16_t)node_id}]);
+        // Force-close: E.1.3 P4-pre-7 (D-490) — the node POSTS an ExitReq onto ITS OWN ring; the composer
+        // pushes the MARKET_SELL at its pump's step 0 (qty re-derived there; sid / leg 0 / price CARRIED —
+        // the HEAD command shape, byte for byte). The slow thread no longer touches submit_queues.
+        // (v5.15.5.C.4 Phase D5 / WIP2d-1.B.1 / D-470 history: see EngineCommon_DrainExitRequests.)
+        ExitReq req{};
+        req.slot               = tt::SlotIdx{(int16_t)slot};
+        req.leg                = 0;
+        req.reason             = EXIT_REQ_TIME;
+        req.strategy_id        = state->nodes[tt::NodeIdx{(int16_t)node_id}].resolved_strategy_id;   // D-470 — RESOLVED, matching the entry submit
+        req.entry_timestamp_us = entry_identity_us;
+        req.price              = Money{ money_from_double_payload(current_price) };  // D-103 ingress bridge — at the request site
+        (void)tt::Node_RequestExit(&state->agg.exit_req_rings[tt::NodeIdx{(int16_t)node_id}], req, oms, node_id);
 
         fprintf(stderr,
             "[time-exit] node %d slot %d: held %lu ticks, gain %.3f%%\n",
@@ -3912,8 +3918,10 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
 // per slow-path cycle per core. Caller passes its own measurement
 // (live: system_clock; backtest: tick.timestamp for determinism).
 //
-// Returns: 0 if not breached or CAS lost; > 0 (count of submits) when
-// this thread won the CAS and fired the flatten.
+// Returns: 0 if not breached, CAS lost, or the request was DROPPED (ring full → the CAS is
+// rolled back so the next cadence re-fires); 1 when this thread won the CAS and POSTED the
+// FLATTEN element onto its node's ring (E.1.3 P4-pre-7, D-490 — the composer executes
+// EventLoop_FlattenAll at its pump's step 0; the SELLs are its, not this thread's).
 //
 // Branchless considerations: cfg-flag check is the dominant fast path
 // (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED) = 0 by default → early return ~5ns,
@@ -3924,7 +3932,8 @@ template <unsigned F>
 inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
                                        const ControllerConfig<F>& cfg,
                                        double current_price,
-                                       uint64_t now_us) {
+                                       uint64_t now_us,
+                                       int node_id) {   // E.1.3 P4-pre-7 (D-490): the CAS winner posts the FLATTEN element onto ITS OWN node's ring
     // v5.14.9.B.0 — refresh engine-wide gate cache from cfg before reading.
     // Cheap (~3ns OR-reduction); defensive against callers that haven't run
     // RebuildOneCore yet (CheckWsStaleness fires every slow-path cycle in
@@ -3980,11 +3989,19 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
         (double)gap_us / 1.0e6,
         cfg.ws_dead_time_flatten_threshold_secs,
         cfg.recovery_delay_secs);
-    // E.1.3 P4-pre-7 C1: FlattenAll takes Money — the D-103 ingress bridge moved here from its body.
-    // (C2 replaces this direct call with the winner's ExitReq; the bridge then lives at that site.)
-    const Money flatten_price = (current_price > 0.0) ? Money{ money_from_double_payload(current_price) }
-                                                      : Money_Zero();
-    return EventLoop_FlattenAll(state, state->oms, cfg.nodes, flatten_price, /*reason*/1);
+    // E.1.3 P4-pre-7 (D-490): the winner POSTS a FLATTEN element onto ITS OWN node's ring; the composer
+    // executes EventLoop_FlattenAll at its pump's step 0 (the D-103 double ingress bridge lives here —
+    // the only double ingress left on this path). A FULL ring is counted (exit_requests_dropped) + WARN
+    // and the CAS is ROLLED BACK: the gate must not stay armed with nothing in flight — the next cadence
+    // re-fires (recovery_until_us stays set: a refusal window without a flatten is the conservative side).
+    ExitReq req{};
+    req.reason = EXIT_REQ_FLATTEN_WS;
+    req.price  = (current_price > 0.0) ? Money{ money_from_double_payload(current_price) } : Money_Zero();
+    if (!tt::Node_RequestExit(&state->agg.exit_req_rings[tt::NodeIdx{(int16_t)node_id}], req, state->oms, node_id)) {
+        state->oms->flatten_pending.store(0, std::memory_order_release);
+        return 0;
+    }
+    return 1;
 }
 
 //------------------------------------------------------------------------------

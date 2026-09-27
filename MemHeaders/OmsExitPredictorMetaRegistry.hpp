@@ -39,12 +39,13 @@
 //   bit  6    (1 bit)  = valid    — 1 = arm + regime populated; 0 = unset (replaces -1 sentinel)
 //   bit  7             — reserved
 //
-// Single-thread access (per-arm reward observability invariant):
-//   - WRITER: the per-node slow-path body (EngineCommon.hpp) at submit time (single thread per OMS).
-//   - READER: drainer in ControllerEventLoop.hpp HandleFill attribution (single thread).
-//   - CLEAR:  drainer post-attribution (same thread as read).
-// SPSC ring release-acquire fence provides cross-thread visibility (set BEFORE
-// OMS_PushSubmit; read AFTER OMS_DrainSubmit). No atomic accessors needed.
+// Single-thread access (per-arm reward observability invariant) — E.1.3 P4-pre-7 (D-490):
+//   - WRITER: the COMPOSER at the exit-request drain (OMS_SET_PER_SLOT_EXIT_PREDICTOR, after a
+//             successful push of the predictor's SELL). The slow path CARRIES p + the packed meta
+//             in its ExitReq; it no longer writes the trio (PARITY-073's N+1-writer RMW is closed).
+//   - READER: the composer — HandleFill attribution (real_on_exit_calibration) + DrainPostFill.
+//   - CLEAR:  the composer — DrainPostFill post-attribution (OMS_RESET_PER_SLOT_EXIT_PREDICTOR).
+// ONE thread, program order: SET at pump step 0 → DrainSubmit → fill → read → clear. No fence needed.
 //
 // Branchless inference API (per multi-bit-state-encoding-pattern.md):
 //   OMS_META_GET_REGIME(byte)        — 1 AND, returns uint8_t

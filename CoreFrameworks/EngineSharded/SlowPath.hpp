@@ -103,8 +103,9 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
                 "[manual-close] slot %d: no active position, ignoring\n", slot);
             continue;
         }
-        Money qty = oms.portfolio.positions[slot].quantity;
-        if (Money_IsZero(qty)) continue;
+        // qty for the log line below; the kernel re-derives it on this same thread and owns the F-096
+        // zero-qty skip (E.1.3 P4-pre-7, D-490) — its 0 return is HEAD's early `continue`.
+        const Money qty = oms.portfolio.positions[slot].quantity;
         // Map slot → node_id for strategy_id + leg lookup
         // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
         // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
@@ -127,15 +128,16 @@ inline void EngineSharded_SlowPath_DrainManualCloses(
         // the drainer thread serializes Submit calls. Manual close is a
         // GUI-driven event; without funneling, this site races with
         // other producer-thread Submits when Phase C spawns multiple.
-        // v5.15.5.C.4 Phase D5: routed via OMS_PushExitForSlot helper —
-        // 8-arg market-sell-with-degenerate-TP/SL → 6-arg helper call.
-        tt::OMS_PushExitForSlot(&oms,
+        // v5.15.5.C.4 Phase D5: routed via OMS_PushExitForSlot helper; E.1.3 P4-pre-7 (D-490): via the
+        // per-slot KERNEL — the manual close already runs ON the composer, so it stays a direct push.
+        if (tt::OMS_PushExitResolvedQty(&oms,
             (int16_t)slot,
-            qty,
             strategy_id,
             fill_px,
             (uint8_t)leg,
-            &cfg.nodes[tt::NodeIdx{(int16_t)node_id}]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-node cfg for pre-resolve at submit
+            &cfg.nodes[tt::NodeIdx{(int16_t)node_id}]) == 0) {  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-node cfg for pre-resolve at submit
+            continue;   // an emptied slot: nothing to close (HEAD's early `continue`), no log line
+        }
         // v4.7.19: counter bumps moved to EventLoop_DrainPostFill —
         // see the doctrine note there. Pre-v4.7.19 we bumped here
         // BEFORE Submit could fail (queue full, slot already closed,

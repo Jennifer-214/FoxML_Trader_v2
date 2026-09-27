@@ -416,18 +416,10 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             // v5.15.5.B.2 — wrapped in WsHeartbeatTelemetry alignas(64) cluster.
             drv->state->ws_telemetry.last_tick_us.store(tick.timestamp,
                                                std::memory_order_release);
-            // v5.12.1.A.2 — backtest also runs CheckWsStaleness for parity
-            // with live slow-path call sites. Pass tick.timestamp as
-            // now_us (deterministic; matches the field we just published).
-            // Gate is inert at default cfg flag = 0; if operator enables
-            // it during backtest, gap == 0 → still no flatten (publish
-            // and check use same value). Determinism preserved.
-            if (drv->config && drv->oms) {
-                double current_price = Money_ToDouble(tick.price);
-                EventLoop_CheckWsStaleness(drv->state, *drv->config,
-                                            current_price,
-                                            tick.timestamp);
-            }
+            // v5.12.1.A.2 ran EventLoop_CheckWsStaleness here "for parity with live". E.1.3 P4-pre-7
+            // (D-490) DELETED it: the gate is a NODE's request now (the CAS winner posts a FLATTEN element
+            // onto its own ring) and the driver is not a node; the call was a by-construction no-op
+            // anyway — publish and check used the same tick.timestamp, so gap == 0 could never breach.
         }
         // BACKTEST slow-path-cycle via EngineCommon helper per train-serve
         // execution-layer parity (M5 first canonical). Single call to
