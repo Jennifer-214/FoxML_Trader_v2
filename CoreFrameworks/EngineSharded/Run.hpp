@@ -2327,12 +2327,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // Reconciler status
             uint64_t rc_polls = g_reconciler.total_polls.load(std::memory_order_relaxed);
             uint64_t rc_corr  = g_reconciler.drift_corrections.load(std::memory_order_relaxed);
+            uint64_t rc_drop  = g_reconciler.corrections_dropped.load(std::memory_order_relaxed);   // 3b(iii) Leaf 4
             double   rc_drift = g_reconciler.last_drift_usdt.load(std::memory_order_relaxed);
             fprintf(stdout, " " SH_BOLD SH_PEACH "RECONCILE" SH_RESET
                     "    " SH_DIM "polls" SH_RESET " " SH_FG "%lu" SH_RESET
                     "  " SH_DIM "corrections" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "dropped" SH_RESET " %s%lu" SH_RESET
                     "  " SH_DIM "drift" SH_RESET " %s$%.4f" SH_RESET "\033[K\n",
                     (unsigned long)rc_polls, (unsigned long)rc_corr,
+                    rc_drop ? SH_RED : SH_FG, (unsigned long)rc_drop,
                     SH_PNL(rc_drift), rc_drift);
         }
 

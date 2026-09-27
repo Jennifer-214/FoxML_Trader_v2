@@ -1054,9 +1054,10 @@ struct TUISnapshot {
     // SILENT failure — the drainer keeps spinning + spends time it shouldn't,
     // or events get dropped, and the operator has no GUI signal.
     //
-    // Both are monotonic counters (never reset). GUI panels render the raw
-    // value; non-zero = something to investigate. Health log emits WARN on
-    // first non-zero observation (rate-limited).
+    // These are monotonic counters (never reset). NO GUI panel renders them today (verified
+    // 2026-09-26 — the cohort-wide counter surface is TECH_DEBT-350); the operator signal is the
+    // health log's WARN on the first non-zero observation (Async.hpp, rate-limited). Non-zero =
+    // something to investigate.
     uint64_t oms_log_ring_full_spins;        // total spin/usleep iters in OrderEventLog_Append
     uint64_t oms_log_writer_realloc_failed;  // realloc failures inside async writer thread (legacy — should stay 0 post-v5.11.5.C)
     uint64_t oms_log_full_drops;             // v5.11.5.D — events dropped because mmap'd capacity exhausted (parity-check J.1)

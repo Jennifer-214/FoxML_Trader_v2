@@ -10,6 +10,7 @@
 // [OVERVIEW]_[the advisory venue-reconcile safety net — own thread + own REST instance; detect-only alerts via CMD_RECONCILE]
 // [CONTAINS]
 //   - [STRUCT]_[ReconciliationLoopState]
+//   - [FUNCTION]_[ReconciliationLoop_PushCorrection]
 //   - [FUNCTION]_[ReconciliationLoop_Pass]
 //   - [FUNCTION]_[reconcile_thread_body]
 //   - [FUNCTION]_[ReconciliationLoop_Init]
@@ -36,7 +37,7 @@ namespace tt {
 // [STRUCT]_[ReconciliationLoopState]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
-// [THREAD]_[[RECONCILER_WRITER] [GUI_READER]]
+// [THREAD]_[[RECONCILER_WRITER] [TUI_READER]]
 // [SYNC]_[ATOMIC]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[reconciler thread state — own REST instance + read-only OMS view + observability atomics the TUI reads]
@@ -74,9 +75,14 @@ struct ReconciliationLoopState {
     //  ReconciliationLoop_TriggerNow, had ZERO callers; H21 rule 3 removes dead capital-path
     //  code. A future "reconcile now" hook re-adds the word WITH its caller.)
 
-    // Observability (atomic for TUI reads)
+    // Observability atomics. READERS (verified 2026-09-26, 3b(iii) Leaf 4): the ANSI dashboard's
+    // RECONCILE line on the run thread (Run.hpp) + the shutdown print below — there is NO GUI reader
+    // (the [THREAD] tag used to say GUI_READER; the cohort-wide counter surface is TECH_DEBT-350).
     std::atomic<uint64_t> total_polls;
-    std::atomic<uint64_t> drift_corrections;
+    std::atomic<uint64_t> drift_corrections;    // alerts PUSHED (the composer drains them; detect-only, D-216)
+    std::atomic<uint64_t> corrections_dropped;  // alerts REFUSED by a FULL ring (3b(iii) Leaf 4). The ring holds
+                                                // OMS_RECONCILE_RING_SIZE and the composer drains it every cycle,
+                                                // so non-zero means the composer stalled or the reconciler flooded
     std::atomic<double>   last_drift_usdt;
 };
 //======================================================================
@@ -112,12 +118,55 @@ struct ReconciliationLoopState {
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-09-26]
 //----------------------------------------------------------------------
-// [SIZE]_[576B]
+// [SIZE]_[592B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[9]
+// [CACHE_LINES]_[10]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ReconciliationLoopState]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ReconciliationLoop_PushCorrection]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [LIVE_TRADING] [CONCURRENCY]]
+// [REFERENCE]_[DECISION]_[[D-216] [D-489]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[push ONE drift alert onto the OMS's reconcile ALERT ring (the composer drains it); a FULL ring drops it LOUD + counted, never spins]
+//======================================================================
+// [CODE]
+//======================================================================
+template <unsigned F>
+static inline int ReconciliationLoop_PushCorrection(ReconciliationLoopState<F>* s, const Command& cmd) {
+    if (!SPSCRing_TryPush(&s->oms->reconcile_queue, cmd)) {
+        const uint64_t dropped = s->corrections_dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+        tt::Health_Log(tt::HEALTH_WARN, "reconcile_ring_full", -1,
+                       "reconcile ALERT ring (size=%d) full — alert DROPPED (total dropped %llu; drift=%.4f); "
+                       "the next pass re-detects the drift",
+                       (int)OMS_RECONCILE_RING_SIZE, (unsigned long long)dropped, cmd.result.avg_fill_price);
+        fprintf(stderr, "[Reconciler] oms->reconcile_queue full, dropping alert (total dropped %llu)\n",
+                (unsigned long long)dropped);
+        return 0;
+    }
+    s->drift_corrections.fetch_add(1, std::memory_order_relaxed);
+    return 1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [COMMENT]
+//----------------------------------------------------------------------
+// The alert ring's ONE producer arm (the reconciler thread; the composer is its one consumer —
+// OMS_AccountRingsDrain, compose step 0-acct, 3b(iii)). Detect-only (D-216): a dropped alert loses
+// an audit row, never capital, and the next pass re-detects the same drift — so the full-ring
+// policy is drop + counter + a durable WARN (the count-only class of the D-479 table), not a spin.
+// History: the Phase 0.3 fix retargeted this push from the reconciler's OWN ring, which nothing
+// read (alerts were silently dropped); that dead ring and its RECONCILE_QUEUE_SIZE were deleted at
+// 3b(iii) Leaf 3 (TECH_DEBT-192 (4)) — the live ring's depth is OMS_RECONCILE_RING_SIZE.
+// Extracted from _Pass at Leaf 4 so char (9) drives the full-ring arm without a venue (M6 args:
+// the ring, both counters, the command).
+//======================================================================
+// [END_FUNCTION]_[ReconciliationLoop_PushCorrection]
 //======================================================================
 
 //======================================================================
@@ -192,18 +241,8 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
              "drift=%.4f exchange=%.4f expected=%.4f",
              drift_usdt, exchange_usdt, expected_usdt);
 
-    // Push to the OMS's reconcile ALERT ring (the composer drains it — OMS_AccountRingsDrain,
-    // compose step 0-acct, 3b(iii)). History: the Phase 0.3 fix retargeted this push from the
-    // reconciler's OWN ring, which nothing read (alerts were silently dropped on the floor); that
-    // dead ring and its RECONCILE_QUEUE_SIZE were deleted at 3b(iii) Leaf 3 (TECH_DEBT-192 (4)) —
-    // the live ring's depth is OMS_RECONCILE_RING_SIZE beside its declaration.
-    if (!SPSCRing_TryPush(&s->oms->reconcile_queue, cmd)) {
-        fprintf(stderr, "[Reconciler] oms->reconcile_queue full, dropping correction\n");
-        return 0;
-    }
-
-    s->drift_corrections.fetch_add(1, std::memory_order_relaxed);
-    return 1;
+    // The one producer arm — full-ring policy (drop + counter + durable WARN) lives in the helper.
+    return ReconciliationLoop_PushCorrection(s, cmd);
 }
 //======================================================================
 // [END_CODE]
@@ -213,7 +252,8 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
 // One reconciliation cycle. Queries exchange balances, computes expected
 // balances from OMS state, reports drift.
 //
-// Returns 1 if drift was detected and a CMD_RECONCILE was pushed, 0 if clean.
+// Returns 1 if drift was detected and a CMD_RECONCILE was pushed; 0 if clean, if the venue call
+// failed, if no pack is published yet, or if the alert ring was FULL (counted in corrections_dropped).
 //======================================================================
 // [END_FUNCTION]_[ReconciliationLoop_Pass]
 //======================================================================
@@ -275,6 +315,7 @@ static inline int ReconciliationLoop_Init(ReconciliationLoopState<F>* s,
     s->shutdown_requested.store(0, std::memory_order_relaxed);
     s->total_polls.store(0, std::memory_order_relaxed);
     s->drift_corrections.store(0, std::memory_order_relaxed);
+    s->corrections_dropped.store(0, std::memory_order_relaxed);
     s->last_drift_usdt.store(0.0, std::memory_order_relaxed);
 
     if (!BinanceOrderAPI_Init(&s->rest_api, host, api_key, api_secret, symbol)) {
@@ -316,9 +357,10 @@ static inline void ReconciliationLoop_Shutdown(ReconciliationLoopState<F>* s) {
     s->shutdown_requested.store(1, std::memory_order_release);
     if (s->thread.joinable()) s->thread.join();
     BinanceOrderAPI_Cleanup(&s->rest_api);
-    fprintf(stderr, "[Reconciler] shutdown (polls=%llu corrections=%llu)\n",
+    fprintf(stderr, "[Reconciler] shutdown (polls=%llu corrections=%llu dropped=%llu)\n",
             (unsigned long long)s->total_polls.load(),
-            (unsigned long long)s->drift_corrections.load());
+            (unsigned long long)s->drift_corrections.load(),
+            (unsigned long long)s->corrections_dropped.load());
 }
 //======================================================================
 // [END_CODE]
