@@ -173,7 +173,7 @@ constexpr size_t OMS_RESULT_RING_PER_NODE = OMS_RESULT_QUEUE_SIZE / MAX_EXECUTIO
 // 3b(iii) (D-478 (a) / D-489): the reconcile ALERT ring's depth. ONE ring, composer-owned — it stays
 // single at the flip (account-level rows have no node lane). Named here beside its siblings so the
 // declaration and its drain share one number; the dead RECONCILE_QUEUE_SIZE in ReconciliationLoop.hpp
-// sized a ring nothing read and retires with it (Leaf 3).
+// sized a ring nothing read and retired with it at Leaf 3 (TECH_DEBT-192 (4)).
 constexpr size_t OMS_RECONCILE_RING_SIZE = 64;
 static_assert(OMS_RESULT_RING_PER_NODE * MAX_EXECUTION_NODES == OMS_RESULT_QUEUE_SIZE,
               "per-node result depth must PARTITION the old total exactly (capacity conserved, "

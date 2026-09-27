@@ -32,8 +32,6 @@
 
 namespace tt {
 
-constexpr size_t RECONCILE_QUEUE_SIZE = 64;
-
 //======================================================================
 // [STRUCT]_[ReconciliationLoopState]
 //----------------------------------------------------------------------
@@ -63,12 +61,6 @@ struct ReconciliationLoopState {
     // seqlock) for a COHERENT expected-free-cash scalar the composer computed
     // same-thread with the OMS. Read-only.
     const AggregatorState<F>* agg;
-
-    // DEAD (Phase 0.3 fix — see ReconciliationLoop_Pass): the Pass pushes to
-    // oms->reconcile_queue, NOT this ring; nothing reads this one. Kept
-    // initialized (callers may reference it); cleanup is the follow-on the
-    // Pass comment tracks (TECH_DEBT-192 dead-code cluster).
-    SPSCRing<Command, RECONCILE_QUEUE_SIZE> reconcile_queue;
 
     // Config
     int    interval_secs;       // default 30
@@ -118,11 +110,11 @@ struct ReconciliationLoopState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
+// [UPDATED]_[2026-09-26]
 //----------------------------------------------------------------------
-// [SIZE]_[17088B]
-// [ALIGN]_[64]
-// [CACHE_LINES]_[267]
+// [SIZE]_[576B]
+// [ALIGN]_[16]
+// [CACHE_LINES]_[9]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[ReconciliationLoopState]
@@ -200,11 +192,11 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
              "drift=%.4f exchange=%.4f expected=%.4f",
              drift_usdt, exchange_usdt, expected_usdt);
 
-    // Phase 0.3 fix: push to the OMS's reconcile_queue (which OMS_Tick
-    // drains). Previously we pushed to our own s->reconcile_queue, which
-    // nothing reads — drift corrections were silently dropped on the floor.
-    // s->reconcile_queue stays initialized for now (callers may reference
-    // it); it's dead code that should be cleaned up in a follow-on commit.
+    // Push to the OMS's reconcile ALERT ring (the composer drains it — OMS_AccountRingsDrain,
+    // compose step 0-acct, 3b(iii)). History: the Phase 0.3 fix retargeted this push from the
+    // reconciler's OWN ring, which nothing read (alerts were silently dropped on the floor); that
+    // dead ring and its RECONCILE_QUEUE_SIZE were deleted at 3b(iii) Leaf 3 (TECH_DEBT-192 (4)) —
+    // the live ring's depth is OMS_RECONCILE_RING_SIZE beside its declaration.
     if (!SPSCRing_TryPush(&s->oms->reconcile_queue, cmd)) {
         fprintf(stderr, "[Reconciler] oms->reconcile_queue full, dropping correction\n");
         return 0;
@@ -284,7 +276,6 @@ static inline int ReconciliationLoop_Init(ReconciliationLoopState<F>* s,
     s->total_polls.store(0, std::memory_order_relaxed);
     s->drift_corrections.store(0, std::memory_order_relaxed);
     s->last_drift_usdt.store(0.0, std::memory_order_relaxed);
-    SPSCRing_Init(&s->reconcile_queue);
 
     if (!BinanceOrderAPI_Init(&s->rest_api, host, api_key, api_secret, symbol)) {
         fprintf(stderr, "[Reconciler] failed to init REST API instance\n");
