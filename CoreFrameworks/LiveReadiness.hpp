@@ -210,7 +210,7 @@ inline bool check_state_dir_writable(const ControllerConfig<F>& cfg,
 template <unsigned F>
 inline bool check_mlockall_required(const ControllerConfig<F>& cfg,
                                     const EventLoopState<F>&) {
-    // If require_mlockall=1 and mlockall failed, main.cpp:209 returns 1
+    // If require_mlockall=1 and mlockall failed, main() returns 1
     // before reaching EngineSharded_Run. So under LIVE mode we just
     // verify the operator set the flag (engine wouldn't be here if
     // require_mlockall=1 AND mlockall failed).

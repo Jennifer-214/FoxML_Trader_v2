@@ -35,6 +35,7 @@
 
 #include "Backtest/BacktestPanels.hpp"
 #include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
+#include "CoreFrameworks/CfgPaths.hpp"    // the cfg-filename SSoT (the suite cfg + the default engine cfg)
 
 #include <sys/stat.h>  // mkdir
 #include <stdlib.h>    // v5.15.3.C — setenv("OMP_NUM_THREADS", ...) at main entry
@@ -157,7 +158,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n\n");
 
     // ensure logging dir exists, then redirect stderr to logging/foxml_suite.log
-    // so the in-app Log panel can tail it. mirrors main.cpp:117-132 pattern.
+    // so the in-app Log panel can tail it. mirrors main()'s logging/ + stderr-redirect block.
     mkdir("logging", 0755);
     {
         const char *log_path = "logging/foxml_suite.log";
@@ -332,11 +333,11 @@ int main(int argc, char *argv[]) {
     // settings panel — suite uses its own config so experiments don't affect live trading
     static SettingsState settings = {};
     {
-        const char *suite_cfg = "backtest.cfg";
+        const char *suite_cfg = CFG_PATH_BACKTEST_CFG;
         FILE *check = fopen(suite_cfg, "r");
         if (!check) {
             // first run: copy from engine.cfg as starting point
-            FILE *src = fopen("engine.cfg", "r");
+            FILE *src = fopen(CFG_PATH_DEFAULT_ENGINE_CFG, "r");
             if (src) {
                 FILE *dst = fopen(suite_cfg, "w");
                 if (dst) {
@@ -367,9 +368,11 @@ int main(int argc, char *argv[]) {
     //
     // Discipline: simple byte-level file diff (fast; catches all drift). More-precise
     // STAMP_BOUND_CFG_DERIVED-field-specific diff queued with the structural fix.
+    // Compares the DEFAULT engine cfg (CFG_PATH_DEFAULT_ENGINE_CFG) only — an engine launched
+    // with another cfg file on its command line is outside this check.
     {
-        FILE* fe = fopen("engine.cfg", "rb");
-        FILE* fb = fopen("backtest.cfg", "rb");
+        FILE* fe = fopen(CFG_PATH_DEFAULT_ENGINE_CFG, "rb");
+        FILE* fb = fopen(CFG_PATH_BACKTEST_CFG, "rb");
         if (fe && fb) {
             fseek(fe, 0, SEEK_END); long se = ftell(fe);
             fseek(fb, 0, SEEK_END); long sb = ftell(fb);

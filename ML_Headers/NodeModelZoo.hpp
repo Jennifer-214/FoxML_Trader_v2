@@ -1198,7 +1198,7 @@ static inline int ModelExpected_Compare(const ModelExpectedCfg* e, const char* r
             "engine running at poll_interval=%u\n"
             "                  RollingStats time-windows differ %.1f×; "
             "predictions will diverge from training distribution.\n"
-            "                  Set engine.cfg poll_interval=%d to match.\n",
+            "                  Set poll_interval=%d in the running cfg to match.\n",
             node_id, record, e->poll_interval, live_poll_interval,
             (double)live_poll_interval / (double)e->poll_interval,
             e->poll_interval);
@@ -1221,7 +1221,7 @@ static inline int ModelExpected_Compare(const ModelExpectedCfg* e, const char* r
     // compare each field, log mismatches
     if (e->barrier_gate >= 0 && e->barrier_gate != live_barrier_gate_enabled) {
         fprintf(stderr, "[ML] node %d: MISMATCH — %s says barrier_gate_enabled=%d, "
-                        "engine.cfg has %d\n",
+                        "the running cfg has %d\n",
                 node_id, record, e->barrier_gate, live_barrier_gate_enabled);
         mismatches++;
     }
@@ -1229,7 +1229,7 @@ static inline int ModelExpected_Compare(const ModelExpectedCfg* e, const char* r
         (live_ml_buy_threshold < e->threshold - 0.001 ||
          live_ml_buy_threshold > e->threshold + 0.001)) {
         fprintf(stderr, "[ML] node %d: MISMATCH — %s says ml_buy_threshold=%.3f, "
-                        "engine.cfg has %.3f\n",
+                        "the running cfg has %.3f\n",
                 node_id, record, e->threshold, live_ml_buy_threshold);
         mismatches++;
     }
@@ -1337,13 +1337,13 @@ static inline int ModelExpected_Verdict(int mismatches, int strict_mode, int nod
     if (mismatches == 0) return 1;
     if (strict_mode > 0) {
         fprintf(stderr, "[ML] node %d: %d MISMATCH(ES) in %s — STRICT MODE refusing to load.\n"
-                        "                update engine.cfg to match the expected record(s), or set\n"
+                        "                update the running cfg to match the expected record(s), or set\n"
                         "                model_verify_strict=0 to override.\n",
                 node_id, mismatches, what);
         return 0;
     }
     fprintf(stderr, "[ML] node %d: %d mismatch(es) in %s — model may not behave as trained.\n"
-                    "                fix engine.cfg to silence these warnings.\n",
+                    "                fix the running cfg to silence these warnings.\n",
             node_id, mismatches, what);
     return 1;
 }

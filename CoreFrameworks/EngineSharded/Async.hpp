@@ -474,7 +474,7 @@ inline bool EngineSharded_Async_FanOut(
     TickRecorder_Push(&tick_rec, price_d, volume_d, (int64_t)ts_us, is_buyer_maker);
 
 #ifdef USE_IMGUI_GUI
-    // Feed candles for the chart panel (same pattern as main.cpp:396)
+    // Feed candles for the chart panel (same pattern as the legacy main loop, removed from main.cpp at 7eacb80)
     if (candle_acc_ptr) {
         // Same PARITY-047 residual, GUI half. The 4th param is `is_seller`, and
         // `is_buyer_maker == 1` IS seller aggression — authoritative at
@@ -685,7 +685,7 @@ inline bool EngineSharded_Async_FanOut(
 
 #ifdef USE_IMGUI_GUI
         // Populate TUISnapshot for the GUI — same double-buffered
-        // pattern as legacy engine in main.cpp:845-912.
+        // pattern as the legacy engine (removed from main.cpp at 7eacb80).
         if (shared_ptr) {
             // v5.11.3.B — seqlock publish: parity bit flips odd → fill
             // back → flip even (idx toggled). Reader retries if mid-write.

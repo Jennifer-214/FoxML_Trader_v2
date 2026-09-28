@@ -31,10 +31,11 @@
 // All functions are paper-mode safe (early return when live_trading == 0
 // or notify == nullptr).
 //
-// References to the legacy implementations they mirror:
-//   0.1 orphan recovery        — main.cpp:290-340
-//   0.2 force-close on shutdown — main.cpp:56-101
-//   0.3 external trade reconcile — main.cpp:894-921
+// References to the legacy implementations they mirror — the legacy single-core engine, removed from
+// main.cpp at 7eacb80 (`git show 7eacb80^:main.cpp`; its old line numbers had already drifted, so none are cited):
+//   0.1 orphan recovery
+//   0.2 force-close on shutdown
+//   0.3 external trade reconcile
 //======================================================================================================
 #include "../DataStream/BinanceOrderAPI.hpp"
 #include "BinanceAdapter.hpp"
@@ -289,7 +290,7 @@ static inline int EngineSharded_ForceCloseOnShutdown(
 // so the normal exit flow can process the resulting fills.
 //
 // Refuses to silently exit with open positions — the legacy guarantee from
-// main.cpp:56-101 was "we NEVER reconnect with orphaned positions." Same
+// the legacy single-core engine (removed from main.cpp at 7eacb80) was "we NEVER reconnect with orphaned positions." Same
 // applies here: graceful shutdown means a flat book.
 //
 // Returns the number of positions still open after the timeout (0 = clean).

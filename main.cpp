@@ -26,6 +26,7 @@
 // NotifyState_Init when cfg.notify_enabled=1 (lands in c3+c4).
 #include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
+#include "CoreFrameworks/CfgPaths.hpp"    // the cfg-filename SSoT (the default engine cfg)
 
 #ifdef USE_IMGUI_GUI
 #include "GUI/CandleAccumulator.hpp"
@@ -76,7 +77,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "FoxML_Trader_v2 — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
     fprintf(stderr, "Licensed under AGPL-3.0-or-later. Commercial license: jenn.lewis5789@gmail.com\n\n");
 
-    const char *cfg_path = (argc > 1) ? argv[1] : "engine.cfg";
+    const char *cfg_path = (argc > 1) ? argv[1] : CFG_PATH_DEFAULT_ENGINE_CFG;
 
     //==================================================================================================
     // load configs
@@ -112,8 +113,9 @@ int main(int argc, char *argv[]) {
     // Ordering matters: this fires AFTER freopen(log_file) above, so a fatal
     // mlockall failure prints to logging/engine.log rather than terminal
     // stderr (where headless / systemd / nohup operators wouldn't see it).
-    // Trade-off: cfg-parsing memory at lines ~128-129 isn't locked, but cfg
-    // is parsed-and-discarded outside the hot path; not a regression.
+    // Trade-off: the cfg is parsed before this point, so its parse can page-fault (outside the
+    // hot path; not a regression). MCL_CURRENT then locks every page already mapped, the parsed
+    // cfg included.
     //
     // Failure modes:
     //   1. RLIMIT_MEMLOCK soft limit too low → mlockall returns EAGAIN.
@@ -167,9 +169,9 @@ int main(int argc, char *argv[]) {
     //==================================================================================================
     // WIP2d-1.A — per-core symbol axis (partial advance of .F.4c.3.A; uniformity check
     // + bridge to BinanceConfig.symbol). Operator can set node_<N>_symbol=BTCUSDT in
-    // engine.cfg; this overrides binance.cfg's symbol field if uniformity holds. Multi-
-    // symbol DataStream not yet supported — boot fails with clear error if cores have
-    // mismatched non-empty symbols. Empty = no override (binance.cfg's symbol drives).
+    // the cfg; this overrides BinanceConfig's symbol= (read from the SAME cfg) if uniformity
+    // holds. Multi-symbol DataStream not yet supported — boot fails with clear error if cores
+    // have mismatched non-empty symbols. Empty = no override (the cfg's symbol= drives).
     {
         const char* primary_symbol = ccfg.node_symbol[0];
         bool any_set = (primary_symbol[0] != '\0');
@@ -183,7 +185,7 @@ int main(int argc, char *argv[]) {
                     fprintf(stderr,
                         "[boot] FATAL: per-node symbols differ (node %d='%s' vs primary='%s'); "
                         "multi-symbol DataStream not yet supported. Set all node_<N>_symbol= "
-                        "identical OR leave all empty (binance.cfg's symbol drives).\n",
+                        "identical OR leave all empty (the cfg's symbol= drives).\n",
                         (int)c, sc, primary_symbol);
                     return 1;
                 }
@@ -193,7 +195,7 @@ int main(int argc, char *argv[]) {
             strncpy(bcfg.symbol, primary_symbol, sizeof(bcfg.symbol) - 1);
             bcfg.symbol[sizeof(bcfg.symbol) - 1] = '\0';
             fprintf(stderr, "[boot] per-node symbol override: BinanceConfig.symbol='%s' "
-                            "(from engine.cfg node_<N>_symbol=)\n", bcfg.symbol);
+                            "(from %s node_<N>_symbol=)\n", bcfg.symbol, ccfg.source_cfg_path);
         }
     }
 
@@ -202,7 +204,7 @@ int main(int argc, char *argv[]) {
     // Ambiguous capital intent on a SAFETY_CRITICAL field must not boot — covers sharded + legacy.
     if (ccfg.live_capital_cfg_conflict) {
         fprintf(stderr, "[ENGINE] FATAL: contradictory capital config (use_real_money vs trading_mode) "
-                        "-> boot REFUSED. Resolve engine.cfg (see the [cfg] FATAL above).\n");
+                        "-> boot REFUSED. Resolve %s (see the [cfg] FATAL above).\n", ccfg.source_cfg_path);
         return 1;
     }
 

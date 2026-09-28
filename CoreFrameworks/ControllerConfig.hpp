@@ -1456,10 +1456,13 @@ static_assert(sizeof(ControllerConfig<64>) == 52800,
               "byte-equivalence size-pin for the fingerprinted cfg struct (D-254).");
 
 // ③ D-254 — cfg_compile_ok: the capital-validation boot gate. Returns false iff
-// ControllerConfig_Load flagged ANY capital fault (malformed/overflow at parse OR out-of-range at
-// the post-resolve sweep) into cfg_load_fault_flags. Reasoned per-fault [cfg] FATAL lines already
-// printed at detection. A bool (not an exit) so tests can assert it; production callers (main.cpp
-// boot, backtest, GUI) ALWAYS-ABORT on false (D2 — no-margin, all modes).
+// ControllerConfig_Load set ANY cfg_load_fault_flags bit — a capital fault (malformed/overflow at
+// parse OR out-of-range at the post-resolve sweep) or any other CFG_FAULT_* (an unknown sharded key,
+// a malformed feature field). Reasoned per-fault [cfg] FATAL lines already printed at detection. A
+// bool (not an exit) so tests can assert it. Callers REFUSE on false, each in its own context (D2 —
+// no-margin, all modes): the engine boot exits (main()); a backtest or an optimizer run fails the
+// run; the engine's hot reload keeps the running cfg (EngineSharded/Async.hpp). The Settings panel
+// does NOT gate — it shows whatever the file parsed to.
 template <unsigned F>
 inline bool cfg_compile_ok(const ControllerConfig<F>& cfg) {
     return cfg.cfg_load_fault_flags == 0u;
@@ -1469,8 +1472,9 @@ inline bool cfg_compile_ok(const ControllerConfig<F>& cfg) {
 // testable); this wraps it with the reasoned operator FATAL so EVERY boot path emits the same message
 // and can't silently skip the gate (pre-D-255 only main.cpp gated → the suite/backtest ran a malformed
 // cfg with a silently-disabled stop). Boot paths still respond context-appropriately on false (engine
-// returns 1 / backtest fails the run / GUI keeps-old) — they just share this predicate+report. The
-// recurrence guard enforces caller-coverage.
+// returns 1 / a backtest or optimizer run fails) — they just share this predicate+report. (The hot
+// reload gates on cfg_compile_ok directly and keeps the running cfg; the Settings panel does not
+// gate.) The recurrence guard enforces caller-coverage.
 template <unsigned F>
 inline bool cfg_capital_gate_ok(const ControllerConfig<F>& cfg, const char* who) {
     if (cfg_compile_ok(cfg)) return true;
@@ -3464,7 +3468,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // ③ clean-break (D-223/D-255) — unrecognized SHARDED key HARD-REFUSE (the loop-tail fall-through;
     // reached only when NO handler matched, since every handler `continue`s). SCOPED to the core_*/node_*
     // namespace ControllerConfig EXCLUSIVELY owns: a non-sharded unknown key may belong to a sibling
-    // parser (BinanceConfig reads use_testnet/symbol/... from this SAME cfg path, main.cpp:75) —
+    // parser (BinanceConfig_Load reads use_testnet/symbol/... from this SAME cfg path in main()) —
     // false-refusing those would break boot, so the broader global-unknown refuse waits on the
     // multi-parser unification (N1, task #10). Exclusivity verified: the per-node block above is the SOLE
     // node_ handler and no core_ handler survives the ② rename. The refuse rides cfg_compile_ok (any bit
@@ -3588,7 +3592,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.trading_mode = TRADING_MODE_LIVE;
         cfg.cfg_keys_explicit |= MASK_CFG_KEY_TRADING_MODE;
         fprintf(stderr, "[cfg] WARN: 'use_real_money=1' is DEPRECATED (tombstoned, NEW-1). "
-          "Promoted to trading_mode=live. Update engine.cfg: replace it with 'trading_mode=live'.\n");
+          "Promoted to trading_mode=live. Update %s: replace it with 'trading_mode=live'.\n",
+          filepath ? filepath : "(unknown cfg)");
       } else if (cfg.trading_mode != TRADING_MODE_LIVE) {
         // HARD REFUSE (D-217/D-218): a contradictory capital config — legacy use_real_money=1 (wants
         // live) vs an explicit non-LIVE trading_mode — is AMBIGUOUS on a SAFETY_CRITICAL field. Do NOT
@@ -3596,11 +3601,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         // safe was an effort-driven deviation from this decision — reconciled D-218.)
         cfg.live_capital_cfg_conflict = 1;
         fprintf(stderr, "[cfg] FATAL: 'use_real_money=1' CONFLICTS with explicit 'trading_mode=%u'. "
-          "Ambiguous capital intent on a SAFETY_CRITICAL field -> boot REFUSED. Resolve engine.cfg: "
-          "remove 'use_real_money' OR set 'trading_mode=live'.\n", (unsigned)cfg.trading_mode);
+          "Ambiguous capital intent on a SAFETY_CRITICAL field -> boot REFUSED. Resolve %s: "
+          "remove 'use_real_money' OR set 'trading_mode=live'.\n", (unsigned)cfg.trading_mode,
+          filepath ? filepath : "(unknown cfg)");
       } else {
         fprintf(stderr, "[cfg] WARN: 'use_real_money=1' is DEPRECATED + redundant (trading_mode=live "
-          "already set). Remove it from engine.cfg.\n");
+          "already set). Remove it from %s.\n", filepath ? filepath : "(unknown cfg)");
       }
     } else {
       fprintf(stderr, "[cfg] WARN: 'use_real_money' is DEPRECATED (tombstoned, NEW-1); ignored. "

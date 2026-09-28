@@ -25,6 +25,7 @@
 #include "../ML_Headers/ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT
 #include <errno.h>   // 2026-09-03 — the data-file sidecar writer fails LOUD with errno (path-schema discipline 5)
 #include "../MemHeaders/DirCreate.hpp"        // D-431 — FoxDir_CreateParents (family+horizon chain)
+#include "../CoreFrameworks/CfgPaths.hpp"     // the cfg-filename SSoT (the panels' default cfg)
 #include "Fingerprint.hpp"
 #include <dirent.h>
 #include <sys/stat.h>
@@ -296,7 +297,7 @@ struct RunControlState {
 //======================================================================
 static inline void RunControl_Init(RunControlState *state) {
     memset(state, 0, sizeof(*state));
-    strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
+    strncpy(state->config_path, CFG_PATH_BACKTEST_CFG, sizeof(state->config_path) - 1);
     BacktestResults_Init(&state->results);
 }
 //======================================================================
@@ -2987,12 +2988,12 @@ static inline void OptimizerPanel_Init(OptimizerPanelState *state) {
     strncpy(state->ranges[1].key, "stop_loss_pct", 31);
     state->ranges[1].lo = 0.5; state->ranges[1].hi = 3.0; state->ranges[1].step = 0.5;
     // v5.15.5.F.4d.1.B.3 Step 6.9 (2026-05-24) — closes foxml_suite Optimizer-vs-RunControl
-    // divergence. Pre-fix: OptimizerPanel defaulted to "engine.cfg" while RunControl_Init:160
+    // divergence. Pre-fix: OptimizerPanel defaulted to "engine.cfg" while RunControl_Init
     // defaulted to "backtest.cfg" — two suite-internal panels loaded DIFFERENT cfg files.
     // foxml_suite agent CRIT-3 finding 2026-05-24. Fix: 1-line "engine.cfg" → "backtest.cfg"
     // restores parity between suite panels. (Note: backtest.cfg/engine.cfg structural drift
     // closes separately at v5.15.6.A/B/C per TECH_DEBT-123.)
-    strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
+    strncpy(state->config_path, CFG_PATH_BACKTEST_CFG, sizeof(state->config_path) - 1);
 }
 //======================================================================
 // [END_CODE]

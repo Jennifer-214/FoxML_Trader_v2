@@ -178,8 +178,8 @@ inline int sq_tail_read(const char* path, int max_lines, int line_cap,
         // message so the operator can debug.
         if (errno == ENOENT) {
             snprintf(error_out, error_cap,
-                     "no health log yet at %s — set health_log_path "
-                     "in engine.cfg + run a trade to populate", path);
+                     "no health log yet at %s (set health_log_path to it in the "
+                     "engine's cfg + run a trade to populate)", path);
         } else {
             snprintf(error_out, error_cap, "open failed: %s (%s)",
                      path, strerror(errno));
@@ -358,7 +358,8 @@ inline void GUI_Panel_StrategyQuality(StrategyQualityState* state,
         ImGui::TextColored(FoxmlColors::comment,
             "Click Refresh. Reads last 2000 lines from health.jsonl");
         ImGui::TextColored(FoxmlColors::comment,
-            "(set health_log_path in engine.cfg to enable per-trade logging)");
+            "(set health_log_path=%s in the engine's cfg to enable per-trade logging)",
+            health_log_path);
         ImGui::End();
         return;
     }

@@ -84,8 +84,9 @@ inline void EngineHeader_Render(const struct TUISnapshot* snap = nullptr) {
             ImGui::Text("%s", snap->source_cfg_path);
             ImGui::SetItemTooltip(
                 "Cfg file path the binary parsed at boot.\n"
-                "engine_gui reads engine.cfg; foxml_suite reads backtest.cfg.\n"
-                "Edits to the OTHER file have no effect on this binary.\n"
+                "engine_gui reads the cfg named on its command line (engine.cfg when\n"
+                "none is named); foxml_suite reads backtest.cfg.\n"
+                "Edits to any other file have no effect on this binary.\n"
                 "If you expected different behavior, check which cfg you edited.");
         }
 

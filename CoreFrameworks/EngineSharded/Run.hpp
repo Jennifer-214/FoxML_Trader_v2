@@ -75,6 +75,7 @@
 #include "../../ML_Headers/RollingStats.hpp"
 #include "../../ML_Headers/BuildFlags.hpp"  // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift WARN
 #include "../LiveReadiness.hpp"  // v5.15.2: LiveReadiness_Verify boot gate + FOREACH_LIVE_READINESS_CHECK
+#include "../CfgPaths.hpp"       // the cfg-filename SSoT (the secrets file)
 #include "../../Strategies/StrategyParameters.hpp"
 #include "../../Strategies/StrategyLifecycle.hpp"  // v5.4.0 Phase 1.2: Strategy_InitPerCore / _FreePerCore
 #include "../../DataStream/BinanceUserData.hpp"
@@ -583,8 +584,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     "[sharded]        AUTO is recommended for live capital "
                     "(regime-gated strategy selection).\n"
                     "[sharded]        To override: set "
-                    "acknowledge_hardcoded_strategy_in_live=1 in engine.cfg.\n",
-                    hardcoded_count, hardcoded_list);
+                    "acknowledge_hardcoded_strategy_in_live=1 in %s.\n",
+                    hardcoded_count, hardcoded_list, cfg.source_cfg_path);
                 tt::Health_Log(tt::HEALTH_INFO, "engine", -1,
                     "boot_abort reason=hardcoded_strategy_in_live nodes=%s",
                     hardcoded_list);
@@ -646,7 +647,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     }
 
     // === Live trading setup (use_real_money) ===
-    // Mirrors the legacy engine pattern in main.cpp:212-237. Loads secrets,
+    // Mirrors the legacy engine pattern (the single-core engine, removed from main.cpp at 7eacb80). Loads secrets,
     // initializes the BinanceAdapter (which spawns one worker thread per
     // BinanceOrderAPI instance — currently 1 worker for phase 02), prints
     // a 10-second warning if running against PRODUCTION (not testnet).
@@ -661,7 +662,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     bool live_trading = ControllerConfig_IsLiveCapital(cfg); // NEW-1 — single capital-authority predicate (was cfg.use_real_money; RBP Class 47)
     if (live_trading) {
         char api_key[128] = {}, api_secret[128] = {};
-        if (!LoadSecrets("secrets.cfg", api_key, api_secret)) {
+        if (!LoadSecrets(CFG_PATH_SECRETS_CFG, api_key, api_secret)) {
             fprintf(stderr, "[sharded] ERROR: trading_mode=live but secrets.cfg missing or incomplete\n");
             std::signal(SIGINT, prev_int);
             std::signal(SIGTERM, prev_term);
@@ -842,7 +843,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static BinanceUserDataState g_user_data;
     if (live_trading) {
         char ud_api_key[128] = {}, ud_api_secret[128] = {};
-        LoadSecrets("secrets.cfg", ud_api_key, ud_api_secret);
+        LoadSecrets(CFG_PATH_SECRETS_CFG, ud_api_key, ud_api_secret);
         const char* ws_host = bcfg.use_testnet
             ? "testnet.binance.vision" : "stream.binance.com";
         const char* rest_host = bcfg.use_testnet
@@ -934,7 +935,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static ReconciliationLoopState<F> g_reconciler;
     if (live_trading) {
         char rc_key[128] = {}, rc_secret[128] = {};
-        LoadSecrets("secrets.cfg", rc_key, rc_secret);
+        LoadSecrets(CFG_PATH_SECRETS_CFG, rc_key, rc_secret);
         const char* rc_host = bcfg.use_testnet
             ? "testnet.binance.vision" : "api.binance.us";
         if (ReconciliationLoop_Init(&g_reconciler, rc_host, rc_key, rc_secret,
@@ -1134,7 +1135,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // v5.14.4.B.1 — 3-mode dispatch (FOREACH_RECONCILE_MODE).
             //
             // SHARDED-ONLY (deep audit 2026-05-09 / TECH_DEBT-002 alignment):
-            // centralized engine main.cpp:362 does balance check only, NOT
+            // centralized engine (the legacy engine, removed from main.cpp at 7eacb80) did a balance check only, NOT
             // reconciliation. This dispatch lives in EngineSharded boot ONLY.
             // When TECH_DEBT-002 (centralized removal) ships, no migration
             // step needed here. If v5.X+ adds Phase 3 heartbeat reconcile
