@@ -105,6 +105,20 @@ static inline long parse_int_checked(const char *s, bool *malformed_out) {
     return ok ? v : 0;
 }
 
+// Checked UNSIGNED base-10 parse — the sister of parse_int_checked for values that can never be negative.
+// Digits only: std::from_chars for an unsigned type rejects '-', '+' and whitespace, and a value past
+// UINT64_MAX is out of range. Unlike the sister, an EMPTY/NULL value IS malformed — a caller that allows
+// an empty value checks for it first (E.1.3 NA CFG-1b: a command-line value is never empty).
+static inline bool parse_uint64_checked(const char *s, uint64_t *out) {
+    if (s == nullptr || *s == '\0') return false;
+    size_t n = std::strlen(s);
+    uint64_t v;
+    auto r = std::from_chars(s, s + n, v);
+    if (r.ec != std::errc() || r.ptr != s + n) return false;
+    *out = v;
+    return true;
+}
+
 // Length-aware variant — caller already knows the byte count, skipping
 // the strlen scan. Use when parsing a slice of a JSON message buffer
 // (e.g. extract returned a span with explicit length).

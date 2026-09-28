@@ -144,7 +144,11 @@
     X(FOREACH_SP_SECTION                        , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Slow-path section enum (regime/rebuild/etc.).") \
     X(FOREACH_PANEL                             , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "GUI panel registry.") \
     X(FOREACH_ROLLING_WINDOW                    , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Rolling window template variant registry.") \
-    X(FOREACH_KILL_TRIP_SITE                    , 1,      FOREACH_REGISTRY                 , "SSOT",              "GLOBAL fatal-trip sites of AggregatorState::kill_trip_request (D-479 as amended; the KTS_* enum + name table the OEVT_RING_FULL_FATAL marker + the Health_Log CRITICAL record persist; enum:KillTripSite in the H21 ledger).")
+    X(FOREACH_KILL_TRIP_SITE                    , 1,      FOREACH_REGISTRY                 , "SSOT",              "GLOBAL fatal-trip sites of AggregatorState::kill_trip_request (D-479 as amended; the KTS_* enum + name table the OEVT_RING_FULL_FATAL marker + the Health_Log CRITICAL record persist; enum:KillTripSite in the H21 ledger).") \
+    /* === The engine binary's command line (E.1.3 NA CFG-1b-i, CoreFrameworks/EngineCli.hpp) === */                                                      \
+    X(FOREACH_ENGINE_CLI_OPTION                 , 1,      FOREACH_REGISTRY                 , "SSOT",              "The engine binary's options (--help; later --replay, --protective-state, --check-cfg …) — the rows ARE the grammar; ENGINE_CLI_OPT_<name> + the production array derive from them.") \
+    X(FOREACH_ENGINE_CLI_DISPATCH               , 1,      FOREACH_REGISTRY                 , "SSOT",              "The engine binary's modes (run = the default, help; later replay / maintenance / check) — each mode's cfg-path policy; EngineCliDispatchId + the production array derive from them.") \
+    X(FOREACH_ENGINE_CLI_REFUSAL                , 1,      FOREACH_REGISTRY                 , "SSOT",              "Every way the command-line resolver refuses an invocation — EngineCliResult + its message derive from each row.")
 
 #undef ROOT_NONE
 //======================================================================
