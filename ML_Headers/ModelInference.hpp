@@ -11,6 +11,7 @@
 // [CONTAINS]
 //   - [STRUCT]_[ModelHandle]              (bit-packed has_flags + X-macro stamp-derived fields; 5 cluster bands)
 //   - [FUNCTION]_[Model_Init] / [Model_Load] / [Model_Free] / [Model_IsLoaded]   (handle lifecycle)
+//   - [FUNCTION]_[Model_LoadInferenceBooster]   (USE_XGBOOST — the one pinned booster load both backends share)
 //   - [FUNCTION]_[Model_Predict] (+ _Normalized / _AtClass / _AOT stubs / _Ensemble / _Ensemble_Weighted / _PredictMulti)
 //   - [FUNCTION]_[FeatureLookback_Max]    (+ CountEnabled; over the FEATURE_LOOKBACKS temporal-reach table)
 //   - [FUNCTION]_[ModelFeatures_Pack]     (DEPRECATED frozen packer — equivalence-test reference only)
@@ -1098,6 +1099,53 @@ inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster
 //======================================================================
 #endif  // USE_XGBOOST (TreeWalkerOracle_Verify)
 
+#ifdef USE_XGBOOST
+//======================================================================
+// [FUNCTION]_[Model_LoadInferenceBooster]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [BOOT_TIME] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE way an inference booster is made — create, load the
+//   artifact, pin it to one thread — so every Model_Load path serves a pinned
+//   booster; a pin that does not take refuses the load]
+//======================================================================
+// WHY THE PIN LIVES ON THE BOOSTER: libgomp reads OMP_NUM_THREADS once, when
+// the library is loaded — before main() runs — so a setenv() inside main()
+// never reaches it (measured 2026-09-28: 16 threads before and after the call;
+// 1 only when the variable is set before exec). An unpinned booster uses every
+// core: the ~29 ms per predict of the 2026-08-22 latency deep-dive, plus the
+// exposure LANDMINES.md Landmine 1 records. Before this helper the walker's
+// reference booster — installed as the live XGBOOST handle on each of its
+// fallbacks — was the one inference booster never pinned. The pin follows the
+// load, the order the XGBOOST path has always used.
+//======================================================================
+// [CODE]
+//======================================================================
+inline int Model_LoadInferenceBooster(const char* path, BoosterHandle* out, const char* who) {
+    BoosterHandle booster;
+    if (XGBoosterCreate(NULL, 0, &booster) != 0) {
+        fprintf(stderr, "%s: failed to create booster: %s\n", who, XGBGetLastError());
+        return 0;
+    }
+    if (XGBoosterLoadModel(booster, path) != 0) {
+        fprintf(stderr, "%s: failed to load %s: %s\n", who, path, XGBGetLastError());
+        XGBoosterFree(booster);
+        return 0;
+    }
+    if (XGBoosterSetParam(booster, "nthread", "1") != 0) {
+        fprintf(stderr, "%s: could not pin %s to one thread (%s) — load REFUSED\n",
+                who, path, XGBGetLastError());
+        XGBoosterFree(booster);
+        return 0;
+    }
+    *out = booster;
+    return 1;
+}
+// [END_CODE]
+// [END_FUNCTION]_[Model_LoadInferenceBooster]
+//======================================================================
+#endif  // USE_XGBOOST (Model_LoadInferenceBooster)
+
 //======================================================================
 // [FUNCTION]_[Model_Load]
 //----------------------------------------------------------------------
@@ -1152,18 +1200,10 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
     // activating unchecked.
     if (backend == MODEL_BACKEND_FLAT_WALKER) {
         // 1) the ORACLE REFERENCE — the library booster, loaded exactly as the
-        //    XGBOOST path would load it.
+        //    XGBOOST path loads it: through the same helper, thread pin included,
+        //    so each fallback below installs a pinned handle.
         BoosterHandle booster;
-        if (XGBoosterCreate(NULL, 0, &booster) != 0) {
-            fprintf(stderr, "[ML] walker: reference booster create failed: %s\n", XGBGetLastError());
-            return 0;
-        }
-        if (XGBoosterLoadModel(booster, path) != 0) {
-            fprintf(stderr, "[ML] walker: reference booster load failed for %s: %s\n",
-                    path, XGBGetLastError());
-            XGBoosterFree(booster);
-            return 0;
-        }
+        if (!Model_LoadInferenceBooster(path, &booster, "[ML] walker: reference booster")) return 0;
 
         // 2) the CANDIDATE — parse the artifact into the flat-SoA blob. The
         //    header rides its own load-time allocation (H1 load-path-sanctioned,
@@ -1285,19 +1325,7 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
 
     if (backend == MODEL_BACKEND_XGBOOST) {
         BoosterHandle booster;
-        int ret = XGBoosterCreate(NULL, 0, &booster);
-        if (ret != 0) {
-            fprintf(stderr, "[ML] XGBoost: failed to create booster: %s\n", XGBGetLastError());
-            return 0;
-        }
-        ret = XGBoosterLoadModel(booster, path);
-        if (ret != 0) {
-            fprintf(stderr, "[ML] XGBoost: failed to load %s: %s\n", path, XGBGetLastError());
-            XGBoosterFree(booster);
-            return 0;
-        }
-        // set single-threaded for deterministic latency
-        XGBoosterSetParam(booster, "nthread", "1");
+        if (!Model_LoadInferenceBooster(path, &booster, "[ML] XGBoost")) return 0;
         // version check — reject models trained with a different feature set
         const char *ver = NULL;
         int got_ver = XGBoosterGetAttr(booster, "foxml_version", &ver, (int[]){0});
