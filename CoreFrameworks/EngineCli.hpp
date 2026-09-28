@@ -75,6 +75,15 @@ inline constexpr int     ENGINE_CLI_MAX_OPTIONS   = 32;     // per table — the
 #define ENGINE_CLI_SCOPE_IN(dispatch)             (uint8_t)(dispatch), nullptr
 #define ENGINE_CLI_SCOPE_IN_TOKEN(dispatch, tok)  (uint8_t)(dispatch), (tok)
 
+//======================================================================
+// [STRUCT]_[EngineCliOption]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one option row — the FOREACH_ENGINE_CLI_OPTION columns, with the scope column expanded into its two fields; boot-time data, read by the resolver + the usage]
+//======================================================================
+// [CODE]
+//======================================================================
 struct EngineCliOption {
     const char* name;            // an identifier; the flag is "--" + name with every '_' written as '-'
     uint8_t     value_kind;      // EngineCliValueKind
@@ -85,13 +94,50 @@ struct EngineCliOption {
     uint8_t     presence;        // EngineCliPresence
     const char* doc;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-09-28]
+//----------------------------------------------------------------------
+// [SIZE]_[56B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[EngineCliOption]
+//======================================================================
 
+//======================================================================
+// [STRUCT]_[EngineCliDispatch]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one mode row — the FOREACH_ENGINE_CLI_DISPATCH columns; the mode's cfg-path policy + its default cfg]
+//======================================================================
+// [CODE]
+//======================================================================
 struct EngineCliDispatch {
     const char* name;                // for messages and the usage
     uint8_t     positional;          // EngineCliPositional — the cfg-path policy of this mode
     const char* default_positional;  // the cfg path when OPTIONAL and none is named (nullptr = none)
     const char* doc;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-09-28]
+//----------------------------------------------------------------------
+// [SIZE]_[32B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[EngineCliDispatch]
+//======================================================================
 
 //======================================================================
 // [REGISTRY]_[FOREACH_ENGINE_CLI_REFUSAL]
@@ -224,8 +270,15 @@ inline constexpr EngineCliOption g_engine_cli_options[] = {
 };
 static_assert(ENGINE_CLI_OPTION_COUNT <= ENGINE_CLI_MAX_OPTIONS, "raise ENGINE_CLI_MAX_OPTIONS");
 
-// The resolved invocation. Per-row arrays are indexed by the table's row index (ENGINE_CLI_OPT_<name> for the
-// production table).
+//======================================================================
+// [STRUCT]_[EngineCliArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the resolved invocation — the mode, the cfg path, per-row values; on a refusal the offending token or row. Per-row arrays are indexed by the table's row index (ENGINE_CLI_OPT_<name> for the production table)]
+//======================================================================
+// [CODE]
+//======================================================================
 struct EngineCliArgs {
     uint8_t     result;                                // ENGINE_CLI_OK or a refusal
     uint8_t     dispatch;                              // the resolved mode (an index; 0 = the default)
@@ -239,6 +292,20 @@ struct EngineCliArgs {
     int         token_index[ENGINE_CLI_MAX_OPTIONS];   // per row: that token's argv index (-1 = absent)
     uint64_t    uvalue[ENGINE_CLI_MAX_OPTIONS];        // per row: the parsed UINT value
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-09-28]
+//----------------------------------------------------------------------
+// [SIZE]_[928B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[15]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[EngineCliArgs]
+//======================================================================
 
 //======================================================================
 // [SECTION]_[spelling + value helpers]
