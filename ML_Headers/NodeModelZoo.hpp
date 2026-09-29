@@ -587,11 +587,6 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             STAMP_SET(*handle, build_flags_hash);
             handle->build_flags_hash = sr.build_flags_hash;
         }
-        // v5.11.42 D.1 — copy stamp's xgb_train_nthread for engine boot WARN.
-        if (STAMP_HAS(sr, xgb_train_nthread)) {
-            STAMP_SET(*handle, xgb_train_nthread);
-            handle->xgb_train_nthread = sr.xgb_train_nthread;
-        }
         // v5.11.42 D.2 — copy stamp's label params for ensemble dir-name
         // horizon-mismatch refusal at AutoDetect time.
         if (STAMP_HAS(sr, label_params)) {

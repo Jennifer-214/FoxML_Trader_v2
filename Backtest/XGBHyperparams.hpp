@@ -10,9 +10,9 @@
 //   - [FUNCTION]_[XGBHyperparams_Apply]   (XGBHyperparams_Defaults rides)
 //======================================================================================================
 // XGBoost hyperparameter struct — single source of truth for training-side
-// parameters. Used by the Train Model worker, WalkForward folds, HeldOut
-// training, and the multi-horizon full-validation eval (4 Apply sites at
-// HEAD; StampHelper reads Defaults for stamp emit). Pre-v5.9.5h these were
+// parameters. Applied by the Train Model worker, the WalkForward folds and
+// HeldOut training (the multi-horizon full-validation eval runs through the
+// last two); StampHelper reads Defaults for stamp emit. Pre-v5.9.5h these were
 // hardcoded across the then-3 sites with subtle divergences (Train Model
 // used operator-tunable max_depth/lr/n_est while WF/HeldOut hardcoded
 // 6/0.1/...; nthread varied). v5.9.5h centralizes the values + extends
@@ -151,12 +151,13 @@ inline XGBHyperparams XGBHyperparams_Defaults() {
 #ifdef USE_XGBOOST
 // Apply all hyperparams to an XGBoost BoosterHandle. Replaces the
 // hand-written XGBoosterSetParam blocks the training sites carried
-// pre-v5.9.5h. nthread is passed separately — each flow reads its own
-// cfg knob (xgb_train_nthread for Train Model, xgb_eval_nthread for
-// WF/HeldOut/full-validation; both default 4, boot-only). Caller chooses.
+// pre-v5.9.5h. No thread count: XGBoost is built without OpenMP (D-494,
+// OMP-B), so every booster runs one thread by construction — the nthread
+// argument this used to take was inert and went with the retired
+// xgb_eval_nthread knob.
+// Every training site applies its hyperparameters through this one call.
 inline void XGBHyperparams_Apply(BoosterHandle booster,
-                                  const XGBHyperparams& hp,
-                                  int nthread) {
+                                  const XGBHyperparams& hp) {
     char buf[24];
 
     snprintf(buf, sizeof(buf), "%d", hp.max_depth);
@@ -173,9 +174,6 @@ inline void XGBHyperparams_Apply(BoosterHandle booster,
 
     snprintf(buf, sizeof(buf), "%d", hp.min_child_weight);
     XGBoosterSetParam(booster, "min_child_weight", buf);
-
-    snprintf(buf, sizeof(buf), "%d", nthread);
-    XGBoosterSetParam(booster, "nthread", buf);
 
     snprintf(buf, sizeof(buf), "%d", hp.seed);
     XGBoosterSetParam(booster, "seed", buf);

@@ -1800,7 +1800,7 @@ struct FullValidationResults {
 // Backtest_RunFullValidation calls it on a sliced view of BacktestResults.
 // v5.10.0a.D — optional cfg_override param. When non-null, WF reads
 // XGBoost hyperparams (xgb_subsample / xgb_colsample_bytree /
-// xgb_min_child_weight / xgb_seed / xgb_eval_nthread) from override
+// xgb_min_child_weight / xgb_seed) from override
 // instead of data->config_used. Used by Backtest_RunHyperparamTrainSweep
 // to vary hyperparams per sweep cell without copying the entire
 // BacktestResults struct. Default-NULL preserves pre-v5.10.0a.D
@@ -2791,10 +2791,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // Train Model worker (BacktestPanels.hpp). Defaults match the
         // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
         // identical training output.
-        // v5.10.0 Item D — nthread reads from cfg.xgb_eval_nthread (default
-        // 1; matches pre-v5.10 hardcoded behavior). Operator opts in to >1
-        // by setting cfg explicitly. CFG_PARSE_INT clamps negatives to 0;
-        // we coerce 0/negative to 1 here for safety.
+        // (No thread count here: XGBoost is built without OpenMP — D-494, OMP-B — so
+        // every booster runs one thread; the retired xgb_eval_nthread once set it.)
         // v5.10.0a.D — read xgb_* from eff_cfg (override-or-data->config_used)
         // so hyperparam sweep can vary subsample / colsample / etc per cell.
         // XGBHyperparams_Defaults() returns hardcoded defaults; for sweep,
@@ -2817,9 +2815,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 hp.tree_method[sizeof(hp.tree_method) - 1] = '\0';
             }
         }
-        int eval_nthread = eff_cfg.xgb_eval_nthread > 0
-                         ? eff_cfg.xgb_eval_nthread : 1;
-        tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
+        tt::XGBHyperparams_Apply(booster, hp);
         // class balance — kind-specific.
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
         // Multiclass: per-sample inverse-frequency weights via DMatrix info.
@@ -3449,18 +3445,14 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         }
         // v5.9.5h — XGBHyperparams struct + apply helper. Mirrors WF site
         // above for train-serve parity.
-        // v5.10.0 Item D — nthread reads from cfg.xgb_eval_nthread (default
-        // 1; matches pre-v5.10 hardcoded behavior). Held-out is the
-        // canonical-validation pass — multi-thread breaks bytewise
-        // reproducibility of held_out_metric, so default stays single-thread.
+        // Held-out is the canonical-validation pass, and single-threaded by
+        // construction: XGBoost is built without OpenMP (D-494, OMP-B).
         // E.1.2.C — honour the caller's click-time snapshot when supplied. This
         // site used raw defaults unconditionally, so the held-out model was a
         // different architecture from the shipped one AND from the WF folds.
         tt::XGBHyperparams hp = hp_override ? *hp_override
                                             : tt::XGBHyperparams_Defaults();
-        int eval_nthread = data->config_used.xgb_eval_nthread > 0
-                         ? data->config_used.xgb_eval_nthread : 1;
-        tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
+        tt::XGBHyperparams_Apply(booster, hp);
 
         // TECH_DEBT-301a — the SAME producer the WF folds and the shipped model use. This site
         // previously applied inverse-frequency weights UNCAPPED while WF capped at 5.0, so the
@@ -3638,8 +3630,10 @@ static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char
     OPT_SET_FPN(xgb_colsample_bytree)
     OPT_SET_INT(xgb_min_child_weight)
     OPT_SET_INT(xgb_seed)
-    OPT_SET_INT(xgb_train_nthread)
-    OPT_SET_INT(xgb_eval_nthread)
+    // (xgb_train_nthread + xgb_eval_nthread are NOT sweepable since OMP-B, D-494: neither changes a
+    // trained byte — XGBoost has no OpenMP, and the sweep's worker count comes from the BASE cfg —
+    // so sweeping either filled a grid with identical cells. The key probe now refuses both as
+    // unknown. xgb_eval_nthread is retired outright.)
     // Note: label_tp_pct / label_sl_pct / label_forward_ticks are on
     // BacktestRunConfig (per-run), not ControllerConfig. Sweeping those
     // requires a separate Sweep extension; deferred until operator
@@ -3910,10 +3904,10 @@ static inline void Backtest_RunHyperparamTrainSweep(
     // v5.10.0a.F — parallel pthread training. cfg.xgb_train_nthread > 1
     // dispatches cells across N pthread workers; each worker creates its
     // own DMatrix + Booster (per XGBoost 3.3.0 thread-safety: independent
-    // booster instances are thread-safe across threads). Determinism
-    // preserved: per-booster nthread=1 inside parallel sweep so within-
-    // booster work stays single-threaded. Bytewise-equivalent to serial
-    // sweep for the same seed + data.
+    // booster instances are thread-safe across threads). Every booster is
+    // single-threaded by construction (XGBoost has no OpenMP — D-494), so
+    // the parallel sweep is bytewise-equivalent to serial for the same
+    // seed + data (tests/controller_test_omp.hpp pins that property).
     int n_workers = base_cfg.xgb_train_nthread > 0
                   ? base_cfg.xgb_train_nthread : 1;
     if (n_workers > opt->total_runs) n_workers = opt->total_runs;
@@ -3949,10 +3943,6 @@ static inline void Backtest_RunHyperparamTrainSweep(
         int i0 = idx / opt->dims[1];
         int i1 = idx % opt->dims[1];
         ControllerConfig<BACKTEST_FP> cell_cfg = base_cfg;
-        // Force per-booster nthread=1 in parallel mode for determinism;
-        // operator's xgb_eval_nthread is preserved in serial mode (only
-        // overridden when running parallel sweep).
-        if (n_workers > 1) cell_cfg.xgb_eval_nthread = 1;
         ConfigField_Set(&cell_cfg, ranges[0].key, opt->param_vals[0][i0]);
         if (num_params > 1)
             ConfigField_Set(&cell_cfg, ranges[1].key, opt->param_vals[1][i1]);

@@ -1142,8 +1142,8 @@ struct PastRun {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-23]
-// [SIZE]_[6272B]
+// [UPDATED]_[2026-09-29]
+// [SIZE]_[6256B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[98]
 // [STRADDLE]_[none]
@@ -1190,10 +1190,10 @@ struct PastRunsState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-23]
-// [SIZE]_[401712B]
+// [UPDATED]_[2026-09-29]
+// [SIZE]_[400688B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[6277]
+// [CACHE_LINES]_[6261]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRunsState]
@@ -3060,14 +3060,16 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
         "tp_hold_score", "tp_trail_mult", "sl_trail_mult", "no_trade_band_mult",
         "ml_buy_threshold", "danger_warn_stddevs", "danger_crash_stddevs",
         "poll_interval", "warmup_ticks", "max_hold_ticks", "sl_cooldown_base",
-        // v5.10.0a — XGBoost hyperparam sweeping (cfg-bound since v5.9.5h
-        // + v5.10.0D thread counts). Common operator targets:
+        // v5.10.0a — XGBoost hyperparam sweeping (cfg-bound since v5.9.5h).
+        // Common operator targets:
         //   xgb_subsample / xgb_colsample_bytree → tree regularization
         //   xgb_min_child_weight → leaf-purity gate
         //   xgb_seed → reproducibility check (sweep multiple seeds, look at
         //              variance to detect overfit-to-seed)
+        // (The thread counts left this list at OMP-B, D-494: XGBoost has no
+        // OpenMP, so sweeping one filled the grid with identical cells.)
         "xgb_subsample", "xgb_colsample_bytree", "xgb_min_child_weight",
-        "xgb_seed", "xgb_train_nthread", "xgb_eval_nthread"
+        "xgb_seed"
     };
     constexpr int sweep_keys_count = (int)(sizeof(sweep_keys) / sizeof(sweep_keys[0]));
 
@@ -4256,8 +4258,8 @@ static inline void *fullvalidation_worker_fn(void *arg) {
 //      inference (G.4)
 //
 // LITE caveats:
-//   - Models trained sequentially within this worker (each horizon
-//     uses cfg.xgb_train_nthread for per-booster threads)
+//   - Models trained sequentially within this worker (each booster is
+//     single-threaded — XGBoost has no OpenMP, D-494)
 //   - No ensemble training-time discipline check — operator must
 //     manually pick which to deploy OR rely on G.4 ensemble inference
 //   - Save Run for multi-horizon: writes per-horizon dirs; Past Runs
@@ -4587,9 +4589,7 @@ static inline void mh_run_one_horizon_fv(
                 XGBoosterCreate(&dtrain, 1, &booster);
                 // E.1.2.C — the click-time snapshot, not eight live widget reads.
                 tt::XGBHyperparams hp = snap_hp;
-                int eval_nthread = results->config_used.xgb_eval_nthread > 0
-                                 ? results->config_used.xgb_eval_nthread : 1;
-                tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
+                tt::XGBHyperparams_Apply(booster, hp);
                 int K_classes = (label_type >= 0 && label_type < LABEL_COUNT)
                               ? label_table[label_type].num_classes : 0;
                 int is_multi  = (K_classes >= 2);
@@ -4944,8 +4944,9 @@ static inline void mh_run_one_horizon_fv(
 // v5.11.41 — per-horizon parallel worker. Each thread runs ONE horizon's
 // full FV pipeline against its own isolated_results (shallow copy of shared
 // BacktestResults + own labels[] buffer to avoid race with other threads
-// recomputing labels concurrently). Forces config_used.xgb_train_nthread=1
-// for bytewise-determinism parity with serial-mode-with-nthread=1.
+// recomputing labels concurrently). Records config_used.xgb_train_nthread=1,
+// the stamp's parallel-mode marker (the trained bytes are the same either
+// way: every booster is single-threaded — XGBoost has no OpenMP, D-494).
 //======================================================================
 // [STRUCT]_[MultiHorizonParallelJob]
 //----------------------------------------------------------------------
@@ -5185,8 +5186,9 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     // in libgomp's parallel-region setup) until OMP-B (D-494) built XGBoost without OpenMP: there is no
     // runtime pool left for the workers to race on. (The v5.15.3.C process-entry setenv this block used
     // to credit never reached libgomp, which reads its environment at load — measured 2026-09-28.)
-    // cfg.multi_horizon_max_threads honours the operator's setting: 0 = auto (= horizon_count, fully
-    // parallel), N = cap to N concurrent.
+    // cfg.multi_horizon_max_threads honours the operator's setting: N = cap to N concurrent, 1 = serial.
+    // (The registry clamps it to [1, 256] with a WARN, so a cfg `0` runs SERIAL; the `<= 0` floor
+    // below — "auto" = horizon_count — is reachable only by a direct struct write.)
     int mh_max_threads = results->config_used.multi_horizon_max_threads;
     if (mh_max_threads <= 0) {
         mh_max_threads = horizon_count;  // 0 = auto = fully parallel
@@ -5248,16 +5250,15 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
 
     if (parallel_mode) {
         fprintf(stderr, "[mh-train] parallel mode: %d horizons across %d threads "
-                        "(xgb_train_nthread pinned to 1 per thread for parity)\n",
+                        "(one single-threaded booster per worker)\n",
                 horizon_count, n_parallel);
 
         // v5.11.41.C — spawn one pthread per horizon. Each thread:
         //   - shallow-copies BacktestResults (shared read-only feature_matrix)
         //   - allocates own labels[] buffer (avoids race with concurrent
         //     Backtest_ComputeLabelsFromSamples calls in other threads)
-        //   - shallow-copies cfg with xgb_train_nthread=1 forced (parity
-        //     contract — same value as serial mode would produce when cfg
-        //     has nthread=1, and bytewise-deterministic across mode).
+        //   - shallow-copies cfg with xgb_train_nthread=1, the stamp's
+        //     parallel-mode marker (the bytes match serial mode regardless).
         pthread_t tids[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
         int spawned[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
         for (int h = 0; h < horizon_count; ++h) {
@@ -5291,13 +5292,11 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 continue;
             }
             job->labels_precomputed = mh_batch_ok;
-            // Pin xgb_train_nthread=1 + xgb_eval_nthread=1 in the isolated
-            // cfg for parity vs serial-mode-with-nthread=1 (WF folds inside RFV
-            // use xgb_eval_nthread). The libgomp team-collision reason these pins
-            // also carried is gone since OMP-B (D-494 — XGBoost has no OpenMP);
-            // OMP-B-ii retires xgb_eval_nthread and re-decides this block.
+            // Record xgb_train_nthread=1 in the isolated cfg — the stamp's
+            // parallel-mode marker (serial mode records the operator's value).
+            // Not a determinism pin since OMP-B (D-494): XGBoost has no OpenMP,
+            // so every booster is single-threaded and the bytes match serial.
             job->isolated_results.config_used.xgb_train_nthread = 1;
-            job->isolated_results.config_used.xgb_eval_nthread  = 1;
             job->h = h;
             job->horizon_count = horizon_count;  // v5.15.3.B.2 PARITY-021
             job->horizon_ticks = horizons[h];
@@ -5368,7 +5367,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     } else {
         // Serial mode (existing v5.11.41.A behavior; now via helper)
         fprintf(stderr, "[mh-train] serial mode: %d horizons sequential "
-                        "(xgb_train_nthread=%d from cfg)\n",
+                        "(stamps record xgb_train_nthread=%d from cfg)\n",
                 horizon_count, results->config_used.xgb_train_nthread);
         for (int h = 0; h < horizon_count; ++h) {
             if (state->mh_cancel) {
@@ -7533,7 +7532,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "  4. Inspect results table; best cell highlighted\n\n"
         "Sweepable fields (ConfigField_Set whitelist):\n"
         "  xgb_subsample / xgb_colsample_bytree / xgb_min_child_weight\n"
-        "  / xgb_seed / xgb_train_nthread / xgb_eval_nthread");
+        "  / xgb_seed");
     {
         ImGui::PushItemWidth(-180);
         ImGui::SliderInt("Sweep params (1 or 2)", &state->hp_num_params, 1, OPT_MAX_PARAMS);

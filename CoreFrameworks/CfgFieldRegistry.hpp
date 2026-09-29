@@ -390,7 +390,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     X(uint32_t,             KIND_INT,        record_max_days,             "Record Max Days",      "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 0, 365),                                                                   \
         "Auto-delete tick (_staging) + depth CSVs older than this many days. 0 = never prune (the depth dir is the backtest replay corpus, not scratch). 30 = ~1-2GB cap on disk usage.",                                                                                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    /* === Training (9) === */                                                                                                                                                                                        \
+    /* === Training (7) === */                                                                                                                                                                                        \
     X(int,                  KIND_INT,        xgb_min_child_weight,        "Min Child Weight",     "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 10000),                                  \
         "Min sum-of-weights per leaf (1-50). Higher = more regularization.\nDefault 5. Match deployed model's training value or expect WARN.",                                                                      \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
@@ -398,11 +398,15 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
         "RNG seed for reproducible runs. Default 42. Match deployed model's\ntraining seed or expect WARN.",                                                                                                        \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(int,                  KIND_INT,        xgb_train_nthread,           "Train Threads",        "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
-        "XGBoost training thread count (OpenMP). Default 4; clamp [1, 256].",                                                                                                                                       \
+        "Hyperparameter-sweep worker threads (pthreads; each trains its own\nsingle-threaded booster — XGBoost has no OpenMP). Also recorded in\nthe model stamp. Default 4; clamp [1, 256].",                                                                                                                                       \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(int,                  KIND_INT,        xgb_eval_nthread,            "Eval Threads",         "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
-        "XGBoost evaluation thread count (OpenMP). Default 4; clamp [1, 256].",                                                                                                                                     \
-        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* OMP-B-ii (2026-09-29, D-494 sub-choice 2, operator-decided) — `xgb_eval_nthread` ROW    */ \
+    /* DELETED; name BURNED in RETIRED_NAMES (H21) + RETIRED_KEYS (a cfg file still carrying */ \
+    /* it is flagged by check_cfg_key_prefix_drift). Class 12+24: once XGBoost was built     */ \
+    /* without OpenMP, the per-booster thread count it set changed nothing — and it carried  */ \
+    /* two defaults (registry 4, manual 1; Class 21). At LOAD a stale line is silently       */ \
+    /* ignored until the RETIRE leaf lands. cfg-fingerprint shift free per                   */ \
+    /* project_no_live_models. DO NOT REUSE THE NAME.                                        */ \
     /* E.1.2.D leaf 12 (2026-08-22, operator-decided) — `csv_load_workers` ROW DELETED;      */ \
     /* name BURNED in RETIRED_NAMES (H21 — the exit_signal_model_dir precedent for cfg name  */ \
     /* keys). Class 12+24: an advertised knob whose only consumer was a stub printing "worth */ \

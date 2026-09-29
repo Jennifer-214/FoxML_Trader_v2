@@ -1226,22 +1226,20 @@ template <unsigned F> struct ControllerConfig {
   FPN_Binary<F>   xgb_colsample_bytree;   // column subsample per tree (0.5-1.0); default 0.8
   char     xgb_tree_method[16];    // hist | exact | approx | auto; default "hist"
 
-  // v5.10.0 Item D — hardware-aware cfg. Operator-tunable thread counts
+  // v5.10.0 Item D — hardware-aware cfg. Operator-tunable worker counts
   // and RAM budgets; defaults match v5.9.5j-final behavior bytewise so
-  // upgrades don't silently flip defaults. Operator opts in to multi-thread
-  // training / parallel CSV / larger budgets.
+  // upgrades don't silently flip defaults.
   //
-  // Thread counts (default=1 matches current hardcoded behavior at
-  // the WF + HeldOut xgb-param sites in BacktestEngine.hpp). Setting >1 breaks bytewise reproducibility;
-  // boot-time WARN fires when operator sets >1 to make the tradeoff explicit.
-  // v5.11.41 — Multi-Horizon parallelism cap. Worker spawns
+  // Thread counts: every XGBoost booster is single-threaded by construction
+  // since OMP-B (D-494 — XGBoost is built without OpenMP), so no knob here
+  // changes a trained byte. xgb_train_nthread is the hyperparameter sweep's
+  // pthread worker count (and a stamp field); xgb_eval_nthread, the
+  // per-booster thread count, was RETIRED at OMP-B-ii.
+  // v5.11.41 — Multi-Horizon parallelism cap. The worker spawns
   //   min(N_horizons, multi_horizon_max_threads) pthreads, each running a
-  //   full per-horizon Backtest_RunFullValidation pipeline. 0 = auto
-  //   (defaults to min(8, ncores/2) computed at runtime to leave room
-  //   for GUI/other threads). 1 = forced serial (legacy behavior). >1
-  //   pins xgb_train_nthread=1 inside parallel worker for bytewise
-  //   determinism vs serial-mode-with-nthread=1. Recorded in stamp body
-  //   via xgb_train_nthread field for forensic mode-divergence detection.
+  //   full per-horizon Backtest_RunFullValidation pipeline; 1 = serial.
+  //   A parallel worker records xgb_train_nthread=1 in its model's stamp
+  //   (the parallel-mode marker; serial records the operator's value).
 
   // RAM budgets (advisory soft caps — emit WARN at boot if dataset projects
   // to exceed; no hard refuse since the streaming label compute closes
@@ -1393,7 +1391,7 @@ template <unsigned F> struct ControllerConfig {
   //==================================================================================================
   // [Global cfg field auto-generation — v5.15.5.F.4d.1.B.3 Step 0.5b.B Path α landing]
   //==================================================================================================
-  // 48 global cfg fields auto-generated from FOREACH_GLOBAL_CFG_FIELD (one source of truth at
+  // The global cfg fields are auto-generated from FOREACH_GLOBAL_CFG_FIELD (one source of truth at
   // CoreFrameworks/CfgFieldRegistry.hpp). Sister to FOREACH_PER_NODE_CFG_FIELD(EMIT_PER_NODE_CFG_STRUCT_FIELD)
   // at PerNodeCfg<F>:324 — closes the global↔per-core column asymmetry per Decision A (a) Path α.
   //
@@ -1813,10 +1811,10 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   ControllerConfig<F> cfg;
 
-  // v5.15.5.F.4d.1.B.3 Step 1.6.1 — auto-defaults for all 48 global cfg fields via
+  // v5.15.5.F.4d.1.B.3 Step 1.6.1 — auto-defaults for every global cfg field via
   // FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_DEFAULT). Sister to struct-gen invocation
   // via the FOREACH_GLOBAL_CFG_FIELD default-emit walk (Step 0.5b.B). Closes TECH_DEBT-093 (gap_acceptable_threshold full closure)
-  // + future-headache reducer for all 48 globals. Manual default lines DELETED below
+  // + future-headache reducer for every global. Manual default lines DELETED below
   // (Python script /tmp/delete_manual_defaults.py).
   //
   // tt::cfg_assign_field reads descriptor.payload per KIND dispatch (FPN_Binary<F> from as_double;
@@ -2093,18 +2091,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.15.5.F.4d.1.B.3 Step 8.6: xgb_min_child_weight MATCH (registry INT(5)); xgb_seed MATCH (INT(42)); 2 manual defaults DELETED.
   strncpy(cfg.xgb_tree_method, "hist", sizeof(cfg.xgb_tree_method) - 1);
   cfg.xgb_tree_method[sizeof(cfg.xgb_tree_method) - 1] = '\0';
-  // v5.10.0 Item D — hardware-aware cfg. Defaults match pre-v5.10
-  // hardcoded behavior. Two distinct defaults reflect two distinct
-  // pre-v5.10 hardcoded sites:
-  //   - Train Model worker (BacktestPanels.hpp:2056) was nthread=4 for
-  //     faster GUI iter (exploratory; reproducibility not required)
-  //   - WF + HeldOut (their xgb-param sites in BacktestEngine.hpp) were nthread=1
-  //     for deterministic per-fold output (validation parity)
-  // Setting these NOW separable. Operators wanting all-deterministic
-  // workflow set both to 1; operators with bigger boxes can bump both.
-  // v5.15.5.F.4d.1.B.3 Step 8.6: xgb_train_nthread MATCH — registry INT(4) == manual 4; DELETED.
-  // xgb_eval_nthread DIFFER — registry INT(4); manual=1 (determinism for validation parity).
-  cfg.xgb_eval_nthread        = 1;   // KEEP — registry INT(4) breaks per-fold determinism; manual=1 matches the WF + HeldOut sites in BacktestEngine.hpp pre-v5.10
+  // v5.10.0 Item D thread counts: xgb_train_nthread (the hyperparameter sweep's pthread
+  // worker count) takes its registry default — v5.15.5.F.4d.1.B.3 Step 8.6: registry INT(4)
+  // == the old manual 4; manual line DELETED.
+  // (xgb_eval_nthread manual default DELETED with its retired cfg row — OMP-B-ii, D-494: once
+  //  XGBoost had no OpenMP, the per-booster thread count it set changed nothing.)
   // (csv_load_workers manual default DELETED with its retired cfg row — E.1.2.D leaf 12.)
   //
   // multi_horizon_max_threads manual=1 override DELETED (E.1.2.D 2026-08-22):
@@ -3021,12 +3012,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     // v5.10.0 Item D — hardware-aware cfg parsers. CFG_PARSE_INT clamps
     // negatives to defaults; we want >=0 (0 = auto-detect via nproc, NOT
-    // currently implemented; reserved for future). Setting nthread or
-    // workers > 1 emits a one-shot WARN at boot (handled in engine boot
-    // path, not parser).
-    // v5.15.5.F.4c — xgb_*_nthread + multi_horizon_max_threads +
+    // currently implemented; reserved for future).
+    // v5.15.5.F.4c — xgb_train_nthread + multi_horizon_max_threads +
     // feature_collect_max_gb + wf_split_max_gb + held_out_max_gb all migrated to FOREACH_CFG_FIELD
-    // (KIND_INT; IS_BOOT_ONLY). (csv_load_workers was in this cohort; row RETIRED at E.1.2.D leaf 12.)
+    // (KIND_INT; IS_BOOT_ONLY). (csv_load_workers was in this cohort; row RETIRED at E.1.2.D leaf 12 —
+    // and xgb_eval_nthread, RETIRED at OMP-B-ii, D-494.)
     // v5.10.0a.G.6 — global ensemble cfg parsers (string + numeric).
     if (strcmp(key, "ensemble_blend_mode") == 0) {
         // Validate against known modes; reject unknown with WARN.

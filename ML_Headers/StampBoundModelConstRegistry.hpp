@@ -515,7 +515,9 @@ namespace tt {
     /* bump + operator-TTY re-bless in ONE commit. Queued as its own wire change; lineage lives in  */ \
     /* summary.txt meanwhile. See the E.1.2.D plan § s5 leaf-15 stamp rider.                        */ \
     /* === xgb_train_nthread (standalone) — emitted at line 2323 === */                             \
-    X(xgb_train_nthread,                        _, INCLUDE, int, "%d", 0,                           \
+    /* A forensic record of the training mode; not on the handle since OMP-B-ii (D-494) — its   */  \
+    /* one load-time reader, a cfg-drift row, went with its false "bytewise divergence" premise. */  \
+    X(xgb_train_nthread,                        _, SKIP_HANDLE, int, "%d", 0,                       \
       inf->xgb_train_nthread, inf->has_xgb_train_nthread,                                           \
       "XGBoost training thread count; lets operator detect serial vs parallel mode forensically")
 

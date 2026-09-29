@@ -200,8 +200,8 @@ build_gui() {
     emit_asm_for_dir build_gui
     update_bin_links
     # XLANE (D-492 item 24) — RUN the XGBoost lane's suite, not only build it: its
-    # USE_XGBOOST cells (the walker's load-time parity oracle, L3, L7, the nthread pin,
-    # OMP-B's build-flag check + training golden) run nowhere else, and until 2026-09-28
+    # USE_XGBOOST cells (the walker's load-time parity oracle, L3, L7, OMP-B's
+    # build-flag check + training golden) run nowhere else, and until 2026-09-28
     # no gate ran them (L3 sat red unseen). A failing cell fails this target (set -e).
     echo "--- running controller_test (XGBoost lane) ---"
     ./build_gui/controller_test

@@ -238,7 +238,7 @@ enum FailureModeGroupId : int {
     X(cfg_cross_binary_drift,   BIT_FLAG,    SEV_YELLOW, "cfg: CROSS-BINARY DRIFT",                     \
       "One or more cross-binary stamp-bound fields diverge from cfg at load:\n"                         \
       "xgb_subsample, xgb_colsample_bytree, xgb_min_child_weight, xgb_seed,\n"                          \
-      "xgb_tree_method, xgb_train_nthread, training_poll_interval,\n"                                   \
+      "xgb_tree_method, training_poll_interval,\n"                                                      \
       "build_flags_hash (when not covered by ArchFieldDrift).\n"                                        \
       "Cross-binary drift = bytewise model divergence if retrained under current\n"                     \
       "cfg. Forensic only at load (cannot retrain at boot); operator notification.\n"                   \
