@@ -246,9 +246,14 @@ target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
 # dead in every lane while reading as coverage (Class 51). Now the split is the
 # intended one: build/ = ANSI fixtures only, build_gui|build_suite = fixtures
 # PLUS the oracle.
+#
+# XLANE (D-492 item 24): link the IMPORTED target, exactly as engine_gui / foxml_suite do.
+# The bare `xgboost` name linked fine but carried no RUNPATH, so the lane's binary could
+# not start without LD_LIBRARY_PATH=/usr/local/lib — and no gate ran it, so its cells
+# (the walker oracle, L3, L7, the nthread pin) went unexercised. `./build.sh gui` now runs it.
 if(USE_XGBOOST)
     target_compile_definitions(controller_test PRIVATE USE_XGBOOST)
-    target_link_libraries(controller_test PRIVATE xgboost)
+    target_link_libraries(controller_test PRIVATE xgboost::xgboost)
 endif()
 # (native-FP pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 find_package(Threads REQUIRED)
