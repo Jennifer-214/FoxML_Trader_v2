@@ -122,7 +122,7 @@ namespace tt {
 enum FailureModeGroupId : int {
     GROUP_STANDALONE  = 0,  // sentinel; standalone display
     GROUP_NAN_EVENTS  = 1,  // nan_feature_events + nan_prediction_events
-    GROUP_DRIFT       = 2,  // v5.15.1 — Model Health drift surface (8 entries since cfg_cross_binary_drift joined at v5.15.5.A.7)
+    GROUP_DRIFT       = 2,  // v5.15.1 — Model Health drift surface (the rows tagged tt::GROUP_DRIFT; cfg_cross_binary_drift joined at v5.15.5.A.7)
     // Future combined-display groups append here.
 };
 }
@@ -186,7 +186,7 @@ enum FailureModeGroupId : int {
       "(zero sentinel written). Indicates feature pipeline drift\n"                                     \
       "or stalled data source. Investigate if counter grows steadily.",                                  \
       tt::GROUP_STANDALONE)                                                                             \
-    /* === v5.15.1 — Model Health drift surface (7 BIT_FLAG entries; tt::GROUP_DRIFT) === */            \
+    /* === v5.15.1 — Model Health drift surface (BIT_FLAG entries; tt::GROUP_DRIFT) === */              \
     /* Set at NodeModelZoo_TryLoadRole post-verify_model_stamp chokepoint; read by   */                 \
     /* MLStatusPanel.hpp Model Health CollapsingHeader + (future) v5.15.2 boot gate. */                 \
     X(feature_hash_drift,       BIT_FLAG,    SEV_RED,    "feat: HASH DRIFT",                            \

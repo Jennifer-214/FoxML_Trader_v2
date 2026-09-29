@@ -439,11 +439,11 @@ namespace tt {
     /* epoch floor (STAMP_FORMAT_VERSION_EPOCH_FLOOR=3) already hard-refuses every stamp that   */ \
     /* could carry them, the parser ignores unknown keys, and no live models exist. The NAMES   */ \
     /* stay retired via this comment — new meaning MUST get a new identifier.                   */ \
-    /* === training_poll_interval (standalone) — emitted at line 2203 === */                        \
+    /* === training_poll_interval (standalone) === */                                               \
     X(training_poll_interval,                   _, INCLUDE, uint32_t, "%u", 0,                      \
       (unsigned)inf->training_poll_interval, inf->has_training_poll_interval,                       \
       "training data poll cadence; engine boot WARN on cross-cadence drift")                        \
-    /* === scaler group (2 fields) — emitted at line 2211; gated by has_scaler === */               \
+    /* === scaler group (2 fields) — gated by has_scaler === */                                     \
     /* v5.14.8.A.0.b — re-added during pre-flight registry data completion;                      */ \
     /* originally dropped between training_poll_interval and xgb_hyperparams in v5.14.8.A.1.    */ \
     /* GATE-NEW-2 wire-format preservation depends on these landing here.                       */ \
@@ -455,11 +455,11 @@ namespace tt {
     X(scaler_sha256,                            scaler, INCLUDE, tt::stamp_str_65, "%s", "",        \
       inf->scaler_sha256, inf->has_scaler,                                                          \
       "SHA-256 of full scaler sidecar file (64 hex + null)")                                        \
-    /* === model_num_outputs (standalone) — emitted at line 2223; gated by has_model_num_outputs */ \
+    /* === model_num_outputs (standalone) — gated by has_model_num_outputs */                       \
     X(model_num_outputs,                        _, INCLUDE, int, "%d", 0,                           \
       inf->model_num_outputs, inf->has_model_num_outputs,                                           \
       "model output dimension; binary/regression=1, multiclass=N (REFUSE on mismatch)")             \
-    /* === xgb_hyperparams group (8 fields) — emitted at line 2234 === */                           \
+    /* === xgb_hyperparams group (8 fields) === */                                                  \
     X(xgb_max_depth,                            xgb_hyperparams, INCLUDE, int, "%d", 0,             \
       inf->xgb_max_depth, inf->has_xgb_hyperparams, "XGBoost max tree depth")                       \
     X(xgb_learning_rate,                        xgb_hyperparams, INCLUDE, double, "%g", 0.0,        \
@@ -479,28 +479,28 @@ namespace tt {
     /* (ModelInference.hpp:2243) + manual parse (1629-1633). Wire format byte-identical.        */ \
     X(xgb_tree_method,                          xgb_hyperparams, INCLUDE, tt::stamp_str_16, "%s", "", \
       inf->xgb_tree_method, inf->has_xgb_hyperparams, "XGBoost tree-method enum (e.g., \"hist\")") \
-    /* === build_flags_hash (standalone) — emitted at line 2253 === */                              \
+    /* === build_flags_hash (standalone) === */                                                     \
     X(build_flags_hash,                         _, INCLUDE, uint64_t, "%016lx", 0,                  \
       (unsigned long)inf->build_flags_hash, inf->has_build_flags_hash,                              \
       "build-time feature flag hash; engine boot WARN on cross-binary drift")                       \
-    /* === grid_member_count group (2 fields) — emitted at line 2266 === */                         \
+    /* === grid_member_count group (2 fields) === */                                                \
     /* Forensic / informational on parse side; no runtime use → SKIP_HANDLE.                    */  \
     X(grid_member_count,                        grid_member, SKIP_HANDLE, int, "%d", 0, \
       inf->grid_member_count, inf->has_grid_member_count,                                           \
       "ensemble member count when trained as part of horizon set")                                  \
     X(grid_member_idx,                          grid_member, SKIP_HANDLE, int, "%d", 0, \
       inf->grid_member_idx, inf->has_grid_member_count, "this model's index within the grid")       \
-    /* === label_registry_hash (standalone) — emitted at line 2278 === */                           \
+    /* === label_registry_hash (standalone) === */                                                  \
     /* Parser checks against runtime LABEL_REGISTRY_HASH() at boot; not stored on handle.       */  \
     X(label_registry_hash,                      _, SKIP_HANDLE, uint64_t, "%016lx", 0,              \
       (unsigned long)inf->label_registry_hash, inf->has_label_registry_hash,                        \
       "label registry hash; engine boot REFUSE on mismatch (label set drift)")                      \
-    /* === feature_mask (standalone) — emitted at line 2292 === */                                  \
+    /* === feature_mask (standalone) === */                                                         \
     /* Parser compares against runtime cfg.node_feature_mask[core] at boot; not on handle.      */  \
     X(feature_mask,                             _, SKIP_HANDLE, uint64_t, "%016lx", 0,              \
       (unsigned long)inf->feature_mask_train, inf->has_feature_mask,                                \
       "feature mask at training time; engine compares to runtime feature_mask")                     \
-    /* === label_params group (3 fields) — emitted at line 2306 === */                              \
+    /* === label_params group (3 fields) === */                                                     \
     X(label_lookahead_ticks,                    label_params, INCLUDE, int, "%d", 0,                \
       inf->label_lookahead_ticks, inf->has_label_params, "label lookahead window in ticks")         \
     X(label_tp_pct,                             label_params, INCLUDE, double, "%.6g", 0.0,         \
@@ -514,7 +514,7 @@ namespace tt {
     /* stamp body. Correct form = append at the TRUE END of the flat walk + STAMP_FORMAT_VERSION    */ \
     /* bump + operator-TTY re-bless in ONE commit. Queued as its own wire change; lineage lives in  */ \
     /* summary.txt meanwhile. See the E.1.2.D plan § s5 leaf-15 stamp rider.                        */ \
-    /* === xgb_train_nthread (standalone) — emitted at line 2323 === */                             \
+    /* === xgb_train_nthread (standalone) === */                                                    \
     /* A forensic record of the training mode; not on the handle since OMP-B-ii (D-494) — its   */  \
     /* one load-time reader, a cfg-drift row, went with its false "bytewise divergence" premise. */  \
     X(xgb_train_nthread,                        _, SKIP_HANDLE, int, "%d", 0,                       \
@@ -535,7 +535,7 @@ namespace tt {
 // late-emit since it's bounded vs the original 9-site manual N-site
 // pattern).
 #define FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)                                                 \
-    /* === v5.14.2.E.2.B model-architectural fields — emitted at line ~2069 === */                  \
+    /* === v5.14.2.E.2.B model-architectural fields === */                                          \
     /* E.1.2.C (2026-08-21) — `expected_num_classes` ROW DELETED; name burned NAMESPACE-SCOPED as  */ \
     /* `stamp-key:expected_num_classes` (a bare burn was impossible — the LIVE `expected.cfg`      */ \
     /* sidecar key shares the spelling). It was a DEAD DUPLICATE on BOTH ends, not a zero-emit:    */ \
@@ -552,7 +552,7 @@ namespace tt {
     X(expected_feature_format_version,          _, SKIP_HANDLE, int, "%d", 0,                       \
       inf->expected_feature_format_version, inf->has_expected_feature_format_version,               \
       "MODEL_FORMAT_VERSION at training time")                                                      \
-    /* === v5.14.3.B overlay-derived fields — emitted at line ~2092 === */                          \
+    /* === v5.14.3.B overlay-derived fields === */                                                  \
     X(overlay_hash,                             _, INCLUDE, tt::stamp_str_65, "%s", "",             \
       inf->overlay_hash, inf->has_overlay_hash,                                                     \
       "SHA256 of canonical overlay JSON (3-layer fingerprinting layer 2)")                          \
