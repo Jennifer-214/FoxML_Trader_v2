@@ -446,4 +446,10 @@ case "$TARGET" in
         ;;
 esac
 
-echo "--- $TARGET: ok ---"
+# A sanitizer lane only BUILDS; "ok" there read as "sanitizer-clean" with no test run
+# (it misled a gate script at OMP-B-ii, 2026-09-29). Say what actually happened.
+case "$TARGET" in
+    asan|ubsan) echo "--- $TARGET: built — NO tests ran; run the suite under it: tools/run_sanitizer_suite.sh $TARGET ---" ;;
+    tsan)       echo "--- $TARGET: built — NO tests ran; run the suite under it: tools/run_sanitizer_tests.sh tsan (manual — no standing gate runs tsan) ---" ;;
+    *)          echo "--- $TARGET: ok ---" ;;
+esac

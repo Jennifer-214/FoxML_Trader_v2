@@ -217,9 +217,9 @@ enum FailureModeGroupId : int {
       tt::GROUP_DRIFT)                                                                                  \
     X(cfg_binding_drift,        BIT_FLAG,    SEV_YELLOW, "cfg: INFERENCE DRIFT",                        \
       "One or more stamp-bound inference_cfg fields diverge between training-time\n"                    \
-      "and runtime cfg.* values. Examples: confidence_threshold_scale,\n"                               \
-      "barrier_gate_enabled, bandit_blend_ratio, ml_tp_pct, ml_sl_pct,\n"                               \
-      "barrier_blend_mode, per_horizon_barrier_blend (v5.15.5.A.7+).\n"                                 \
+      "and runtime cfg.* values — the INFERENCE_CFG rows of FOREACH_CFG_DRIFT_CHECK\n"                  \
+      "(the registry is the list; the boot log names each drifted field on a\n"                         \
+      "`[cfg-drift] INFERENCE_CFG` line).\n"                                                            \
       "Tier 1 fields REFUSE in strict mode (model_verify_strict=1);                                 \n" \
       "Tier 2 fields WARN regardless. Set by FOREACH_CFG_DRIFT_CHECK walker                          \n" \
       "at NodeModelZoo_ValidateAgainstCfg post-v5.15.5.A.7 chokepoint.                                \n"\
@@ -236,10 +236,9 @@ enum FailureModeGroupId : int {
     /* bit). Closes ArchField↔CfgDrift bitmap asymmetry — ArchField sets per-entry bits; cfg-     */    \
     /* drift now sets per-category bits via FOREACH_CFG_DRIFT_CHECK Y3 category dispatch.         */    \
     X(cfg_cross_binary_drift,   BIT_FLAG,    SEV_YELLOW, "cfg: CROSS-BINARY DRIFT",                     \
-      "One or more cross-binary stamp-bound fields diverge from cfg at load:\n"                         \
-      "xgb_subsample, xgb_colsample_bytree, xgb_min_child_weight, xgb_seed,\n"                          \
-      "xgb_tree_method, training_poll_interval,\n"                                                      \
-      "build_flags_hash (when not covered by ArchFieldDrift).\n"                                        \
+      "One or more cross-binary stamp-bound fields diverge from cfg at load —\n"                        \
+      "the CROSS_BINARY rows of FOREACH_CFG_DRIFT_CHECK (the registry is the list;\n"                   \
+      "the boot log names each drifted field on a `[cfg-drift] CROSS_BINARY` line).\n"                  \
       "Cross-binary drift = bytewise model divergence if retrained under current\n"                     \
       "cfg. Forensic only at load (cannot retrain at boot); operator notification.\n"                   \
       "Set by FOREACH_CFG_DRIFT_CHECK walker (v5.15.5.A.7+).\n"                                         \
