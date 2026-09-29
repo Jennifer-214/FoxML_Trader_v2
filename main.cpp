@@ -5,25 +5,17 @@
 //======================================================================================================
 // [TICK TRADER ENGINE]
 //======================================================================================================
-// main event loop - wires the Binance data stream to the execution pipeline
-// single-threaded, poll-based: BinanceStream -> BuyGate -> PositionExitGate -> PortfolioController
-//
-// the engine runs identically whether data is arriving or not - poll() timeout ensures
-// exit gates are always checked against last known price
-//
-// burst drain: when multiple frames buffer between poll cycles (volatile markets),
-// we drain ALL of them, running exit gates on each intermediate price so TP/SL triggers
-// arent missed in a burst. BuyGate only runs on the final/freshest price
-//
-// session lifecycle: 24-hour cycle with clean wind-down, position close, and reconnect
-// reconnect procedure is airtight - verifies bitmap is zero before proceeding
+// process entry - pins the process-wide state (FTZ/DAZ, the locale), loads the cfg, refuses a
+// contradictory or malformed capital / venue cfg, then hands off to the sharded engine
+// (EngineSharded_Run): one producer thread fans every tick out to a hot + a slow thread per
+// node, and a drainer thread runs the OMS. the event loop and its threads live there, not here.
 //======================================================================================================
 #include <locale.h>   // .E.0.1: LC_NUMERIC=C boot pin (locale-determinism class close)
 #include "DataStream/BinanceCrypto.hpp"
 #include "CoreFrameworks/Notify.hpp"
 // Phase 8b — g_notify is a C++17 inline variable defined in Notify.hpp,
-// nullptr by default. Live engine assigns &g_notify_state in main() after
-// NotifyState_Init when cfg.notify_enabled=1 (lands in c3+c4).
+// nullptr by default; the sharded engine assigns &g_notify_state after
+// NotifyState_Init when cfg.notify_enabled=1 (in EngineSharded_Run, not main()).
 #include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 #include "CoreFrameworks/CfgPaths.hpp"    // the cfg-filename SSoT (the default engine cfg)
@@ -61,16 +53,16 @@ int main(int argc, char *argv[]) {
     // libgomp+pthread shared-init race the landmine documents. MUST be
     // before any thread exists so libgomp inherits it at first init.
     setenv("OMP_NUM_THREADS", "1", /*overwrite=*/1);
-    // v5.11.0.A — Set FTZ/DAZ as the FIRST thing in main(). Subnormal stalls
+    // v5.11.0.A — Set FTZ/DAZ before any thread exists. Subnormal stalls
     // cost up to 100x FPU throughput (microcode trap); critical for HFT
     // determinism. Linux pthread_create inherits MXCSR, so this covers all
     // slow-path threads. Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.3.
     tt::engine_set_mxcsr_ftz_daz();
 
     // .E.0.1 locale-determinism class close: pin LC_NUMERIC=C process-wide at boot,
-    // BEFORE any float parse (cfg load at :139+). setlocale is process-global so every
-    // pthread inherits it — makes the formerly-phantom "engine boot pins this"
-    // (NodeModelZoo.hpp:2845) actually TRUE. Headless engine: sole pin. engine_gui:
+    // BEFORE any float parse (the cfg loads below). setlocale is process-global so every
+    // pthread inherits it — the pin a comment once claimed with no code behind it (the
+    // instance DOCS/recurring-bug-patterns/class-38 records). Headless engine: sole pin. engine_gui:
     // re-pinned after SDL_Init (GuiThread) since SDL/X11 can reset LC_*.
     setlocale(LC_NUMERIC, "C");
 
@@ -85,11 +77,14 @@ int main(int argc, char *argv[]) {
     BinanceConfig bcfg       = BinanceConfig_Load(cfg_path);
     ControllerConfig<FP> ccfg = ControllerConfig_Load<FP>(cfg_path);
 
-    // create logging directory — all runtime files go here (rm -rf logging/* for clean start)
-    mkdir("logging", 0755); // silently succeeds if already exists
+    // create the logging directory — the engine log and the runtime logs go here. NOT a
+    // clean-start switch: the restart snapshot (data/) and the learned model state live
+    // outside it, so clearing logging/ does not reset the engine
+    mkdir("logging", 0755); // EEXIST (or any error) is ignored; the freopen below reports a failure
 
-    // auto-redirect stderr to log file — must happen BEFORE sharded dispatch
-    // so the Engine Log panel can read from logging/engine.log
+    // auto-redirect stderr to the log file — must happen BEFORE sharded dispatch, so
+    // everything the engine prints lands in logging/<log_file> (the operator tails it;
+    // engine_gui's Engine Log panel reads it until that binary retires — D-493)
     if (bcfg.log_file[0]) {
         char log_path[300], prev[304];
         snprintf(log_path, sizeof(log_path), "logging/%s", bcfg.log_file);
@@ -118,12 +113,12 @@ int main(int argc, char *argv[]) {
     // cfg included.
     //
     // Failure modes:
-    //   1. RLIMIT_MEMLOCK soft limit too low → mlockall returns EAGAIN.
+    //   1. RLIMIT_MEMLOCK soft limit nonzero but too low → mlockall returns ENOMEM.
     //      We probe the limit first and emit a clear WARN before attempting.
-    //   2. Process lacks CAP_IPC_LOCK on non-root → mlockall returns EPERM.
+    //   2. Unprivileged (no CAP_IPC_LOCK) and no memlock allowance → mlockall returns EPERM.
     //      Operator must run with appropriate caps or as root.
-    // An HFT engine that can't lock its memory is a fail-fast condition
-    // (per HFT-suggestion annotation in plan).
+    // An HFT engine that can't lock its memory is a fail-fast condition by default
+    // (require_mlockall=1; a laptop/dev cfg sets 0 to warn and continue).
     //==================================================================================================
     {
         struct rlimit rl;
@@ -158,13 +153,10 @@ int main(int argc, char *argv[]) {
     }
 
     //==================================================================================================
-    // Phase 13+ dispatch: SHARDED is the production engine and is now the DEFAULT.
-    // Legacy single-threaded mode is kept as a benchmark/regression baseline but is
-    // DEPRECATED — see CLAUDE.md "Cross-Mode Init Placement" invariant. Adding
-    // features in main.cpp's post-dispatch loop = silent production gap (the
-    // sharded path won't see them). New features should land in:
-    //   - EngineSharded.hpp (sharded-only setup / per-core init)
-    //   - CoreFrameworks/EventLoopState (cross-core dispatch)
+    // SHARDED is the only engine path (.E.1.1 removed the legacy single-threaded mode).
+    // main() boots and dispatches; new engine behaviour lands in:
+    //   - CoreFrameworks/EngineSharded/ (Boot / SlowPath / Async / Run — setup + per-node init)
+    //   - EventLoopState (CoreFrameworks/ControllerEventLoop.hpp — cross-node dispatch)
     //   - CoreFrameworks/OrderManager (OMS HandleFill — fee math + counters)
     //==================================================================================================
     // WIP2d-1.A — per-core symbol axis (partial advance of .F.4c.3.A; uniformity check
@@ -201,7 +193,7 @@ int main(int argc, char *argv[]) {
 
     // NEW-1/D-218 — HARD-REFUSE a contradictory capital config BEFORE any engine dispatch
     // (use_real_money=1 conflicting with an explicit non-LIVE trading_mode; Load flagged it).
-    // Ambiguous capital intent on a SAFETY_CRITICAL field must not boot — covers sharded + legacy.
+    // Ambiguous capital intent on a SAFETY_CRITICAL field must not boot.
     if (ccfg.live_capital_cfg_conflict) {
         fprintf(stderr, "[ENGINE] FATAL: contradictory capital config (use_real_money vs trading_mode) "
                         "-> boot REFUSED. Resolve %s (see the [cfg] FATAL above).\n", ccfg.source_cfg_path);
@@ -209,7 +201,7 @@ int main(int argc, char *argv[]) {
     }
 
     // ③ D-254 — HARD-REFUSE a capital-validation fault (malformed/out-of-range capital cfg).
-    // ALWAYS-ABORT, all modes (no-margin is non-negotiable; D2). Reasoned per-fault [cfg] FATAL
+    // ALWAYS-ABORT, all modes (no-margin is non-negotiable; D-254's D2). Reasoned per-fault [cfg] FATAL
     // lines were printed by ControllerConfig_Load at detection.
     if (!cfg_capital_gate_ok(ccfg, "ENGINE")) return 1;  // ③ D-255 — shared single-source gate (was inline)
     // N1 (③ reuse) — the sibling boot parser (BinanceConfig, read from the SAME cfg) validates its venue
