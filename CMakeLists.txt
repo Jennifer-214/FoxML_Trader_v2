@@ -14,6 +14,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # binary; the module proves its own matcher at every configure.
 include(${CMAKE_SOURCE_DIR}/cmake/NoOpenMPRuntime.cmake)
 
+# Format-string guard — a printf-family argument its specifier does not take is a compile ERROR (a
+# 16-byte Money / FPN_Binary fed to %f printed garbage, silently). Defines ${FOXML_FORMAT_GUARD} for
+# every first-party executable, proves its own teeth at configure, and foxml_check_format_guard()
+# (called at the end of this file) refuses an executable that lacks it.
+include(${CMAKE_SOURCE_DIR}/cmake/FormatGuard.cmake)
+
 #===============================================================================
 # engine binary — ANSI TUI (zero deps, diff-based rendering)
 #===============================================================================
@@ -30,7 +36,7 @@ target_link_libraries(engine PRIVATE simdjson_vendor)
 # 1:1 asm sidecars' line interleave (objdump -l reads DWARF from the SHIPPED binary — the
 # source↔shipped-asm sync + inline attribution + per-line cost the plugin renders). Strippable
 # for deploy; never affects -O3/-flto output.
-target_compile_options(engine PRIVATE -O3 -march=native -funroll-loops -flto -g -Werror=float-conversion)  # E.1.2.C leg 0 — PARTIAL guard for the fan-shift class (type-crossing positional re-maps; arity de-defaulting is the full closure). Measured 0 pre-existing hits.
+target_compile_options(engine PRIVATE -O3 -march=native -funroll-loops -flto -g -Werror=float-conversion ${FOXML_FORMAT_GUARD})  # E.1.2.C leg 0 — PARTIAL guard for the fan-shift class (type-crossing positional re-maps; arity de-defaulting is the full closure). Measured 0 pre-existing hits.
 target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_ANSI_TUI LICENSE_BYPASS)
 target_link_libraries(engine PRIVATE ssl crypto pthread)
 
@@ -146,7 +152,7 @@ if(USE_IMGUI_GUI)
 
     add_executable(engine_gui main.cpp)
 target_link_libraries(engine_gui PRIVATE simdjson_vendor)
-    target_compile_options(engine_gui PRIVATE -O3 -march=native -funroll-loops -flto -g)
+    target_compile_options(engine_gui PRIVATE -O3 -march=native -funroll-loops -flto -g ${FOXML_FORMAT_GUARD})
     target_compile_definitions(engine_gui PRIVATE
         MULTICORE_TUI USE_IMGUI_GUI LICENSE_BYPASS
     )
@@ -193,7 +199,7 @@ endif()
 if(USE_IMGUI_GUI)
     add_executable(foxml_suite foxml_suite.cpp)
 target_link_libraries(foxml_suite PRIVATE simdjson_vendor)
-    target_compile_options(foxml_suite PRIVATE -O3 -march=native -funroll-loops -flto -g)
+    target_compile_options(foxml_suite PRIVATE -O3 -march=native -funroll-loops -flto -g ${FOXML_FORMAT_GUARD})
     target_compile_definitions(foxml_suite PRIVATE
         FOXML_SUITE LICENSE_BYPASS MULTICORE_TUI
     )
@@ -234,7 +240,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 include_directories(${CMAKE_SOURCE_DIR}/CoreFrameworks)
 add_executable(controller_test tests/controller_test.cpp)
 target_link_libraries(controller_test PRIVATE simdjson_vendor)
-target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto -g -Werror=float-conversion)  # E.1.2.C leg 0 — same class guard; measured 0 hits
+target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto -g -Werror=float-conversion ${FOXML_FORMAT_GUARD})  # E.1.2.C leg 0 — same class guard; measured 0 hits
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 # Phase 5d regression tests pull in Backtest/BacktestEngine.hpp for BacktestResults
 # helpers, XGBoost weight helpers, and LabelType_* helpers. BacktestEngine.hpp
@@ -267,7 +273,7 @@ foxml_refuse_openmp_runtime(controller_test)
 # in DataStream/DepthRecorder.hpp which transitively includes BinanceDepth.hpp;
 # no MULTICORE_TUI needed (no TUISnapshot reference path).
 add_executable(depth_recorder_test tests/depth_recorder_test.cpp)
-target_compile_options(depth_recorder_test PRIVATE -O2 -march=native)
+target_compile_options(depth_recorder_test PRIVATE -O2 -march=native ${FOXML_FORMAT_GUARD})
 target_include_directories(depth_recorder_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(depth_recorder_test PRIVATE ssl crypto pthread)
 # (F-057 native-FP-path pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
@@ -281,7 +287,7 @@ endif()  # tests/ present
 # compare_scalers is a private dev tool (tools/ gitignored); skip on a code-only public clone
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/compare_scalers.cpp)
 add_executable(compare_scalers tools/compare_scalers.cpp)
-target_compile_options(compare_scalers PRIVATE -O2 -march=native)
+target_compile_options(compare_scalers PRIVATE -O2 -march=native ${FOXML_FORMAT_GUARD})
 target_include_directories(compare_scalers PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(compare_scalers PRIVATE ssl crypto)
 endif()
@@ -337,3 +343,6 @@ endforeach()
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
 add_test(NAME depth_recorder_test COMMAND depth_recorder_test)
+
+# Every executable above must carry ${FOXML_FORMAT_GUARD} (cmake/FormatGuard.cmake).
+foxml_check_format_guard()

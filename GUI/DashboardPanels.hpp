@@ -117,6 +117,7 @@ static inline void SectionHeader(const char *title) {
 //======================================================================
 // [CODE]
 //======================================================================
+__attribute__((format(printf, 2, 3)))  // -Werror=format sees every call (cmake/FormatGuard.cmake)
 static inline void LabeledValue(const char *label, const char *fmt, ...) {
     ImGui::TextColored(FoxmlColors::sand, "%s", label);
     ImGui::SameLine();

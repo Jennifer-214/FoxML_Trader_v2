@@ -858,9 +858,12 @@ static inline int BinanceOrderAPI_LoadFilters(BinanceOrderAPI *api) {
         api->filters.min_notional = Money{ money_from_double_payload(binance_json_extract_double(notional, "minNotional")) };
 
     api->filters.loaded = 1;
+    // Display-only doubles (H4). These were once passed as raw Money: a 16-byte struct fed to
+    // %f is UB — every value on this line printed garbage, decimals included (the structs eat
+    // its argument register). -Werror=format now refuses that at compile time.
     fprintf(stderr, "[REST] filters: step=%.8f minQty=%.8f minNotional=%.2f decimals=%d\n",
-            api->filters.lot_step_size, api->filters.lot_min_qty,
-            api->filters.min_notional, api->filters.qty_decimals);
+            Money_ToDouble(api->filters.lot_step_size), Money_ToDouble(api->filters.lot_min_qty),
+            Money_ToDouble(api->filters.min_notional), api->filters.qty_decimals);
     return 1;
 }
 

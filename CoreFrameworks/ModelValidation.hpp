@@ -76,24 +76,28 @@ namespace tt {
 // Default LogFn for production callers — preserves pre-refactor `fprintf(stderr, ...)` semantics
 // exactly. Tests inject a capturing functor (e.g., recording lambda) for log-content assertions.
 //
-// LogFn is invoked as a printf-style callable: `log_fn("fmt %d", arg)`. Variadic template
-// forwards args to vfprintf or vsnprintf depending on the functor. Per template-deferred-
-// dependency-injection.md: zero runtime overhead in production (compiler inlines
-// StderrLog::operator() at the call site).
+// LogFn is invoked as a printf-style callable: `log_fn("fmt %d", arg)`. StderrLog takes C
+// varargs under the printf attribute, so -Werror=format checks every log_fn call instantiated
+// with it (cmake/FormatGuard.cmake) — a template parameter pack is invisible to that check.
+// Test functors forward however they like. The walker runs at model load, not per tick, so a
+// non-inlined variadic call per log line costs nothing that matters.
 
 //======================================================================
 // [STRUCT]_[StderrLog]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [HELPER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the default production LogFn functor — a printf-style operator() forwarding to fprintf(stderr); tests inject a capturing functor instead (zero runtime overhead, inlined)]
+// [OVERVIEW]_[the default production LogFn functor — a C-varargs printf-style operator() (format-checked) forwarding to vfprintf(stderr); tests inject a capturing functor instead]
 //======================================================================
 // [CODE]
 //======================================================================
 struct StderrLog {
-    template <typename... Args>
-    void operator()(const char* fmt, Args... args) const {
-        fprintf(stderr, fmt, args...);
+    __attribute__((format(printf, 2, 3)))  // a member: the implicit object is argument 1
+    void operator()(const char* fmt, ...) const {
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(stderr, fmt, ap);
+        va_end(ap);
     }
 };
 //======================================================================

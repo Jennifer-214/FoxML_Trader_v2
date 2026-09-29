@@ -928,7 +928,9 @@ static inline void GUI_Panel_Results(const BacktestResults *results) {
         ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthFixed, 140);
         ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-        auto row = [](const char *label, const char *fmt, ...) {
+        // The printf attribute puts every row() under -Werror=format (cmake/FormatGuard.cmake);
+        // on a lambda it counts the implicit object, so fmt is argument 3.
+        auto row = [](const char *label, const char *fmt, ...) __attribute__((format(printf, 3, 4))) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn(); ImGui::Text("%s", label);
             ImGui::TableNextColumn();
@@ -2626,14 +2628,17 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                         ImGui::Separator();
                         ImGui::TextColored(FoxmlColors::comment,
                                            "Recorded cfg at training time:");
+                        // Display-only doubles (H4): these three are FPN_Binary<64> since the
+                        // .B.3 cfg-derived struct-gen, and a raw 16-byte struct fed to %g / %f
+                        // printed garbage (UB). -Werror=format now refuses that at compile time.
                         ImGui::Text("  confidence_threshold_scale:       %.4g",
-                                    v.confidence_threshold_scale);
+                                    FPN_ToDouble(v.confidence_threshold_scale));
                         ImGui::Text("  barrier_gate_enabled:             %d",
                                     v.barrier_gate_enabled);
                         ImGui::Text("  confidence_hard_block_threshold:  %.4g",
-                                    v.confidence_hard_block_threshold);
+                                    FPN_ToDouble(v.confidence_hard_block_threshold));
                         ImGui::Text("  held_out_fraction:                %.3f",
-                                    v.held_out_fraction);
+                                    FPN_ToDouble(v.held_out_fraction));
                         // v5.14.9.D — DELETED freshness_tau display
                         // (TECH_DEBT-004 close); registry entry + struct field
                         // deleted; stamp body line no longer emitted.

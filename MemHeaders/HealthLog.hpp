@@ -237,6 +237,7 @@ inline int Health_LogEnabled(int level) {
 // and a printf-style payload string. Output is one JSONL line.
 //
 // Returns 1 on success, 0 on i/o failure (ignored by most callers).
+__attribute__((format(printf, 4, 5)))  // -Werror=format sees every call (cmake/FormatGuard.cmake)
 inline int Health_Log(int level, const char* category, int node_id,
                       const char* fmt, ...) {
     HealthLogState* s = HealthLog_Singleton();
@@ -355,6 +356,7 @@ inline int Health_Log(int level, const char* category, int node_id,
 // shared across threads (per-core fields are; per-process statics
 // need pthread mutex if shared, but the failure mode is acceptable
 // double-emit-once on race, not data corruption).
+__attribute__((format(printf, 5, 6)))  // -Werror=format sees every call (cmake/FormatGuard.cmake)
 inline int Health_LogCriticalRateLimited(uint64_t* last_emit_us,
                                           uint64_t gate_us,
                                           int node_id,
