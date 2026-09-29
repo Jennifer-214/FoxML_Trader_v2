@@ -9,6 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # the db of the build actually being shipped, never from editor-supplied or hand-assembled flags).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# D-494 (OMP-B) — no engine binary may load an OpenMP runtime (Landmine 1: libgomp crashed parallel
+# XGBoost training). Each executable below gets a POST_BUILD `ldd` check that refuses one and removes the
+# binary; the module proves its own matcher at every configure.
+include(${CMAKE_SOURCE_DIR}/cmake/NoOpenMPRuntime.cmake)
+
 #===============================================================================
 # engine binary — ANSI TUI (zero deps, diff-based rendering)
 #===============================================================================
@@ -85,9 +90,10 @@ endif()
 
 # ML inference backends (applied to engine, engine_gui added below if built)
 if(USE_XGBOOST)
-    find_package(xgboost REQUIRED)
-    target_compile_definitions(engine PRIVATE USE_XGBOOST)
-    target_link_libraries(engine PRIVATE xgboost::xgboost)
+    # the pinned, OpenMP-free XGBoost (tools/build_xgboost.sh) — found, checked and linked in ONE
+    # place; any other XGBoost fails the configure (D-494)
+    include(${CMAKE_SOURCE_DIR}/cmake/XGBoostPin.cmake)
+    foxml_link_xgboost(engine)
 endif()
 if(USE_LIGHTGBM)
     find_library(LIGHTGBM_LIB _lightgbm REQUIRED)
@@ -98,6 +104,7 @@ endif()
 # v5.11.0.D — Apply PGO flags to engine (no-op when neither GENERATE
 # nor USE option is on, no-op for non-GCC compilers).
 apply_pgo_flags(engine)
+foxml_refuse_openmp_runtime(engine)
 
 #===============================================================================
 # engine_gui binary — Dear ImGui + implot (SDL2 + OpenGL3)
@@ -167,8 +174,7 @@ target_link_libraries(engine_gui PRIVATE simdjson_vendor)
         target_compile_definitions(engine_gui PRIVATE BUSY_POLL)
     endif()
     if(USE_XGBOOST)
-        target_compile_definitions(engine_gui PRIVATE USE_XGBOOST)
-        target_link_libraries(engine_gui PRIVATE xgboost::xgboost)
+        foxml_link_xgboost(engine_gui)
     endif()
     if(USE_LIGHTGBM)
         target_compile_definitions(engine_gui PRIVATE USE_LIGHTGBM)
@@ -178,6 +184,7 @@ target_link_libraries(engine_gui PRIVATE simdjson_vendor)
     # v5.11.0.D — Apply PGO to engine_gui (operator's typical
     # profile-collection target since it has the full panel surface).
     apply_pgo_flags(engine_gui)
+    foxml_refuse_openmp_runtime(engine_gui)
 endif()
 
 #===============================================================================
@@ -201,15 +208,11 @@ target_link_libraries(foxml_suite PRIVATE simdjson_vendor)
         ${SDL2_LIBRARIES}
         OpenGL::GL
         ssl crypto pthread
-        gomp  # v5.11.44 hotfix — omp_set_num_threads + omp_set_dynamic in
-              # mh_per_horizon_parallel_worker (caps libgomp thread pool
-              # per-pthread to prevent OpenMP team collisions across
-              # parallel multi-horizon workers running XGBoost)
     )
     if(USE_XGBOOST)
-        target_compile_definitions(foxml_suite PRIVATE USE_XGBOOST)
-        target_link_libraries(foxml_suite PRIVATE xgboost::xgboost)
+        foxml_link_xgboost(foxml_suite)
     endif()
+    foxml_refuse_openmp_runtime(foxml_suite)
     if(USE_LIGHTGBM)
         target_compile_definitions(foxml_suite PRIVATE USE_LIGHTGBM)
         target_link_libraries(foxml_suite PRIVATE ${LIGHTGBM_LIB})
@@ -244,20 +247,20 @@ target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
 # they compiled out EVERYWHERE (controller_test carried only MULTICORE_TUI, even
 # under -DUSE_XGBOOST=ON) — a whole `#ifdef USE_XGBOOST` test block that was
 # dead in every lane while reading as coverage (Class 51). Now the split is the
-# intended one: build/ = ANSI fixtures only, build_gui|build_suite = fixtures
-# PLUS the oracle.
+# intended one: build/ = ANSI fixtures only, build_gui (`./build.sh suite` is its
+# alias since OMP-B) = fixtures PLUS the oracle.
 #
-# XLANE (D-492 item 24): link the IMPORTED target, exactly as engine_gui / foxml_suite do.
-# The bare `xgboost` name linked fine but carried no RUNPATH, so the lane's binary could
-# not start without LD_LIBRARY_PATH=/usr/local/lib — and no gate ran it, so its cells
-# (the walker oracle, L3, L7, the nthread pin) went unexercised. `./build.sh gui` now runs it.
+# XLANE (D-492 item 24): link the SAME XGBoost as engine_gui / foxml_suite — since OMP-B (D-494)
+# through foxml_link_xgboost(), the pinned no-OpenMP build, so the lane tests exactly what
+# ships. `./build.sh gui` runs this binary; before XLANE no gate did, and its cells (the walker
+# oracle, L3, L7, the nthread pin) went unexercised.
 if(USE_XGBOOST)
-    target_compile_definitions(controller_test PRIVATE USE_XGBOOST)
-    target_link_libraries(controller_test PRIVATE xgboost::xgboost)
+    foxml_link_xgboost(controller_test)
 endif()
 # (native-FP pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 find_package(Threads REQUIRED)
 target_link_libraries(controller_test PRIVATE Threads::Threads ssl crypto)
+foxml_refuse_openmp_runtime(controller_test)
 
 # Phase 8a c7 — DepthRecorder test binary. Separate from controller_test
 # because the recorder writes to disk and tests use tempdir fixtures. Pulls

@@ -32,12 +32,6 @@
 #include <pthread.h>
 #include <ftw.h>          // v5.11.51 — nftw() for recursive directory delete
 #include <unistd.h>       // v5.15.5 — fork() / execlp() / _exit() for Open Folder Path
-#include <omp.h>          // v5.11.44 hotfix — omp_set_num_threads(1) in
-                          // per-horizon parallel workers to cap libgomp's
-                          // thread pool. Without this, multiple pthreads
-                          // each running XGBoost (which uses libgomp
-                          // internally) cause OpenMP team collisions in
-                          // RowsWiseBuildHistKernel → segfault.
 
 // scan cap for the Data panel — must be ≥ MAX_DATA_FILES so the GUI doesn't
 // silently truncate before the run_config buffer fills. paired with Limits.hpp.
@@ -5013,7 +5007,7 @@ struct MultiHorizonParallelJob {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[parallel per-horizon worker for the multi-horizon sweep (caps libgomp to 1 thread)]
+// [OVERVIEW]_[parallel per-horizon worker for the multi-horizon sweep]
 //======================================================================
 // [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
@@ -5021,14 +5015,9 @@ struct MultiHorizonParallelJob {
 //======================================================================
 static inline void *mh_per_horizon_parallel_worker(void *arg) {
     MultiHorizonParallelJob *job = (MultiHorizonParallelJob *)arg;
-    // v5.15.3.C — libgomp pthread-race landmine FIXED at process entry
-    // via setenv("OMP_NUM_THREADS", "1", ...) in foxml_suite.cpp:main.
-    // Per-pthread omp_set_num_threads(1) here is now defensive (process-
-    // global env already set, but cheap belt-and-suspenders against any
-    // accidental nested omp_set_num_threads call elsewhere in libgomp/
-    // XGBoost init).
-    omp_set_num_threads(1);
-    omp_set_dynamic(0);
+    // No OpenMP pinning here: since OMP-B (D-494) XGBoost is built without OpenMP, so boosters on
+    // concurrent workers share no thread pool. The omp_set_num_threads / omp_set_dynamic pair that
+    // stood here was one of Landmine 1's failed mitigations — the crash lived inside libgomp itself.
     // PROGRESS PUBLISH (2026-08-25, operator: the bar read "horizon 0/3 (current: 0 ticks)" for a
     // whole run). mh_progress / mh_current_horizon were written ONLY by the SERIAL path, and
     // parallel became the default when E.1.2.D deleted the multi_horizon_max_threads=1 override —
@@ -5192,15 +5181,11 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     }
     state->mh_total = horizon_count;
 
-    // v5.15.3.C — libgomp landmine FIXED at process entry (setenv
-    // OMP_NUM_THREADS=1 in foxml_suite.cpp:main). XGBoost trainings across
-    // pthreads no longer race on libgomp's shared parallel-region state
-    // because the process-global single-thread mode is set before any
-    // libgomp init. Per-pthread workers can now safely run concurrent
-    // XGBoost without the v5.11.44 omp_set_num_threads(1) per-pthread
-    // workaround (kept defensively) or the v5.11.45 forced-serial clamp
-    // (REMOVED in this ship). cfg.multi_horizon_max_threads now honors
-    // operator's actual setting: 0 = auto (= horizon_count, fully
+    // Parallel horizons run concurrent XGBoost trainings on pthreads — Landmine 1's workload (a SIGSEGV
+    // in libgomp's parallel-region setup) until OMP-B (D-494) built XGBoost without OpenMP: there is no
+    // runtime pool left for the workers to race on. (The v5.15.3.C process-entry setenv this block used
+    // to credit never reached libgomp, which reads its environment at load — measured 2026-09-28.)
+    // cfg.multi_horizon_max_threads honours the operator's setting: 0 = auto (= horizon_count, fully
     // parallel), N = cap to N concurrent.
     int mh_max_threads = results->config_used.multi_horizon_max_threads;
     if (mh_max_threads <= 0) {
@@ -5307,11 +5292,10 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             }
             job->labels_precomputed = mh_batch_ok;
             // Pin xgb_train_nthread=1 + xgb_eval_nthread=1 in the isolated
-            // cfg for parity vs serial-mode-with-nthread=1 AND for parallel-
-            // mode safety (WF folds inside RFV use xgb_eval_nthread). Both
-            // must be 1 to prevent libgomp OpenMP team collisions across
-            // pthreads (v5.11.44 hotfix: also paired with omp_set_num_threads(1)
-            // in the worker entry).
+            // cfg for parity vs serial-mode-with-nthread=1 (WF folds inside RFV
+            // use xgb_eval_nthread). The libgomp team-collision reason these pins
+            // also carried is gone since OMP-B (D-494 — XGBoost has no OpenMP);
+            // OMP-B-ii retires xgb_eval_nthread and re-decides this block.
             job->isolated_results.config_used.xgb_train_nthread = 1;
             job->isolated_results.config_used.xgb_eval_nthread  = 1;
             job->h = h;

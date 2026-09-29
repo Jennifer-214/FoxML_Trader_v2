@@ -921,7 +921,8 @@ static inline void TreeWalkerOracle_EmitLeafRows(
 //
 // The per-row version was MEASURED at 168 SECONDS for 4096 probes on the twins
 // model (~41ms/probe: two 1-row DMatrix builds + two full 1050-tree traversals
-// each, plus libgomp spin-up per call). That is ~3 minutes added to every boot,
+// each, plus libgomp spin-up per call — measured on the OpenMP library that OMP-B
+// replaced). That is ~3 minutes added to every boot,
 // per model — a gate nobody would keep enabled is a gate that does not protect
 // anything. Batching collapses 2N library calls into exactly 2.
 //======================================================================
@@ -1106,18 +1107,18 @@ inline int TreeWalkerOracle_Verify(const FlatTreeModel* w, BoosterHandle booster
 // [TAG]_[[ENGINE] [ML_INFERENCE] [BOOT_TIME] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ONE way an inference booster is made — create, load the
-//   artifact, pin it to one thread — so every Model_Load path serves a pinned
-//   booster; a pin that does not take refuses the load]
+//   artifact, set nthread 1 — so every Model_Load path serves the same shape of
+//   booster; a SetParam that fails refuses the load]
 //======================================================================
-// WHY THE PIN LIVES ON THE BOOSTER: libgomp reads OMP_NUM_THREADS once, when
-// the library is loaded — before main() runs — so a setenv() inside main()
-// never reaches it (measured 2026-09-28: 16 threads before and after the call;
-// 1 only when the variable is set before exec). An unpinned booster uses every
-// core: the ~29 ms per predict of the 2026-08-22 latency deep-dive, plus the
-// exposure LANDMINES.md Landmine 1 records. Before this helper the walker's
-// reference booster — installed as the live XGBOOST handle on each of its
-// fallbacks — was the one inference booster never pinned. The pin follows the
-// load, the order the XGBOOST path has always used.
+// THE PIN IS INERT SINCE OMP-B (D-494): XGBoost is built without OpenMP, so every
+// booster runs one thread by construction and nthread changes nothing. It was the
+// mitigation while libgomp was linked — libgomp reads OMP_NUM_THREADS once, at
+// library load, so a setenv() in main() never reached it (measured 2026-09-28), and
+// an unpinned booster used every core (~29 ms per predict, 2026-08-22). What holds
+// the property now: cmake/XGBoostPin.cmake (configure), cmake/NoOpenMPRuntime.cmake
+// (link) and tests/controller_test_omp.hpp (the running process). The pin and its
+// test cells are deleted at OMP-B-ii (D-494 sub-choice 4).
+// Every Model_Load path makes its booster here — the one inference-booster factory.
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1200,8 +1201,8 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
     // activating unchecked.
     if (backend == MODEL_BACKEND_FLAT_WALKER) {
         // 1) the ORACLE REFERENCE — the library booster, loaded exactly as the
-        //    XGBOOST path loads it: through the same helper, thread pin included,
-        //    so each fallback below installs a pinned handle.
+        //    XGBOOST path loads it, through the same helper, so each fallback
+        //    below installs the same kind of handle the XGBOOST path serves.
         BoosterHandle booster;
         if (!Model_LoadInferenceBooster(path, &booster, "[ML] walker: reference booster")) return 0;
 

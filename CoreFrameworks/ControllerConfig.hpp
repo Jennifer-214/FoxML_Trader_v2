@@ -2110,12 +2110,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // multi_horizon_max_threads manual=1 override DELETED (E.1.2.D 2026-08-22):
   // the registry default (4 → parallel horizon training, per-worker
   // xgb nthread pinned to 1 for parity) now applies. The override's stated
-  // reason — the v5.11.45 XGBoost+libgomp+pthread segfault class — was
-  // CLOSED at v5.15.3.C (process-entry setenv("OMP_NUM_THREADS","1") in
-  // foxml_suite main, before any libgomp init; the per-pthread omp_set
-  // calls remain as defensive belt). The hold was a stale safety clamp:
-  // the operator's multi-horizon trains ran SERIAL the whole time while
-  // the parallel path's own comments described it as the honored default.
+  // reason — the v5.11.45 XGBoost+libgomp+pthread segfault class — is closed
+  // by OMP-B (D-494): XGBoost is built without OpenMP, so parallel workers
+  // share no libgomp to race on. (The v5.15.3.C process-entry setenv once
+  // credited here never reached libgomp — measured 2026-09-28.) The deleted
+  // hold was a stale safety clamp: the operator's multi-horizon trains ran
+  // SERIAL the whole time while the parallel path's own comments described
+  // it as the honored default.
   // v5.15.5.F.4d.1.B.3 Step 8.6: feature_collect_max_gb DIFFER — registry INT(8); manual=12 (operator-favored ceiling).
   cfg.feature_collect_max_gb  = 12;  // KEEP — registry INT(8) too restrictive; advisory cap; WARN-only
   // wf_split_max_gb MATCH — registry INT(8) == manual; DELETED.

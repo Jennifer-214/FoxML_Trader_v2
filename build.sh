@@ -16,8 +16,9 @@ flock 200
 #   engine      ANSI engine + controller_test (build/) — minimal, no ImGui
 #   gui         engine_gui + foxml_suite (build_gui/, ImGui+SDL2 + LATENCY +
 #               XGBoost) — the "everything on" build with ALL panels visible
-#               (Latency, Per-Core, ML Intelligence). Requires libxgboost
-#               headers at /usr/local/include/xgboost.
+#               (Latency, Per-Core, ML Intelligence). Requires the pinned,
+#               OpenMP-free XGBoost — build it once with
+#               tools/build_xgboost.sh (D-494; cmake/XGBoostPin.cmake).
 #   gui-lite    engine_gui + foxml_suite (build_gui_lite/, ImGui+SDL2 only,
 #               no profiling/XGBoost) — minimal GUI, fastest hot path
 #   suite       alias for gui (kept for backward compat)
@@ -93,8 +94,8 @@ link_cfg() {
 
 # v4.3 — maintain bin/ symlinks to the canonical "latest" binary of each
 # user-facing target. Without this, users get confused about which build_*
-# directory contains the up-to-date binary (since `./build.sh suite` only
-# rebuilds in build_suite/ while `./build.sh gui` rebuilds in build_gui/,
+# directory contains the up-to-date binary (since `./build.sh gui-lite`
+# rebuilds in build_gui_lite/ while `./build.sh gui` rebuilds in build_gui/,
 # the same target binary can have different timestamps in each dir).
 #
 # pick_newest target candidate1 candidate2 ... — symlinks bin/{target} to
@@ -124,7 +125,7 @@ update_bin_links() {
     pick_newest engine          build/engine          build_gui/engine          build_lat/engine
     pick_newest controller_test build/controller_test build_gui/controller_test
     pick_newest engine_gui      build_gui/engine_gui  build_gui_lite/engine_gui
-    pick_newest foxml_suite     build_gui/foxml_suite build_suite/foxml_suite   build_gui_lite/foxml_suite
+    pick_newest foxml_suite     build_gui/foxml_suite build_gui_lite/foxml_suite
 }
 
 build_engine() {
@@ -199,9 +200,9 @@ build_gui() {
     emit_asm_for_dir build_gui
     update_bin_links
     # XLANE (D-492 item 24) — RUN the XGBoost lane's suite, not only build it: its
-    # USE_XGBOOST cells (the walker's load-time parity oracle, L3, L7, the nthread pin)
-    # run nowhere else, and until 2026-09-28 no gate ran them (L3 sat red unseen).
-    # A failing cell fails this target (set -e).
+    # USE_XGBOOST cells (the walker's load-time parity oracle, L3, L7, the nthread pin,
+    # OMP-B's build-flag check + training golden) run nowhere else, and until 2026-09-28
+    # no gate ran them (L3 sat red unseen). A failing cell fails this target (set -e).
     echo "--- running controller_test (XGBoost lane) ---"
     ./build_gui/controller_test
 }
@@ -248,13 +249,11 @@ build_debug() {
 }
 
 build_suite() {
-    # Backward-compat alias — build_suite is now the same as build_gui.
-    [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_suite
-    cmake -B build_suite -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON -DCMAKE_BUILD_TYPE=Release
-    cmake --build build_suite -j"$JOBS" --target foxml_suite
-    link_cfg build_suite
-    emit_asm_for_dir build_suite
-    update_bin_links
+    # A REAL alias of build_gui (D-494, OMP-B): one XGBoost lane, so its gates — the suite run and
+    # the no-OpenMP checks — cover the foxml_suite that scripts/launch.sh starts. This used to
+    # configure its own build_suite/ and build only foxml_suite there, so no gate rebuilt or tested
+    # that binary (at OMP-B it was a month old and still loading libgomp).
+    build_gui
 }
 
 build_latency() {
@@ -354,7 +353,7 @@ emit_asm_for_dir() {
 
 emit_asm_sidecars() {
     local found=0
-    for dir in build build_gui build_gui_lite build_suite build_lat build_pgo; do
+    for dir in build build_gui build_gui_lite build_lat build_pgo; do
         [[ -d "$dir" ]] || continue
         local before after
         before=$(ls "$dir"/asm/*.asm 2>/dev/null | wc -l)

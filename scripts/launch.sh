@@ -17,7 +17,7 @@
 # Usage:
 #   scripts/launch.sh                 # engine_gui, symbol from engine.cfg, last 30 days
 #   scripts/launch.sh engine          # ANSI engine (build/engine)
-#   scripts/launch.sh suite           # foxml_suite (build_suite/foxml_suite)
+#   scripts/launch.sh suite           # foxml_suite (build_gui/foxml_suite — the one XGBoost lane, D-494)
 #   SYNC_DAYS=90 scripts/launch.sh    # widen the backfill window
 #   SKIP_SYNC=1 scripts/launch.sh     # offline / airgapped: skip steps 1-2
 #
@@ -40,7 +40,7 @@ SYMBOL="${SYMBOL:-BTCUSDT}"
 case "$MODE" in
     gui)    BIN=build_gui/engine_gui;    BUILD_TARGET=gui ;;
     engine) BIN=build/engine;            BUILD_TARGET=test ;;
-    suite)  BIN=build_suite/foxml_suite; BUILD_TARGET=suite ;;
+    suite)  BIN=build_gui/foxml_suite;   BUILD_TARGET=gui ;;
     *) echo "[launch] unknown mode '$MODE' (gui | engine | suite)" >&2; exit 2 ;;
 esac
 
