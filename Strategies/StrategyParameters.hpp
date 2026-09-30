@@ -413,43 +413,42 @@ inline void GateParameters_FinalizeEmit(GateParameters<F>* out, uint8_t* strateg
 //   ~3 sim seconds) refreshes them as the rolling stats move, so the drift
 //   is bounded.
 //======================================================================================================
-// ───────── H22 single-source per-fill TP/SL pct (.E.0.10 A1) ─────────
-// Effective per-fill TP/SL pct = the strategy override (simpledip/mr/emacross_*_pct)
-// ?: the shared take_profit_pct / stop_loss_pct. ONE source for BOTH the fresh-entry
-// dispatcher (compile-time strategy id → the switch folds; slow-path, H7/H20-clean) and
-// snapshot restore (runtime resolved_strategy_id; boot-time-only, the H20 exception), so a
-// restored position exits at the SAME TP/SL it had while live. (A1 fix: restore previously
-// read the GLOBAL take_profit_pct, dropping the per-node override → SimpleDip/MR/EmaCross
-// positions survived a warm-restart at the wrong exit price.) Templated on the cfg view so
-// PerNodeCfg<F> (dispatcher) and the resolved ControllerConfig<F> (restore) both call it.
-// MOMENTUM → flat global (no override field); ML → global (its TP is the barrier blend at
-// entry, unreproducible at restore — a separate tracked sibling, NOT closed by A1).
+// ───────── H22 single-source per-fill TP/SL pct (.E.0.10 A1; generated from the registry 2026-09-30) ─────────
+// The per-fill TP / SL fraction a strategy's position is bracketed with, read by EVERY site that
+// derives it: the strategy packs (compile-time id → the switch folds; slow-path, H7/H20-clean), the
+// A25 entry submit (EngineCommon_DrainEventsAndSubmit, runtime resolved_strategy_id — original_tp is
+// armed from it), and the warm restore (runtime; boot-time-only, the H20 exception). Templated on the
+// cfg view so PerNodeCfg<F> and the node-resolved ControllerConfig<F> both call it.
+// The arms are GENERATED from FOREACH_STRATEGY's tp_field / sl_field / mode columns: every registered
+// strategy declares its own source, so none can fall through to another's field. That fall-through is
+// how Class 45 survived A1 for ML — a hand-written switch sent ML to the default arm (the node's
+// take_profit_pct / stop_loss_pct) while ML's pack armed live_tp / live_sl from ml_tp_pct / ml_sl_pct,
+// so its restored bracket and its fill-time trail anchor were both wrong (PARITY-092). ML's row is
+// exact for the LEGACY barrier mode; the blend modes decide the fraction at entry, which no cfg
+// field can reproduce — binding that decided value is S2's (PARITY-092's blend half).
+// The default arm serves only STRATEGY_AUTO / STRATEGY_NONE, which are not strategies.
 template <typename CfgT>
 inline Money ResolvePerFillTpPct(uint8_t strategy_id, const CfgT& cfg) {
     switch (strategy_id) {
-        case STRATEGY_SIMPLE_DIP:
-            return !Money_IsZero(cfg.simpledip_tp_pct) ? cfg.simpledip_tp_pct : cfg.take_profit_pct;
-        case STRATEGY_MEAN_REVERSION:
-            return !Money_IsZero(cfg.mr_tp_pct) ? cfg.mr_tp_pct : cfg.take_profit_pct;
-#if __has_include("private/EmaCross.hpp")
-        case STRATEGY_EMA_CROSS:
-            return !Money_IsZero(cfg.emacross_tp_pct) ? cfg.emacross_tp_pct : cfg.take_profit_pct;
-#endif
-        default:  // MOMENTUM (flat) / ML (blend at entry; restore→global) / AUTO / NONE
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn, tp_field, sl_field, mode) \
+        case STRATEGY_##id:                                                                         \
+            return ((mode) == PERFILL_OWN_OR_SHARED && Money_IsZero(cfg.tp_field))                  \
+                ? cfg.take_profit_pct : cfg.tp_field;
+        FOREACH_STRATEGY(X)
+#undef X
+        default:
             return cfg.take_profit_pct;
     }
 }
 template <typename CfgT>
 inline Money ResolvePerFillSlPct(uint8_t strategy_id, const CfgT& cfg) {
     switch (strategy_id) {
-        case STRATEGY_SIMPLE_DIP:
-            return !Money_IsZero(cfg.simpledip_sl_pct) ? cfg.simpledip_sl_pct : cfg.stop_loss_pct;
-        case STRATEGY_MEAN_REVERSION:
-            return !Money_IsZero(cfg.mr_sl_pct) ? cfg.mr_sl_pct : cfg.stop_loss_pct;
-#if __has_include("private/EmaCross.hpp")
-        case STRATEGY_EMA_CROSS:
-            return !Money_IsZero(cfg.emacross_sl_pct) ? cfg.emacross_sl_pct : cfg.stop_loss_pct;
-#endif
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn, tp_field, sl_field, mode) \
+        case STRATEGY_##id:                                                                         \
+            return ((mode) == PERFILL_OWN_OR_SHARED && Money_IsZero(cfg.sl_field))                  \
+                ? cfg.stop_loss_pct : cfg.sl_field;
+        FOREACH_STRATEGY(X)
+#undef X
         default:
             return cfg.stop_loss_pct;
     }
@@ -1828,9 +1827,11 @@ inline void ML_BuildParameters(
         tp_pct = Money{ money_from_double_payload(dominant_tp_d) };
         sl_pct = Money{ money_from_double_payload(dominant_sl_d) };
     } else {
-        // LEGACY fallback: cfg-direct (bytewise-identical to pre-v5.15.5).
-        tp_pct = node_cfg->ml_tp_pct;
-        sl_pct = node_cfg->ml_sl_pct;
+        // LEGACY fallback: ML's registry-declared per-fill source (ml_tp_pct / ml_sl_pct, bytewise
+        // what this arm always read) through the SAME resolver the entry submit and the warm restore
+        // call — so the three agree by construction (Class 45; PARITY-092's LEGACY half).
+        tp_pct = ResolvePerFillTpPct(STRATEGY_ML, *node_cfg);
+        sl_pct = ResolvePerFillSlPct(STRATEGY_ML, *node_cfg);
     }
     // v5.15.5.A.6 — observability writes for the per-horizon barrier
     // dispatch. Mirrors exit-side pattern. Surfaces to MLStatusPanel via

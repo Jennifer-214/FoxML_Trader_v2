@@ -135,7 +135,7 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
     // on the arena slot. Tests + non-engine consumers fall back to
     // standard `new`.
     switch (strategy_id) {
-#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn, ...) \
         case STRATEGY_##id: { \
             state_t<F>* s; \
             if (auto* arena = tt::InitArena_Global()) { \
@@ -227,7 +227,7 @@ inline void Strategy_AdaptPerCore(
     // the original AUTO sentinel) leaves state untouched. Phase 3 will
     // handle AUTO re-allocation on regime transitions.
     switch (effective_strategy_id) {
-#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn, ...) \
         case STRATEGY_##id: \
             if (ctx.strategy_state_kind == STRATEGY_##id) { \
                 adapt_fn(static_cast<state_t<F>*>(ctx.strategy_state), \
@@ -394,7 +394,7 @@ inline void Strategy_ExitAdjustPerCore(
     // _ExitAdjustSharded is a no-op stub (added in v5.8.0 for X-macro
     // signature uniformity); the call still happens but does nothing.
     switch (effective_strategy_id) {
-#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn, ...) \
         case STRATEGY_##id: \
             if (ctx.strategy_state_kind == STRATEGY_##id) { \
                 exit_fn(state, slot, \
@@ -458,7 +458,7 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
     // structs are trivially destructible (POD-only fields verified by
     // construction at v5.4.0 strategy spec).
     switch (ctx.strategy_state_kind) {
-#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn, ...) \
         case STRATEGY_##id: \
             if (!tt::InitArena_Owns(tt::InitArena_Global(), ctx.strategy_state)) { \
                 delete static_cast<state_t<F>*>(ctx.strategy_state); \

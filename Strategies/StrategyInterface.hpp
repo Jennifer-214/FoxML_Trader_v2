@@ -73,7 +73,10 @@
 //   1. cp DOCS/STRATEGY_TEMPLATE.hpp Strategies/<Name>.hpp; implement
 //      4 lifecycle fns (_Init / _BuildParameters / _Adapt /
 //      _ExitAdjustSharded) per DOCS/STRATEGY_INTERFACE.md.
-//   2. Append one row to FOREACH_STRATEGY(X) below.
+//   2. Append one row to FOREACH_STRATEGY(X) below — including its per-fill
+//      TP / SL source (the cfg fields its pack arms live_tp / live_sl from),
+//      which the entry submit and the warm restore then read through the
+//      same resolver; a row without them does not compile.
 //   3. Add a strategy color to GUI/DashboardPanels.hpp's strat_colors[].
 //   4. ./build.sh test
 //
@@ -104,11 +107,19 @@
 // "private snapshot can't reference private code" behavior.
 //======================================================================================================
 
+// Per-fill bracket source mode for a FOREACH_STRATEGY row — how ResolvePerFillTpPct / SlPct
+// (StrategyParameters.hpp) read the row's TP / SL fraction fields:
+enum PerFillBracketMode : uint8_t {
+    PERFILL_OWN           = 0,   // the row's own field, verbatim
+    PERFILL_OWN_OR_SHARED = 1,   // the row's own field; zero = inherit take_profit_pct / stop_loss_pct
+};
+
 #if __has_include("private/EmaCross.hpp")
 #  define FOREACH_STRATEGY_EMACROSS(X) \
     X(EMA_CROSS, "EMA",  "EmaCross",      EmaCrossState, \
        EmaCross_Init,        EmaCross_BuildParameters, \
-       EmaCross_Adapt,       EmaCross_ExitAdjustSharded)
+       EmaCross_Adapt,       EmaCross_ExitAdjustSharded, \
+       emacross_tp_pct,      emacross_sl_pct,  PERFILL_OWN_OR_SHARED)
 #else
 #  define FOREACH_STRATEGY_EMACROSS(X) /* private/EmaCross.hpp absent */
 #endif
@@ -123,23 +134,29 @@
 // [COLUMN]_[short/full]_[display names -> STRATEGY_SHORT_NAMES / STRATEGY_FULL_NAMES tables]
 // [COLUMN]_[StateT]_[per-node strategy state struct — allocated by Strategy_InitPerCore]
 // [COLUMN]_[Init/BuildParameters/Adapt/ExitAdjustSharded]_[the 4 lifecycle fns wired into X-macro dispatch]
-// [REFERENCE]_[INVARIANT]_[[H15] [H21]]
+// [COLUMN]_[tp_field/sl_field/mode]_[the per-fill TP / SL fraction source (a per-node cfg field + PerFillBracketMode) -> ResolvePerFillTpPct/SlPct, read by the pack, the entry submit and the warm restore alike]
+// [REFERENCE]_[INVARIANT]_[[H15] [H21] [H22]]
+// [REFERENCE]_[CLASS]_[45]
 //======================================================================
 // [CODE]
 //======================================================================
 #define FOREACH_STRATEGY(X) \
     X(MEAN_REVERSION, "MR",   "MeanReversion", MeanReversionState, \
        MeanReversion_Init,   MeanReversion_BuildParameters, \
-       MeanReversion_Adapt,  MeanReversion_ExitAdjustSharded) \
+       MeanReversion_Adapt,  MeanReversion_ExitAdjustSharded, \
+       mr_tp_pct,            mr_sl_pct,        PERFILL_OWN_OR_SHARED) \
     X(MOMENTUM,       "MOM",  "Momentum",      MomentumState, \
        Momentum_Init,        Momentum_BuildParameters, \
-       Momentum_Adapt,       Momentum_ExitAdjustSharded) \
+       Momentum_Adapt,       Momentum_ExitAdjustSharded, \
+       take_profit_pct,      stop_loss_pct,    PERFILL_OWN) \
     X(SIMPLE_DIP,     "DIP",  "SimpleDip",     SimpleDipState, \
        SimpleDip_Init,       SimpleDip_BuildParameters, \
-       SimpleDip_Adapt,      SimpleDip_ExitAdjustSharded) \
+       SimpleDip_Adapt,      SimpleDip_ExitAdjustSharded, \
+       simpledip_tp_pct,     simpledip_sl_pct, PERFILL_OWN_OR_SHARED) \
     X(ML,             "ML",   "ML",            MLStrategyState, \
        MLStrategy_Init,      ML_BuildParameters, \
-       MLStrategy_Adapt_Canonical, MLStrategy_ExitAdjustSharded) \
+       MLStrategy_Adapt_Canonical, MLStrategy_ExitAdjustSharded, \
+       ml_tp_pct,            ml_sl_pct,        PERFILL_OWN) \
     FOREACH_STRATEGY_EMACROSS(X)
 //======================================================================
 // [END_CODE]

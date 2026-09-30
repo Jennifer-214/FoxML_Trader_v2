@@ -178,7 +178,9 @@ struct OrderPreResolved {
     Money fee_rate;       // pre-resolved at submit: is_maker ? maker_rate : taker_rate
     Money slippage_pct;   // pre-resolved per-node
     Money tp_pct;         // A25 (D-205): per-fill TP fraction — leg-effective (ResolvePerFillTpPct base, ×tp2_mult for leg B). Carried on SubmitCommand (resolver not include-reachable at the OMS layer) → NOT bound in Order_BindPreResolved; set in OMS_Submit from cmd.tp_pct. Consumed @handle_buy_fill: original_tp = fill×(1+tp_pct); tp_pct==0 → fallback to intended_tp (bytewise-identical legacy path).
-    // Future per-resolved fields (extend in lockstep with Order_BindPreResolved):
+    // Future per-resolved fields (bind them in Order_BindPreResolved or at the submit; Order_Init
+    // zeroes this WHOLE struct, so a new field needs no second edit there — tp_pct was added without
+    // one and read uninitialized on the reconcile replay's bare `Order<F> synth;`, CS-269):
     //   - effective_kill_switch_threshold (per-core risk envelope at submit time)
     //   - effective_min_holding_ticks (per-core time-exit floor)
     //   - effective_intended_strategy_dispatch (pre-resolved dispatch arm)
@@ -451,8 +453,7 @@ inline void Order_Init(Order<F>* o, uint64_t id, tt::SlotIdx portfolio_slot, Ord
     o->event_price               = Money_Zero();
     o->submitted_at_us           = 0;
     o->last_update_us            = 0;
-    o->pre_resolved.fee_rate     = Money_Zero();
-    o->pre_resolved.slippage_pct = Money_Zero();
+    o->pre_resolved              = OrderPreResolved<F>{};   // the WHOLE struct (CS-269)
     o->exchange_id[0]            = '\0';
 }
 //======================================================================
