@@ -1077,6 +1077,41 @@ static inline const char* Training_ResolveRole(int label_type, int training_side
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Training_RoleFromModelFile]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the role a Run Full Validation re-stamp records, read off the model file's name — the basename stem when it exactly names a role file ("barrier." / "regime." / "exit." / "buy_signal."), else "" (legacy)]
+//======================================================================
+// E.1.2.C 3-role (F1, per the D2 verdict) — the derivation the FV worker did, verbatim; moved here by
+// E.1.3 MP-1b so the test TU drives the real rule (the precedent: Training_ResolveRole above). Identity
+// from a filename (Class 59): MP-7a retires the FV stamp request and this with it. A cell pins it against
+// Training_ResolveRole — every role that function can return must round-trip through a file name here.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void Training_RoleFromModelFile(const char* path, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!path) return;
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    static const char* const kRoles[4] = {"barrier", "regime", "exit", "buy_signal"};
+    for (int ri = 0; ri < 4; ++ri) {
+        size_t rl = strlen(kRoles[ri]);
+        if (strncmp(base, kRoles[ri], rl) == 0 && base[rl] == '.') {
+            snprintf(out, cap, "%s", kRoles[ri]);
+            return;
+        }
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_RoleFromModelFile]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[Training_SideLabelGate]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]

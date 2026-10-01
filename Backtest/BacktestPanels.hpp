@@ -3354,11 +3354,10 @@ struct TrainingPanelState {
     volatile int fv_running;
     volatile int fv_progress;
     volatile int fv_cancel;
-    volatile int fv_complete;
+    volatile int fv_complete;         // 1 = fv_results holds a finished run — published (release) by the job, read with TrainingSink_Load (MP-1b; it replaced a plain `bool fv_has_results` that said the same thing)
     pthread_t fv_tid;
     FullValidationResults fv_results;
-    bool fv_has_results;
-    char fv_auto_stamp_secret[128];   // HMAC secret (empty = devmode, signs but accepts any sig)
+    char fv_auto_stamp_secret[128];   // HMAC secret; empty = the collected cfg's auto_stamp_secret, dev mode only when that is empty too (CS-277)
     float fv_held_out_fraction;       // 0.05 .. 0.30; clamped by HeldOutSplit_Make
     float fv_gap_threshold;           // gap threshold for stamp accept/refuse
     char fv_status_msg[256];          // post-run summary + auto-stamp result
@@ -3515,7 +3514,7 @@ struct TrainingPanelState {
 //======================================================================
 static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
     return st && (st->tm_running || st->wf_running ||
-                  st->fv_running || st->hp_running || TrainingSink_Load(&st->mh_running));
+                  TrainingSink_Load(&st->fv_running) || st->hp_running || TrainingSink_Load(&st->mh_running));
 }
 
 //======================================================================
@@ -3715,9 +3714,8 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->fv_progress = 0;
     state->fv_cancel = 0;
     state->fv_complete = 0;
-    state->fv_has_results = false;
     memset(&state->fv_results, 0, sizeof(state->fv_results));
-    state->fv_auto_stamp_secret[0] = '\0';   // devmode by default
+    state->fv_auto_stamp_secret[0] = '\0';   // empty = the collected cfg's secret, dev mode only if that is empty too (CS-277)
     state->fv_held_out_fraction = 0.20f;      // matches HELDOUT_FRACTION default
     state->fv_gap_threshold = 0.05f;          // matches gap_acceptable_threshold default
     state->fv_status_msg[0] = '\0';
@@ -3955,83 +3953,32 @@ static inline void *hp_sweep_worker_fn(void *arg) {
 // [END_FUNCTION]_[hp_sweep_worker_fn]
 //======================================================================
 
-// v5.8.7 — full-validation worker thread. Mirrors walkforward_worker_fn but
-// calls Backtest_RunFullValidation, which carries the v5.8.6 auto-stamp
-// wiring (FEATURE_REGISTRY_HASH + engine_version embedded in stamp body).
+// v5.8.7 — Run Full Validation's worker thread. Since E.1.3 MP-1b it is an adapter: the job
+// (Backtest_RunFullValidation and its v5.8.6 auto-stamp wiring — FEATURE_REGISTRY_HASH +
+// engine_version in the stamp body) is TrainingWorkers_RunFullValidation in Backtest/TrainingWorkers.hpp.
 //======================================================================
 // [STRUCT]_[FullValidationWorkerArgs]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[worker-thread args for Run Full Validation — panel state + data + click-time snapshots of model path / stamp secret / label params (capture-at-click defeats the ImGui edit race)]
+// [OVERVIEW]_[worker-thread args for Run Full Validation — the panel (wired as the job's sink) + the click-time TrainingFvRequest (capture-at-click defeats the ImGui edit race, v5.10.0E)]
 //======================================================================
 // [CODE]
 //======================================================================
 struct FullValidationWorkerArgs {
-    TrainingPanelState *state;
-    const BacktestResults *data;
-    // v5.10.0E — snapshot operator-editable fields at click time, not in
-    // the worker. The ImGui input fields write into state->model_path /
-    // state->fv_auto_stamp_secret CONCURRENTLY with worker execution; if
-    // operator clicks Run Full Validation with empty model_path then
-    // types it AFTER, the worker reads empty (skip copy → auto_stamp_path
-    // empty), then status build reads the post-typed value, producing
-    // "model_path='X' did not propagate (worker race)" diagnostic.
-    // Capture-at-click eliminates the race.
-    char snap_model_path[256];
-    char snap_fv_auto_stamp_secret[64];
-    // v5.11.41 — capture label params from run_control->run_config at click
-    // time so RFV can stamp them into the body. Live in BacktestRunConfig,
-    // not in ControllerConfig (= data->config_used) so RFV can't reach
-    // them otherwise. Closes /parity-check 2026-05-07-stamp CRITICAL-1.
-    int     snap_label_forward_ticks;
-    double  snap_label_tp_pct;
-    double  snap_label_sl_pct;
-    // D-476 (2026-09-02) — the round-trip fee, so the single-horizon stamp records the
-    // SAME effective TP the label walk used (tp+fee for a percent barrier). Without it
-    // this seam stamped the fee-blind tp while the multi-horizon seam stamped tp+fee —
-    // a served bracket narrower than the trained barrier (PARITY-065 residual (3)).
-    double  snap_label_roundtrip_fee_pct;
-    uint64_t snap_feature_mask;   // D-477 — the collect-time mask (0 = all-on)
-    // E.1.2.C — the remaining fields RFV was reading LIVE off `state->` from the
-    // worker thread. `snap_label_type` is deliberately sourced from
-    // run_control->run_config (the field that actually produced results->labels[]),
-    // NOT from state->label_type: the combo can be changed BETWEEN the Collect
-    // click and the Run-Full-Validation click, with no race required, and the
-    // worker then trained WF/held-out on one objective while stamping another.
-    // When the class counts differ the engine REFUSES at load
-    // (NodeModelZoo.hpp: "stamp claims model_num_outputs=N but handle=M"); when
-    // they match — WIN_LOSS / BARRIER / VOL_BARRIER / WILL_PEAK are all binary —
-    // nothing catches it and the stamp simply records a label the model never
-    // trained on. Sourcing from run_config makes the stamp describe the labels.
-    int     snap_label_type;
-    int     snap_wf_n_splits;
-    int     snap_wf_horizon_ticks;
-    int     snap_wf_buffer_ticks;
-    int     snap_wf_min_train;
-    float   snap_fv_gap_threshold;
-    float   snap_fv_held_out_fraction;
-    // E.1.2.C follow-up (2026-08-22) — the SECOND entry point into
-    // Backtest_RunFullValidation. The multi-horizon Train path was threaded with
-    // the click-time hyperparameters at f99e102; THIS one was missed, so the
-    // standalone "Run Full Validation" button still trained WF folds + held-out at
-    // XGBHyperparams_Defaults() AND overwrote the target model's signed stamp with
-    // 6/0.1/200 — silently undoing, on disk, the thing f99e102 fixed. The
-    // `= nullptr` default that makes hp_override safe for un-updated callers is
-    // exactly what made the omission invisible: no compile error, no warning.
-    // Caught by the Stage-6.5.4 adversarial handoff review, not by the author.
-    tt::XGBHyperparams snap_hp;
+    TrainingPanelState *state;      // the panel — wired as the job's sink by the worker
+    TrainingFvRequest   req;        // the click-time request: every input of the job (MP-1b)
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
-// [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-02]
-// [SIZE]_[448B]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[528B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[7]
-// [STRADDLE]_[snap_fv_auto_stamp_secret@272]
+// [CACHE_LINES]_[9]
+// [STRADDLE]_[none]
+// [ORIGIN]_[AUTO]
 //======================================================================
 // [END_STRUCT]_[FullValidationWorkerArgs]
 //======================================================================
@@ -4041,198 +3988,100 @@ struct FullValidationWorkerArgs {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[background thread: run full validation (WF + held-out gap)]
-//======================================================================
+// [OVERVIEW]_[background thread: the GUI adapter — wires the panel in as the job's sink and runs the click-time request through TrainingWorkers_RunFullValidation (WF + held-out gap + the re-stamp)]
 //======================================================================
 // [CODE]
 //======================================================================
 static inline void *fullvalidation_worker_fn(void *arg) {
     FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
-    const BacktestResults *data = args->data;
-    // v5.10.0E — local copies of click-time snapshots. Free args
-    // immediately so caller-side memory hygiene matches the legacy worker
-    // pattern (free as early as practical).
-    char model_path_snap[256];
-    char fv_auto_stamp_secret_snap[64];
-    // v5.11.41 — local copies of label params (live in BacktestRunConfig
-    // which is operator-mutable; capture at click time avoids race).
-    int    snap_label_forward_ticks = args->snap_label_forward_ticks;
-    double snap_label_tp_pct        = args->snap_label_tp_pct;
-    // E.1.2.C — capture the rest of the click-time snapshot before free(args).
-    // Every one of these was a live `state->` read further down.
-    int    snap_label_type          = args->snap_label_type;
-    int    snap_wf_n_splits         = args->snap_wf_n_splits;
-    int    snap_wf_horizon_ticks    = args->snap_wf_horizon_ticks;
-    int    snap_wf_buffer_ticks     = args->snap_wf_buffer_ticks;
-    int    snap_wf_min_train        = args->snap_wf_min_train;
-    float  snap_fv_gap_threshold    = args->snap_fv_gap_threshold;
-    float  snap_fv_held_out_fraction = args->snap_fv_held_out_fraction;
-    tt::XGBHyperparams snap_hp       = args->snap_hp;   // E.1.2.C follow-up
-    double snap_label_sl_pct        = args->snap_label_sl_pct;
-    double snap_label_roundtrip_fee_pct = args->snap_label_roundtrip_fee_pct;   // D-476
-    uint64_t snap_feature_mask          = args->snap_feature_mask;               // D-477
-    {
-        size_t n = strnlen(args->snap_model_path,
-                           sizeof(args->snap_model_path));
-        if (n >= sizeof(model_path_snap)) n = sizeof(model_path_snap) - 1;
-        memcpy(model_path_snap, args->snap_model_path, n);
-        model_path_snap[n] = '\0';
-    }
-    {
-        size_t n = strnlen(args->snap_fv_auto_stamp_secret,
-                           sizeof(args->snap_fv_auto_stamp_secret));
-        if (n >= sizeof(fv_auto_stamp_secret_snap))
-            n = sizeof(fv_auto_stamp_secret_snap) - 1;
-        memcpy(fv_auto_stamp_secret_snap, args->snap_fv_auto_stamp_secret, n);
-        fv_auto_stamp_secret_snap[n] = '\0';
-    }
+    TrainingFvSink sink{};
+    sink.status     = state->fv_status_msg;
+    sink.status_cap = sizeof(state->fv_status_msg);
+    sink.progress   = &state->fv_progress;
+    sink.cancel     = &state->fv_cancel;
+    sink.complete   = &state->fv_complete;
+    sink.running    = &state->fv_running;
+    TrainingWorkers_RunFullValidation(args->req, sink, &state->fv_results);
     free(args);
-
-    // Build held-out split and unlock immediately. The friction-grade lock
-    // exists to make held-out access a deliberate operator action; the
-    // suite UI's Run Full Validation button is exactly that deliberate
-    // action, so unlocking here is correct.
-    // E.1.2.C — the click-time fraction. This determined the held-out split size,
-    // hence held_out_metric, hence the generalization gap that gates auto-stamp —
-    // off a live slider read from a worker thread.
-    HeldOutSplit split = HeldOutSplit_Make(data->sample_count,
-                                            (double)snap_fv_held_out_fraction);
-    char unlock_token[33];
-    memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
-    HeldOutSplit_Unlock(&split, unlock_token);
-
-    // Pre-populate auto-stamp request fields. Backtest_RunFullValidation
-    // gates the stamp_write_for_model call on auto_stamp_path being non-empty
-    // AND ran_held_out=1; both are met here when training succeeds.
-    //
-    // v5.8.10 — gate path-setting on the cfg's auto_stamp_on_held_out flag.
-    // When the operator runs the suite with auto_stamp_on_held_out=0 (originally:
-    // for manual stamping via tools/stamp_model.sh; bash CLI DELETED at .B.3 Path C
-    // 2026-05-24; =0 now only meaningful for v5.16+ cmdline-invocable training per
-    // decoupling-endgoal-roadmap), the FV button still runs held-out validation
-    // but skips the stamp write. Honors operator intent.
-    memset(&state->fv_results, 0, sizeof(state->fv_results));
-    int auto_stamp_enabled = data->config_used.auto_stamp_on_held_out;
-    if (auto_stamp_enabled) {
-        // v5.10.0E — read from local snapshot (captured at click time),
-        // not from state->model_path which may have changed since.
-        size_t n = strnlen(model_path_snap, sizeof(model_path_snap));
-        if (n >= sizeof(state->fv_results.auto_stamp_path))
-            n = sizeof(state->fv_results.auto_stamp_path) - 1;
-        memcpy(state->fv_results.auto_stamp_path, model_path_snap, n);
-        // E.1.2.C 3-role (F1, per the D2 verdict) — the FV re-stamp was the ONE
-        // production emit path that omitted expected_role (fv_results is memset
-        // above, req_role stayed ""). Derive it from the model basename stem
-        // when it exactly names a role file; otherwise leave empty (legacy).
-        {
-            const char* base = strrchr(model_path_snap, '/');
-            base = base ? base + 1 : model_path_snap;
-            static const char* kRoles[4] = {"barrier", "regime", "exit", "buy_signal"};
-            for (int ri = 0; ri < 4; ++ri) {
-                size_t rl = strlen(kRoles[ri]);
-                if (strncmp(base, kRoles[ri], rl) == 0 && base[rl] == '.') {
-                    snprintf(state->fv_results.req_role,
-                             sizeof(state->fv_results.req_role), "%s", kRoles[ri]);
-                    break;
-                }
-            }
-        }
-        state->fv_results.auto_stamp_path[n] = '\0';
-    }
-    {
-        // v5.10.0E — same race-free snapshot read for secret.
-        size_t n = strnlen(fv_auto_stamp_secret_snap,
-                           sizeof(fv_auto_stamp_secret_snap));
-        if (n >= sizeof(state->fv_results.auto_stamp_secret))
-            n = sizeof(state->fv_results.auto_stamp_secret) - 1;
-        memcpy(state->fv_results.auto_stamp_secret, fv_auto_stamp_secret_snap, n);
-        state->fv_results.auto_stamp_secret[n] = '\0';
-    }
-    state->fv_results.auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
-
-    // v5.11.41 — populate per-horizon label params from snap'd BacktestRunConfig
-    // (captured at click time alongside model_path + secret). Single-horizon
-    // path; multi-horizon worker populates these per horizon directly.
-    // Closes pre-existing schema gap so single-horizon stamps also gain
-    // forensic horizon record.
-    state->fv_results.req_label_lookahead_ticks = snap_label_forward_ticks;
-    // D-476 — the single-horizon twin of the multi-horizon stamp seam: the same
-    // kind-aware rule (Label_Stamp*Pct), with the click-time fee so a percent TP
-    // stamps tp+fee here exactly as the multi-horizon seam does (PARITY-065 (3)).
-    state->fv_results.req_label_tp_pct = Label_StampTpPct(snap_label_type, snap_label_tp_pct,
-                                                          snap_label_roundtrip_fee_pct);
-    state->fv_results.req_label_sl_pct = Label_StampSlPct(snap_label_type, snap_label_sl_pct);
-    state->fv_results.req_feature_mask = snap_feature_mask;   // D-477
-
-    // E.1.2.C — every argument here is now the CLICK-TIME snapshot. These were
-    // live `state->` reads from a worker thread; the label_type one needed no
-    // race at all (change the combo between Collect and this click).
-    Backtest_RunFullValidation(&state->fv_results, data, &split,
-                                snap_wf_n_splits, snap_wf_horizon_ticks,
-                                snap_wf_buffer_ticks, snap_wf_min_train,
-                                &state->fv_progress, &state->fv_cancel,
-                                snap_label_type, snap_fv_gap_threshold,
-                                /*hp_override=*/&snap_hp);
-
-    // Build a one-line status summary the UI can render in fv_status_msg.
-    if (state->fv_results.auto_stamp_attempted) {
-        if (state->fv_results.auto_stamp_ok) {
-            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                "Stamp written: %s", state->fv_results.auto_stamp_path_written);
-        } else {
-            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                "Stamp REFUSED: %s", state->fv_results.auto_stamp_error);
-        }
-    } else if (state->fv_results.ran_held_out) {
-        if (!auto_stamp_enabled) {
-            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                "Held-out OK; auto-stamp disabled (cfg auto_stamp_on_held_out=0)");
-        } else {
-            // v5.9.4a — improved diagnostic. Pre-v5.9.4a always said
-            // "model_path empty?" — operator had no info to debug.
-            // v5.10.0E — read model_path from local SNAPSHOT (captured at
-            // click time), not from state->model_path which the operator
-            // may have edited since worker started. This makes the
-            // diagnostic accurate ("at click time, model_path was empty"
-            // vs the false "did not propagate" message we used to print
-            // when operator typed model_path AFTER clicking).
-            if (model_path_snap[0] == '\0') {
-                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                    "Held-out OK; auto-stamp skipped — model_path was empty "
-                    "AT CLICK TIME (set Model Path field BEFORE clicking "
-                    "Run Full Validation; current value: '%s')",
-                    state->model_path);
-            } else if (state->fv_results.auto_stamp_path[0] == '\0') {
-                // Truly unexpected — snapshot was non-empty but copy didn't
-                // populate. Code path shouldn't fire post-v5.10.0E.
-                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                    "Held-out OK; auto-stamp skipped — model_path='%s' "
-                    "snapshot non-empty but auto_stamp_path empty "
-                    "(internal copy failure; report bug)",
-                    model_path_snap);
-            } else {
-                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                    "Held-out OK; auto-stamp skipped — Backtest_RunFullValidation "
-                    "did not fire stamp_write (auto_stamp_path='%s'; check "
-                    "ran_held_out flag + path validity)",
-                    state->fv_results.auto_stamp_path);
-            }
-        }
-    } else {
-        snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-            "Held-out did not complete (cancel or shape error?)");
-    }
-
-    state->fv_has_results = true;
-    state->fv_complete = 1;
-    state->fv_running = 0;
     return NULL;
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[fullvalidation_worker_fn]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingPanel_FullValidationArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Run Full Validation's click-time request builder — the model path + its role, the one secret rule, the labels' identity from the run config, the WF + gate params and the hyperparameters from the panel; NULL on allocation failure]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline FullValidationWorkerArgs *TrainingPanel_FullValidationArgs(TrainingPanelState *state,
+                                                                         RunControlState *run_control,
+                                                                         const BacktestResults *fv_data) {
+    FullValidationWorkerArgs *a = TrainingWorkers_AllocZeroed<FullValidationWorkerArgs>();
+    if (!a) return NULL;
+    a->state = state;
+    TrainingFvRequest &r = a->req;
+    r = TrainingFvRequest{};
+    // The model, its role, the secret and the labels' identity — through the core's GUI-free builder,
+    // so the cells drive the very code that fills these (MP-1b review F2: CS-274 and CS-277 lived here).
+    TrainingWorkers_FvRequestIdentity(&r, state->model_path, sizeof(state->model_path),
+                                      state->fv_auto_stamp_secret, sizeof(state->fv_auto_stamp_secret),
+                                      fv_data, &run_control->run_config);
+    // The rest from the panel at click time.
+    r.wf_n_splits       = state->wf_n_splits;
+    r.wf_horizon_ticks  = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
+    r.wf_buffer_ticks   = state->wf_buffer_ticks;
+    r.wf_min_train      = state->wf_min_train;
+    r.gap_threshold     = state->fv_gap_threshold;
+    r.held_out_fraction = state->fv_held_out_fraction;
+    // E.1.2.C follow-up — the same click-time snapshot the Train path builds, so BOTH entry points
+    // describe one architecture.
+    r.hp = Training_SnapshotHyperparams(state);
+    return a;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_FullValidationArgs]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingPanel_LaunchFullValidation]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Run Full Validation's launch — build the click-time request and start the worker; an allocation or thread-start failure is reported on the job's status line and its run flag cleared, never a crash or a stuck "running"]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void TrainingPanel_LaunchFullValidation(TrainingPanelState *state,
+                                                      RunControlState *run_control,
+                                                      const BacktestResults *fv_data) {
+    FullValidationWorkerArgs *fv_args = TrainingPanel_FullValidationArgs(state, run_control, fv_data);
+    const int rc = fv_args
+        ? pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args)
+        : ENOMEM;
+    if (rc == 0) {
+        pthread_detach(state->fv_tid);
+    } else {
+        free(fv_args);
+        snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                 "Full validation did not start (%s).", strerror(rc));
+        fprintf(stderr, "[fv] %s\n", state->fv_status_msg);
+        state->fv_running = 0;
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_LaunchFullValidation]
 //======================================================================
 
 // D-d (2026-08-22, operator-decided) — train_model_worker_fn + TrainModelWorkerArgs DELETED (~470 lines).
@@ -4372,14 +4221,11 @@ static inline MultiHorizonWorkerArgs *TrainingPanel_MultiHorizonArgs(TrainingPan
     r.wf_min_train      = state->wf_min_train;
     r.gap_threshold     = state->fv_gap_threshold;
     r.held_out_fraction = state->fv_held_out_fraction;
-    {
-        const char *src = state->fv_auto_stamp_secret;
-        if (src[0] == '\0') src = run_control->results.config_used.auto_stamp_secret;
-        size_t n = strnlen(src, sizeof(state->fv_auto_stamp_secret));
-        if (n >= sizeof(r.stamp_secret)) n = sizeof(r.stamp_secret) - 1;
-        memcpy(r.stamp_secret, src, n);
-        r.stamp_secret[n] = '\0';
-    }
+    // CS-277 — the one secret rule, shared with Run Full Validation.
+    TrainingWorkers_ResolveStampSecret(state->fv_auto_stamp_secret, sizeof(state->fv_auto_stamp_secret),
+                                       run_control->results.config_used.auto_stamp_secret,
+                                       sizeof(run_control->results.config_used.auto_stamp_secret),
+                                       r.stamp_secret, sizeof(r.stamp_secret));
     // F16 — the serial / parallel choice is an explicit request field (its value is still the
     // collect-time cfg's, as it always was).
     r.max_threads = run_control->results.config_used.multi_horizon_max_threads;
@@ -6040,7 +5886,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // before tm_running flipped). Recompute here for safety.
         bool any_worker_running_wf =
             state->tm_running ||
-            state->fv_running ||
+            TrainingSink_Load(&state->fv_running) ||
             state->hp_running ||
             TrainingSink_Load(&state->mh_running);  // intentionally exclude wf_running so WF can show its own cancel button
         bool can_wf = results->sample_count >= 50 && !any_worker_running_wf
@@ -6430,7 +6276,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         bool any_worker_running_hp =
             state->tm_running ||
             state->wf_running ||
-            state->fv_running ||
+            TrainingSink_Load(&state->fv_running) ||
             TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
         bool can_hp =
 #ifdef USE_XGBOOST
@@ -6570,14 +6416,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                            &state->fv_held_out_fraction, 0.05f, 0.30f, "%.2f");
         ImGui::SliderFloat("Gap threshold",
                            &state->fv_gap_threshold, 0.01f, 0.20f, "%.2f");
-        ImGui::InputText("HMAC secret (empty = devmode)",
+        ImGui::InputText("HMAC secret (empty = the cfg's)",
                          state->fv_auto_stamp_secret,
                          sizeof(state->fv_auto_stamp_secret));
         ImGui::PopItemWidth();
-        ImGui::SetItemTooltip("Empty secret = dev mode. Stamp is written but the\n"
+        ImGui::SetItemTooltip("Empty = the collected cfg's auto_stamp_secret (set it once\n"
+                              "there), for both Train and Run Full Validation. Dev mode\n"
+                              "only when that is empty too: the stamp is written but the\n"
                               "verifier accepts any signature on load (with a stderr\n"
                               "warn). Production: set a non-empty secret in BOTH the\n"
-                              "suite (here) and engine.cfg (held_out_stamp_secret),\n"
+                              "suite (here or its cfg) and engine.cfg (held_out_stamp_secret),\n"
                               "and flip held_out_gate_strict=1 in engine.cfg to refuse\n"
                               "unsigned loads.");
 
@@ -6597,7 +6445,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             false;
 #endif
 
-        if (state->fv_running) {
+        if (TrainingSink_Load(&state->fv_running)) {
             ImGui::ProgressBar(state->fv_progress / 100.0f, ImVec2(-1, 0),
                                "Full validation...");
             if (ImGui::Button("Cancel Full Validation"))
@@ -6609,57 +6457,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 state->fv_progress = 0;
                 state->fv_cancel = 0;
                 state->fv_complete = 0;
-                state->fv_has_results = false;
                 state->fv_status_msg[0] = '\0';
-
-                FullValidationWorkerArgs *fv_args =
-                    (FullValidationWorkerArgs *)malloc(sizeof(FullValidationWorkerArgs));
-                fv_args->state = state;
-                fv_args->data = fv_data;
-                // v5.10.0E — snapshot operator-editable fields at click
-                // time, not in worker. Fixes the auto_stamp_path race
-                // where typing model_path AFTER clicking produced a
-                // misleading "worker race or copy failure" diagnostic.
-                {
-                    size_t n = strnlen(state->model_path, sizeof(state->model_path));
-                    if (n >= sizeof(fv_args->snap_model_path))
-                        n = sizeof(fv_args->snap_model_path) - 1;
-                    memcpy(fv_args->snap_model_path, state->model_path, n);
-                    fv_args->snap_model_path[n] = '\0';
-                }
-                {
-                    size_t n = strnlen(state->fv_auto_stamp_secret,
-                                       sizeof(state->fv_auto_stamp_secret));
-                    if (n >= sizeof(fv_args->snap_fv_auto_stamp_secret))
-                        n = sizeof(fv_args->snap_fv_auto_stamp_secret) - 1;
-                    memcpy(fv_args->snap_fv_auto_stamp_secret,
-                           state->fv_auto_stamp_secret, n);
-                    fv_args->snap_fv_auto_stamp_secret[n] = '\0';
-                }
-                // v5.11.41 — snap label params from BacktestRunConfig at click time.
-                // Live in run_control->run_config (BacktestRunConfig) which is
-                // operator-mutable. Worker uses these to populate fv_results.req_label_*
-                // before calling Backtest_RunFullValidation, which embeds them in
-                // the stamp body. Closes /parity-check 2026-05-07-stamp CRITICAL-1.
-                fv_args->snap_label_forward_ticks = run_control->run_config.label_forward_ticks;
-                fv_args->snap_label_tp_pct        = run_control->run_config.label_tp_pct;
-                fv_args->snap_label_sl_pct        = run_control->run_config.label_sl_pct;
-                fv_args->snap_label_roundtrip_fee_pct = run_control->run_config.label_roundtrip_fee_pct;   // D-476
-                fv_args->snap_feature_mask        = run_control->run_config.feature_mask;               // D-477
-                // E.1.2.C — label_type from run_config (the labels' own source), the
-                // rest from the panel at click time. See the struct comment.
-                fv_args->snap_label_type          = run_control->run_config.label_type;
-                fv_args->snap_wf_n_splits         = state->wf_n_splits;
-                fv_args->snap_wf_horizon_ticks    = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
-                fv_args->snap_wf_buffer_ticks     = state->wf_buffer_ticks;
-                fv_args->snap_wf_min_train        = state->wf_min_train;
-                fv_args->snap_fv_gap_threshold    = state->fv_gap_threshold;
-                fv_args->snap_fv_held_out_fraction = state->fv_held_out_fraction;
-                // E.1.2.C follow-up — the same click-time snapshot the Train path
-                // builds, so BOTH entry points describe one architecture.
-                fv_args->snap_hp = Training_SnapshotHyperparams(state);
-                pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
-                pthread_detach(state->fv_tid);
+                // MP-1b — every input of the job is snapped HERE by its request builder (the v5.10.0E
+                // click-time pattern; the label params from the run config, the rest from the panel).
+                TrainingPanel_LaunchFullValidation(state, run_control, fv_data);
             }
             if (!can_fv) {
                 ImGui::EndDisabled();
@@ -6674,10 +6475,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                     ImGui::TextDisabled("Need 50+ samples");
 #endif
             }
+            // A launch that failed leaves no result to show, so its reason renders here (a finished
+            // run's summary renders with its result, below).
+            if (!TrainingSink_Load(&state->fv_complete) && state->fv_status_msg[0])
+                ImGui::TextWrapped("%s", state->fv_status_msg);
         }
     }
 
-    if (state->fv_has_results) {
+    if (TrainingSink_Load(&state->fv_complete)) {   // F6 — acquire: the job published the result before this flag
         const FullValidationResults *fv = &state->fv_results;
         ImGui::Separator();
 
@@ -6703,9 +6508,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 "Held-out did NOT complete");
         }
 
-        // Auto-stamp result line. Sourced from the worker's status_msg.
+        // Auto-stamp result line. Sourced from the job's status line.
         // v5.11.36 — operator-flagged 2026-05-07: long status lines (e.g.
-        // "Held-out OK; auto-stamp skipped — model_path='...' snapshot
+        // "Held-out OK; auto-stamp skipped — model_path='...'
         // non-empty but auto_stamp_path empty (internal copy failure;
         // report bug)") ran off the panel right edge on 1080p. Use
         // PushStyleColor + TextWrapped instead of TextColored so the

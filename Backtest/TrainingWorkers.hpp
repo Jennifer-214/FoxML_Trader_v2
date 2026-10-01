@@ -4,7 +4,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ML producer core (E.1.3 MP-1) — the multi-horizon orchestrator and its per-horizon train + validate + record job, ImGui-free: a request in, a sink for display, a result out, so the suite's panel and a headless caller run the same code]
+// [OVERVIEW]_[the ML producer core (E.1.3 MP-1) — the multi-horizon orchestrator, its per-horizon train + validate + record job, and the Run Full Validation job, ImGui-free: a request in, a sink for display, a result out, so the suite's panel and a headless caller run the same code]
 // [CONTAINS]
 //   - [STRUCT]_[TrainingHorizonSink]
 //   - [STRUCT]_[TrainingHorizonDisplay]
@@ -14,14 +14,19 @@
 //   - [STRUCT]_[TrainingHorizonOutcome]
 //   - [STRUCT]_[TrainingRunResult]
 //   - [STRUCT]_[TrainingHorizonJob]
-//   - [FUNCTION]_[TrainingSink_Status]   (TrainingSink_IsCancelled / _Set / _Load / _PublishComplete / _FinishRun / _ForHorizon ride)
+//   - [STRUCT]_[TrainingFvRequest]
+//   - [STRUCT]_[TrainingFvSink]
+//   - [FUNCTION]_[TrainingSink_Status]   (TrainingSink_IsCancelled / _Set / _Load / _PublishComplete / _Finish / _FinishRun / _ForHorizon ride)
 //   - [FUNCTION]_[TrainingWorkers_AllocZeroed]
+//   - [FUNCTION]_[TrainingWorkers_ResolveStampSecret]
 //   - [FUNCTION]_[TrainingWorkers_HorizonRequest]
 //   - [FUNCTION]_[TrainingWorkers_WriteSummary]
 //   - [FUNCTION]_[TrainingWorkers_RunHorizon]
 //   - [STRUCT]_[TrainingPool]
 //   - [FUNCTION]_[TrainingWorkers_RunPool]   (TrainingWorkers_PoolWorker rides)
 //   - [FUNCTION]_[TrainingWorkers_RunMultiHorizon]   (TrainingWorkers_HorizonThread / _PoolJob / _Refuse ride)
+//   - [FUNCTION]_[TrainingWorkers_FvRequestIdentity]
+//   - [FUNCTION]_[TrainingWorkers_RunFullValidation]
 //======================================================================================================
 // Why this file exists (E.1.3 MP-1; sidecar CS-249, CS-217). The producer — the code that trains a
 // model grid, validates every horizon, saves each model and writes its stamp, summary, data-files
@@ -30,7 +35,8 @@
 // lists (the per-horizon job's 21 parameters, the parallel job struct's 21 fields, the serial path's
 // positional call). Here the inputs are ONE request (each horizon's built in one place), the GUI is a
 // SINK the adapter wires (display and cancel only — a headless caller supplies its own or none), and
-// what the run produced comes back in a RESULT the caller owns, never read back out of the GUI.
+// what the run produced comes back in a RESULT the caller owns, never read back out of the GUI. The
+// Run Full Validation job (MP-1b) has the same shape: its request, its sink, its FullValidationResults.
 //
 // The move is behaviour-neutral for every artifact. These change, each on purpose (MP-1):
 //   - the core works on a PRIVATE run-config copy. The serial path used to mutate the GUI-shared
@@ -188,7 +194,7 @@ struct TrainingRunRequest {
     int   wf_min_train;
     float gap_threshold;
     float held_out_fraction;
-    char  stamp_secret[128];
+    char  stamp_secret[sizeof(FullValidationResults::auto_stamp_secret)];   // the destination's own size (CS-274)
     int   max_threads;                   // 1 = serial · >= 2 = parallel · <= 0 = one per horizon (F16)
 };
 //======================================================================
@@ -231,7 +237,7 @@ struct TrainingHorizonRequest {
     int   wf_min_train;
     float gap_threshold;
     float held_out_fraction;
-    char  stamp_secret[128];
+    char  stamp_secret[sizeof(FullValidationResults::auto_stamp_secret)];
     int   labels_precomputed;            // 1 = the orchestrator's batch pass already filled the view's labels
 };
 //======================================================================
@@ -346,6 +352,117 @@ static_assert(alignof(TrainingHorizonJob) == 64,
 //======================================================================
 
 //======================================================================
+// [STRUCT]_[TrainingFvRequest]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[every input of a Run Full Validation job — the model to validate and re-stamp, the role it records, the labels' identity, the WF + gate params, the hyperparameters and the secret; value-initialise it, then set EVERY field]
+//======================================================================
+// [CODE]
+//======================================================================
+struct TrainingFvRequest {
+    const BacktestResults* data;         // the collected samples — read only; config_used.auto_stamp_on_held_out decides whether a stamp is requested (R-31 retires that knob at MP-7)
+    // v5.10.0E — snapshot operator-editable fields at click time, not in
+    // the worker. The ImGui input fields write into state->model_path /
+    // state->fv_auto_stamp_secret CONCURRENTLY with worker execution; if
+    // operator clicks Run Full Validation with empty model_path then
+    // types it AFTER, the worker reads empty (skip copy → auto_stamp_path
+    // empty), then status build reads the post-typed value, producing
+    // "model_path='X' did not propagate (worker race)" diagnostic.
+    // Capture-at-click eliminates the race.
+    char     model_path[256];            // the model to validate — the stamp target
+    char     role[sizeof(FullValidationResults::req_role)];   // F10 — the role the stamp records ("" = none), explicit; Training_RoleFromModelFile derives it from the file name (Class 59) until MP-7a retires the FV stamp
+    // v5.11.41 — capture label params from run_control->run_config at click
+    // time so RFV can stamp them into the body. Live in BacktestRunConfig,
+    // not in ControllerConfig (= data->config_used) so RFV can't reach
+    // them otherwise. Closes /parity-check 2026-05-07-stamp CRITICAL-1.
+    //
+    // E.1.2.C — `label_type` is deliberately sourced from
+    // run_control->run_config (the field that actually produced results->labels[]),
+    // NOT from state->label_type: the combo can be changed BETWEEN the Collect
+    // click and the Run-Full-Validation click, with no race required, and the
+    // worker then trained WF/held-out on one objective while stamping another.
+    // When the class counts differ the engine REFUSES at load
+    // (NodeModelZoo.hpp: "stamp claims model_num_outputs=N but handle=M"); when
+    // they match — WIN_LOSS / BARRIER / VOL_BARRIER / WILL_PEAK are all binary —
+    // nothing catches it and the stamp simply records a label the model never
+    // trained on. Sourcing from run_config makes the stamp describe the labels.
+    int      label_type;
+    int      label_forward_ticks;
+    double   label_tp_pct;
+    double   label_sl_pct;
+    // D-476 (2026-09-02) — the round-trip fee, so the single-horizon stamp records the
+    // SAME effective TP the label walk used (tp+fee for a percent barrier). Without it
+    // this seam stamped the fee-blind tp while the multi-horizon seam stamped tp+fee —
+    // a served bracket narrower than the trained barrier (PARITY-065 residual (3)).
+    double   label_roundtrip_fee_pct;
+    uint64_t feature_mask;               // D-477 — the collect-time mask (0 = all-on)
+    int      wf_n_splits;
+    int      wf_horizon_ticks;           // the purge horizon (s5 leaf-16)
+    int      wf_buffer_ticks;
+    int      wf_min_train;
+    float    gap_threshold;
+    float    held_out_fraction;
+    // E.1.2.C follow-up (2026-08-22) — the SECOND entry point into
+    // Backtest_RunFullValidation. The multi-horizon Train path was threaded with
+    // the click-time hyperparameters at f99e102; THIS one was missed, so the
+    // standalone "Run Full Validation" button still trained WF folds + held-out at
+    // XGBHyperparams_Defaults() AND overwrote the target model's signed stamp with
+    // 6/0.1/200 — silently undoing, on disk, the thing f99e102 fixed. The
+    // `= nullptr` default that makes hp_override safe for un-updated callers is
+    // exactly what made the omission invisible: no compile error, no warning.
+    // Caught by the Stage-6.5.4 adversarial handoff review, not by the author.
+    // (MP-1b: a request value-initialised and never given `hp` carries
+    // XGBHyperparams' default member values — the same silent 6/0.1/200. Set it.)
+    tt::XGBHyperparams hp;
+    char     stamp_secret[sizeof(FullValidationResults::auto_stamp_secret)];   // CS-274 — the destination's own size, so nothing truncates it (the old snapshot was 64 B)
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[520B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[9]
+// [STRADDLE]_[hp@344]
+// [ORIGIN]_[AUTO]
+//======================================================================
+// [END_STRUCT]_[TrainingFvRequest]
+//======================================================================
+
+//======================================================================
+// [STRUCT]_[TrainingFvSink]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a Run Full Validation job's display + control channel — status text, progress, cancel (read), and the completion + running flags published LAST; every pointer may be NULL]
+//======================================================================
+// [CODE]
+//======================================================================
+struct TrainingFvSink {
+    char*         status;
+    size_t        status_cap;
+    volatile int* progress;              // 0..100, written by the validation pass
+    volatile int* cancel;                // READ
+    volatile int* complete;              // published (release) LAST — the panel shows the result once it reads 1 (acquire)
+    volatile int* running;               // cleared (release) LAST
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[48B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+// [ORIGIN]_[AUTO]
+//======================================================================
+// [END_STRUCT]_[TrainingFvSink]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingSink_Status]
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
@@ -373,9 +490,12 @@ inline void TrainingSink_Set(volatile int* p, int v) {
 inline void TrainingSink_PublishComplete(volatile int* flag) {
     if (flag) __atomic_store_n(flag, 1, __ATOMIC_RELEASE);
 }
+inline void TrainingSink_Finish(volatile int* complete, volatile int* running) {
+    TrainingSink_PublishComplete(complete);
+    if (running) __atomic_store_n(running, 0, __ATOMIC_RELEASE);
+}
 inline void TrainingSink_FinishRun(const TrainingRunSink& sink) {
-    TrainingSink_PublishComplete(sink.complete);
-    if (sink.running) __atomic_store_n(sink.running, 0, __ATOMIC_RELEASE);
+    TrainingSink_Finish(sink.complete, sink.running);
 }
 inline int TrainingSink_Load(const volatile int* flag) {
     return __atomic_load_n(flag, __ATOMIC_ACQUIRE);
@@ -420,6 +540,40 @@ inline T* TrainingWorkers_AllocZeroed() {
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[TrainingWorkers_AllocZeroed]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingWorkers_ResolveStampSecret]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE rule for the secret a training stamp is signed with — the panel's field, else the collected cfg's auto_stamp_secret, else empty (dev mode); copied whole, NUL-terminated]
+//======================================================================
+// CS-277 — Train Multi-Horizon fell back to the cfg secret when the panel field was empty (v5.11.47:
+// set it once in cfg) and Run Full Validation did not, so with the secret set only in cfg the FV
+// re-stamp overwrote a cfg-signed stamp with a dev-mode one. Both request builders call this now.
+//======================================================================
+// [CODE]
+//======================================================================
+inline void TrainingWorkers_ResolveStampSecret(const char* panel_secret, size_t panel_cap,
+                                               const char* cfg_secret, size_t cfg_cap,
+                                               char* out, size_t out_cap) {
+    if (!out || out_cap == 0) return;
+    const char* src = panel_secret;
+    size_t      cap = panel_cap;
+    if (!src || cap == 0 || src[0] == '\0') {
+        src = cfg_secret;
+        cap = cfg_cap;
+    }
+    size_t n = (src && cap) ? strnlen(src, cap) : 0;
+    if (n >= out_cap) n = out_cap - 1;
+    if (n) memcpy(out, src, n);
+    out[n] = '\0';
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingWorkers_ResolveStampSecret]
 //======================================================================
 
 //======================================================================
@@ -1482,4 +1636,198 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[TrainingWorkers_RunMultiHorizon]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingWorkers_FvRequestIdentity]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[fill a Run Full Validation request's identity from its click-time sources — the dataset, the model path and the role its file name names, the stamp secret by the one rule, the labels' identity from the run config that produced them; GUI-free, so the cells drive it]
+//======================================================================
+// MP-1b review F2 (Class 64): CS-274 (a 64-byte secret snapshot) and CS-277 (no cfg fallback) both lived
+// in the panel's click handler, where no test reaches. The panel's request builder calls this for every
+// field those bugs touched, and tests call the same function.
+//======================================================================
+// [CODE]
+//======================================================================
+inline void TrainingWorkers_FvRequestIdentity(TrainingFvRequest* r,
+                                              const char* model_path, size_t model_path_cap,
+                                              const char* panel_secret, size_t panel_secret_cap,
+                                              const BacktestResults* data,
+                                              const BacktestRunConfig* run_cfg) {
+    if (!r) return;
+    r->data = data;
+    {
+        size_t n = model_path ? strnlen(model_path, model_path_cap) : 0;
+        if (n >= sizeof(r->model_path)) n = sizeof(r->model_path) - 1;
+        if (n) memcpy(r->model_path, model_path, n);
+        r->model_path[n] = '\0';
+    }
+    Training_RoleFromModelFile(r->model_path, r->role, sizeof(r->role));   // F10
+    // CS-277 — the one secret rule (the panel's field, else the collected cfg's); CS-274 — whole.
+    TrainingWorkers_ResolveStampSecret(panel_secret, panel_secret_cap,
+                                       data ? data->config_used.auto_stamp_secret : NULL,
+                                       data ? sizeof(data->config_used.auto_stamp_secret) : 0,
+                                       r->stamp_secret, sizeof(r->stamp_secret));
+    if (run_cfg) {
+        r->label_type              = run_cfg->label_type;
+        r->label_forward_ticks     = run_cfg->label_forward_ticks;
+        r->label_tp_pct            = run_cfg->label_tp_pct;
+        r->label_sl_pct            = run_cfg->label_sl_pct;
+        r->label_roundtrip_fee_pct = run_cfg->label_roundtrip_fee_pct;   // D-476
+        r->feature_mask            = run_cfg->feature_mask;              // D-477
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingWorkers_FvRequestIdentity]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingWorkers_RunFullValidation]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[Run Full Validation — WF on the train+val slice, the held-out evaluation and its gap gate, and the re-stamp of the model at the request's path when the gate passes; fills the caller's result, publishes completion LAST]
+//======================================================================
+// v5.8.7 — the full-validation job, moved here by MP-1b (it was fullvalidation_worker_fn in the panel
+// file). Behaviour-neutral but for: the role the stamp records comes from the request (F10 — the panel
+// derives it from the file name, as the worker did); the secret travels at its full size (CS-274) and
+// follows the one secret rule (CS-277, applied by the panel's request builder); completion is published
+// with release (F6). The role still does not reach the stamp: Backtest_RunFullValidation's entry reset
+// wipes req_role (CS-216 — MP-3's).
+//======================================================================
+// [CODE]
+//======================================================================
+inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, const TrainingFvSink& sink,
+                                              FullValidationResults* out) {
+    if (!out || !req.data) {
+        if (out) memset((void *)out, 0, sizeof(*out));   // completion is published: no stale result behind it
+        TrainingSink_Status(sink.status, sink.status_cap,
+                            "Full validation: no dataset or result storage in the request — refused.");
+        TrainingSink_Finish(sink.complete, sink.running);
+        return;
+    }
+    const BacktestResults* data = req.data;
+    // Backtest_RunFullValidation writes progress and reads cancel through non-null pointers.
+    volatile int  progress_unwired = 0;
+    volatile int  cancel_never     = 0;
+    volatile int* progress = sink.progress ? sink.progress : &progress_unwired;
+    volatile int* cancel   = sink.cancel   ? sink.cancel   : &cancel_never;
+
+    // Build held-out split and unlock immediately. The friction-grade lock
+    // exists to make held-out access a deliberate operator action; the
+    // suite UI's Run Full Validation button is exactly that deliberate
+    // action, so unlocking here is correct.
+    // E.1.2.C — the click-time fraction. This determined the held-out split size,
+    // hence held_out_metric, hence the generalization gap that gates auto-stamp —
+    // off a live slider read from a worker thread.
+    HeldOutSplit split = HeldOutSplit_Make(data->sample_count,
+                                            (double)req.held_out_fraction);
+    char unlock_token[33];
+    memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
+    HeldOutSplit_Unlock(&split, unlock_token);
+
+    // Pre-populate auto-stamp request fields. Backtest_RunFullValidation
+    // gates the stamp_write_for_model call on auto_stamp_path being non-empty
+    // AND ran_held_out=1; both are met here when training succeeds.
+    //
+    // v5.8.10 — gate path-setting on the cfg's auto_stamp_on_held_out flag.
+    // When the operator runs the suite with auto_stamp_on_held_out=0 (originally:
+    // for manual stamping via tools/stamp_model.sh; bash CLI DELETED at .B.3 Path C
+    // 2026-05-24; =0 now only meaningful for v5.16+ cmdline-invocable training per
+    // decoupling-endgoal-roadmap), the FV button still runs held-out validation
+    // but skips the stamp write. Honors operator intent.
+    memset((void *)out, 0, sizeof(*out));   // zero BYTES, as the panel worker did
+    const int auto_stamp_enabled = data->config_used.auto_stamp_on_held_out;
+    if (auto_stamp_enabled) {
+        // v5.10.0E — the click-time snapshot of the model path (the request's).
+        size_t n = strnlen(req.model_path, sizeof(req.model_path));
+        if (n >= sizeof(out->auto_stamp_path))
+            n = sizeof(out->auto_stamp_path) - 1;
+        memcpy(out->auto_stamp_path, req.model_path, n);
+        out->auto_stamp_path[n] = '\0';
+        // E.1.2.C 3-role (F1, per the D2 verdict) — the FV re-stamp was the ONE
+        // production emit path that omitted expected_role. The role is the request's
+        // own field now (F10); "" leaves it empty (legacy).
+        snprintf(out->req_role, sizeof(out->req_role), "%.*s",
+                 (int)strnlen(req.role, sizeof(req.role)), req.role);
+    }
+    {
+        // The secret, whole: the request field is the destination's own size (CS-274).
+        size_t n = strnlen(req.stamp_secret, sizeof(req.stamp_secret));
+        if (n >= sizeof(out->auto_stamp_secret))
+            n = sizeof(out->auto_stamp_secret) - 1;
+        memcpy(out->auto_stamp_secret, req.stamp_secret, n);
+        out->auto_stamp_secret[n] = '\0';
+    }
+    out->auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
+
+    // v5.11.41 — the per-horizon label params from the click-time BacktestRunConfig
+    // (single-horizon path; the multi-horizon job populates these per horizon).
+    out->req_label_lookahead_ticks = req.label_forward_ticks;
+    // D-476 — the single-horizon twin of the multi-horizon stamp seam: the same
+    // kind-aware rule (Label_Stamp*Pct), with the click-time fee so a percent TP
+    // stamps tp+fee here exactly as the multi-horizon seam does (PARITY-065 (3)).
+    out->req_label_tp_pct = Label_StampTpPct(req.label_type, req.label_tp_pct,
+                                             req.label_roundtrip_fee_pct);
+    out->req_label_sl_pct = Label_StampSlPct(req.label_type, req.label_sl_pct);
+    out->req_feature_mask = req.feature_mask;   // D-477
+
+    // E.1.2.C — every argument is the CLICK-TIME snapshot (they were live `state->` reads from a
+    // worker thread; the label_type one needed no race at all — change the combo between Collect
+    // and this click).
+    Backtest_RunFullValidation(out, data, &split,
+                               req.wf_n_splits, req.wf_horizon_ticks,
+                               req.wf_buffer_ticks, req.wf_min_train,
+                               progress, cancel,
+                               req.label_type, req.gap_threshold,
+                               /*hp_override=*/&req.hp);
+
+    // A one-line status summary for the panel.
+    if (out->auto_stamp_attempted) {
+        if (out->auto_stamp_ok) {
+            TrainingSink_Status(sink.status, sink.status_cap,
+                                "Stamp written: %s", out->auto_stamp_path_written);
+        } else {
+            TrainingSink_Status(sink.status, sink.status_cap,
+                                "Stamp REFUSED: %s", out->auto_stamp_error);
+        }
+    } else if (out->ran_held_out) {
+        if (!auto_stamp_enabled) {
+            TrainingSink_Status(sink.status, sink.status_cap,
+                                "Held-out OK; auto-stamp disabled (cfg auto_stamp_on_held_out=0)");
+        } else if (req.model_path[0] == '\0') {
+            // v5.9.4a / v5.10.0E — the model path as it was AT CLICK TIME (the panel's button needs a
+            // non-empty path, so this is a headless caller's empty request).
+            TrainingSink_Status(sink.status, sink.status_cap,
+                                "Held-out OK; auto-stamp skipped — model_path was empty in the request "
+                                "(set Model Path BEFORE clicking Run Full Validation)");
+        } else if (out->auto_stamp_path[0] == '\0') {
+            // Truly unexpected — the request's path was non-empty but the copy didn't populate.
+            TrainingSink_Status(sink.status, sink.status_cap,
+                                "Held-out OK; auto-stamp skipped — model_path='%.*s' "
+                                "non-empty but auto_stamp_path empty "
+                                "(internal copy failure; report bug)",
+                                (int)strnlen(req.model_path, sizeof(req.model_path)), req.model_path);
+        } else {
+            TrainingSink_Status(sink.status, sink.status_cap,
+                                "Held-out OK; auto-stamp skipped — Backtest_RunFullValidation "
+                                "did not fire stamp_write (auto_stamp_path='%s'; check "
+                                "ran_held_out flag + path validity)",
+                                out->auto_stamp_path);
+        }
+    } else {
+        TrainingSink_Status(sink.status, sink.status_cap,
+                            "Held-out did not complete (cancel or shape error?)");
+    }
+    // F6 — the result is complete: publish it LAST (release); the panel reads with acquire.
+    TrainingSink_Finish(sink.complete, sink.running);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingWorkers_RunFullValidation]
 //======================================================================
