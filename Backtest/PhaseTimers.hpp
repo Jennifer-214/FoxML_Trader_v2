@@ -198,6 +198,10 @@ static inline void PhaseTimer_PopulateSnapshot(const PhaseTimer* pt,
 // ONE writer (the training worker, at run end — the two PhaseTimer_Summary
 // sites) / ONE reader (the GUI thread). Value-init'd slot = zeroed buffers =
 // valid=0, so a pre-first-run read renders nothing rather than garbage.
+// NOT true in a parallel multi-horizon run (E.1.3 MP-2 review F-4): every horizon's
+// Backtest_RunFullValidation publishes at its own end, so several workers write this
+// single-writer slot and the phase panel can show a torn snapshot (display only). MP-3
+// publishes once per run, after the join — the claim above holds again then.
 static inline ParameterSlot<PhaseTimerSnapshot>& PhaseTimer_SnapshotSlot() {
     static ParameterSlot<PhaseTimerSnapshot> slot{};
     return slot;

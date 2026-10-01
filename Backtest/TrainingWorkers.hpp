@@ -1191,9 +1191,11 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
 
     // 2026-09-03 — the full data-file list, side-addressed like its summary
     // (model-artifact-path-schema-discipline #6). Written from the run cfg the
-    // trainer holds (the Data panel selection at CLICK time) and stamped with
-    // BOTH hashes, so a selection changed between Collect and Train is visible
-    // in the file itself instead of silently listing the wrong corpus.
+    // request carries and stamped with BOTH hashes. In the GUI that run cfg is the
+    // selection the last Collect / Run Backtest built — the same click that reset the
+    // samples and recorded their corpus — so the two always MATCH there; MISMATCH means
+    // a caller paired the dataset with another file list, whose labels came from the
+    // wrong ticks (CS-280 — MP-3's request contract refuses it).
     if (local_run_cfg) {
         char dst_list[400];
         snprintf(dst_list, sizeof(dst_list), "%s/%s", horizon_dir,
