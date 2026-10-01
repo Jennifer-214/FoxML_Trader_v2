@@ -5,10 +5,11 @@
 //======================================================================================================
 // [TICK TRADER ENGINE]
 //======================================================================================================
-// process entry - pins the process-wide state (FTZ/DAZ, the locale), loads the cfg, refuses a
-// contradictory or malformed capital / venue cfg, then hands off to the sharded engine
-// (EngineSharded_Run): one producer thread fans every tick out to a hot + a slow thread per
-// node, and a drainer thread runs the OMS. the event loop and its threads live there, not here.
+// process entry - pins the process-wide state (FTZ/DAZ, the locale), routes the command line (--help and
+// every refusal exit there, before any cfg is read), loads the cfg, refuses a contradictory or malformed
+// capital / venue cfg, then hands off to the sharded engine (EngineSharded_Run): one producer thread fans
+// every tick out to a hot + a slow thread per node, and a drainer thread runs the OMS. the event loop and
+// its threads live there, not here.
 //======================================================================================================
 #include <locale.h>   // .E.0.1: LC_NUMERIC=C boot pin (locale-determinism class close)
 #include "DataStream/BinanceCrypto.hpp"
@@ -18,7 +19,7 @@
 // NotifyState_Init when cfg.notify_enabled=1 (in EngineSharded_Run, not main()).
 #include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
-#include "CoreFrameworks/CfgPaths.hpp"    // the cfg-filename SSoT (the default engine cfg)
+#include "CoreFrameworks/EngineCli.hpp"   // the command line: resolve → verdict → emit; RUN is the only verdict that boots
 
 #ifdef USE_IMGUI_GUI
 #include "GUI/CandleAccumulator.hpp"
@@ -60,7 +61,12 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "FoxML_Trader_v2 — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
     fprintf(stderr, "Licensed under AGPL-3.0-or-later. Commercial license: jenn.lewis5789@gmail.com\n\n");
 
-    const char *cfg_path = (argc > 1) ? argv[1] : CFG_PATH_DEFAULT_ENGINE_CFG;
+    // the command line first: --help and every refusal leave here, before a cfg is read, a log is
+    // rotated or stderr moves to the log file — so a refusal reaches the terminal
+    EngineCliArgs cli;
+    int st = 1;
+    if (EngineCli_Entry(argc, argv, stdout, stderr, &cli, &st) != ENGINE_CLI_VERDICT_RUN) return st;
+    const char *cfg_path = cli.positional;   // never null on RUN — EngineCli.hpp's run-row static_assert
 
     //==================================================================================================
     // load configs

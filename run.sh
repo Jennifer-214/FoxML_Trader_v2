@@ -8,10 +8,11 @@ WANT_CHART=0
 
 cd "$(dirname "$0")"
 
-# build if needed
+# build if needed — through build.sh's engine lane, which pins the build type (TECH_DEBT-329: an
+# unpinned configure silently differs on -DNDEBUG)
 if [ ! -f build/engine ]; then
     echo "[build] compiling..."
-    cmake -B build && cmake --build build -j$(nproc)
+    ./build.sh engine
 fi
 
 # ensure config symlink

@@ -22,7 +22,8 @@
 // a panel's default path) names one of these; a message that merely MENTIONS a filename stays a literal.
 //======================================================================
 
-// The engine's cfg when its command line names none (main.cpp), and the layout foxml_suite treats as the
+// The engine's cfg when its command line names none (the run mode's default — EngineCli.hpp's
+// FOREACH_ENGINE_CLI_DISPATCH run row, which the resolver fills in), and the layout foxml_suite treats as the
 // engine's cfg (its first-run copy source + its drift check). A DEFAULT, not the engine's cfg: an engine
 // run may name another file, so a comparison against this path compares the default layout only.
 inline constexpr const char* CFG_PATH_DEFAULT_ENGINE_CFG = "engine.cfg";

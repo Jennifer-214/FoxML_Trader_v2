@@ -2,6 +2,9 @@ build/
 build_gui/
 build_gui_lite/
 build_lat/
+build_lat_fast/
+build_lat_lite/
+build_bench/
 build_latency/
 build_suite/
 build_suite_asan/

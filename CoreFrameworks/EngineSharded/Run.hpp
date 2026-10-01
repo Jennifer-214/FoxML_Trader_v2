@@ -433,11 +433,11 @@ static inline void EngineSharded_DumpLatency(const tt::NodeArray<ExecutionCore<F
 //   4. Spawn N executor threads (one per core, each pinned if possible)
 //   5. Spawn 1 drainer thread on the controller core
 //   6. Enable per-core NodeLatencyStats
-//   7. Run until shutdown_flag is raised
+//   7. Run until the shutdown flag is raised
 //   8. Join all threads, dump per-core latency
 //
-// shutdown_flag is the same volatile int main.cpp uses for SIGINT/SIGTERM.
-// Pass &g_shutdown_requested or whichever variable you have.
+// The shutdown flag is g_engine_sharded_shutdown (Boot.hpp), raised by EngineSharded_SignalHandler, which
+// this function installs for SIGINT / SIGTERM itself — main() has no signal code.
 //======================================================================================================
 
 // v5.14.2.E.1 — NodeModelZoo_ValidateAgainstCfg moved to its own header
