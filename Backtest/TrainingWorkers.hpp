@@ -18,7 +18,9 @@
 //   - [FUNCTION]_[TrainingWorkers_AllocZeroed]
 //   - [FUNCTION]_[TrainingWorkers_HorizonRequest]
 //   - [FUNCTION]_[TrainingWorkers_RunHorizon]
-//   - [FUNCTION]_[TrainingWorkers_RunMultiHorizon]   (TrainingWorkers_HorizonThread / _Refuse ride)
+//   - [STRUCT]_[TrainingPool]
+//   - [FUNCTION]_[TrainingWorkers_RunPool]   (TrainingWorkers_PoolWorker rides)
+//   - [FUNCTION]_[TrainingWorkers_RunMultiHorizon]   (TrainingWorkers_HorizonThread / _PoolJob / _Refuse ride)
 //======================================================================================================
 // Why this file exists (E.1.3 MP-1; sidecar CS-249, CS-217). The producer — the code that trains a
 // model grid, validates every horizon, saves each model and writes its stamp, summary, data-files
@@ -49,7 +51,10 @@
 //   - a refused run clears the per-horizon display, so the panel never shows the previous run's rows
 //     under the new click's horizons;
 //   - the 64-aligned objects (the run-config copy, the jobs) are allocated at their alignment: the old
-//     job came from malloc, which promises 16 bytes (MP-1a review F1).
+//     job came from malloc, which promises 16 bytes (MP-1a review F1);
+//   - the parallel path runs at most max_threads horizons at once, on a bounded pool — it started one
+//     thread per horizon whatever the cap (CS-275) — and a horizon a cancel reaches before it starts
+//     says so on its row, in both modes.
 // Plan: the E.1.3 plan's THE GATE AMENDMENT, MP-1; step 0 =
 // plans/v5.15-live-readiness/plan_checks/2026-09-30-E.1.3-MP-1-producer-core-body-content-enumeration.csv.
 //======================================================================================================
@@ -1064,6 +1069,81 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
 //======================================================================
 
 //======================================================================
+// [STRUCT]_[TrainingPool]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the bounded pool's shared queue — the job function, its context and the job count (fixed before any worker starts) and the next index to claim (the one word the workers write)]
+//======================================================================
+// [CODE]
+//======================================================================
+typedef void (*TrainingPoolFn)(void* ctx, int i);
+struct TrainingPool {
+    TrainingPoolFn  fn;                  // fixed before the workers start
+    void*           ctx;
+    int             count;
+    alignas(64) int next;                // H6 — the one cross-thread-written word (an atomic fetch-add), on its own line
+};
+static_assert(alignof(TrainingPool) == 64, "TrainingPool's claim counter must sit on its own cache line (H6)");
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[128B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[2]
+// [STRADDLE]_[none]
+// [ORIGIN]_[AUTO]
+//======================================================================
+// [END_STRUCT]_[TrainingPool]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingWorkers_RunPool]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[run fn(ctx, i) for every i in [0, count) on at most max_workers threads, the caller one of them — each index exactly once; returns how many threads worked (the caller included)]
+//======================================================================
+// CS-275 — the cap `multi_horizon_max_threads` promises. The parallel path used to start one thread per
+// horizon however low the cap was, and every running horizon copies its training set and builds its own
+// DMatrix, so a cap set to bound memory bounded nothing. Workers claim the next index from one counter;
+// the CALLER is the last worker, so a failed thread start leaves fewer workers, never an unrun index.
+//======================================================================
+// [CODE]
+//======================================================================
+inline void* TrainingWorkers_PoolWorker(void* arg) {
+    TrainingPool* p = (TrainingPool*)arg;
+    for (int i = __atomic_fetch_add(&p->next, 1, __ATOMIC_RELAXED); i < p->count;
+         i = __atomic_fetch_add(&p->next, 1, __ATOMIC_RELAXED))
+        p->fn(p->ctx, i);
+    return NULL;
+}
+inline int TrainingWorkers_RunPool(TrainingPoolFn fn, void* ctx, int count, int max_workers) {
+    constexpr int TMAX = ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX;   // the grid never needs more
+    TrainingPool pool{};
+    pool.fn    = fn;
+    pool.ctx   = ctx;
+    pool.count = count;
+    int extra = (max_workers < count ? max_workers : count) - 1;             // the caller is one worker
+    if (extra > TMAX - 1) extra = TMAX - 1;
+    pthread_t tids[TMAX];
+    int spawned = 0;
+    for (int k = 0; k < extra; ++k)
+        if (pthread_create(&tids[spawned], NULL, TrainingWorkers_PoolWorker, &pool) == 0) ++spawned;
+    TrainingWorkers_PoolWorker(&pool);
+    // The join orders every worker's writes before the caller reads them.
+    for (int k = 0; k < spawned; ++k) pthread_join(tids[k], NULL);
+    return spawned + 1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingWorkers_RunPool]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingWorkers_RunMultiHorizon]
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
@@ -1086,6 +1166,20 @@ inline void* TrainingWorkers_HorizonThread(void* arg) {
                                               job->result);
     if (job->done) __atomic_add_fetch(job->done, 1, __ATOMIC_RELAXED);   // display-only: RELAXED
     return NULL;
+}
+
+// One pooled horizon (ctx = the jobs array). A job whose setup failed is NULL — its row already says why.
+// A job the run's cancel reaches before it starts never runs (serial's rule) and says so on its row; it
+// publishes no completion, because it did not complete.
+inline void TrainingWorkers_PoolJob(void* ctx, int h) {
+    TrainingHorizonJob* job = ((TrainingHorizonJob**)ctx)[h];
+    if (!job) return;
+    if (TrainingSink_IsCancelled(job->sink.cancel)) {
+        TrainingSink_Status(job->sink.status, job->sink.status_cap,
+                            "h=%d not started: the run was cancelled", job->req.horizon_ticks);
+        return;
+    }
+    TrainingWorkers_HorizonThread(job);
 }
 
 // A run that stops before it starts: say why, and publish the run's completion.
@@ -1164,10 +1258,11 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
 
     // Parallel horizons run concurrent XGBoost trainings on pthreads — Landmine 1's workload (a SIGSEGV
     // in libgomp's parallel-region setup) until OMP-B (D-494) built XGBoost without OpenMP: there is no
-    // runtime pool left for the workers to race on. max_threads picks the mode: 1 = serial, >= 2 =
-    // parallel, one thread per horizon — the cap itself is NOT enforced (CS-275). (The registry clamps
-    // the cfg knob to [1, 256] with a WARN, so a cfg `0` runs SERIAL; the `<= 0` floor below — "auto"
-    // = horizon_count — is reachable only by a direct request write.)
+    // runtime pool left for the workers to race on. max_threads picks the mode and caps it: 1 = serial;
+    // N >= 2 = at most N horizons at once, on a bounded pool (CS-275 — it used to start one thread per
+    // horizon whatever N was). (The registry clamps the cfg knob to [1, 256] with a WARN, so a cfg `0`
+    // runs SERIAL; the `<= 0` floor below — "auto" = horizon_count — is reachable only by a direct
+    // request write.)
     int mh_max_threads = req.max_threads;
     if (mh_max_threads <= 0) {
         mh_max_threads = horizon_count;  // 0 = auto = fully parallel
@@ -1210,20 +1305,25 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
     }
 
     if (parallel_mode) {
-        fprintf(stderr, "[mh-train] parallel mode: %d horizons across %d threads "
-                        "(one single-threaded booster per worker)\n",
+        fprintf(stderr, "[mh-train] parallel mode: %d horizons on %d workers "
+                        "(one single-threaded booster each)\n",
                 horizon_count, n_parallel);
 
-        // v5.11.41.C — one pthread per horizon. Each job is zeroed at its alignment, gets its request from the
-        // ONE builder, a dataset view with its own labels (the batch vector, ownership transferred; or
-        // the fallback walk's buffer), its own copy of the run config, its own slot in the result, and
-        // records xgb_train_nthread=1 — the stamp's parallel-mode marker (the MODEL bytes match serial's:
-        // every booster is single-threaded since D-494; the marker retires with the key at MP-7b). The
-        // orchestrator frees every job after the join.
-        pthread_t tids[HMAX] = {0};
+        // v5.11.41.C — every horizon gets a job: zeroed at its alignment, its request from the ONE
+        // builder, a dataset view with its own labels (the batch vector, ownership transferred; or the
+        // fallback walk's buffer), its own copy of the run config, its own slot in the result, and
+        // xgb_train_nthread=1 — the stamp's parallel-mode marker (the MODEL bytes match serial's: every
+        // booster is single-threaded since D-494; the marker retires with the key at MP-7b). CS-275: the
+        // jobs then run on the bounded pool, at most n_parallel at once; the orchestrator frees every job
+        // after the pool returns.
         TrainingHorizonJob *jobs[HMAX] = {0};
         for (int h = 0; h < horizon_count; ++h) {
-            if (TrainingSink_IsCancelled(sink.cancel)) break;
+            if (TrainingSink_IsCancelled(sink.cancel)) {
+                for (int r = h; r < horizon_count; ++r)
+                    TrainingSink_Status(sink.horizon[r].status, sink.horizon[r].status_cap,
+                                        "h=%d not started: the run was cancelled", req.horizon_ticks[r]);
+                break;
+            }
             const TrainingHorizonDisplay& hd = sink.horizon[h];
             TrainingHorizonJob *job = TrainingWorkers_AllocZeroed<TrainingHorizonJob>();
             if (!job) {
@@ -1258,28 +1358,19 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
             job->result      = &out->horizon[h];
             job->current     = sink.current;
             job->done        = sink.done;
-            int rc = pthread_create(&tids[h], NULL, TrainingWorkers_HorizonThread, job);
-            if (rc != 0) {
-                TrainingSink_Status(hd.status, hd.status_cap,
-                                    "h=%d FAILED: pthread_create rc=%d", req.horizon_ticks[h], rc);
-                TrainingSink_PublishComplete(hd.complete);
-                free(job->view.labels);
-                free(job);
-                continue;
-            }
             jobs[h] = job;
         }
-        // Join every spawned worker; total wall time is the slowest horizon's.
-        for (int h = 0; h < horizon_count; ++h) {
-            if (jobs[h]) pthread_join(tids[h], NULL);
-        }
+        const int workers = TrainingWorkers_RunPool(TrainingWorkers_PoolJob, jobs, horizon_count, n_parallel);
+        if (workers < n_parallel)
+            fprintf(stderr, "[mh-train] only %d of %d workers started (pthread_create failed); "
+                            "every horizon still ran\n", workers, n_parallel);
         for (int h = 0; h < horizon_count; ++h) {
             if (!jobs[h]) continue;
             out->outcome[h] = jobs[h]->outcome;
             free(jobs[h]->view.labels);
             free(jobs[h]);
         }
-        // Workers counted themselves up; this is the terminal pin (a cancelled or failed worker may
+        // Workers counted themselves up; this is the terminal pin (a cancelled or failed horizon may
         // not have ticked, and the bar must still read complete at the end).
         TrainingSink_Set(sink.done, horizon_count);
     } else {
@@ -1293,6 +1384,9 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
             if (TrainingSink_IsCancelled(sink.cancel)) {
                 fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
                         h, horizon_count);
+                for (int r = h; r < horizon_count; ++r)
+                    TrainingSink_Status(sink.horizon[r].status, sink.horizon[r].status_cap,
+                                        "h=%d not started: the run was cancelled", req.horizon_ticks[r]);
                 break;
             }
             TrainingSink_Set(sink.current, req.horizon_ticks[h]);

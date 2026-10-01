@@ -1235,9 +1235,11 @@ template <unsigned F> struct ControllerConfig {
   // changes a trained byte. xgb_train_nthread is the hyperparameter sweep's
   // pthread worker count (and a stamp field); xgb_eval_nthread, the
   // per-booster thread count, was RETIRED at OMP-B-ii.
-  // v5.11.41 — Multi-Horizon parallelism cap. The worker spawns
-  //   min(N_horizons, multi_horizon_max_threads) pthreads, each running a
-  //   full per-horizon Backtest_RunFullValidation pipeline; 1 = serial.
+  // v5.11.41 — Multi-Horizon parallelism cap. At most
+  //   min(N_horizons, multi_horizon_max_threads) horizons train at once, on a
+  //   bounded pool whose workers include the orchestrator's own thread (E.1.3
+  //   CS-275 — it used to start one thread per horizon whatever the cap); each
+  //   runs a full per-horizon Backtest_RunFullValidation pipeline; 1 = serial.
   //   A parallel worker records xgb_train_nthread=1 in its model's stamp
   //   (the parallel-mode marker; serial records the operator's value).
 
