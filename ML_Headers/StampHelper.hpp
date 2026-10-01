@@ -133,6 +133,13 @@ struct StampArgs {
     // === Architectural fields (training-time identity) ===
     // Defaults zero = helper falls back to derive from label_kind / MODEL_NUM_FEATURES
     const char* req_role          = "";   // "" = no expected_role emit
+
+    // CS-273 — the run's clock: μs since the Unix epoch, CLOCK_REALTIME, taken by the CALLER (the
+    // panel takes it at the click; a test or a replay passes a fixed one). It is the stamp's
+    // training_timestamp_us and — when trained_on_iso is empty — the UTC date in trained_on. 0 = no
+    // clock: the helper REFUSES rather than read one, because a stamp whose bytes depend on when and
+    // in which timezone it was written cannot be pinned by a golden (MP-2) or reproduced by a rerun.
+    uint64_t now_us              = 0;
 };
 
 //======================================================================================================
@@ -154,8 +161,8 @@ struct StampArgs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-02]
-// [SIZE]_[208B]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[216B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[4]
 // [STRADDLE]_[none]
@@ -184,6 +191,17 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     const char* hmac_secret,
     const ControllerConfig<F>& cfg,
     const StampArgs<F>& args) {
+
+    // CS-273 — the stamp's time is an INPUT; a request without one is refused before any work.
+    if (args.now_us == 0) {
+        StampWriteResult r{};
+        r.ok = 0;
+        snprintf(r.error, sizeof(r.error),
+                 "CS-273: REFUSING a stamp request with no clock (now_us = 0) — the caller passes "
+                 "the run's time");
+        fprintf(stderr, "[stamp] %s\n", r.error);
+        return r;
+    }
 
     StampInferenceCfgInputs inf = {};
 
@@ -305,20 +323,15 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // a green that a model of ANY age passed. Leaving it off was the more honest state, which is
     // the tell: a safety feature whose activation weakens the signal.
     //
-    // EMIT-TIME is the correct value, not a caller arg: neither production caller
-    // (BacktestEngine.hpp:1440, BacktestPanels.hpp:4047) holds a training-start time, and this
-    // funnel runs at training COMPLETION — so emit-time is the only truthful value in scope, and
-    // it needs no caller change. CLOCK_REALTIME (not a monotonic timer) is REQUIRED: the consumer
-    // computes `now_us - training_timestamp_us` against its own CLOCK_REALTIME read
-    // (NodeModelZoo.hpp:625-627), and the registry row documents the contract as "μs since unix
-    // epoch". A monotonic source would silently produce garbage ages across reboots.
-    {
-        struct timespec ts_train;
-        clock_gettime(CLOCK_REALTIME, &ts_train);
-        STAMP_PUT(inf, training_timestamp_us,
-                  (uint64_t)ts_train.tv_sec * 1000000ULL
-                + (uint64_t)ts_train.tv_nsec / 1000ULL);
-    }
+    // E.1.3 CS-273 — the value is the CALLER's clock (args.now_us), no longer an emit-time read
+    // here: the producer core takes one clock per run at the click, so every horizon of a run
+    // records the same time, and a fixed clock makes the stamp's bytes reproducible (MP-2's golden).
+    // It is still CLOCK_REALTIME μs since the Unix epoch — REQUIRED, because the consumer computes
+    // `now_us - training_timestamp_us` against its own CLOCK_REALTIME read (NodeModelZoo.hpp), and
+    // the registry row documents the contract as "μs since unix epoch"; a monotonic source would
+    // silently produce garbage ages across reboots. A run's start time ages the model by the
+    // training's own length — the conservative side for the age gate.
+    STAMP_PUT(inf, training_timestamp_us, args.now_us);
 
     // Model output count (from label_kind, or caller override)
     {
@@ -413,15 +426,16 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     // (3) Resolve caller-default fallbacks for stamp_write_for_model args.
     // ────────────────────────────────────────────────────────────────────
 
-    // Today's ISO date if caller didn't provide
-    char today_local[16] = {0};
+    // The run's date, if the caller didn't provide one — in UTC (CS-273: it was the machine's LOCAL
+    // date, so two identical runs in different timezones signed different bodies).
+    char today_utc[16] = {0};
     const char* trained_on = args.trained_on_iso;
     if (!trained_on || !trained_on[0]) {
-        time_t now = time(NULL);
+        const time_t run_s = (time_t)(args.now_us / 1000000ULL);
         struct tm tm_buf;
-        localtime_r(&now, &tm_buf);
-        strftime(today_local, sizeof(today_local), "%Y-%m-%d", &tm_buf);
-        trained_on = today_local;
+        gmtime_r(&run_s, &tm_buf);
+        strftime(today_utc, sizeof(today_utc), "%Y-%m-%d", &tm_buf);
+        trained_on = today_utc;
     }
 
     uint64_t feat_hash = (args.feature_registry_hash != 0)

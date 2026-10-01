@@ -1329,7 +1329,7 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         if (!parse_kv_line(line, k, sizeof(k), v, sizeof(v))) continue;
         if      (strcmp(k, "role") == 0)                 strncpy(r->role, v, sizeof(r->role) - 1);
         else if (strcmp(k, "accuracy") == 0)             r->train_accuracy = (float)atof(v);
-        else if (strcmp(k, "train_correlation") == 0)  { r->train_correlation = (float)atof(v); r->has_train_correlation = 1; }
+        else if (strcmp(k, "train_correlation") == 0)  { r->train_correlation = (float)tt::parse_double_fast(v); r->has_train_correlation = 1; }   // locale-immune (H5)
         else if (strcmp(k, "label_type") == 0)           r->label_type = atoi(v);
         else if (strcmp(k, "expected_num_classes") == 0) r->expected_num_classes = atoi(v);
         else if (strcmp(k, "max_depth") == 0)            r->max_depth = atoi(v);
@@ -3974,7 +3974,7 @@ struct FullValidationWorkerArgs {
 //======================================================================
 // [DERIVED]
 // [UPDATED]_[2026-09-30]
-// [SIZE]_[528B]
+// [SIZE]_[536B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[9]
 // [STRADDLE]_[none]
@@ -4044,6 +4044,7 @@ static inline FullValidationWorkerArgs *TrainingPanel_FullValidationArgs(Trainin
     // E.1.2.C follow-up — the same click-time snapshot the Train path builds, so BOTH entry points
     // describe one architecture.
     r.hp = Training_SnapshotHyperparams(state);
+    r.now_us = TrainingWorkers_WallClockUs();   // CS-273 — the run's clock, taken at the click
     return a;
 }
 //======================================================================
@@ -4229,6 +4230,7 @@ static inline MultiHorizonWorkerArgs *TrainingPanel_MultiHorizonArgs(TrainingPan
     // F16 — the serial / parallel choice is an explicit request field (its value is still the
     // collect-time cfg's, as it always was).
     r.max_threads = run_control->results.config_used.multi_horizon_max_threads;
+    r.now_us      = TrainingWorkers_WallClockUs();   // CS-273 — the run's clock, taken once at the click
     return a;
 }
 //======================================================================

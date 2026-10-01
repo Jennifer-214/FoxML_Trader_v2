@@ -19,6 +19,7 @@
 //   - [FUNCTION]_[TrainingSink_Status]   (TrainingSink_IsCancelled / _Set / _Load / _PublishComplete / _Finish / _FinishRun / _ForHorizon ride)
 //   - [FUNCTION]_[TrainingWorkers_AllocZeroed]
 //   - [FUNCTION]_[TrainingWorkers_ResolveStampSecret]
+//   - [FUNCTION]_[TrainingWorkers_WallClockUs]
 //   - [FUNCTION]_[TrainingWorkers_HorizonRequest]
 //   - [FUNCTION]_[TrainingWorkers_WriteSummary]
 //   - [FUNCTION]_[TrainingWorkers_RunHorizon]
@@ -195,6 +196,7 @@ struct TrainingRunRequest {
     float gap_threshold;
     float held_out_fraction;
     char  stamp_secret[sizeof(FullValidationResults::auto_stamp_secret)];   // the destination's own size (CS-274)
+    uint64_t now_us;                     // CS-273 — the run's clock (μs since the Unix epoch): every horizon's stamp records it; the panel takes it at the click, a fixed one makes a run byte-reproducible
     int   max_threads;                   // 1 = serial · >= 2 = parallel · <= 0 = one per horizon (F16)
 };
 //======================================================================
@@ -202,7 +204,7 @@ struct TrainingRunRequest {
 //======================================================================
 // [DERIVED]
 // [UPDATED]_[2026-09-30]
-// [SIZE]_[672B]
+// [SIZE]_[688B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[11]
 // [STRADDLE]_[run_name@16 · tp_pct@380 · label_type@444 · hp@476]
@@ -238,6 +240,7 @@ struct TrainingHorizonRequest {
     float gap_threshold;
     float held_out_fraction;
     char  stamp_secret[sizeof(FullValidationResults::auto_stamp_secret)];
+    uint64_t now_us;                     // the run's clock (CS-273)
     int   labels_precomputed;            // 1 = the orchestrator's batch pass already filled the view's labels
 };
 //======================================================================
@@ -245,8 +248,8 @@ struct TrainingHorizonRequest {
 //======================================================================
 // [DERIVED]
 // [UPDATED]_[2026-09-30]
-// [SIZE]_[548B]
-// [ALIGN]_[4]
+// [SIZE]_[560B]
+// [ALIGN]_[8]
 // [CACHE_LINES]_[9]
 // [STRADDLE]_[run_name@32 · hp@352]
 // [ORIGIN]_[AUTO]
@@ -416,13 +419,14 @@ struct TrainingFvRequest {
     // XGBHyperparams' default member values — the same silent 6/0.1/200. Set it.)
     tt::XGBHyperparams hp;
     char     stamp_secret[sizeof(FullValidationResults::auto_stamp_secret)];   // CS-274 — the destination's own size, so nothing truncates it (the old snapshot was 64 B)
+    uint64_t now_us;                     // CS-273 — the run's clock (μs since the Unix epoch) for the stamp; the panel takes it at the click
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [UPDATED]_[2026-09-30]
-// [SIZE]_[520B]
+// [SIZE]_[528B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[9]
 // [STRADDLE]_[hp@344]
@@ -577,6 +581,26 @@ inline void TrainingWorkers_ResolveStampSecret(const char* panel_secret, size_t 
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[TrainingWorkers_WallClockUs]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the wall clock a run's request carries (CS-273) — CLOCK_REALTIME, μs since the Unix epoch, the stamp consumer's contract; the GUI adapters take it once, at the click]
+//======================================================================
+// [CODE]
+//======================================================================
+inline uint64_t TrainingWorkers_WallClockUs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingWorkers_WallClockUs]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingWorkers_HorizonRequest]
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
@@ -605,6 +629,7 @@ inline TrainingHorizonRequest TrainingWorkers_HorizonRequest(const TrainingRunRe
     r.gap_threshold      = run.gap_threshold;
     r.held_out_fraction  = run.held_out_fraction;
     memcpy(r.stamp_secret, run.stamp_secret, sizeof(r.stamp_secret));
+    r.now_us             = run.now_us;
     r.labels_precomputed = labels_precomputed;
     return r;
 }
@@ -1086,6 +1111,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
                                 progress,
                                 cancel,
                                 label_type, snap_gap_threshold,
+                                req.now_us,   // CS-273 — the run's clock
                                 /*hp_override=*/&snap_hp);
 
 
@@ -1784,6 +1810,7 @@ inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, cons
                                req.wf_buffer_ticks, req.wf_min_train,
                                progress, cancel,
                                req.label_type, req.gap_threshold,
+                               req.now_us,   // CS-273
                                /*hp_override=*/&req.hp);
 
     // A one-line status summary for the panel.

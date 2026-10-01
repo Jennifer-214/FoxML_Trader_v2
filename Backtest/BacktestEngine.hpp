@@ -1845,6 +1845,10 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 volatile int *cancel,
                                                 int label_type,
                                                 float gap_threshold,
+                                                // E.1.3 CS-273 — the run's clock (μs since the
+                                                // Unix epoch) for the stamp: its training time and
+                                                // its UTC date. Required — 0 makes the stamp refuse.
+                                                uint64_t now_us,
                                                 // E.1.2.C — the operator's click-time
                                                 // hyperparameters. nullptr = previous
                                                 // behaviour bytewise (defaults + the
@@ -2102,6 +2106,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
 
         // Architectural fields (training-time identity)
         args.req_role        = out->req_role;
+        args.now_us          = now_us;   // CS-273 — the run's clock, never a read here
 
         // v5.10.0 Item A — stamp_emit phase timer (kept; wraps helper call).
         uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();
