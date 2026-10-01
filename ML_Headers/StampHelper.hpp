@@ -141,9 +141,9 @@ struct StampArgs {
 // [COMMENT]
 //----------------------------------------------------------------------
 // Default member init for all fields → callers fill only what differs.
-// Single-horizon callers (train_model_worker_fn) leave horizon_* +
-// grid_member_* at defaults. Multi-horizon callers (mh_run_one_horizon_fv
-// → RFV) set them via FullValidationResults.req_grid_*.
+// Callers that train one horizon leave horizon_* + grid_member_* at
+// defaults; the multi-horizon job (TrainingWorkers_RunHorizon → RFV) sets
+// them via FullValidationResults.req_grid_*.
 //
 // Per CLAUDE.md item 27: explicit defaults zero-init padding (POD struct
 // is stack-allocated; not used in byte-equivalence contexts directly but

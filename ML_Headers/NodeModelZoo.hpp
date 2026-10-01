@@ -1079,7 +1079,7 @@ struct ModelExpectedCfg {
 // [CODE]
 //======================================================================
 // reads the SIDE-ADDRESSED expected records under <dir> — expected_entry.cfg /
-// expected_exit.cfg (written per horizon dir by mh_run_one_horizon_fv; the
+// expected_exit.cfg (written per horizon dir by TrainingWorkers_RunHorizon; the
 // shared expected.cfg is the pre-2026-09-03 legacy name, read-only fallback,
 // consumed at most ONCE per dir because it carries whichever role wrote last)
 // and verifies the live ML config matches what the model was trained against.
@@ -2830,9 +2830,9 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
 // Wasteful (re-opens file at boot) but boundary-stable per CLAUDE.local.md
 // "boundary-stable refactor" rule (no struct schema cascade).
 //
-// Back-compat: legacy stamps without grid_member_count log a WARN-and-load
-// note explaining that train_multi_horizon_worker_fn doesn't emit stamps yet.
-// Closure of the emit side is deferred to v5.10.X.
+// Back-compat: legacy stamps without grid_member_count — written before
+// v5.15.3.B.2 plumbed the grid identity into the producer (PARITY-021) —
+// log a WARN and load.
 //
 // Returns:
 //   1 — OK (uniform grid_member_count or all-legacy WARN-and-load)

@@ -689,11 +689,12 @@ static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int cou
 //
 // `inline thread_local`, NOT `static thread_local`: static in a header mints a copy per TU, and
 // the worker's write would not be the marker's read. Same reasoning as the E.1.2.E leaf-7
-// ML_PREDICT accumulator. 0 = serial / untagged, and the marker omits the qualifier then.
+// ML_PREDICT accumulator. 0 = untagged (a thread not running a horizon), and the marker omits the
+// qualifier then.
 inline thread_local int g_wf_marker_horizon = 0;
 inline thread_local char g_wf_marker_buf[24] = {0};
-// Renders " h=<ticks>" when tagged, "" when serial — so serial output is byte-identical
-// to what it was before this change and no existing bisection habit breaks.
+// Renders " h=<ticks>" when tagged, "" when not. The training core tags every horizon in BOTH
+// dispatch modes (TrainingWorkers_RunHorizon, E.1.3 MP-1a), so serial markers carry the qualifier too.
 #define WF_MARKER_TAG (g_wf_marker_horizon > 0 \
     ? (snprintf(g_wf_marker_buf, sizeof(g_wf_marker_buf), " h=%d", g_wf_marker_horizon), \
        g_wf_marker_buf) : "")
@@ -1760,7 +1761,7 @@ struct FullValidationResults {
     // v5.15.3.B.2 — Multi-horizon grid identification (PARITY-021 close).
     // Caller populates BEFORE calling Backtest_RunFullValidation. Single-
     // horizon callers leave at defaults (count=1, idx=0, horizon_count=1).
-    // Multi-horizon worker (mh_run_one_horizon_fv) sets per-horizon values.
+    // The multi-horizon job (TrainingWorkers_RunHorizon) sets per-horizon values.
     // RFV reads these into StampArgs.grid_member_count/idx/horizon_count and
     // emits via Stamp_AssembleAndEmit — fields previously declared on the
     // stamp body schema (FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG) but no
@@ -2093,7 +2094,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // own node_<N>_feature_mask against it (verify_model_stamp expected_feature_mask).
         args.feature_mask = out->req_feature_mask ? out->req_feature_mask : 0xFFFFFFFFFFFFFFFFULL;
 
-        // PARITY-021 close — grid identification (mh_run_one_horizon_fv
+        // PARITY-021 close — grid identification (TrainingWorkers_RunHorizon
         // populates req_grid_*; single-horizon callers leave at defaults).
         args.grid_member_count = out->req_grid_member_count;
         args.grid_member_idx   = out->req_grid_member_idx;

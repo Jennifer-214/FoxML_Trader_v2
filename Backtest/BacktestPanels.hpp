@@ -21,6 +21,7 @@
 
 #include "imgui.h"
 #include "BacktestEngine.hpp"
+#include "TrainingWorkers.hpp"   // E.1.3 MP-1 — the ML producer core the Train buttons drive
 #include "BacktestSharded.hpp"  // phase 13: per-core sharded backtest path
 #include "../ML_Headers/ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT
 #include <errno.h>   // 2026-09-03 — the data-file sidecar writer fails LOUD with errno (path-schema discipline 5)
@@ -3439,14 +3440,13 @@ struct TrainingPanelState {
     float           ui_sl_per_horizon[PANEL_HORIZON_MAX];
     int             ui_tp_per_horizon_count;  // 0 = empty/use single field; 1 = broadcast; N = positional
     int             ui_sl_per_horizon_count;
-    // v5.11.41 — per-horizon FullValidationResults (one per horizon, max PANEL_HORIZON_MAX).
-    // Multi-horizon worker writes mh_horizon_fv[h] for each h in [0..N-1)
-    // by calling Backtest_RunFullValidation per horizon (replacing the
-    // previous "train+save only" inline XGBoost path). GUI reads
-    // mh_horizon_status[h] for live render. mh_horizon_progress[h] is
-    // the current horizon's WF + held-out % (0..100). mh_horizon_complete[h]
-    // = 1 when that horizon's FV pipeline finished (or failed).
-    FullValidationResults  mh_horizon_fv[PANEL_HORIZON_MAX];
+    // v5.11.41 — the per-horizon display of a multi-horizon run (one row per horizon, max
+    // PANEL_HORIZON_MAX). The run (TrainingWorkers_RunMultiHorizon) writes these as its sink:
+    // mh_horizon_status[h] is the live row text, mh_horizon_progress[h] the horizon's WF + held-out %
+    // (0..100), and mh_horizon_complete[h] = 1 (release-published, read with TrainingSink_Load) once
+    // that horizon finished or failed, after every file it writes. The FullValidationResults
+    // themselves are no longer kept here: no panel code read them, and the run returns them in its
+    // TrainingRunResult (E.1.3 MP-1).
     volatile int           mh_horizon_complete[PANEL_HORIZON_MAX];
     alignas(64) volatile int mh_horizon_progress[PANEL_HORIZON_MAX];  // H6 (Stage-5.5): cross-thread, was straddling a line
     // 256B per row (was 128B, which clipped the skill-floor refuse reason
@@ -3492,11 +3492,11 @@ struct TrainingPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-03]
-// [SIZE]_[517760B]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[411968B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[8090]
-// [STRADDLE]_[run_name@14241 · tm_phase_msg@28112 · ui_horizon_list@409320 · ui_tp_pct_csv@409356 · ui_sl_pct_csv@409420 · ui_sl_per_horizon@409516 · ui_label_kind_csv@517508]
+// [CACHE_LINES]_[6437]
+// [STRADDLE]_[run_name@14241 · tm_phase_msg@28112 · ui_horizon_list@409320 · ui_tp_pct_csv@409356 · ui_sl_pct_csv@409420 · ui_sl_per_horizon@409516 · ui_label_kind_csv@411716]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3512,7 +3512,7 @@ struct TrainingPanelState {
 //======================================================================
 static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
     return st && (st->tm_running || st->wf_running ||
-                  st->fv_running || st->hp_running || st->mh_running);
+                  st->fv_running || st->hp_running || TrainingSink_Load(&st->mh_running));
 }
 
 //======================================================================
@@ -4240,17 +4240,20 @@ static inline void *fullvalidation_worker_fn(void *arg) {
 // trainer does not — scan-1 NEW-2's evidence), held the only
 // FeatureStandardizer_Persist caller (the .scaler capability is hereby dormant-by-
 // decision), and kept `model_trained` semantics alive (S1-F8). The expected.cfg
-// producer — the one part worth keeping — was PORTED into mh_run_one_horizon_fv.
+// producer — the one part worth keeping — was PORTED into mh_run_one_horizon_fv (now
+// TrainingWorkers_RunHorizon, Backtest/TrainingWorkers.hpp — E.1.3 MP-1).
 
 
 //======================================================================================================
-// [v5.10.0a.G.1 — MULTI-HORIZON TRAINING WORKER]
+// [v5.10.0a.G.1 — MULTI-HORIZON TRAINING WORKER]  (the GUI adapter since E.1.3 MP-1)
 //======================================================================================================
-// Trains N models, one per horizon in cfg.horizon_list, sharing the
-// feature_matrix collected once. Each horizon recomputes its labels
-// (Backtest_ComputeLabelsFromSamples with override forward_ticks),
-// then trains an XGBooster on (features, this-horizon's labels), then
-// saves to a per-horizon dir.
+// Trains N models, one per horizon in cfg.horizon_list (or the panel's Horizons CSV), sharing the
+// feature_matrix collected once. One batched pass labels every horizon (E.1.2.D leaf 5); each
+// horizon then trains an XGBooster on (features, its labels), saves it to a per-horizon dir, and
+// runs WF + held-out validation, which emits its stamp. The run itself lives in
+// Backtest/TrainingWorkers.hpp (TrainingWorkers_RunMultiHorizon); this section is the panel's side
+// of it — the click-time request builder both Train buttons use, the launcher, and the worker
+// thread that wires the panel in as the run's sink.
 //
 // Per-horizon save path (D-431 nested): models/<class>/<run>/horizon_<H>/<role>.json
 // Per-horizon summary:                    .../horizon_<H>/summary_{entry|exit}.txt (D-e)
@@ -4258,812 +4261,131 @@ static inline void *fullvalidation_worker_fn(void *arg) {
 // Operator workflow:
 //   1. Set cfg.horizon_list=100,500,1000 (CSV)
 //   2. Click Collect Features (single feature collect)
-//   3. Click Train Multi-Horizon — N models trained sequentially
+//   3. Click Train Multi-Horizon — N models trained (serial, or in parallel per
+//      multi_horizon_max_threads; each booster is single-threaded — XGBoost has no OpenMP, D-494)
 //   4. (Future) cfg.horizon_list non-empty + Run Engine = ensemble
 //      inference (G.4)
 //
 // LITE caveats:
-//   - Models trained sequentially within this worker (each booster is
-//     single-threaded — XGBoost has no OpenMP, D-494)
 //   - No ensemble training-time discipline check — operator must
 //     manually pick which to deploy OR rely on G.4 ensemble inference
 //   - Save Run for multi-horizon: writes per-horizon dirs; Past Runs
 //     panel rescan picks them up as N separate rows
 //
-// Click-time snapshot mirrors v5.10.0E pattern.
+// Click-time snapshot mirrors v5.10.0E pattern — since MP-1 the snapshot IS the run's request, the
+// run config included, taken on the GUI thread.
 //======================================================================================================
 //======================================================================
 // [STRUCT]_[MultiHorizonWorkerArgs]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[worker-thread args for the multi-horizon training run — panel/run state + click-snapshots of run name / model path / XGBoost hyperparams / per-horizon TP-SL + WF/held-out/auto-stamp params + sell-side routing]
+// [OVERVIEW]_[worker-thread args for the multi-horizon training run — the panel (wired as the run's sink) + the click-time TrainingRunRequest + the run-config snapshot the request points at]
 //======================================================================
 // [CODE]
 //======================================================================
 struct MultiHorizonWorkerArgs {
-    TrainingPanelState *state;
-    RunControlState *run_control;
-    char snap_run_name[64];
-    char snap_model_path[256];
-    int  snap_label_type;
-    int  snap_max_depth;
-    float snap_learning_rate;
-    int  snap_n_estimators;
-    float snap_subsample;
-    float snap_colsample_bytree;
-    int  snap_min_child_weight;
-    int  snap_seed;
-    int  snap_tree_method_idx;
-    int  snap_horizon_count;
-    int  snap_horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    // v5.11.40 — per-horizon TP/SL. snap_tp_pct[h] / snap_sl_pct[h]
-    // are the barrier values for horizon h (broadcast or positional
-    // per the operator's CSV input + the broadcast-or-match rule).
-    float snap_tp_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    float snap_sl_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    // v5.11.41 — Backtest_RunFullValidation needs WF + held-out + auto-stamp
-    // params snap'd at click time (operator-mutable in GUI; race-free
-    // capture). Mirrors FullValidationWorkerArgs pattern.
-    char  snap_auto_stamp_secret[128];     // from cfg.auto_stamp_secret
-    int   snap_auto_stamp_enabled;          // from cfg.auto_stamp_on_held_out
-    int   snap_n_splits;                    // from state->wf_n_splits
-    int   snap_buffer_ticks;                // from state->wf_buffer_ticks
-    int   snap_min_train;                   // from state->wf_min_train
-    float snap_gap_threshold;               // from state->fv_gap_threshold
-    float snap_held_out_fraction;           // from state->fv_held_out_fraction
-    // v5.13.1 — sell-side training routing + per-horizon label_kind.
-    // snap_training_side = 0 (buy) leaves existing path bytewise; 1 (exit)
-    // historically routed models/exit/... — that side tree is RETIRED
-    // (PARITY-044); side flips the ROLE FILE, co-located in the family.
-    // snap_label_kind_per_horizon[h] overrides snap_label_type per horizon
-    // when its source CSV had >1 entries; otherwise broadcasts the single
-    // value (back-compat with single-uniform Label Type combo).
-    int  snap_training_side;
-    int  snap_label_kind_per_horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    TrainingPanelState *state;      // the panel — wired as the run's sink by the worker
+    TrainingRunRequest  req;        // the click-time request: every input of the run (MP-1)
+    BacktestRunConfig   run_cfg;    // the click-time run-config snapshot req.run_cfg points at (F3 — taken on the GUI thread)
 };
+// The embedded BacktestRunConfig makes the args 64-aligned, so they come from TrainingWorkers_AllocZeroed,
+// never malloc / calloc (MP-1a review F1).
+static_assert(alignof(MultiHorizonWorkerArgs) == 64,
+              "MultiHorizonWorkerArgs' alignment changed: re-check how it is allocated");
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[578624B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[9041]
+// [STRADDLE]_[none]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-08-22]
-// [SIZE]_[664B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[11]
-// [STRADDLE]_[snap_run_name@16 · snap_horizons@376 · snap_sl_pct@440 · snap_label_kind_per_horizon@628]
 //======================================================================
 // [END_STRUCT]_[MultiHorizonWorkerArgs]
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[mh_run_one_horizon_fv]
+// [FUNCTION]_[TrainingPanel_MultiHorizonArgs]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[run full validation for one horizon of a multi-horizon grid + emit its stamp]
-//======================================================================
-// v5.11.41 — per-horizon FV helper. Extracted from train_multi_horizon_worker_fn
-// for both serial-mode (called from for-loop) AND parallel-mode (called from
-// per-horizon pthreads). Writes mh_horizon_fv[h] / mh_horizon_complete[h] /
-// mh_horizon_status[h] / per-horizon summary.txt + fires
-// Backtest_RunFullValidation (which itself fires WF + held-out + auto-stamp).
-//
-// Parameters:
-//   state        — for status writes
-//   results      — feature matrix + labels[]; in PARALLEL mode each thread
-//                  passes its own isolated copy with own labels[] buffer
-//   h            — horizon index (0..N-1)
-//   horizon_ticks/tp_pct/sl_pct — per-horizon overrides
-//   local_run_cfg — mutable copy of BacktestRunConfig; mutated per horizon
-//                   to drive Backtest_ComputeLabelsFromSamples. In SERIAL,
-//                   this is &run_control->run_config (shared mutate). In
-//                   PARALLEL, each thread passes its own local copy.
-// [REFERENCE]_[PARITY]_[PARITY-21]
+// [OVERVIEW]_[the ONE click-time request builder for both Train buttons — every input of the run snapped on the GUI thread, the run config included; NULL on allocation failure]
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void mh_run_one_horizon_fv(
-    TrainingPanelState *state,
-    BacktestResults *results,
-    // E.1.2.C — the click-time hyperparameter snapshot. Replaces eight live
-    // `state->` reads and is handed to Backtest_RunFullValidation so the booster,
-    // the WF folds, the held-out model and the stamp all describe ONE architecture.
-    const tt::XGBHyperparams &snap_hp,
-    int h,
-    int horizon_ticks,
-    float tp_pct, float sl_pct,
-    int label_type,
-    const char *run_name,
-    int snap_n_splits, int snap_buffer_ticks, int snap_min_train,
-    float snap_gap_threshold, float snap_held_out_fraction,
-    int snap_auto_stamp_enabled,
-    const char *snap_auto_stamp_secret,
-    BacktestRunConfig *local_run_cfg,
-    // D-431 nested layout (S2-F4 close) — the RUN's primary label kind
-    // decides the class tree ONCE for the whole family, so a mixed
-    // Label-Kind CSV can no longer fragment one family across
-    // classification/ + regression/ as two same-named trees. Per-horizon
-    // label_type still drives role file, objective, labels and stamp.
-    // NO default (AR-20 — every caller states it).
-    int primary_label_type,
-    // E.1.2.D leaf 5 — 1 = results->labels already filled by the caller's
-    // Backtest_ComputeLabelsBatch (ONE corpus walk covers every horizon);
-    // 0 = do the single-target walk here (legacy per-horizon behavior).
-    // Deliberately NO default: every caller states its choice — leaf 4b is
-    // the record of how a defaulted new param keeps an unwired entry point
-    // invisible (AR-20).
-    int labels_precomputed,
-    // v5.13.1 — sell-side training. Default 0 preserves pre-v5.13.1 path
-    // for legacy callers. 1 → prepend "exit/" to run_subdir routing
-    // output co-located: side flips the ROLE FILE in the same nested
-    // horizon dirs (the models/exit/ side tree is RETIRED, PARITY-044).
-    int training_side = 0,
-    // v5.15.3.B.2 — total horizon count in this multi-horizon sweep
-    // (default 1 = single-horizon caller; multi-horizon callers pass N).
-    // Closes PARITY-021: stamp body grid_member_count + grid_member_idx
-    // were orphan-placeholder fields; this plumbs the real values.
-    int horizon_count = 1)
-{
-    snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-             "h=%d: computing labels...", horizon_ticks);
-
-    local_run_cfg->label_forward_ticks = horizon_ticks;
-    local_run_cfg->label_tp_pct        = (double)tp_pct;
-    local_run_cfg->label_sl_pct        = (double)sl_pct;
-    // E.1.2.C — the label KIND belongs in this per-horizon mutation set too,
-    // and its absence was not cosmetic. Backtest_ComputeLabelsFromSamples
-    // picks the label leaf from local_run_cfg->label_type
-    // (the label pass reads local_run_cfg->label_type), which nothing here
-    // wrote — so every horizon
-    // recomputed labels from whatever the last COLLECT click left behind,
-    // while `label_type` (the parameter) drove num_classes, the XGB
-    // objective, the role file, the run_subdir and the stamp. Same run,
-    // two different labels.
-    //
-    // That silently voided the "Label Kind CSV" feature outright: :4885
-    // writes the per-horizon kind into job->label_type, so it reached the
-    // objective and the stamp but NEVER the labels the model actually
-    // trained on. Every horizon trained on the collect-time label and was
-    // then stamped as something else.
-    //
-    // Safe to mutate: local_run_cfg is a per-JOB copy of saved_run_cfg
-    // (:4907), documented at :4284 as "mutated per horizon" — this is
-    // exactly the mutation set it exists for.
-    local_run_cfg->label_type          = label_type;
-    // The mutation set above stays UNCONDITIONAL even when labels arrive
-    // precomputed: Backtest_RunFullValidation + the stamp read label_type /
-    // fwd / tp / sl off local_run_cfg downstream. Only the corpus walk is
-    // skipped — the batch already produced these exact bytes (memcmp oracle).
-    if (!labels_precomputed) {
-        Backtest_ComputeLabelsFromSamples(results, local_run_cfg);
-    }
-
-    int n_valid = 0;
-    for (int s = 0; s < results->sample_count; ++s) {
-        if (!isnan(results->labels[s]) && !isinf(results->labels[s]))
-            n_valid++;
-    }
-    if (n_valid < 50) {
-        fprintf(stderr, "[mh-train] horizon %d: only %d valid labels; skip\n",
-                horizon_ticks, n_valid);
-        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d FAILED: only %d valid labels (need >= 50)",
-                 horizon_ticks, n_valid);
-        state->mh_horizon_complete[h] = 1;
-        return;
-    }
-
-    int num_classes = (label_type >= 0 && label_type < LABEL_COUNT)
-                      ? label_table[label_type].num_classes : 0;
-    int is_multiclass = (num_classes >= 2);
-    int is_regression = (num_classes == 1);
-    // E.1.2.C 3-role — side selects the ROLE FILE via the extracted helper
-    // (side=1 => "exit", saved CO-LOCATED; label kind stays free per (b)).
-    const char* role = Training_ResolveRole(label_type, training_side);
-    // D-431 nested layout — run_subdir derives from the RUN's PRIMARY kind
-    // (S2-F4 close: one family = one class tree; the old per-horizon
-    // derivation fragmented a mixed-CSV family across two trees).
-    int primary_nc = (primary_label_type >= 0 && primary_label_type < LABEL_COUNT)
-                     ? label_table[primary_label_type].num_classes : 0;
-    const char* run_subdir = (primary_label_type == LABEL_PEAK_VALLEY_STABLE
-                              || primary_label_type == LABEL_REGIME
-                              || primary_nc >= 2)
-        ? "classification" : (primary_nc == 1 ? "regression" : "classification");
-    // E.1.2.C 3-retire (2026-08-20) — the models/exit/ SIDE TREE is RETIRED:
-    // no loader ever walked it (PARITY-044); exit models land CO-LOCATED in
-    // the same per-horizon dirs (side flips the ROLE FILE, next commit).
-    //
-    // D-431 — the FAMILY node is the unit: models/<class>/<family>/ holds
-    // horizon_<N> children + the bundle-scoped state files. Every future
-    // family is born with its bundle node (the treadmill's structural end);
-    // FoxDir_CreateParents builds the whole chain.
-    char family_dir[340];
-    snprintf(family_dir, sizeof(family_dir), "models/%s/%s",
-             run_subdir, run_name);
-    char horizon_dir[360];
-    ModelPath_HorizonDir(horizon_dir, sizeof(horizon_dir),
-                         family_dir, (long)horizon_ticks);
-    FoxDir_CreateParents(horizon_dir);
-
-    HeldOutSplit split = HeldOutSplit_Make(results->sample_count,
-                                            (double)snap_held_out_fraction);
-    char unlock_token[33];
-    memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
-    HeldOutSplit_Unlock(&split, unlock_token);
-
-    FullValidationResults *fv = &state->mh_horizon_fv[h];
-    memset(fv, 0, sizeof(*fv));
-    // v5.11.47 — ALWAYS stamp. Was gated on snap_auto_stamp_enabled
-    // (= cfg.auto_stamp_on_held_out which defaults to 1 but could be
-    // 0 OR uninitialized if Run Control never loaded a cfg). Operator
-    // wants stamps unconditionally — they're cheap, and unstamped
-    // models lose load-time safety checks (label_registry_hash,
-    // feature_registry_hash, model_num_outputs, etc.). Removed the
-    // conditional; auto_stamp_path is always set.
-    snprintf(fv->auto_stamp_path, sizeof(fv->auto_stamp_path),
-             "%s/%s.json", horizon_dir, role);
-    size_t n = strnlen(snap_auto_stamp_secret, 128);
-    if (n >= sizeof(fv->auto_stamp_secret))
-        n = sizeof(fv->auto_stamp_secret) - 1;
-    memcpy(fv->auto_stamp_secret, snap_auto_stamp_secret, n);
-    fv->auto_stamp_secret[n] = '\0';
-    fv->auto_stamp_format_version = 0;
-    (void)snap_auto_stamp_enabled;  // kept in args for back-compat; not gating now
-    fv->req_label_lookahead_ticks = horizon_ticks;
-    // s5-F12 — record the EFFECTIVE barrier, i.e. the one the labels were
-    // actually built against, not the raw operator input. Same resolver the
-    // label walk uses (Label_ResolveEffectiveTp), so train-time and stamp-time
-    // cannot disagree. Before this the stamp carried the raw tp while the
-    // labels carried tp+fee, and the served bracket inherited the stamp's
-    // value — an M5 train-serve parity break with no observable symptom
-    // (the fee is not in the stamp body either, so nothing could catch it).
-    // D-476 (2026-09-02) — and record it BY KIND. The sl line here used to copy the
-    // raw slot (the s5-F12 fix landed on tp and not its sibling), so a sigma-window
-    // row stamped its TICK COUNT into a field the serve side reads as a price
-    // bracket and tt::barrier_is_corrupt refused as >100%. Label_Stamp*Pct is the
-    // ONE rule for both stamp seams (this one + the single-horizon twin): price-
-    // percent kinds → the effective resolver; sigma-quantities (TP_SIGMA_K,
-    // SL_VOL_WINDOW_TICKS) → 0, which the serve side defines as "use the cfg
-    // bracket" (GateParameters.hpp tp_pct / sl_pct). PARITY-065 carries the future
-    // tier, where the kind itself travels in the stamp body.
-    fv->req_label_tp_pct          = Label_StampTpPct(
-                                        label_type, (double)tp_pct,
-                                        local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
-    fv->req_label_sl_pct          = Label_StampSlPct(label_type, (double)sl_pct);
-    fv->req_feature_mask          = local_run_cfg ? local_run_cfg->feature_mask : 0;   // D-477 — the mask the rows were collected under
-    // v5.15.3.B.2 — PARITY-021 close. Grid identification plumbed from
-    // multi-horizon worker through FullValidationResults → StampArgs.
-    // grid_member_count = horizon_count (total horizons), member_idx = h
-    // (this horizon's index 0..N-1). Single-horizon callers (Train Model
-    // button) leave defaults at 1/0/1 via the function-arg default.
-    fv->req_grid_member_count = horizon_count;
-    fv->req_grid_member_idx   = h;
-    fv->req_horizon_count     = horizon_count;
-    // v5.15.3.B.2 — also plumb expected_role from label_type so Stamp_
-    // AssembleAndEmit emits args.req_role correctly. Pre-v5.15.3 this
-    // came via inf.expected_role manual setter at RFV; helper expects
-    // it via out->req_role.
-    snprintf(fv->req_role, sizeof(fv->req_role), "%s", role);
-
-    // v5.11.52 — train + save the FINAL deployable model BEFORE calling
-    // RFV. RFV computes WF + held-out metrics + auto-stamps the file at
-    // fv->auto_stamp_path, but it doesn't save a model itself (it trains
-    // boosters internally for WF folds + held-out then discards). The
-    // pre-v5.11.41.A worker had this train+save inline; my v5.11.41.A
-    // refactor dropped it when replacing inline XGB with RFV. Without
-    // a saved model file, stamp_write_for_model failed at SHA256 of
-    // model_path → "could not sha256 ..." status. Restoring train+save
-    // here closes that bug.
-    //
-    // Model trained on full feature_matrix (NaN-filtered labels). This
-    // matches the held-out training's training portion ([0, trainval_end))
-    // closely enough for deployment purposes — operator gets a model
-    // that learned from the most data possible.
-#ifdef USE_XGBOOST
+static inline MultiHorizonWorkerArgs *TrainingPanel_MultiHorizonArgs(TrainingPanelState *state,
+                                                                     RunControlState *run_control,
+                                                                     int horizon_count,
+                                                                     const int *horizons) {
+    MultiHorizonWorkerArgs *a = TrainingWorkers_AllocZeroed<MultiHorizonWorkerArgs>();
+    if (!a) return NULL;
+    a->state   = state;
+    a->run_cfg = run_control->run_config;    // F3 — the worker never reads the shared one
+    TrainingRunRequest &r = a->req;
+    r = TrainingRunRequest{};
+    r.data    = &run_control->results;
+    r.run_cfg = &a->run_cfg;
     {
-        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d: training final model for save+stamp...", horizon_ticks);
-
-        // count valid (non-NaN, non-Inf) labels
-        int n_valid = 0;
-        for (int s = 0; s < results->sample_count; ++s) {
-            if (!isnan(results->labels[s]) && !isinf(results->labels[s]))
-                n_valid++;
-        }
-        if (n_valid >= 50) {
-            float *train_features = (float*)malloc((size_t)n_valid * MODEL_NUM_FEATURES * sizeof(float));
-            float *train_labels   = (float*)malloc((size_t)n_valid * sizeof(float));
-            if (train_features && train_labels) {
-                int j = 0;
-                for (int s = 0; s < results->sample_count; ++s) {
-                    if (isnan(results->labels[s]) || isinf(results->labels[s])) continue;
-                    memcpy(&train_features[(size_t)j * MODEL_NUM_FEATURES],
-                           &results->feature_matrix[(size_t)s * MODEL_NUM_FEATURES],
-                           MODEL_NUM_FEATURES * sizeof(float));
-                    train_labels[j] = results->labels[s];
-                    j++;
-                }
-                DMatrixHandle dtrain = nullptr;
-                // PARITY-049 — was a bare quiet_NaN() literal while nine other sites passed
-                // -1.0f. The VALUE was right (and is why no retrain is owed); the divergence was.
-                XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES,
-                                        XGB_MISSING_VALUE, &dtrain);
-                XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
-                BoosterHandle booster = nullptr;
-                XGBoosterCreate(&dtrain, 1, &booster);
-                // E.1.2.C — the click-time snapshot, not eight live widget reads.
-                tt::XGBHyperparams hp = snap_hp;
-                tt::XGBHyperparams_Apply(booster, hp);
-                int K_classes = (label_type >= 0 && label_type < LABEL_COUNT)
-                              ? label_table[label_type].num_classes : 0;
-                int is_multi  = (K_classes >= 2);
-                int is_regr   = (K_classes == 1);
-                if (is_multi) {
-                    XGBoosterSetParam(booster, "objective", "multi:softprob");
-                    char nc_s[8]; snprintf(nc_s, 8, "%d", K_classes);
-                    XGBoosterSetParam(booster, "num_class", nc_s);
-                } else if (is_regr) {
-                    XGBoosterSetParam(booster, "objective", "reg:squarederror");
-                } else {
-                    XGBoosterSetParam(booster, "objective", "binary:logistic");
-                }
-                // TECH_DEBT-301a (2026-08-25) — THE SHIPPED MODEL WAS TRAINED UNWEIGHTED.
-                // The WF folds and the held-out eval both applied class balance; this site — the
-                // one whose artifact is actually SAVED and STAMPED — applied none. So the two
-                // numbers the stamp certifies described boosters this model is not, and on a
-                // 61.5/34.4/4.1 split an unweighted booster leans to the majority and rarely
-                // emits the rare class, which is the buy signal. Routed through the SAME producer
-                // as the other two so the three cannot drift apart again.
-                float *ship_w = XGBoost_ApplyClassBalance(booster, dtrain, train_labels, n_valid,
-                                                           K_classes, is_regr, is_multi,
-                                                           "mh-train shipped");
-                int it_completed = 0;   // E.1.2.D (scan-2 NEW-1) — real rounds only
-                for (int it = 0; it < hp.n_estimators; ++it) {
-                    if (state->mh_cancel) break;
-                    if (XGBoosterUpdateOneIter(booster, it, dtrain) != 0) break;
-                    it_completed++;
-                }
-                // E.1.2.D (scan-2 NEW-1) — NEVER save a zero-tree husk over a
-                // real artifact. A cancel at round 0 / a first-round failure /
-                // n_estimators==0 fell through to an unconditional save,
-                // writing a valid-but-empty XGBoost JSON ("num_trees":"0")
-                // that silently REPLACED the previous model at this path and
-                // predicted base_score forever — unstamped, so every load-time
-                // check was vacuous on it (S2-F6). The 516-byte
-                // twins_horizon_7500/exit.json husk is the live instance.
-                if (ship_w) { free(ship_w); ship_w = nullptr; }   // TECH_DEBT-301a — DMatrix copied it
-                if (it_completed > 0) {
-                    int save_rc = XGBoosterSaveModel(booster, fv->auto_stamp_path);
-                    if (save_rc != 0) {
-                        fprintf(stderr, "[mh-train] horizon %d: SaveModel(%s) failed: %s\n",
-                                horizon_ticks, fv->auto_stamp_path,
-                                XGBGetLastError() ? XGBGetLastError() : "(null)");
-                    }
-                } else {
-                    fprintf(stderr, "[mh-train] horizon %d: 0 boosting rounds "
-                            "completed (%s) — NOT saving over %s\n",
-                            horizon_ticks,
-                            state->mh_cancel ? "cancelled"
-                                             : "first round failed or n_estimators==0",
-                            fv->auto_stamp_path);
-                }
-                XGBoosterFree(booster);
-                XGDMatrixFree(dtrain);
-            }
-            free(train_features);
-            free(train_labels);
-        }
+        size_t n = strnlen(state->run_name, sizeof(state->run_name));
+        if (n >= sizeof(r.run_name)) n = sizeof(r.run_name) - 1;
+        memcpy(r.run_name, state->run_name, n);
+        r.run_name[n] = '\0';
     }
-#endif
-
-    snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-             "h=%d: WF + held-out (%d folds)...",
-             horizon_ticks, snap_n_splits);
-
-    // E.1.2.C — hand the SAME snapshot to validation. Without this the WF folds
-    // trained at 6/0.1/200 + four cfg overrides, the held-out model at pure
-    // defaults, and the stamp recorded a third story — while the booster above
-    // used the operator's values. Four descriptions of one run.
-    Backtest_RunFullValidation(fv, results, &split,
-                                snap_n_splits, horizon_ticks,
-                                snap_buffer_ticks, snap_min_train,
-                                &state->mh_horizon_progress[h],
-                                &state->mh_cancel,
-                                label_type, snap_gap_threshold,
-                                /*hp_override=*/&snap_hp);
-
-    state->mh_horizon_complete[h] = 1;
-
-    // E.1.2.D (scan-1 NEW-6) — `label_kind == 2` was the wrong discriminant:
-    // FullValidationResults.label_kind IS num_classes (0=binary, 1=regression,
-    // >=2=multiclass) and no FOREACH_TARGET row has num_classes==2, so that
-    // branch was unreachable and every REGRESSION horizon displayed/recorded
-    // accuracy 0.00 instead of its correlation. Route through the kind SSoT.
-    double wf_metric = LabelType_IsRegression(label_type)
-        ? fv->walkforward.mean_val_correlation
-        : fv->walkforward.mean_val_accuracy;
-    double ho_metric = LabelType_IsRegression(label_type)
-        ? fv->held_out_correlation : fv->held_out_metric;
-    // 2026-09-03 — the per-horizon row shows the GATE metric + direction recall
-    // next to the plain pair (E.2/E.3): "bal=0.412 rec c0/c1/c2=0.31/0.47/0.45".
-    // Built once, appended to every classification verdict below; empty for
-    // regression (the buffer is 256 B — the recall list stays compact).
-    char bal_buf[96] = "";
-    if (!LabelType_IsRegression(label_type)) {
-        const int Kp = (fv->walkforward.num_classes >= 2)
-                     ? (fv->walkforward.num_classes > 6 ? 6 : fv->walkforward.num_classes) : 2;
-        int off = snprintf(bal_buf, sizeof(bal_buf), " bal=%.3f rec",
-                           (double)fv->walkforward.mean_val_balanced_accuracy);
-        for (int k = 0; k < Kp && off > 0 && off < (int)sizeof(bal_buf); ++k)
-            off += snprintf(bal_buf + off, sizeof(bal_buf) - (size_t)off, "%s%.2f",
-                            k == 0 ? " " : "/", (double)fv->walkforward.mean_val_class_recall[k]);
+    snprintf(r.models_root, sizeof(r.models_root), "%s", "models");
+    r.primary_label_type = Label_ResolveKindForHorizon(   // D-476: CSV position 0 wins
+        state->ui_label_kind_per_horizon,
+        state->ui_label_kind_per_horizon_count, state->label_type, 0);
+    // v5.13.1.A — the side, snapped at click time (single-horizon too, v5.13.5.A).
+    r.training_side = state->ui_training_side;
+    r.horizon_count = horizon_count;
+    // v5.11.40 — per-horizon TP/SL by the broadcast-or-match rule: one value broadcasts, N map
+    // positionally, an empty CSV falls back to label_tp_pct / label_sl_pct. D-476 — ONE label-kind
+    // rule for every click (Label_ResolveKindForHorizon). Slots past horizon_count are never read.
+    const float bcast_tp = (state->ui_tp_per_horizon_count > 0)
+        ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
+    const float bcast_sl = (state->ui_sl_per_horizon_count > 0)
+        ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
+    for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
+        const int live = (i < horizon_count);
+        r.horizon_ticks[i] = live ? horizons[i] : 0;
+        r.tp_pct[i] = (state->ui_tp_per_horizon_count > 1 && i < state->ui_tp_per_horizon_count)
+            ? state->ui_tp_per_horizon[i] : bcast_tp;
+        r.sl_pct[i] = (state->ui_sl_per_horizon_count > 1 && i < state->ui_sl_per_horizon_count)
+            ? state->ui_sl_per_horizon[i] : bcast_sl;
+        r.label_type[i] = live ? Label_ResolveKindForHorizon(
+                                     state->ui_label_kind_per_horizon,
+                                     state->ui_label_kind_per_horizon_count, state->label_type, i)
+                               : 0;
     }
-
-    if (fv->auto_stamp_attempted && fv->auto_stamp_ok) {
-        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f stamped%s",
-                 horizon_ticks, wf_metric, ho_metric,
-                 fv->wf_to_held_out_gap, bal_buf);
-    } else if (fv->ran_held_out && fv->auto_stamp_attempted) {
-        // Class-62 close — a run the gate REFUSED (or whose stamp write failed)
-        // is NOT "OK". The old format labeled the refuse branch
-        // "h=%d OK: … (stamp skipped: %s)" — a refused run read as OK, and the
-        // reason clipped at 128B. auto_stamp_error carries the gate's verdict
-        // (skill floor / gap gate) or the writer's error.
-        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d REFUSED: WF=%.3f HO=%.3f gap=%.3f%s — %s",
-                 horizon_ticks, wf_metric, ho_metric, fv->wf_to_held_out_gap, bal_buf,
-                 fv->auto_stamp_error[0] ? fv->auto_stamp_error
-                                         : "unknown write error");
-    } else if (fv->ran_held_out) {
-        // stamp not requested (auto_stamp_attempted=0: auto_stamp_on_held_out=0
-        // in cfg, OR snap was 0 at click time, OR Run Control hasn't loaded a
-        // cfg) — validation itself completed; only the stamp was never asked for.
-        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f%s (no stamp requested: auto_stamp_on_held_out=0)",
-                 horizon_ticks, wf_metric, ho_metric,
-                 fv->wf_to_held_out_gap, bal_buf);
-    } else if (state->mh_cancel) {
-        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d CANCELLED mid-validation", horizon_ticks);
-    } else {
-        snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                 "h=%d FAILED: held-out did not complete",
-                 horizon_ticks);
-    }
-
-    char dst_summary[400];
-    // E.1.2.D D-e (operator-decided) — SIDE-SUFFIXED summaries end the
-    // buy/exit collision: the exit run used to OVERWRITE summary.txt,
-    // destroying the buy record (measured twice — twins and run_1 both
-    // lost their entry metrics to it; D4's accept+document disposition
-    // failed in practice). Entry runs write summary_entry.txt, exit runs
-    // summary_exit.txt; legacy summary.txt on old dirs stays readable via
-    // the PastRuns_LoadOne preference chain.
-    snprintf(dst_summary, sizeof(dst_summary), "%s/%s", horizon_dir,
-             training_side == 1 ? "summary_exit.txt" : "summary_entry.txt");
-    FILE *sf = fopen(dst_summary, "w");
-    if (sf) {
-        // v5.11.50 — use CANONICAL summary.txt field names that past_runs
-        // reads (in PastRuns_LoadOne). Pre-fix v5.11.41.A used made-up wf_*
-        // names; past_runs ignored them, leaving Train Acc/Val Acc/Gap
-        // columns blank. NOW uses the same names Save Run uses so
-        // multi-horizon runs render the same as single-horizon Save Run
-        // bundles. Plus expected_num_classes (v5.11.49) for Classes col.
-        fprintf(sf, "run: %s/horizon_%d\n", run_name, horizon_ticks);  // D-431 nested (display-only; verified unparsed)
-        fprintf(sf, "role: %s\n", role);
-        fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
-        fprintf(sf, "label_type: %d\n", label_type);
-        fprintf(sf, "expected_num_classes: %d\n", num_classes);
-        // E.1.2.C — report what actually TRAINED. These were a SECOND live read of
-        // the same widgets, minutes after the first, so an edit in between made
-        // summary.txt disagree with the model sitting beside it — and PastRuns
-        // displays the summary value as truth.
-        fprintf(sf, "max_depth: %d\n", snap_hp.max_depth);
-        fprintf(sf, "learning_rate: %.3f\n", (double)snap_hp.learning_rate);
-        fprintf(sf, "n_estimators: %d\n", snap_hp.n_estimators);
-        fprintf(sf, "label_tp_pct: %.4f\n", (double)tp_pct);
-        fprintf(sf, "label_sl_pct: %.4f\n", (double)sl_pct);
-        // s5 leaf-15 — lineage: which round trip this run's win threshold cleared.
-        // Sourced from local_run_cfg (the config that produced these labels), the
-        // same click-time-snapshot discipline as the hyperparameters above.
-        fprintf(sf, "label_roundtrip_fee_pct: %.4f\n",
-                local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
-        fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
-        fprintf(sf, "n_train_samples: %d\n", results->sample_count);
-        fprintf(sf, "label_kind: %d\n", fv->label_kind);
-        fprintf(sf, "valid_folds: %d\n", fv->walkforward.valid_folds);
-        // val_accuracy / val_correlation: pick whichever fits the kind.
-        // past_runs reader sets has_wf_results=1 when EITHER is read.
-        if (LabelType_IsRegression(label_type)) {  // regression (E.1.2.D NEW-6 — was the unreachable == 2)
-            fprintf(sf, "val_correlation: %.4f\n",
-                    (double)fv->walkforward.mean_val_correlation);
-            fprintf(sf, "val_mse: %.6f\n",
-                    (double)fv->walkforward.mean_val_mse);
-        } else {  // binary or multiclass
-            fprintf(sf, "val_accuracy: %.2f\n",
-                    100.0 * (double)fv->walkforward.mean_val_accuracy);
-            fprintf(sf, "val_stddev: %.2f\n",
-                    100.0 * (double)fv->walkforward.std_val_accuracy);
-            // 2026-09-03 — the gate metric + per-class recall (E.2/E.3). Percent
-            // like val_accuracy so Past Runs reads them with the same rule.
-            fprintf(sf, "val_balanced_accuracy: %.2f\n",
-                    100.0 * (double)fv->walkforward.mean_val_balanced_accuracy);
-            {
-                const int Kp = (fv->walkforward.num_classes >= 2)
-                             ? (fv->walkforward.num_classes > 16 ? 16 : fv->walkforward.num_classes) : 2;
-                for (int k = 0; k < Kp; ++k)
-                    fprintf(sf, "val_recall_c%d: %.2f\n", k,
-                            100.0 * (double)fv->walkforward.mean_val_class_recall[k]);
-                fprintf(sf, "held_out_balanced_accuracy: %.4f\n",
-                        (double)fv->held_out_balanced_accuracy);
-                for (int k = 0; k < Kp; ++k)
-                    fprintf(sf, "held_out_recall_c%d: %.4f\n", k,
-                            (double)fv->held_out_class_recall[k]);
-            }
-        }
-        fprintf(sf, "train_val_gap: %.4f\n",
-                (double)fv->wf_to_held_out_gap);
-        fprintf(sf, "overfit_folds: %d\n", fv->walkforward.overfit_count);
-        fprintf(sf, "held_out_metric: %.4f\n", (double)fv->held_out_metric);
-        fprintf(sf, "held_out_count: %d\n", fv->held_out_count);
-        // accuracy = train accuracy. Past_runs reads this as `r->train_accuracy`.
-        // Use mean_train_accuracy from WF folds (closest analog).
-        if (fv->label_kind != 2) {
-            fprintf(sf, "accuracy: %.2f\n",
-                    100.0 * (double)fv->walkforward.mean_train_accuracy);
-        }
-        // Bookkeeping (operator may grep for these even though past_runs
-        // doesn't use them):
-        fprintf(sf, "ran_held_out: %d\n", fv->ran_held_out);
-        fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
-        fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
-        if (fv->auto_stamp_ok) {
-            fprintf(sf, "auto_stamp_path_written: %s\n",
-                    fv->auto_stamp_path_written);
-        } else if (fv->auto_stamp_attempted) {
-            fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
-        }
-        // 2026-09-03 — the CORPUS SELECTION record (what-to-do-next.md: "today the
-        // selection is not recorded anywhere"). Sourced from `results` — the record
-        // the corpus walk wrote at collect time (BacktestResults_RecordCorpus), NOT
-        // the Data panel's live selection: the operator can reselect between
-        // Collect and Train, and the samples this model trained on are the
-        // collect-time set. The tick-time span is the DATA's own timestamps (UTC),
-        // the same two scalars the purge gap's time reach reads (D-474).
-        {
-            fprintf(sf, "data_files: %d\n", results->data_file_count);
-            if (results->data_file_count > 0) {
-                fprintf(sf, "data_first_file: %s\n", results->data_first_file);
-                fprintf(sf, "data_last_file: %s\n",  results->data_last_file);
-            }
-            if (results->data_list_sha256[0])
-                fprintf(sf, "data_list_sha256: %s\n", results->data_list_sha256);
-            if (results->first_tick_us > 0 && results->last_tick_us >= results->first_tick_us) {
-                char d0[16] = "", d1[16] = "";
-                struct tm tm0, tm1;
-                time_t t0 = (time_t)(results->first_tick_us / 1000000ULL);
-                time_t t1 = (time_t)(results->last_tick_us  / 1000000ULL);
-                if (gmtime_r(&t0, &tm0)) strftime(d0, sizeof(d0), "%Y-%m-%d", &tm0);
-                if (gmtime_r(&t1, &tm1)) strftime(d1, sizeof(d1), "%Y-%m-%d", &tm1);
-                fprintf(sf, "data_first_tick_utc: %s\n", d0);
-                fprintf(sf, "data_last_tick_utc: %s\n",  d1);
-                fprintf(sf, "data_first_tick_us: %llu\n", (unsigned long long)results->first_tick_us);
-                fprintf(sf, "data_last_tick_us: %llu\n",  (unsigned long long)results->last_tick_us);
-            }
-        }
-        fclose(sf);
-    }
-
-    // 2026-09-03 — the full data-file list, side-addressed like its summary
-    // (model-artifact-path-schema-discipline #6). Written from the run cfg the
-    // trainer holds (the Data panel selection at CLICK time) and stamped with
-    // BOTH hashes, so a selection changed between Collect and Train is visible
-    // in the file itself instead of silently listing the wrong corpus.
-    if (local_run_cfg) {
-        char dst_list[400];
-        snprintf(dst_list, sizeof(dst_list), "%s/%s", horizon_dir,
-                 training_side == 1 ? MODEL_SIDECAR_DATA_FILES_EXIT
-                                    : MODEL_SIDECAR_DATA_FILES_ENTRY);
-        FILE *lf = fopen(dst_list, "w");
-        if (lf) {
-            char sel_sha[65] = "";
-            BacktestRunConfig_DataListSha256(local_run_cfg, sel_sha, sizeof(sel_sha));
-            const int same = (results->data_list_sha256[0] && sel_sha[0] &&
-                              strcmp(results->data_list_sha256, sel_sha) == 0);
-            fprintf(lf, "# data files selected at Train click (%d) — the %s record\n",
-                    local_run_cfg->num_data_files, training_side == 1 ? "EXIT" : "ENTRY");
-            fprintf(lf, "# selection_list_sha256 = %s\n", sel_sha[0] ? sel_sha : "(unknown)");
-            fprintf(lf, "# corpus_list_sha256 = %s   (the Collect-time list the samples came from)\n",
-                    results->data_list_sha256[0] ? results->data_list_sha256 : "(unknown)");
-            fprintf(lf, "# %s\n", same ? "MATCH — this list IS the training corpus"
-                                       : "MISMATCH — the selection changed since Collect; the corpus is the "
-                                         "Collect-time list (see summary data_first_file / data_last_file)");
-            for (int i = 0; i < local_run_cfg->num_data_files && i < MAX_DATA_FILES; ++i)
-                fprintf(lf, "%s\n", local_run_cfg->data_paths[i]);
-            fclose(lf);
-        } else {
-            fprintf(stderr, "[mh] h=%d: could not write %s (errno %d)\n",
-                    horizon_ticks, dst_list, errno);
-        }
-    }
-
-    // D-d (2026-08-22, operator-decided) — expected.cfg gains its FIRST live
-    // producer, ported from the deleted Save Run block: the mh path emits it
-    // per horizon dir, so the load-side VerifyExpected + the cd9c2c7
-    // label-direction check stop being vacuous (register #22 / Class 51).
-    // NEW-8 dies in the port: num_classes comes from label_table (computed
-    // above), never a hand-switch; hyperparams record the CLICK-TIME SNAPSHOT
-    // (the dead writer recorded live panel state).
-    // 2026-09-03 — SIDE-ADDRESSED (model-artifact-path-schema-discipline #6, the
-    // summary_{entry,exit}.txt shape): one shared expected.cfg per horizon dir
-    // meant the exit run OVERWROTE the entry record (role=exit, label 5,
-    // 0 classes) on every horizon of the operator's best family — the barrier
-    // record was gone and nothing said so. entry runs write expected_entry.cfg,
-    // exit runs expected_exit.cfg; every reader resolves through
-    // ModelPath_ExpectedCfgResolve (side file first, legacy shared name once).
+    // E.1.2.C — the hyperparameters through the panel's ONE mapping (the WF and FV clicks use it too).
+    r.hp = Training_SnapshotHyperparams(state);
+    // v5.11.41 — the WF + held-out params. v5.11.47 — the secret falls back to cfg.auto_stamp_secret
+    // when the GUI field is empty (set it once in cfg instead of re-typing it every session).
+    r.wf_n_splits       = state->wf_n_splits;
+    r.wf_buffer_ticks   = state->wf_buffer_ticks;
+    r.wf_min_train      = state->wf_min_train;
+    r.gap_threshold     = state->fv_gap_threshold;
+    r.held_out_fraction = state->fv_held_out_fraction;
     {
-        char dst_expected[400];
-        snprintf(dst_expected, sizeof(dst_expected), "%s/%s", horizon_dir,
-                 ModelPath_ExpectedCfgName(training_side));
-        FILE *ef = fopen(dst_expected, "w");
-        if (ef) {
-            fprintf(ef, "# auto-generated by foxml_suite multi-horizon train — DO NOT EDIT\n");
-            fprintf(ef, "# the engine compares these against engine.cfg at load time.\n");
-            fprintf(ef, "# mismatch → warning (default) or failure (model_verify_strict=1).\n");
-            fprintf(ef, "# side-addressed: this is the %s record; the other side's record is its sibling file.\n\n",
-                    training_side == 1 ? "EXIT" : "ENTRY");
-            fprintf(ef, "expected_role = %s\n", role);
-            fprintf(ef, "expected_label_type = %d\n", label_type);
-            fprintf(ef, "expected_num_classes = %d\n", num_classes);
-            fprintf(ef, "\n# ML config the model was trained against. live engine should match.\n");
-            fprintf(ef, "ml_buy_threshold = %.3f\n",
-                    FPN_ToDouble(results->config_used.ml_buy_threshold));
-            fprintf(ef, "ml_tp_pct = %.6f\n", Money_ToDouble(results->config_used.ml_tp_pct));
-            fprintf(ef, "ml_sl_pct = %.6f\n", Money_ToDouble(results->config_used.ml_sl_pct));
-            fprintf(ef, "ml_backend = %d\n", results->config_used.ml_backend);
-            fprintf(ef, "expected_poll_interval = %u\n",
-                    results->config_used.poll_interval);
-            fprintf(ef, "expected_feature_format_version = %u\n",
-                    (unsigned)MODEL_FORMAT_VERSION);
-            fprintf(ef, "expected_num_features = %u\n", (unsigned)MODEL_NUM_FEATURES);
-            fprintf(ef, "held_out_fraction = %.4f\n",
-                    FPN_ToDouble(results->config_used.held_out_fraction));
-            fprintf(ef, "gap_acceptable_threshold = %.4f\n",
-                    FPN_ToDouble(results->config_used.gap_acceptable_threshold));
-            fprintf(ef, "\n# click-time training hyperparameters (informational)\n");
-            fprintf(ef, "# max_depth = %d\n", snap_hp.max_depth);
-            fprintf(ef, "# learning_rate = %.3f\n", (double)snap_hp.learning_rate);
-            fprintf(ef, "# n_estimators = %d\n", snap_hp.n_estimators);
-            fclose(ef);
-        }
+        const char *src = state->fv_auto_stamp_secret;
+        if (src[0] == '\0') src = run_control->results.config_used.auto_stamp_secret;
+        size_t n = strnlen(src, sizeof(state->fv_auto_stamp_secret));
+        if (n >= sizeof(r.stamp_secret)) n = sizeof(r.stamp_secret) - 1;
+        memcpy(r.stamp_secret, src, n);
+        r.stamp_secret[n] = '\0';
     }
+    // F16 — the serial / parallel choice is an explicit request field (its value is still the
+    // collect-time cfg's, as it always was).
+    r.max_threads = run_control->results.config_used.multi_horizon_max_threads;
+    return a;
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
-// [END_FUNCTION]_[mh_run_one_horizon_fv]
-//======================================================================
-
-// v5.11.41 — per-horizon parallel worker. Each thread runs ONE horizon's
-// full FV pipeline against its own isolated_results (shallow copy of shared
-// BacktestResults + own labels[] buffer to avoid race with other threads
-// recomputing labels concurrently). Records config_used.xgb_train_nthread=1,
-// the stamp's parallel-mode marker (the trained bytes are the same either
-// way: every booster is single-threaded — XGBoost has no OpenMP, D-494).
-//======================================================================
-// [STRUCT]_[MultiHorizonParallelJob]
-//----------------------------------------------------------------------
-// [TAG]_[[GUI] [BACKTEST]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one per-horizon parallel job — an isolated result copy + horizon index/barriers + WF/held-out/auto-stamp snapshots + local run cfg + grid-member identification (PARITY-021)]
-// [REFERENCE]_[PARITY]_[PARITY-21]
-//======================================================================
-// [CODE]
-//======================================================================
-struct MultiHorizonParallelJob {
-    TrainingPanelState *state;
-    BacktestResults isolated_results;  // shallow copy + own labels[]
-    int h;
-    int horizon_ticks;
-    float tp_pct, sl_pct;
-    int label_type;
-    char run_name[64];
-    int snap_n_splits, snap_buffer_ticks, snap_min_train;
-    float snap_gap_threshold, snap_held_out_fraction;
-    int snap_auto_stamp_enabled;
-    char snap_auto_stamp_secret[128];
-    BacktestRunConfig local_run_cfg;
-    // v5.13.1 — sell-side training routing. Defaults to 0 (buy) so legacy
-    // parallel-mode callers preserve bytewise output paths.
-    int training_side;
-    // v5.15.3.B.2 — grid identification (PARITY-021 close). horizon_count = N
-    // total horizons in this multi-horizon sweep. h is the per-job index
-    // (already present). Plumbed into fv->req_grid_* before RFV call so
-    // Stamp_AssembleAndEmit emits grid_member_count + grid_member_idx fields
-    // (previously orphan-placeholder fields in FOREACH_STAMP_BOUND_MODEL_CONST
-    // that no production caller populated).
-    int horizon_count;
-    // E.1.2.C — the click-time hyperparameter snapshot rides the job, because the
-    // parallel worker cannot reach the outer scope's copy. Without it the parallel
-    // path would keep reading `state->` live from N threads at once while ImGui
-    // wrote the same non-atomic ints.
-    tt::XGBHyperparams snap_hp;
-    // E.1.2.D leaf 5 — 1 = isolated_results.labels was filled by the ONE
-    // batched corpus walk before spawn (worker skips its own walk); 0 = the
-    // batch fell back (buffer alloc failure) and the worker does the legacy
-    // per-horizon walk itself.
-    int labels_precomputed;
-    // D-431 — the RUN's primary label kind (class-tree derivation is
-    // once-per-family, S2-F4; per-horizon label_type above still drives
-    // role/objective/labels/stamp).
-    int primary_label_type;
-};
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [DERIVED]   (tool-refreshed — do NOT hand-edit; check_cache_layout --fix owns these)
-//======================================================================
-// [END_STRUCT]_[MultiHorizonParallelJob]
-//======================================================================
-
-//======================================================================
-// [FUNCTION]_[mh_per_horizon_parallel_worker]
-//----------------------------------------------------------------------
-// [TAG]_[[GUI] [ML] [BACKTEST]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[parallel per-horizon worker for the multi-horizon sweep]
-//======================================================================
-// [REFERENCE]_[PARITY]_[PARITY-21]
-//======================================================================
-// [CODE]
-//======================================================================
-static inline void *mh_per_horizon_parallel_worker(void *arg) {
-    MultiHorizonParallelJob *job = (MultiHorizonParallelJob *)arg;
-    // No OpenMP pinning here: since OMP-B (D-494) XGBoost is built without OpenMP, so boosters on
-    // concurrent workers share no thread pool. The omp_set_num_threads / omp_set_dynamic pair that
-    // stood here was one of Landmine 1's failed mitigations — the crash lived inside libgomp itself.
-    // PROGRESS PUBLISH (2026-08-25, operator: the bar read "horizon 0/3 (current: 0 ticks)" for a
-    // whole run). mh_progress / mh_current_horizon were written ONLY by the SERIAL path, and
-    // parallel became the default when E.1.2.D deleted the multi_horizon_max_threads=1 override —
-    // so in parallel mode the bar sat at 0 until the join, then jumped straight to N. That made a
-    // running job indistinguishable from a hung one, which is also why Cancel felt inert: there
-    // was no signal that anything had happened. Publish the horizon on entry; the completion
-    // counter is bumped atomically below because N workers finish out of order.
-    __atomic_store_n(&job->state->mh_current_horizon, job->horizon_ticks, __ATOMIC_RELAXED);
-    // TECH_DEBT-302c — tag this thread's [WF marker] crash-bisection lines with its horizon.
-    // Without it, N parallel horizons interleave on shared stderr and the markers cannot
-    // attribute the segfault they exist to bisect.
-    g_wf_marker_horizon = job->horizon_ticks;
-    mh_run_one_horizon_fv(
-        job->state,
-        &job->isolated_results,
-        job->snap_hp,
-        job->h,
-        job->horizon_ticks,
-        job->tp_pct, job->sl_pct,
-        job->label_type,
-        job->run_name,
-        job->snap_n_splits, job->snap_buffer_ticks, job->snap_min_train,
-        job->snap_gap_threshold, job->snap_held_out_fraction,
-        job->snap_auto_stamp_enabled, job->snap_auto_stamp_secret,
-        &job->local_run_cfg,
-        job->primary_label_type,   // D-431 — class tree from the RUN's primary kind
-        job->labels_precomputed,   // E.1.2.D leaf 5 — batch filled labels pre-spawn
-        job->training_side,
-        job->horizon_count);  // v5.15.3.B.2 PARITY-021
-    // Completion tick — atomic because N workers finish out of order and a plain `volatile`
-    // increment from several threads loses counts. Display-only, so RELAXED is sufficient.
-    __atomic_add_fetch(&job->state->mh_progress, 1, __ATOMIC_RELAXED);
-    free(job->isolated_results.labels);
-    free(job);
-    return NULL;
-}
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [END_FUNCTION]_[mh_per_horizon_parallel_worker]
+// [END_FUNCTION]_[TrainingPanel_MultiHorizonArgs]
 //======================================================================
 
 //======================================================================
@@ -5071,7 +4393,7 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[background thread: train a multi-horizon model grid, serial or parallel]
+// [OVERVIEW]_[background thread: the GUI adapter — wires the panel in as the run's sink and runs the click-time request through TrainingWorkers_RunMultiHorizon]
 //======================================================================
 // [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
@@ -5080,372 +4402,76 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
 static inline void *train_multi_horizon_worker_fn(void *arg) {
     MultiHorizonWorkerArgs *args = (MultiHorizonWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
-    RunControlState *run_control = args->run_control;
 
-    // Local snapshots
-    char run_name[64];
-    char model_path[256];
-    {
-        size_t n = strnlen(args->snap_run_name, sizeof(args->snap_run_name));
-        if (n >= sizeof(run_name)) n = sizeof(run_name) - 1;
-        memcpy(run_name, args->snap_run_name, n);
-        run_name[n] = '\0';
-    }
-    {
-        size_t n = strnlen(args->snap_model_path, sizeof(args->snap_model_path));
-        if (n >= sizeof(model_path)) n = sizeof(model_path) - 1;
-        memcpy(model_path, args->snap_model_path, n);
-        model_path[n] = '\0';
-    }
-    int label_type = args->snap_label_type;
-    int horizon_count = args->snap_horizon_count;
-    int horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    float tp_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    float sl_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    memcpy(horizons, args->snap_horizons, sizeof(horizons));
-    memcpy(tp_pcts,  args->snap_tp_pct,   sizeof(tp_pcts));
-    memcpy(sl_pcts,  args->snap_sl_pct,   sizeof(sl_pcts));
-    // v5.11.41 — local copies of FV / auto-stamp params before free(args)
-    char  snap_auto_stamp_secret[128];
-    {
-        size_t n = strnlen(args->snap_auto_stamp_secret,
-                           sizeof(args->snap_auto_stamp_secret));
-        if (n >= sizeof(snap_auto_stamp_secret))
-            n = sizeof(snap_auto_stamp_secret) - 1;
-        memcpy(snap_auto_stamp_secret, args->snap_auto_stamp_secret, n);
-        snap_auto_stamp_secret[n] = '\0';
-    }
-    int   snap_auto_stamp_enabled = args->snap_auto_stamp_enabled;
-    int   snap_n_splits           = args->snap_n_splits;
-    int   snap_buffer_ticks       = args->snap_buffer_ticks;
-    int   snap_min_train          = args->snap_min_train;
-    float snap_gap_threshold      = args->snap_gap_threshold;
-    float snap_held_out_fraction  = args->snap_held_out_fraction;
-    // E.1.2.C — capture the EIGHT hyperparameter snaps that the click handlers have
-    // populated since v5.11.41 and that NOTHING has ever read. The worker was reading
-    // `state->` live instead, from a worker thread, so an operator edit during the
-    // label pass (seconds to minutes) silently changed the model that got saved; the
-    // same fields were read AGAIN at summary-write time, so summary.txt could
-    // disagree with the model beside it; and in parallel mode N threads read
-    // non-atomic ints while ImGui wrote them. Capturing them here makes the snap
-    // block do the job it was written for, and gives us ONE value to hand to both
-    // the booster and the validation trainers so they cannot describe different
-    // architectures. Class 13, "snap block complete, consumer bypasses it".
-    // E.1.2.D leaf 14 — the ONE value-mapper (was the second hand-copy)
-    tt::XGBHyperparams snap_hp = tt::XGBHyperparams_FromRaw(
-        args->snap_max_depth, (float)args->snap_learning_rate,
-        args->snap_n_estimators, args->snap_subsample,
-        args->snap_colsample_bytree, args->snap_min_child_weight,
-        args->snap_seed, args->snap_tree_method_idx);
-    // v5.13.5.B (parity-check audit gap-close 2026-05-08) — copy NEW
-    // v5.13.5 snap fields to stack BEFORE free(args). Without this,
-    // subsequent reads at the parallel-job populate +
-    // the serial-mode call would dereference freed
-    // memory → undefined label_kind in stamp + wrong/random training_side
-    // path routing. Same pattern as horizons/tp_pcts/sl_pcts above.
-    int snap_label_kind_per_horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-    memcpy(snap_label_kind_per_horizon,
-           args->snap_label_kind_per_horizon,
-           sizeof(snap_label_kind_per_horizon));
-    int snap_training_side = args->snap_training_side;
-    free(args);
-
-    BacktestResults *results = &run_control->results;
-
-#ifdef USE_XGBOOST
-    if (horizon_count <= 0) {
-        snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Multi-horizon: cfg.horizon_list empty; set horizons first.");
-        state->mh_complete = 1;
-        state->mh_running = 0;
-        return NULL;
-    }
-    if (results->sample_count <= 0) {
-        snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Multi-horizon: Collect Features first.");
-        state->mh_complete = 1;
-        state->mh_running = 0;
-        return NULL;
-    }
-
-    fprintf(stderr, "[mh-train] starting multi-horizon train: %d horizons, "
-                    "%d samples, run_name='%s'\n",
-            horizon_count, results->sample_count, run_name);
-
-    // Save the original RunConfig + restore at end (we mutate
-    // label_forward_ticks per horizon).
-    BacktestRunConfig saved_run_cfg = run_control->run_config;
-
-    // v5.11.41 — clear per-horizon state arrays before the loop. operator
-    // may have run Multi-Horizon previously; stale mh_horizon_* arrays
-    // would confuse the GUI panel.
+    TrainingRunSink sink{};
+    sink.status     = state->status_msg;
+    sink.status_cap = sizeof(state->status_msg);
+    sink.cancel     = &state->mh_cancel;
+    sink.total      = &state->mh_total;
+    sink.current    = &state->mh_current_horizon;
+    sink.done       = &state->mh_progress;
+    sink.complete   = &state->mh_complete;
+    sink.running    = &state->mh_running;
     for (int h = 0; h < TrainingPanelState::PANEL_HORIZON_MAX; ++h) {
-        memset(&state->mh_horizon_fv[h], 0, sizeof(FullValidationResults));
-        state->mh_horizon_complete[h] = 0;
-        state->mh_horizon_progress[h] = 0;
-        state->mh_horizon_status[h][0] = '\0';
-    }
-    state->mh_total = horizon_count;
-
-    // Parallel horizons run concurrent XGBoost trainings on pthreads — Landmine 1's workload (a SIGSEGV
-    // in libgomp's parallel-region setup) until OMP-B (D-494) built XGBoost without OpenMP: there is no
-    // runtime pool left for the workers to race on. (The v5.15.3.C process-entry setenv this block used
-    // to credit never reached libgomp, which reads its environment at load — measured 2026-09-28.)
-    // cfg.multi_horizon_max_threads honours the operator's setting: N = cap to N concurrent, 1 = serial.
-    // (The registry clamps it to [1, 256] with a WARN, so a cfg `0` runs SERIAL; the `<= 0` floor
-    // below — "auto" = horizon_count — is reachable only by a direct struct write.)
-    int mh_max_threads = results->config_used.multi_horizon_max_threads;
-    if (mh_max_threads <= 0) {
-        mh_max_threads = horizon_count;  // 0 = auto = fully parallel
-    }
-    int n_parallel = horizon_count < mh_max_threads ? horizon_count : mh_max_threads;
-    int parallel_mode = (n_parallel >= 2 && horizon_count >= 2);
-
-    int trained = 0;
-    int saved_count = 0;
-    int validated = 0;
-
-    // E.1.2.D leaf 5 — ONE batched corpus walk labels every horizon up front
-    // (was: one full walk per horizon, and in parallel mode N of them running
-    // SIMULTANEOUSLY against the same disk). Targets carry the per-horizon
-    // (kind, fwd, tp, sl); both modes consume the vectors below and skip the
-    // in-place walk. Buffer-alloc failure degrades to the legacy per-horizon
-    // walks (mh_batch_ok=0), never to wrong labels. A corpus abort keeps
-    // precomputed=1: the NAN prefill makes every horizon refuse on 0 valid
-    // labels — the legacy path would have re-walked the broken corpus N more
-    // times and, worse, counted whatever stale labels sat in results->labels.
-    float *mh_label_bufs[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
-    int mh_batch_ok = 1;
-    {
-        LabelBatchTarget bt[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
-        for (int h = 0; h < horizon_count; ++h) {
-            mh_label_bufs[h] = (float *)malloc(
-                (size_t)results->sample_count * sizeof(float));
-            if (!mh_label_bufs[h]) { mh_batch_ok = 0; break; }
-            bt[h] = LabelBatchTarget{};
-            bt[h].label_type    = snap_label_kind_per_horizon[h];
-            bt[h].tp_pct        = (double)tp_pcts[h];
-            bt[h].sl_pct        = (double)sl_pcts[h];
-            bt[h].forward_ticks = horizons[h];
-            bt[h].out_labels    = mh_label_bufs[h];
-        }
-        if (mh_batch_ok) {
-            int labeled = Backtest_ComputeLabelsBatch(results, &saved_run_cfg,
-                                                      bt, horizon_count);
-            if (labeled < 0) {
-                fprintf(stderr, "[mh-train] batched label pass aborted; "
-                                "horizons will refuse on 0 valid labels\n");
-            } else if (!parallel_mode) {
-                // Serial-mode legacy stats parity: each per-horizon walk used
-                // to fold its NaN counters into results->stats (the S3-F3
-                // accumulate semantics — leaf 13 owns re-thinking them);
-                // parallel mode folded into discarded isolated copies. Both
-                // preserved (serial folds all-up-front vs per-iteration; the
-                // post-run totals are identical).
-                for (int h = 0; h < horizon_count; ++h) {
-                    results->stats.nan_labels_total   += bt[h].nan_total;
-                    results->stats.nan_labels_dropped += bt[h].nan_dropped;
-                }
-            }
-        } else {
-            fprintf(stderr, "[mh-train] label batch buffer alloc failed; "
-                            "falling back to per-horizon label walks\n");
-        }
+        sink.horizon[h].status     = state->mh_horizon_status[h];
+        sink.horizon[h].status_cap = sizeof(state->mh_horizon_status[h]);
+        sink.horizon[h].progress   = &state->mh_horizon_progress[h];
+        sink.horizon[h].complete   = &state->mh_horizon_complete[h];
     }
 
-    if (parallel_mode) {
-        fprintf(stderr, "[mh-train] parallel mode: %d horizons across %d threads "
-                        "(one single-threaded booster per worker)\n",
-                horizon_count, n_parallel);
-
-        // v5.11.41.C — spawn one pthread per horizon. Each thread:
-        //   - shallow-copies BacktestResults (shared read-only feature_matrix)
-        //   - allocates own labels[] buffer (avoids race with concurrent
-        //     Backtest_ComputeLabelsFromSamples calls in other threads)
-        //   - shallow-copies cfg with xgb_train_nthread=1, the stamp's
-        //     parallel-mode marker (the bytes match serial mode regardless).
-        pthread_t tids[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
-        int spawned[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
-        for (int h = 0; h < horizon_count; ++h) {
-            if (state->mh_cancel) break;
-            MultiHorizonParallelJob *job =
-                (MultiHorizonParallelJob *)malloc(sizeof(MultiHorizonParallelJob));
-            if (!job) {
-                snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                         "h=%d FAILED: malloc job arg", horizons[h]);
-                state->mh_horizon_complete[h] = 1;
-                continue;
-            }
-            job->state = state;
-            job->snap_hp = snap_hp;   // E.1.2.C — one snapshot, every worker
-            // Shallow-copy results; labels[] = the horizon's batch-filled
-            // vector (ownership TRANSFERS to the job — the worker frees it;
-            // E.1.2.D leaf 5). Legacy own-malloc only on batch fallback.
-            job->isolated_results = *results;
-            if (mh_batch_ok) {
-                job->isolated_results.labels = mh_label_bufs[h];
-                mh_label_bufs[h] = NULL;   // consumed — post-join free skips it
-            } else {
-                job->isolated_results.labels =
-                    (float *)malloc((size_t)results->sample_count * sizeof(float));
-            }
-            if (!job->isolated_results.labels) {
-                snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                         "h=%d FAILED: malloc labels[]", horizons[h]);
-                state->mh_horizon_complete[h] = 1;
-                free(job);
-                continue;
-            }
-            job->labels_precomputed = mh_batch_ok;
-            // Record xgb_train_nthread=1 in the isolated cfg — the stamp's
-            // parallel-mode marker (serial mode records the operator's value).
-            // Not a determinism pin since OMP-B (D-494): XGBoost has no OpenMP,
-            // so every booster is single-threaded and the bytes match serial.
-            job->isolated_results.config_used.xgb_train_nthread = 1;
-            job->h = h;
-            job->horizon_count = horizon_count;  // v5.15.3.B.2 PARITY-021
-            job->horizon_ticks = horizons[h];
-            job->tp_pct = tp_pcts[h];
-            job->sl_pct = sl_pcts[h];
-            // v5.13.1.B — per-horizon label_kind. Click-handler snap
-            // populates each slot with either the per-horizon CSV value
-            // (when N>1 entries given) or the broadcast (single value /
-            // empty CSV). Worker reads array directly.
-            // v5.13.5.B (parity-check gap-close 2026-05-08) — read from
-            // stack-local snap (post-free(args)), not args->* (freed).
-            job->label_type = snap_label_kind_per_horizon[h];
-            // D-431 — the RUN's primary kind rides the job so the class tree
-            // derives once per family (S2-F4), not per horizon.
-            job->primary_label_type = label_type;
-            // v5.13.1.A — per-job training_side (stack-local copy)
-            job->training_side = snap_training_side;
-            {
-                size_t n = strnlen(run_name, sizeof(job->run_name) - 1);
-                memcpy(job->run_name, run_name, n);
-                job->run_name[n] = '\0';
-            }
-            job->snap_n_splits          = snap_n_splits;
-            job->snap_buffer_ticks      = snap_buffer_ticks;
-            job->snap_min_train         = snap_min_train;
-            job->snap_gap_threshold     = snap_gap_threshold;
-            job->snap_held_out_fraction = snap_held_out_fraction;
-            job->snap_auto_stamp_enabled = snap_auto_stamp_enabled;
-            {
-                size_t n = strnlen(snap_auto_stamp_secret,
-                                   sizeof(job->snap_auto_stamp_secret) - 1);
-                memcpy(job->snap_auto_stamp_secret, snap_auto_stamp_secret, n);
-                job->snap_auto_stamp_secret[n] = '\0';
-            }
-            // Local cfg copy — per-thread mutation of label_*; restored
-            // implicitly when thread exits (job is freed).
-            job->local_run_cfg = saved_run_cfg;
-
-            int rc = pthread_create(&tids[h], NULL,
-                                     mh_per_horizon_parallel_worker, job);
-            if (rc != 0) {
-                snprintf(state->mh_horizon_status[h], sizeof(state->mh_horizon_status[h]),
-                         "h=%d FAILED: pthread_create rc=%d", horizons[h], rc);
-                state->mh_horizon_complete[h] = 1;
-                free(job->isolated_results.labels);
-                free(job);
-                continue;
-            }
-            spawned[h] = 1;
-        }
-        // Join all spawned threads. Throttle concurrency by limiting
-        // simultaneous joins is not necessary — pthread_join just blocks
-        // until each completes. Total wall time is max-per-horizon time.
-        for (int h = 0; h < horizon_count; ++h) {
-            if (spawned[h]) pthread_join(tids[h], NULL);
-        }
-        // Tally counters from per-horizon FV results
-        for (int h = 0; h < horizon_count; ++h) {
-            if (!state->mh_horizon_complete[h]) continue;
-            FullValidationResults *fv = &state->mh_horizon_fv[h];
-            trained++;
-            if (fv->ran_held_out) validated++;
-            if (fv->auto_stamp_ok) saved_count++;
-        }
-        // Workers already counted themselves up; this is the terminal pin (a cancelled or
-        // failed worker may not have ticked, and the bar must still read complete at the end).
-        state->mh_progress = horizon_count;
+    // The run's per-horizon validation results come back here. The panel shows its rows from the
+    // sink's status lines, so the result is released once the run is done.
+    TrainingRunResult *result = TrainingWorkers_AllocZeroed<TrainingRunResult>();
+    if (!result) {
+        TrainingSink_Status(sink.status, sink.status_cap,
+                            "Multi-horizon: out of memory (run result).");
+        TrainingSink_FinishRun(sink);
     } else {
-        // Serial mode (existing v5.11.41.A behavior; now via helper)
-        fprintf(stderr, "[mh-train] serial mode: %d horizons sequential "
-                        "(stamps record xgb_train_nthread=%d from cfg)\n",
-                horizon_count, results->config_used.xgb_train_nthread);
-        for (int h = 0; h < horizon_count; ++h) {
-            if (state->mh_cancel) {
-                fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
-                        h, horizon_count);
-                break;
-            }
-            state->mh_current_horizon = horizons[h];
-            state->mh_progress = h + 1;
-
-            // v5.13.1.B — per-horizon label_kind from snap (broadcast
-            // already applied at click time when CSV had ≤1 entries).
-            // v5.13.5.B (parity-check gap-close) — read stack-local snap
-            // (args is freed by the worker before these reads).
-            int per_horizon_lk = snap_label_kind_per_horizon[h];
-            // E.1.2.D leaf 5 — consume the batch vector (bytewise what the
-            // in-place walk produced; memcmp-pinned) instead of re-walking
-            // the corpus for every horizon.
-            if (mh_batch_ok) {
-                memcpy(results->labels, mh_label_bufs[h],
-                       (size_t)results->sample_count * sizeof(float));
-            }
-            mh_run_one_horizon_fv(
-                state, results, snap_hp, h,
-                horizons[h], tp_pcts[h], sl_pcts[h],
-                per_horizon_lk, run_name,
-                snap_n_splits, snap_buffer_ticks, snap_min_train,
-                snap_gap_threshold, snap_held_out_fraction,
-                snap_auto_stamp_enabled, snap_auto_stamp_secret,
-                &run_control->run_config,
-                label_type,        // primary_label_type (D-431 — the run's snap primary)
-                mh_batch_ok,       // labels_precomputed (E.1.2.D leaf 5)
-                snap_training_side,
-                horizon_count);  // v5.15.3.B.2 PARITY-021
-
-            FullValidationResults *fv = &state->mh_horizon_fv[h];
-            trained++;
-            if (fv->ran_held_out) validated++;
-            if (fv->auto_stamp_ok) saved_count++;
-        }
+        TrainingWorkers_RunMultiHorizon(args->req, sink, result);
+        free(result);
     }
-
-    // E.1.2.D leaf 5 — release batch vectors (parallel transferred consumed
-    // slots to jobs and NULLed them; serial memcpys and keeps ownership;
-    // free(NULL) is a no-op for every consumed/never-allocated slot).
-    for (int h = 0; h < horizon_count; ++h) free(mh_label_bufs[h]);
-
-    // Restore RunConfig
-    run_control->run_config = saved_run_cfg;
-
-    snprintf(state->status_msg, sizeof(state->status_msg),
-             "Multi-horizon: %d/%d horizons trained, %d validated (held-out), "
-             "%d stamped. Models in models/<class>/%s_horizon_*/.",
-             trained, horizon_count, validated, saved_count, run_name);
-#else
-    snprintf(state->status_msg, sizeof(state->status_msg),
-             "Multi-horizon: XGBoost not compiled in (build with -DUSE_XGBOOST=ON)");
-    (void)results;
-    (void)label_type;
-    (void)horizon_count;
-    (void)horizons;
-    (void)run_name;
-    (void)model_path;
-#endif
-
-    state->mh_complete = 1;
-    state->mh_running = 0;
+    free(args);
     return NULL;
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[train_multi_horizon_worker_fn]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingPanel_LaunchMultiHorizon]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[both Train buttons' launch — build the click-time request and start the worker; an allocation or thread-start failure is reported on the status line and the run flag cleared, never a crash or a stuck "running"]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
+                                                    RunControlState *run_control,
+                                                    int horizon_count, const int *horizons) {
+    MultiHorizonWorkerArgs *mh_args =
+        TrainingPanel_MultiHorizonArgs(state, run_control, horizon_count, horizons);
+    const int rc = mh_args
+        ? pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args)
+        : ENOMEM;
+    if (rc == 0) {
+        pthread_detach(state->mh_tid);
+    } else {
+        // Not started: say why, hide the per-horizon table the click armed (its rows are the previous
+        // run's), and clear the run flag so the buttons re-arm.
+        free(mh_args);
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Multi-horizon: the worker did not start (%s).", strerror(rc));
+        state->mh_total   = 0;
+        state->mh_running = 0;
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_LaunchMultiHorizon]
 //======================================================================
 
 //======================================================================
@@ -6715,16 +5741,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->mh_cancel = 0;
             state->mh_complete = 0;
 
-            // Build MultiHorizonWorkerArgs (same as Train Multi-Horizon
-            // click handler below, but with N=1 horizon).
+            // Train Model is the multi-horizon run with N=1 (v5.11.44).
             int single_h = (state->ui_horizon_count >= 1)
                          ? state->ui_horizon_list[0]
                          : (state->label_forward_ticks > 0
                             ? state->label_forward_ticks : 1000);
-            float single_tp = (state->ui_tp_per_horizon_count > 0)
-                            ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
-            float single_sl = (state->ui_sl_per_horizon_count > 0)
-                            ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
 
             // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
             // per-horizon results table (the render must never read the
@@ -6733,79 +5754,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             for (int i = 1; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
                 state->mh_horizon_ticks[i] = 0;
 
-            MultiHorizonWorkerArgs *mh_args =
-                (MultiHorizonWorkerArgs *)malloc(sizeof(MultiHorizonWorkerArgs));
-            mh_args->state = state;
-            mh_args->run_control = run_control;
-            {
-                size_t n = strnlen(state->run_name, sizeof(state->run_name));
-                if (n >= sizeof(mh_args->snap_run_name))
-                    n = sizeof(mh_args->snap_run_name) - 1;
-                memcpy(mh_args->snap_run_name, state->run_name, n);
-                mh_args->snap_run_name[n] = '\0';
-            }
-            {
-                size_t n = strnlen(state->model_path, sizeof(state->model_path));
-                if (n >= sizeof(mh_args->snap_model_path))
-                    n = sizeof(mh_args->snap_model_path) - 1;
-                memcpy(mh_args->snap_model_path, state->model_path, n);
-                mh_args->snap_model_path[n] = '\0';
-            }
-            mh_args->snap_label_type     = Label_ResolveKindForHorizon(   // D-476: CSV position 0 wins
-                state->ui_label_kind_per_horizon,
-                state->ui_label_kind_per_horizon_count, state->label_type, 0);
-            mh_args->snap_max_depth      = state->max_depth;
-            mh_args->snap_learning_rate  = state->learning_rate;
-            mh_args->snap_n_estimators   = state->n_estimators;
-            mh_args->snap_subsample        = state->ui_subsample;
-            mh_args->snap_colsample_bytree = state->ui_colsample_bytree;
-            mh_args->snap_min_child_weight = state->ui_min_child_weight;
-            mh_args->snap_seed             = state->ui_seed;
-            mh_args->snap_tree_method_idx  = state->ui_tree_method_idx;
-            mh_args->snap_horizon_count = 1;
-            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
-                mh_args->snap_horizons[i] = (i == 0) ? single_h : 0;
-                mh_args->snap_tp_pct[i]   = single_tp;
-                mh_args->snap_sl_pct[i]   = single_sl;
-                // v5.13.5.A — populate new snap fields. Without this,
-                // malloc'd MultiHorizonWorkerArgs leaves snap_label_kind_
-                // per_horizon[] uninitialized → undefined label_type
-                // passed to mh_run_one_horizon_fv. Single-horizon click
-                // mirrors broadcast: label_type combo for h=0, 0 elsewhere.
-                // D-476 — h=0 takes the Label Kind CSV's position 0 (else the combo),
-                // the same rule every other click uses (TECH_DEBT-323).
-                mh_args->snap_label_kind_per_horizon[i] =
-                    (i == 0) ? Label_ResolveKindForHorizon(
-                                   state->ui_label_kind_per_horizon,
-                                   state->ui_label_kind_per_horizon_count,
-                                   state->label_type, 0)
-                             : 0;
-            }
-            // v5.13.5.A — single-horizon training_side. Operator's UI
-            // toggle applies even in single-horizon mode (lets them
-            // train one exit-side model without per-horizon CSV).
-            mh_args->snap_training_side = state->ui_training_side;
-            // v5.11.47 — same cfg-fallback for secret as Multi-Horizon path.
-            {
-                const char* secret_src = state->fv_auto_stamp_secret;
-                if (secret_src[0] == '\0') {
-                    secret_src = run_control->results.config_used.auto_stamp_secret;
-                }
-                size_t n = strnlen(secret_src, sizeof(state->fv_auto_stamp_secret));
-                if (n >= sizeof(mh_args->snap_auto_stamp_secret))
-                    n = sizeof(mh_args->snap_auto_stamp_secret) - 1;
-                memcpy(mh_args->snap_auto_stamp_secret, secret_src, n);
-                mh_args->snap_auto_stamp_secret[n] = '\0';
-            }
-            mh_args->snap_auto_stamp_enabled  =
-                run_control->results.config_used.auto_stamp_on_held_out;
-            mh_args->snap_n_splits            = state->wf_n_splits;
-            mh_args->snap_buffer_ticks        = state->wf_buffer_ticks;
-            mh_args->snap_min_train           = state->wf_min_train;
-            mh_args->snap_gap_threshold       = state->fv_gap_threshold;
-            mh_args->snap_held_out_fraction   = state->fv_held_out_fraction;
-            pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args);
-            pthread_detach(state->mh_tid);
+            // MP-1 — the same request builder as Train Multi-Horizon: one horizon, and the operator's
+            // training side applies here too (v5.13.5.A — one exit-side model without a CSV).
+            TrainingPanel_LaunchMultiHorizon(state, run_control, 1, &single_h);
         }
         if (!can_train) {
             ImGui::EndDisabled();
@@ -6920,103 +5871,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->mh_complete = 0;
             state->status_msg[0] = '\0';
 
-            MultiHorizonWorkerArgs *mh_args =
-                (MultiHorizonWorkerArgs *)malloc(sizeof(MultiHorizonWorkerArgs));
-            mh_args->state = state;
-            mh_args->run_control = run_control;
-            // Snapshot fields at click time (v5.10.0E pattern)
-            {
-                size_t n = strnlen(state->run_name, sizeof(state->run_name));
-                if (n >= sizeof(mh_args->snap_run_name))
-                    n = sizeof(mh_args->snap_run_name) - 1;
-                memcpy(mh_args->snap_run_name, state->run_name, n);
-                mh_args->snap_run_name[n] = '\0';
-            }
-            {
-                size_t n = strnlen(state->model_path, sizeof(state->model_path));
-                if (n >= sizeof(mh_args->snap_model_path))
-                    n = sizeof(mh_args->snap_model_path) - 1;
-                memcpy(mh_args->snap_model_path, state->model_path, n);
-                mh_args->snap_model_path[n] = '\0';
-            }
-            mh_args->snap_label_type     = Label_ResolveKindForHorizon(   // D-476: CSV position 0 wins
-                state->ui_label_kind_per_horizon,
-                state->ui_label_kind_per_horizon_count, state->label_type, 0);
-            mh_args->snap_max_depth      = state->max_depth;
-            mh_args->snap_learning_rate  = state->learning_rate;
-            mh_args->snap_n_estimators   = state->n_estimators;
-            mh_args->snap_subsample        = state->ui_subsample;
-            mh_args->snap_colsample_bytree = state->ui_colsample_bytree;
-            mh_args->snap_min_child_weight = state->ui_min_child_weight;
-            mh_args->snap_seed             = state->ui_seed;
-            mh_args->snap_tree_method_idx  = state->ui_tree_method_idx;
-            // v5.10.0a-bugfix2 — snapshot effective horizons (UI takes
-            // priority over cfg fallback at click time).
-            mh_args->snap_horizon_count = eff_horizon_count;
-            // v5.11.40 — snap per-horizon TP/SL (broadcast-or-match
-            // rule). Single-value broadcasts; N values map positional.
-            // Empty CSV falls back to label_tp_pct/_sl_pct float.
-            float bcast_tp = (state->ui_tp_per_horizon_count > 0)
-                ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
-            float bcast_sl = (state->ui_sl_per_horizon_count > 0)
-                ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
-            // v5.13.1.B — broadcast-or-match for per-horizon label_kind.
-            // Empty CSV / single value → broadcast state->label_type
-            // (which is the existing UI Label Type combo). N values map
-            // positional. Mirrors TP/SL CSV pattern.
-            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
-                mh_args->snap_horizons[i] = (i < eff_horizon_count)
-                    ? eff_horizons[i] : 0;
-                mh_args->snap_tp_pct[i] = (state->ui_tp_per_horizon_count > 1
-                                           && i < state->ui_tp_per_horizon_count)
-                    ? state->ui_tp_per_horizon[i] : bcast_tp;
-                mh_args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
-                                           && i < state->ui_sl_per_horizon_count)
-                    ? state->ui_sl_per_horizon[i] : bcast_sl;
-                // D-476 — ONE kind rule for every click (Label_ResolveKindForHorizon).
-                mh_args->snap_label_kind_per_horizon[i] = Label_ResolveKindForHorizon(
-                    state->ui_label_kind_per_horizon,
-                    state->ui_label_kind_per_horizon_count, state->label_type, i);
-            }
             // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
             // per-horizon results table (arrays sized PANEL_HORIZON_MAX =
             // HORIZON_LIST_MAX since E.1.2.D leaf 13, so they track the grid).
             for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
                 state->mh_horizon_ticks[i] =
                     (i < eff_horizon_count) ? eff_horizons[i] : 0;
-            // v5.13.1.A — snapshot side at click time (race-free).
-            mh_args->snap_training_side = state->ui_training_side;
-            // v5.11.41 — snap FV/auto-stamp params at click time. Closes
-            // the gap where Train Multi-Horizon trained but didn't run WF
-            // / held-out / stamp. Now mirrors single-horizon RFV behavior.
-            // v5.11.47 — secret falls back to cfg.auto_stamp_secret when
-            // GUI text input (state->fv_auto_stamp_secret) is empty. Lets
-            // operator set secret once in cfg without re-typing per session.
-            // per horizon (sequential; v5.11.41.C adds parallelism).
-            // v5.11.47 — if GUI text input is empty, fall back to cfg's
-            // auto_stamp_secret (lets operator set it once in cfg).
-            {
-                const char* secret_src = state->fv_auto_stamp_secret;
-                if (secret_src[0] == '\0') {
-                    secret_src = run_control->results.config_used.auto_stamp_secret;
-                }
-                size_t n = strnlen(secret_src, sizeof(state->fv_auto_stamp_secret));
-                if (n >= sizeof(mh_args->snap_auto_stamp_secret))
-                    n = sizeof(mh_args->snap_auto_stamp_secret) - 1;
-                memcpy(mh_args->snap_auto_stamp_secret, secret_src, n);
-                mh_args->snap_auto_stamp_secret[n] = '\0';
-            }
-            // v5.11.47 — kept for back-compat in args struct; worker no
-            // longer gates on this (always stamps).
-            mh_args->snap_auto_stamp_enabled  =
-                run_control->results.config_used.auto_stamp_on_held_out;
-            mh_args->snap_n_splits            = state->wf_n_splits;
-            mh_args->snap_buffer_ticks        = state->wf_buffer_ticks;
-            mh_args->snap_min_train           = state->wf_min_train;
-            mh_args->snap_gap_threshold       = state->fv_gap_threshold;
-            mh_args->snap_held_out_fraction   = state->fv_held_out_fraction;
-            pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args);
-            pthread_detach(state->mh_tid);
+            // MP-1 — every input of the run is snapped HERE by the one request builder (v5.10.0E
+            // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2).
+            TrainingPanel_LaunchMultiHorizon(state, run_control, eff_horizon_count, eff_horizons);
         }
         if (!mh_can_train) {
             ImGui::EndDisabled();
@@ -7042,7 +5905,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "Compare-to-Baseline.");
 
         // Multi-horizon progress bar (rendered when worker is running)
-        if (state->mh_running) {
+        if (TrainingSink_Load(&state->mh_running)) {
             float pct = state->mh_total > 0
                 ? (float)state->mh_progress / state->mh_total : 0.0f;
             char overlay[96];
@@ -7087,9 +5950,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                     else          ImGui::TextDisabled("--");
 
                     ImGui::TableNextColumn();
-                    if (state->mh_horizon_complete[h]) {
+                    if (TrainingSink_Load(&state->mh_horizon_complete[h])) {   // F6 — acquire
                         ImGui::TextColored(FoxmlColors::green, "DONE");
-                    } else if (state->mh_running && h == (state->mh_progress - 1)) {
+                    } else if (TrainingSink_Load(&state->mh_running) && h == (state->mh_progress - 1)) {
                         ImGui::TextColored(FoxmlColors::yellow, "running");
                     } else {
                         ImGui::TextDisabled("waiting");
@@ -7176,7 +6039,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->tm_running ||
             state->fv_running ||
             state->hp_running ||
-            state->mh_running;  // intentionally exclude wf_running so WF can show its own cancel button
+            TrainingSink_Load(&state->mh_running);  // intentionally exclude wf_running so WF can show its own cancel button
         bool can_wf = results->sample_count >= 50 && !any_worker_running_wf
                       && !run_control->running;  // E.1.2.D NEW-5 — no train-during-collect
 #ifndef USE_XGBOOST
@@ -7565,7 +6428,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->tm_running ||
             state->wf_running ||
             state->fv_running ||
-            state->mh_running;
+            TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
         bool can_hp =
 #ifdef USE_XGBOOST
             hp_data->sample_count >= 100 && hp_total_cells > 0
@@ -7721,7 +6584,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->tm_running ||
             state->wf_running ||
             state->hp_running ||
-            state->mh_running;
+            TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
         bool can_fv =
 #ifdef USE_XGBOOST
             fv_data->sample_count >= 50 && state->model_path[0] != '\0'
