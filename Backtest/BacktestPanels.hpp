@@ -1087,6 +1087,8 @@ struct PastRun {
     float val_stddev;
     float val_correlation;       // for regression
     float val_mse;               // for regression
+    float train_correlation;     // regression: the in-sample r — the Train r column (CS-272)
+    int   has_train_correlation; // 1 = the summary carried it; 0 = an older summary → the legacy proxy
     float train_val_gap;
     int   overfit_folds;
     int   has_wf_results;        // 1 = WF metrics present, 0 = old-format file
@@ -1145,8 +1147,8 @@ struct PastRun {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-29]
-// [SIZE]_[6256B]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[6272B]
 // [ALIGN]_[16]
 // [CACHE_LINES]_[98]
 // [STRADDLE]_[none]
@@ -1193,10 +1195,10 @@ struct PastRunsState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-29]
-// [SIZE]_[400688B]
+// [UPDATED]_[2026-09-30]
+// [SIZE]_[401712B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[6261]
+// [CACHE_LINES]_[6277]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRunsState]
@@ -1327,6 +1329,7 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         if (!parse_kv_line(line, k, sizeof(k), v, sizeof(v))) continue;
         if      (strcmp(k, "role") == 0)                 strncpy(r->role, v, sizeof(r->role) - 1);
         else if (strcmp(k, "accuracy") == 0)             r->train_accuracy = (float)atof(v);
+        else if (strcmp(k, "train_correlation") == 0)  { r->train_correlation = (float)atof(v); r->has_train_correlation = 1; }
         else if (strcmp(k, "label_type") == 0)           r->label_type = atoi(v);
         else if (strcmp(k, "expected_num_classes") == 0) r->expected_num_classes = atoi(v);
         else if (strcmp(k, "max_depth") == 0)            r->max_depth = atoi(v);
@@ -2267,13 +2270,13 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                         ImGui::TextDisabled("-");
                     }
 
-                    // Train r — for regression, train_accuracy field stores
-                    // the in-sample correlation already (since training code
-                    // sets state->train_correlation; "accuracy" field stays 0).
-                    // Older runs may not have separate train_correlation
-                    // captured — we show train_accuracy for now as a proxy.
+                    // Train r — the summary's train_correlation (CS-272: the multi-horizon
+                    // writer emits it for regression). An older summary has none, and keeps the
+                    // proxy this column always showed: its "accuracy" value (the deleted single-
+                    // horizon trainer stored r there; the multi-horizon writer wrote 0.00).
                     ImGui::TableNextColumn();
-                    ImGui::Text("%.3f", r->train_accuracy / 100.0f);
+                    if (r->has_train_correlation) ImGui::Text("%.3f", r->train_correlation);
+                    else                          ImGui::Text("%.3f", r->train_accuracy / 100.0f);
 
                     ImGui::TableNextColumn();
                     if (r->has_wf_results) {

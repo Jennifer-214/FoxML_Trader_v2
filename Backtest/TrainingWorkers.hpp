@@ -17,6 +17,7 @@
 //   - [FUNCTION]_[TrainingSink_Status]   (TrainingSink_IsCancelled / _Set / _Load / _PublishComplete / _FinishRun / _ForHorizon ride)
 //   - [FUNCTION]_[TrainingWorkers_AllocZeroed]
 //   - [FUNCTION]_[TrainingWorkers_HorizonRequest]
+//   - [FUNCTION]_[TrainingWorkers_WriteSummary]
 //   - [FUNCTION]_[TrainingWorkers_RunHorizon]
 //   - [STRUCT]_[TrainingPool]
 //   - [FUNCTION]_[TrainingWorkers_RunPool]   (TrainingWorkers_PoolWorker rides)
@@ -460,6 +461,151 @@ inline TrainingHorizonRequest TrainingWorkers_HorizonRequest(const TrainingRunRe
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[TrainingWorkers_WriteSummary]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[one horizon's summary_{entry,exit}.txt body — the identity, the hyperparameters that trained, the label config, the WF + held-out metrics by kind, the stamp outcome and the corpus record; Past Runs reads it]
+//======================================================================
+// Lifted out of TrainingWorkers_RunHorizon (CS-272) so a cell can check what a summary says for each
+// label kind without training a model. The body is the moved block; the request is bound to its names.
+//======================================================================
+// [CODE]
+//======================================================================
+inline void TrainingWorkers_WriteSummary(FILE* sf, const TrainingHorizonRequest& req, const char* role,
+                                         const char* horizon_dir, int num_classes,
+                                         const BacktestRunConfig* local_run_cfg,
+                                         const BacktestResults* results,
+                                         const FullValidationResults* fv) {
+    const char*               run_name      = req.run_name;
+    const int                 horizon_ticks = req.horizon_ticks;
+    const int                 label_type    = req.label_type;
+    const float               tp_pct        = req.tp_pct;
+    const float               sl_pct        = req.sl_pct;
+    const tt::XGBHyperparams& snap_hp       = req.hp;
+    // v5.11.50 — use CANONICAL summary.txt field names that past_runs
+    // reads (in PastRuns_LoadOne). Pre-fix v5.11.41.A used made-up wf_*
+    // names; past_runs ignored them, leaving Train Acc/Val Acc/Gap
+    // columns blank. NOW uses the same names Save Run uses so
+    // multi-horizon runs render the same as single-horizon Save Run
+    // bundles. Plus expected_num_classes (v5.11.49) for Classes col.
+    fprintf(sf, "run: %s/horizon_%d\n", run_name, horizon_ticks);  // D-431 nested (display-only; verified unparsed)
+    fprintf(sf, "role: %s\n", role);
+    fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
+    fprintf(sf, "label_type: %d\n", label_type);
+    fprintf(sf, "expected_num_classes: %d\n", num_classes);
+    // E.1.2.C — report what actually TRAINED. These were a SECOND live read of
+    // the same widgets, minutes after the first, so an edit in between made
+    // summary.txt disagree with the model sitting beside it — and PastRuns
+    // displays the summary value as truth.
+    fprintf(sf, "max_depth: %d\n", snap_hp.max_depth);
+    fprintf(sf, "learning_rate: %.3f\n", (double)snap_hp.learning_rate);
+    fprintf(sf, "n_estimators: %d\n", snap_hp.n_estimators);
+    fprintf(sf, "label_tp_pct: %.4f\n", (double)tp_pct);
+    fprintf(sf, "label_sl_pct: %.4f\n", (double)sl_pct);
+    // s5 leaf-15 — lineage: which round trip this run's win threshold cleared.
+    // Sourced from local_run_cfg (the config that produced these labels), the
+    // same click-time-snapshot discipline as the hyperparameters above.
+    fprintf(sf, "label_roundtrip_fee_pct: %.4f\n",
+            local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
+    fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
+    fprintf(sf, "n_train_samples: %d\n", results->sample_count);
+    fprintf(sf, "label_kind: %d\n", fv->label_kind);
+    fprintf(sf, "valid_folds: %d\n", fv->walkforward.valid_folds);
+    // val_accuracy / val_correlation: pick whichever fits the kind.
+    // past_runs reader sets has_wf_results=1 when EITHER is read.
+    if (LabelType_IsRegression(label_type)) {  // regression (E.1.2.D NEW-6 — was the unreachable == 2)
+        fprintf(sf, "val_correlation: %.4f\n",
+                (double)fv->walkforward.mean_val_correlation);
+        fprintf(sf, "val_mse: %.6f\n",
+                (double)fv->walkforward.mean_val_mse);
+        // CS-272 — the in-sample r, for Past Runs' Train r column (it showed the train "accuracy"
+        // line as a proxy, and that line was always 0.00 for regression).
+        fprintf(sf, "train_correlation: %.4f\n",
+                (double)fv->walkforward.mean_train_correlation);
+    } else {  // binary or multiclass
+        fprintf(sf, "val_accuracy: %.2f\n",
+                100.0 * (double)fv->walkforward.mean_val_accuracy);
+        fprintf(sf, "val_stddev: %.2f\n",
+                100.0 * (double)fv->walkforward.std_val_accuracy);
+        // 2026-09-03 — the gate metric + per-class recall (E.2/E.3). Percent
+        // like val_accuracy so Past Runs reads them with the same rule.
+        fprintf(sf, "val_balanced_accuracy: %.2f\n",
+                100.0 * (double)fv->walkforward.mean_val_balanced_accuracy);
+        {
+            const int Kp = (fv->walkforward.num_classes >= 2)
+                         ? (fv->walkforward.num_classes > 16 ? 16 : fv->walkforward.num_classes) : 2;
+            for (int k = 0; k < Kp; ++k)
+                fprintf(sf, "val_recall_c%d: %.2f\n", k,
+                        100.0 * (double)fv->walkforward.mean_val_class_recall[k]);
+            fprintf(sf, "held_out_balanced_accuracy: %.4f\n",
+                    (double)fv->held_out_balanced_accuracy);
+            for (int k = 0; k < Kp; ++k)
+                fprintf(sf, "held_out_recall_c%d: %.4f\n", k,
+                        (double)fv->held_out_class_recall[k]);
+        }
+    }
+    fprintf(sf, "train_val_gap: %.4f\n",
+            (double)fv->wf_to_held_out_gap);
+    fprintf(sf, "overfit_folds: %d\n", fv->walkforward.overfit_count);
+    fprintf(sf, "held_out_metric: %.4f\n", (double)fv->held_out_metric);
+    fprintf(sf, "held_out_count: %d\n", fv->held_out_count);
+    // accuracy = train accuracy (classification); past_runs reads it as `r->train_accuracy`.
+    // CS-272 — gated on the kind SSoT: `label_kind != 2` was the unreachable discriminant NEW-6
+    // fixed in TrainingWorkers_RunHorizon's metric lines (label_kind IS num_classes and no target
+    // has 2), so every regression horizon wrote "accuracy: 0.00" — mean_train_accuracy is never
+    // set for regression.
+    if (!LabelType_IsRegression(label_type)) {
+        fprintf(sf, "accuracy: %.2f\n",
+                100.0 * (double)fv->walkforward.mean_train_accuracy);
+    }
+    // Bookkeeping (operator may grep for these even though past_runs
+    // doesn't use them):
+    fprintf(sf, "ran_held_out: %d\n", fv->ran_held_out);
+    fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
+    fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
+    if (fv->auto_stamp_ok) {
+        fprintf(sf, "auto_stamp_path_written: %s\n",
+                fv->auto_stamp_path_written);
+    } else if (fv->auto_stamp_attempted) {
+        fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
+    }
+    // 2026-09-03 — the CORPUS SELECTION record (what-to-do-next.md: "today the
+    // selection is not recorded anywhere"). Sourced from `results` — the record
+    // the corpus walk wrote at collect time (BacktestResults_RecordCorpus), NOT
+    // the Data panel's live selection: the operator can reselect between
+    // Collect and Train, and the samples this model trained on are the
+    // collect-time set. The tick-time span is the DATA's own timestamps (UTC),
+    // the same two scalars the purge gap's time reach reads (D-474).
+    {
+        fprintf(sf, "data_files: %d\n", results->data_file_count);
+        if (results->data_file_count > 0) {
+            fprintf(sf, "data_first_file: %s\n", results->data_first_file);
+            fprintf(sf, "data_last_file: %s\n",  results->data_last_file);
+        }
+        if (results->data_list_sha256[0])
+            fprintf(sf, "data_list_sha256: %s\n", results->data_list_sha256);
+        if (results->first_tick_us > 0 && results->last_tick_us >= results->first_tick_us) {
+            char d0[16] = "", d1[16] = "";
+            struct tm tm0, tm1;
+            time_t t0 = (time_t)(results->first_tick_us / 1000000ULL);
+            time_t t1 = (time_t)(results->last_tick_us  / 1000000ULL);
+            if (gmtime_r(&t0, &tm0)) strftime(d0, sizeof(d0), "%Y-%m-%d", &tm0);
+            if (gmtime_r(&t1, &tm1)) strftime(d1, sizeof(d1), "%Y-%m-%d", &tm1);
+            fprintf(sf, "data_first_tick_utc: %s\n", d0);
+            fprintf(sf, "data_last_tick_utc: %s\n",  d1);
+            fprintf(sf, "data_first_tick_us: %llu\n", (unsigned long long)results->first_tick_us);
+            fprintf(sf, "data_last_tick_us: %llu\n",  (unsigned long long)results->last_tick_us);
+        }
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingWorkers_WriteSummary]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingWorkers_RunHorizon]
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
@@ -859,114 +1005,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
              training_side == 1 ? "summary_exit.txt" : "summary_entry.txt");
     FILE *sf = fopen(dst_summary, "w");
     if (sf) {
-        // v5.11.50 — use CANONICAL summary.txt field names that past_runs
-        // reads (in PastRuns_LoadOne). Pre-fix v5.11.41.A used made-up wf_*
-        // names; past_runs ignored them, leaving Train Acc/Val Acc/Gap
-        // columns blank. NOW uses the same names Save Run uses so
-        // multi-horizon runs render the same as single-horizon Save Run
-        // bundles. Plus expected_num_classes (v5.11.49) for Classes col.
-        fprintf(sf, "run: %s/horizon_%d\n", run_name, horizon_ticks);  // D-431 nested (display-only; verified unparsed)
-        fprintf(sf, "role: %s\n", role);
-        fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
-        fprintf(sf, "label_type: %d\n", label_type);
-        fprintf(sf, "expected_num_classes: %d\n", num_classes);
-        // E.1.2.C — report what actually TRAINED. These were a SECOND live read of
-        // the same widgets, minutes after the first, so an edit in between made
-        // summary.txt disagree with the model sitting beside it — and PastRuns
-        // displays the summary value as truth.
-        fprintf(sf, "max_depth: %d\n", snap_hp.max_depth);
-        fprintf(sf, "learning_rate: %.3f\n", (double)snap_hp.learning_rate);
-        fprintf(sf, "n_estimators: %d\n", snap_hp.n_estimators);
-        fprintf(sf, "label_tp_pct: %.4f\n", (double)tp_pct);
-        fprintf(sf, "label_sl_pct: %.4f\n", (double)sl_pct);
-        // s5 leaf-15 — lineage: which round trip this run's win threshold cleared.
-        // Sourced from local_run_cfg (the config that produced these labels), the
-        // same click-time-snapshot discipline as the hyperparameters above.
-        fprintf(sf, "label_roundtrip_fee_pct: %.4f\n",
-                local_run_cfg ? local_run_cfg->label_roundtrip_fee_pct : 0.0);
-        fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
-        fprintf(sf, "n_train_samples: %d\n", results->sample_count);
-        fprintf(sf, "label_kind: %d\n", fv->label_kind);
-        fprintf(sf, "valid_folds: %d\n", fv->walkforward.valid_folds);
-        // val_accuracy / val_correlation: pick whichever fits the kind.
-        // past_runs reader sets has_wf_results=1 when EITHER is read.
-        if (LabelType_IsRegression(label_type)) {  // regression (E.1.2.D NEW-6 — was the unreachable == 2)
-            fprintf(sf, "val_correlation: %.4f\n",
-                    (double)fv->walkforward.mean_val_correlation);
-            fprintf(sf, "val_mse: %.6f\n",
-                    (double)fv->walkforward.mean_val_mse);
-        } else {  // binary or multiclass
-            fprintf(sf, "val_accuracy: %.2f\n",
-                    100.0 * (double)fv->walkforward.mean_val_accuracy);
-            fprintf(sf, "val_stddev: %.2f\n",
-                    100.0 * (double)fv->walkforward.std_val_accuracy);
-            // 2026-09-03 — the gate metric + per-class recall (E.2/E.3). Percent
-            // like val_accuracy so Past Runs reads them with the same rule.
-            fprintf(sf, "val_balanced_accuracy: %.2f\n",
-                    100.0 * (double)fv->walkforward.mean_val_balanced_accuracy);
-            {
-                const int Kp = (fv->walkforward.num_classes >= 2)
-                             ? (fv->walkforward.num_classes > 16 ? 16 : fv->walkforward.num_classes) : 2;
-                for (int k = 0; k < Kp; ++k)
-                    fprintf(sf, "val_recall_c%d: %.2f\n", k,
-                            100.0 * (double)fv->walkforward.mean_val_class_recall[k]);
-                fprintf(sf, "held_out_balanced_accuracy: %.4f\n",
-                        (double)fv->held_out_balanced_accuracy);
-                for (int k = 0; k < Kp; ++k)
-                    fprintf(sf, "held_out_recall_c%d: %.4f\n", k,
-                            (double)fv->held_out_class_recall[k]);
-            }
-        }
-        fprintf(sf, "train_val_gap: %.4f\n",
-                (double)fv->wf_to_held_out_gap);
-        fprintf(sf, "overfit_folds: %d\n", fv->walkforward.overfit_count);
-        fprintf(sf, "held_out_metric: %.4f\n", (double)fv->held_out_metric);
-        fprintf(sf, "held_out_count: %d\n", fv->held_out_count);
-        // accuracy = train accuracy. Past_runs reads this as `r->train_accuracy`.
-        // Use mean_train_accuracy from WF folds (closest analog).
-        if (fv->label_kind != 2) {
-            fprintf(sf, "accuracy: %.2f\n",
-                    100.0 * (double)fv->walkforward.mean_train_accuracy);
-        }
-        // Bookkeeping (operator may grep for these even though past_runs
-        // doesn't use them):
-        fprintf(sf, "ran_held_out: %d\n", fv->ran_held_out);
-        fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
-        fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
-        if (fv->auto_stamp_ok) {
-            fprintf(sf, "auto_stamp_path_written: %s\n",
-                    fv->auto_stamp_path_written);
-        } else if (fv->auto_stamp_attempted) {
-            fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
-        }
-        // 2026-09-03 — the CORPUS SELECTION record (what-to-do-next.md: "today the
-        // selection is not recorded anywhere"). Sourced from `results` — the record
-        // the corpus walk wrote at collect time (BacktestResults_RecordCorpus), NOT
-        // the Data panel's live selection: the operator can reselect between
-        // Collect and Train, and the samples this model trained on are the
-        // collect-time set. The tick-time span is the DATA's own timestamps (UTC),
-        // the same two scalars the purge gap's time reach reads (D-474).
-        {
-            fprintf(sf, "data_files: %d\n", results->data_file_count);
-            if (results->data_file_count > 0) {
-                fprintf(sf, "data_first_file: %s\n", results->data_first_file);
-                fprintf(sf, "data_last_file: %s\n",  results->data_last_file);
-            }
-            if (results->data_list_sha256[0])
-                fprintf(sf, "data_list_sha256: %s\n", results->data_list_sha256);
-            if (results->first_tick_us > 0 && results->last_tick_us >= results->first_tick_us) {
-                char d0[16] = "", d1[16] = "";
-                struct tm tm0, tm1;
-                time_t t0 = (time_t)(results->first_tick_us / 1000000ULL);
-                time_t t1 = (time_t)(results->last_tick_us  / 1000000ULL);
-                if (gmtime_r(&t0, &tm0)) strftime(d0, sizeof(d0), "%Y-%m-%d", &tm0);
-                if (gmtime_r(&t1, &tm1)) strftime(d1, sizeof(d1), "%Y-%m-%d", &tm1);
-                fprintf(sf, "data_first_tick_utc: %s\n", d0);
-                fprintf(sf, "data_last_tick_utc: %s\n",  d1);
-                fprintf(sf, "data_first_tick_us: %llu\n", (unsigned long long)results->first_tick_us);
-                fprintf(sf, "data_last_tick_us: %llu\n",  (unsigned long long)results->last_tick_us);
-            }
-        }
+        TrainingWorkers_WriteSummary(sf, req, role, horizon_dir, num_classes, local_run_cfg, results, fv);
         fclose(sf);
     }
 
