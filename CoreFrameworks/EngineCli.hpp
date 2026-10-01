@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BOOT_TIME]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the engine binary's command-line grammar — option + dispatch rows (X-macro registries) and ONE data-driven resolver over a row ARRAY, so the production table and the suite's fixture table run the same function]
+// [OVERVIEW]_[the engine binary's command-line grammar — option + dispatch rows (X-macro registries) and ONE data-driven resolver over a row ARRAY, so the production table and the suite's fixture table run the same function; then the routing main() calls once (resolve → verdict → emit), where RUN is the only verdict that boots]
 // [CONTAINS]
 //   - [REGISTRY]_[FOREACH_ENGINE_CLI_REFUSAL]
 //   - [REGISTRY]_[FOREACH_ENGINE_CLI_DISPATCH]
@@ -16,16 +16,22 @@
 //   - [FUNCTION]_[EngineCli_Resolve]
 //   - [FUNCTION]_[EngineCli_PrintUsage]
 //   - [FUNCTION]_[EngineCli_PrintRefusal]
+//   - [FUNCTION]_[EngineCli_Verdict]
+//   - [FUNCTION]_[EngineCli_Emit]
+//   - [FUNCTION]_[EngineCli_Entry]
 // [REFERENCE]_[DESIGN_SPEC]_[framework-driven-cli-binary-pattern]
 //======================================================================================================
 //
 // THE GRAMMAR (E.1.3 NA CFG-1b; the spec's "planned first engine instance" section):
 //   engine [<cfg>]              run the engine (the DEFAULT dispatch — index 0 — when no mode flag is given)
 //   engine --help               print the usage to stdout
-// Later leaves add ROWS, not code: REPLAY's scoped family (--replay <tape> + --replay-pace max|tape|boundary …),
-// PERSIST's maintenance verbs (--protective-state show|clear|init + --latch required under clear), E.2's
-// --check-cfg, the roadmap's --dump-stamp-schema (no cfg). The suite's fixture table already exercises every one
-// of those grammar classes against THIS resolver.
+// A new OPTION inside an existing mode is one row. A new MODE is a row AND routing — its verdict in
+// EngineCli_Verdict and its arm in main(): the mode-count static_assert in EngineCli_Verdict fails the build
+// until the author has been there, and a mode with no verdict is UNHANDLED, refused and never booted. The
+// planned modes: REPLAY's scoped family (--replay <tape> + --replay-pace max|tape|boundary …), PERSIST's
+// maintenance verbs (--protective-state show|clear|init + --latch required under clear), E.2's --check-cfg, the
+// roadmap's --dump-stamp-schema (no cfg). The suite's fixture table already exercises every one of those
+// grammar classes against THIS resolver.
 //
 // THE RULES a row cannot bend: one spelling (`--name value`; `--name=value` refuses); `--` ends the options;
 // a mode flag (dispatch != NONE) is at most one per invocation, so exclusivity is DERIVED, never listed pairwise;
@@ -586,4 +592,115 @@ static inline void EngineCli_PrintRefusal(const EngineCliArgs* a, const EngineCl
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[EngineCli_PrintRefusal]
+//======================================================================
+
+//======================================================================
+// [SECTION]_[the routing — from a resolved invocation to what the binary does]
+//----------------------------------------------------------------------
+// main() never branches on the resolver's fields: EngineCli_Entry resolves, EngineCli_Verdict decides,
+// EngineCli_Emit writes the streams + the exit status, and main() boots only on ENGINE_CLI_VERDICT_RUN.
+// A "proceed" bool would lose WHICH mode proceeds, so a later mode would fall through into the RUN boot.
+//======================================================================
+enum EngineCliVerdict : uint8_t {
+    ENGINE_CLI_VERDICT_REFUSED   = 0,   // the zero value, so an unset verdict fails closed
+    ENGINE_CLI_VERDICT_HELP      = 1,   // the usage on stdout
+    ENGINE_CLI_VERDICT_UNHANDLED = 2,   // resolved OK into a mode this binary has no routing for — refused
+    ENGINE_CLI_VERDICT_RUN       = 3,   // the ONLY verdict that boots the engine
+};
+
+// a booting invocation always names a cfg: with an OPTIONAL cfg path + a default, the resolver fills the default
+// whenever none is named and refuses an empty one — and the loaders' fopen has no null guard
+static_assert(g_engine_cli_dispatches[ENGINE_CLI_DISPATCH_RUN].positional == ENGINE_CLI_POSITIONAL_OPTIONAL_ONE &&
+              g_engine_cli_dispatches[ENGINE_CLI_DISPATCH_RUN].default_positional != nullptr,
+              "the run mode's cfg path must be OPTIONAL with a default, so RUN can never boot on a null cfg path");
+
+//======================================================================
+// [FUNCTION]_[EngineCli_Verdict]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[PURE — the whole routing policy: a refusal never boots, (OK, run) boots, (OK, help) prints the usage, and every other mode that resolves OK is UNHANDLED (refused); the suite exhausts every (result, dispatch) pair]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline uint8_t EngineCli_Verdict(uint8_t result, uint8_t dispatch) {
+    // the allow-list below is the safety (only RUN boots; an unrouted mode is UNHANDLED); this assert is the
+    // pointer — a new mode row fails the build HERE, so its author writes its verdict and its arm in main()
+    static_assert(ENGINE_CLI_DISPATCH_COUNT == 2, "a new mode needs its verdict here and its arm in main()");
+    if (result != ENGINE_CLI_OK)              return ENGINE_CLI_VERDICT_REFUSED;
+    if (dispatch == ENGINE_CLI_DISPATCH_RUN)  return ENGINE_CLI_VERDICT_RUN;
+    if (dispatch == ENGINE_CLI_DISPATCH_HELP) return ENGINE_CLI_VERDICT_HELP;
+    return ENGINE_CLI_VERDICT_UNHANDLED;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCli_Verdict]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineCli_Emit]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a verdict's output + exit status over a row ARRAY — HELP: the usage on `out`, 0 (1 when the write fails); REFUSED: the refusal line + the usage on `err`, 1; UNHANDLED, or a value no verdict has: one line on `err`, 1; RUN: nothing, 0. The 1 is interim until C1a's exit-status registry names it]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int EngineCli_Emit(uint8_t verdict, const EngineCliArgs* a,
+                                 const EngineCliOption* rows, int n_rows,
+                                 const EngineCliDispatch* disp, int n_disp,
+                                 const char* prog, FILE* out, FILE* err) {
+    switch (verdict) {
+        case ENGINE_CLI_VERDICT_RUN:
+            return 0;
+        case ENGINE_CLI_VERDICT_HELP:
+            EngineCli_PrintUsage(rows, n_rows, disp, n_disp, prog, out);
+            // stdout into a pipe or a file is fully buffered: unflushed, a failed write would surface only at
+            // exit — after `--help` had already reported success
+            return (fflush(out) != 0 || ferror(out)) ? 1 : 0;
+        case ENGINE_CLI_VERDICT_REFUSED:
+            EngineCli_PrintRefusal(a, rows, err);
+            EngineCli_PrintUsage(rows, n_rows, disp, n_disp, prog, err);
+            return 1;
+        case ENGINE_CLI_VERDICT_UNHANDLED:
+            if (a->dispatch < n_disp)
+                fprintf(err, "[engine] command line refused: mode '%s' has no routing in this binary\n", disp[a->dispatch].name);
+            else
+                fprintf(err, "[engine] command line refused: mode #%u has no routing in this binary\n", (unsigned)a->dispatch);
+            return 1;
+        default:   // a value EngineCli_Verdict never returns — fail closed all the same
+            fprintf(err, "[engine] command line refused: unknown verdict %u\n", (unsigned)verdict);
+            return 1;
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCli_Emit]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineCli_Entry]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the binary's command line in one call — resolve argv over the PRODUCTION table → verdict → emit; returns the verdict, writes the exit status; the usage names argv[0] verbatim, "engine" when it is absent or empty]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline uint8_t EngineCli_Entry(int argc, const char* const* argv, FILE* out, FILE* err,
+                                      EngineCliArgs* args, int* status) {
+    const char* prog = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : "engine";
+    const uint8_t result  = EngineCli_Resolve(g_engine_cli_options, ENGINE_CLI_OPTION_COUNT,
+                                              g_engine_cli_dispatches, ENGINE_CLI_DISPATCH_COUNT, argc, argv, args);
+    const uint8_t verdict = EngineCli_Verdict(result, args->dispatch);
+    *status = EngineCli_Emit(verdict, args, g_engine_cli_options, ENGINE_CLI_OPTION_COUNT,
+                             g_engine_cli_dispatches, ENGINE_CLI_DISPATCH_COUNT, prog, out, err);
+    return verdict;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineCli_Entry]
 //======================================================================
