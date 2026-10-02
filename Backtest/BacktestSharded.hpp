@@ -108,19 +108,19 @@ static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uin
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[sharded backtest entry point — loads tick files, drives the per-core architecture through the shared OMS, aggregates P&L/win-loss/drawdown + equity curve; signature matches the Backtest_Run wrapper]
+// [OVERVIEW]_[sharded backtest entry point — loads tick files, drives the per-core architecture through the shared OMS, aggregates P&L/win-loss/drawdown + equity curve; returns DONE, or names why no run happened (the cfg refused, the tick buffer not allocated) — reached only through Backtest_Run, which checks the suite run lease first]
 // [REFERENCE]_[DECISION]_[[C-1] [D-122] [D-170] [D-254] [D-255]]
 // [REFERENCE]_[PARITY]_[[PARITY-26] [PARITY-27] [PARITY-28] [PARITY-29] [PARITY-30] [PARITY-31]]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-119]
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void BacktestSharded_Run(BacktestResults *results,
-                                        const BacktestRunConfig *run_cfg,
-                                        volatile int *progress_pct,
-                                        volatile int *cancel_flag,
-                                        CandleAccumulator *candle_acc,
-                                        TUISnapshot *out_snapshot = NULL) {
+static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
+                                                     const BacktestRunConfig *run_cfg,
+                                                     volatile int *progress_pct,
+                                                     volatile int *cancel_flag,
+                                                     CandleAccumulator *candle_acc,
+                                                     TUISnapshot *out_snapshot = NULL) {
     // Reset results — preserve dynamic allocations like the legacy path does
     BacktestResults_Reset(results);
     // 2026-09-03 — the corpus-selection record rides the results from the ONE site
@@ -141,7 +141,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // BacktestResults_Reset above. This is pre-fingerprint, so the golden is not perturbed.
     if (!cfg_capital_gate_ok(cfg, "backtest sharded")) {
         results->config_used = cfg;
-        return;
+        return BACKTEST_RUN_CFG_REFUSED;
     }
     cfg.slow_path_max_secs = 999999;
     results->config_used = cfg;
@@ -163,7 +163,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     if (!Sharded_ValidatePartialExitCfg(&cfg)) {
         fprintf(stderr, "[backtest sharded] FATAL: partial-exit cfg "
                         "validation failed. Skipping run.\n");
-        return;
+        return BACKTEST_RUN_CFG_REFUSED;
     }
 
     // Track E.2 — multi-strategy support. The prior SimpleDip-only gate
@@ -629,7 +629,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     if (!ticks) {
         fprintf(stderr, "[backtest sharded] failed to allocate tick buffer\n");
         free(file_tick_counts);
-        return;
+        return BACKTEST_RUN_ALLOC_FAILED;
     }
 
     // Track per-trade outcomes for win/loss/avg stats. We sample the
@@ -949,6 +949,7 @@ done:
             stats->total_pnl);
     fprintf(stderr, "[backtest sharded DEBUG] state.total_entries=%lu state.total_exits=%lu\n",
             (unsigned long)state.total_entries, (unsigned long)state.total_exits);
+    return BACKTEST_RUN_DONE;
 }
 //======================================================================
 // [END_CODE]

@@ -265,6 +265,8 @@ struct RunControlState {
     // prior FILE is its only learned-state input. Empty = start uniform.
     char bandit_state_prior_path[400];
     char launch_msg[160];   // GUI thread only — why the last Run Backtest did not start ("" = it did)
+    // the last run's BacktestRunStatus — the worker writes it before its job publishes; read once the job is done
+    uint8_t last_status;
 };
 //======================================================================
 // [END_CODE]
@@ -279,6 +281,12 @@ struct RunControlState {
 //======================================================================
 // [END_STRUCT]_[RunControlState]
 //======================================================================
+
+// A finished Run Control run whose backtest actually ran — the ONE predicate every results display reads (the panel,
+// the dashboard, the trade history, the window title): a refused or failed run is done but has no results to show.
+static inline bool RunControl_HasRun(const RunControlState *rc) {
+    return SuiteJob_Done(&rc->job) && rc->last_status == BACKTEST_RUN_DONE;
+}
 
 //======================================================================
 // [FUNCTION]_[RunControl_Init]
@@ -397,14 +405,17 @@ struct BacktestWorkerArgs {
 // [CODE]
 //======================================================================
 static inline void *backtest_worker_fn(void *arg, uint64_t lease) {
-    (void)lease;   // MP-6 step 6: Backtest_Run takes it as its proof of the lease
     BacktestWorkerArgs *args = (BacktestWorkerArgs *)arg;
     RunControlState *state = args->state;
     free(args);
 
-    Backtest_Run(&state->results, &state->run_config,
-                 &state->job.progress, &state->job.cancel,
-                 state->candle_acc, state->snapshot);
+    state->last_status = Backtest_Run(lease, &state->results, &state->run_config,
+                                      &state->job.progress, &state->job.cancel,
+                                      state->candle_acc, state->snapshot);
+    if (state->last_status != BACKTEST_RUN_DONE) {   // no run happened: nothing to post-process
+        SuiteJob_Publish(&state->job);
+        return NULL;
+    }
 
     // Compute display snapshot after labels are populated by Backtest_Run's
     // post-pass. Done BEFORE the job publishes, so the GUI never sees a stale
@@ -487,7 +498,6 @@ struct CollectMultiHorizonWorkerArgs {
 // [CODE]
 //======================================================================
 static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
-    (void)lease;   // MP-6 step 6: Backtest_Run takes it as its proof of the lease
     auto *args = (CollectMultiHorizonWorkerArgs *)arg;
     RunControlState *rc = args->run_control;
     int horizon_count = args->snap_horizon_count;
@@ -508,9 +518,14 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     // 1. Collect features ONCE. label_forward_ticks at this point is
     //    whatever was set when the button was clicked — we'll overwrite
     //    labels per horizon afterwards.
-    Backtest_Run(&rc->results, &rc->run_config,
-                  &rc->job.progress, &rc->job.cancel,
-                  rc->candle_acc, rc->snapshot);
+    rc->last_status = Backtest_Run(lease, &rc->results, &rc->run_config,
+                                   &rc->job.progress, &rc->job.cancel,
+                                   rc->candle_acc, rc->snapshot);
+    if (rc->last_status != BACKTEST_RUN_DONE) {   // no run happened: no label pass, no per-horizon table
+        fprintf(stderr, "[collect-mh] no run (%s) — no labels computed\n", BacktestRunStatus_Name(rc->last_status));
+        SuiteJob_Publish(&rc->job);
+        return NULL;
+    }
 
     // 2. Per-horizon label diagnostic — ONE batched walk (E.1.2.D leaf 5),
     //    was one full-corpus walk PER horizon. All targets share the
@@ -864,7 +879,12 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
         if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
     }
 
-    if (SuiteJob_Done(&state->job)) {
+    if (SuiteJob_Done(&state->job) && !RunControl_HasRun(state)) {
+        ImGui::Separator();
+        ImGui::TextColored(FoxmlColors::red, "The last run did not happen — %s",
+                           BacktestRunStatus_Name(state->last_status));
+    }
+    if (RunControl_HasRun(state)) {
         ImGui::Separator();
         BacktestStats *s = &state->results.stats;
         ImGui::Text("Completed in %.1f ms (%lu ticks)", s->elapsed_ms, s->ticks_processed);
@@ -2960,9 +2980,9 @@ struct OptimizerPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-02]
-// [SIZE]_[959424B]
+// [SIZE]_[961920B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[14991]
+// [CACHE_LINES]_[15030]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OptimizerPanelState]
@@ -3016,12 +3036,11 @@ struct OptWorkerArgs {
 // [CODE]
 //======================================================================
 static inline void *optimizer_worker_fn(void *arg, uint64_t lease) {
-    (void)lease;   // MP-6 step 6: the sweep passes it to every cell's Backtest_Run
     OptWorkerArgs *args = (OptWorkerArgs *)arg;
     OptimizerPanelState *state = args->state;
     free(args);
 
-    Backtest_RunSweep(&state->results, &state->run_config,
+    Backtest_RunSweep(lease, &state->results, &state->run_config,
                        state->ranges, state->num_params, state->metric_idx,
                        &state->job.progress, &state->job.total, &state->job.cancel);
 
@@ -3180,18 +3199,29 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
     if (SuiteJob_Done(&state->job) && state->results.total_runs > 0) {
         ImGui::Separator();
         OptimizerResults *r = &state->results;
+        // MP-6 (D-503) — only the cells whose backtest ran are recorded; say how many, so a refused cell's empty
+        // bar or heatmap square is never read as a result
+        int ran = 0;
+        for (int i = 0; i < r->total_runs; ++i) ran += r->cell_ran[i];
+        if (ran < r->total_runs)
+            ImGui::TextColored(FoxmlColors::yellow, "%d of %d cells ran — the rest were refused, failed or not "
+                               "reached (see the log) and are never the best", ran, r->total_runs);
 
         // best result header
         int bi = r->best_idx;
-        ImGui::TextColored(ResultsPnlColor(r->stats[bi].total_pnl),
-                           "Best: %s=%.2f", state->ranges[0].key,
-                           r->param_vals[0][bi / r->dims[1]]);
-        if (r->num_params > 1)
-            ImGui::SameLine(), ImGui::Text(" %s=%.2f", state->ranges[1].key,
-                                            r->param_vals[1][bi % r->dims[1]]);
-        ImGui::Text("P&L $%.2f  |  Sharpe %.2f  |  WR %.1f%%  |  PF %.2f",
-                     r->stats[bi].total_pnl, r->stats[bi].sharpe_ratio,
-                     r->stats[bi].win_rate, r->stats[bi].profit_factor);
+        if (bi < 0) {
+            ImGui::TextColored(FoxmlColors::red, "No cell ran — there is no best");
+        } else {
+            ImGui::TextColored(ResultsPnlColor(r->stats[bi].total_pnl),
+                               "Best: %s=%.2f", state->ranges[0].key,
+                               r->param_vals[0][bi / r->dims[1]]);
+            if (r->num_params > 1)
+                ImGui::SameLine(), ImGui::Text(" %s=%.2f", state->ranges[1].key,
+                                                r->param_vals[1][bi % r->dims[1]]);
+            ImGui::Text("P&L $%.2f  |  Sharpe %.2f  |  WR %.1f%%  |  PF %.2f",
+                         r->stats[bi].total_pnl, r->stats[bi].sharpe_ratio,
+                         r->stats[bi].win_rate, r->stats[bi].profit_factor);
+        }
 
         // 1D: bar chart
         if (r->num_params == 1) {
@@ -3232,14 +3262,17 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
             ImGui::TableSetupColumn("Trades", ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableHeadersRow();
 
-            // sort by metric (descending)
+            // the cells that ran first, by metric (descending); the rest after them
             int sorted[OPT_MAX_GRID];
             for (int i = 0; i < r->total_runs; i++) sorted[i] = i;
             for (int i = 0; i < r->total_runs - 1; i++)
-                for (int j = i + 1; j < r->total_runs; j++)
-                    if (r->metric[sorted[j]] > r->metric[sorted[i]]) {
-                        int tmp = sorted[i]; sorted[i] = sorted[j]; sorted[j] = tmp;
+                for (int j = i + 1; j < r->total_runs; j++) {
+                    const int a = sorted[i], b = sorted[j];
+                    if (r->cell_ran[b] > r->cell_ran[a] ||
+                        (r->cell_ran[b] == r->cell_ran[a] && r->metric[b] > r->metric[a])) {
+                        sorted[i] = b; sorted[j] = a;
                     }
+                }
 
             int show = r->total_runs < 20 ? r->total_runs : 20;
             for (int si = 0; si < show; si++) {
@@ -3250,6 +3283,11 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
                 if (r->num_params > 1) {
                     ImGui::TableNextColumn();
                     ImGui::Text("%.2f", r->param_vals[1][idx % r->dims[1]]);
+                }
+                if (!r->cell_ran[idx]) {   // P&L, WR, PF, Sharpe, Trades — none recorded
+                    ImGui::TableNextColumn(); ImGui::TextDisabled("not run");
+                    for (int c = 0; c < 4; ++c) { ImGui::TableNextColumn(); ImGui::TextDisabled("-"); }
+                    continue;
                 }
                 ImGui::TableNextColumn();
                 ImGui::TextColored(ResultsPnlColor(r->stats[idx].total_pnl),
@@ -3447,11 +3485,11 @@ struct TrainingPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-10-01]
-// [SIZE]_[409472B]
+// [UPDATED]_[2026-10-02]
+// [SIZE]_[411968B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6398]
-// [STRADDLE]_[run_name@11817 · ui_horizon_list@406640 · ui_tp_pct_csv@406676 · ui_sl_pct_csv@406740 · ui_sl_per_horizon@406836 · ui_label_kind_csv@409092]
+// [CACHE_LINES]_[6437]
+// [STRADDLE]_[run_name@11817 · ui_horizon_list@409136 · ui_tp_pct_csv@409172 · ui_sl_pct_csv@409236 · ui_sl_per_horizon@409332 · ui_label_kind_csv@411588]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -4865,6 +4903,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     } // end !single_horizon_mode (Collect Multi-Horizon)
     // MP-6 — why this panel's last start did not start (refused, naming the run that holds the lease, or failed)
     if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
+    // ... and a Run Control run that started but did not happen (its backtest refused the cfg or could not allocate)
+    if (SuiteJob_Done(&run_control->job) && !RunControl_HasRun(run_control))
+        ImGui::TextColored(FoxmlColors::red, "The last Run Control run did not happen — %s",
+                           BacktestRunStatus_Name(run_control->last_status));
 
     // v5.11.43 — Horizons (CSV) input ALWAYS visible. Single source of
     // truth for both Collect/Train mode auto-routing AND single-horizon

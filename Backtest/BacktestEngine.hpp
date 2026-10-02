@@ -48,6 +48,7 @@
 #include "ValidationSplit.hpp"
 #include "OverfitDetection.hpp"
 #include "HeldOutSplit.hpp"  // Phase 7prep — locked held-out test set discipline
+#include "SuiteLease.hpp"   // E.1.3 MP-6 — Backtest_Run runs only for the holder of the suite run lease (D-503)
 #include "../MemHeaders/HmacSha256.hpp"  // 2026-09-03 — tt::sha256_bytes_hex for the corpus-selection record
 #include <stdio.h>
 #include <stdlib.h>
@@ -896,18 +897,39 @@ static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
 // [END_FUNCTION]_[BacktestStats_ComputeFromEquity]
 //======================================================================
 
+// What a backtest call did (E.1.3 MP-6, D-503). Every caller handles it by name: a run that did not happen must
+// never read as one — a sweep that recorded a refused cell's empty stats could crown it "best". The zero value
+// refuses, so an unset status never reads as a run (the SuiteLaunch rule). Never persisted, never logged as a number
+// — print BacktestRunStatus_Name.
+enum BacktestRunStatus : uint8_t {
+    BACKTEST_RUN_REFUSED_NO_LEASE = 0,   // the caller's token does not hold the suite run lease — nothing reset, no run
+    BACKTEST_RUN_DONE             = 1,   // the run happened (a cancel ends it early; the results cover what ran)
+    BACKTEST_RUN_CFG_REFUSED      = 2,   // the capital gate or the partial-exit check refused the cfg — no run
+    BACKTEST_RUN_ALLOC_FAILED     = 3,   // the tick buffer could not be allocated — no run
+};
+
+static inline const char* BacktestRunStatus_Name(uint8_t s) {
+    switch (s) {
+        case BACKTEST_RUN_REFUSED_NO_LEASE: return "refused: not the holder of the suite run lease";
+        case BACKTEST_RUN_DONE:             return "done";
+        case BACKTEST_RUN_CFG_REFUSED:      return "refused: the cfg failed validation (see the log)";
+        case BACKTEST_RUN_ALLOC_FAILED:     return "failed: out of memory for the tick buffer";
+        default:                            return "unknown status";
+    }
+}
+
 // Forward decl for the sharded backtest path. The actual implementation lives
 // in Backtest/BacktestSharded.hpp which is included AFTER this declaration so
 // the dispatcher can call it. Both functions share the BacktestRunConfig +
 // BacktestResults shape so the suite GUI doesn't care which path produced the
 // results.
 namespace tt {
-static inline void BacktestSharded_Run(BacktestResults *results,
-                                        const BacktestRunConfig *run_cfg,
-                                        volatile int *progress_pct,
-                                        volatile int *cancel_flag,
-                                        CandleAccumulator *candle_acc,
-                                        TUISnapshot *out_snapshot);
+static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
+                                                     const BacktestRunConfig *run_cfg,
+                                                     volatile int *progress_pct,
+                                                     volatile int *cancel_flag,
+                                                     CandleAccumulator *candle_acc,
+                                                     TUISnapshot *out_snapshot);
 }
 
 //======================================================================
@@ -1431,7 +1453,7 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the public backtest entry — thin wrapper: BacktestSharded_Run then the forward-scan label post-pass then a phase-timer summary; the legacy PortfolioController body is gone (E.7)]
+// [OVERVIEW]_[the public backtest entry — runs ONLY for the holder of the suite run lease (refused before anything is reset otherwise); then BacktestSharded_Run, the forward-scan label post-pass and a phase-timer summary; returns what happened by name (BacktestRunStatus)]
 //======================================================================
 // After Track E.7 (2026-04-26), Backtest_Run is a thin wrapper around the
 // sharded path. The legacy `PortfolioController_Tick`-driven body
@@ -1443,10 +1465,15 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
 // `engine_mode=single_core` don't fail to load; it's a no-op going
 // forward and will be removed in a follow-up release.
 //
-// All call sites (BacktestPanels.hpp Run Backtest button, Sweep,
-// FullValidation, WalkForward downstream consumers) keep working
-// transparently — same signature, same `BacktestResults` output, same
-// label post-pass.
+// E.1.3 MP-6 (D-503): BacktestSharded_Run's function-local statics and the
+// caller's shared results belong to ONE suite run at a time, so the caller
+// passes its suite run lease token as proof and a token that does not hold
+// the lease is refused BEFORE anything is reset (a refusal never wipes the
+// results another run owns). The status names every outcome — the lease
+// refusal and BacktestSharded_Run's no-run returns (cfg refused, allocation
+// failed) — and every caller handles it by name: the Run Control workers
+// skip their post-processing, the sweep never records the cell, the tests
+// take a lease. The label post-pass runs only after a run that happened.
 //
 // What still works that used to live in the legacy body:
 //   - `out_snapshot` populate: `BacktestSharded_Run` calls
@@ -1469,14 +1496,20 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void Backtest_Run(BacktestResults *results,
-                                 const BacktestRunConfig *run_cfg,
-                                 volatile int *progress_pct,
-                                 volatile int *cancel_flag,
-                                 CandleAccumulator *candle_acc,
-                                 TUISnapshot *out_snapshot = NULL) {
-    tt::BacktestSharded_Run(results, run_cfg, progress_pct, cancel_flag,
-                            candle_acc, out_snapshot);
+static inline BacktestRunStatus Backtest_Run(uint64_t lease,
+                                             BacktestResults *results,
+                                             const BacktestRunConfig *run_cfg,
+                                             volatile int *progress_pct,
+                                             volatile int *cancel_flag,
+                                             CandleAccumulator *candle_acc,
+                                             TUISnapshot *out_snapshot = NULL) {
+    if (!SuiteLease_HeldBy(lease)) {
+        fprintf(stderr, "[backtest] REFUSED: the caller does not hold the suite run lease — nothing reset, no run\n");
+        return BACKTEST_RUN_REFUSED_NO_LEASE;
+    }
+    const BacktestRunStatus st = tt::BacktestSharded_Run(results, run_cfg, progress_pct, cancel_flag,
+                                                         candle_acc, out_snapshot);
+    if (st != BACKTEST_RUN_DONE) return st;   // no run happened: no label pass, no phase summary
     // Labels need forward-looking ticks the replay already discarded.
     // Helper reloads + computes; no-op when collect_features=0.
     Backtest_ComputeLabelsFromSamples(results, run_cfg);
@@ -1495,6 +1528,7 @@ static inline void Backtest_Run(BacktestResults *results,
         tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
         tt::PhaseTimer_PublishSnapshot(&tt::PhaseTimer_Global());  // TD-240
     }
+    return BACKTEST_RUN_DONE;
 }
 //======================================================================
 // [END_CODE]
@@ -3707,7 +3741,10 @@ struct OptimizerResults {
     int dims[OPT_MAX_PARAMS];          // steps per dimension
     int num_params;
     int total_runs;
-    int best_idx;
+    int best_idx;                      // Grid Search: -1 = no cell ran (MP-6 — the HP sweep adopts this at HPROUTE)
+    // Grid Search: 1 = this cell's backtest ran and its stats + metric are recorded; 0 = it did not run (refused,
+    // failed, or never reached) — the panel shows it as not run and it can never be the best (MP-6, D-503)
+    uint8_t cell_ran[OPT_MAX_GRID];
 };
 
 // metric selector
@@ -3740,23 +3777,34 @@ static inline double OptimizerMetric(const BacktestStats *s, int metric) {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[engine-cfg parameter grid search — load base cfg, gate the sweep-range endpoints for capital-cap safety, run a backtest per cell, pick the best by the selected metric]
+// [OVERVIEW]_[engine-cfg parameter grid search — only for the holder of the suite run lease (refused before the results are touched otherwise); load base cfg, gate the sweep-range endpoints for capital-cap safety, run a backtest per cell, record ONLY the cells that ran, pick the best among them]
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void Backtest_RunSweep(OptimizerResults *opt,
+static inline void Backtest_RunSweep(uint64_t lease,
+                                      OptimizerResults *opt,
                                       const BacktestRunConfig *base_cfg,
                                       const OptimizerRange *ranges, int num_params,
                                       int metric_idx,
                                       volatile int *current_run, volatile int *total_runs,
                                       volatile int *cancel_flag) {
+    // MP-6 (D-503) — the sweep runs every cell through Backtest_Run on the caller's lease; refuse here, before the
+    // caller's results are touched, rather than once per cell
+    if (!SuiteLease_HeldBy(lease)) {
+        fprintf(stderr, "[optimizer] REFUSED: the caller does not hold the suite run lease — no cell runs\n");
+        return;
+    }
     opt->num_params = num_params;
     opt->dims[0] = ranges[0].steps();
     opt->dims[1] = (num_params > 1) ? ranges[1].steps() : 1;
     opt->total_runs = opt->dims[0] * opt->dims[1];
     *total_runs = opt->total_runs;
     *current_run = 0;
-    opt->best_idx = 0;
+    // no cell has run yet: none recorded, none best — a refused or unreached cell never shows a previous sweep's numbers
+    opt->best_idx = -1;
+    memset(opt->cell_ran, 0, sizeof(opt->cell_ran));
+    memset(opt->stats, 0, sizeof(opt->stats));
+    for (int i = 0; i < OPT_MAX_GRID; ++i) opt->metric[i] = 0.0;
     double best_metric = -1e30;
 
     // store parameter values
@@ -3820,10 +3868,18 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
             BacktestResults results;
             BacktestResults_Init(&results);
             int dummy_progress = 0;
-            Backtest_Run(&results, &run, &dummy_progress, cancel_flag, NULL);
+            const BacktestRunStatus st = Backtest_Run(lease, &results, &run, &dummy_progress, cancel_flag, NULL);
+            if (st != BACKTEST_RUN_DONE) {
+                // a cell that did not run is never recorded: its empty stats must not compete for best
+                fprintf(stderr, "[optimizer] cell %d not run (%s) — not recorded\n", idx, BacktestRunStatus_Name(st));
+                BacktestResults_Free(&results);
+                if (st == BACKTEST_RUN_REFUSED_NO_LEASE) return;   // the sweep lost its proof — no later cell can run
+                continue;
+            }
 
             opt->stats[idx] = results.stats;
             opt->metric[idx] = OptimizerMetric(&results.stats, metric_idx);
+            opt->cell_ran[idx] = 1;
             BacktestResults_Free(&results);
 
             if (opt->metric[idx] > best_metric) {
