@@ -2948,24 +2948,21 @@ struct OptimizerPanelState {
     int num_params;
     int metric_idx;
     OptimizerResults results;
-    volatile int running;
-    volatile int current_run;
-    volatile int total_runs;
-    volatile int cancel_flag;
-    volatile int complete;
+    SuiteJob job;   // Grid Search (D-506 — the funnel owns its start and its end; progress counts cells of total)
     // copies for the worker thread
     BacktestRunConfig run_config;
     char config_path[256];
+    char launch_msg[160];   // GUI thread only — why the last Grid Search did not start ("" = it did)
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-02]
-// [SIZE]_[959168B]
+// [UPDATED]_[2026-10-02]
+// [SIZE]_[959424B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[14987]
+// [CACHE_LINES]_[14991]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OptimizerPanelState]
@@ -3018,17 +3015,17 @@ struct OptWorkerArgs {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void *optimizer_worker_fn(void *arg) {
+static inline void *optimizer_worker_fn(void *arg, uint64_t lease) {
+    (void)lease;   // MP-6 step 6: the sweep passes it to every cell's Backtest_Run
     OptWorkerArgs *args = (OptWorkerArgs *)arg;
     OptimizerPanelState *state = args->state;
     free(args);
 
     Backtest_RunSweep(&state->results, &state->run_config,
                        state->ranges, state->num_params, state->metric_idx,
-                       &state->current_run, &state->total_runs, &state->cancel_flag);
+                       &state->job.progress, &state->job.total, &state->job.cancel);
 
-    state->complete = 1;
-    state->running = 0;
+    SuiteJob_Publish(&state->job);
     return NULL;
 }
 //======================================================================
@@ -3131,13 +3128,14 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 
     ImGui::Separator();
 
-    if (state->running) {
-        float pct = state->total_runs > 0 ? (float)state->current_run / state->total_runs : 0.0f;
+    if (SuiteJob_Running(&state->job)) {
+        const int done = state->job.progress, total = state->job.total;
+        float pct = total > 0 ? (float)done / total : 0.0f;
         char overlay[64];
-        snprintf(overlay, sizeof(overlay), "%d / %d", (int)state->current_run, (int)state->total_runs);
+        snprintf(overlay, sizeof(overlay), "%d / %d", done, total);
         ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
         if (ImGui::Button("Cancel"))
-            state->cancel_flag = 1;
+            SuiteJob_Cancel(&state->job);
     } else {
         bool can_run = data->selected_count > 0 && total_combos > 0 && total_combos <= OPT_MAX_GRID;
         if (!can_run) ImGui::BeginDisabled();
@@ -3155,15 +3153,18 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
             state->run_config.use_config_override = 0;
             state->run_config.collect_features = 0;
 
-            state->cancel_flag = 0;
-            state->complete = 0;
-            state->running = 1;
-
+            // start through the suite's funnel — it resets the job under the lease, or refuses naming the holder
             OptWorkerArgs *args = (OptWorkerArgs *)malloc(sizeof(OptWorkerArgs));
-            args->state = state;
-            pthread_t tid;
-            pthread_create(&tid, NULL, optimizer_worker_fn, args);
-            pthread_detach(tid);
+            if (!args) {
+                snprintf(state->launch_msg, sizeof(state->launch_msg), "Grid Search: out of memory");
+            } else {
+                args->state = state;
+                if (SuiteWorker_Launch("Grid Search", &state->job, optimizer_worker_fn, args, state->launch_msg,
+                                       sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+                    state->launch_msg[0] = '\0';
+                else
+                    free(args);
+            }
         }
         if (!can_run) {
             ImGui::EndDisabled();
@@ -3172,10 +3173,11 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
             else if (total_combos > OPT_MAX_GRID)
                 ImGui::SameLine(), ImGui::TextDisabled("Too many combos (max %d)", OPT_MAX_GRID);
         }
+        if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
     }
 
     // results
-    if (state->complete && state->results.total_runs > 0) {
+    if (SuiteJob_Done(&state->job) && state->results.total_runs > 0) {
         ImGui::Separator();
         OptimizerResults *r = &state->results;
 
