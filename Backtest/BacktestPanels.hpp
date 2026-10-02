@@ -3366,10 +3366,7 @@ struct TrainingPanelState {
     // that exercises Backtest_RunFullValidation, which is the function
     // carrying the v5.8.6 auto-stamp wiring (FEATURE_REGISTRY_HASH +
     // engine_version embedded in stamp body).
-    volatile int fv_running;
-    volatile int fv_progress;
-    volatile int fv_cancel;
-    volatile int fv_complete;         // 1 = fv_results holds a finished run — published (release) by the job, read with TrainingSink_Load (MP-1b; it replaced a plain `bool fv_has_results` that said the same thing)
+    SuiteJob fv_job;                  // Run Full Validation (D-506): progress is a percent; complete = fv_results holds a finished run — published by the job (release), read with SuiteJob_Done (acquire), as MP-1b's flag was
     FullValidationResults fv_results;
     char fv_auto_stamp_secret[128];   // HMAC secret; empty = the collected cfg's auto_stamp_secret, dev mode only when that is empty too (CS-277)
     float fv_held_out_fraction;       // 0.05 .. 0.30; clamped by HeldOutSplit_Make
@@ -3391,12 +3388,8 @@ struct TrainingPanelState {
     // ui_horizon_list/_count are parsed on each render. cfg.horizon_list
     // still works as a fallback if ui_horizon_csv is empty (back-compat
     // for operators who already set cfg).
-    volatile int    mh_running;
-    volatile int    mh_progress;            // 1..N as horizons complete
-    volatile int    mh_total;                // N (set by worker)
+    SuiteJob        mh_job;                 // both Train buttons (D-506): progress = horizons done (1..N) of total, set by the run
     volatile int    mh_current_horizon;     // current horizon ticks
-    volatile int    mh_cancel;
-    volatile int    mh_complete;
     char            ui_horizon_csv[128];    // operator-typed; parsed → ui_horizon_*
     // E.1.2.D leaf 13 (S3-F10) — the panel's per-horizon arrays were literal
     // [8]; bind them to the cfg grid cap so a future HORIZON_LIST_MAX bump
@@ -3480,10 +3473,10 @@ struct TrainingPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-02]
-// [SIZE]_[412160B]
+// [SIZE]_[412288B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6440]
-// [STRADDLE]_[run_name@11920 · ui_tp_pct_csv@409340 · ui_sl_pct_csv@409404 · ui_label_kind_csv@411780]
+// [CACHE_LINES]_[6442]
+// [STRADDLE]_[run_name@11920 · ui_tp_pct_csv@409448 · ui_sl_pct_csv@409512 · ui_label_kind_csv@411908]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3498,8 +3491,8 @@ struct TrainingPanelState {
 // [CODE]
 //======================================================================
 static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
-    return st && (SuiteJob_Running(&st->wf_job) || TrainingSink_Load(&st->fv_running) || SuiteJob_Running(&st->hp_job) ||
-                  TrainingSink_Load(&st->mh_running));
+    return st && (SuiteJob_Running(&st->wf_job) || SuiteJob_Running(&st->fv_job) || SuiteJob_Running(&st->hp_job) ||
+                  SuiteJob_Running(&st->mh_job));
 }
 
 //======================================================================
@@ -3673,10 +3666,6 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     memset(&state->wf_results, 0, sizeof(state->wf_results));
     // v5.8.7 — full validation defaults (mirrors the cfg defaults so the
     // suite UI is usable out-of-the-box without editing engine.cfg).
-    state->fv_running = 0;
-    state->fv_progress = 0;
-    state->fv_cancel = 0;
-    state->fv_complete = 0;
     memset(&state->fv_results, 0, sizeof(state->fv_results));
     state->fv_auto_stamp_secret[0] = '\0';   // empty = the collected cfg's secret, dev mode only if that is empty too (CS-277)
     state->fv_held_out_fraction = 0.20f;      // matches HELDOUT_FRACTION default
@@ -3696,12 +3685,7 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->hp_num_params  = 1;
     memset(&state->hp_results, 0, sizeof(state->hp_results));
     // v5.10.0a.G.1 — Multi-Horizon training state init
-    state->mh_running         = 0;
-    state->mh_progress        = 0;
-    state->mh_total           = 0;
     state->mh_current_horizon = 0;
-    state->mh_cancel          = 0;
-    state->mh_complete        = 0;
     memset(state->mh_horizon_ticks, 0, sizeof(state->mh_horizon_ticks));
     // v5.10.0a-bugfix2 — UI horizon list defaults empty; operator types
     // CSV (or leaves blank to fall back to cfg.horizon_list). Pre-fill
@@ -3933,20 +3917,24 @@ struct FullValidationWorkerArgs {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[background thread: the GUI adapter — wires the panel in as the job's sink and runs the click-time request through TrainingWorkers_RunFullValidation (WF + held-out gap + the re-stamp)]
+// [OVERVIEW]_[background thread (a SuiteWorkerFn, under the lease): the GUI adapter — clears the job's status line, wires the panel in as the job's sink and runs the click-time request through TrainingWorkers_RunFullValidation (WF + held-out gap + the re-stamp)]
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void *fullvalidation_worker_fn(void *arg) {
+static inline void *fullvalidation_worker_fn(void *arg, uint64_t lease) {
+    (void)lease;   // MP-6 commit (3): the producer core requires it
     FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
+    // the job's status line clears HERE, under the lease — a refused click never reaches it, so the last run's
+    // summary stays beside its results (MP-6 step 8)
+    state->fv_status_msg[0] = '\0';
     TrainingFvSink sink{};
     sink.status     = state->fv_status_msg;
     sink.status_cap = sizeof(state->fv_status_msg);
-    sink.progress   = &state->fv_progress;
-    sink.cancel     = &state->fv_cancel;
-    sink.complete   = &state->fv_complete;
-    sink.running    = &state->fv_running;
+    sink.progress   = &state->fv_job.progress;
+    sink.cancel     = &state->fv_job.cancel;
+    sink.complete   = &state->fv_job.complete;
+    sink.running    = nullptr;   // the funnel's trampoline ends the job once the run returns (D-506)
     TrainingWorkers_RunFullValidation(args->req, sink, &state->fv_results);
     free(args);
     return NULL;
@@ -4003,7 +3991,7 @@ static inline FullValidationWorkerArgs *TrainingPanel_FullValidationArgs(Trainin
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[Run Full Validation's launch — build the click-time request and start the worker; an allocation or thread-start failure is reported on the job's status line and its run flag cleared, never a crash or a stuck "running"]
+// [OVERVIEW]_[Run Full Validation's launch — build the click-time request and start the worker through the suite's funnel; a refusal or an allocation failure changes nothing, a thread-start failure ends the job the funnel began; each is reported on the panel's launch line, never a crash or a stuck "running"]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -4011,19 +3999,18 @@ static inline void TrainingPanel_LaunchFullValidation(TrainingPanelState *state,
                                                       RunControlState *run_control,
                                                       const BacktestResults *fv_data) {
     FullValidationWorkerArgs *fv_args = TrainingPanel_FullValidationArgs(state, run_control, fv_data);
-    pthread_t tid;
-    const int rc = fv_args
-        ? pthread_create(&tid, NULL, fullvalidation_worker_fn, fv_args)
-        : ENOMEM;
-    if (rc == 0) {
-        pthread_detach(tid);
-    } else {
-        free(fv_args);
-        snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                 "Full validation did not start (%s).", strerror(rc));
-        fprintf(stderr, "[fv] %s\n", state->fv_status_msg);
-        state->fv_running = 0;
+    if (!fv_args) {
+        snprintf(state->launch_msg, sizeof(state->launch_msg), "Run Full Validation: out of memory");
+        return;
     }
+    // the funnel takes the lease and owns the job's start and end: a refusal (it names the holder) changes nothing;
+    // a thread that does not start ends the job the funnel began (its last results hide, as the old click did);
+    // either says why on the panel's launch line (MP-6 step 8)
+    if (SuiteWorker_Launch("Run Full Validation", &state->fv_job, fullvalidation_worker_fn, fv_args, state->launch_msg,
+                           sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+        state->launch_msg[0] = '\0';
+    else
+        free(fv_args);
 }
 //======================================================================
 // [END_CODE]
@@ -4196,19 +4183,24 @@ static inline MultiHorizonWorkerArgs *TrainingPanel_MultiHorizonArgs(TrainingPan
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void *train_multi_horizon_worker_fn(void *arg) {
+static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
+    (void)lease;   // MP-6 commit (3): the producer core requires it
     MultiHorizonWorkerArgs *args = (MultiHorizonWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
+    // the job's display that SuiteJob does not hold resets HERE, under the lease (the core clears the per-horizon
+    // rows and holds the run's total at 0 until it accepts the run) — a refused click never reaches it (MP-6 step 8)
+    state->status_msg[0]      = '\0';
+    state->mh_current_horizon = 0;
 
     TrainingRunSink sink{};
     sink.status     = state->status_msg;
     sink.status_cap = sizeof(state->status_msg);
-    sink.cancel     = &state->mh_cancel;
-    sink.total      = &state->mh_total;
+    sink.cancel     = &state->mh_job.cancel;
+    sink.total      = &state->mh_job.total;
     sink.current    = &state->mh_current_horizon;
-    sink.done       = &state->mh_progress;
-    sink.complete   = &state->mh_complete;
-    sink.running    = &state->mh_running;
+    sink.done       = &state->mh_job.progress;
+    sink.complete   = &state->mh_job.complete;
+    sink.running    = nullptr;   // the funnel's trampoline ends the job once the run returns (D-506)
     for (int h = 0; h < TrainingPanelState::PANEL_HORIZON_MAX; ++h) {
         sink.horizon[h].status     = state->mh_horizon_status[h];
         sink.horizon[h].status_cap = sizeof(state->mh_horizon_status[h]);
@@ -4241,30 +4233,34 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[both Train buttons' launch — build the click-time request and start the worker; an allocation or thread-start failure is reported on the status line and the run flag cleared, never a crash or a stuck "running"]
+// [OVERVIEW]_[both Train buttons' launch — build the click-time request and start the worker through the suite's funnel (true = started; the per-horizon table's horizons snap only then); a refusal or an allocation failure changes nothing, a thread-start failure ends the job the funnel began; each is reported on the panel's launch line]
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
-                                                    RunControlState *run_control,
+static inline bool TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
+                                                    RunControlState *run_control, const char *name,
                                                     int horizon_count, const int *horizons) {
     MultiHorizonWorkerArgs *mh_args =
         TrainingPanel_MultiHorizonArgs(state, run_control, horizon_count, horizons);
-    pthread_t tid;
-    const int rc = mh_args
-        ? pthread_create(&tid, NULL, train_multi_horizon_worker_fn, mh_args)
-        : ENOMEM;
-    if (rc == 0) {
-        pthread_detach(tid);
-    } else {
-        // Not started: say why, hide the per-horizon table the click armed (its rows are the previous
-        // run's), and clear the run flag so the buttons re-arm.
-        free(mh_args);
-        snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Multi-horizon: the worker did not start (%s).", strerror(rc));
-        state->mh_total   = 0;
-        state->mh_running = 0;
+    if (!mh_args) {
+        snprintf(state->launch_msg, sizeof(state->launch_msg), "%s: out of memory", name);
+        return false;
     }
+    // the funnel takes the lease and owns the job's start and end: a refusal (it names the holder) changes nothing;
+    // a thread that does not start ends the job the funnel began (its last results hide, as the old click did);
+    // either says why on the panel's launch line (MP-6 step 8)
+    if (SuiteWorker_Launch(name, &state->mh_job, train_multi_horizon_worker_fn, mh_args, state->launch_msg,
+                           sizeof(state->launch_msg)) != SUITE_LAUNCH_STARTED) {
+        free(mh_args);
+        return false;
+    }
+    state->launch_msg[0] = '\0';
+    // E.1.2.C GUI polish (a) — the per-horizon table's horizons, snapped for the run that STARTED (GUI thread only: the
+    // render never reads the live-reparsed ui_horizon_list, and a refused click must not relabel the last run's rows;
+    // the arrays are sized PANEL_HORIZON_MAX = HORIZON_LIST_MAX since E.1.2.D leaf 13, so they track the grid)
+    for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+        state->mh_horizon_ticks[i] = (i < horizon_count) ? horizons[i] : 0;
+    return true;
 }
 //======================================================================
 // [END_CODE]
@@ -4686,11 +4682,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (single_horizon_mode) {
     if (!can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Features")) {
-        // clear the results that describe the dataset this collect replaces: training, walk-forward and the HP
-        // sweep (MP-6 step 7 — the HP sweep's results used to survive a re-collect, a missed sibling)
-        state->status_msg[0] = '\0';
-        SuiteJob_Forget(&state->wf_job);
-        SuiteJob_Forget(&state->hp_job);
         // set up run config with feature collection enabled
         run_control->run_config.num_data_files = 0;
         for (int i = 0; i < data->file_count && run_control->run_config.num_data_files < MAX_DATA_FILES; i++) {
@@ -4728,10 +4719,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         } else {
             args->state = run_control;
             if (SuiteWorker_Launch("Collect Features", &run_control->job, backtest_worker_fn, args,
-                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED) {
                 state->launch_msg[0] = '\0';
-            else
+                // the collect started: the results that describe the dataset it replaces clear — training, walk-forward
+                // and the HP sweep (step 7: the HP sweep's used to survive a re-collect; step 8: only once started,
+                // so a collect that did not start clears nothing — the lease is the collect's, so no job writes them now)
+                state->status_msg[0] = '\0';
+                SuiteJob_Forget(&state->wf_job);
+                SuiteJob_Forget(&state->hp_job);
+            } else {
                 free(args);
+            }
         }
     }
     ImGui::SetItemTooltip(
@@ -4783,10 +4781,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (!single_horizon_mode) {
     if (!mh_can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Multi-Horizon")) {
-        // clear the results that describe the dataset this collect replaces (training, walk-forward, the HP sweep)
-        state->status_msg[0] = '\0';
-        SuiteJob_Forget(&state->wf_job);
-        SuiteJob_Forget(&state->hp_job);
         // build run_config (mirrors single-horizon Collect Features above)
         run_control->run_config.num_data_files = 0;
         for (int i = 0; i < data->file_count
@@ -4855,10 +4849,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         } else {
             *args = snap;
             if (SuiteWorker_Launch("Collect Multi-Horizon", &run_control->job, collect_multi_horizon_worker_fn, args,
-                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED) {
                 state->launch_msg[0] = '\0';
-            else
+                // the collect started: the results that describe the dataset it replaces clear — training, walk-forward
+                // and the HP sweep (step 7: the HP sweep's used to survive a re-collect; step 8: only once started,
+                // so a collect that did not start clears nothing — the lease is the collect's, so no job writes them now)
+                state->status_msg[0] = '\0';
+                SuiteJob_Forget(&state->wf_job);
+                SuiteJob_Forget(&state->hp_job);
+            } else {
                 free(args);
+            }
         }
     }
     if (!mh_can_collect) ImGui::EndDisabled();
@@ -5490,32 +5491,21 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // train+WF+held-out+stamp pipeline that Multi-Horizon does, in
         // ONE click (no separate Run Walk-Forward / Run Full Validation
         // needed). Per-horizon results table renders 1 row.
-        state->status_msg[0] = '\0';
-        SuiteJob_Forget(&state->wf_job);
-        memset(&state->wf_results, 0, sizeof(state->wf_results));
-        state->mh_running = 1;
-        state->mh_progress = 0;
-        state->mh_total = 1;  // N=1 in single-horizon mode
-        state->mh_current_horizon = 0;
-        state->mh_cancel = 0;
-        state->mh_complete = 0;
-
         // Train Model is the multi-horizon run with N=1 (v5.11.44).
         int single_h = (state->ui_horizon_count >= 1)
                      ? state->ui_horizon_list[0]
                      : (state->label_forward_ticks > 0
                         ? state->label_forward_ticks : 1000);
 
-        // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
-        // per-horizon results table (the render must never read the
-        // live-reparsed ui_horizon_list).
-        state->mh_horizon_ticks[0] = single_h;
-        for (int i = 1; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
-            state->mh_horizon_ticks[i] = 0;
-
         // MP-1 — the same request builder as Train Multi-Horizon: one horizon, and the operator's
-        // training side applies here too (v5.13.5.A — one exit-side model without a CSV).
-        TrainingPanel_LaunchMultiHorizon(state, run_control, 1, &single_h);
+        // training side applies here too (v5.13.5.A — one exit-side model without a CSV). The launch
+        // snaps the per-horizon table's horizon once the run has started (MP-6 step 8).
+        if (TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Model", 1, &single_h)) {
+            // Train Model has always cleared the standalone walk-forward's results (its pipeline runs its own —
+            // v5.11.44); now only once this run has started, so a refused click changes nothing (MP-6 step 8)
+            SuiteJob_Forget(&state->wf_job);
+            memset(&state->wf_results, 0, sizeof(state->wf_results));
+        }
     }
     if (!can_train) {
         ImGui::EndDisabled();
@@ -5622,23 +5612,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Each model gets full WF + held-out + auto-stamp. Per-horizon\n"
         "results table renders below.");
     if (mh_clicked) {
-        state->mh_running = 1;
-        state->mh_progress = 0;
-        state->mh_total = eff_horizon_count;
-        state->mh_current_horizon = 0;
-        state->mh_cancel = 0;
-        state->mh_complete = 0;
-        state->status_msg[0] = '\0';
-
-        // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
-        // per-horizon results table (arrays sized PANEL_HORIZON_MAX =
-        // HORIZON_LIST_MAX since E.1.2.D leaf 13, so they track the grid).
-        for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
-            state->mh_horizon_ticks[i] =
-                (i < eff_horizon_count) ? eff_horizons[i] : 0;
         // MP-1 — every input of the run is snapped HERE by the one request builder (v5.10.0E
-        // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2).
-        TrainingPanel_LaunchMultiHorizon(state, run_control, eff_horizon_count, eff_horizons);
+        // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2). The launch snaps
+        // the per-horizon table's horizons once the run has started (MP-6 step 8).
+        TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Multi-Horizon", eff_horizon_count, eff_horizons);
     }
     if (!mh_can_train) {
         ImGui::EndDisabled();
@@ -5664,16 +5641,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Compare-to-Baseline.");
 
     // Multi-horizon progress bar (rendered when worker is running)
-    if (TrainingSink_Load(&state->mh_running)) {
-        float pct = state->mh_total > 0
-            ? (float)state->mh_progress / state->mh_total : 0.0f;
+    if (SuiteJob_Running(&state->mh_job)) {
+        const int done = state->mh_job.progress, total = state->mh_job.total;
+        float pct = total > 0 ? (float)done / total : 0.0f;
         char overlay[96];
         snprintf(overlay, sizeof(overlay), "horizon %d/%d (current: %d ticks)",
-                 (int)state->mh_progress, (int)state->mh_total,
-                 (int)state->mh_current_horizon);
+                 done, total, (int)state->mh_current_horizon);
         ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
         if (ImGui::Button("Cancel Multi-Horizon"))
-            state->mh_cancel = 1;
+            SuiteJob_Cancel(&state->mh_job);
     }
 
     // v5.11.41 — per-horizon results table. Renders during run AND
@@ -5683,7 +5659,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     //   Horizon  | Progress  | Status   | Metrics
     // (status string is built by the worker's per-horizon block).
     // Empty when no Multi-Horizon run has fired yet.
-    if (state->mh_total > 0) {
+    if (state->mh_job.total > 0) {
         ImGui::Separator();
         ImGui::SeparatorText("Per-horizon results");
         if (ImGui::BeginTable("mh_horizons", 4,
@@ -5694,7 +5670,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::TableSetupColumn("Metrics");
             ImGui::TableHeadersRow();
 
-            int n_show = state->mh_total < 8 ? state->mh_total : 8;
+            const int mh_total = state->mh_job.total;
+            int n_show = mh_total < 8 ? mh_total : 8;
             for (int h = 0; h < n_show; ++h) {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -5711,7 +5688,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ImGui::TableNextColumn();
                 if (TrainingSink_Load(&state->mh_horizon_complete[h])) {   // F6 — acquire
                     ImGui::TextColored(FoxmlColors::green, "DONE");
-                } else if (TrainingSink_Load(&state->mh_running) && h == (state->mh_progress - 1)) {
+                } else if (SuiteJob_Running(&state->mh_job) && h == (state->mh_job.progress - 1)) {
                     ImGui::TextColored(FoxmlColors::yellow, "running");
                 } else {
                     ImGui::TextDisabled("waiting");
@@ -5791,9 +5768,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     {
         // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_wf =
-            TrainingSink_Load(&state->fv_running) ||
+            SuiteJob_Running(&state->fv_job) ||
             SuiteJob_Running(&state->hp_job) ||
-            TrainingSink_Load(&state->mh_running);  // intentionally exclude WF's own job so WF can show its own cancel button
+            SuiteJob_Running(&state->mh_job);  // intentionally exclude WF's own job so WF can show its own cancel button
         bool can_wf = results->sample_count >= 50 && !any_worker_running_wf
                       && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
 #ifndef USE_XGBOOST
@@ -6185,8 +6162,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_hp =
             SuiteJob_Running(&state->wf_job) ||
-            TrainingSink_Load(&state->fv_running) ||
-            TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
+            SuiteJob_Running(&state->fv_job) ||
+            SuiteJob_Running(&state->mh_job);   // acquire, pairs with the trampoline's release
         bool can_hp =
 #ifdef USE_XGBOOST
             hp_data->sample_count >= 100 && hp_total_cells > 0
@@ -6345,7 +6322,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         bool any_worker_running_fv =
             SuiteJob_Running(&state->wf_job) ||
             SuiteJob_Running(&state->hp_job) ||
-            TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
+            SuiteJob_Running(&state->mh_job);   // acquire, pairs with the trampoline's release
         bool can_fv =
 #ifdef USE_XGBOOST
             fv_data->sample_count >= 50 && state->model_path[0] != '\0'
@@ -6355,19 +6332,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             false;
 #endif
 
-        if (TrainingSink_Load(&state->fv_running)) {
-            ImGui::ProgressBar(state->fv_progress / 100.0f, ImVec2(-1, 0),
+        if (SuiteJob_Running(&state->fv_job)) {
+            ImGui::ProgressBar(state->fv_job.progress / 100.0f, ImVec2(-1, 0),
                                "Full validation...");
             if (ImGui::Button("Cancel Full Validation"))
-                state->fv_cancel = 1;
+                SuiteJob_Cancel(&state->fv_job);
         } else {
             if (!can_fv) ImGui::BeginDisabled();
             if (ImGui::Button("Run Full Validation")) {
-                state->fv_running = 1;
-                state->fv_progress = 0;
-                state->fv_cancel = 0;
-                state->fv_complete = 0;
-                state->fv_status_msg[0] = '\0';
                 // MP-1b — every input of the job is snapped HERE by its request builder (the v5.10.0E
                 // click-time pattern; the label params from the run config, the rest from the panel).
                 TrainingPanel_LaunchFullValidation(state, run_control, fv_data);
@@ -6385,14 +6357,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                     ImGui::TextDisabled("Need 50+ samples");
 #endif
             }
-            // A launch that failed leaves no result to show, so its reason renders here (a finished
-            // run's summary renders with its result, below).
-            if (!TrainingSink_Load(&state->fv_complete) && state->fv_status_msg[0])
-                ImGui::TextWrapped("%s", state->fv_status_msg);
         }
     }
 
-    if (TrainingSink_Load(&state->fv_complete)) {   // F6 — acquire: the job published the result before this flag
+    if (SuiteJob_Done(&state->fv_job)) {   // acquire: the job published the result before this flag
         const FullValidationResults *fv = &state->fv_results;
         ImGui::Separator();
 
