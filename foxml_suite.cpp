@@ -433,7 +433,7 @@ int main(int argc, char *argv[]) {
         GUI_Panel_LogViewer(&log_viewer);
 
         // dashboard panels — show backtest engine state (reuse from live GUI)
-        if (run_control.complete) {
+        if (SuiteJob_Done(&run_control.job)) {
             uint64_t suite_start = (uint64_t)time(NULL); // just for uptime display
             GUI_RenderDashboard(&suite_snap, suite_start);
         }
@@ -451,7 +451,7 @@ int main(int argc, char *argv[]) {
         tt::MLStatus_Render(&suite_snap);
 
         // trade history (reuse existing panel — reads backtest CSV)
-        if (run_control.complete) {
+        if (SuiteJob_Done(&run_control.job)) {
             // partial_exit_enabled=0: the suite's own panel call below passes the same
             // (no partials concept in the training/backtest surface), so v3-era rows are
             // left un-normalized here exactly as before.
@@ -462,7 +462,7 @@ int main(int argc, char *argv[]) {
         // charts (reuse existing panels — fed from backtest candle accumulator)
         CandleSnapshot csnap = {};
         CandleAccumulator_Snapshot(&candle_acc, &csnap);
-        if (run_control.complete)
+        if (SuiteJob_Done(&run_control.job))
             TradeData_Refresh(&trades);
         trades.max_visible_markers = chart_settings.visible_candles * 2;
 
@@ -475,11 +475,11 @@ int main(int argc, char *argv[]) {
         GUI_LivePnLChart(&suite_snap);
 
         // update window title with backtest status
-        if (run_control.running) {
+        if (SuiteJob_Running(&run_control.job)) {
             char title[128];
-            snprintf(title, sizeof(title), "foxml suite  |  running... %d%%", run_control.progress_pct);
+            snprintf(title, sizeof(title), "foxml suite  |  running... %d%%", run_control.job.progress);
             SDL_SetWindowTitle(window, title);
-        } else if (run_control.complete) {
+        } else if (SuiteJob_Done(&run_control.job)) {
             char title[128];
             snprintf(title, sizeof(title), "foxml suite  |  P&L $%+.2f  |  %u trades",
                      run_control.results.stats.total_pnl, run_control.results.stats.total_trades);

@@ -22,6 +22,7 @@
 #include "imgui.h"
 #include "BacktestEngine.hpp"
 #include "TrainingWorkers.hpp"   // E.1.3 MP-1 — the ML producer core the Train buttons drive
+#include "SuiteLease.hpp"        // E.1.3 MP-6 — the suite run lease, the launch funnel and SuiteJob (D-503 / D-506)
 #include "BacktestSharded.hpp"  // phase 13: per-core sharded backtest path
 #include "../ML_Headers/ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT
 #include <errno.h>   // 2026-09-03 — the data-file sidecar writer fails LOUD with errno (path-schema discipline 5)
@@ -168,9 +169,9 @@ static inline void DataPanel_Scan(DataPanelState *state) {
 // rendering — never iterates results->labels[] directly, eliminating the
 // realloc-race that crashed the suite on 2026-04-25.
 //
-// Thread safety: worker writes all fields, then sets running=0 last.
-// GUI reads only when running==0. The volatile running flag prevents
-// compiler reordering of the loads/stores around it on x86.
+// Thread safety: the worker writes all fields, then publishes its job's
+// result (SuiteJob_Publish — a release); the GUI reads only once the job
+// shows no run (SuiteJob_Running — an acquire on the trampoline's release).
 //
 // All three label-kind branches (binary/multiclass/regression) populate
 // the appropriate subset; the rest stay zero. label_kind tells the GUI
@@ -235,10 +236,9 @@ struct SamplesSnapshot {
 // [CODE]
 //======================================================================
 struct RunControlState {
-    volatile int running;
-    volatile int progress_pct;
-    volatile int cancel_flag;
-    volatile int complete;
+    // Run Backtest, Collect Features and Collect Multi-Horizon share ONE job: they write the same results, run_config
+    // and snapshots (D-506 — the funnel owns its start and its end; progress is a percent)
+    SuiteJob job;
     BacktestRunConfig run_config;
     BacktestResults results;
     CandleAccumulator *candle_acc;
@@ -247,8 +247,8 @@ struct RunControlState {
     // E.1.2.G — per-horizon collect distributions (operator ask 2026-09-01: "can
     // we display the breakdown per horizon instead of just the last one"). The
     // collect worker fills [0..count) then writes mh_collect_snap_count LAST;
-    // the GUI reads only when running==0 — the same happens-before edge
-    // stats_snapshot already rides. tp/sl are the click-time echo for the
+    // the GUI reads only once the job shows no run — the same happens-before
+    // edge stats_snapshot already rides. tp/sl are the click-time echo for the
     // table; the label KIND rides inside each snapshot (heterogeneous under a
     // Label Kind CSV override).
     SamplesSnapshot mh_collect_snap[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
@@ -264,16 +264,17 @@ struct RunControlState {
     // now fresh-only (it binds no state dir, loads no learned state from the model tree), an explicit
     // prior FILE is its only learned-state input. Empty = start uniform.
     char bandit_state_prior_path[400];
+    char launch_msg[160];   // GUI thread only — why the last Run Backtest did not start ("" = it did)
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-04]
-// [SIZE]_[633728B]
+// [UPDATED]_[2026-10-01]
+// [SIZE]_[633856B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9902]
+// [CACHE_LINES]_[9904]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
@@ -395,23 +396,23 @@ struct BacktestWorkerArgs {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void *backtest_worker_fn(void *arg) {
+static inline void *backtest_worker_fn(void *arg, uint64_t lease) {
+    (void)lease;   // MP-6 step 6: Backtest_Run takes it as its proof of the lease
     BacktestWorkerArgs *args = (BacktestWorkerArgs *)arg;
     RunControlState *state = args->state;
     free(args);
 
     Backtest_Run(&state->results, &state->run_config,
-                 &state->progress_pct, &state->cancel_flag,
+                 &state->job.progress, &state->job.cancel,
                  state->candle_acc, state->snapshot);
 
     // Compute display snapshot after labels are populated by Backtest_Run's
-    // post-pass. Done BEFORE running=0 so the GUI never sees a stale
-    // snapshot when it next reads (running=0 is the happens-before edge).
+    // post-pass. Done BEFORE the job publishes, so the GUI never sees a stale
+    // snapshot (the publish, then the trampoline's end, is the happens-before edge).
     SamplesSnapshot_Compute(&state->stats_snapshot, &state->results,
                               state->run_config.label_type);
 
-    state->complete = 1;
-    state->running = 0;
+    SuiteJob_Publish(&state->job);
     return NULL;
 }
 //======================================================================
@@ -485,7 +486,8 @@ struct CollectMultiHorizonWorkerArgs {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void *collect_multi_horizon_worker_fn(void *arg) {
+static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
+    (void)lease;   // MP-6 step 6: Backtest_Run takes it as its proof of the lease
     auto *args = (CollectMultiHorizonWorkerArgs *)arg;
     RunControlState *rc = args->run_control;
     int horizon_count = args->snap_horizon_count;
@@ -507,7 +509,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
     //    whatever was set when the button was clicked — we'll overwrite
     //    labels per horizon afterwards.
     Backtest_Run(&rc->results, &rc->run_config,
-                  &rc->progress_pct, &rc->cancel_flag,
+                  &rc->job.progress, &rc->job.cancel,
                   rc->candle_acc, rc->snapshot);
 
     // 2. Per-horizon label diagnostic — ONE batched walk (E.1.2.D leaf 5),
@@ -521,7 +523,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
     // v5.11.40 — label_tp_pct/label_sl_pct rotate per horizon (broadcast or
     //            per-horizon CSV from operator); double-typed, percent
     //            pass-through without /100.
-    if (!rc->cancel_flag && horizon_count > 0) {
+    if (!rc->job.cancel && horizon_count > 0) {
         LabelBatchTarget bt[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
         float *tmp_bufs[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
         int bt_ok = 1;
@@ -563,7 +565,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
         }
         int snaps_filled = 0;
         for (int h = 0; h < horizon_count; ++h) {
-            if (rc->cancel_flag) {
+            if (rc->job.cancel) {
                 fprintf(stderr, "[collect-mh] cancelled at horizon %d/%d\n",
                         h, horizon_count);
                 break;
@@ -605,11 +607,11 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
                         ? label_table[bt[h].label_type].name : "?",
                     tp_pcts[h], sl_pcts[h], hs->sample_count, cls);
         }
-        // count LAST — the GUI's read gate is running==0, but a torn mid-loop
+        // count LAST — the GUI reads once the job shows no run, but a torn mid-loop
         // count would still describe half-filled rows to the first frame.
         rc->mh_collect_snap_count = snaps_filled;
         for (int h = 0; h < horizon_count; ++h) free(tmp_bufs[h]);
-    } else if (rc->cancel_flag) {
+    } else if (rc->job.cancel) {
         fprintf(stderr, "[collect-mh] cancelled at horizon 0/%d\n", horizon_count);
     }
 
@@ -626,8 +628,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
         (horizon_count > 1 && horizon_count <= ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX)
             ? horizons[horizon_count - 1] : 0;
 
-    rc->complete = 1;
-    rc->running = 0;
+    SuiteJob_Publish(&rc->job);
     return NULL;
 }
 //======================================================================
@@ -647,8 +648,6 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
 // [CODE]
 //======================================================================
 static inline void RunControl_Start(RunControlState *state, DataPanelState *data) {
-    if (state->running) return;
-
     // build run config from data panel selection
     state->run_config.num_data_files = 0;
     for (int i = 0; i < data->file_count && state->run_config.num_data_files < MAX_DATA_FILES; i++) {
@@ -670,23 +669,24 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
     state->run_config.use_config_override = 0;
     state->run_config.collect_features = 0;
 
-    // reset state
-    state->progress_pct = 0;
-    state->cancel_flag = 0;
-    state->complete = 0;
+    // reset what the job does not own (the funnel resets the job itself, under the lease)
     memset(&state->stats_snapshot, 0, sizeof(state->stats_snapshot));
-    state->running = 1;
-
-    // reset candle accumulator if present
     if (state->candle_acc)
         CandleAccumulator_Init(state->candle_acc, 60);
 
-    // spawn worker
+    // start through the suite's funnel: it takes the lease or refuses naming the holder, and a
+    // second start while a run is on refuses there (the funnel is the guard)
     BacktestWorkerArgs *args = (BacktestWorkerArgs *)malloc(sizeof(BacktestWorkerArgs));
+    if (!args) {
+        snprintf(state->launch_msg, sizeof(state->launch_msg), "Run Backtest: out of memory");
+        return;
+    }
     args->state = state;
-    pthread_t tid;
-    pthread_create(&tid, NULL, backtest_worker_fn, args);
-    pthread_detach(tid);
+    if (SuiteWorker_Launch("Run Backtest", &state->job, backtest_worker_fn, args, state->launch_msg,
+                           sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+        state->launch_msg[0] = '\0';
+    else
+        free(args);   // a refused or failed start leaves the args with the caller
 }
 //======================================================================
 // [END_CODE]
@@ -837,11 +837,11 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
                           "nothing at completion (D-483 C, 2026-09-04) — a run is reproducible from its\n"
                           "cfg + data + this prior. Exit / Thompson bandits always start uniform.");
 
-    if (state->running) {
+    if (SuiteJob_Running(&state->job)) {
         // progress bar
-        ImGui::ProgressBar(state->progress_pct / 100.0f, ImVec2(-1, 0));
+        ImGui::ProgressBar(state->job.progress / 100.0f, ImVec2(-1, 0));
         if (ImGui::Button("Cancel")) {
-            state->cancel_flag = 1;
+            SuiteJob_Cancel(&state->job);
         }
     } else {
         // run button
@@ -861,9 +861,10 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
             ImGui::SameLine();
             ImGui::TextDisabled("Select data files first");
         }
+        if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
     }
 
-    if (state->complete) {
+    if (SuiteJob_Done(&state->job)) {
         ImGui::Separator();
         BacktestStats *s = &state->results.stats;
         ImGui::Text("Completed in %.1f ms (%lu ticks)", s->elapsed_ms, s->ticks_processed);
@@ -3437,6 +3438,7 @@ struct TrainingPanelState {
     // 64B line boundary on this [THREAD]-tagged struct (the strict layout gate caught it).
     char     ui_feature_mask_hex[24];
     uint64_t ui_feature_mask;
+    char     launch_msg[160];   // GUI thread only — why this panel's last start did not start ("" = it did)
 };
 //======================================================================
 // [END_CODE]
@@ -3444,9 +3446,9 @@ struct TrainingPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-01]
-// [SIZE]_[409344B]
+// [SIZE]_[409472B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6396]
+// [CACHE_LINES]_[6398]
 // [STRADDLE]_[run_name@11817 · ui_horizon_list@406640 · ui_tp_pct_csv@406676 · ui_sl_pct_csv@406740 · ui_sl_per_horizon@406836 · ui_label_kind_csv@409092]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
@@ -4657,7 +4659,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // E.1.2.C — `&& !Training_AnyWorkerRunning(state)` closes the realloc-under-worker
     // hazard: Collect runs Backtest_Run, which reallocs (and therefore MOVES)
     // feature_matrix/labels while a training worker holds a shallow copy.
-    bool can_collect = has_data && !run_control->running && side_gate != 0
+    bool can_collect = has_data && !SuiteJob_Running(&run_control->job) && side_gate != 0
                        && !Training_AnyWorkerRunning(state);  // E.1.2.C F3
     // v5.11.43 — uses panel_eff_horizon_count (UI takes priority, falls back
     // to cfg.horizon_list). 0 or 1 = single mode; >1 = multi-horizon mode.
@@ -4693,22 +4695,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->run_config.feature_mask = state->ui_feature_mask;   // D-477 — 0 = all-on
         run_control->run_config.label_forward_ticks = state->label_forward_ticks;
 
-        // start the run
-        run_control->progress_pct = 0;
-        run_control->cancel_flag = 0;
-        run_control->complete = 0;
+        // start the run — what the job does not own resets here; the funnel resets the job
         memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
         run_control->mh_collect_snap_count = 0;   // E.1.2.G — single collect: retire any stale per-horizon table
-        run_control->running = 1;
 
         if (run_control->candle_acc)
             CandleAccumulator_Init(run_control->candle_acc, 60);
 
         BacktestWorkerArgs *args = (BacktestWorkerArgs *)malloc(sizeof(BacktestWorkerArgs));
-        args->state = run_control;
-        pthread_t tid;
-        pthread_create(&tid, NULL, backtest_worker_fn, args);
-        pthread_detach(tid);
+        if (!args) {
+            snprintf(state->launch_msg, sizeof(state->launch_msg), "Collect Features: out of memory");
+        } else {
+            args->state = run_control;
+            if (SuiteWorker_Launch("Collect Features", &run_control->job, backtest_worker_fn, args,
+                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+                state->launch_msg[0] = '\0';
+            else
+                free(args);
+        }
     }
     ImGui::SetItemTooltip(
         "Runs a backtest AND gathers ML training samples (features + labels)\n"
@@ -4719,15 +4723,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (!can_collect) {
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (run_control->running) {
-            ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
+        if (SuiteJob_Running(&run_control->job)) {
+            ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->job.progress);
         } else {
             ImGui::TextDisabled("Select data files first");
         }
-    } else if (run_control->running) {
-        // safety belt: if running flag flipped while button was enabled (race), still warn
+    } else if (SuiteJob_Running(&run_control->job)) {
+        // safety belt: if the job started while the button was enabled (race), still warn
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
+        ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->job.progress);
     }
     } // end single_horizon_mode (Collect Features)
 
@@ -4751,7 +4755,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     int sl_n = state->ui_sl_per_horizon_count;
     bool tp_aligned = (tp_n <= 1) || (tp_n == mh_collect_horizon_count);
     bool sl_aligned = (sl_n <= 1) || (sl_n == mh_collect_horizon_count);
-    bool mh_can_collect = has_data && !run_control->running
+    bool mh_can_collect = has_data && !SuiteJob_Running(&run_control->job)
                           && !Training_AnyWorkerRunning(state)   // E.1.2.C — see can_collect
                           && mh_collect_horizon_count > 0
                           && tp_aligned && sl_aligned
@@ -4787,20 +4791,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->run_config.feature_mask = state->ui_feature_mask;   // D-477 — 0 = all-on
         run_control->run_config.label_forward_ticks = state->label_forward_ticks;
 
-        run_control->progress_pct = 0;
-        run_control->cancel_flag = 0;
-        run_control->complete = 0;
+        // what the job does not own resets here; the funnel resets the job
         memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
         run_control->mh_collect_snap_count = 0;   // E.1.2.G — worker refills
-        run_control->running = 1;
 
         if (run_control->candle_acc)
             CandleAccumulator_Init(run_control->candle_acc, 60);
 
-        auto *args = (CollectMultiHorizonWorkerArgs *)malloc(
-            sizeof(CollectMultiHorizonWorkerArgs));
-        args->run_control = run_control;
-        args->snap_horizon_count = mh_collect_horizon_count;
+        // the click-time snapshot is built on the stack; the heap copy the worker frees is made only to launch
+        CollectMultiHorizonWorkerArgs snap{};
+        snap.run_control = run_control;
+        snap.snap_horizon_count = mh_collect_horizon_count;
         // v5.11.40 — snap per-horizon TP/SL using broadcast-or-match.
         // single value (count==1) broadcasts to all horizons; N values
         // map positionally. Single label_tp_pct/_sl_pct float as
@@ -4814,22 +4815,30 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // the dropdown while train obeyed the CSV — the panel could summarize
         // a label training never consumed (measured 2026-09-01).
         for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
-            args->snap_horizons[i] = (i < mh_collect_horizon_count)
+            snap.snap_horizons[i] = (i < mh_collect_horizon_count)
                 ? state->ui_horizon_list[i] : 0;
-            args->snap_tp_pct[i] = (state->ui_tp_per_horizon_count > 1
-                                    && i < state->ui_tp_per_horizon_count)
+            snap.snap_tp_pct[i] = (state->ui_tp_per_horizon_count > 1
+                                   && i < state->ui_tp_per_horizon_count)
                 ? state->ui_tp_per_horizon[i] : bcast_tp;
-            args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
-                                    && i < state->ui_sl_per_horizon_count)
+            snap.snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
+                                   && i < state->ui_sl_per_horizon_count)
                 ? state->ui_sl_per_horizon[i] : bcast_sl;
             // D-476 — ONE kind rule for every click (Label_ResolveKindForHorizon).
-            args->snap_label_kind[i] = Label_ResolveKindForHorizon(
+            snap.snap_label_kind[i] = Label_ResolveKindForHorizon(
                 state->ui_label_kind_per_horizon,
                 state->ui_label_kind_per_horizon_count, state->label_type, i);
         }
-        pthread_t tid;
-        pthread_create(&tid, NULL, collect_multi_horizon_worker_fn, args);
-        pthread_detach(tid);
+        auto *args = (CollectMultiHorizonWorkerArgs *)malloc(sizeof(CollectMultiHorizonWorkerArgs));
+        if (!args) {
+            snprintf(state->launch_msg, sizeof(state->launch_msg), "Collect Multi-Horizon: out of memory");
+        } else {
+            *args = snap;
+            if (SuiteWorker_Launch("Collect Multi-Horizon", &run_control->job, collect_multi_horizon_worker_fn, args,
+                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+                state->launch_msg[0] = '\0';
+            else
+                free(args);
+        }
     }
     if (!mh_can_collect) ImGui::EndDisabled();
     ImGui::SetItemTooltip(
@@ -4852,6 +4861,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             tp_n, sl_n, mh_collect_horizon_count, mh_collect_horizon_count);
     }
     } // end !single_horizon_mode (Collect Multi-Horizon)
+    // MP-6 — why this panel's last start did not start (refused, naming the run that holds the lease, or failed)
+    if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
 
     // v5.11.43 — Horizons (CSV) input ALWAYS visible. Single source of
     // truth for both Collect/Train mode auto-routing AND single-horizon
@@ -4908,7 +4919,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // multi-horizon collect has filled the per-horizon snapshots, render ALL
     // of them and retire the single-line-plus-footnote view; the legacy line
     // stays for single-horizon runs (count==0).
-    int mh_n = (!run_control->running) ? run_control->mh_collect_snap_count : 0;
+    int mh_n = (!SuiteJob_Running(&run_control->job)) ? run_control->mh_collect_snap_count : 0;
     if (mh_n > 0) {
         const ImVec4 vg = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 vy = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
@@ -5432,13 +5443,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // COLLECT predicates, so a REFUSE-tier label could still be TRAINED from
     // samples a previous collect had left behind: collect at side=Buy, flip to
     // Exit, pick any label, Train. The gate rendered red and stopped nothing.
-    // E.1.2.D (scan-1 NEW-5) — `!run_control->running` closes the REVERSE
+    // E.1.2.D (scan-1 NEW-5) — the Run Control job's term closes the REVERSE
     // direction of the leaf-6 exclusion: a collect/backtest reallocs + MOVES
     // (or Reset()s) the shared results buffers, so no trainer may start while
     // Run Control is live. Leaf 6 gated collect-during-train; this gates
     // train-during-collect. mh_can_train derives from can_train and inherits.
     bool can_train = results->sample_count >= 10 && !any_worker_running
-                     && !run_control->running
+                     && !SuiteJob_Running(&run_control->job)
                      && side_gate != 0;
 #ifndef USE_XGBOOST
     can_train = false;
@@ -5759,7 +5770,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->hp_running ||
             TrainingSink_Load(&state->mh_running);  // intentionally exclude wf_running so WF can show its own cancel button
         bool can_wf = results->sample_count >= 50 && !any_worker_running_wf
-                      && !run_control->running;  // E.1.2.D NEW-5 — no train-during-collect
+                      && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
 #ifndef USE_XGBOOST
         can_wf = false;
 #endif
@@ -6151,7 +6162,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 #ifdef USE_XGBOOST
             hp_data->sample_count >= 100 && hp_total_cells > 0
             && hp_total_cells <= OPT_MAX_GRID && !any_worker_running_hp
-            && !run_control->running;  // E.1.2.D NEW-5 — no train-during-collect
+            && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
 #else
             false;
 #endif
@@ -6309,7 +6320,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 #ifdef USE_XGBOOST
             fv_data->sample_count >= 50 && state->model_path[0] != '\0'
             && !any_worker_running_fv
-            && !run_control->running;  // E.1.2.D NEW-5 — no train-during-collect
+            && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
 #else
             false;
 #endif
