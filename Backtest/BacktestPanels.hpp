@@ -31,7 +31,6 @@
 #include "Fingerprint.hpp"
 #include <dirent.h>
 #include <sys/stat.h>
-#include <pthread.h>
 #include <ftw.h>          // v5.11.51 — nftw() for recursive directory delete
 #include <unistd.h>       // v5.15.5 — fork() / execlp() / _exit() for Open Folder Path
 
@@ -4199,7 +4198,8 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     sink.total      = &state->mh_job.total;
     sink.current    = &state->mh_current_horizon;
     sink.done       = &state->mh_job.progress;
-    sink.complete   = &state->mh_job.complete;
+    sink.complete   = nullptr;   // no reader wants a whole-run "done": the table renders on total, each row on its own
+                                 // mh_horizon_complete[h] — the D-504 trace found mh_complete write-only (D-505: NULL)
     sink.running    = nullptr;   // the funnel's trampoline ends the job once the run returns (D-506)
     for (int h = 0; h < TrainingPanelState::PANEL_HORIZON_MAX; ++h) {
         sink.horizon[h].status     = state->mh_horizon_status[h];
