@@ -3357,12 +3357,8 @@ struct TrainingPanelState {
     int wf_horizon_ticks;     // label horizon for purge gap calc (0 = auto-derive)
     int wf_buffer_ticks;      // extra purge buffer (default 512)
     int wf_min_train;         // min training samples per fold (default 500)
-    volatile int wf_running;  // 1 = walk-forward in progress
-    volatile int wf_progress; // 0-100 progress
-    volatile int wf_cancel;   // 1 = user requested cancel
-    volatile int wf_complete; // 1 = run finished
+    SuiteJob wf_job;          // Walk-Forward (D-506): progress is a percent; complete = wf_results readable (release / acquire)
     WalkForwardResults wf_results;
-    bool wf_has_results;      // true after first completed walk-forward run
     // save run (bundles config + model for deployment)
     char run_name[64];
     // v5.8.7 — Full Validation (held-out + auto-stamp). Replaces the
@@ -3386,12 +3382,7 @@ struct TrainingPanelState {
     OptimizerRange  hp_ranges[OPT_MAX_PARAMS];
     int             hp_num_params;          // 1 or 2 active params
     OptimizerResults hp_results;
-    volatile int    hp_running;
-    volatile int    hp_progress;            // current cell index
-    volatile int    hp_total;                // total cells (set by worker)
-    volatile int    hp_cancel;
-    volatile int    hp_complete;
-    bool            hp_has_results;
+    SuiteJob        hp_job;                 // the HP sweep (D-506): progress counts cells of total; complete = hp_results readable
     // v5.10.0a.G.1 — Multi-Horizon training state. Operator clicks Train
     // Multi-Horizon button; worker trains N models, one per horizon.
     // v5.10.0a-bugfix2 — horizons editable IN PANEL via CSV input
@@ -3426,7 +3417,10 @@ struct TrainingPanelState {
     // the multi-horizon worker only.
     char            ui_tp_pct_csv[64];   // e.g. "0.030" or "0.020,0.030,0.040"
     char            ui_sl_pct_csv[64];
-    float           ui_tp_per_horizon[PANEL_HORIZON_MAX];   // parsed values (broadcast or positional)
+    // alignas: the tp/sl pair fills exactly one 64B line (8+8 floats) — every change to this struct walked it across a
+    // line (D-477, the MP-6 deletions, the step-7 jobs); aligned, it stays put. RunControlState's tp/sl echo pair is
+    // the precedent (MP-6 step 7).
+    alignas(64) float ui_tp_per_horizon[PANEL_HORIZON_MAX];   // parsed values (broadcast or positional)
     float           ui_sl_per_horizon[PANEL_HORIZON_MAX];
     int             ui_tp_per_horizon_count;  // 0 = empty/use single field; 1 = broadcast; N = positional
     int             ui_sl_per_horizon_count;
@@ -3486,10 +3480,10 @@ struct TrainingPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-02]
-// [SIZE]_[411968B]
+// [SIZE]_[412160B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6437]
-// [STRADDLE]_[run_name@11817 · ui_horizon_list@409136 · ui_tp_pct_csv@409172 · ui_sl_pct_csv@409236 · ui_sl_per_horizon@409332 · ui_label_kind_csv@411588]
+// [CACHE_LINES]_[6440]
+// [STRADDLE]_[run_name@11920 · ui_tp_pct_csv@409340 · ui_sl_pct_csv@409404 · ui_label_kind_csv@411780]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3504,7 +3498,7 @@ struct TrainingPanelState {
 // [CODE]
 //======================================================================
 static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
-    return st && (st->wf_running || TrainingSink_Load(&st->fv_running) || st->hp_running ||
+    return st && (SuiteJob_Running(&st->wf_job) || TrainingSink_Load(&st->fv_running) || SuiteJob_Running(&st->hp_job) ||
                   TrainingSink_Load(&st->mh_running));
 }
 
@@ -3676,11 +3670,6 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->wf_horizon_ticks = 0;
     state->wf_buffer_ticks = PURGE_BUFFER_DEFAULT;
     state->wf_min_train = 500;
-    state->wf_running = 0;
-    state->wf_progress = 0;
-    state->wf_cancel = 0;
-    state->wf_complete = 0;
-    state->wf_has_results = false;
     memset(&state->wf_results, 0, sizeof(state->wf_results));
     // v5.8.7 — full validation defaults (mirrors the cfg defaults so the
     // suite UI is usable out-of-the-box without editing engine.cfg).
@@ -3705,12 +3694,6 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->hp_ranges[1].hi   = 0.0;
     state->hp_ranges[1].step = 0.0;
     state->hp_num_params  = 1;
-    state->hp_running     = 0;
-    state->hp_progress    = 0;
-    state->hp_total       = 0;
-    state->hp_cancel      = 0;
-    state->hp_complete    = 0;
-    state->hp_has_results = false;
     memset(&state->hp_results, 0, sizeof(state->hp_results));
     // v5.10.0a.G.1 — Multi-Horizon training state init
     state->mh_running         = 0;
@@ -3790,7 +3773,8 @@ struct WalkForwardWorkerArgs {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void *walkforward_worker_fn(void *arg) {
+static inline void *walkforward_worker_fn(void *arg, uint64_t lease) {
+    (void)lease;   // Walk-Forward trains on the collected matrix — it runs no backtest
     WalkForwardWorkerArgs *args = (WalkForwardWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     const BacktestResults *data = args->data;
@@ -3808,13 +3792,11 @@ static inline void *walkforward_worker_fn(void *arg) {
     Backtest_RunWalkForward(&state->wf_results, data,
                              snap_wf_n_splits, snap_wf_horizon_ticks,
                              snap_wf_buffer_ticks, snap_wf_min_train,
-                             &state->wf_progress, &state->wf_cancel,
+                             &state->wf_job.progress, &state->wf_job.cancel,
                              snap_label_type,
                              /*cfg_override=*/nullptr, /*hp_override=*/&snap_hp);
 
-    state->wf_has_results = true;
-    state->wf_complete = 1;
-    state->wf_running = 0;
+    SuiteJob_Publish(&state->wf_job);   // wf_results is readable — LAST, after every write to it
     return NULL;
 }
 //======================================================================
@@ -3877,7 +3859,8 @@ struct HyperparamSweepWorkerArgs {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void *hp_sweep_worker_fn(void *arg) {
+static inline void *hp_sweep_worker_fn(void *arg, uint64_t lease) {
+    (void)lease;   // the HP sweep trains on the collected matrix — it runs no backtest (CS-194)
     HyperparamSweepWorkerArgs *args = (HyperparamSweepWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     const BacktestResults *data = args->data;
@@ -3893,25 +3876,20 @@ static inline void *hp_sweep_worker_fn(void *arg) {
     int wf_min_train = args->snap_wf_min_train;
     free(args);
 
-    memset(&state->hp_results, 0, sizeof(state->hp_results));
-    state->hp_progress = 0;
-    state->hp_total = 0;
+    memset(&state->hp_results, 0, sizeof(state->hp_results));   // under the lease; the funnel reset the job's progress
 
 #ifdef USE_XGBOOST
     Backtest_RunHyperparamTrainSweep(
         &state->hp_results, data, ranges, num_params,
         label_type,
         wf_n_splits, wf_horizon, wf_buffer, wf_min_train,
-        &state->hp_progress, &state->hp_total,
-        &state->hp_cancel);
-    state->hp_has_results = (state->hp_results.total_runs > 0);
+        &state->hp_job.progress, &state->hp_job.total,
+        &state->hp_job.cancel);
+    // readable only when the sweep produced cells — published LAST, after every write to hp_results
+    if (state->hp_results.total_runs > 0) SuiteJob_Publish(&state->hp_job);
 #else
     fprintf(stderr, "[hpsweep] XGBoost not compiled in — sweep skipped\n");
-    state->hp_has_results = false;
 #endif
-
-    state->hp_complete = 1;
-    state->hp_running = 0;
     return NULL;
 }
 //======================================================================
@@ -4708,9 +4686,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (single_horizon_mode) {
     if (!can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Features")) {
-        // clear previous training/walk-forward results on re-collect
+        // clear the results that describe the dataset this collect replaces: training, walk-forward and the HP
+        // sweep (MP-6 step 7 — the HP sweep's results used to survive a re-collect, a missed sibling)
         state->status_msg[0] = '\0';
-        state->wf_has_results = false;
+        SuiteJob_Forget(&state->wf_job);
+        SuiteJob_Forget(&state->hp_job);
         // set up run config with feature collection enabled
         run_control->run_config.num_data_files = 0;
         for (int i = 0; i < data->file_count && run_control->run_config.num_data_files < MAX_DATA_FILES; i++) {
@@ -4803,9 +4783,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (!single_horizon_mode) {
     if (!mh_can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Multi-Horizon")) {
-        // clear previous training/walk-forward results
+        // clear the results that describe the dataset this collect replaces (training, walk-forward, the HP sweep)
         state->status_msg[0] = '\0';
-        state->wf_has_results = false;
+        SuiteJob_Forget(&state->wf_job);
+        SuiteJob_Forget(&state->hp_job);
         // build run_config (mirrors single-horizon Collect Features above)
         run_control->run_config.num_data_files = 0;
         for (int i = 0; i < data->file_count
@@ -5510,7 +5491,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // ONE click (no separate Run Walk-Forward / Run Full Validation
         // needed). Per-horizon results table renders 1 row.
         state->status_msg[0] = '\0';
-        state->wf_has_results = false;
+        SuiteJob_Forget(&state->wf_job);
         memset(&state->wf_results, 0, sizeof(state->wf_results));
         state->mh_running = 1;
         state->mh_progress = 0;
@@ -5811,27 +5792,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_wf =
             TrainingSink_Load(&state->fv_running) ||
-            state->hp_running ||
-            TrainingSink_Load(&state->mh_running);  // intentionally exclude wf_running so WF can show its own cancel button
+            SuiteJob_Running(&state->hp_job) ||
+            TrainingSink_Load(&state->mh_running);  // intentionally exclude WF's own job so WF can show its own cancel button
         bool can_wf = results->sample_count >= 50 && !any_worker_running_wf
                       && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
 #ifndef USE_XGBOOST
         can_wf = false;
 #endif
-        if (state->wf_running) {
-            ImGui::ProgressBar(state->wf_progress / 100.0f, ImVec2(-1, 0), "Walk-forward...");
+        if (SuiteJob_Running(&state->wf_job)) {
+            ImGui::ProgressBar(state->wf_job.progress / 100.0f, ImVec2(-1, 0), "Walk-forward...");
             if (ImGui::Button("Cancel Walk-Forward"))
-                state->wf_cancel = 1;
+                SuiteJob_Cancel(&state->wf_job);
         } else {
             if (!can_wf) ImGui::BeginDisabled();
             if (ImGui::Button("Run Walk-Forward")) {
-                state->wf_running = 1;
-                state->wf_progress = 0;
-                state->wf_cancel = 0;
-                state->wf_complete = 0;
-                state->wf_has_results = false;
-
-                WalkForwardWorkerArgs *wf_args = (WalkForwardWorkerArgs *)malloc(sizeof(WalkForwardWorkerArgs));
+                // the click-time snapshot on the stack; the heap copy the worker frees is made only to launch
+                WalkForwardWorkerArgs snap{};
+                WalkForwardWorkerArgs *wf_args = &snap;
                 wf_args->state = state;
                 wf_args->data = results;
                 // E.1.2.C follow-up — snapshot at click, on the GUI thread, which is
@@ -5844,9 +5821,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 wf_args->snap_wf_min_train     = state->wf_min_train;
                 wf_args->snap_label_type       = run_control->run_config.label_type;
                 wf_args->snap_hp = Training_SnapshotHyperparams(state);
-                pthread_t tid;
-                pthread_create(&tid, NULL, walkforward_worker_fn, wf_args);
-                pthread_detach(tid);
+                auto *heap = (WalkForwardWorkerArgs *)malloc(sizeof(WalkForwardWorkerArgs));
+                if (!heap) {
+                    snprintf(state->launch_msg, sizeof(state->launch_msg), "Walk-Forward: out of memory");
+                } else {
+                    *heap = snap;
+                    if (SuiteWorker_Launch("Walk-Forward", &state->wf_job, walkforward_worker_fn, heap,
+                                           state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+                        state->launch_msg[0] = '\0';
+                    else
+                        free(heap);
+                }
             }
             if (!can_wf) {
                 ImGui::EndDisabled();
@@ -5864,7 +5849,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     }
 
     // walk-forward results display — kind-aware (label-type-aware metric invariant)
-    if (state->wf_has_results) {
+    if (SuiteJob_Done(&state->wf_job)) {
         WalkForwardResults *wf = &state->wf_results;
         bool wf_is_regression = (wf->label_kind == 1);
 
@@ -6199,7 +6184,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         const BacktestResults *hp_data = &run_control->results;
         // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_hp =
-            state->wf_running ||
+            SuiteJob_Running(&state->wf_job) ||
             TrainingSink_Load(&state->fv_running) ||
             TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
         bool can_hp =
@@ -6211,28 +6196,21 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             false;
 #endif
 
-        if (state->hp_running) {
-            float pct = state->hp_total > 0
-                ? (float)state->hp_progress / state->hp_total : 0.0f;
+        if (SuiteJob_Running(&state->hp_job)) {
+            const int done = state->hp_job.progress, total = state->hp_job.total;
+            float pct = total > 0 ? (float)done / total : 0.0f;
             char overlay[64];
-            snprintf(overlay, sizeof(overlay), "%d / %d cells",
-                     (int)state->hp_progress, (int)state->hp_total);
+            snprintf(overlay, sizeof(overlay), "%d / %d cells", done, total);
             ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
             if (ImGui::Button("Cancel Hyperparam Sweep"))
-                state->hp_cancel = 1;
+                SuiteJob_Cancel(&state->hp_job);
         } else {
             if (!can_hp) ImGui::BeginDisabled();
             if (ImGui::Button("Run Hyperparam Sweep")) {
-                state->hp_running = 1;
-                state->hp_progress = 0;
-                state->hp_total = 0;
-                state->hp_cancel = 0;
-                state->hp_complete = 0;
-                state->hp_has_results = false;
-                memset(&state->hp_results, 0, sizeof(state->hp_results));
-
-                HyperparamSweepWorkerArgs *hp_args =
-                    (HyperparamSweepWorkerArgs *)malloc(sizeof(HyperparamSweepWorkerArgs));
+                // the click-time snapshot on the stack; the heap copy the worker frees is made only to launch (the
+                // worker clears hp_results itself, under the lease — a refused start leaves the last sweep shown)
+                HyperparamSweepWorkerArgs snap{};
+                HyperparamSweepWorkerArgs *hp_args = &snap;
                 hp_args->state = state;
                 hp_args->data = hp_data;
                 memcpy(hp_args->snap_ranges, state->hp_ranges, sizeof(hp_args->snap_ranges));
@@ -6247,9 +6225,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 hp_args->snap_wf_horizon_ticks = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
                 hp_args->snap_wf_buffer_ticks = state->wf_buffer_ticks;
                 hp_args->snap_wf_min_train = state->wf_min_train;
-                pthread_t tid;
-                pthread_create(&tid, NULL, hp_sweep_worker_fn, hp_args);
-                pthread_detach(tid);
+                auto *heap = (HyperparamSweepWorkerArgs *)malloc(sizeof(HyperparamSweepWorkerArgs));
+                if (!heap) {
+                    snprintf(state->launch_msg, sizeof(state->launch_msg), "Hyperparam Sweep: out of memory");
+                } else {
+                    *heap = snap;
+                    if (SuiteWorker_Launch("Hyperparam Sweep", &state->hp_job, hp_sweep_worker_fn, heap,
+                                           state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
+                        state->launch_msg[0] = '\0';
+                    else
+                        free(heap);
+                }
             }
             if (!can_hp) {
                 ImGui::EndDisabled();
@@ -6269,7 +6255,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
 
         // Results table — kind-aware (WF metric: accuracy or correlation)
-        if (state->hp_has_results && state->hp_results.total_runs > 0) {
+        if (SuiteJob_Done(&state->hp_job) && state->hp_results.total_runs > 0) {
             const OptimizerResults *opt = &state->hp_results;
             ImGui::Separator();
             ImGui::Text("Best cell: %s=%.3f",
@@ -6357,8 +6343,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         const BacktestResults *fv_data = &run_control->results;
         // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_fv =
-            state->wf_running ||
-            state->hp_running ||
+            SuiteJob_Running(&state->wf_job) ||
+            SuiteJob_Running(&state->hp_job) ||
             TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
         bool can_fv =
 #ifdef USE_XGBOOST
