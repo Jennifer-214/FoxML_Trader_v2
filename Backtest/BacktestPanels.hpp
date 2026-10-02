@@ -23,6 +23,7 @@
 #include "BacktestEngine.hpp"
 #include "TrainingWorkers.hpp"   // E.1.3 MP-1 — the ML producer core the Train buttons drive
 #include "SuiteLease.hpp"        // E.1.3 MP-6 — the suite run lease, the launch funnel and SuiteJob (D-503 / D-506)
+#include "SuiteStartGates.hpp"   // E.1.3 MP-6 — every start button's gate, ImGui-free and cell-tested (D-507)
 #include "BacktestSharded.hpp"  // phase 13: per-core sharded backtest path
 #include "../ML_Headers/ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT
 #include <errno.h>   // 2026-09-03 — the data-file sidecar writer fails LOUD with errno (path-schema discipline 5)
@@ -53,9 +54,8 @@ struct DataPanelState {
     // discovered files
     char files[DATA_MAX_FILES][256];
     int file_count;
-    // selection
+    // selection (its count is DataPanel_SelectedCount — computed, never stored, so it cannot outlive a scan)
     bool selected[DATA_MAX_FILES];
-    int selected_count;
     // scan state
     bool scanned;
 };
@@ -64,8 +64,8 @@ struct DataPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-07-18]
-// [SIZE]_[526604B]
+// [UPDATED]_[2026-10-02]
+// [SIZE]_[526600B]
 // [ALIGN]_[4]
 // [CACHE_LINES]_[8229]
 // [STRADDLE]_[none]
@@ -154,6 +154,24 @@ static inline void DataPanel_Scan(DataPanelState *state) {
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[DataPanel_Scan]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[DataPanel_SelectedCount]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the files selected among the files the last scan found — the panel's fields read into the cell-tested StartGate_SelectedFiles; computed on every read, never stored, so it cannot outlive a scan]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int DataPanel_SelectedCount(const DataPanelState *state) {
+    return StartGate_SelectedFiles(state->selected, state->file_count, DATA_MAX_FILES);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[DataPanel_SelectedCount]
 //======================================================================
 
 //======================================================================
@@ -709,6 +727,26 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[SuiteGate_ShowWhy]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[beside a greyed-out start button, the reason its gate gives — the first term that failed, in that term's tone (D-507)]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void SuiteGate_ShowWhy(const SuiteGate *g) {
+    ImGui::SameLine();
+    if (g->tone == SUITE_GATE_FIX) ImGui::TextColored(FoxmlColors::yellow, "%s", g->why);
+    else                           ImGui::TextDisabled("%s", g->why);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SuiteGate_ShowWhy]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[GUI_Panel_DataBrowser]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
@@ -790,12 +828,7 @@ static inline void GUI_Panel_DataBrowser(DataPanelState *state) {
         else          select_first_n(n_custom);
     }
 
-    // count selected
-    state->selected_count = 0;
-    for (int i = 0; i < state->file_count; i++)
-        if (state->selected[i]) state->selected_count++;
-
-    ImGui::Text("%d files, %d selected", state->file_count, state->selected_count);
+    ImGui::Text("%d files, %d selected", state->file_count, DataPanel_SelectedCount(state));
     ImGui::Separator();
 
     // file list with checkboxes
@@ -858,8 +891,9 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
             SuiteJob_Cancel(&state->job);
         }
     } else {
-        // run button
-        bool can_run = data->selected_count > 0;
+        // run button — its gate (D-507; Backtest/SuiteStartGates.hpp)
+        const SuiteGate gate = StartGate_RunBacktest(DataPanel_SelectedCount(data));
+        const bool can_run = SuiteGate_Open(&gate);
         if (!can_run) ImGui::BeginDisabled();
         if (ImGui::Button("Run Backtest")) {
             RunControl_Start(state, data);
@@ -872,8 +906,7 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
             "the feature/label samples XGBoost needs.");
         if (!can_run) {
             ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::TextDisabled("Select data files first");
+            SuiteGate_ShowWhy(&gate);
         }
         if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
     }
@@ -3155,7 +3188,12 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
         if (ImGui::Button("Cancel"))
             SuiteJob_Cancel(&state->job);
     } else {
-        bool can_run = data->selected_count > 0 && total_combos > 0 && total_combos <= OPT_MAX_GRID;
+        // its gate (D-507; Backtest/SuiteStartGates.hpp) — each axis checked on its own, so two inverted ranges can no
+        // longer multiply to a positive count
+        const SuiteGate gate = StartGate_GridSearch(DataPanel_SelectedCount(data), state->ranges[0].steps(),
+                                                    state->num_params > 1 ? state->ranges[1].steps() : 1,
+                                                    OPT_MAX_GRID);
+        const bool can_run = SuiteGate_Open(&gate);
         if (!can_run) ImGui::BeginDisabled();
         if (ImGui::Button("Run Grid Search")) {
             // build run config from data selection
@@ -3186,10 +3224,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
         }
         if (!can_run) {
             ImGui::EndDisabled();
-            if (data->selected_count == 0)
-                ImGui::SameLine(), ImGui::TextDisabled("Select data files first");
-            else if (total_combos > OPT_MAX_GRID)
-                ImGui::SameLine(), ImGui::TextDisabled("Too many combos (max %d)", OPT_MAX_GRID);
+            SuiteGate_ShowWhy(&gate);
         }
         if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
     }
@@ -3481,20 +3516,6 @@ struct TrainingPanelState {
 //======================================================================
 
 //======================================================================
-// [FUNCTION]_[Training_AnyWorkerRunning]
-//----------------------------------------------------------------------
-// [TAG]_[[GUI] [ML] [BACKTEST]]
-// [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ONE "is a suite worker live" predicate — hoisted so the COLLECT gates can consult it, not just the train gates]
-//======================================================================
-// [CODE]
-//======================================================================
-static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
-    return st && (SuiteJob_Running(&st->wf_job) || SuiteJob_Running(&st->fv_job) || SuiteJob_Running(&st->hp_job) ||
-                  SuiteJob_Running(&st->mh_job));
-}
-
-//======================================================================
 // [FUNCTION]_[Training_ResolvePurgeHorizon]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
@@ -3536,25 +3557,6 @@ static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[Training_ResolvePurgeHorizon]
-//======================================================================
-//======================================================================
-// [END_CODE]
-//======================================================================
-// [COMMENT]
-//----------------------------------------------------------------------
-// The predicate already existed, but INLINE and computed AFTER the collect
-// gates, so `can_collect` / `mh_can_collect` could not see it — they consulted
-// only `run_control->running`. That left a real hazard: Collect Features runs
-// Backtest_Run, which REALLOCs results->feature_matrix and results->labels, and
-// a realloc MOVES those buffers. A training worker holding a shallow copy of
-// `results` then reads freed memory. The 2026-04-25 segfault this file's
-// comments describe was mitigated for the DISPLAY path only; the worker path
-// stayed open.
-//
-// Hoisted to a named function so a future gate cannot silently re-derive a
-// different answer — the same reason Training_ResolveRole was extracted.
-//======================================================================
-// [END_FUNCTION]_[Training_AnyWorkerRunning]
 //======================================================================
 
 //======================================================================
@@ -4346,20 +4348,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // it. That hole widened the moment the CSV started reaching the labels the model
     // actually trains on. Worst (numerically lowest) tier across the set wins.
     int side_gate = Training_SideLabelGate(state->label_type, state->ui_training_side);
+    // the label the verdict is about — the worst of the set, which can be a Label Kind CSV entry rather than the
+    // combo's, so the line names it (the start gates' "label refused ... (above)" points here; D-507 review F8). The
+    // CSV parse keeps only kinds in [0, LABEL_COUNT), so either is a valid label_table index.
+    int side_kind = state->label_type;
     for (int lk = 0; lk < state->ui_label_kind_per_horizon_count && lk < 8; ++lk) {
         int t = Training_SideLabelGate(state->ui_label_kind_per_horizon[lk],
                                        state->ui_training_side);
-        if (t < side_gate) side_gate = t;
+        if (t < side_gate) { side_gate = t; side_kind = state->ui_label_kind_per_horizon[lk]; }
     }
     if (side_gate == 0) {
         ImGui::TextColored(FoxmlColors::red,
             "exit side: label '%s' trains an ENTRY-goodness objective — inverted as an exit "
             "signal. Use Will Peak (default) or Peak/Valley/Stable.",
-            label_table[state->label_type].display_name);
+            label_table[side_kind].display_name);
     } else if (side_gate == 1) {
         ImGui::TextColored(FoxmlColors::yellow,
             "exit side: label '%s' is untriaged for exit semantics — proceed deliberately.",
-            label_table[state->label_type].display_name);
+            label_table[side_kind].display_name);
     }
     ImGui::SetItemTooltip(
         "Buy: trains entry-signal models (default). Output:\n"
@@ -4660,8 +4666,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     ImGui::Separator();
 
-    // collect features button — disabled if no data selected OR a backtest is
-    // already running (mirrors the Walk-Forward pattern). prevents the
+    // collect features button — disabled until its gate below opens (the
+    // files, the side's verdict on the label, the suite free). prevents the
     // "click button N times because nothing visibly happens" UX trap that
     // fires N parallel backtests each writing to the same log file.
     //
@@ -4669,12 +4675,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // Horizons CSV; only the matching button is rendered. <=1 horizon =
     // "Collect Features" (single-mode worker). >1 = "Collect Multi-Horizon"
     // (multi-horizon worker). Both still write to results->feature_matrix.
-    bool has_data = data->selected_count > 0;
-    // E.1.2.C — `&& !Training_AnyWorkerRunning(state)` closes the realloc-under-worker
-    // hazard: Collect runs Backtest_Run, which reallocs (and therefore MOVES)
-    // feature_matrix/labels while a training worker holds a shallow copy.
-    bool can_collect = has_data && !SuiteJob_Running(&run_control->job) && side_gate != 0
-                       && !Training_AnyWorkerRunning(state);  // E.1.2.C F3
+    const int selected_files = DataPanel_SelectedCount(data);
+    // the collect's gate (D-507; Backtest/SuiteStartGates.hpp): the files, the training side's verdict on the label
+    // (E.1.2.C F3 — the line above), then the suite free — a collect reallocates (MOVES) the shared feature_matrix /
+    // labels every training worker reads, so it never overlaps another suite run: the lease is that rule
+    const SuiteGate collect_gate = StartGate_CollectFeatures(selected_files, side_gate);
+    const bool can_collect = SuiteGate_Open(&collect_gate);
     // v5.11.43 — uses panel_eff_horizon_count (UI takes priority, falls back
     // to cfg.horizon_list). 0 or 1 = single mode; >1 = multi-horizon mode.
     bool single_horizon_mode = (panel_eff_horizon_count <= 1);
@@ -4738,24 +4744,21 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Output goes to results->feature_matrix (in-memory). The dataset\n"
         "rebuilds every time you click — use Run Control's Run Backtest if\n"
         "you only need stats and want to skip the sample collection cost.");
-    if (!can_collect) {
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (SuiteJob_Running(&run_control->job)) {
-            ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->job.progress);
-        } else {
-            ImGui::TextDisabled("Select data files first");
-        }
-    } else if (SuiteJob_Running(&run_control->job)) {
-        // safety belt: if the job started while the button was enabled (race), still warn
+    if (!can_collect) ImGui::EndDisabled();
+    // the Run Control job's own run shows its progress (it holds the lease — or the click above just started it);
+    // any other reason is the gate's
+    if (SuiteJob_Running(&run_control->job)) {
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->job.progress);
+    } else if (!can_collect) {
+        SuiteGate_ShowWhy(&collect_gate);
     }
     } // end single_horizon_mode (Collect Features)
 
     // v5.11.24 — Collect Multi-Horizon button. Mirrors Train Multi-Horizon's
     // pattern (uses state->ui_horizon_csv populated by the input field below).
-    // Disabled when no horizons configured OR a backtest is already running.
+    // Disabled until its gate opens (below — the files, the horizons, TP / SL
+    // counts that agree with them, the side's verdict, the suite free).
     // Clicking spawns collect_multi_horizon_worker_fn which collects features
     // ONCE then loops over horizons recomputing labels + logging valid-sample
     // counts to engine.log. Final state: last horizon's labels in
@@ -4765,19 +4768,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // Single horizon → operator sees "Collect Features" only (rendered above).
     // N>1 → operator sees "Collect Multi-Horizon" only (rendered here).
     int mh_collect_horizon_count = state->ui_horizon_count;
-    // v5.11.40 — broadcast-or-match alignment for per-horizon TP/SL.
-    // Allowed: single value (broadcasts) OR N values where N matches
-    // horizon count. Anything else disables the Multi-Horizon button
-    // with a hint. tp_aligned + sl_aligned both must be true.
+    // v5.11.40 — broadcast-or-match alignment for per-horizon TP/SL:
+    // a single value broadcasts, N values match the horizon count; anything
+    // else disables the Multi-Horizon button with a hint. The rule is
+    // StartGate_BroadcastsOrMatches, one of the gate's terms (D-507).
     int tp_n = state->ui_tp_per_horizon_count;
     int sl_n = state->ui_sl_per_horizon_count;
-    bool tp_aligned = (tp_n <= 1) || (tp_n == mh_collect_horizon_count);
-    bool sl_aligned = (sl_n <= 1) || (sl_n == mh_collect_horizon_count);
-    bool mh_can_collect = has_data && !SuiteJob_Running(&run_control->job)
-                          && !Training_AnyWorkerRunning(state)   // E.1.2.C — see can_collect
-                          && mh_collect_horizon_count > 0
-                          && tp_aligned && sl_aligned
-                          && side_gate != 0;  // E.1.2.C F3
+    const SuiteGate mh_collect_gate =
+        StartGate_CollectMultiHorizon(selected_files, mh_collect_horizon_count, tp_n, sl_n, side_gate);
+    const bool mh_can_collect = SuiteGate_Open(&mh_collect_gate);
     if (!single_horizon_mode) {
     if (!mh_can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Multi-Horizon")) {
@@ -4873,14 +4872,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Train Multi-Horizon will recompute per horizon during\n"
         "training, so nothing is lost.");
 
-    // v5.11.40 — TP/SL misalignment hint. When operator typed a
-    // multi-value TP/SL CSV that doesn't broadcast or match horizon
-    // count, surface an explicit reason next to the disabled button.
-    if (mh_collect_horizon_count > 0 && (!tp_aligned || !sl_aligned)) {
+    // the Run Control job's own run shows its progress; any other reason is the gate's (v5.11.40's TP/SL
+    // misalignment hint is one of its terms)
+    if (SuiteJob_Running(&run_control->job)) {
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::yellow,
-            "(misaligned: TP=%d, SL=%d, horizons=%d — need 1 or %d each)",
-            tp_n, sl_n, mh_collect_horizon_count, mh_collect_horizon_count);
+        ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->job.progress);
+    } else if (!mh_can_collect) {
+        SuiteGate_ShowWhy(&mh_collect_gate);
     }
     } // end !single_horizon_mode (Collect Multi-Horizon)
     // MP-6 — why this panel's last start did not start (refused, naming the run that holds the lease, or failed)
@@ -4916,11 +4914,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                         state->ui_horizon_count,
                         state->ui_horizon_count == 1 ? "" : "s");
 
-    // results pointer for Train Model + Walk-Forward sections below — they
-    // need sample_count + feature_matrix + labels, all of which are safe to
-    // read by the time those sections run (Train Model runs synchronously
-    // on the UI thread; Walk-Forward worker is its own thread that doesn't
-    // collide with backtest_worker_fn).
+    // results pointer for the training sections below — every training run
+    // (Train Model too: it runs on the funnel's worker, the multi-horizon run
+    // with N=1, since v5.11.44) reads feature_matrix + labels while holding
+    // the suite run lease, and a collect or a backtest — the runs that reset
+    // and rebuild them — cannot start until the lease is free (D-503), so
+    // the buffers never move under a reader.
     BacktestResults *results = &run_control->results;
 
     // show feature collection status — display reads from a worker-written
@@ -4931,10 +4930,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // GUI rendering at 60fps that iterated those buffers raced with worker
     // reallocs → use-after-free → segfault on a 2.25M-sample run on
     // 2026-04-25. Snapshot pattern: worker computes the distribution stats
-    // ONCE after Backtest_Run completes (in backtest_worker_fn) and sets
-    // running=0 last. GUI reads the snapshot when running==0. The volatile
-    // flag prevents compiler reordering of the loads/stores, giving a
-    // happens-before edge.
+    // ONCE after Backtest_Run completes (in backtest_worker_fn) and publishes
+    // its job's result last (SuiteJob_Publish — a release); the trampoline
+    // then ends the job (a release compare-and-swap). GUI reads the snapshot
+    // only once SuiteJob_Running shows no run — the acquire that pairs with
+    // them is the happens-before edge.
     //
     // Bonus: the diagnostic compute happens once per run, not every render
     // frame. Iterating millions of labels every frame was wasteful even
@@ -4945,7 +4945,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // multi-horizon collect has filled the per-horizon snapshots, render ALL
     // of them and retire the single-line-plus-footnote view; the legacy line
     // stays for single-horizon runs (count==0).
-    int mh_n = (!SuiteJob_Running(&run_control->job)) ? run_control->mh_collect_snap_count : 0;
+    // Both views read the snapshot only while the Run Control job shows no run — the worker writes it at the end of
+    // its run, so a read during the run could see half of it (the single-horizon line used to read it every frame,
+    // relying on the click's zeroing; D-507 review F5).
+    const bool rc_shows_run = SuiteJob_Running(&run_control->job);
+    int mh_n = (!rc_shows_run) ? run_control->mh_collect_snap_count : 0;
     if (mh_n > 0) {
         const ImVec4 vg = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 vy = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
@@ -5037,7 +5041,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "Verdict thresholds match the single-run diagnosis: rarest class under\n"
             "15%% of fair share = starved; under 50%% = under-represented; one\n"
             "class >70%% = dominance.");
-    } else if (snap->sample_count > 0) {
+    } else if (!rc_shows_run && snap->sample_count > 0) {
         // FoxML colors for diagnostics
         const ImVec4 diag_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 diag_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
@@ -5458,28 +5462,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // concurrent training pthreads. XGBoost's internal global state +
     // PhaseTimer_Global() singleton are NOT safe under that concurrency on
     // some builds; result was a segfault when GUI thread tried to read
-    // worker-mutating state on click-back. Fix: gate all training buttons
-    // on a single "any_worker_running" predicate so only ONE worker runs
-    // at a time. Operator-friendly: button is disabled with a tooltip
-    // "(another training task is running)" rather than crashing.
-    // E.1.2.C — the one predicate, hoisted; see Training_AnyWorkerRunning.
-    bool any_worker_running = Training_AnyWorkerRunning(state);
-    // E.1.2.C — `&& side_gate != 0` is the half F3 was missing. The tier's own
-    // comment claimed "buttons disabled", but side_gate reached only the two
-    // COLLECT predicates, so a REFUSE-tier label could still be TRAINED from
-    // samples a previous collect had left behind: collect at side=Buy, flip to
-    // Exit, pick any label, Train. The gate rendered red and stopped nothing.
-    // E.1.2.D (scan-1 NEW-5) — the Run Control job's term closes the REVERSE
-    // direction of the leaf-6 exclusion: a collect/backtest reallocs + MOVES
-    // (or Reset()s) the shared results buffers, so no trainer may start while
-    // Run Control is live. Leaf 6 gated collect-during-train; this gates
-    // train-during-collect. mh_can_train derives from can_train and inherits.
-    bool can_train = results->sample_count >= 10 && !any_worker_running
-                     && !SuiteJob_Running(&run_control->job)
-                     && side_gate != 0;
-#ifndef USE_XGBOOST
-    can_train = false;
-#endif
+    // worker-mutating state on click-back. The exclusion is the suite run
+    // lease now (D-503): one suite run at a time, refused at the funnel, and
+    // every start button's gate reads it and names the run that holds it
+    // (D-507) — which also keeps a collect from reallocating the results a
+    // trainer reads (E.1.2.D NEW-5) without a term of its own. The gate's
+    // terms: Backtest/SuiteStartGates.hpp.
+    const SuiteGate train_gate =
+        StartGate_TrainModel(START_GATE_BUILD_TRAINS, side_gate, results->sample_count);
+    const bool can_train = SuiteGate_Open(&train_gate);
 
     // v5.11.43 — auto-route by horizon count. Single-horizon (count<=1)
     // shows "Train Model"; multi-horizon (count>1) shows "Train Multi-Horizon".
@@ -5509,15 +5500,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     }
     if (!can_train) {
         ImGui::EndDisabled();
-#ifndef USE_XGBOOST
-        ImGui::SameLine();
-        ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
-#else
-        if (results->sample_count < 10) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("Collect features first (need 10+ samples)");
-        }
-#endif
+        SuiteGate_ShowWhy(&train_gate);
     }
     } // end single_horizon_mode (Train Model)
 
@@ -5569,18 +5552,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // Same validation as Collect Multi-Horizon (above). When eff_horizon
     // came from cfg.horizon_list fallback (operator didn't type a CSV),
     // ui_horizon_count is 0; in that case alignment uses
-    // eff_horizon_count for the match.
+    // eff_horizon_count for the match. v5.13.1.B — the label_kind CSV
+    // follows the same rule. All three are terms of the gate (D-507;
+    // Backtest/SuiteStartGates.hpp) — the label-kind misalignment used to
+    // grey the button with no reason shown.
     int train_tp_n = state->ui_tp_per_horizon_count;
     int train_sl_n = state->ui_sl_per_horizon_count;
-    bool train_tp_aligned = (train_tp_n <= 1) || (train_tp_n == eff_horizon_count);
-    bool train_sl_aligned = (train_sl_n <= 1) || (train_sl_n == eff_horizon_count);
-    // v5.13.1.B — alignment check for per-horizon label_kind CSV.
-    // Same broadcast-or-match rule as TP/SL CSV.
     int train_lk_n = state->ui_label_kind_per_horizon_count;
-    bool train_lk_aligned = (train_lk_n <= 1) || (train_lk_n == eff_horizon_count);
-    bool mh_can_train = can_train && (eff_horizon_count > 0)
-                        && train_tp_aligned && train_sl_aligned
-                        && train_lk_aligned;
+    const SuiteGate mh_train_gate =
+        StartGate_TrainMultiHorizon(START_GATE_BUILD_TRAINS, side_gate, eff_horizon_count, train_tp_n, train_sl_n,
+                                    train_lk_n, results->sample_count);
+    const bool mh_can_train = SuiteGate_Open(&mh_train_gate);
     if (!single_horizon_mode) {
     if (!mh_can_train) ImGui::BeginDisabled();
     // v5.13.6.D — tooltip for the click target. Note: SetItemTooltip
@@ -5610,7 +5592,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "under node_N_model_dir automatically (E.1.2.C).\n"
         "\n"
         "Each model gets full WF + held-out + auto-stamp. Per-horizon\n"
-        "results table renders below.");
+        "results table renders below.\n"
+        "\n"
+        "Each horizon recomputes labels with that label_forward_ticks value\n"
+        "and trains a separate model (D-431 nested family layout).\n"
+        "Operator manually picks which horizon to deploy (or relies on\n"
+        "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
+        "Runs panel treats each horizon as a separate row for\n"
+        "Compare-to-Baseline.");
     if (mh_clicked) {
         // MP-1 — every input of the run is snapped HERE by the one request builder (v5.10.0E
         // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2). The launch snaps
@@ -5619,26 +5608,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     }
     if (!mh_can_train) {
         ImGui::EndDisabled();
-        if (eff_horizon_count == 0) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(set Horizons CSV above OR cfg.horizon_list to enable)");
-        } else if (!train_tp_aligned || !train_sl_aligned) {
-            // v5.11.40 — same misalignment hint as Collect side
-            ImGui::SameLine();
-            ImGui::TextColored(FoxmlColors::yellow,
-                "(misaligned: TP=%d, SL=%d, horizons=%d — need 1 or %d each)",
-                train_tp_n, train_sl_n, eff_horizon_count, eff_horizon_count);
-        }
+        SuiteGate_ShowWhy(&mh_train_gate);   // v5.11.40's misalignment hints are among its terms
     }
-    ImGui::SetItemTooltip(
-        "Trains N XGBoost models, one per horizon in 'Horizons (CSV)' above.\n"
-        "Each horizon recomputes labels with that label_forward_ticks value,\n"
-        "trains a separate model, saves to (D-431 nested family layout):\n"
-        "  models/<class>/<run_name>/horizon_<H>/<role>.json\n\n"
-        "Operator manually picks which horizon to deploy (or relies on\n"
-        "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
-        "Runs panel treats each horizon as a separate row for\n"
-        "Compare-to-Baseline.");
+    // (ONE tooltip, on the button above: a second SetItemTooltip here bound to the reason text, or — with the button
+    // enabled — replaced the first one, so its Label Kind text never showed; its content moved into the first)
 
     // Multi-horizon progress bar (rendered when worker is running)
     if (SuiteJob_Running(&state->mh_job)) {
@@ -5766,16 +5739,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // run / cancel button
     {
-        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
-        bool any_worker_running_wf =
-            SuiteJob_Running(&state->fv_job) ||
-            SuiteJob_Running(&state->hp_job) ||
-            SuiteJob_Running(&state->mh_job);  // intentionally exclude WF's own job so WF can show its own cancel button
-        bool can_wf = results->sample_count >= 50 && !any_worker_running_wf
-                      && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
-#ifndef USE_XGBOOST
-        can_wf = false;
-#endif
+        // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503); while WF itself runs, the
+        // running branch below shows its progress and Cancel instead of this button
+        const SuiteGate wf_gate = StartGate_WalkForward(START_GATE_BUILD_TRAINS, results->sample_count);
+        const bool can_wf = SuiteGate_Open(&wf_gate);
         if (SuiteJob_Running(&state->wf_job)) {
             ImGui::ProgressBar(state->wf_job.progress / 100.0f, ImVec2(-1, 0), "Walk-forward...");
             if (ImGui::Button("Cancel Walk-Forward"))
@@ -5812,15 +5779,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             if (!can_wf) {
                 ImGui::EndDisabled();
-#ifndef USE_XGBOOST
-                ImGui::SameLine();
-                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
-#else
-                if (results->sample_count < 50) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("Need 50+ samples");
-                }
-#endif
+                SuiteGate_ShowWhy(&wf_gate);
             }
         }
     }
@@ -6159,19 +6118,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::PopItemWidth();
 
         const BacktestResults *hp_data = &run_control->results;
-        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
-        bool any_worker_running_hp =
-            SuiteJob_Running(&state->wf_job) ||
-            SuiteJob_Running(&state->fv_job) ||
-            SuiteJob_Running(&state->mh_job);   // acquire, pairs with the trampoline's release
-        bool can_hp =
-#ifdef USE_XGBOOST
-            hp_data->sample_count >= 100 && hp_total_cells > 0
-            && hp_total_cells <= OPT_MAX_GRID && !any_worker_running_hp
-            && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
-#else
-            false;
-#endif
+        // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503); each axis checked on its own,
+        // so two inverted ranges can no longer multiply to an in-range count
+        const SuiteGate hp_gate =
+            StartGate_HyperparamSweep(START_GATE_BUILD_TRAINS, state->hp_ranges[0].steps(),
+                                      state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1, OPT_MAX_GRID,
+                                      hp_data->sample_count);
+        const bool can_hp = SuiteGate_Open(&hp_gate);
 
         if (SuiteJob_Running(&state->hp_job)) {
             const int done = state->hp_job.progress, total = state->hp_job.total;
@@ -6216,18 +6169,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             if (!can_hp) {
                 ImGui::EndDisabled();
-#ifndef USE_XGBOOST
-                ImGui::SameLine();
-                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
-#else
-                if (hp_data->sample_count < 100) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("Need 100+ samples (Collect Features first)");
-                } else if (hp_total_cells == 0 || hp_total_cells > OPT_MAX_GRID) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("Cell count out of range (1..%d)", OPT_MAX_GRID);
-                }
-#endif
+                SuiteGate_ShowWhy(&hp_gate);
             }
         }
 
@@ -6318,19 +6260,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "unsigned loads.");
 
         const BacktestResults *fv_data = &run_control->results;
-        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
-        bool any_worker_running_fv =
-            SuiteJob_Running(&state->wf_job) ||
-            SuiteJob_Running(&state->hp_job) ||
-            SuiteJob_Running(&state->mh_job);   // acquire, pairs with the trampoline's release
-        bool can_fv =
-#ifdef USE_XGBOOST
-            fv_data->sample_count >= 50 && state->model_path[0] != '\0'
-            && !any_worker_running_fv
-            && !SuiteJob_Running(&run_control->job);  // E.1.2.D NEW-5 — no train-during-collect
-#else
-            false;
-#endif
+        // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503)
+        const SuiteGate fv_gate =
+            StartGate_FullValidation(START_GATE_BUILD_TRAINS, state->model_path[0] != '\0', fv_data->sample_count);
+        const bool can_fv = SuiteGate_Open(&fv_gate);
 
         if (SuiteJob_Running(&state->fv_job)) {
             ImGui::ProgressBar(state->fv_job.progress / 100.0f, ImVec2(-1, 0),
@@ -6346,16 +6279,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             if (!can_fv) {
                 ImGui::EndDisabled();
-#ifndef USE_XGBOOST
-                ImGui::SameLine();
-                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
-#else
-                ImGui::SameLine();
-                if (state->model_path[0] == '\0')
-                    ImGui::TextDisabled("Set Model Path first");
-                else if (fv_data->sample_count < 50)
-                    ImGui::TextDisabled("Need 50+ samples");
-#endif
+                SuiteGate_ShowWhy(&fv_gate);
             }
         }
     }
