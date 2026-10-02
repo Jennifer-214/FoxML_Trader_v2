@@ -3804,7 +3804,7 @@ static inline void Backtest_RunSweep(uint64_t lease,
     opt->best_idx = -1;
     memset(opt->cell_ran, 0, sizeof(opt->cell_ran));
     memset(opt->stats, 0, sizeof(opt->stats));
-    for (int i = 0; i < OPT_MAX_GRID; ++i) opt->metric[i] = 0.0;
+    memset(opt->metric, 0, sizeof(opt->metric));   // all-zero bits = 0.0 (IEEE 754)
     double best_metric = -1e30;
 
     // store parameter values
@@ -3814,11 +3814,15 @@ static inline void Backtest_RunSweep(uint64_t lease,
         for (int i = 0; i < opt->dims[1]; i++)
             opt->param_vals[1][i] = ranges[1].lo + i * ranges[1].step;
 
+    // Everything that can refuse the WHOLE sweep clears `admissible`, and then no cell runs — never an early return
+    // below the reset above (Class 62: a refused sweep shows "no cell ran", never a half-written struct).
+    bool admissible = true;
+
     // load base config once
     ControllerConfig<BACKTEST_FP> base = ControllerConfig_Load<BACKTEST_FP>(base_cfg->config_path);
     // GAP-1 (③ caller-coverage) — gate the optimizer's base cfg: a malformed / unknown-sharded-key capital
     // fault poisons EVERY sweep run (all share `base`). Fail the run (abort), matching BacktestSharded's gate.
-    if (!cfg_capital_gate_ok(base, "backtest optimizer")) return;
+    if (!cfg_capital_gate_ok(base, "backtest optimizer")) admissible = false;
 
     // ③ item-4 (E.1.1, F2) — gate the SWEEP RANGE, not just the base. ConfigField_Set mutates the FLAT
     // fields WITHOUT re-running PopulateCoresFromFlat, so the base gate above never sees the swept values;
@@ -3826,7 +3830,7 @@ static inline void Backtest_RunSweep(uint64_t lease,
     // ENDPOINTS are the binding points; refuse the whole optimization if a swept capital param would go out
     // of range (refuse-don't-coerce — an out-of-range sweep range is operator misconfiguration, not a point
     // to silently skip). Two endpoint probes cover each field's lo+hi regardless of sweep direction.
-    for (int ep = 0; ep < 2; ++ep) {
+    for (int ep = 0; admissible && ep < 2; ++ep) {
         ControllerConfig<BACKTEST_FP> probe = base;
         // E.1.2.D (scan-1 NEW-7, optimizer sibling) — the probe already calls
         // ConfigField_Set; CHECKING its return closes the typo'd-key silent
@@ -3834,19 +3838,21 @@ static inline void Backtest_RunSweep(uint64_t lease,
         if (!ConfigField_Set(&probe, ranges[0].key, opt->param_vals[0][ep ? opt->dims[0] - 1 : 0])) {
             fprintf(stderr, "[optimizer] REFUSED: unknown sweep key '%s' — every "
                     "run would silently use the base cfg\n", ranges[0].key);
-            return;
+            admissible = false;
+            break;
         }
         if (num_params > 1 &&
             !ConfigField_Set(&probe, ranges[1].key, opt->param_vals[1][ep ? opt->dims[1] - 1 : 0])) {
             fprintf(stderr, "[optimizer] REFUSED: unknown sweep key '%s' — every "
                     "run would silently use the base cfg\n", ranges[1].key);
-            return;
+            admissible = false;
+            break;
         }
         ControllerConfig_CapitalRangeSweep(probe);
-        if (!cfg_capital_gate_ok(probe, "backtest optimizer sweep range")) return;
+        if (!cfg_capital_gate_ok(probe, "backtest optimizer sweep range")) admissible = false;
     }
 
-    for (int i0 = 0; i0 < opt->dims[0]; i0++) {
+    for (int i0 = 0; admissible && i0 < opt->dims[0]; i0++) {
         for (int i1 = 0; i1 < opt->dims[1]; i1++) {
             if (*cancel_flag) return;
 
