@@ -2793,8 +2793,9 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
         // v5.9.5h — XGBHyperparams struct + apply helper. Single source of
-        // truth shared with HeldOut training (HeldOutSplit_TrainEval below) and
-        // Train Model worker (BacktestPanels.hpp). Defaults match the
+        // truth shared with held-out training (HeldOutSplit_TrainEval below) and
+        // the producer core's per-horizon train (TrainingWorkers_RunHorizon,
+        // Backtest/TrainingWorkers.hpp). Defaults match the
         // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
         // identical training output.
         // (No thread count here: XGBoost is built without OpenMP — D-494, OMP-B — so

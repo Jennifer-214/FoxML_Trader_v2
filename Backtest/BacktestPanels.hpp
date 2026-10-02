@@ -229,7 +229,7 @@ struct SamplesSnapshot {
 // [TAG]_[[GUI] [BACKTEST]]
 // [THREAD]_[[RUN_WORKER_WRITER] [GUI_READER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[state for the Run Control panel — the worker thread, run config + results, snapshot, and candle feed]
+// [OVERVIEW]_[state for the Run Control panel — the worker's display flags, run config + results, snapshot, and candle feed]
 //======================================================================
 //======================================================================
 // [CODE]
@@ -239,7 +239,6 @@ struct RunControlState {
     volatile int progress_pct;
     volatile int cancel_flag;
     volatile int complete;
-    pthread_t worker_tid;
     BacktestRunConfig run_config;
     BacktestResults results;
     CandleAccumulator *candle_acc;
@@ -685,8 +684,9 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
     // spawn worker
     BacktestWorkerArgs *args = (BacktestWorkerArgs *)malloc(sizeof(BacktestWorkerArgs));
     args->state = state;
-    pthread_create(&state->worker_tid, NULL, backtest_worker_fn, args);
-    pthread_detach(state->worker_tid);
+    pthread_t tid;
+    pthread_create(&tid, NULL, backtest_worker_fn, args);
+    pthread_detach(tid);
 }
 //======================================================================
 // [END_CODE]
@@ -2952,7 +2952,6 @@ struct OptimizerPanelState {
     volatile int total_runs;
     volatile int cancel_flag;
     volatile int complete;
-    pthread_t worker_tid;
     // copies for the worker thread
     BacktestRunConfig run_config;
     char config_path[256];
@@ -3161,8 +3160,9 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 
             OptWorkerArgs *args = (OptWorkerArgs *)malloc(sizeof(OptWorkerArgs));
             args->state = state;
-            pthread_create(&state->worker_tid, NULL, optimizer_worker_fn, args);
-            pthread_detach(state->worker_tid);
+            pthread_t tid;
+            pthread_create(&tid, NULL, optimizer_worker_fn, args);
+            pthread_detach(tid);
         }
         if (!can_run) {
             ImGui::EndDisabled();
@@ -3274,7 +3274,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [THREAD]_[[TRAIN_WORKER_WRITER] [GUI_READER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[state for the Training panel — every training / validation / multi-horizon knob and worker handle]
+// [OVERVIEW]_[state for the Training panel — every training / validation / multi-horizon knob and each worker's display flags]
 //======================================================================
 //======================================================================
 // [CODE]
@@ -3286,10 +3286,10 @@ struct TrainingPanelState {
     int n_estimators;
     // v5.9.5h — additional cfg-tunable XGBoost hyperparams. Defaults match
     // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
-    // identical training output. UI exposes these as advanced tuning;
-    // operator edits affect Train Model worker output only (worker captures
-    // a snapshot at entry, like max_depth/lr/n_estimators above). Backtest
-    // WF/HeldOut paths read from cfg directly.
+    // identical training output. UI exposes these as advanced tuning; the
+    // Train buttons, Walk-Forward and Run Full Validation snapshot them at the
+    // click with max_depth/lr/n_estimators above (Training_SnapshotHyperparams).
+    // The HP sweep does not read them (HPROUTE, D-505).
     float ui_subsample;          // 0.5-1.0
     float ui_colsample_bytree;   // 0.5-1.0
     int   ui_min_child_weight;   // clamped to the cfg registry's INT(...) bound for xgb_min_child_weight (read at render)
@@ -3305,28 +3305,8 @@ struct TrainingPanelState {
     float label_roundtrip_fee_pct;
     int label_forward_ticks;
     // results
-    float feature_importance[MODEL_MAX_FEATURES];
-    char feature_names[MODEL_MAX_FEATURES][32];
     char model_path[256];
-    float train_accuracy;            // binary/multiclass: classification accuracy (0..1)
-    // regression-only metrics (valid when label kind == regression)
-    float train_mse;                 // mean squared error
-    float train_correlation;         // Pearson r between predictions and labels
-    float train_label_min;           // observed label min/max for context
-    float train_label_max;
-    float train_label_mean;
-    float train_label_stddev;
-    int positive_count, negative_count;
     char status_msg[128];
-    // v5.9.5d — scaler SHA-256 hex (64 chars + null) for GUI display.
-    // Populated by the DELETED train_model_worker_fn (D-d) — dead at HEAD;
-    // retained pending the field-hygiene sweep (leaf-13-adjacent);
-    // empty when scaler not persisted. Single-writer (worker) → reader (UI
-    // render after tm_complete=1 flips). Pre-v5.9.5d the SHA was only
-    // logged via stderr — operator couldn't see it in foxml_suite.
-    char scaler_sha256_hex[80];
-    // (v5.9.5j tm_auto_stamp_* result fields DELETED at D-d with their only
-    // writer; the mh path's RFV auto-stamp is the live mechanism.)
     // walk-forward validation (Phase 6A — A7 GUI rework)
     int wf_n_splits;          // number of temporal folds (default 5)
     // s5 leaf-16: 0 = AUTO (max of the Horizons CSV, resolved at every use via
@@ -3340,12 +3320,10 @@ struct TrainingPanelState {
     volatile int wf_progress; // 0-100 progress
     volatile int wf_cancel;   // 1 = user requested cancel
     volatile int wf_complete; // 1 = run finished
-    pthread_t wf_tid;
     WalkForwardResults wf_results;
     bool wf_has_results;      // true after first completed walk-forward run
     // save run (bundles config + model for deployment)
     char run_name[64];
-    char save_msg[128];
     // v5.8.7 — Full Validation (held-out + auto-stamp). Replaces the
     // hand-wired multi-button workflow with a single integrated path
     // that exercises Backtest_RunFullValidation, which is the function
@@ -3355,41 +3333,12 @@ struct TrainingPanelState {
     volatile int fv_progress;
     volatile int fv_cancel;
     volatile int fv_complete;         // 1 = fv_results holds a finished run — published (release) by the job, read with TrainingSink_Load (MP-1b; it replaced a plain `bool fv_has_results` that said the same thing)
-    pthread_t fv_tid;
     FullValidationResults fv_results;
     char fv_auto_stamp_secret[128];   // HMAC secret; empty = the collected cfg's auto_stamp_secret, dev mode only when that is empty too (CS-277)
     float fv_held_out_fraction;       // 0.05 .. 0.30; clamped by HeldOutSplit_Make
     float fv_gap_threshold;           // gap threshold for stamp accept/refuse
     char fv_status_msg[256];          // post-run summary + auto-stamp result
-    // v5.9.0c — Train Model worker thread state (V5_9_AUDIT-#7).
-    // Pre-v5.9.0c, Train Model ran synchronously and froze the GUI 5-30s.
-    // Worker pattern mirrors fv_* above. State is single-writer (worker
-    // thread) → main UI reads after volatile completion flag flips.
-    volatile int tm_running;
-    volatile int tm_complete;
-    volatile int tm_cancel;     // v5.9.0d: polled between XGBoost iterations
-    pthread_t tm_tid;
-    // v5.11.25 — XGBoost iteration progress (operator-flagged 2026-05-07).
-    // Worker writes tm_progress_iter (current_iter+1, 1..n_estimators) and
-    // tm_progress_total (snapshotted n_estimators) every iteration; GUI
-    // renders ImGui::ProgressBar(tm_progress_iter / tm_progress_total).
-    // Both reset to 0 on entry; written single-writer (worker thread)
-    // with volatile to prevent compiler reordering. Pre-v5.11.25 the
-    // progress bar was indeterminate (-1 fed into ImGui as a pulse).
-    volatile int tm_progress_iter;
-    volatile int tm_progress_total;
-    // v5.11.29 — post-iter phase indicator. After the iter loop completes
-    // (tm_progress_iter == tm_progress_total), the worker still does
-    // significant work: XGBoosterSaveModel (slow JSON serialization for
-    // 400+ trees, 1-5s), train-set predict + accuracy, scaler compute +
-    // persist + SHA-256, optional auto-stamp. Pre-v5.11.29 the GUI
-    // showed "iter 400/400" stuck at 100% for several seconds — operator
-    // couldn't tell if it was hung. Worker now writes a short phase
-    // string here at each post-iter transition; GUI uses it as the
-    // ProgressBar overlay during the post-iter window. Empty string =
-    // either pre-iter or iter-running (overlay falls back to iter count).
-    char tm_phase_msg[64];
-    // v5.10.0a.E — Hyperparam Sweep state. Mirrors wf_* / tm_* worker
+    // v5.10.0a.E — Hyperparam Sweep state. Mirrors the wf_* worker
     // pattern. Operator clicks Run Hyperparam Sweep → spawn worker that
     // calls Backtest_RunHyperparamTrainSweep using already-collected
     // feature_matrix.
@@ -3401,7 +3350,6 @@ struct TrainingPanelState {
     volatile int    hp_total;                // total cells (set by worker)
     volatile int    hp_cancel;
     volatile int    hp_complete;
-    pthread_t       hp_tid;
     bool            hp_has_results;
     // v5.10.0a.G.1 — Multi-Horizon training state. Operator clicks Train
     // Multi-Horizon button; worker trains N models, one per horizon.
@@ -3417,7 +3365,6 @@ struct TrainingPanelState {
     volatile int    mh_current_horizon;     // current horizon ticks
     volatile int    mh_cancel;
     volatile int    mh_complete;
-    pthread_t       mh_tid;
     char            ui_horizon_csv[128];    // operator-typed; parsed → ui_horizon_*
     // E.1.2.D leaf 13 (S3-F10) — the panel's per-horizon arrays were literal
     // [8]; bind them to the cfg grid cap so a future HORIZON_LIST_MAX bump
@@ -3449,7 +3396,9 @@ struct TrainingPanelState {
     // that horizon finished or failed, after every file it writes. The FullValidationResults
     // themselves are no longer kept here: no panel code read them, and the run returns them in its
     // TrainingRunResult (E.1.3 MP-1).
-    volatile int           mh_horizon_complete[PANEL_HORIZON_MAX];
+    // alignas: the completion flags are cross-thread (released by the run, acquired by the GUI) — H6 by
+    // construction, so a field added or deleted above can never walk them across a line again.
+    alignas(64) volatile int mh_horizon_complete[PANEL_HORIZON_MAX];
     alignas(64) volatile int mh_horizon_progress[PANEL_HORIZON_MAX];  // H6 (Stage-5.5): cross-thread, was straddling a line
     // 256B per row (was 128B, which clipped the skill-floor refuse reason
     // mid-word — "classification: majo" — hiding the operative half of the
@@ -3494,11 +3443,11 @@ struct TrainingPanelState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-30]
-// [SIZE]_[411968B]
+// [UPDATED]_[2026-10-01]
+// [SIZE]_[409344B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6437]
-// [STRADDLE]_[run_name@14241 · tm_phase_msg@28112 · ui_horizon_list@409320 · ui_tp_pct_csv@409356 · ui_sl_pct_csv@409420 · ui_sl_per_horizon@409516 · ui_label_kind_csv@411716]
+// [CACHE_LINES]_[6396]
+// [STRADDLE]_[run_name@11817 · ui_horizon_list@406640 · ui_tp_pct_csv@406676 · ui_sl_pct_csv@406740 · ui_sl_per_horizon@406836 · ui_label_kind_csv@409092]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3513,8 +3462,8 @@ struct TrainingPanelState {
 // [CODE]
 //======================================================================
 static inline bool Training_AnyWorkerRunning(const TrainingPanelState *st) {
-    return st && (st->tm_running || st->wf_running ||
-                  TrainingSink_Load(&st->fv_running) || st->hp_running || TrainingSink_Load(&st->mh_running));
+    return st && (st->wf_running || TrainingSink_Load(&st->fv_running) || st->hp_running ||
+                  TrainingSink_Load(&st->mh_running));
 }
 
 //======================================================================
@@ -3677,23 +3626,6 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     strncpy(state->run_name, "run", sizeof(state->run_name) - 1);
     state->label_forward_ticks = 1000;
     strncpy(state->model_path, "models/buy_signal.json", sizeof(state->model_path) - 1);
-    // feature names from ModelInference.hpp constants
-    strncpy(state->feature_names[FEAT_SHORT_SLOPE],    "short_slope", 31);
-    strncpy(state->feature_names[FEAT_SHORT_R2],       "short_r2", 31);
-    strncpy(state->feature_names[FEAT_SHORT_VARIANCE], "short_var", 31);
-    strncpy(state->feature_names[FEAT_LONG_SLOPE],     "long_slope", 31);
-    strncpy(state->feature_names[FEAT_LONG_R2],        "long_r2", 31);
-    strncpy(state->feature_names[FEAT_LONG_VARIANCE],  "long_var", 31);
-    strncpy(state->feature_names[FEAT_VOL_RATIO],      "vol_ratio", 31);
-    strncpy(state->feature_names[FEAT_ROR_SLOPE],      "ror_slope", 31);
-    strncpy(state->feature_names[FEAT_VOLUME_SLOPE],   "vol_slope", 31);
-    strncpy(state->feature_names[FEAT_VOLUME_DELTA],   "vol_delta", 31);
-    strncpy(state->feature_names[FEAT_EMA_SMA_SPREAD], "ema_sma", 31);
-    strncpy(state->feature_names[FEAT_VWAP_DEV],       "vwap_dev", 31);
-    strncpy(state->feature_names[FEAT_PRICE_STDDEV],   "stddev", 31);
-    strncpy(state->feature_names[FEAT_PRICE_AVG],      "price_avg", 31);
-    strncpy(state->feature_names[FEAT_VOLUME_AVG],     "vol_avg", 31);
-    strncpy(state->feature_names[FEAT_EMA_ABOVE_SMA],  "ema>sma", 31);
     // walk-forward defaults (FoxML battle-tested values)
     state->wf_n_splits = 5;
     // s5 leaf-16: 0 = AUTO (derive max(Horizons CSV) at use — see
@@ -3719,13 +3651,6 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->fv_held_out_fraction = 0.20f;      // matches HELDOUT_FRACTION default
     state->fv_gap_threshold = 0.05f;          // matches gap_acceptable_threshold default
     state->fv_status_msg[0] = '\0';
-    // v5.9.0c — Train Model worker init
-    state->tm_running = 0;
-    state->tm_complete = 0;
-    state->tm_cancel = 0;
-    state->tm_progress_iter = 0;   // v5.11.25
-    state->tm_progress_total = 0;  // v5.11.25
-    state->tm_phase_msg[0] = '\0'; // v5.11.29 — clear post-iter phase indicator
     // v5.10.0a.E — Hyperparam Sweep init. Default param 0 = sweep
     // xgb_subsample 0.5 .. 0.9 step 0.1 (5 cells).
     strncpy(state->hp_ranges[0].key, "xgb_subsample", sizeof(state->hp_ranges[0].key) - 1);
@@ -4066,11 +3991,12 @@ static inline void TrainingPanel_LaunchFullValidation(TrainingPanelState *state,
                                                       RunControlState *run_control,
                                                       const BacktestResults *fv_data) {
     FullValidationWorkerArgs *fv_args = TrainingPanel_FullValidationArgs(state, run_control, fv_data);
+    pthread_t tid;
     const int rc = fv_args
-        ? pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args)
+        ? pthread_create(&tid, NULL, fullvalidation_worker_fn, fv_args)
         : ENOMEM;
     if (rc == 0) {
-        pthread_detach(state->fv_tid);
+        pthread_detach(tid);
     } else {
         free(fv_args);
         snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
@@ -4304,11 +4230,12 @@ static inline void TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
                                                     int horizon_count, const int *horizons) {
     MultiHorizonWorkerArgs *mh_args =
         TrainingPanel_MultiHorizonArgs(state, run_control, horizon_count, horizons);
+    pthread_t tid;
     const int rc = mh_args
-        ? pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args)
+        ? pthread_create(&tid, NULL, train_multi_horizon_worker_fn, mh_args)
         : ENOMEM;
     if (rc == 0) {
-        pthread_detach(state->mh_tid);
+        pthread_detach(tid);
     } else {
         // Not started: say why, hide the per-horizon table the click armed (its rows are the previous
         // run's), and clear the run flag so the buttons re-arm.
@@ -4779,8 +4706,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
         BacktestWorkerArgs *args = (BacktestWorkerArgs *)malloc(sizeof(BacktestWorkerArgs));
         args->state = run_control;
-        pthread_create(&run_control->worker_tid, NULL, backtest_worker_fn, args);
-        pthread_detach(run_control->worker_tid);
+        pthread_t tid;
+        pthread_create(&tid, NULL, backtest_worker_fn, args);
+        pthread_detach(tid);
     }
     ImGui::SetItemTooltip(
         "Runs a backtest AND gathers ML training samples (features + labels)\n"
@@ -5082,11 +5010,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             // regression: continuous labels — show distribution stats, not +/- counts.
             float lmin = snap->lmin, lmax = snap->lmax;
             float mean = snap->lmean, stddev = snap->lstddev;
-            // expose to state for downstream display
-            state->train_label_min    = lmin;
-            state->train_label_max    = lmax;
-            state->train_label_mean   = mean;
-            state->train_label_stddev = stddev;
             ImGui::Text("Samples: %d  |  range: [%.4f, %.4f]  |  mean: %.4f  |  σ: %.4f",
                          snap->sample_count, lmin, lmax, mean, stddev);
             ImGui::SetItemTooltip("Regression labels — continuous target (e.g. forward %% return).\n"
@@ -5262,8 +5185,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::SetItemTooltip("%s", mc_tip);
         } else {
             // binary: +/-/neutral counts from snapshot
-            state->positive_count = snap->pos_count;
-            state->negative_count = snap->neg_count;
             int neutral_count = snap->neutral_count;
             int labeled = snap->pos_count + snap->neg_count;
             ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  neutral: %d  |  Ratio: %.1f%%",
@@ -5523,304 +5444,254 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     can_train = false;
 #endif
 
-    // v5.11.44 — single-mode now routes through Multi-Horizon worker. We
-    // gate the legacy tm_running progress bar on tm_running specifically
-    // (legacy worker still exists for back-compat callers). Multi-Horizon
-    // running state is shown by the per-horizon table + mh progress bar
-    // further down. New mh_running covers BOTH single (N=1) + multi (N>1).
-    if (state->tm_running) {
-        // v5.11.25 — real per-iteration progress bar. Pre-fix used a
-        // pulsing indeterminate bar (`-1.0f * GetTime()`) as a "still
-        // alive" signal because the XGBoost C-API had no progress
-        // callback hook — but this file's per-iteration training loop
-        // already uses XGBoosterUpdateOneIter
-        // (added for cancel support, v5.9.0d), so the worker can
-        // publish current_iter to a volatile field cheaply. Operator
-        // sees actual % done + iter count.
-        // v5.11.29 — post-iter phases. After iter loop completes the
-        // worker still does 1-5s of save-model + scaler + auto-stamp;
-        // tm_phase_msg gets updated at each transition. GUI shows the
-        // phase msg as the overlay when set, else falls back to iter
-        // count.
-        int p_total = state->tm_progress_total;
-        int p_iter  = state->tm_progress_iter;
-        const char* phase = (const char*)state->tm_phase_msg;
-        bool have_phase = phase[0] != '\0';
-        if (p_total > 0) {
-            float frac = (float)p_iter / (float)p_total;
-            char overlay[96];
-            if (have_phase) {
-                // post-iter phase active — keep bar full + show phase
-                snprintf(overlay, sizeof(overlay),
-                         "Training XGBoost... %s", phase);
-                ImGui::ProgressBar(1.0f, ImVec2(-1, 0), overlay);
-            } else {
-                snprintf(overlay, sizeof(overlay),
-                         "Training XGBoost... iter %d / %d", p_iter, p_total);
-                ImGui::ProgressBar(frac, ImVec2(-1, 0), overlay);
-            }
-        } else {
-            // Pre-loop: still allocating dtrain, no iters started yet.
-            const char* preparing = have_phase ? phase : "(preparing)";
-            char overlay[96];
-            snprintf(overlay, sizeof(overlay),
-                     "Training XGBoost... %s", preparing);
-            ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(),
-                               ImVec2(-1, 0), overlay);
-        }
-        if (ImGui::Button("Cancel Training")) {
-            state->tm_cancel = 1;
-        }
-    } else {
-        // v5.11.43 — auto-route by horizon count. Single-horizon (count<=1)
-        // shows "Train Model"; multi-horizon (count>1) shows "Train Multi-Horizon".
-        if (single_horizon_mode) {
-        if (!can_train) ImGui::BeginDisabled();
-        if (ImGui::Button("Train Model")) {
-            // v5.11.44 — route Train Model through the Multi-Horizon worker
-            // with N=1. This makes single-horizon training run the same
-            // train+WF+held-out+stamp pipeline that Multi-Horizon does, in
-            // ONE click (no separate Run Walk-Forward / Run Full Validation
-            // needed). Per-horizon results table renders 1 row.
-            state->status_msg[0] = '\0';
-            state->wf_has_results = false;
-            memset(&state->wf_results, 0, sizeof(state->wf_results));
-            state->mh_running = 1;
-            state->mh_progress = 0;
-            state->mh_total = 1;  // N=1 in single-horizon mode
-            state->mh_current_horizon = 0;
-            state->mh_cancel = 0;
-            state->mh_complete = 0;
+    // v5.11.43 — auto-route by horizon count. Single-horizon (count<=1)
+    // shows "Train Model"; multi-horizon (count>1) shows "Train Multi-Horizon".
+    if (single_horizon_mode) {
+    if (!can_train) ImGui::BeginDisabled();
+    if (ImGui::Button("Train Model")) {
+        // v5.11.44 — route Train Model through the Multi-Horizon worker
+        // with N=1. This makes single-horizon training run the same
+        // train+WF+held-out+stamp pipeline that Multi-Horizon does, in
+        // ONE click (no separate Run Walk-Forward / Run Full Validation
+        // needed). Per-horizon results table renders 1 row.
+        state->status_msg[0] = '\0';
+        state->wf_has_results = false;
+        memset(&state->wf_results, 0, sizeof(state->wf_results));
+        state->mh_running = 1;
+        state->mh_progress = 0;
+        state->mh_total = 1;  // N=1 in single-horizon mode
+        state->mh_current_horizon = 0;
+        state->mh_cancel = 0;
+        state->mh_complete = 0;
 
-            // Train Model is the multi-horizon run with N=1 (v5.11.44).
-            int single_h = (state->ui_horizon_count >= 1)
-                         ? state->ui_horizon_list[0]
-                         : (state->label_forward_ticks > 0
-                            ? state->label_forward_ticks : 1000);
+        // Train Model is the multi-horizon run with N=1 (v5.11.44).
+        int single_h = (state->ui_horizon_count >= 1)
+                     ? state->ui_horizon_list[0]
+                     : (state->label_forward_ticks > 0
+                        ? state->label_forward_ticks : 1000);
 
-            // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
-            // per-horizon results table (the render must never read the
-            // live-reparsed ui_horizon_list).
-            state->mh_horizon_ticks[0] = single_h;
-            for (int i = 1; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
-                state->mh_horizon_ticks[i] = 0;
+        // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
+        // per-horizon results table (the render must never read the
+        // live-reparsed ui_horizon_list).
+        state->mh_horizon_ticks[0] = single_h;
+        for (int i = 1; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+            state->mh_horizon_ticks[i] = 0;
 
-            // MP-1 — the same request builder as Train Multi-Horizon: one horizon, and the operator's
-            // training side applies here too (v5.13.5.A — one exit-side model without a CSV).
-            TrainingPanel_LaunchMultiHorizon(state, run_control, 1, &single_h);
-        }
-        if (!can_train) {
-            ImGui::EndDisabled();
-#ifndef USE_XGBOOST
-            ImGui::SameLine();
-            ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
-#else
-            if (results->sample_count < 10) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("Collect features first (need 10+ samples)");
-            }
-#endif
-        }
-        } // end single_horizon_mode (Train Model)
-
-        // v5.10.0a.G.1 — Train Multi-Horizon button. Adjacent to Train
-        // Model so operators see both options. Gated on horizons being
-        // configured (in-panel CSV input OR cfg.horizon_list fallback).
-        // v5.10.0a-bugfix2: in-panel CSV editor — operator no longer
-        // needs to edit cfg.horizon_list + reload to multi-horizon train.
-        // v5.11.43 — only render in multi-horizon mode (single mode shows
-        // Train Model, above).
-        const auto& mh_cfg = run_control->results.config_used;
-
-        // Parse the operator's CSV input on each render. Cheap (typically
-        // 1-8 entries; bounded loop). Updates state->ui_horizon_list/_count
-        // so the click handler reads from a stable snapshot.
-        {
-            int n = 0;
-            const char* p = state->ui_horizon_csv;
-            while (*p && n < 8) {
-                while (*p == ' ' || *p == '\t' || *p == ',') p++;
-                if (!*p) break;
-                char* end = nullptr;
-                long v = strtol(p, &end, 10);
-                if (end == p) break;
-                if (v > 0 && v <= 1000000)
-                    state->ui_horizon_list[n++] = (int)v;
-                p = end;
-            }
-            state->ui_horizon_count = n;
-        }
-
-        // Effective horizons: operator's UI input takes priority; if
-        // empty (CSV doesn't parse to any valid horizon), fall back to
-        // cfg.horizon_list (back-compat for operators who already wired
-        // the cfg).
-        int eff_horizon_count = state->ui_horizon_count > 0
-                              ? state->ui_horizon_count
-                              : mh_cfg.horizon_count;
-        const int *eff_horizons = state->ui_horizon_count > 0
-                                 ? state->ui_horizon_list
-                                 : mh_cfg.horizon_list;
-
-        // v5.11.43 — second Horizons CSV InputText DELETED. Single source of
-        // truth lives at the top of the panel (rendered always, near
-        // Collect Features / Collect Multi-Horizon). Operator types horizons
-        // there; auto-routing renders the matching Train button here.
-
-        // v5.11.40 — broadcast-or-match for TP/SL on the train side too.
-        // Same validation as Collect Multi-Horizon (above). When eff_horizon
-        // came from cfg.horizon_list fallback (operator didn't type a CSV),
-        // ui_horizon_count is 0; in that case alignment uses
-        // eff_horizon_count for the match.
-        int train_tp_n = state->ui_tp_per_horizon_count;
-        int train_sl_n = state->ui_sl_per_horizon_count;
-        bool train_tp_aligned = (train_tp_n <= 1) || (train_tp_n == eff_horizon_count);
-        bool train_sl_aligned = (train_sl_n <= 1) || (train_sl_n == eff_horizon_count);
-        // v5.13.1.B — alignment check for per-horizon label_kind CSV.
-        // Same broadcast-or-match rule as TP/SL CSV.
-        int train_lk_n = state->ui_label_kind_per_horizon_count;
-        bool train_lk_aligned = (train_lk_n <= 1) || (train_lk_n == eff_horizon_count);
-        bool mh_can_train = can_train && (eff_horizon_count > 0)
-                            && train_tp_aligned && train_sl_aligned
-                            && train_lk_aligned;
-        if (!single_horizon_mode) {
-        if (!mh_can_train) ImGui::BeginDisabled();
-        // v5.13.6.D — tooltip for the click target. Note: SetItemTooltip
-        // attaches to the LAST item; ImGui::Button must be issued first
-        // for the tooltip to bind to it. Render order matters here.
-        bool mh_clicked = ImGui::Button("Train Multi-Horizon");
-        ImGui::SetItemTooltip(
-            "Train N models in one click — one per horizon in Horizons CSV.\n"
-            "\n"
-            "Per-horizon TP/SL via the CSV inputs above (broadcast-or-match\n"
-            "rule: empty/single value broadcasts; N values map positional).\n"
-            "\n"
-            "v5.13.5 — per-horizon Label Kind via 'Label Kind CSV' input:\n"
-            "  Empty: all horizons use the Label Type combo above\n"
-            "  Single value: broadcasts to all horizons\n"
-            "  N values: positional map to Horizons CSV\n"
-            "  Misalignment disables this button (count != horizons count)\n"
-            "Hover the 'Label Kind CSV' input for the integer→name lookup.\n"
-            "Trains heterogeneous mixed-output ensembles in ONE click;\n"
-            "v5.12.3.B+E mixed-output normalizer blends them at inference.\n"
-            "\n"
-            "Training Side combo at top of panel selects the ROLE FILE\n"
-            "(co-located; E.1.2.C):\n"
-            "  Buy:  models/<run_subdir>/<run>/horizon_<N>/<role>.json\n"
-            "  Exit: models/<run_subdir>/<run>/horizon_<N>/exit.json\n"
-            "No cfg step: the engine auto-discovers exit.json siblings\n"
-            "under node_N_model_dir automatically (E.1.2.C).\n"
-            "\n"
-            "Each model gets full WF + held-out + auto-stamp. Per-horizon\n"
-            "results table renders below.");
-        if (mh_clicked) {
-            state->mh_running = 1;
-            state->mh_progress = 0;
-            state->mh_total = eff_horizon_count;
-            state->mh_current_horizon = 0;
-            state->mh_cancel = 0;
-            state->mh_complete = 0;
-            state->status_msg[0] = '\0';
-
-            // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
-            // per-horizon results table (arrays sized PANEL_HORIZON_MAX =
-            // HORIZON_LIST_MAX since E.1.2.D leaf 13, so they track the grid).
-            for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
-                state->mh_horizon_ticks[i] =
-                    (i < eff_horizon_count) ? eff_horizons[i] : 0;
-            // MP-1 — every input of the run is snapped HERE by the one request builder (v5.10.0E
-            // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2).
-            TrainingPanel_LaunchMultiHorizon(state, run_control, eff_horizon_count, eff_horizons);
-        }
-        if (!mh_can_train) {
-            ImGui::EndDisabled();
-            if (eff_horizon_count == 0) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(set Horizons CSV above OR cfg.horizon_list to enable)");
-            } else if (!train_tp_aligned || !train_sl_aligned) {
-                // v5.11.40 — same misalignment hint as Collect side
-                ImGui::SameLine();
-                ImGui::TextColored(FoxmlColors::yellow,
-                    "(misaligned: TP=%d, SL=%d, horizons=%d — need 1 or %d each)",
-                    train_tp_n, train_sl_n, eff_horizon_count, eff_horizon_count);
-            }
-        }
-        ImGui::SetItemTooltip(
-            "Trains N XGBoost models, one per horizon in 'Horizons (CSV)' above.\n"
-            "Each horizon recomputes labels with that label_forward_ticks value,\n"
-            "trains a separate model, saves to (D-431 nested family layout):\n"
-            "  models/<class>/<run_name>/horizon_<H>/<role>.json\n\n"
-            "Operator manually picks which horizon to deploy (or relies on\n"
-            "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
-            "Runs panel treats each horizon as a separate row for\n"
-            "Compare-to-Baseline.");
-
-        // Multi-horizon progress bar (rendered when worker is running)
-        if (TrainingSink_Load(&state->mh_running)) {
-            float pct = state->mh_total > 0
-                ? (float)state->mh_progress / state->mh_total : 0.0f;
-            char overlay[96];
-            snprintf(overlay, sizeof(overlay), "horizon %d/%d (current: %d ticks)",
-                     (int)state->mh_progress, (int)state->mh_total,
-                     (int)state->mh_current_horizon);
-            ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
-            if (ImGui::Button("Cancel Multi-Horizon"))
-                state->mh_cancel = 1;
-        }
-
-        // v5.11.41 — per-horizon results table. Renders during run AND
-        // post-completion so operator can review metrics without scrolling
-        // through stderr. Each row = one horizon's WF + held-out + stamp
-        // status. Columns:
-        //   Horizon  | Progress  | Status   | Metrics
-        // (status string is built by the worker's per-horizon block).
-        // Empty when no Multi-Horizon run has fired yet.
-        if (state->mh_total > 0) {
-            ImGui::Separator();
-            ImGui::SeparatorText("Per-horizon results");
-            if (ImGui::BeginTable("mh_horizons", 4,
-                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-                ImGui::TableSetupColumn("Horizon");
-                ImGui::TableSetupColumn("WF %");
-                ImGui::TableSetupColumn("State");
-                ImGui::TableSetupColumn("Metrics");
-                ImGui::TableHeadersRow();
-
-                int n_show = state->mh_total < 8 ? state->mh_total : 8;
-                for (int h = 0; h < n_show; ++h) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    // E.1.2.C GUI polish (a) — the click-time snapshot, never
-                    // the live-reparsed ui_horizon_list (editing the CSV
-                    // mid/post-run relabeled these rows).
-                    ImGui::Text("%d", state->mh_horizon_ticks[h]);
-
-                    ImGui::TableNextColumn();
-                    int prog = state->mh_horizon_progress[h];
-                    if (prog > 0) ImGui::Text("%d%%", prog);
-                    else          ImGui::TextDisabled("--");
-
-                    ImGui::TableNextColumn();
-                    if (TrainingSink_Load(&state->mh_horizon_complete[h])) {   // F6 — acquire
-                        ImGui::TextColored(FoxmlColors::green, "DONE");
-                    } else if (TrainingSink_Load(&state->mh_running) && h == (state->mh_progress - 1)) {
-                        ImGui::TextColored(FoxmlColors::yellow, "running");
-                    } else {
-                        ImGui::TextDisabled("waiting");
-                    }
-
-                    ImGui::TableNextColumn();
-                    if (state->mh_horizon_status[h][0] != '\0') {
-                        ImGui::TextWrapped("%s", state->mh_horizon_status[h]);
-                    } else {
-                        ImGui::TextDisabled("--");
-                    }
-                }
-                ImGui::EndTable();
-            }
-        }
-        } // end !single_horizon_mode (Train Multi-Horizon block)
+        // MP-1 — the same request builder as Train Multi-Horizon: one horizon, and the operator's
+        // training side applies here too (v5.13.5.A — one exit-side model without a CSV).
+        TrainingPanel_LaunchMultiHorizon(state, run_control, 1, &single_h);
     }
+    if (!can_train) {
+        ImGui::EndDisabled();
+#ifndef USE_XGBOOST
+        ImGui::SameLine();
+        ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+        if (results->sample_count < 10) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("Collect features first (need 10+ samples)");
+        }
+#endif
+    }
+    } // end single_horizon_mode (Train Model)
+
+    // v5.10.0a.G.1 — Train Multi-Horizon button. Adjacent to Train
+    // Model so operators see both options. Gated on horizons being
+    // configured (in-panel CSV input OR cfg.horizon_list fallback).
+    // v5.10.0a-bugfix2: in-panel CSV editor — operator no longer
+    // needs to edit cfg.horizon_list + reload to multi-horizon train.
+    // v5.11.43 — only render in multi-horizon mode (single mode shows
+    // Train Model, above).
+    const auto& mh_cfg = run_control->results.config_used;
+
+    // Parse the operator's CSV input on each render. Cheap (typically
+    // 1-8 entries; bounded loop). Updates state->ui_horizon_list/_count
+    // so the click handler reads from a stable snapshot.
+    {
+        int n = 0;
+        const char* p = state->ui_horizon_csv;
+        while (*p && n < 8) {
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            if (!*p) break;
+            char* end = nullptr;
+            long v = strtol(p, &end, 10);
+            if (end == p) break;
+            if (v > 0 && v <= 1000000)
+                state->ui_horizon_list[n++] = (int)v;
+            p = end;
+        }
+        state->ui_horizon_count = n;
+    }
+
+    // Effective horizons: operator's UI input takes priority; if
+    // empty (CSV doesn't parse to any valid horizon), fall back to
+    // cfg.horizon_list (back-compat for operators who already wired
+    // the cfg).
+    int eff_horizon_count = state->ui_horizon_count > 0
+                          ? state->ui_horizon_count
+                          : mh_cfg.horizon_count;
+    const int *eff_horizons = state->ui_horizon_count > 0
+                             ? state->ui_horizon_list
+                             : mh_cfg.horizon_list;
+
+    // v5.11.43 — second Horizons CSV InputText DELETED. Single source of
+    // truth lives at the top of the panel (rendered always, near
+    // Collect Features / Collect Multi-Horizon). Operator types horizons
+    // there; auto-routing renders the matching Train button here.
+
+    // v5.11.40 — broadcast-or-match for TP/SL on the train side too.
+    // Same validation as Collect Multi-Horizon (above). When eff_horizon
+    // came from cfg.horizon_list fallback (operator didn't type a CSV),
+    // ui_horizon_count is 0; in that case alignment uses
+    // eff_horizon_count for the match.
+    int train_tp_n = state->ui_tp_per_horizon_count;
+    int train_sl_n = state->ui_sl_per_horizon_count;
+    bool train_tp_aligned = (train_tp_n <= 1) || (train_tp_n == eff_horizon_count);
+    bool train_sl_aligned = (train_sl_n <= 1) || (train_sl_n == eff_horizon_count);
+    // v5.13.1.B — alignment check for per-horizon label_kind CSV.
+    // Same broadcast-or-match rule as TP/SL CSV.
+    int train_lk_n = state->ui_label_kind_per_horizon_count;
+    bool train_lk_aligned = (train_lk_n <= 1) || (train_lk_n == eff_horizon_count);
+    bool mh_can_train = can_train && (eff_horizon_count > 0)
+                        && train_tp_aligned && train_sl_aligned
+                        && train_lk_aligned;
+    if (!single_horizon_mode) {
+    if (!mh_can_train) ImGui::BeginDisabled();
+    // v5.13.6.D — tooltip for the click target. Note: SetItemTooltip
+    // attaches to the LAST item; ImGui::Button must be issued first
+    // for the tooltip to bind to it. Render order matters here.
+    bool mh_clicked = ImGui::Button("Train Multi-Horizon");
+    ImGui::SetItemTooltip(
+        "Train N models in one click — one per horizon in Horizons CSV.\n"
+        "\n"
+        "Per-horizon TP/SL via the CSV inputs above (broadcast-or-match\n"
+        "rule: empty/single value broadcasts; N values map positional).\n"
+        "\n"
+        "v5.13.5 — per-horizon Label Kind via 'Label Kind CSV' input:\n"
+        "  Empty: all horizons use the Label Type combo above\n"
+        "  Single value: broadcasts to all horizons\n"
+        "  N values: positional map to Horizons CSV\n"
+        "  Misalignment disables this button (count != horizons count)\n"
+        "Hover the 'Label Kind CSV' input for the integer→name lookup.\n"
+        "Trains heterogeneous mixed-output ensembles in ONE click;\n"
+        "v5.12.3.B+E mixed-output normalizer blends them at inference.\n"
+        "\n"
+        "Training Side combo at top of panel selects the ROLE FILE\n"
+        "(co-located; E.1.2.C):\n"
+        "  Buy:  models/<run_subdir>/<run>/horizon_<N>/<role>.json\n"
+        "  Exit: models/<run_subdir>/<run>/horizon_<N>/exit.json\n"
+        "No cfg step: the engine auto-discovers exit.json siblings\n"
+        "under node_N_model_dir automatically (E.1.2.C).\n"
+        "\n"
+        "Each model gets full WF + held-out + auto-stamp. Per-horizon\n"
+        "results table renders below.");
+    if (mh_clicked) {
+        state->mh_running = 1;
+        state->mh_progress = 0;
+        state->mh_total = eff_horizon_count;
+        state->mh_current_horizon = 0;
+        state->mh_cancel = 0;
+        state->mh_complete = 0;
+        state->status_msg[0] = '\0';
+
+        // E.1.2.C GUI polish (a) — click-time horizon snapshot for the
+        // per-horizon results table (arrays sized PANEL_HORIZON_MAX =
+        // HORIZON_LIST_MAX since E.1.2.D leaf 13, so they track the grid).
+        for (int i = 0; i < TrainingPanelState::PANEL_HORIZON_MAX; ++i)
+            state->mh_horizon_ticks[i] =
+                (i < eff_horizon_count) ? eff_horizons[i] : 0;
+        // MP-1 — every input of the run is snapped HERE by the one request builder (v5.10.0E
+        // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2).
+        TrainingPanel_LaunchMultiHorizon(state, run_control, eff_horizon_count, eff_horizons);
+    }
+    if (!mh_can_train) {
+        ImGui::EndDisabled();
+        if (eff_horizon_count == 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(set Horizons CSV above OR cfg.horizon_list to enable)");
+        } else if (!train_tp_aligned || !train_sl_aligned) {
+            // v5.11.40 — same misalignment hint as Collect side
+            ImGui::SameLine();
+            ImGui::TextColored(FoxmlColors::yellow,
+                "(misaligned: TP=%d, SL=%d, horizons=%d — need 1 or %d each)",
+                train_tp_n, train_sl_n, eff_horizon_count, eff_horizon_count);
+        }
+    }
+    ImGui::SetItemTooltip(
+        "Trains N XGBoost models, one per horizon in 'Horizons (CSV)' above.\n"
+        "Each horizon recomputes labels with that label_forward_ticks value,\n"
+        "trains a separate model, saves to (D-431 nested family layout):\n"
+        "  models/<class>/<run_name>/horizon_<H>/<role>.json\n\n"
+        "Operator manually picks which horizon to deploy (or relies on\n"
+        "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
+        "Runs panel treats each horizon as a separate row for\n"
+        "Compare-to-Baseline.");
+
+    // Multi-horizon progress bar (rendered when worker is running)
+    if (TrainingSink_Load(&state->mh_running)) {
+        float pct = state->mh_total > 0
+            ? (float)state->mh_progress / state->mh_total : 0.0f;
+        char overlay[96];
+        snprintf(overlay, sizeof(overlay), "horizon %d/%d (current: %d ticks)",
+                 (int)state->mh_progress, (int)state->mh_total,
+                 (int)state->mh_current_horizon);
+        ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
+        if (ImGui::Button("Cancel Multi-Horizon"))
+            state->mh_cancel = 1;
+    }
+
+    // v5.11.41 — per-horizon results table. Renders during run AND
+    // post-completion so operator can review metrics without scrolling
+    // through stderr. Each row = one horizon's WF + held-out + stamp
+    // status. Columns:
+    //   Horizon  | Progress  | Status   | Metrics
+    // (status string is built by the worker's per-horizon block).
+    // Empty when no Multi-Horizon run has fired yet.
+    if (state->mh_total > 0) {
+        ImGui::Separator();
+        ImGui::SeparatorText("Per-horizon results");
+        if (ImGui::BeginTable("mh_horizons", 4,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+            ImGui::TableSetupColumn("Horizon");
+            ImGui::TableSetupColumn("WF %");
+            ImGui::TableSetupColumn("State");
+            ImGui::TableSetupColumn("Metrics");
+            ImGui::TableHeadersRow();
+
+            int n_show = state->mh_total < 8 ? state->mh_total : 8;
+            for (int h = 0; h < n_show; ++h) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                // E.1.2.C GUI polish (a) — the click-time snapshot, never
+                // the live-reparsed ui_horizon_list (editing the CSV
+                // mid/post-run relabeled these rows).
+                ImGui::Text("%d", state->mh_horizon_ticks[h]);
+
+                ImGui::TableNextColumn();
+                int prog = state->mh_horizon_progress[h];
+                if (prog > 0) ImGui::Text("%d%%", prog);
+                else          ImGui::TextDisabled("--");
+
+                ImGui::TableNextColumn();
+                if (TrainingSink_Load(&state->mh_horizon_complete[h])) {   // F6 — acquire
+                    ImGui::TextColored(FoxmlColors::green, "DONE");
+                } else if (TrainingSink_Load(&state->mh_running) && h == (state->mh_progress - 1)) {
+                    ImGui::TextColored(FoxmlColors::yellow, "running");
+                } else {
+                    ImGui::TextDisabled("waiting");
+                }
+
+                ImGui::TableNextColumn();
+                if (state->mh_horizon_status[h][0] != '\0') {
+                    ImGui::TextWrapped("%s", state->mh_horizon_status[h]);
+                } else {
+                    ImGui::TextDisabled("--");
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
+    } // end !single_horizon_mode (Train Multi-Horizon block)
 
     // training results — kind-appropriate display.
     // D-d (2026-08-22, operator-decided) — the ~300-line results+Save-Run block
@@ -5882,12 +5753,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // run / cancel button
     {
-        // v5.10.0a-bugfix1 — re-evaluate any_worker_running for WF gate
-        // (state may have flipped since the can_train computation above
-        // — e.g. if the operator clicked Train Model then renders fired
-        // before tm_running flipped). Recompute here for safety.
+        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_wf =
-            state->tm_running ||
             TrainingSink_Load(&state->fv_running) ||
             state->hp_running ||
             TrainingSink_Load(&state->mh_running);  // intentionally exclude wf_running so WF can show its own cancel button
@@ -5922,8 +5789,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 wf_args->snap_wf_min_train     = state->wf_min_train;
                 wf_args->snap_label_type       = run_control->run_config.label_type;
                 wf_args->snap_hp = Training_SnapshotHyperparams(state);
-                pthread_create(&state->wf_tid, NULL, walkforward_worker_fn, wf_args);
-                pthread_detach(state->wf_tid);
+                pthread_t tid;
+                pthread_create(&tid, NULL, walkforward_worker_fn, wf_args);
+                pthread_detach(tid);
             }
             if (!can_wf) {
                 ImGui::EndDisabled();
@@ -6276,7 +6144,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         const BacktestResults *hp_data = &run_control->results;
         // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_hp =
-            state->tm_running ||
             state->wf_running ||
             TrainingSink_Load(&state->fv_running) ||
             TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
@@ -6325,8 +6192,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 hp_args->snap_wf_horizon_ticks = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
                 hp_args->snap_wf_buffer_ticks = state->wf_buffer_ticks;
                 hp_args->snap_wf_min_train = state->wf_min_train;
-                pthread_create(&state->hp_tid, NULL, hp_sweep_worker_fn, hp_args);
-                pthread_detach(state->hp_tid);
+                pthread_t tid;
+                pthread_create(&tid, NULL, hp_sweep_worker_fn, hp_args);
+                pthread_detach(tid);
             }
             if (!can_hp) {
                 ImGui::EndDisabled();
@@ -6434,7 +6302,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         const BacktestResults *fv_data = &run_control->results;
         // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
         bool any_worker_running_fv =
-            state->tm_running ||
             state->wf_running ||
             state->hp_running ||
             TrainingSink_Load(&state->mh_running);   // F6 — acquire, pairs with the worker's release
