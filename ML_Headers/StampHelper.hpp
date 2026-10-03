@@ -14,9 +14,9 @@
 //   - [FUNCTION]_[Stamp_AssembleAndEmit]
 //======================================================================================================
 // Single canonical orchestration helper for assembling StampInferenceCfgInputs
-// + emitting the stamp body. Used by both production callers:
-//   - Backtest_RunFullValidation (single-horizon + multi-horizon-via-RFV)
-//   - train_model_worker_fn (Train Model panel; training-only stamp)
+// + emitting the stamp body. Its ONE production caller is Backtest_RunFullValidation
+// (Backtest/BacktestEngine.hpp — single-horizon and each multi-horizon job); the second,
+// train_model_worker_fn, was deleted with the dead training chain (D-d, 2026-08-22).
 //
 // Closes the Class 18 mirror between these callers (PARITY-020): both
 // previously had parallel ~200/95 LOC blocks of manual StampInferenceCfgInputs

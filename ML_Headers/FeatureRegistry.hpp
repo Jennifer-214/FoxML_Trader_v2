@@ -781,7 +781,7 @@ LADDER_FRACDIFF_BARS(FracDiffBars_d06, kFracDiff_d06_Coeffs)
 
 // --- T2/T3: cyclical phase rows ---------------------------------------------
 // Pure functions of the DATA timestamp — no feed, deterministic, and
-// backtest-reproducible by construction. FPN_Sin/FPN_Cos, never libm (H15).
+// backtest-reproducible by construction. FPN_Sin/FPN_Cos, never libm (determinism — a libm result can differ across builds).
 // The 8h row is the perp funding cycle's 3rd harmonic, which hour_sin/cos cannot
 // give a tree cheaply.
 #define LADDER_PHASE(NAME, PERIOD_US, FN)                                         \
@@ -822,7 +822,7 @@ LADDER_PHASE(FundingPhaseCos,  28800000000ULL, FPN_Cos)
 #define FEATURE_ENABLED  1
 #define FEATURE_DISABLED 0
 
-// v5.14.9.E — extended to 7 columns. New 7th column: max_staleness_minutes
+// v5.14.9.E — extended to 7 columns (10 since the hash-folded reach columns, D-463 / D-466 / D-467). New 7th column: max_staleness_minutes
 // (0 = disabled; >0 = max age in minutes before feature treated as stale +
 // zero-substituted in Features_PackAll + bumps stale_feature_events_total).
 // Initial values all 0 (preserves pre-v5.14.9.E behavior bytewise). Operator

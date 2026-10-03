@@ -12,7 +12,7 @@
 //   - [REGISTRY]_[FOREACH_ML_CFG_FLAG]
 //======================================================================================================
 // Third domain registry. ML/confidence-mechanic boolean cfg flags. uint16_t bitmap on
-// ControllerConfig (7 entries; uint8_t would fit but uint16_t for headroom — ML domain
+// ControllerConfig (the rows outgrew uint8_t's 8 bits — the ML domain
 // growing fastest per TECH_DEBT-021 post-paper-test profiling concern).
 //
 // Pattern: heterogeneous-registry-pattern.md DOMAIN SPLIT form (Form 2) +
@@ -35,9 +35,7 @@
 // stamps. All other entries marked DIRECT_FIELD (no behavior change). Round-trip
 // HMAC test validates byte-equivalence load-bearingly.
 //
-// CFG-FLAG ELIGIBILITY (per TECH_DEBT-023): all 7 entries below pass all 5 criteria.
-//
-// CFG-FLAG ELIGIBILITY (per TECH_DEBT-023): all 7 entries below pass all 5 criteria.
+// CFG-FLAG ELIGIBILITY (per TECH_DEBT-023): its first seven rows were vetted against all 5 criteria; later rows carry their own.
 //======================================================================================================
 #ifndef ML_CFG_FLAG_REGISTRY_HPP
 #define ML_CFG_FLAG_REGISTRY_HPP
@@ -100,7 +98,9 @@ FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 // [SECTION]_[COHORT GATE MACROS — v5.15.5.F.4d.1.B.2 Step 5.0]
 //------------------------------------------------------------------------------------------------------
 // Shared cohort gate predicates across 3 registries:
-//   - FOREACH_STAMP_BOUND_CFG col 5 (emit_when) at ML_Headers/StampBoundCfgRegistry.hpp
+//   - the stamp-bound cfg emit — FOREACH_STAMP_BOUND_CFG's col 5 (emit_when) until .B.3 deleted it with
+//     StampBoundCfgRegistry.hpp; the cohort now emits through FOREACH_STAMP_BOUND_DERIVED_COHORT
+//     (MemHeaders/CfgGateRegistry.hpp — master-registry rows with the STAMP_BOUND_CFG_DERIVED bit)
 //   - FOREACH_CFG_DRIFT_CHECK col 8 (gate_when) at ML_Headers/CfgDriftCheckRegistry.hpp
 //   - FOREACH_CFG_GATE_PER_NODE entries at MemHeaders/CfgGateRegistry.hpp
 //

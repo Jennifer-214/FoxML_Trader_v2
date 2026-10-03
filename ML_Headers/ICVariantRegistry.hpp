@@ -15,7 +15,7 @@
 // on ConfidenceScorer. Operator selects active variant via cfg.confidence_ic_variant.
 //
 // **Today's truth (verified 2026-05-09):** the existing `RollingIC` struct
-// at `ML_Headers/ConfidenceScore.hpp:57` ALREADY computes Spearman rank
+// in `ML_Headers/ConfidenceScore.hpp`'s rolling-IC section ALREADY computes Spearman rank
 // correlation (ranks both arrays then Pearson on ranks = Spearman). Despite
 // the generic struct name, behavior has been Spearman since v5.x.x. The
 // registry exposes this AS Spearman (variant 0, default).

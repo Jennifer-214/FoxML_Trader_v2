@@ -13,9 +13,11 @@
 //======================================================================================================
 // X-macro registry for ARCHITECTURAL stamp body fields — fields that
 // describe the model itself (training timestamp, run name, scaler fit
-// hash, environment metadata, removal reasons CSV, etc.). Sister
-// registry to FOREACH_STAMP_BOUND_CFG (StampBoundCfgRegistry.hpp) which
-// covers cfg-bound fields (drift detection between trainer cfg + engine cfg).
+// hash, environment metadata, removal reasons CSV, etc.). Sister to the
+// cfg-bound stamp fields — the master registry's STAMP_BOUND_CFG_DERIVED cohort
+// (FOREACH_STAMP_BOUND_DERIVED_COHORT, MemHeaders/CfgGateRegistry.hpp; it replaced
+// FOREACH_STAMP_BOUND_CFG / StampBoundCfgRegistry.hpp at .B.3), which covers the
+// drift detection between trainer cfg + engine cfg.
 //
 // CLOSES TECH_DEBT-006: previously, the ~24 architectural stamp body
 // fields on ModelStampResult / StampInferenceCfgInputs / ModelHandle
@@ -33,7 +35,7 @@
 // optional canonical body lines).
 //
 // SISTER REGISTRY DISTINCTION:
-//   FOREACH_STAMP_BOUND_CFG    — cfg fields (drift detection between
+//   the STAMP_BOUND_CFG_DERIVED cohort (was FOREACH_STAMP_BOUND_CFG) — cfg fields (drift detection between
 //                                 trainer cfg + engine cfg; emit_when
 //                                 typically gated on cfg flag)
 //   FOREACH_STAMP_BOUND_MODEL_CONST — architectural model-const fields
@@ -394,9 +396,9 @@ namespace tt {
 //                 (the boolean; scaler_sha256 IS on handle), grid_member_count,
 //                 grid_member_idx, label_registry_hash, feature_mask.
 
-// PRE_CFG section: entries that emit BEFORE FOREACH_STAMP_BOUND_CFG in
-// canonical wire format. 26 entries today. Adding new pre-cfg field =
-// 1 row here.
+// PRE_CFG section: entries that emit BEFORE the cfg block (the
+// STAMP_BOUND_CFG_DERIVED cohort) in canonical wire format. Adding a new
+// pre-cfg field = 1 row here.
 #define FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)                                                  \
     /* === inference_cfg group (4 fields) DELETED at v5.15.5.F.4d.1.B.3 Phase F HIGH-1 (b) ===   */ \
     /* Cleanup completes the single-source-of-truth migration: 3 rows (confidence_threshold_scale / */ \

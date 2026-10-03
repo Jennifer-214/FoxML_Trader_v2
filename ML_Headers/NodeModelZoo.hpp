@@ -256,7 +256,7 @@ static inline int Model_RoleCheckDecide(const char* slot_role, const char* stamp
 // defect below survived: nothing could reach it.
 //
 // THE DEFECT: the walk compared `sr.<hash> != runtime_hash` with no guard, but
-// ModelInference.hpp:2201 documents the field's own contract — "0 if absent (old
+// ModelStampResult (ModelInference.hpp) documents the field's own contract — "0 if absent (old
 // stamps)". For a model with NO .stamp sidecar every stamp-side hash is 0, so all
 // three hash rows fired and the operator saw `feat: HASH DRIFT` (RED),
 // `label: HASH DRIFT` (RED), `build: FLAG DRIFT` — a model reported as DRIFTED
@@ -281,7 +281,7 @@ inline uint16_t ArchFieldDrift_Evaluate(const ModelStampResult &sr,
                                         const ModelHandle<F> *handle) {
     uint16_t bits = 0;
     #define X(name, stamp_field, runtime_value, fail_mask)                     \
-        /* stamp-side 0 == ABSENT (ModelInference.hpp:2201), not a value */    \
+        /* stamp-side 0 == ABSENT (ModelStampResult's contract), not a value */    \
         if ((stamp_field) != 0 && (stamp_field) != (runtime_value)) {          \
             BITMAP_SET(bits, fail_mask);                                       \
         }
@@ -315,7 +315,7 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     // doesn't match this value.
                                     uint64_t expected_feature_mask = 0,
                                     // v5.11.42 D.2 — expected horizon ticks
-                                    // (parsed from dir name `_horizon_<N>` by
+                                    // (parsed from the `horizon_<N>` child dir name by
                                     // EnsembleModelZoo_LoadFromCfg). Default 0
                                     // = skip check (single-horizon load path).
                                     // When non-zero AND stamp has label_params,
@@ -400,7 +400,7 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // cfg_ptr=nullptr (legacy callers + tests) → skip silently.
         // Local `cfg` reference inside the block lets the X-macro
         // entries use `cfg.field` syntax uniformly (matches the macro
-        // contract documented in StampBoundCfgRegistry.hpp).
+        // contract DRIFT_CHECK_FROM_DERIVED documents, MemHeaders/CfgGateRegistry.hpp).
         if (cfg_ptr && sr.valid > 0) {
             const ControllerConfig<F>& cfg = *cfg_ptr;
             // v5.15.5.F.4d.1.B.3 Step 1.6.6 (Decision B (a); codified at v1.12 plan body) —
@@ -726,7 +726,7 @@ inline int NodeModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         }
         // v5.11.42 D.2 — horizon-mismatch refusal at ensemble load.
         // EnsembleModelZoo_LoadFromCfg parses horizon_ticks from dir
-        // name `_horizon_<N>` and passes it as expected_horizon_ticks.
+        // name `horizon_<N>` (the D-431 child) and passes it as expected_horizon_ticks.
         // Stamp's label_lookahead_ticks must match. Catches: dir
         // rename, copy-paste mistake, two horizons accidentally swapped
         // between dirs. ALWAYS refuses on mismatch (no strict-mode
@@ -1560,11 +1560,11 @@ struct alignas(64) EnsembleModelZoo {
     int expected_mismatches;
     int horizon_ticks_at_idx[ENSEMBLE_HORIZON_MAX];
     // v5.15.5.A.2.c — init flags bit-pack via FOREACH_EZOO_INIT_FLAG registry.
-    // 4 bits used (ACTIVE, BANDITS_READY, EXIT_BANDITS_READY, THOMPSON_READY);
-    // 4 free for future flags. Access: BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_*).
+    // One bit per FOREACH_EZOO_INIT_FLAG row (the READY bits + the D-483 bind outcomes); the
+    // registry's overflow assert guards the uint8_t. Access: BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_*).
     uint8_t init_flags;
     // v5.15.5.A.2.b — per-arm flag bitmaps auto-generated from FOREACH_PER_ARM_FLAG:
-    // disabled_horizon_mask + arms_with_barriers_mask (uint8_t each, 8 arms = 8 bits).
+    // one uint8_t per row — disabled_horizon_mask, arms_with_barriers_mask, corrupt_arms_mask (8 arms = 8 bits).
     PER_ARM_FLAG_DECLARE_FIELDS()
 
     // Per-prediction tracking (per-cycle writes).
@@ -1609,7 +1609,7 @@ struct alignas(64) EnsembleModelZoo {
     // v5.14.10.B — Bayesian Thompson sampling bandits (BUY-side). Activated when
     // cfg.bandit_algorithm in {1, 2, 3, 4} per FOREACH_BANDIT_ALGORITHM thompson_up metadata bit.
     // Cfg=0 (EXP3) → never read but init'd anyway so cfg-flip mid-run doesn't see uninitialized state.
-    // ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B). Persistence: thompson_state.json.
+    // ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B). Persistence: buy_thompson_state.json (a legacy thompson_state.json still loads).
     alignas(64) ThompsonBanditState buy_thompson_bandits[NUM_REGIMES];
 
     // v5.15.5.F.4d — Bayesian Thompson sampling bandits (EXIT-side). Exit-side Thompson mirror per
@@ -1617,7 +1617,7 @@ struct alignas(64) EnsembleModelZoo {
     // buy-side had Thompson but exit-side was Exp3-only. Activated when cfg.bandit_algorithm in
     // {1, 2, 3, 4} via exit_thompson_update_fn sink-fn-pointer dispatch (same metadata bits drive
     // both sides; per-side init flag MASK_EZOO_EXIT_THOMPSON_READY gates init wiring).
-    // Persistence: thompson_exit_state.json (parallel to thompson_state.json buy-side file).
+    // Persistence: exit_thompson_state.json (parallel to the buy side's buy_thompson_state.json).
     // Size: ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B sister to buy_thompson_bandits[]).
     alignas(64) ThompsonBanditState exit_thompson_bandits[NUM_REGIMES];
 
@@ -1655,7 +1655,7 @@ struct alignas(64) EnsembleModelZoo {
     //---- [SECTION]_[COLD CLUSTER — boot / persistence / display only] ----
     // v5.10.0a.G.9 — bandit state persistence config. base_dir captured at
     // AutoDetectFromDir / LoadFromCfg time; empty path = persistence disabled.
-    alignas(64) char bandit_save_path[400];   // <node_model_dir>/bandit_state.json
+    alignas(64) char bandit_save_path[400];   // <the BOUND state dir>/bandit_state.json — EnsembleModelZoo_BindStateDir its one writer; empty = persistence OFF
     int      bandit_save_interval;             // 0 = no periodic save (shutdown only)
     // s5 BT-10' — set when a save cadence crossed on a thread that must not do
     // file I/O (the global drainer); the per-node SLOW path performs the write on
@@ -1708,7 +1708,7 @@ struct alignas(64) EnsembleModelZoo {
 // [END_STRUCT]_[EnsembleModelZoo]
 //======================================================================
 // v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
-// EnsembleModelZoo is large (~40-60KB depending on F) but the constituent
+// EnsembleModelZoo is large (its [SIZE] tag above — 277 KB at F=64) but the constituent
 // member alignments (ModelHandle alignas(64) × 32 slots + RidgeWeights
 // alignas(64) × 2 + ThompsonBanditState ×5) all sit on 64-byte boundaries,
 // so total size is a multiple of 64 (verified by static_assert).
@@ -1751,7 +1751,7 @@ inline void ezoo_set_per_arm_barrier(EnsembleModelZoo<F>* ezoo, int arm_idx,
     // majority-SHALT + the sticky retrain alert) and WITHHOLD both the barrier value and the
     // LOADED_BARRIERS bit -> excluded from the barrier blend (arms_with_barriers_mask gate). The
     // disabled_horizon_mask union (prediction-loop exclusion) is applied at the post-load
-    // EvaluateCorruptShalt finalize, AFTER SetDisabledHorizons' reset so it can't be wiped.
+    // EnsembleZoo_FinalizeCorrupt finalize, AFTER SetDisabledHorizons' reset so it can't be wiped.
     if (tt::barrier_is_corrupt((double)tp, (double)sl)) {
         BITMAP_SET(ezoo->corrupt_arms_mask, BITMAP_BIT_U8(arm_idx));
         return;  // per_arm_barriers[arm_idx] stays zero-init; no LOADED_BARRIERS bit

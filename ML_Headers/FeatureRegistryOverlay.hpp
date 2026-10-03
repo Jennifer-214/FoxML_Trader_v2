@@ -30,7 +30,8 @@
 // against HMAC-protected stamp body fails.
 //
 // HELPER LOCATION (per v5.14.2.E.1 precedent): standalone header so
-// caller sites (boot ×2 / backtest ×2 / hot-swap ×2 = 6 sites) all
+// caller sites — the boot (EngineCommon_BootPerCore, shared by live and
+// the backtest) and the two hot-swap paths (EngineSharded/Run.hpp) — all
 // invoke the same code. Adding a new overlay verification step = 1-line
 // edit to the helper. Class 18 (mirror data-flow incomplete) extinct
 // for the overlay surface, structurally.
@@ -154,8 +155,9 @@ inline int FeatureOverlay_ParseLayer2HashFromSidecar(
 //  -1 = REFUSE in strict mode (one or more handles mismatched)
 //
 // Strict-mode failure handling: caller decides what to do with -1
-// return (boot Free+null+flag; hot-swap log+leave; backtest log+continue).
-// Helper itself just reports.
+// return. The hot-swaps set the node's MODEL_LOAD_FAILED; the boot DISCARDS
+// it today (the E.1.3 plan's L4, CS-002: "boot acts on a strict REFUSE
+// exactly as hot-swap does"). Helper itself just reports.
 //======================================================================================================
 
 template <unsigned F>

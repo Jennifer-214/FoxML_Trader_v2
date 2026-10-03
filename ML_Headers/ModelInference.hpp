@@ -2544,9 +2544,9 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.engine_version[vl] = '\0';
             } else if (strcmp(key, "stamp_format_version") == 0) {
                 // v5.9.0: stamp body schema version. 0 means absent (legacy);
-                // current = 1. Future schema changes bump this. Verifier
-                // could reject unknown versions in strict mode (deferred to
-                // a future ship; for now we just record the value).
+                // current = STAMP_FORMAT_VERSION_CURRENT. The verifier below
+                // fails a version above MAX_SUPPORTED_STAMP_FORMAT_VERSION and
+                // one under the pre-epoch floor (D-174).
                 r.stamp_format_version = atoi(val);
             }
             // v5.15.0.B — Registry-driven PRE_CFG parser dispatch.
@@ -2826,14 +2826,14 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// A `.stamp` file lives alongside each `.bin` model:
+// A `.stamp` file lives beside each model file (the D-431 nested layout):
 //
-//   models/aggressive/buy_signal.bin
-//   models/aggressive/buy_signal.stamp
+//   models/<class>/<family>/horizon_<N>/<role>.json
+//   models/<class>/<family>/horizon_<N>/<role>.json.stamp
 //
 // Stamp format (text, key=value lines, last line is signature):
 //
-//   model_format_version=12
+//   model_format_version=<MODEL_FORMAT_VERSION>
 //   model_sha256=<hex of binary>
 //   trained_on=2026-04-28
 //   wf_mean_val=0.55
@@ -3084,7 +3084,7 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     locale_t prev = (locale_t)0;
     if (pinned) prev = uselocale(pinned);
 
-    // 5. Canonical body — must match bash script + verifier byte-for-byte.
+    // 5. Canonical body — must match the verifier byte-for-byte.
     //    Field order: format-version, sha256, trained_on, wf_mean_val,
     //    held_out_metric, gap, gap_threshold, [feature_registry_hash],
     //    [engine_version].

@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [DETERMINISM] [FRAMEWORK_DISCIPLINE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[stamp<->cfg drift-check registry (v5.15.5.A.7) — 18 rows replace 14 manual if-blocks; 3-axis Y3 dispatch (severity/category/compare_kind)]
+// [OVERVIEW]_[stamp<->cfg drift-check registry (v5.15.5.A.7) — its rows replaced 14 manual if-blocks; 3-axis Y3 dispatch (severity/category/compare_kind)]
 // [CONTAINS]
 //   - [REGISTRY]_[FOREACH_CFG_DRIFT_CHECK]
 //======================================================================================================
@@ -33,7 +33,7 @@
 //   - registry-tuple-as-single-source-of-truth.md   (Option D 10-col tuple)
 //   - stamp-vs-runtime-drift-detection-registry.md  (canonical drift-detection pattern)
 //   - bitmap-flag-api.md                            (per-category fail_mask SET on drift_flags_at_load)
-//   - autopopulate-pattern-for-production-caller-class.md (entries auto-flow from FOREACH_STAMP_BOUND_CFG via STAMP_CFG_AUTOPOPULATE)
+//   - autopopulate-pattern-for-production-caller-class.md (entries auto-flowed from FOREACH_STAMP_BOUND_CFG, deleted at .B.3 — now the STAMP_BOUND_CFG_DERIVED cohort)
 //   - template-deferred-dependency-injection.md     (caller injects log_fn for testability)
 //   - cfg-flag-eligibility-criteria.md              (cohort-audit; ack flags migrated to ops_cfg_flags v5.15.5.A.7)
 //
@@ -76,7 +76,7 @@
 // [REFERENCE]_[DESIGN_SPEC]_[[dual-axis-y3-dispatch-pattern] [wire-format-byte-preservation-discipline.md]]
 // [REFERENCE]_[CLASS]_[18]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[10-col tuple; Y3 axes: SEVERITY (WARN/TIER1/TIER2) x CATEGORY x COMPARE_KIND; 18 entries + count helper + test instrumentation]
+// [OVERVIEW]_[10-col tuple; Y3 axes: SEVERITY (WARN/TIER1/TIER2) x CATEGORY x COMPARE_KIND; the entries + a count helper + test instrumentation]
 // [COLUMN]_[10-col tuple]_[see the entry-shape doc directly below]
 // [REFERENCE]_[PARITY]_[[PARITY-24] [PARITY-26]]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-9]
@@ -207,9 +207,10 @@
 // does NOT affect runtime correctness (each entry is independent).
 //
 // HMAC byte-preservation note: this registry READS stamp body fields. The stamp
-// body itself is defined by FOREACH_STAMP_BOUND_CFG; adding a new drift entry
-// here requires the corresponding stamp-binding row in StampBoundCfgRegistry.hpp
-// (appended AT END per wire-format-byte-preservation-discipline.md).
+// body's cfg half is the master registry's STAMP_BOUND_CFG_DERIVED cohort
+// (FOREACH_STAMP_BOUND_DERIVED_COHORT, MemHeaders/CfgGateRegistry.hpp — it replaced
+// FOREACH_STAMP_BOUND_CFG / StampBoundCfgRegistry.hpp at .B.3); a new drift entry here
+// needs that bit on the field's master row (wire order: wire-format-byte-preservation-discipline.md).
 
 #define FOREACH_CFG_DRIFT_CHECK(X)                                                                                                                                                                                                                                              \
     /* ====== CROSS_BINARY category (WARN-only; suppressed by acknowledge_cross_binary_version_drift) ====== */                                                                                                                                                                  \
@@ -300,7 +301,7 @@
       COHORT_GATE_COST_GATE_ENABLED, FAILURE_MASK_cfg_binding_drift,                                                                                                                                                                                                             \
       "Tier 2 fee_rate_taker drift (gated by cost_gate_enabled cohort; WARN)")                                                                                                                                                                                                   \
     /* ====== INFERENCE_CFG category Tier 1 — v5.15.5.A.7 PARITY-024 cohort (per-horizon barrier serving) ====== */                                                                                                                                                              \
-    /* All 4 entries map to FOREACH_STAMP_BOUND_CFG appendix rows (lines 177-189). gate_when was RE-KEYED at Step 6.10 to cfg-only cohort gates (NOT STAMP_HAS(*h,    */                                                                                                                                                            \
+    /* All 4 entries map to cfg-derived stamp rows (FOREACH_STAMP_BOUND_CFG's appendix until .B.3 deleted it). gate_when was RE-KEYED at Step 6.10 to cfg-only cohort gates (NOT STAMP_HAS(*h,    */                                                                                                                                                            \
     /* <field>)); see the :273 decision — the cfg-cohort-on gate FIRES for legacy stamps (trained-without-feature catch).         */                                                                                                                                                              \
     /* per_horizon_barrier_blend is master ON/OFF (always checked when has flag set); other 3 gated additionally   */                                                                                                                                                            \
     /* by the feature being enabled in cfg (operator turning feature off → model trained with feature ON →         */                                                                                                                                                            \
