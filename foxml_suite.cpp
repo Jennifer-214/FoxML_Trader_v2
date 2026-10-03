@@ -437,7 +437,8 @@ int main(int argc, char *argv[]) {
         GUI_Panel_Comparison(&comparison, rc_results);
         // v5.11.57 — Verify Stamp verifies with cfg.auto_stamp_secret (devmode while there is none): the panel's own
         // copy, refreshed while Run Control's outputs are at rest and held through a run (E.1.3 MP-6 step 10.3)
-        PastRuns_AdoptVerifySecret(&past_runs, &run_control);
+        PastRuns_AdoptVerifySecret(&past_runs, &run_control, training.fv_auto_stamp_secret,
+                                   sizeof(training.fv_auto_stamp_secret));   // signed by CS-277's rule, verified by it (10.6)
         GUI_Panel_PastRuns(&past_runs);
         GUI_Panel_Optimizer(&optimizer, &data_panel, &launch_failure);
         GUI_Panel_Training(&training, &run_control, &data_panel, &launch_failure);

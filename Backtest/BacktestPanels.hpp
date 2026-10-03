@@ -1373,9 +1373,15 @@ struct PastRunsState {
     // to the row's transient context). Track pending row index here;
     // single modal renders at window scope after EndTabBar.
     int     pending_delete_idx;  // -1 = no delete pending
-    // E.1.3 MP-6 step 10.3 (F6 of its review) — the secret Verify Stamp verifies with: the GUI's copy of the last Run
-    // Control run's auto_stamp_secret (PastRuns_AdoptVerifySecret). Empty until a run has loaded a config = devmode.
+    // E.1.3 MP-6 step 10.3 (F6 of its review) — the GUI's copy of the last Run Control run's auto_stamp_secret, adopted
+    // only while Run Control is at rest (PastRuns_AdoptVerifySecret). Step 10.6 — the secret Verify Stamp verifies with
+    // is RESOLVED from it by the rule stamps are SIGNED by (CS-277, TrainingWorkers_ResolveStampSecret): the Training
+    // panel's field, else this copy; both empty = devmode.
+    char    verify_cfg_secret[sizeof(ControllerConfig<BACKTEST_FP>::auto_stamp_secret)];
     char    verify_secret[sizeof(ControllerConfig<BACKTEST_FP>::auto_stamp_secret)];
+    // Step 10.6 — the selected run's actions block (its lines, the buttons, the verdict, the stamp-details header) as
+    // drawn last frame: the run tables leave this much room below themselves. 0 = not yet drawn (a default stands in).
+    float   actions_h;
 };
 //======================================================================
 // [END_CODE]
@@ -1383,9 +1389,9 @@ struct PastRunsState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-03]
-// [SIZE]_[401840B]
+// [SIZE]_[401968B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[6279]
+// [CACHE_LINES]_[6281]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRunsState]
@@ -1431,9 +1437,15 @@ static inline void PastRuns_Init(PastRunsState *s) {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void PastRuns_AdoptVerifySecret(PastRunsState *s, const RunControlState *rc) {
-    if (s && RunControl_AtRest(rc))
-        snprintf(s->verify_secret, sizeof(s->verify_secret), "%s", rc->results.config_used.auto_stamp_secret);
+static inline void PastRuns_AdoptVerifySecret(PastRunsState *s, const RunControlState *rc,
+                                              const char *panel_secret, size_t panel_cap) {
+    if (!s) return;
+    if (RunControl_AtRest(rc))
+        snprintf(s->verify_cfg_secret, sizeof(s->verify_cfg_secret), "%s", rc->results.config_used.auto_stamp_secret);
+    // Step 10.6 (the second review's finding 13) — verify by the rule stamps are SIGNED by: a model the Training panel
+    // signed with its own secret failed Verify Stamp, which checked only the cfg's.
+    TrainingWorkers_ResolveStampSecret(panel_secret, panel_cap, s->verify_cfg_secret, sizeof(s->verify_cfg_secret),
+                                       s->verify_secret, sizeof(s->verify_secret));
 }
 //======================================================================
 // [END_CODE]
@@ -2164,7 +2176,23 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
     ImGuiTableFlags flags =
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
         ImGuiTableFlags_Sortable | ImGuiTableFlags_Resizable |
-        ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit;
+        ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
+    // Step 10.6 — a scrolling table given no height takes the window's whole remaining height, so the selected run's
+    // actions (Open Folder Path, Copy Path, Verify Stamp, the stamp details) always sat below the panel's edge. Each
+    // table gets the height its rows need, capped by what the window has left after the actions block (measured last
+    // frame) and never under PAST_RUNS_TABLE_MIN_ROWS rows; past the cap it scrolls its own rows (header frozen).
+    enum { PAST_RUNS_TABLE_MIN_ROWS = 4 };
+    const float row_h   = ImGui::GetFrameHeightWithSpacing();
+    const bool  has_actions = s->selected >= 0 && s->selected < s->count;   // no run selected: no block to leave room for
+    const float reserve     = !has_actions ? 0.0f : (s->actions_h > 0.0f ? s->actions_h : row_h * 6.0f);
+    auto table_height = [&](int rows) -> float {
+        const float chrome = row_h + ImGui::GetStyle().ScrollbarSize;   // the header row + the X scrollbar
+        const float want   = chrome + row_h * (float)rows;
+        const float floor  = chrome + row_h * (float)PAST_RUNS_TABLE_MIN_ROWS;
+        float room = ImGui::GetContentRegionAvail().y - reserve;
+        if (room < floor) room = floor;
+        return want < room ? want : room;
+    };
 
     // Helper: render one selectable row's leading "Run" cell. Shared between
     // both tabs since selection is global across runs.
@@ -2219,7 +2247,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(class_label)) {
             if (n_class == 0) {
                 ImGui::TextDisabled("No classification runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_class", 16, flags)) {  // v5.11.51: +Date +Delete cols; v5.15.5.E.bugfix: 15→16 (Samples col added but BeginTable count missed; ImGui asserted on 16th TableSetupColumn)
+            } else if (ImGui::BeginTable("past_runs_class", 16, flags, ImVec2(0.0f, table_height(n_class)))) {  // v5.11.51: +Date +Delete cols; v5.15.5.E.bugfix: 15→16 (Samples col added but BeginTable count missed; ImGui asserted on 16th TableSetupColumn)
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Date",       ImGuiTableColumnFlags_WidthFixed, 100);  // v5.11.51
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
@@ -2236,6 +2264,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
                 ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableSetupColumn("",           ImGuiTableColumnFlags_WidthFixed, 30);  // v5.11.51 Delete
+                ImGui::TableSetupScrollFreeze(0, 1);   // the header stays while the rows scroll (10.6)
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
@@ -2412,7 +2441,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(regr_label)) {
             if (n_regr == 0) {
                 ImGui::TextDisabled("No regression runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_regr", 15, flags)) {  // v5.11.55: +Date +Delete cols; v5.15.5.E.bugfix: 14→15 (Samples col added but BeginTable count missed; same off-by-one as past_runs_class)
+            } else if (ImGui::BeginTable("past_runs_regr", 15, flags, ImVec2(0.0f, table_height(n_regr)))) {  // v5.11.55: +Date +Delete cols; v5.15.5.E.bugfix: 14→15 (Samples col added but BeginTable count missed; same off-by-one as past_runs_class)
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Date",       ImGuiTableColumnFlags_WidthFixed, 100);  // v5.11.55
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
@@ -2428,6 +2457,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
                 ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableSetupColumn("",           ImGuiTableColumnFlags_WidthFixed, 30);  // v5.11.55 Delete
+                ImGui::TableSetupScrollFreeze(0, 1);   // the header stays while the rows scroll (10.6)
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
@@ -2615,6 +2645,10 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
     // detail / action area for the selected run
     if (s->selected >= 0 && s->selected < s->count) {
         PastRun *r = &s->runs[s->selected];
+        // Step 10.6 — measure this block (up to the stamp-details header, never its contents) for next frame's table
+        // heights: each mark() moves the measured end past the last actions element drawn so far.
+        const float actions_top = ImGui::GetCursorPosY();
+        auto mark = [&] { s->actions_h = ImGui::GetCursorPosY() - actions_top; };
         ImGui::Separator();
         ImGui::TextColored(FoxmlColors::primary, "Selected: %s", r->dir_name);
         ImGui::TextColored(FoxmlColors::comment,
@@ -2769,12 +2803,14 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
             }
         }
 
+        mark();   // the buttons row
         // Render verify result if button has been pressed for this run.
         if (r->stamp_verify_msg[0]) {
             ImVec4 vc = (r->stamp_verify_state == 1)
                 ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
                 : ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
             ImGui::TextColored(vc, "%s", r->stamp_verify_msg);
+            mark();   // the verdict line
 
             // v5.9.5d — Stamp details expansion. Renders all recorded
             // body fields when the stamp verifies. Lets operator audit
@@ -2786,7 +2822,9 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 char tree_id[64];
                 snprintf(tree_id, sizeof(tree_id), "Stamp details##%s",
                          r->dir_name);
-                if (ImGui::TreeNode(tree_id)) {
+                const bool details_open = ImGui::TreeNode(tree_id);
+                mark();   // the "Stamp details" header — its expanded contents may run long, and the window scrolls them
+                if (details_open) {
                     // Generalization metrics
                     ImGui::Text("gap:               %.4f  (threshold: %.4f)",
                                 v.generalization_gap, v.gap_threshold);
