@@ -980,8 +980,9 @@ static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
 // What a backtest call did (E.1.3 MP-6, D-503). Every caller handles it by name: a run that did not happen must
 // never read as one — a sweep that recorded a refused cell's empty stats could crown it "best". The zero value
 // refuses, so an unset status never reads as a run (the SuiteLaunch rule). Never persisted, never logged as a number
-// — print BacktestRunStatus_Name.
-enum BacktestRunStatus : uint8_t {
+// — print BacktestRunStatus_Name. [[nodiscard]] on the TYPE: every function returning one must have its status read
+// (the result guard, cmake/FormatGuard.cmake — discarding it is a compile error).
+enum [[nodiscard]] BacktestRunStatus : uint8_t {
     BACKTEST_RUN_REFUSED_NO_LEASE = 0,   // the caller's token does not hold the suite run lease — nothing reset, no run
     BACKTEST_RUN_DONE             = 1,   // the run happened (a cancel ends it early; the results cover what ran)
     BACKTEST_RUN_CFG_REFUSED      = 2,   // the capital gate or the partial-exit check refused the cfg — no run
@@ -1218,7 +1219,8 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
 // / target overflow — already logged; output vectors hold the NAN prefill
 // past the abort point). The legacy single-target body returned void and
 // printed nothing on abort; the 1-target wrapper preserves that exactly.
-static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
+// [[nodiscard]]: a caller that drops the -1 trains on what the pass did not finish (the result guard refuses it).
+[[nodiscard]] static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
                                               const BacktestRunConfig *run_cfg,
                                               LabelBatchTarget *targets,
                                               int num_targets) {
