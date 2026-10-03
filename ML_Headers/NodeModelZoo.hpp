@@ -2440,35 +2440,49 @@ inline void EnsembleModelZoo_InitExitThompsonBandits(EnsembleModelZoo<F>* ezoo,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the kill-switch CSV parser (Free rides) — horizon ticks -> disabled_horizon_mask; disabled arms skip predict + freeze their bandit weights]
+// [OVERVIEW]_[the kill-switch CSV parser (Free rides) — horizon ticks -> disabled_horizon_mask (entries read by Cfg_HorizonListNext; the cfg load refuses an unreadable list, D-509); disabled arms skip the WEIGHTED blend's predict + freeze their bandit weights (the selection path, the barrier dispatch and the exit predictors do not read the mask — Phase S3); a horizon no arm has is said loudly]
 //======================================================================
 // [CODE]
 //======================================================================
 template <unsigned F>
 inline void EnsembleModelZoo_SetDisabledHorizons(EnsembleModelZoo<F>* ezoo,
-                                                   const char* csv) {
+                                                   const char* csv, int node_id) {
     if (!ezoo) return;
     EnsembleModelZoo_EnsurePrimary(ezoo);
     ezoo->disabled_horizon_mask = 0;  // uint8_t per FOREACH_PER_ARM_FLAG
     if (!csv || csv[0] == '\0') return;
-    const char* p = csv;
-    while (*p) {
-        while (*p == ' ' || *p == '\t' || *p == ',') p++;
-        if (!*p) break;
-        char* end = nullptr;
-        long h = strtol(p, &end, 10);
-        if (end == p) break;
-        // Find which arm this horizon ticks corresponds to
-        // v5.11.62 — primary_count (matches primary_handles array length)
-        for (int a = 0; a < ezoo->primary_count; ++a) {
-            if (ezoo->horizon_ticks_at_idx[a] == (int)h) {
-                ezoo->disabled_horizon_mask |= (1u << a);
-                fprintf(stderr, "[ensemble] horizon %d (arm %d) DISABLED by cfg\n",
-                        (int)h, a);
-                break;
-            }
+    // Entries are read by the cfg's ONE reader (Cfg_HorizonListNext). The cfg LOAD refuses a list it cannot read (D-509:
+    // the fault refuses a fresh start; a hot reload keeps the running list), so a loaded cfg never reaches the unreadable
+    // branch below — a caller that never loaded one gets the entry ignored, loudly, never a guess at which arms it meant.
+    // (D-509's first draft disabled EVERY arm there; its review showed that is no block — the blend's all-disabled 0.5
+    // passes an ml_buy_threshold of 0.50, and the selection path never reads this mask: Phase S3 of the E.1.3 plan.)
+    // Until 2026-10-03 the first unreadable entry ended the parse in silence, and a horizon no arm has was skipped in
+    // silence too. ENSEMBLE_HORIZON_MAX <= 8 (static_assert above), so every arm has a bit of the uint8_t mask.
+    const char* p   = csv;
+    const char* tok = nullptr;
+    int tok_len = 0, r;
+    uint64_t h = 0;
+    for (int pos = 1; (r = Cfg_HorizonListNext(&p, &tok, &tok_len, &h)) != 0; ++pos) {
+        if (r < 0) {
+            fprintf(stderr, "[ensemble] node %d: disabled_horizons entry %d '%.*s' is not a horizon (a tick count) — "
+                            "IGNORED (a loaded cfg refuses such a list at load)\n", node_id, pos, tok_len, tok);
+            tt::Health_Log(tt::HEALTH_CRITICAL, "ensemble", node_id,
+                           "disabled_horizons entry %d '%.*s' is not a horizon: ignored", pos, tok_len, tok);
+            continue;
         }
-        p = end;
+        int arm = -1;
+        for (int a = 0; a < ezoo->primary_count && arm < 0; ++a)   // v5.11.62 — primary_count (the primary handles' length)
+            if ((uint64_t)ezoo->horizon_ticks_at_idx[a] == h) arm = a;   // a loaded arm's horizon is >= 1
+        if (arm < 0) {
+            fprintf(stderr, "[ensemble] node %d: disabled_horizons names horizon %llu, which no loaded arm has — "
+                            "nothing to disable for it\n", node_id, (unsigned long long)h);
+            tt::Health_Log(tt::HEALTH_WARN, "ensemble", node_id,
+                           "disabled_horizons names horizon %llu: no loaded arm has it", (unsigned long long)h);
+            continue;
+        }
+        ezoo->disabled_horizon_mask |= (uint8_t)(1u << arm);
+        fprintf(stderr, "[ensemble] node %d: horizon %d (arm %d) DISABLED by cfg\n",
+                node_id, ezoo->horizon_ticks_at_idx[arm], arm);
     }
 }
 
@@ -2510,7 +2524,11 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
 // SetDisabledHorizons: parses CSV string ("100,500") → bitmask of horizon
 // indices that match. Disabled horizons skip predict (saves N×predict cost
 // per disabled); their bandit weights stay frozen at last value (skipped
-// by Bandit_Update).
+// by Bandit_Update) — on the WEIGHTED blend path only: the selection path
+// (Model_Predict_Ensemble), the per-arm barrier dispatch and the exit
+// predictors never read the mask, and every arm disabled is the blend's 0.5
+// "no-edge" value, which an ml_buy_threshold of 0.50 still enters on (D-509's
+// review, F1 / F2 — homed at the E.1.3 plan's Phase S3).
 //======================================================================
 // [END_FUNCTION]_[EnsembleModelZoo_SetDisabledHorizons]
 //======================================================================
@@ -4240,7 +4258,7 @@ inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
     X(blend_mode,          ensemble_post_load_apply_blend_mode(ezoo, cfg,        \
                                node_id))                                          \
     X(disabled_horizons,   EnsembleModelZoo_SetDisabledHorizons(ezoo,            \
-                               cfg.node_disabled_horizons[node_id]))             \
+                               cfg.node_disabled_horizons[node_id], node_id))    \
     /* D-483 C (2026-09-04) — BIND the state dir (exclusive lock; the ONE writer of         */ \
     /* bandit_save_path) BEFORE any state loader runs. The four load rows below read        */ \
     /* state_dir — the BOUND dir, empty when unbound — so a refused node loads NOTHING of    */ \

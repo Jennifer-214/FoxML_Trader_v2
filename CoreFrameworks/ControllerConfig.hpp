@@ -41,6 +41,7 @@
 #include "SessionPhaseRegistry.hpp"            // v5.15.5.B.5 — FOREACH_SESSION_PHASE + SESSION_BY_HOUR[24] (closes TECH_DEBT-040)
 #include "CfgFieldRegistry.hpp"                // v5.15.5.F.4b — universal cfg field registry (FOREACH_CFG_FIELD + CfgFieldDescriptor)
 #include "CfgFieldDispatch.hpp"                // v5.15.5.F.4b — tt:: type-trait dispatch (3-barrier Class 23 fix)
+#include "ParseFast.hpp"                       // tt::parse_uint64_checked — Cfg_HorizonListNext's entries (D-509)
 #include "IndexSpaces.hpp"                     // E.1.3 P0/TD-299 — tt::NodeIdx/NodeArray (typed per-NODE subscripts, D-438)
 #include <stdio.h>
 #include <stdlib.h>
@@ -1420,6 +1421,45 @@ template <unsigned F> struct ControllerConfig {
 // [STRADDLE]_[horizon_list@4400 · node_time_exit_ticks@39568 · unverified: node_risk_pct node_max_drawdown_pct node_overrides]
 //======================================================================
 // [END_STRUCT]_[ControllerConfig]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Cfg_HorizonListNext]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [CFG_FLOW] [BOOT_TIME] [ML_INFERENCE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE reader of a horizon list's entries (node_N_disabled_horizons) — 1 = a horizon in ticks (*h), -1 = an entry that is not one (*tok / *tok_len name it), 0 = no more entries; the cfg load refuses on a -1 and the ensemble's post-load parse fails closed on one, so the two cannot disagree on what an entry is]
+// [REFERENCE]_[DECISION]_[[D-509]]
+//======================================================================
+// An entry is a tick count: digits, an optional leading '+' (strtol read one, so the old parse did), blanks around it;
+// commas separate and empty entries are skipped. Anything else — '100;500', '100abc', '-100', '1e3', a number past
+// uint64 — is not a horizon: the caller decides what that costs (D-509: the load refuses, the zoo stops every arm).
+//======================================================================
+// [CODE]
+//======================================================================
+inline int Cfg_HorizonListNext(const char** p, const char** tok, int* tok_len, uint64_t* h) {
+    const char* s = *p;
+    while (*s == ',' || *s == ' ' || *s == '\t') ++s;
+    if (!*s) { *p = s; return 0; }
+    const char* b = s;
+    while (*s && *s != ',') ++s;
+    const char* e = s;
+    while (e > b && (e[-1] == ' ' || e[-1] == '\t')) --e;
+    *p = s;
+    *tok = b;
+    *tok_len = (int)(e - b);
+    const char* num = b + (*b == '+');
+    const size_t n = (size_t)(e - num);
+    char digits[24];
+    if (n == 0 || n >= sizeof(digits)) return -1;   // a long entry is unreadable — never copied past the buffer
+    memcpy(digits, num, n);
+    digits[n] = '\0';
+    return tt::parse_uint64_checked(digits, h) ? 1 : -1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Cfg_HorizonListNext]
 //======================================================================
 
 //======================================================================
@@ -3345,10 +3385,32 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
             continue;
         }
         if (strcmp(suffix, "disabled_horizons") == 0) {
-            strncpy(cfg.node_disabled_horizons[node_idx], val,
-                    sizeof(cfg.node_disabled_horizons[node_idx]) - 1);
-            cfg.node_disabled_horizons[node_idx][
-                sizeof(cfg.node_disabled_horizons[node_idx]) - 1] = '\0';
+            // D-509 — the ensemble kill switch's list is REFUSED here (Class 52: refuse, don't coerce): an entry that is
+            // not a horizon names arms nobody can know, and a list longer than its field is cut — '...,100' stored as
+            // '...,10' would stop a different arm. Every bad entry is named; the fault refuses a fresh start and makes
+            // a hot reload keep the running cfg (cfg_compile_ok's callers). Stored either way, as the file says.
+            const size_t cap = sizeof(cfg.node_disabled_horizons[node_idx]);
+            const size_t len = strlen(val);
+            bool bad = len >= cap;
+            if (bad)
+                fprintf(stderr, "[cfg] FATAL: node_%d_disabled_horizons is %zu characters; the field holds %zu — a cut "
+                        "list could stop a different arm. Boot REFUSED.\n", node_idx, len, cap - 1);
+            const char* p = val;
+            const char* tok = nullptr;
+            int tok_len = 0, pos = 0, r;
+            uint64_t h = 0;
+            while (!bad && (r = Cfg_HorizonListNext(&p, &tok, &tok_len, &h)) != 0) {
+                ++pos;
+                if (r < 0) {
+                    fprintf(stderr, "[cfg] FATAL: node_%d_disabled_horizons entry %d '%.*s' is not a horizon (a tick "
+                            "count) — the kill switch cannot know which arms it means. Boot REFUSED.\n",
+                            node_idx, pos, tok_len, tok);
+                    cfg.cfg_load_fault_flags |= CFG_FAULT_KILL_SWITCH_MALFORMED;
+                }
+            }
+            if (bad) cfg.cfg_load_fault_flags |= CFG_FAULT_KILL_SWITCH_MALFORMED;
+            strncpy(cfg.node_disabled_horizons[node_idx], val, cap - 1);
+            cfg.node_disabled_horizons[node_idx][cap - 1] = '\0';
             continue;
         }
         // v5.11.18a — per-core feature_mask (uint64_t, hex or decimal).

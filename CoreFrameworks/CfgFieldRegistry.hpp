@@ -256,6 +256,7 @@ static_assert(CfgFieldDescriptor::CAPITAL_BOUND_GAIN < (1u << 16),  // ③ D-254
 inline constexpr uint32_t CFG_FAULT_CAPITAL_MALFORMED    = 1u << 0;  // parse-point: a CAPITAL_BOUND field was MALFORMED/OVERFLOW (banana / 1,5 / 1.5% / saturated)
 inline constexpr uint32_t CFG_FAULT_CAPITAL_OUT_OF_RANGE = 1u << 1;  // post-resolve sweep: a CAPITAL_BOUND value exceeded the no-margin cap (loss>100% / gain>1000%)
 inline constexpr uint32_t CFG_FAULT_UNKNOWN_KEY          = 1u << 2;  // loop-tail: an unrecognized SHARDED key (core_*/node_*) — a retired-prefix or typo'd/out-of-range per-node key (③ clean-break, D-223/D-255)
+inline constexpr uint32_t CFG_FAULT_KILL_SWITCH_MALFORMED = 1u << 4;  // parse-point: a node_N_disabled_horizons entry is not a horizon, or the list does not fit its field — the ensemble kill switch cannot know which arms it means (D-509)
 inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-point: a non-capital FEATURE field (FPN/float regime/ema/rolling/ML threshold) was MALFORMED — determinism-bearing, refuse-don't-coerce (C1/C2; DISTINCT from CAPITAL_MALFORMED to keep the severities separable — no Class-49 merge)
 //======================================================================
 // [END_CODE]

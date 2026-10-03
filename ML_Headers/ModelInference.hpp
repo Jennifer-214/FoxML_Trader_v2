@@ -1941,7 +1941,9 @@ inline float Model_Predict_Ensemble_Weighted(
         double agreement  = (frac_long > frac_short) ? frac_long : frac_short;
         if (agreement < min_agreement_pct) {
             if (out_dominant_idx) *out_dominant_idx = -1;
-            return 0.5f;  // no-edge sentinel; MLStrategy → no entry
+            return 0.5f;  // the 0.5 "no-edge" value — NOT a no-entry guarantee: the sharded entry test is
+                          // `prediction >= threshold`, so a threshold of 0.50 or below enters on it (D-509's review,
+                          // F1 — homed at the E.1.3 plan's Phase S3)
         }
     }
 
@@ -1963,9 +1965,10 @@ inline float Model_Predict_Ensemble_Weighted(
         best_idx     = win ? i       : best_idx;
     }
     if (sum_w <= 0.0 || n_active == 0) {
-        // All-NaN or all-disabled: no signal. Fall back to first-loaded
-        // model's raw predict for robustness (matches single-model failure
-        // mode); if even that fails caller sees 0.0 / NaN.
+        // All-NaN, all-unloaded or all-disabled: the 0.5 "no-edge" value and no
+        // dominant arm — NOT a no-entry guarantee: the sharded entry test is
+        // `prediction >= threshold`, so a threshold of 0.50 or below enters on it
+        // (D-509's review, F1 — homed at the E.1.3 plan's Phase S3).
         if (out_dominant_idx) *out_dominant_idx = -1;
         return 0.5f;
     }
@@ -1995,11 +1998,13 @@ inline float Model_Predict_Ensemble_Weighted(
 //   weights: per-arm weights from BanditState (already-normalized
 //            probabilities, OR raw weights — function renormalizes)
 //   disabled_mask: bit i set = skip horizon i (operator kill-switch via
-//                  cfg.core_N_disabled_horizons, parsed by
-//                  EnsembleModelZoo_SetDisabledHorizons)
+//                  node_N_disabled_horizons, parsed by
+//                  EnsembleModelZoo_SetDisabledHorizons; the cfg load
+//                  refuses an unreadable list — D-509)
 //   min_agreement_pct: ≥X fraction of non-disabled horizons must predict
-//                       same direction OR return 0.5 (no-edge sentinel,
-//                       MLStrategy treats as no-entry). 0.0 = disabled.
+//                       same direction OR return 0.5 (the "no-edge" value —
+//                       NOT a no-entry guarantee at a threshold of 0.50 or
+//                       below: D-509's review, F1). 0.0 = disabled.
 //
 // Outputs:
 //   *out_dominant_idx: which arm contributed most to signal direction

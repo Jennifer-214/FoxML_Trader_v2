@@ -1964,7 +1964,8 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
     // EnsembleModelZoo_AutoDetectFromDir found at boot (per-horizon
     // detection, scaler/stamp state, current bandit weights per regime).
     // Read-only display + checkbox writes node_N_disabled_horizons CSV
-    // back to cfg (operator must restart or 'r' reload to apply). Only
+    // back to cfg (applied at the next boot or hot-swap of the node's models —
+    // an 'r' reload never re-applies it: D-509's review, F9). Only
     // renders when this core is ML (strategy filter) AND ensemble is active.
     if (node_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
         node_id < snap->per_node_count &&
@@ -2038,8 +2039,9 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                 ImGui::EndTable();
 
                 // If operator toggled any checkbox, recompute the
-                // disabled_horizons CSV and write to cfg. Engine picks
-                // it up on next 'r' reload or restart.
+                // disabled_horizons CSV and write to cfg. The engine applies
+                // it at the next boot or hot-swap of the node's models (an 'r'
+                // reload never re-runs the kill switch's parse).
                 if (any_toggle) {
                     char csv[128] = {0};
                     size_t off = 0;
@@ -2056,14 +2058,15 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int node_id,
                     char key[64];
                     snprintf(key, sizeof(key), "node_%d_disabled_horizons", node_id);
                     cfg_write_field(s->cfg_path, key, csv);
-                    fprintf(stderr, "[settings] wrote %s=%s — press 'r' in "
-                                    "TUI or restart engine to apply\n",
+                    fprintf(stderr, "[settings] wrote %s=%s — restart the engine "
+                                    "(or hot-swap the node's models) to apply\n",
                             key, csv[0] ? csv : "(none)");
                     changed = true;
                 }
             }
             ImGui::TextColored(FoxmlColors::comment,
-                "Toggle requires engine restart OR 'r' hot-reload to apply.\n"
+                "Toggle applies at the next engine restart or model hot-swap\n"
+                "(an 'r' reload does not re-apply it).\n"
                 "Bandit weights drift toward better-performing horizons per regime.");
         }
     } else if (node_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&

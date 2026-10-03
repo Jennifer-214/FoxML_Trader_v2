@@ -172,9 +172,10 @@ inline int HotSwap_ShadowLoad_Ensemble(
         return -2;
     }
 
-    // Grid-change WARN: per-horizon cfg semantics (node_N_disabled_horizons
-    // mask bits, per-arm expectations) are POSITIONAL against the grid —
-    // a changed grid re-means them. Loud, not blocking.
+    // Grid-change WARN: per-arm expectations are POSITIONAL against the grid —
+    // a changed grid re-means them. (node_N_disabled_horizons is not: it names
+    // horizons by VALUE and is re-matched to the new arms at this load; a
+    // horizon the new grid lacks WARNs — D-509.) Loud, not blocking.
     // (2026-08-23 correction: the old parenthetical here claimed "bandit/Ridge
     // state in new_ezoo is fresh-init either way". That is FALSE and has been
     // since the POST_LOAD load rows landed — step (4) below OVERLAYS persisted
