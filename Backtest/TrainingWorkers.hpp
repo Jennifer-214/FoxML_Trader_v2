@@ -1001,15 +1001,9 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     // E.1.2.C 3-role — side selects the ROLE FILE via the extracted helper
     // (side=1 => "exit", saved CO-LOCATED; label kind stays free per (b)).
     const char* role = Training_ResolveRole(label_type, training_side);
-    // D-431 nested layout — run_subdir derives from the RUN's PRIMARY kind
-    // (S2-F4 close: one family = one class tree; the old per-horizon
-    // derivation fragmented a mixed-CSV family across two trees).
-    int primary_nc = (primary_label_type >= 0 && primary_label_type < LABEL_COUNT)
-                     ? label_table[primary_label_type].num_classes : 0;
-    const char* run_subdir = (primary_label_type == LABEL_PEAK_VALLEY_STABLE
-                              || primary_label_type == LABEL_REGIME
-                              || primary_nc >= 2)
-        ? "classification" : (primary_nc == 1 ? "regression" : "classification");
+    // D-431 nested layout — run_subdir derives from the RUN's PRIMARY kind (Training_ResolveClassTree — the panel's
+    // "Will write to" preview calls the same rule).
+    const char* run_subdir = Training_ResolveClassTree(primary_label_type);
     // E.1.2.C 3-retire (2026-08-20) — the models/exit/ SIDE TREE is RETIRED:
     // no loader ever walked it (PARITY-044); exit models land CO-LOCATED in
     // the same per-horizon dirs (side flips the ROLE FILE, next commit).

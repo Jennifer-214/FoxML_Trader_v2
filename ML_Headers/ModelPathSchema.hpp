@@ -42,13 +42,16 @@
 //======================================================================
 static const char MODEL_HORIZON_PREFIX[] = "horizon_";
 enum { MODEL_HORIZON_PREFIX_LEN = 8 };  // strlen("horizon_")
+// The largest horizon (ticks) a model path names — the matcher below refuses past it, so the Training panel's Horizons
+// CSV takes no more (E.1.3 MP-6 step 10.5's review, F8: the two bounds were separate literals).
+enum { MODEL_HORIZON_TICKS_MAX = 1000000 };
 
 //======================================================================
 // [FUNCTION]_[Model_ParseHorizonSibling]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML_INFERENCE] [GUI]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ONE horizon-entry matcher — prefix match + all-digits suffix + (0, 1000000] bounds + the leaf-8 canonical round-trip; returns the horizon ticks or -1. RELOCATED here from NodeModelZoo at the nested ship (D-431) so builders and parsers share one grammar header; semantics byte-unchanged, the 3G-ii + L8 test cells pin it]
+// [OVERVIEW]_[the ONE horizon-entry matcher — prefix match + all-digits suffix + (0, MODEL_HORIZON_TICKS_MAX] bounds + the leaf-8 canonical round-trip; returns the horizon ticks or -1. RELOCATED here from NodeModelZoo at the nested ship (D-431) so builders and parsers share one grammar header; semantics byte-unchanged, the 3G-ii + L8 test cells pin it]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -60,7 +63,7 @@ static inline long Model_ParseHorizonSibling(const char* entry_name,
     char* end = nullptr;
     long h = strtol(suffix, &end, 10);
     if (end == suffix || *end != '\0') return -1;  // non-numeric suffix
-    if (h <= 0 || h > 1000000) return -1;          // sanity bounds
+    if (h <= 0 || h > MODEL_HORIZON_TICKS_MAX) return -1;   // sanity bounds
     // E.1.2.D leaf 8 (S2-F5) — canonical-form round-trip. strtol accepts
     // "07500" / "+7500" / " 7500" / "00000007500" as 7500, and every loader
     // REBUILDS the path FROM the int — so an aliased spelling loaded the ONE

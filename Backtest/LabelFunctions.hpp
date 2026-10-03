@@ -1077,6 +1077,34 @@ static inline const char* Training_ResolveRole(int label_type, int training_side
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[Training_ResolveClassTree]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE class-tree derivation for a run's model family — "classification" or "regression" from the run's PRIMARY label kind (position 0's resolved kind); the writer and the panel's "Will write to" preview both call it]
+// [REFERENCE]_[DECISION]_[[D-431]]
+//======================================================================
+// D-431 nested layout — one family = one class tree, from the PRIMARY kind (S2-F4: a per-horizon derivation
+// fragmented a mixed-CSV family across two trees). Moved verbatim out of the writer at E.1.3 MP-6 step 10.5's second
+// review (N6): the preview kept its own copy of the rule, read from the combo.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline const char* Training_ResolveClassTree(int primary_label_type) {
+    int primary_nc = (primary_label_type >= 0 && primary_label_type < LABEL_COUNT)
+                     ? label_table[primary_label_type].num_classes : 0;
+    return (primary_label_type == LABEL_PEAK_VALLEY_STABLE
+            || primary_label_type == LABEL_REGIME
+            || primary_nc >= 2)
+        ? "classification" : (primary_nc == 1 ? "regression" : "classification");
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_ResolveClassTree]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[Training_RoleFromModelFile]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]

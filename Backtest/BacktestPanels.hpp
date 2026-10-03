@@ -3625,13 +3625,12 @@ struct TrainingPanelState {
     // v5.11.40 — per-horizon TP/SL CSV (operator-flagged 2026-05-07).
     // Broadcast-or-match rule: 1 value applies to all horizons; N values
     // map positionally where N == ui_horizon_count; anything else is
-    // misaligned and disables the Multi-Horizon button with a hint.
+    // misaligned and refuses both multi-horizon starts.
     //
-    // Backward compat: when CSV is empty OR parses to 1 value, the
-    // existing single-value label_tp_pct/label_sl_pct fields are used
-    // (single-horizon Train Model + cfg load + Save Run output paths
-    // all read from those float fields). Per-horizon arrays here drive
-    // the multi-horizon worker only.
+    // Every collect / train request reads the parsed arrays below (one
+    // value or more behind an open gate: TrainingPanel_ParseInputs seeds a
+    // field holding none). label_tp_pct / label_sl_pct keep position 0's
+    // last value — what a field emptied of its values takes back.
     // each typed CSV line on its own cache line (H6; TECH_DEBT-269's last straddlers, D-507 call 5) — each aligned, so
     // a field inserted between them cannot walk the second across a line
     alignas(64) char ui_tp_pct_csv[64];   // e.g. "0.030" or "0.020,0.030,0.040"
@@ -3641,7 +3640,7 @@ struct TrainingPanelState {
     // the precedent (MP-6 step 7).
     alignas(64) float ui_tp_per_horizon[PANEL_HORIZON_MAX];   // parsed values (broadcast or positional)
     float           ui_sl_per_horizon[PANEL_HORIZON_MAX];
-    int             ui_tp_per_horizon_count;  // 0 = empty/use single field; 1 = broadcast; N = positional
+    int             ui_tp_per_horizon_count;  // 1 = broadcast; N = positional; 0 = the field cannot be applied (its parse refuses)
     int             ui_sl_per_horizon_count;
     // v5.11.41 — the per-horizon display of a multi-horizon run (one row per horizon, max
     // PANEL_HORIZON_MAX). The run (TrainingWorkers_RunMultiHorizon) writes these as its sink:
@@ -3676,10 +3675,10 @@ struct TrainingPanelState {
     int             ui_training_side;  // 0=buy (default), 1=exit
 
     // v5.13.1.B — per-horizon label_kind CSV (operator-flagged 2026-05-08).
-    // Broadcast-or-match rule mirrors ui_tp_pct_csv. Empty/single value
-    // falls back to state->label_type (existing behavior). N values map
-    // positionally where N == ui_horizon_count; misalignment disables
-    // Train Multi-Horizon button.
+    // Broadcast-or-match rule mirrors ui_tp_pct_csv: empty = the Label Type
+    // combo; a single value broadcasts itself (D-476); N values map
+    // positionally where N == ui_horizon_count; misalignment refuses both
+    // multi-horizon starts (StartGate_NeedAlignedKinds).
     //
     // Format: integer label_type values per LABEL_* enum (LabelFunctions.hpp).
     // Operator types e.g. "0,2,1" → horizon_0=binary, horizon_1=multi,
@@ -3692,6 +3691,14 @@ struct TrainingPanelState {
     // 64B line boundary on this [THREAD]-tagged struct (the strict layout gate caught it).
     char     ui_feature_mask_hex[24];
     uint64_t ui_feature_mask;
+    // E.1.3 MP-6 step 10.5 — what each CSV field's parse gave (TrainingPanel_ParseInputs, once a frame): a field that
+    // cannot be applied as typed shows its red line and refuses the starts that read it. GUI thread only; at the TAIL, as
+    // the mask above; a cache line each (SuiteCsvParse is 64 B) — the strict layout gate holds this [THREAD] struct
+    // straddle-free (9.4's choice: alignment, not exemptions)
+    alignas(64) SuiteCsvParse ui_horizon_parse;
+    alignas(64) SuiteCsvParse ui_label_kind_parse;
+    alignas(64) SuiteCsvParse ui_tp_parse;
+    alignas(64) SuiteCsvParse ui_sl_parse;
 };
 // Over-aligned through its alignas(64) members: it lives in foxml_suite.cpp's static storage, never malloc / calloc
 // (Check K — an over-aligned type from bare malloc is misaligned, UB).
@@ -3702,9 +3709,9 @@ static_assert(alignof(TrainingPanelState) == 64, "TrainingPanelState's alignment
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-03]
-// [SIZE]_[412352B]
+// [SIZE]_[412608B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6443]
+// [CACHE_LINES]_[6447]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
@@ -3799,8 +3806,8 @@ static inline BacktestLabelRequest TrainingPanel_CollectLabels(const TrainingPan
     l.label_type        = Label_ResolveKindForHorizon(state->ui_label_kind_per_horizon,
                                                       state->ui_label_kind_per_horizon_count, state->label_type, 0);
     l.forward_ticks     = state->ui_horizon_count >= 1 ? state->ui_horizon_list[0] : 0;   // the CSV's first (a start's gate requires one); 0 = the label pass's default
-    l.tp_pct            = state->label_tp_pct;
-    l.sl_pct            = state->label_sl_pct;
+    l.tp_pct            = state->ui_tp_per_horizon[0];   // position 0 — the field's own value (seeded if it held none)
+    l.sl_pct            = state->ui_sl_per_horizon[0];
     l.roundtrip_fee_pct = state->label_roundtrip_fee_pct;
     l.feature_mask      = state->ui_feature_mask;
     return l;
@@ -3904,9 +3911,9 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     // operator sets the venue's round trip explicitly — no silent default that
     // would change every existing run's labels on upgrade.
     state->label_roundtrip_fee_pct = 0.0f;
-    // v5.11.40 — CSV-aware TP/SL per-horizon. Default: empty CSV =
-    // single-value mode (uses label_tp_pct/_sl_pct directly). Operator
-    // types comma-separated values to opt in to per-horizon.
+    // v5.11.40 — CSV-aware TP/SL per-horizon. Empty at start: the first
+    // parse seeds each field from label_tp_pct / label_sl_pct (one value,
+    // broadcast); comma-separated values map one per horizon.
     state->ui_tp_pct_csv[0] = '\0';
     state->ui_sl_pct_csv[0] = '\0';
     // v5.13.1 — sell-side training defaults: side=buy, empty CSV
@@ -4398,12 +4405,11 @@ static inline MultiHorizonWorkerArgs *TrainingPanel_MultiHorizonArgs(TrainingPan
     r.training_side = state->ui_training_side;
     r.horizon_count = horizon_count;
     // v5.11.40 — per-horizon TP/SL by the broadcast-or-match rule: one value broadcasts, N map
-    // positionally, an empty CSV falls back to label_tp_pct / label_sl_pct. D-476 — ONE label-kind
-    // rule for every click (Label_ResolveKindForHorizon). Slots past horizon_count are never read.
-    const float bcast_tp = (state->ui_tp_per_horizon_count > 0)
-        ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
-    const float bcast_sl = (state->ui_sl_per_horizon_count > 0)
-        ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
+    // positionally (behind an open gate each list holds one value or more — TrainingPanel_ParseInputs
+    // seeds a field holding none). D-476 — ONE label-kind rule for every click
+    // (Label_ResolveKindForHorizon). Slots past horizon_count are never read.
+    const float bcast_tp = state->ui_tp_per_horizon[0];
+    const float bcast_sl = state->ui_sl_per_horizon[0];
     for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
         const int live = (i < horizon_count);
         r.horizon_ticks[i] = live ? horizons[i] : 0;
@@ -4540,33 +4546,262 @@ static inline bool TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the panel's Horizons CSV → ui_horizon_list / ui_horizon_count (at most PANEL_HORIZON_MAX; each 1..1000000, others dropped; parsing stops at the first non-number) — the ONE source of the panel's horizons (E.1.3 MP-6 step 10.3: no fallback to the last run's config)]
+// [OVERVIEW]_[the panel's Horizons CSV → ui_horizon_list / ui_horizon_count / ui_horizon_parse (at most PANEL_HORIZON_MAX, each 1..MODEL_HORIZON_TICKS_MAX — the largest a model path names; it STOPS at the first value it cannot keep and says so — SuiteCsv_Parse) — the ONE source of the panel's horizons (E.1.3 MP-6 step 10.3: no fallback to the last run's config)]
 //======================================================================
-// Called ONCE a frame, at the panel's top, before anything reads the horizons: the mode, every gate and every click read
-// one parse, and an edit typed into the CSV reaches them the next frame. (The panel parsed twice — two byte-identical
-// copies, the second after the input field — so for the frame of an edit the mode and the Train gate could disagree.)
+// Called by TrainingPanel_ParseInputs — ONCE a frame, at the panel's top, before anything reads the horizons: the mode,
+// every gate and every click read one parse, and an edit typed into the CSV reaches them the next frame. (The panel
+// parsed twice — two byte-identical copies, the second after the input field — so for the frame of an edit the mode
+// and the Train gate could disagree.)
 //======================================================================
 // [CODE]
 //======================================================================
 static inline void TrainingPanel_ParseHorizonCsv(TrainingPanelState *state) {
-    int n = 0;
-    const char* p = state->ui_horizon_csv;
-    while (*p && n < TrainingPanelState::PANEL_HORIZON_MAX) {   // the list's own size (was a literal 8 beside it)
-        while (*p == ' ' || *p == '\t' || *p == ',') p++;
-        if (!*p) break;
-        char* end = nullptr;
-        long v = strtol(p, &end, 10);
-        if (end == p) break;
-        if (v > 0 && v <= 1000000)
-            state->ui_horizon_list[n++] = (int)v;
-        p = end;
-    }
-    state->ui_horizon_count = n;
+    state->ui_horizon_parse = SuiteCsv_Parse(state->ui_horizon_csv, state->ui_horizon_list,
+                                             TrainingPanelState::PANEL_HORIZON_MAX, [](int, double *lo, double *hi) {
+                                                 *lo = 1.0;
+                                                 *hi = MODEL_HORIZON_TICKS_MAX;
+                                             });
+    state->ui_horizon_count = state->ui_horizon_parse.count;
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[TrainingPanel_ParseHorizonCsv]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Training_TrainedKind]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the label kind horizon i of a collect or train start labels — D-476's one rule (Label_ResolveKindForHorizon) over the parsed Label Kind CSV and the combo — and, Training_TrainedHorizons, how many horizons a start labels (the parsed horizons; one in single mode)]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Training_TrainedHorizons(const TrainingPanelState *st) {
+    return st->ui_horizon_count > 1 ? st->ui_horizon_count : 1;
+}
+static inline int Training_TrainedKind(const TrainingPanelState *st, int i) {
+    return Label_ResolveKindForHorizon(st->ui_label_kind_per_horizon, st->ui_label_kind_per_horizon_count,
+                                       st->label_type, i);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_TrainedKind]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Training_SlotUnit]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the unit the TP (tp) or SL slot's values carry across the horizons a start labels — the slot kind they all share, an unused slot counting as a percent (the stamp records its value raw, as one); TRAINING_SLOT_NONE when no labelled horizon's kind uses the slot, TRAINING_SLOT_MIXED when their units differ — and Training_SlotCaption, the field's caption for it]
+//======================================================================
+// E.1.3 MP-6 step 10.5's review (F1, F2, F4): which kind the TP / SL fields describe had three answers — the captions
+// took the combo's label first (wrong whenever the Label Kind CSV overrides it: D-476), the fields' visibility took the
+// kinds the horizons resolve to, and one value was range-checked against horizon 0's kind and applied to every horizon.
+// One answer now, over the kinds the start labels: the captions, the fields' visibility, and the refusal of one value
+// for horizons whose units differ all read it. An unused slot is not ignored downstream: until the locked recipe's S2,
+// the stamp records its value raw as a percent bracket (Label_StampTpPct's pass-through; PARITY-065 item 4), so beside
+// a percent kind it is the same unit, and beside a sigma kind a different one.
+//======================================================================
+// [CODE]
+//======================================================================
+enum : int { TRAINING_SLOT_NONE = -1, TRAINING_SLOT_MIXED = -2 };
+static inline int Training_SlotUnit(const TrainingPanelState *st, bool tp) {
+    const int unused = tp ? (int)TP_UNUSED : (int)SL_UNUSED;
+    const int pct    = tp ? (int)TP_PCT : (int)SL_PCT;
+    bool      used   = false;
+    int       unit   = TRAINING_SLOT_NONE;
+    for (int i = 0; i < Training_TrainedHorizons(st); ++i) {
+        const int k    = Training_TrainedKind(st, i);
+        const int kind = (k >= 0 && k < LABEL_COUNT) ? (tp ? (int)label_table[k].tp_kind : (int)label_table[k].sl_kind)
+                                                     : unused;
+        used         = used || kind != unused;
+        const int u  = kind == unused ? pct : kind;
+        if (unit == TRAINING_SLOT_NONE) unit = u;
+        else if (u != unit) return TRAINING_SLOT_MIXED;
+    }
+    return used ? unit : TRAINING_SLOT_NONE;
+}
+static inline const char *Training_SlotCaption(int unit, bool tp) {
+    if (unit == TRAINING_SLOT_MIXED) return tp ? "TP (units differ per horizon)" : "SL (units differ per horizon)";
+    return tp ? Label_TpKindCaption(unit) : Label_SlKindCaption(unit);   // TRAINING_SLOT_NONE: "… (unused by this label)"
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_SlotUnit]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Training_SlotFieldsShown]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[do the TP / SL fields render — when a labelled horizon's kind uses a slot, and, whatever the kinds, when a start refuses on one of them (Training_SlotInError: a field that cannot be applied as typed; in multi-horizon mode, a count that neither broadcasts nor matches the horizons) — a refusal never names a field that is not on screen; and Training_SlotTip, the tooltip of a field whose unit one word cannot name (units differ per horizon; unused), worded by why it shows]
+//======================================================================
+// Clean and unused, they stay hidden (D-473). Hidden, they are still not ignored — the stamp records an unused slot's
+// value raw (Training_SlotUnit) — which is why a value in error refuses even then, and shows itself to be fixed.
+// (E.1.3 MP-6 step 10.5's review, F2: with the Label Kind CSV giving every horizon a slot-less kind, the fields hid
+// while the multi-horizon gates still refused on their counts — a reason naming a field not on screen. Its second
+// review, N4: an unused slot shown beside the other one said a start refused on it when nothing did.)
+//======================================================================
+// [CODE]
+//======================================================================
+static inline bool Training_SlotInError(const TrainingPanelState *st, bool tp) {
+    const SuiteCsvParse &r = tp ? st->ui_tp_parse : st->ui_sl_parse;
+    const int            n = tp ? st->ui_tp_per_horizon_count : st->ui_sl_per_horizon_count;
+    return r.stop != SUITE_CSV_OK || (st->ui_horizon_count > 1 && !StartGate_BroadcastsOrMatches(n, st->ui_horizon_count));
+}
+static inline bool Training_SlotFieldsShown(const TrainingPanelState *st) {
+    return Training_SlotUnit(st, true) != TRAINING_SLOT_NONE || Training_SlotUnit(st, false) != TRAINING_SLOT_NONE ||
+           Training_SlotInError(st, true) || Training_SlotInError(st, false);
+}
+static inline const char *Training_SlotTip(const TrainingPanelState *st, bool tp) {
+    const int unit = Training_SlotUnit(st, tp);
+    if (unit == TRAINING_SLOT_MIXED)
+        return "UNITS DIFFER PER HORIZON — the labels the horizons train (Label Kind CSV) read this slot in\n"
+               "different units: a percent of price for a barrier label, sigmas (k) or a sigma window in ticks\n"
+               "for a Vol Barrier label; a horizon whose label ignores the slot reads it as a percent (the\n"
+               "model stamp records it as a percent bracket). Give one value per horizon, each in its\n"
+               "horizon's unit — a single value is refused, except 0, which means the default in every unit.";
+    if (unit != TRAINING_SLOT_NONE) return nullptr;   // one unit: the kind's own words
+    return Training_SlotInError(st, tp)
+        ? "No horizon's label uses this slot, but the model stamp still records its value (as a percent\n"
+          "bracket), so the starts refuse while it is in error — see the red line, or the start's reason.\n"
+          "Type a value in range: one for every horizon, or one per horizon."
+        : "No horizon's label uses this slot; it shows beside the other slot, which one does. The model\n"
+          "stamp still records its value (as a percent bracket).";
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_SlotFieldsShown]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Training_SideVerdict]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the training side's verdict on the labels a start labels — the worst tier (Training_SideLabelGate: 0 refuse, 1 warn, 2 ok) over the kinds its horizons resolve to (Training_TrainedKind) — and the kind that sets it (*kind, for the line that names it)]
+//======================================================================
+// E.1.2.C (F3): the verdict read the combo alone, so a Label Kind CSV carried a REFUSE-tier kind in behind it; then it
+// read the combo and every CSV entry. It reads exactly the kinds the start labels now (E.1.3 MP-6 step 10.5's review,
+// I4): the combo only where no CSV overrides it (D-476), a CSV entry past the horizons never — a kind nothing labels
+// refuses nothing, and every kind something labels is read.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Training_SideVerdict(const TrainingPanelState *st, int *kind) {
+    int worst   = Training_TrainedKind(st, 0);
+    int verdict = Training_SideLabelGate(worst, st->ui_training_side);
+    for (int i = 1; i < Training_TrainedHorizons(st); ++i) {
+        const int k = Training_TrainedKind(st, i);
+        const int t = Training_SideLabelGate(k, st->ui_training_side);
+        if (t < verdict) {
+            verdict = t;
+            worst   = k;
+        }
+    }
+    if (kind) *kind = worst;
+    return verdict;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_SideVerdict]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingPanel_ParseInputs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[parse the panel's four CSV fields ONCE a frame, at its top, before anything reads them — the horizons, the label kinds, then TP and SL (a field holding no value seeded first with position 0's last value; each position's range its horizon's kind's; one value for horizons whose units differ refused, 0 excepted) — each stopping at the first value it cannot keep; label_tp_pct / label_sl_pct keep position 0's last value]
+//======================================================================
+// E.1.3 MP-6 step 10.5: the kinds and the slots were parsed inside the TP / SL render block — so a combo label with no
+// slot left their counts from the last frame the block drew, still driving collect and train — and each field had its
+// own loop, two of which dropped a bad value and shifted the rest onto the wrong horizon. One parser, one place.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void TrainingPanel_ParseInputs(TrainingPanelState *state) {
+    TrainingPanel_ParseHorizonCsv(state);
+    state->ui_label_kind_parse = SuiteCsv_Parse(state->ui_label_kind_csv, state->ui_label_kind_per_horizon,
+                                                TrainingPanelState::PANEL_HORIZON_MAX, [](int, double *lo, double *hi) {
+                                                    *lo = 0.0;
+                                                    *hi = LABEL_COUNT - 1;
+                                                });
+    state->ui_label_kind_per_horizon_count = state->ui_label_kind_parse.count;
+    // a TP / SL field holding no value — empty, or only separators (", " is what deleting the numbers from "0.5, 1.5"
+    // leaves) — takes position 0's last value (label_tp_pct / label_sl_pct) BEFORE it parses, so what a start applies is
+    // always a value on the field, through every check below: behind an open gate each list holds one value or more.
+    // (It was seeded only when the fields drew, then only when the text was empty: a field of separators parsed to
+    // nothing and the starts broadcast the stored value unchecked — the step's second review, N1.)
+    if (!SuiteCsv_HasValue(state->ui_tp_pct_csv))
+        SuiteCsv_WriteValue(state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv), state->label_tp_pct);
+    if (!SuiteCsv_HasValue(state->ui_sl_pct_csv))
+        SuiteCsv_WriteValue(state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv), state->label_sl_pct);
+    // a position's legal range is its horizon's kind's: a barrier is a percent (no-margin cap 100), a sigma window a
+    // tick count (up to LABEL_VOL_WINDOW_MAX) — the 2026-09-02 rule
+    auto slot_range = [state](bool tp) {
+        return [state, tp](int i, double *lo, double *hi) {
+            const int  k    = Training_TrainedKind(state, i);
+            const bool k_ok = k >= 0 && k < LABEL_COUNT;
+            *lo = 0.0;
+            *hi = tp ? Label_TpSlotMax(k_ok ? label_table[k].tp_kind : TP_PCT)
+                     : Label_SlSlotMax(k_ok ? label_table[k].sl_kind : SL_PCT);
+        };
+    };
+    state->ui_tp_parse = SuiteCsv_Parse(state->ui_tp_pct_csv, state->ui_tp_per_horizon,
+                                        TrainingPanelState::PANEL_HORIZON_MAX, slot_range(true));
+    state->ui_sl_parse = SuiteCsv_Parse(state->ui_sl_pct_csv, state->ui_sl_per_horizon,
+                                        TrainingPanelState::PANEL_HORIZON_MAX, slot_range(false));
+    // one value for horizons whose units differ is a percent at one and sigmas or ticks at another — refused, one per
+    // horizon asked (the step's review, F4: it was range-checked against horizon 0's kind alone, then applied to all).
+    // 0 alone may stand for all: every label path and the stamp read 0 as "this kind's default" (MIXED needs two
+    // horizons, so one horizon never refuses)
+    if (state->ui_tp_parse.stop == SUITE_CSV_OK && state->ui_tp_parse.count == 1 && state->ui_tp_per_horizon[0] != 0.0f &&
+        Training_SlotUnit(state, true) == TRAINING_SLOT_MIXED)
+        SuiteCsv_RefuseBroadcast(&state->ui_tp_parse, state->ui_tp_pct_csv);
+    if (state->ui_sl_parse.stop == SUITE_CSV_OK && state->ui_sl_parse.count == 1 && state->ui_sl_per_horizon[0] != 0.0f &&
+        Training_SlotUnit(state, false) == TRAINING_SLOT_MIXED)
+        SuiteCsv_RefuseBroadcast(&state->ui_sl_parse, state->ui_sl_pct_csv);
+    state->ui_tp_per_horizon_count = state->ui_tp_parse.count;
+    state->ui_sl_per_horizon_count = state->ui_sl_parse.count;
+    // label_tp_pct / _sl_pct track position 0's last value — what a field emptied of its values takes back (above)
+    if (state->ui_tp_per_horizon_count > 0) state->label_tp_pct = state->ui_tp_per_horizon[0];
+    if (state->ui_sl_per_horizon_count > 0) state->label_sl_pct = state->ui_sl_per_horizon[0];
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_ParseInputs]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingPanel_CsvError]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the first CSV field a collect or train start reads that cannot be applied as typed — the horizons, the label kinds, TP, SL (a TP / SL field in error shows itself: Training_SlotFieldsShown) — or nullptr; the four starts' gates take it (StartGate_NeedCsvs)]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline const char *TrainingPanel_CsvError(const TrainingPanelState *st) {
+    if (st->ui_horizon_parse.stop != SUITE_CSV_OK) return "Horizons (CSV)";
+    if (st->ui_label_kind_parse.stop != SUITE_CSV_OK) return "Label Kind CSV";
+    if (st->ui_tp_parse.stop != SUITE_CSV_OK) return "TP CSV";
+    if (st->ui_sl_parse.stop != SUITE_CSV_OK) return "SL CSV";
+    return nullptr;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_CsvError]
 //======================================================================
 
 //======================================================================
@@ -4584,6 +4819,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                        RunControlState *run_control,
                                        DataPanelState *data, LaunchFailureState *lf) {
     ImGui::Begin("Training");
+
+    // the frame's ONE parse of the four CSV fields, before anything reads them — the side's verdict over the kinds, the
+    // TP / SL fields' gate, the mode, every start's gate and click (E.1.3 MP-6 step 10.5; an edit typed this frame, or
+    // a combo changed this frame, reaches them the next)
+    TrainingPanel_ParseInputs(state);
+    const char *csv_bad = TrainingPanel_CsvError(state);   // the first CSV field a collect / train start reads that stopped
 
     // label config — display names derived from label_table (single source of truth).
     // adding a label = 1 entry in LabelFunctions.hpp::label_table[]; this dropdown auto-updates.
@@ -4619,10 +4860,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         //
         // Clearing (rather than retargeting) is the honest choice: a per-horizon
         // label set typed for the ENTRY side carries no meaning on the exit side,
-        // and an emptied CSV makes the visible combo authoritative again. It also
-        // keeps the CSV consistent with its own render gate, which hides the input
-        // entirely for WILL_PEAK — a retarget would leave a populated, invisible,
-        // un-editable CSV driving training.
+        // and an emptied CSV makes the visible combo authoritative again.
         //
         // Only fires on an actual side CHANGE, so a deliberately-typed exit-side
         // CSV survives every subsequent click.
@@ -4641,21 +4879,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // the REAL function — this was the one leg of the D2 verdict without a pin, and
     // an inline replica is the Class-51 shape the plan's OUT-list replica died of.
     //
-    // AGGREGATION over the EFFECTIVE label set (E.1.2.C): the gate used to read
-    // state->label_type alone, so the per-horizon "Label Kind CSV" walked straight
-    // past it — an OK combo selection could carry a REFUSE-tier horizon in behind
-    // it. That hole widened the moment the CSV started reaching the labels the model
-    // actually trains on. Worst (numerically lowest) tier across the set wins.
-    int side_gate = Training_SideLabelGate(state->label_type, state->ui_training_side);
-    // the label the verdict is about — the worst of the set, which can be a Label Kind CSV entry rather than the
-    // combo's, so the line names it (the start gates' "label refused ... (above)" points here; D-507 review F8). The
-    // CSV parse keeps only kinds in [0, LABEL_COUNT), so either is a valid label_table index.
-    int side_kind = state->label_type;
-    for (int lk = 0; lk < state->ui_label_kind_per_horizon_count && lk < TrainingPanelState::PANEL_HORIZON_MAX; ++lk) {
-        int t = Training_SideLabelGate(state->ui_label_kind_per_horizon[lk],
-                                       state->ui_training_side);
-        if (t < side_gate) { side_gate = t; side_kind = state->ui_label_kind_per_horizon[lk]; }
-    }
+    // AGGREGATION over the label set the start labels (E.1.2.C; Training_SideVerdict): the gate used to read
+    // state->label_type alone, so the per-horizon "Label Kind CSV" walked straight past it — an OK combo selection
+    // could carry a REFUSE-tier horizon in behind it. Worst (numerically lowest) tier across the set wins; the line
+    // names the label that sets it — a Label Kind CSV entry, or the combo's (the start gates' "label refused ...
+    // (above)" points here; D-507 review F8). Both are valid label_table indices (the CSV parse keeps only kinds in
+    // [0, LABEL_COUNT)).
+    int       side_kind = 0;
+    const int side_gate = Training_SideVerdict(state, &side_kind);
     if (side_gate == 0) {
         ImGui::TextColored(FoxmlColors::red,
             "exit side: label '%s' trains an ENTRY-goodness objective — inverted as an exit "
@@ -4706,10 +4937,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // A hand-listed consumer of a registry is the Class-19 shape the registry's own
     // comment warns about; driving it off tp_kind/sl_kind means a new row auto-flows
     // its inputs instead of silently getting none.
-    const int _lt_ok   = (state->label_type >= 0 && state->label_type < LABEL_COUNT);
-    const int _tp_kind = _lt_ok ? label_table[state->label_type].tp_kind : TP_UNUSED;
-    const int _sl_kind = _lt_ok ? label_table[state->label_type].sl_kind : SL_UNUSED;
-    if (_tp_kind != TP_UNUSED || _sl_kind != SL_UNUSED) {
+    // E.1.3 MP-6 step 10.5 — the unit each field's values carry across the horizons the start labels (Training_SlotUnit:
+    // one kind's, none, or "units differ"), and the fields render when a labelled horizon's kind uses a slot or a start
+    // refuses on them (Training_SlotFieldsShown) — gated on the combo alone, a CSV kind with slots had its TP / SL hidden
+    const int _tp_unit = Training_SlotUnit(state, true);
+    const int _sl_unit = Training_SlotUnit(state, false);
+    if (Training_SlotFieldsShown(state)) {
         // v5.11.40 — TP/SL fields now accept comma-separated values for
         // per-horizon mapping (broadcast-or-match rule). Single value
         // (e.g. "0.030") works as before — applies to every horizon.
@@ -4717,31 +4950,22 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // the horizon count. Misalignment disables the Multi-Horizon
         // button with a hint (see render below).
         //
-        // Backward compat: state->label_tp_pct / _sl_pct floats remain
-        // the source-of-truth for single-horizon Train Model + cfg I/O
-        // + Save Run output. The parser keeps them in sync with
-        // ui_tp_pct_csv[0] / ui_sl_pct_csv[0] (first parsed value).
-        //
-        // First-time render: if CSV string is empty, seed it from the
-        // existing label_tp_pct float (operator's stored cfg value).
-        if (state->ui_tp_pct_csv[0] == '\0') {
-            snprintf(state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv),
-                     "%.3f", state->label_tp_pct);
-        }
-        if (state->ui_sl_pct_csv[0] == '\0') {
-            snprintf(state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv),
-                     "%.3f", state->label_sl_pct);
-        }
+        // A field emptied of its values takes position 0's last value back
+        // before it parses (TrainingPanel_ParseInputs).
 
-        // 2026-09-02 (operator find) — captions + tooltips follow the row's tp_kind /
-        // sl_kind. D-473 made the fields APPEAR for the sigma-window row but left them
+        // 2026-09-02 (operator find) — captions + tooltips follow the slot's kind.
+        // D-473 made the fields APPEAR for the sigma-window row but left them
         // percent-shaped, so the one row whose units differ was the one the panel
-        // misdescribed. `###` pins the ImGui id while the visible caption changes.
+        // misdescribed. Since E.1.3 MP-6 step 10.5's review (F1) the kind is the one
+        // the horizons are LABELLED with (Training_SlotUnit — the combo's only where no
+        // Label Kind CSV overrides it). `###` pins the ImGui id while the caption changes.
         char tp_cap[64], sl_cap[64];
-        snprintf(tp_cap, sizeof(tp_cap), "%s###label_tp_slot", Label_TpKindCaption(_tp_kind));
-        snprintf(sl_cap, sizeof(sl_cap), "%s###label_sl_slot", Label_SlKindCaption(_sl_kind));
+        snprintf(tp_cap, sizeof(tp_cap), "%s###label_tp_slot", Training_SlotCaption(_tp_unit, true));
+        snprintf(sl_cap, sizeof(sl_cap), "%s###label_sl_slot", Training_SlotCaption(_sl_unit, false));
         ImGui::InputText(tp_cap, state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv));
-        if (_tp_kind == TP_SIGMA_K) {
+        if (const char *tip = Training_SlotTip(state, true)) {   // units differ per horizon, or unused
+            ImGui::SetItemTooltip("%s", tip);
+        } else if (_tp_unit == TP_SIGMA_K) {
             ImGui::SetItemTooltip("UNIT: SIGMAS — k, a multiplier of the sigma of the typical HORIZON move\n"
                                   "(barrier = k * sigma_tick * sqrt(H), D-475). NOT a percent of price.\n"
                                   "Larger k = wider barriers = more timeouts (class 0).\n\n"
@@ -4760,7 +4984,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                   "A single value (e.g. '0.030') broadcasts to all horizons.");
         }
         ImGui::InputText(sl_cap, state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv));
-        if (_sl_kind == SL_VOL_WINDOW_TICKS) {
+        if (const char *tip = Training_SlotTip(state, false)) {   // units differ per horizon, or unused
+            ImGui::SetItemTooltip("%s", tip);
+        } else if (_sl_unit == SL_VOL_WINDOW_TICKS) {
             ImGui::SetItemTooltip("UNIT: TICKS — the sigma-estimation window: how many PRIOR ticks the\n"
                                   "rolling sigma is measured over. NOT a stop-loss, NOT a percent.\n"
                                   "0 = the default (%d ticks). Below %d ticks no sigma can be produced,\n"
@@ -4791,131 +5017,68 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "SL is NOT adjusted: it is a price-level stop — fees deepen the\n"
                               "realized loss but do not move where it fires.\n"
                               "Recorded in the run summary + the model stamp for lineage.");
+        // E.1.3 MP-6 step 10.5 — each field's parse (once a frame, TrainingPanel_ParseInputs) says where it stopped
+        char csv_line[256];
+        if (SuiteCsv_ErrorLine("TP CSV", &state->ui_tp_parse, csv_line, sizeof(csv_line)))
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f), "%s", csv_line);
+        if (SuiteCsv_ErrorLine("SL CSV", &state->ui_sl_parse, csv_line, sizeof(csv_line)))
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f), "%s", csv_line);
+    }
 
-
-        // v5.13.1.B — per-horizon label_kind CSV input. Mirrors TP/SL
-        // CSV pattern: empty → broadcast state->label_type combo;
-        // single value → broadcast that value to all horizons; N values
-        // → positional map to Horizons (CSV) with broadcast-or-match
-        // alignment. Format: integer label_type values per LABEL_*
-        // (LabelFunctions.hpp). Operator types e.g. "0,2,1" →
-        // horizon_0=binary, horizon_1=multiclass, horizon_2=regression.
-        ImGui::InputText("Label Kind CSV",
-                         state->ui_label_kind_csv,
-                         sizeof(state->ui_label_kind_csv));
-        // Tooltip iterates label_table[] live so adding a new label
-        // (1 row in FOREACH_TARGET) auto-updates the lookup.
-        if (ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::TextUnformatted(
-                "Per-horizon label_kind (integer LABEL_* enum values).\n\n"
-                "Empty: all horizons use the Label Type combo above.\n"
-                "Single value: broadcasts to all horizons.\n"
-                "N values: positional map to Horizons CSV.\n"
-                "  N must equal Horizons count or Train Multi-Horizon disables.\n\n"
-                "Trains heterogeneous mixed-output ensembles in ONE click;\n"
-                "v5.12.3.B+E mixed-output normalizer blends them at inference.");
-            ImGui::Separator();
-            ImGui::TextUnformatted("Lookup (auto-synced from FOREACH_TARGET):");
-            for (int i = 0; i < LABEL_COUNT; i++)
-                ImGui::Text("  %2d  %s", i, label_table[i].display_name);
-            ImGui::EndTooltip();
+    // E.1.3 MP-6 step 10.5 — the Label Kind CSV renders ALWAYS: it overrides the label for every start that reads it, so
+    // it is never hidden while it does (inside the TP / SL block, a combo label with no slot hid a populated CSV — its
+    // field and its warning — that still drove collect and train)
+    // v5.13.1.B — per-horizon label_kind CSV input. Mirrors TP/SL
+    // CSV pattern: empty → broadcast state->label_type combo;
+    // single value → broadcast that value to all horizons; N values
+    // → positional map to Horizons (CSV) with broadcast-or-match
+    // alignment. Format: integer label_type values per LABEL_*
+    // (LabelFunctions.hpp). Operator types e.g. "0,2,1" →
+    // horizon_0=binary, horizon_1=multiclass, horizon_2=regression.
+    ImGui::InputText("Label Kind CSV",
+                     state->ui_label_kind_csv,
+                     sizeof(state->ui_label_kind_csv));
+    // Tooltip iterates label_table[] live so adding a new label
+    // (1 row in FOREACH_TARGET) auto-updates the lookup.
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(
+            "Per-horizon label_kind (integer LABEL_* enum values).\n\n"
+            "Empty: all horizons use the Label Type combo above.\n"
+            "Single value: broadcasts to all horizons.\n"
+            "N values: positional map to Horizons CSV.\n"
+            "  N must equal the Horizons count, or both multi-horizon starts refuse.\n\n"
+            "Trains heterogeneous mixed-output ensembles in ONE click;\n"
+            "v5.12.3.B+E mixed-output normalizer blends them at inference.");
+        ImGui::Separator();
+        ImGui::TextUnformatted("Lookup (auto-synced from FOREACH_TARGET):");
+        for (int i = 0; i < LABEL_COUNT; i++)
+            ImGui::Text("  %2d  %s", i, label_table[i].display_name);
+        ImGui::EndTooltip();
+    }
+    // E.1.2.G — mismatch warning. A stale value here silently overrides the
+    // Label Type combo for BOTH collect and train (2026-09-01: a leftover
+    // "7" trained Peak/Valley/Stable for a full multi-horizon run while the
+    // combo read "Vol Barrier 3-Class (timed)"; caught only by the no-skill
+    // REFUSE). Say so IN the panel, at the field, in color.
+    if (state->ui_label_kind_per_horizon_count > 0) {
+        int mm = 0;
+        for (int i = 0; i < state->ui_label_kind_per_horizon_count; ++i)
+            if (state->ui_label_kind_per_horizon[i] != state->label_type) mm = 1;
+        if (mm) {
+            const int k0 = state->ui_label_kind_per_horizon[0];
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                "⚠ CSV overrides Label Type: trains %s%s — not %s. Clear the field to use the combo.",
+                (k0 >= 0 && k0 < LABEL_COUNT) ? label_table[k0].display_name : "?",
+                state->ui_label_kind_per_horizon_count > 1 ? " (+ per-horizon kinds)" : "",
+                (state->label_type >= 0 && state->label_type < LABEL_COUNT)
+                    ? label_table[state->label_type].display_name : "?");
         }
-        // E.1.2.G — mismatch warning. A stale value here silently overrides the
-        // Label Type combo for BOTH collect and train (2026-09-01: a leftover
-        // "7" trained Peak/Valley/Stable for a full multi-horizon run while the
-        // combo read "Vol Barrier 3-Class (timed)"; caught only by the no-skill
-        // REFUSE). Say so IN the panel, at the field, in color.
-        if (state->ui_label_kind_per_horizon_count > 0) {
-            int mm = 0;
-            for (int i = 0; i < state->ui_label_kind_per_horizon_count; ++i)
-                if (state->ui_label_kind_per_horizon[i] != state->label_type) mm = 1;
-            if (mm) {
-                const int k0 = state->ui_label_kind_per_horizon[0];
-                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
-                    "⚠ CSV overrides Label Type: trains %s%s — not %s. Clear the field to use the combo.",
-                    (k0 >= 0 && k0 < LABEL_COUNT) ? label_table[k0].display_name : "?",
-                    state->ui_label_kind_per_horizon_count > 1 ? " (+ per-horizon kinds)" : "",
-                    (state->label_type >= 0 && state->label_type < LABEL_COUNT)
-                        ? label_table[state->label_type].display_name : "?");
-            }
-        }
-
-        // Parse the label_kind CSV (same pattern as TP/SL CSV).
-        auto parse_int_csv = [](const char* csv, int* out, int* n_out) {
-            int n = 0;
-            const char* p = csv;
-            while (*p && n < 8) {
-                while (*p == ' ' || *p == '\t' || *p == ',') p++;
-                if (!*p) break;
-                char* end = nullptr;
-                long v = strtol(p, &end, 10);
-                if (end == p) break;
-                if (v >= 0 && v < LABEL_COUNT) out[n++] = (int)v;
-                p = end;
-            }
-            *n_out = n;
-        };
-        parse_int_csv(state->ui_label_kind_csv,
-                      state->ui_label_kind_per_horizon,
-                      &state->ui_label_kind_per_horizon_count);
-        // Parse the TP/SL CSVs AFTER the kind CSV so each position's legal range
-        // follows THAT horizon's kind: a barrier is a percent (no-margin cap 100), a
-        // sigma window is a TICK COUNT (up to LABEL_VOL_WINDOW_MAX). The old flat
-        // `<= 100` dropped any window over 100 ticks AND shifted every later value
-        // onto the wrong horizon (operator find, 2026-09-02). An out-of-range value
-        // now STOPS the parse at its position and is reported in red below — never
-        // silently dropped. NaN parses as out-of-range (Class 60). Bounded loop,
-        // max 8 entries, every frame (cheap).
-        struct SlotCsvBad { int pos; float val; double max; };
-        auto parse_slot_csv = [&](const char* csv, float* out, int* n_out,
-                                  int is_tp) -> SlotCsvBad {
-            SlotCsvBad bad{-1, 0.0f, 0.0};
-            int n = 0;
-            const char* p = csv;
-            while (*p && n < 8) {
-                while (*p == ' ' || *p == '\t' || *p == ',') p++;
-                if (!*p) break;
-                char* end = nullptr;
-                float v = strtof(p, &end);
-                if (end == p) break;
-                const int kind_h = Label_ResolveKindForHorizon(
-                    state->ui_label_kind_per_horizon,
-                    state->ui_label_kind_per_horizon_count, state->label_type, n);
-                const int k_ok = (kind_h >= 0 && kind_h < LABEL_COUNT);
-                const double vmax = is_tp
-                    ? Label_TpSlotMax(k_ok ? label_table[kind_h].tp_kind : TP_PCT)
-                    : Label_SlSlotMax(k_ok ? label_table[kind_h].sl_kind : SL_PCT);
-                if (!(v >= 0.0f && (double)v <= vmax)) {
-                    bad.pos = n; bad.val = v; bad.max = vmax;
-                    break;
-                }
-                out[n++] = v;
-                p = end;
-            }
-            *n_out = n;
-            return bad;
-        };
-        const SlotCsvBad tp_bad = parse_slot_csv(state->ui_tp_pct_csv,
-            state->ui_tp_per_horizon, &state->ui_tp_per_horizon_count, 1);
-        const SlotCsvBad sl_bad = parse_slot_csv(state->ui_sl_pct_csv,
-            state->ui_sl_per_horizon, &state->ui_sl_per_horizon_count, 0);
-        if (tp_bad.pos >= 0)
-            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
-                "⚠ TP CSV position %d: %g is outside [0, %g] for that horizon's label kind"
-                " — NOT applied, and the values after it are ignored.",
-                tp_bad.pos + 1, (double)tp_bad.val, tp_bad.max);
-        if (sl_bad.pos >= 0)
-            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
-                "⚠ SL CSV position %d: %g is outside [0, %g] for that horizon's label kind"
-                " — NOT applied, and the values after it are ignored.",
-                sl_bad.pos + 1, (double)sl_bad.val, sl_bad.max);
-        // Keep label_tp_pct / _sl_pct in sync with index 0 — the
-        // backward-compat path for single-horizon Train Model.
-        if (state->ui_tp_per_horizon_count > 0)
-            state->label_tp_pct = state->ui_tp_per_horizon[0];
-        if (state->ui_sl_per_horizon_count > 0)
-            state->label_sl_pct = state->ui_sl_per_horizon[0];
+    }
+    {
+        char csv_line[256];
+        if (SuiteCsv_ErrorLine("Label Kind CSV", &state->ui_label_kind_parse, csv_line, sizeof(csv_line)))
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f), "%s", csv_line);
     }
     // v5.11.43 — Forward Ticks / Lookahead Ticks inputs DELETED. The Horizons CSV
     // (rendered below) is the single source of every label horizon: single-horizon
@@ -4924,18 +5087,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // MP-6 step 10.3: with nothing typed it held the last typed value, shown nowhere,
     // and Collect Features / Train Model labelled at it — F2 of the step's review.)
 
-    // v5.11.43 — parse horizon CSV early (was later, post-Train-Model).
-    // Collect Features + Train Model buttons need ui_horizon_count to decide
-    // whether to render single-mode or multi-horizon-mode variant. Parsing
-    // here makes ui_horizon_count fresh BEFORE any button conditional fires —
-    // the frame's ONE parse.
-    TrainingPanel_ParseHorizonCsv(state);
+    // v5.11.43 — the horizon count is fresh before any button conditional fires: the CSV fields are parsed at the
+    // panel's top (TrainingPanel_ParseInputs — once a frame, since E.1.3 MP-6 step 10.5).
 
 
     ImGui::Separator();
 
     // collect features button — disabled until its gate below opens (the
-    // files, the side's verdict on the label, the suite free). prevents the
+    // files, the side's verdict on the label, the CSV fields applied as typed,
+    // a horizon, the suite free). prevents the
     // "click button N times because nothing visibly happens" UX trap that
     // fires N parallel backtests each writing to the same log file.
     //
@@ -4945,10 +5105,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // (multi-horizon worker). Both still write to results->feature_matrix.
     const int selected_files = DataPanel_SelectedCount(data);
     // the collect's gate (D-507; Backtest/SuiteStartGates.hpp): the files, the training side's verdict on the label
-    // (E.1.2.C F3 — the line above), a horizon typed (E.1.3 MP-6 step 10.3 — the labels' horizon is the CSV's), then
-    // the suite free — a collect reallocates (MOVES) the shared feature_matrix / labels every training worker reads, so
+    // (E.1.2.C F3 — the line above), the CSV fields applied as typed (E.1.3 MP-6 step 10.5 — csv_bad), a horizon typed
+    // (step 10.3 — the labels' horizon is the CSV's), then the suite free — a collect reallocates (MOVES) the shared feature_matrix / labels every training worker reads, so
     // it never overlaps another suite run: the lease is that rule
-    const SuiteGate collect_gate = StartGate_CollectFeatures(selected_files, side_gate, state->ui_horizon_count);
+    const SuiteGate collect_gate = StartGate_CollectFeatures(selected_files, side_gate, state->ui_horizon_count, csv_bad);
     const bool can_collect = SuiteGate_Open(&collect_gate);
     // v5.11.43 — the horizon count routes the buttons: 0 or 1 = single mode; >1 = multi-horizon mode. The CSV is the
     // panel's ONE source: the old fallback to cfg.horizon_list read the LAST Run Control run's config (not the cfg
@@ -5003,8 +5163,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // v5.11.24 — Collect Multi-Horizon button. Mirrors Train Multi-Horizon's
     // pattern (uses state->ui_horizon_csv populated by the input field below).
-    // Disabled until its gate opens (below — the files, the horizons, TP / SL
-    // counts that agree with them, the side's verdict, the suite free).
+    // Disabled until its gate opens (below — the files, the CSV fields applied
+    // as typed, the horizons, TP / SL and Label Kind counts that agree with
+    // them, the side's verdict, the suite free).
     // Clicking spawns collect_multi_horizon_worker_fn which collects features
     // ONCE then loops over horizons recomputing labels + logging valid-sample
     // counts to engine.log. Final state: last horizon's labels in
@@ -5014,14 +5175,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // Single horizon → operator sees "Collect Features" only (rendered above).
     // N>1 → operator sees "Collect Multi-Horizon" only (rendered here).
     int mh_collect_horizon_count = state->ui_horizon_count;
-    // v5.11.40 — broadcast-or-match alignment for per-horizon TP/SL:
+    // v5.11.40 — broadcast-or-match alignment for per-horizon TP/SL and (E.1.3
+    // MP-6 step 10.5) the label kinds, as Train Multi-Horizon's gate reads them:
     // a single value broadcasts, N values match the horizon count; anything
     // else disables the Multi-Horizon button with a hint. The rule is
     // StartGate_BroadcastsOrMatches, one of the gate's terms (D-507).
-    int tp_n = state->ui_tp_per_horizon_count;
-    int sl_n = state->ui_sl_per_horizon_count;
+    const int tp_n = state->ui_tp_per_horizon_count;
+    const int sl_n = state->ui_sl_per_horizon_count;
+    const int lk_n = state->ui_label_kind_per_horizon_count;
     const SuiteGate mh_collect_gate =
-        StartGate_CollectMultiHorizon(selected_files, mh_collect_horizon_count, tp_n, sl_n, side_gate);
+        StartGate_CollectMultiHorizon(selected_files, mh_collect_horizon_count, tp_n, sl_n, lk_n, side_gate, csv_bad);
     const bool mh_can_collect = SuiteGate_Open(&mh_collect_gate);
     if (!single_horizon_mode) {
     if (!mh_can_collect) ImGui::BeginDisabled();
@@ -5042,12 +5205,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             snap.snap_horizon_count = mh_collect_horizon_count;
             // v5.11.40 — snap per-horizon TP/SL using broadcast-or-match.
             // single value (count==1) broadcasts to all horizons; N values
-            // map positionally. Single label_tp_pct/_sl_pct float as
-            // ultimate fallback (CSV totally empty).
-            float bcast_tp = (state->ui_tp_per_horizon_count > 0)
-                ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
-            float bcast_sl = (state->ui_sl_per_horizon_count > 0)
-                ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
+            // map positionally (the gate opened: each list holds one value
+            // or more — TrainingPanel_ParseInputs seeds a field holding none).
+            const float bcast_tp = state->ui_tp_per_horizon[0];
+            const float bcast_sl = state->ui_sl_per_horizon[0];
             // E.1.2.G — kinds snap with the SAME broadcast-or-positional resolution
             // the TRAIN click uses. Collect previously labelled every horizon with
             // the dropdown while train obeyed the CSV — the panel could summarize
@@ -5131,11 +5292,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Empty = Collect Features and Train Model refuse (type a horizon);\n"
         "Walk-Forward, the HP sweep and Full Validation still run on the\n"
         "collected labels.\n"
-        "Max %d horizons, each 1..1,000,000 ticks.", TrainingPanelState::PANEL_HORIZON_MAX);
+        "Max %d horizons, each 1..%d ticks; a value outside that, or not a\n"
+        "number, stops the parse there and says so in red.",
+        TrainingPanelState::PANEL_HORIZON_MAX, (int)MODEL_HORIZON_TICKS_MAX);
     ImGui::SameLine();
     ImGui::TextDisabled("(%d horizon%s parsed)",
                         state->ui_horizon_count,
                         state->ui_horizon_count == 1 ? "" : "s");
+    {
+        char csv_line[256];   // E.1.3 MP-6 step 10.5 — where the parse stopped, if it did
+        if (SuiteCsv_ErrorLine("Horizons (CSV)", &state->ui_horizon_parse, csv_line, sizeof(csv_line)))
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f), "%s", csv_line);
+    }
 
     // results pointer for the training sections below — every training run
     // (Train Model too: it runs on the funnel's worker, the multi-horizon run
@@ -5654,15 +5822,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // calls the ONE extracted rule, same as the trainer, Save Run and the boot
         // walk. (Its three siblings were closed earlier in E.1.2.C; this completes
         // the class rather than leaving the visible one wrong.)
+        //
+        // E.1.3 MP-6 step 10.5's second review (N6): it still read the COMBO, while the writer takes the class tree from
+        // the run's PRIMARY kind (position 0's resolved kind) and each horizon's role file from that horizon's kind — so
+        // with a Label Kind CSV it named a file or a tree the run never writes. Both now come from the writer's own rules
+        // over the kinds the start labels (Training_TrainedKind); horizons whose roles differ say so.
         const char* role_preview =
-            Training_ResolveRole(state->label_type, state->ui_training_side);
-        // ...and this ternary returned "classification" in BOTH arms, so a
-        // regression label advertised the classification tree while :4364-4367
-        // routed the write to models/regression/. Derive it the same way the
-        // writer does: num_classes == 1 means regression.
-        const int nclass_preview = (state->label_type >= 0 && state->label_type < LABEL_COUNT)
-                                 ? label_table[state->label_type].num_classes : 0;
-        const char* class_preview = (nclass_preview == 1) ? "regression" : "classification";
+            Training_ResolveRole(Training_TrainedKind(state, 0), state->ui_training_side);
+        for (int i = 1; i < Training_TrainedHorizons(state); ++i)
+            if (strcmp(Training_ResolveRole(Training_TrainedKind(state, i), state->ui_training_side), role_preview) != 0)
+                role_preview = "<role per horizon>";
+        const char* class_preview = Training_ResolveClassTree(Training_TrainedKind(state, 0));
         // D-431 nested layout — the preview spells the SAME grammar the writer
         // builds via ModelPath_HorizonDir ("<family>/horizon_<N>"); the retired
         // flat "<run>_horizon_<H>" form lied to the operator for a month after
@@ -5687,10 +5857,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // every start button's gate reads it and names the run that holds it
     // (D-507) — which also keeps a collect from reallocating the results a
     // trainer reads (E.1.2.D NEW-5) without a term of its own. The gate's
-    // terms: Backtest/SuiteStartGates.hpp.
+    // terms (Backtest/SuiteStartGates.hpp): a build that trains, the side's
+    // verdict, the CSV fields applied as typed, a horizon, the suite free,
+    // the samples.
     const SuiteGate train_gate =
         StartGate_TrainModel(START_GATE_BUILD_TRAINS, side_gate, state->ui_horizon_count,
-                             RunControl_DatasetSamples(run_control));
+                             RunControl_DatasetSamples(run_control), csv_bad);
     const bool can_train = SuiteGate_Open(&train_gate);
 
     // v5.11.43 — auto-route by horizon count. Single-horizon (count<=1)
@@ -5740,14 +5912,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // Same validation as Collect Multi-Horizon (above), against the CSV's
     // horizon count. v5.13.1.B — the label_kind CSV
     // follows the same rule. All three are terms of the gate (D-507;
-    // Backtest/SuiteStartGates.hpp) — the label-kind misalignment used to
-    // grey the button with no reason shown.
+    // Backtest/SuiteStartGates.hpp), after the CSV fields applied as typed
+    // (E.1.3 MP-6 step 10.5) — the label-kind misalignment used to grey the
+    // button with no reason shown.
     int train_tp_n = state->ui_tp_per_horizon_count;
     int train_sl_n = state->ui_sl_per_horizon_count;
     int train_lk_n = state->ui_label_kind_per_horizon_count;
     const SuiteGate mh_train_gate =
         StartGate_TrainMultiHorizon(START_GATE_BUILD_TRAINS, side_gate, state->ui_horizon_count, train_tp_n, train_sl_n,
-                                    train_lk_n, RunControl_DatasetSamples(run_control));
+                                    train_lk_n, RunControl_DatasetSamples(run_control), csv_bad);
     const bool mh_can_train = SuiteGate_Open(&mh_train_gate);
     if (!single_horizon_mode) {
     if (!mh_can_train) ImGui::BeginDisabled();
@@ -5759,7 +5932,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Train N models in one click — one per horizon in Horizons CSV.\n"
         "\n"
         "Per-horizon TP/SL via the CSV inputs above (broadcast-or-match\n"
-        "rule: empty/single value broadcasts; N values map positional).\n"
+        "rule: a single value broadcasts — refused when the horizons' units\n"
+        "differ; N values map positionally).\n"
         "\n"
         "v5.13.5 — per-horizon Label Kind via 'Label Kind CSV' input:\n"
         "  Empty: all horizons use the Label Type combo above\n"
@@ -5780,7 +5954,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Each model gets full WF + held-out + auto-stamp. Per-horizon\n"
         "results table renders below.\n"
         "\n"
-        "Each horizon recomputes labels with that label_forward_ticks value\n"
+        "Each horizon recomputes its labels at its own horizon\n"
         "and trains a separate model (D-431 nested family layout).\n"
         "Operator manually picks which horizon to deploy (or relies on\n"
         "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
