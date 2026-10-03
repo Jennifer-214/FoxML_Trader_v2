@@ -274,6 +274,9 @@ int main(int argc, char *argv[]) {
     // snapshot populated by backtest worker — dashboard panels read this
     static TUISnapshot suite_snap = {};
     run_control.snapshot = &suite_snap;
+    // what the panels draw: a copy of the run's snapshot, taken while Run Control's outputs are at rest (E.1.3 MP-6
+    // step 10.3 — the worker fills suite_snap at its run's end with no seqlock; RunControl_AdoptSnapshot)
+    static TUISnapshot suite_snap_view = {};
 
     // comparison state (overlay multiple runs)
     static ComparisonState comparison;
@@ -426,11 +429,16 @@ int main(int argc, char *argv[]) {
         // backtest panels (right side)
         GUI_Panel_DataBrowser(&data_panel);
         GUI_Panel_RunControl(&run_control, &data_panel, &launch_failure);
-        GUI_Panel_Results(&run_control.results);
-        GUI_Panel_Comparison(&comparison, &run_control.results);
-        // v5.11.57 — pass cfg for Verify Stamp HMAC verification (uses
-        // cfg.auto_stamp_secret if set, falls back to devmode otherwise).
-        GUI_Panel_PastRuns(&past_runs, &run_control.results.config_used);
+        // E.1.3 MP-6 step 10.3 (F8) — the Run Control results are a run's to write while it runs: the panels that show
+        // them get them only through the one predicate (a finished run that ran), never every frame mid-run; the GUI
+        // thread is the lease's only acquirer, so no run can start between this check and the panel's reads
+        const BacktestResults *rc_results = RunControl_HasRun(&run_control) ? &run_control.results : nullptr;
+        GUI_Panel_Results(rc_results);
+        GUI_Panel_Comparison(&comparison, rc_results);
+        // v5.11.57 — Verify Stamp verifies with cfg.auto_stamp_secret (devmode while there is none): the panel's own
+        // copy, refreshed while Run Control's outputs are at rest and held through a run (E.1.3 MP-6 step 10.3)
+        PastRuns_AdoptVerifySecret(&past_runs, &run_control);
+        GUI_Panel_PastRuns(&past_runs);
         GUI_Panel_Optimizer(&optimizer, &data_panel, &launch_failure);
         GUI_Panel_Training(&training, &run_control, &data_panel, &launch_failure);
         GUI_Panel_LogViewer(&log_viewer);
@@ -438,10 +446,14 @@ int main(int argc, char *argv[]) {
         // scope, whichever panel's button failed (Backtest/SuiteModal.hpp)
         LaunchFailure_Modal(&launch_failure);
 
+        // every panel below draws the run's snapshot through the GUI's copy (Class 63 — F4 of the step-10.3 review):
+        // refreshed while Run Control's outputs are at rest, held through a run
+        RunControl_AdoptSnapshot(&suite_snap_view, &run_control);
+
         // dashboard panels — show backtest engine state (reuse from live GUI)
         if (RunControl_HasRun(&run_control)) {
             uint64_t suite_start = (uint64_t)time(NULL); // just for uptime display
-            GUI_RenderDashboard(&suite_snap, suite_start);
+            GUI_RenderDashboard(&suite_snap_view, suite_start);
         }
 
         // settings (config editing — reuse existing panel)
@@ -452,9 +464,9 @@ int main(int argc, char *argv[]) {
 
         // v5.8.6b: engine header — version + feature registry hash + format
         // v5.9.0c: pass snap so cfg path renders too
-        tt::EngineHeader_Render(&suite_snap);
+        tt::EngineHeader_Render(&suite_snap_view);
         // v5.9.0b: ML status — per-core load state, prediction context, NaN counters
-        tt::MLStatus_Render(&suite_snap);
+        tt::MLStatus_Render(&suite_snap_view);
 
         // trade history (reuse existing panel — reads backtest CSV)
         if (RunControl_HasRun(&run_control)) {
@@ -475,10 +487,10 @@ int main(int argc, char *argv[]) {
         ChartState cs = {};
         ChartState_Prepare(&cs, &csnap, &chart_settings);
         // price chart without live drag (pass NULL for shared state pointer)
-        GUI_PriceChart(&cs, &suite_snap, &trades, &chart_settings, &candle_acc, NULL);
-        GUI_VolumeChart(&cs, &suite_snap, &chart_settings);
+        GUI_PriceChart(&cs, &suite_snap_view, &trades, &chart_settings, &candle_acc, NULL);
+        GUI_VolumeChart(&cs, &suite_snap_view, &chart_settings);
         GUI_EquityChart(&trades);
-        GUI_LivePnLChart(&suite_snap);
+        GUI_LivePnLChart(&suite_snap_view);
 
         // update window title with backtest status
         if (SuiteJob_Running(&run_control.job)) {

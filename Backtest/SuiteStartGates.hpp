@@ -132,6 +132,12 @@ inline void StartGate_NeedBuildTrains(SuiteGate* g, bool build_trains) {
 inline void StartGate_NeedFiles(SuiteGate* g, int selected_files) {
     SuiteGate_Need(g, selected_files > 0, "Select data files first");
 }
+// E.1.3 MP-6 step 10.3 (F2 of its review) — the Horizons CSV is the panel's ONE source of label horizons: a start with
+// none typed refuses, where single mode used to label at the last value typed (shown nowhere) and multi mode named a
+// cfg.horizon_list fallback that no longer exists.
+inline void StartGate_NeedHorizons(SuiteGate* g, int horizons) {
+    SuiteGate_Need(g, horizons > 0, "Type a horizon in Horizons (CSV)");   // no "above": it sits below the Collect buttons
+}
 // side_gate is Training_SideLabelGate's verdict over the label set (0 refuse, 1 warn, 2 ok); the panel says why above.
 // Anything but a warn or an ok refuses.
 inline void StartGate_NeedSideAccepts(SuiteGate* g, int side_gate) {
@@ -245,14 +251,15 @@ inline SuiteGate StartGate_GridSearch(int selected_files, int axes, int max_axes
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [GUI]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[Collect Features' gate — the files, the training side's verdict on the label (E.1.2.C F3), then the suite free]
+// [OVERVIEW]_[Collect Features' gate — the files, the training side's verdict on the label (E.1.2.C F3), a horizon typed (the labels' horizon), then the suite free]
 //======================================================================
 // [CODE]
 //======================================================================
-inline SuiteGate StartGate_CollectFeatures(int selected_files, int side_gate) {
+inline SuiteGate StartGate_CollectFeatures(int selected_files, int side_gate, int horizons) {
     SuiteGate g;
     StartGate_NeedFiles(&g, selected_files);
     StartGate_NeedSideAccepts(&g, side_gate);
+    StartGate_NeedHorizons(&g, horizons);
     SuiteGate_NeedLease(&g);
     return g;
 }
@@ -274,7 +281,7 @@ inline SuiteGate StartGate_CollectFeatures(int selected_files, int side_gate) {
 inline SuiteGate StartGate_CollectMultiHorizon(int selected_files, int horizons, int tp_n, int sl_n, int side_gate) {
     SuiteGate g;
     StartGate_NeedFiles(&g, selected_files);
-    SuiteGate_Need(&g, horizons > 0, "(type the horizons in Horizons (CSV) to collect)");
+    StartGate_NeedHorizons(&g, horizons);
     StartGate_NeedAlignedTpSl(&g, horizons, tp_n, sl_n);
     StartGate_NeedSideAccepts(&g, side_gate);
     SuiteGate_NeedLease(&g);
@@ -291,7 +298,7 @@ inline SuiteGate StartGate_CollectMultiHorizon(int selected_files, int horizons,
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [GUI] [ML]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[Train Model's gate — a build that trains, the training side's verdict on the label, the suite free, then the samples a collect must produce]
+// [OVERVIEW]_[Train Model's gate — a build that trains, the training side's verdict on the label, a horizon typed (the one it trains), the suite free, then the samples a collect must produce]
 //======================================================================
 // E.1.2.C — the side term is the half F3 was missing: the verdict used to reach only the two COLLECT gates, so a
 // REFUSE-tier label could still be TRAINED from samples an earlier collect had left behind (collect at side=Buy, flip
@@ -299,10 +306,11 @@ inline SuiteGate StartGate_CollectMultiHorizon(int selected_files, int horizons,
 //======================================================================
 // [CODE]
 //======================================================================
-inline SuiteGate StartGate_TrainModel(bool build_trains, int side_gate, int samples) {
+inline SuiteGate StartGate_TrainModel(bool build_trains, int side_gate, int horizons, int samples) {
     SuiteGate g;
     StartGate_NeedBuildTrains(&g, build_trains);
     StartGate_NeedSideAccepts(&g, side_gate);
+    StartGate_NeedHorizons(&g, horizons);
     SuiteGate_NeedLease(&g);
     StartGate_NeedTrainSamples(&g, samples);
     return g;
@@ -330,7 +338,7 @@ inline SuiteGate StartGate_TrainMultiHorizon(bool build_trains, int side_gate, i
     SuiteGate g;
     StartGate_NeedBuildTrains(&g, build_trains);
     StartGate_NeedSideAccepts(&g, side_gate);
-    SuiteGate_Need(&g, horizons > 0, "(set Horizons CSV above OR cfg.horizon_list to enable)");
+    StartGate_NeedHorizons(&g, horizons);
     StartGate_NeedAlignedTpSl(&g, horizons, tp_n, sl_n);
     SuiteGate_NeedFix(&g, StartGate_BroadcastsOrMatches(lk_n, horizons),
                       "(misaligned: Label Kind=%d, horizons=%d — need 1 or %d)", lk_n, horizons, horizons);

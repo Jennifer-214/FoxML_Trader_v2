@@ -1539,7 +1539,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
     const int   horizon_count = req.horizon_count;
     const char* run_name      = req.run_name;
     if (horizon_count <= 0) {
-        TrainingWorkers_Refuse(sink, "Multi-horizon: cfg.horizon_list empty; set horizons first.");
+        TrainingWorkers_Refuse(sink, "Multi-horizon: the request names no horizons — refused.");   // the panel's gate asks first
         return;
     }
     if (horizon_count > HMAX) {

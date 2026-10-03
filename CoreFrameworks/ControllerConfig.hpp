@@ -1138,12 +1138,13 @@ template <unsigned F> struct ControllerConfig {
   // node_0_model_dir=models/aggressive/
   // node_model_dir: declared via FOREACH_MANUAL_PER_NODE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // v5.10.0a.G.6 — per-core multi-horizon ensemble cfg (string-typed, can't
-  // fit X-macro pattern). Default empty = inherit from global cfg.horizon_list /
-  // cfg.ensemble_blend_mode. Auto-detect (G.5) takes priority over both;
+  // fit X-macro pattern). Default empty = inherit from the global
+  // cfg.ensemble_blend_mode. Auto-detect (G.5) takes priority;
   // these are overrides for operators who want explicit per-core control
   // (e.g., core 0 deploys 5-horizon ensemble while core 1 stays single-model).
   //
-  //   node_0_horizon_list=100,500,1000        # CSV; per-core horizon set
+  //   node_0_horizon_list=100,500,1000        # RETIRED (E.1.3 MP-6 step 10.3) — never read: the
+  //                                           # ensemble discovers each node's horizons from disk
   //   node_0_ensemble_blend_mode=weighted     # selection | weighted (default)
   //   node_0_disabled_horizons=100            # CSV; kill-switch per horizon
   //                                           # (skips predict; bandit weight frozen)
@@ -1247,21 +1248,16 @@ template <unsigned F> struct ControllerConfig {
   // to exceed; no hard refuse since the streaming label compute closes
   // OOM regardless). Operator hint when sizing the box.
 
-  // v5.10.0a Item #4 — multi-horizon training. Comma-separated list of
-  // forward-tick horizons; Train Model worker iterates and trains one
-  // model per horizon. Empty (default) = single-horizon (uses
-  // label_forward_ticks from per-run state). Cfg field rather than
-  // RunConfig because operator typically standardizes horizons across
-  // training experiments.
-  // Example: horizon_list=100,500,1000,5000 → 4 trainings, saved as
-  // <model_dir>/horizon_100/<role>.json etc.
-  // LITE in v5.10.0a: trains + saves N models; operator manually picks
-  // one to deploy. Ensemble inference (load all N at runtime, blend
-  // predictions) deferred to v5.10.0a.x — needs stamp body extension +
-  // multi-model load in NodeModelZoo, both genuinely complex.
+  // v5.10.0a Item #4 — multi-horizon training's cfg list. RETIRED at E.1.3 MP-6 step 10.3: nothing reads it. The
+  // suite's Training panel takes its horizons from its own Horizons (CSV) — its last fallback to this list went at
+  // that step — and the engine's ensemble discovers its horizons from disk (G.5). The `horizon_list` key is an H21
+  // tombstone (the parser warns that it does nothing and stores nothing); the storage stays only because this struct
+  // is fingerprinted raw and size-pinned below — deleting it is a layout + fingerprint-epoch change (the locked-cfg
+  // exception: the operator's call). HORIZON_LIST_MAX stays live: it caps the suite's horizon grid
+  // (TrainingPanelState::PANEL_HORIZON_MAX, the training core's HMAX) and the label batch.
   static constexpr int HORIZON_LIST_MAX = 8;
-  int      horizon_list[HORIZON_LIST_MAX];  // 0 = unused slot
-  int      horizon_count;                    // number of populated slots
+  int      horizon_list[HORIZON_LIST_MAX];  // RETIRED storage — zeroed by the default, never written or read
+  int      horizon_count;                    // RETIRED storage — likewise
 
   // v5.10.0a.G.6 — global ensemble cfg (per-core overrides via
   // node_N_ensemble_blend_mode / node_N_horizon_list / node_N_disabled_horizons).
@@ -2115,9 +2111,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // wf_split_max_gb MATCH — registry INT(8) == manual; DELETED.
   // held_out_max_gb DIFFER — registry INT(8); manual=4 (tighter operator ceiling).
   cfg.held_out_max_gb         = 4;   // KEEP — registry INT(8) too loose; held-out fold is smaller cohort
-  // v5.10.0a — multi-horizon training. Default empty = single-horizon
-  // (Train Model uses TrainingPanel's label_forward_ticks). Operator opts
-  // in by setting cfg.horizon_list=100,500,1000.
+  // RETIRED storage (horizon_list — see the field): zeroed, never read.
   for (int i = 0; i < ControllerConfig<F>::HORIZON_LIST_MAX; ++i)
       cfg.horizon_list[i] = 0;
   cfg.horizon_count = 0;
@@ -3105,29 +3099,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.thompson_rng_seed = v;
         continue;
     }
-    // v5.10.0a — horizon_list CSV parser. Comma-separated ints, max
-    // HORIZON_LIST_MAX entries. Caller can't use CFG_PARSE_INT (single
-    // int) or CFG_PARSE_FPN. Custom branch.
+    // horizon_list — RETIRED at E.1.3 MP-6 step 10.3 (an H21 tombstone: the key stays recognised and is never reused
+    // for another meaning). Nothing reads it — the suite's Training panel takes its horizons from its Horizons (CSV),
+    // the engine's ensemble discovers its horizons from disk (G.5) — so a line setting it says so, instead of being
+    // parsed into storage that changes nothing.
     if (strcmp(key, "horizon_list") == 0) {
-        int n = 0;
-        const char* p = val;
-        while (*p && n < ControllerConfig<F>::HORIZON_LIST_MAX) {
-            // skip whitespace + commas
-            while (*p == ' ' || *p == '\t' || *p == ',') p++;
-            if (!*p) break;
-            char* end = NULL;
-            long v = strtol(p, &end, 10);
-            if (end == p) break;  // parse failure
-            if (v > 0 && v <= 1000000)  // sanity: 1 to 1M ticks
-                cfg.horizon_list[n++] = (int)v;
-            p = end;
-        }
-        cfg.horizon_count = n;
-        if (n == 0) {
-            fprintf(stderr, "[cfg] horizon_list='%s' parsed 0 valid horizons; "
-                    "expected CSV like '100,500,1000'. Multi-horizon disabled.\n",
-                    val);
-        }
+        fprintf(stderr, "[cfg] WARN: horizon_list='%s' is retired and does nothing — the suite takes its horizons from "
+                        "the Training panel's Horizons (CSV), and the engine discovers its ensemble's horizons from disk; "
+                        "remove the line\n", val);
         continue;
     }
     // v5.15.5.F.4c — held_out_gate_strict migrated to FOREACH_CFG_FIELD (KIND_INT; tri-state clamp [-1, 1]).
@@ -3343,13 +3322,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 #undef _PARSE_OV_BITMAP_ROW_risk
 #undef _PARSE_OV_BITMAP_ROW_ops
         // v5.10.0a.G.6 — string-typed per-core ensemble fields. X-macro
-        // doesn't support string types; explicit branches here. All three
-        // default empty (inherit global).
+        // doesn't support string types; explicit branches here. Default
+        // empty (inherit global).
+        // node_N_horizon_list — RETIRED at E.1.3 MP-6 step 10.3 (an H21 tombstone, as the global horizon_list): it was
+        // parsed into storage nothing ever read — the ensemble discovers each node's horizons from disk (G.5)
         if (strcmp(suffix, "horizon_list") == 0) {
-            strncpy(cfg.node_horizon_list[node_idx], val,
-                    sizeof(cfg.node_horizon_list[node_idx]) - 1);
-            cfg.node_horizon_list[node_idx][
-                sizeof(cfg.node_horizon_list[node_idx]) - 1] = '\0';
+            fprintf(stderr, "[cfg] WARN: node_%d_horizon_list='%s' is retired and does nothing — the ensemble discovers "
+                            "its horizons from disk; remove the line\n", node_idx, val);
             continue;
         }
         if (strcmp(suffix, "ensemble_blend_mode") == 0) {

@@ -1061,7 +1061,7 @@ static constexpr int LABEL_DEFAULT_FORWARD_TICKS = 1000;
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [ML]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the horizon a label request actually labels at — its own when positive, else the label pass's default (LABEL_DEFAULT_FORWARD_TICKS); the pass, Full Validation's gate and the panel's defaults read this one rule]
+// [OVERVIEW]_[the horizon a label request actually labels at — its own when positive, else the label pass's default (LABEL_DEFAULT_FORWARD_TICKS); the pass and the run's record (BacktestRunConfig_LabelsHorizon — Full Validation's gate, the purge) read this one rule]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1103,8 +1103,9 @@ static inline int Label_PurgeCovering(int resolved, bool explicit_override, int 
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the horizon a run's collected labels were made with, read from its record — 0 when it made none to compare (it collected nothing, or its collect produced no samples: a refused cfg, a failed allocation)]
 //======================================================================
-// Full Validation's gate and the walk-forward purge read it (D-507 third review, A2 / A3). The record is written by the
-// run's worker under the lease: read it at a click, or only while the lease is free.
+// Full Validation's gate and the walk-forward purge read it (D-507 third review, A2 / A3). The record is written by a
+// Run Control run's worker: read it at a click, or only while Run Control's outputs are at rest (RunControl_AtRest,
+// E.1.3 MP-6 step 10.3).
 //======================================================================
 // [CODE]
 //======================================================================

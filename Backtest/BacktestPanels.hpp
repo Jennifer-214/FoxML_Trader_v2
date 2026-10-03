@@ -276,12 +276,13 @@ struct RunControlState {
     SuiteJob job;
     // the last run's record: the request it started from, written by its worker at its start, under the lease (D-507 —
     // never by a click); a multi-horizon collect's label pass then names the labels it left in the results
-    // (BacktestRunConfig_RecordLabels). The GUI reads it only with the lease free — in a start's click behind its gate,
-    // and Full Validation's horizon term — and only this thread takes the lease, so no worker is writing it then
+    // (BacktestRunConfig_RecordLabels). The GUI reads it only at rest — in a start's click behind its gate (the lease
+    // free: only this thread takes it), and through RunControl_AtRest (the purge display, Full Validation's labels'
+    // horizon) — so no worker is writing it then
     BacktestRunConfig run_config;
     BacktestResults results;
     CandleAccumulator *candle_acc;
-    TUISnapshot *snapshot;       // populated by worker after run completes
+    TUISnapshot *snapshot;       // filled by the worker at its run's end (no seqlock) — the panels draw the GUI's copy (RunControl_AdoptSnapshot)
     SamplesSnapshot stats_snapshot; // distribution stats — see comment above struct
     // E.1.2.G — per-horizon collect distributions (operator ask 2026-09-01: "can
     // we display the breakdown per horizon instead of just the last one"). The
@@ -327,6 +328,33 @@ static_assert(alignof(RunControlState) == 64, "RunControlState's alignment chang
 // the dashboard, the trade history, the window title): a refused or failed run is done but has no results to show.
 static inline bool RunControl_HasRun(const RunControlState *rc) {
     return SuiteJob_Done(&rc->job) && rc->last_status == BACKTEST_RUN_DONE;
+}
+
+// Run Control's outputs AT REST — true while no Run Control run can be writing them (F8; E.1.3 MP-6 step 10.3): its
+// results, its run's record (run_config), its snapshot, the collect's per-horizon rows and the samples line. Its two
+// workers (the backtest, the collect) are their only writers — every other worker reads the dataset through a const
+// pointer (CS-271) and writes none of them — and the job's `running` is set on this thread before the spawn and cleared
+// after the worker's last write (SuiteWorker_ReleaseOnExit), so it is exact. EVERY read of those outputs that is not a
+// results display (those read RunControl_HasRun) goes through it: a gate's sample count, the purge and the labels'
+// horizon, the collect's table, the GUI's copies of the snapshot and of Verify Stamp's secret. Evaluated at each read,
+// never kept for a frame: a start clicked earlier in the same frame has already begun its job. A run of another job (a
+// training run, a sweep) leaves them at rest — it writes none of them, so nothing it does hides them.
+static inline bool RunControl_AtRest(const RunControlState *rc) {
+    return !SuiteJob_Running(&rc->job);
+}
+
+// The collected dataset's sample count for a start gate drawn every frame — 0 while Run Control's outputs are not at
+// rest. Every gate checks the lease before its samples, so the 0 never changes the reason a button shows.
+static inline int RunControl_DatasetSamples(const RunControlState *rc) {
+    return RunControl_AtRest(rc) ? rc->results.sample_count : 0;
+}
+
+// The GUI's copy of the run's snapshot — what every panel that draws it reads (F4 of the step-10 review; Class 63): the
+// worker fills Run Control's snapshot at its run's end, a memset and then field writes with no seqlock, so a panel
+// reading it meanwhile could draw half of each. Copied each frame while Run Control's outputs are at rest, held through
+// a run (63 KB a frame — far less than the panels' own draw).
+static inline void RunControl_AdoptSnapshot(TUISnapshot *view, const RunControlState *rc) {
+    if (view && rc->snapshot && RunControl_AtRest(rc)) memcpy(view, rc->snapshot, sizeof(*view));
 }
 
 //======================================================================
@@ -614,9 +642,9 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     free(args);
     RunControl_ForgetDisplay(rc);
 
-    // 1. Collect features ONCE. label_forward_ticks at this point is
-    //    whatever was set when the button was clicked — we'll overwrite
-    //    labels per horizon afterwards.
+    // 1. Collect features ONCE. The request's label_forward_ticks is the
+    //    CSV's first horizon at the click — we'll overwrite labels per
+    //    horizon afterwards.
     rc->last_status = Backtest_Run(lease, &rc->results, &rc->run_config,
                                    &rc->job.progress, &rc->job.cancel,
                                    rc->candle_acc, rc->snapshot);
@@ -659,17 +687,18 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
             if (!tmp_bufs[h]) { bt_ok = 0; break; }
             bt[h].out_labels = tmp_bufs[h];
         }
+        int label_rc = -1;   // samples labelled, or -1 = the pass aborted (it logged why; step 10.7 makes that fail closed)
         if (!bt_ok) {
             // Pathological small-alloc failure: keep the post-state contract
             // (last horizon into results.labels) and drop the earlier
             // horizons' diagnostics rather than the whole collect.
             fprintf(stderr, "[collect-mh] batch buffer alloc failed; "
                             "labeling last horizon only\n");
-            Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
-                                        &bt[horizon_count - 1], 1);
+            label_rc = Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
+                                                   &bt[horizon_count - 1], 1);
         } else {
-            Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
-                                        bt, horizon_count);
+            label_rc = Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
+                                                   bt, horizon_count);
         }
         // the record describes the labels the results now hold — the LAST horizon's, not the click's position 0:
         // Full Validation, Walk-Forward and the HP sweep take the labels' identity from it (D-507 review F1; until
@@ -683,13 +712,16 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
             rc->results.stats.nan_labels_total   += bt[h].nan_total;
             rc->results.stats.nan_labels_dropped += bt[h].nan_dropped;
         }
+        // The label pass above takes no cancel: once begun it runs to its end, and the dataset holds the last horizon's
+        // labels — what Walk-Forward, the HP sweep and Full Validation use. So its summaries always finish (each one O(n),
+        // milliseconds): a cancel here used to leave k < N rows, the last horizon's among the missing, so the table
+        // described the dataset's labels nowhere (the step-9.2 review's A4; E.1.3 MP-6 step 10.4). (A failed buffer
+        // labels only the last horizon and an aborted pass labels part of one — both said above; neither gets a table.)
+        if (rc->job.cancel && bt_ok && label_rc >= 0)
+            fprintf(stderr, "[collect-mh] cancel came during the label pass, which cannot stop once begun — all %d "
+                            "horizons were labelled; summarising them\n", horizon_count);
         int snaps_filled = 0;
         for (int h = 0; h < horizon_count; ++h) {
-            if (rc->job.cancel) {
-                fprintf(stderr, "[collect-mh] cancelled at horizon %d/%d\n",
-                        h, horizon_count);
-                break;
-            }
             if (!bt_ok && h < horizon_count - 1) continue;  // no buffer to read
 
             // E.1.2.G — the per-horizon DISPLAY snapshot, from THIS horizon's
@@ -1061,7 +1093,9 @@ static inline ImVec4 ResultsPnlColor(double v) {
 static inline void GUI_Panel_Results(const BacktestResults *results) {
     ImGui::Begin("Results");
 
-    if (results->stats.total_trades == 0) {
+    // NULL = no finished run to show (none yet, refused, or one in progress — the caller passes them only through
+    // RunControl_HasRun, E.1.3 MP-6 step 10.3)
+    if (!results || results->stats.total_trades == 0) {
         ImGui::TextDisabled("No backtest results yet. Run a backtest first.");
         ImGui::End();
         return;
@@ -1339,16 +1373,19 @@ struct PastRunsState {
     // to the row's transient context). Track pending row index here;
     // single modal renders at window scope after EndTabBar.
     int     pending_delete_idx;  // -1 = no delete pending
+    // E.1.3 MP-6 step 10.3 (F6 of its review) — the secret Verify Stamp verifies with: the GUI's copy of the last Run
+    // Control run's auto_stamp_secret (PastRuns_AdoptVerifySecret). Empty until a run has loaded a config = devmode.
+    char    verify_secret[sizeof(ControllerConfig<BACKTEST_FP>::auto_stamp_secret)];
 };
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-30]
-// [SIZE]_[401712B]
+// [UPDATED]_[2026-10-03]
+// [SIZE]_[401840B]
 // [ALIGN]_[16]
-// [CACHE_LINES]_[6277]
+// [CACHE_LINES]_[6279]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[PastRunsState]
@@ -1379,6 +1416,29 @@ static inline void PastRuns_Init(PastRunsState *s) {
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[PastRuns_Init]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[PastRuns_AdoptVerifySecret]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[copy the last Run Control run's auto_stamp_secret into Past Runs' own verify_secret while Run Control's outputs are at rest; held through a run — called each frame, before the panel]
+//======================================================================
+// F6 of the step-10.3 review: the panel used to hold the run's whole config for this one field, so the button had to
+// wait out a run (minutes on a large corpus) or race its rewrite. A copy keeps it usable mid-run with the secret it had
+// a frame before the run began.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void PastRuns_AdoptVerifySecret(PastRunsState *s, const RunControlState *rc) {
+    if (s && RunControl_AtRest(rc))
+        snprintf(s->verify_secret, sizeof(s->verify_secret), "%s", rc->results.config_used.auto_stamp_secret);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PastRuns_AdoptVerifySecret]
 //======================================================================
 
 //======================================================================
@@ -1885,16 +1945,15 @@ static inline const char* PastRun_MetricLabel(int expected_num_classes) {
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[render the Past Runs panel — the run table + per-run detail + delete/compare actions]
 //======================================================================
-// v5.11.57 — `cfg_for_verify` exposes ControllerConfig (typically
-// &run_control->results.config_used) so Verify Stamp can use the
-// real cfg.auto_stamp_secret for HMAC-verification (not just devmode).
-// Pass NULL to keep pre-v5.11.57 behavior (devmode-only).
+// v5.11.57 — Verify Stamp uses the real cfg.auto_stamp_secret for HMAC verification (not just devmode). Since E.1.3 MP-6
+// step 10.3 the panel reads its own copy (s->verify_secret, PastRuns_AdoptVerifySecret) instead of holding the last
+// run's whole config, which a Run Control run rewrites (F8; F6 of its review) — so the button works mid-run too.
+// Empty until a run has loaded a config: the verdict then says devmode.
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void GUI_Panel_PastRuns(PastRunsState *s,
-                                        const ControllerConfig<BACKTEST_FP> *cfg_for_verify = nullptr) {
+static inline void GUI_Panel_PastRuns(PastRunsState *s) {
     ImGui::Begin("Past Runs");
     SectionHeader("PAST RUNS");
 
@@ -2628,15 +2687,14 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                     "barrier.json", "buy_signal.json", "regime.json", "exit.json" };
                 static const char *vs_xgb_roles[] = {
                     "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",  "exit.xgb" };
-                // v5.11.57 — use cfg.auto_stamp_secret if available
-                // (caller passed cfg_for_verify). Empty fallback =
-                // devmode (accepts any signature). Operator's engine
-                // load uses the same secret; matching path here means
-                // suite-side verify reflects what the engine will do.
-                const char *verify_secret =
-                    (cfg_for_verify && cfg_for_verify->auto_stamp_secret[0])
-                        ? cfg_for_verify->auto_stamp_secret
-                        : "";
+                // v5.11.57 — use cfg.auto_stamp_secret: the panel's own copy of
+                // it (PastRuns_AdoptVerifySecret — E.1.3 MP-6 step 10.3). Empty =
+                // devmode (accepts any signature). This is the backtest config's
+                // secret; the engine verifies with engine.cfg's, and a stamp signed
+                // with the Training panel's own secret field (CS-277) verifies only
+                // where the two agree — E.1.3 MP-6 step 10.6 aligns this check
+                // with the signing rule.
+                const char *verify_secret = s->verify_secret;
                 char model_path[640];
                 int n_checked = 0, n_ok = 0, n_xgb_only = 0;
                 char fail_role[20] = {0};
@@ -2699,7 +2757,10 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                                                       : "unknown",
                         (unsigned long)first_ok_vr.feature_registry_hash);
                 } else {
-                    r->stamp_verify_state = 0;
+                    // a FAIL is -1: the Stamp column draws it as a red ✗ and the "Stamp FAIL" filter selects it — 0 (the
+                    // value here before E.1.3 MP-6 step 10.3) drew a failed stamp as "?, not yet verified" and hid it
+                    // from that filter
+                    r->stamp_verify_state = -1;
                     r->stamp_verify_has_full = 0;  // FAIL reason IS the message
                     snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
                         "%d/%d roles OK; %s FAIL — %s",
@@ -2945,8 +3006,8 @@ static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResu
 static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestResults *current) {
     ImGui::Begin("Comparison");
 
-    // save current run
-    if (current->stats.total_trades > 0) {
+    // save current run — NULL = no finished run (the caller passes one only through RunControl_HasRun)
+    if (current && current->stats.total_trades > 0) {
         static char save_label[64] = "Run";
         ImGui::InputText("Label", save_label, sizeof(save_label));
         ImGui::SameLine();
@@ -3504,7 +3565,6 @@ struct TrainingPanelState {
     // decision: it generalizes across venues instead of tracking one engine fee
     // cfg. 0 = fee-blind labels (pre-s5 behavior).
     float label_roundtrip_fee_pct;
-    int label_forward_ticks;
     // results
     char model_path[256];
     // the training run's status line — the run (its sink) writes it, the GUI reads it through TrainingStatusLine_Read:
@@ -3548,9 +3608,10 @@ struct TrainingPanelState {
     // v5.10.0a-bugfix2 — horizons editable IN PANEL via CSV input
     // (operator no longer needs to edit cfg.horizon_list + reload).
     // ui_horizon_csv is the operator-typed string (e.g. "100,500,1000");
-    // ui_horizon_list/_count are parsed on each render. cfg.horizon_list
-    // still works as a fallback if ui_horizon_csv is empty (back-compat
-    // for operators who already set cfg).
+    // ui_horizon_list/_count are parsed on each render — the panel's ONE
+    // source of horizons (the cfg.horizon_list fallback, which read the
+    // last run's config while a collect rewrote it, went at E.1.3 MP-6
+    // step 10.3).
     SuiteJob        mh_job;                 // both Train buttons (D-506): progress = horizons done (1..N) of total, set by the run
     volatile int    mh_current_horizon;     // current horizon ticks
     char            ui_horizon_csv[128];    // operator-typed; parsed → ui_horizon_*
@@ -3641,9 +3702,9 @@ static_assert(alignof(TrainingPanelState) == 64, "TrainingPanelState's alignment
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-03]
-// [SIZE]_[412416B]
+// [SIZE]_[412352B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6444]
+// [CACHE_LINES]_[6443]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
@@ -3684,7 +3745,6 @@ static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
         if (st->ui_horizon_list[i] > mx) mx = st->ui_horizon_list[i];
     }
     if (mx > 0) return mx;
-    if (st->label_forward_ticks > 0) return st->label_forward_ticks;  // single-horizon flows
     return LABEL_DEFAULT_FORWARD_TICKS;  // no horizons known — the label pass's own default
 }
 //======================================================================
@@ -3702,14 +3762,19 @@ static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
 //======================================================================
 // The Horizons CSV is the next collect's input and can be edited after one: shrink it from 15000 to 1000 and an auto
 // purge of 1000 ran against 15000-tick labels — the leak Training_ResolvePurgeHorizon's own comment names (D-507 third
-// review, A2). Reads the run's record: call it at a click, or only while the lease is free.
+// review, A2). With no horizon typed and no override, the labels' own horizon IS the purge — the panel's side would
+// otherwise be LABEL_DEFAULT_FORWARD_TICKS, a constant nobody chose that over-purges a short-horizon run's folds
+// (E.1.3 MP-6 step 10.3's second review, finding 8 — the deleted label_forward_ticks used to stand there). Reads the
+// run's record: call it at a click, or only while Run Control's outputs are at rest (RunControl_AtRest).
 //======================================================================
 // [CODE]
 //======================================================================
 static inline int Training_ResolvePurgeForLabels(const TrainingPanelState *st, const BacktestRunConfig *rec,
                                                  const BacktestResults *data) {
-    return Label_PurgeCovering(Training_ResolvePurgeHorizon(st), st && st->wf_horizon_ticks > 0,
-                               BacktestRunConfig_LabelsHorizon(rec, data ? data->sample_count : 0));
+    const bool explicit_override = st && st->wf_horizon_ticks > 0;
+    const int  labels_horizon    = BacktestRunConfig_LabelsHorizon(rec, data ? data->sample_count : 0);
+    if (st && !explicit_override && st->ui_horizon_count == 0 && labels_horizon > 0) return labels_horizon;
+    return Label_PurgeCovering(Training_ResolvePurgeHorizon(st), explicit_override, labels_horizon);
 }
 //======================================================================
 // [END_CODE]
@@ -3733,7 +3798,7 @@ static inline BacktestLabelRequest TrainingPanel_CollectLabels(const TrainingPan
     BacktestLabelRequest l{};
     l.label_type        = Label_ResolveKindForHorizon(state->ui_label_kind_per_horizon,
                                                       state->ui_label_kind_per_horizon_count, state->label_type, 0);
-    l.forward_ticks     = state->label_forward_ticks;
+    l.forward_ticks     = state->ui_horizon_count >= 1 ? state->ui_horizon_list[0] : 0;   // the CSV's first (a start's gate requires one); 0 = the label pass's default
     l.tp_pct            = state->label_tp_pct;
     l.sl_pct            = state->label_sl_pct;
     l.roundtrip_fee_pct = state->label_roundtrip_fee_pct;
@@ -3862,7 +3927,6 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     // generic "run" surfaces less misleading than a specific-looking number.
     // Worker appends "_horizon_<H>" so even default produces "run_horizon_*".
     strncpy(state->run_name, "run", sizeof(state->run_name) - 1);
-    state->label_forward_ticks = LABEL_DEFAULT_FORWARD_TICKS;
     strncpy(state->model_path, "models/buy_signal.json", sizeof(state->model_path) - 1);
     // walk-forward defaults (FoxML battle-tested values)
     state->wf_n_splits = 5;
@@ -3895,10 +3959,10 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     // v5.10.0a.G.1 — Multi-Horizon training state init
     state->mh_current_horizon = 0;
     memset(state->mh_horizon_ticks, 0, sizeof(state->mh_horizon_ticks));
-    // v5.10.0a-bugfix2 — UI horizon list defaults empty; operator types
-    // CSV (or leaves blank to fall back to cfg.horizon_list). Pre-fill
-    // with a sensible suggestion that matches the original Idea #4 spec
-    // example so operators see what shape the field expects.
+    // v5.10.0a-bugfix2 — the operator types the horizons as a CSV; it starts
+    // pre-filled with a suggestion that matches the original Idea #4 spec
+    // example so operators see what shape the field expects (emptied, the
+    // starts ask for a horizon — E.1.3 MP-6 step 10.3).
     strncpy(state->ui_horizon_csv, "100,500,1000",
             sizeof(state->ui_horizon_csv) - 1);
     state->ui_horizon_csv[sizeof(state->ui_horizon_csv) - 1] = '\0';
@@ -4239,7 +4303,7 @@ static inline void TrainingPanel_LaunchFullValidation(TrainingPanelState *state,
 //======================================================================================================
 // [v5.10.0a.G.1 — MULTI-HORIZON TRAINING WORKER]  (the GUI adapter since E.1.3 MP-1)
 //======================================================================================================
-// Trains N models, one per horizon in cfg.horizon_list (or the panel's Horizons CSV), sharing the
+// Trains N models, one per horizon in the panel's Horizons CSV, sharing the
 // feature_matrix collected once. One batched pass labels every horizon (E.1.2.D leaf 5); each
 // horizon then trains an XGBooster on (features, its labels), saves it to a per-horizon dir, and
 // runs WF + held-out validation, which emits its stamp. The run itself lives in
@@ -4251,12 +4315,12 @@ static inline void TrainingPanel_LaunchFullValidation(TrainingPanelState *state,
 // Per-horizon summary:                    .../horizon_<H>/summary_{entry|exit}.txt (D-e)
 //
 // Operator workflow:
-//   1. Set cfg.horizon_list=100,500,1000 (CSV)
-//   2. Click Collect Features (single feature collect)
+//   1. Type the horizons into the panel's Horizons CSV (e.g. 100,500,1000)
+//   2. Click Collect Multi-Horizon (one collect labels every horizon)
 //   3. Click Train Multi-Horizon — N models trained (serial, or in parallel per
 //      multi_horizon_max_threads; each booster is single-threaded — XGBoost has no OpenMP, D-494)
-//   4. (Future) cfg.horizon_list non-empty + Run Engine = ensemble
-//      inference (G.4)
+//   4. The engine serves the trained horizons as an ensemble — it discovers
+//      them from the deploy dir on disk (G.5); no cfg list is involved
 //
 // LITE caveats:
 //   - No ensemble training-time discipline check — operator must
@@ -4472,6 +4536,40 @@ static inline bool TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[TrainingPanel_ParseHorizonCsv]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the panel's Horizons CSV → ui_horizon_list / ui_horizon_count (at most PANEL_HORIZON_MAX; each 1..1000000, others dropped; parsing stops at the first non-number) — the ONE source of the panel's horizons (E.1.3 MP-6 step 10.3: no fallback to the last run's config)]
+//======================================================================
+// Called ONCE a frame, at the panel's top, before anything reads the horizons: the mode, every gate and every click read
+// one parse, and an edit typed into the CSV reaches them the next frame. (The panel parsed twice — two byte-identical
+// copies, the second after the input field — so for the frame of an edit the mode and the Train gate could disagree.)
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void TrainingPanel_ParseHorizonCsv(TrainingPanelState *state) {
+    int n = 0;
+    const char* p = state->ui_horizon_csv;
+    while (*p && n < TrainingPanelState::PANEL_HORIZON_MAX) {   // the list's own size (was a literal 8 beside it)
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        char* end = nullptr;
+        long v = strtol(p, &end, 10);
+        if (end == p) break;
+        if (v > 0 && v <= 1000000)
+            state->ui_horizon_list[n++] = (int)v;
+        p = end;
+    }
+    state->ui_horizon_count = n;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_ParseHorizonCsv]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[GUI_Panel_Training]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
@@ -4553,7 +4651,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // combo's, so the line names it (the start gates' "label refused ... (above)" points here; D-507 review F8). The
     // CSV parse keeps only kinds in [0, LABEL_COUNT), so either is a valid label_table index.
     int side_kind = state->label_type;
-    for (int lk = 0; lk < state->ui_label_kind_per_horizon_count && lk < 8; ++lk) {
+    for (int lk = 0; lk < state->ui_label_kind_per_horizon_count && lk < TrainingPanelState::PANEL_HORIZON_MAX; ++lk) {
         int t = Training_SideLabelGate(state->ui_label_kind_per_horizon[lk],
                                        state->ui_training_side);
         if (t < side_gate) { side_gate = t; side_kind = state->ui_label_kind_per_horizon[lk]; }
@@ -4819,51 +4917,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         if (state->ui_sl_per_horizon_count > 0)
             state->label_sl_pct = state->ui_sl_per_horizon[0];
     }
-    // v5.11.43 — Forward Ticks / Lookahead Ticks inputs DELETED. Horizons CSV
-    // (rendered below) is the single source for label_forward_ticks. For
-    // single-horizon mode (1 entry in CSV), horizons[0] is used as
-    // label_forward_ticks. For multi-horizon (N entries), each horizon
-    // gets its own label_forward_ticks during the per-horizon worker loop.
-    // Sync logic in click handlers: state->label_forward_ticks =
-    //   state->ui_horizon_list[0] when ui_horizon_count >= 1.
+    // v5.11.43 — Forward Ticks / Lookahead Ticks inputs DELETED. The Horizons CSV
+    // (rendered below) is the single source of every label horizon: single-horizon
+    // mode (1 entry) labels at horizons[0]; multi-horizon (N entries) labels each
+    // horizon in the worker loop. (Its mirror, label_forward_ticks, went at E.1.3
+    // MP-6 step 10.3: with nothing typed it held the last typed value, shown nowhere,
+    // and Collect Features / Train Model labelled at it — F2 of the step's review.)
 
     // v5.11.43 — parse horizon CSV early (was later, post-Train-Model).
     // Collect Features + Train Model buttons need ui_horizon_count to decide
     // whether to render single-mode or multi-horizon-mode variant. Parsing
-    // here makes ui_horizon_count fresh BEFORE any button conditional fires.
-    // (The same parser ran later in v5.11.40 — duplicating here doesn't hurt;
-    // CSV parse is microseconds.)
-    {
-        int n = 0;
-        const char* p = state->ui_horizon_csv;
-        while (*p && n < 8) {
-            while (*p == ' ' || *p == '\t' || *p == ',') p++;
-            if (!*p) break;
-            char* end = nullptr;
-            long v = strtol(p, &end, 10);
-            if (end == p) break;
-            if (v > 0 && v <= 1000000)
-                state->ui_horizon_list[n++] = (int)v;
-            p = end;
-        }
-        state->ui_horizon_count = n;
-    }
-    // v5.11.43 — sync label_forward_ticks from horizons[0] when single-horizon
-    // mode (so Collect Features + Train Model use horizons[0] without needing
-    // a separate Lookahead Ticks input). Multi-horizon mode (N>1) overrides
-    // per horizon inside the worker loop.
-    if (state->ui_horizon_count >= 1) {
-        state->label_forward_ticks = state->ui_horizon_list[0];
-    }
+    // here makes ui_horizon_count fresh BEFORE any button conditional fires —
+    // the frame's ONE parse.
+    TrainingPanel_ParseHorizonCsv(state);
 
-    // v5.11.43 — compute effective horizon count up-front. When operator's
-    // UI CSV is empty, fall back to cfg.horizon_list (back-compat). This
-    // value drives the auto-routing button visibility (single_horizon_mode)
-    // so legacy cfg-driven multi-horizon flows still work even when the
-    // operator hasn't typed anything in the UI input.
-    int panel_eff_horizon_count = state->ui_horizon_count > 0
-                                 ? state->ui_horizon_count
-                                 : run_control->results.config_used.horizon_count;
 
     ImGui::Separator();
 
@@ -4878,13 +4945,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // (multi-horizon worker). Both still write to results->feature_matrix.
     const int selected_files = DataPanel_SelectedCount(data);
     // the collect's gate (D-507; Backtest/SuiteStartGates.hpp): the files, the training side's verdict on the label
-    // (E.1.2.C F3 — the line above), then the suite free — a collect reallocates (MOVES) the shared feature_matrix /
-    // labels every training worker reads, so it never overlaps another suite run: the lease is that rule
-    const SuiteGate collect_gate = StartGate_CollectFeatures(selected_files, side_gate);
+    // (E.1.2.C F3 — the line above), a horizon typed (E.1.3 MP-6 step 10.3 — the labels' horizon is the CSV's), then
+    // the suite free — a collect reallocates (MOVES) the shared feature_matrix / labels every training worker reads, so
+    // it never overlaps another suite run: the lease is that rule
+    const SuiteGate collect_gate = StartGate_CollectFeatures(selected_files, side_gate, state->ui_horizon_count);
     const bool can_collect = SuiteGate_Open(&collect_gate);
-    // v5.11.43 — uses panel_eff_horizon_count (UI takes priority, falls back
-    // to cfg.horizon_list). 0 or 1 = single mode; >1 = multi-horizon mode.
-    bool single_horizon_mode = (panel_eff_horizon_count <= 1);
+    // v5.11.43 — the horizon count routes the buttons: 0 or 1 = single mode; >1 = multi-horizon mode. The CSV is the
+    // panel's ONE source: the old fallback to cfg.horizon_list read the LAST Run Control run's config (not the cfg
+    // file), every frame, while a collect rewrote it (F8 — deleted at E.1.3 MP-6 step 10.3); with nothing typed,
+    // single mode's starts refuse (their gates' horizons term) rather than label at a value nothing shows.
+    const bool single_horizon_mode = (state->ui_horizon_count <= 1);
 
     if (single_horizon_mode) {
     if (!can_collect) ImGui::BeginDisabled();
@@ -5040,8 +5110,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                            BacktestRunStatus_Name(run_control->last_status));
 
     // v5.11.43 — Horizons (CSV) input ALWAYS visible. Single source of
-    // truth for both Collect/Train mode auto-routing AND single-horizon
-    // label_forward_ticks. Type "1000" for single-horizon mode (one
+    // truth for both Collect/Train mode auto-routing AND every label
+    // horizon. Type "1000" for single-horizon mode (one
     // training run); type "1000,7500,15000" for multi-horizon (N parallel
     // trainings). v5.11.28 rendered this at the top to mirror the train
     // side; v5.11.43 dropped the train-side mirror so this is now the
@@ -5058,8 +5128,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "  '1000,7500,15000'   → multi-horizon mode (N parallel trainings)\n"
         "                        (Collect Multi-Horizon + Train Multi-Horizon\n"
         "                         render; Train auto-spawns N pthreads)\n\n"
-        "Empty falls back to cfg.horizon_list. Max 8 horizons,\n"
-        "each 1..1,000,000 ticks.");
+        "Empty = Collect Features and Train Model refuse (type a horizon);\n"
+        "Walk-Forward, the HP sweep and Full Validation still run on the\n"
+        "collected labels.\n"
+        "Max %d horizons, each 1..1,000,000 ticks.", TrainingPanelState::PANEL_HORIZON_MAX);
     ImGui::SameLine();
     ImGui::TextDisabled("(%d horizon%s parsed)",
                         state->ui_horizon_count,
@@ -5071,7 +5143,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // the suite run lease, and a collect or a backtest — the runs that reset
     // and rebuild them — cannot start until the lease is free (D-503), so
     // the buffers never move under a reader.
-    BacktestResults *results = &run_control->results;
+    const BacktestResults *results = &run_control->results;   // read only at a click behind an open gate (the lease free); a gate drawn every frame reads RunControl_DatasetSamples
 
     // show feature collection status — display reads from a worker-written
     // snapshot, NOT from results->labels[] directly.
@@ -5096,11 +5168,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // multi-horizon collect has filled the per-horizon snapshots, render ALL
     // of them and retire the single-line-plus-footnote view; the legacy line
     // stays for single-horizon runs (count==0).
-    // Both views read the snapshot only while the Run Control job shows no run — the worker writes it at the end of
-    // its run, so a read during the run could see half of it (the single-horizon line used to read it every frame,
-    // relying on the click's zeroing; D-507 review F5).
-    const bool rc_shows_run = SuiteJob_Running(&run_control->job);
-    int mh_n = (!rc_shows_run) ? run_control->mh_collect_snap_count : 0;
+    // Both views read the snapshot only while Run Control's outputs are at rest (RunControl_AtRest) — the worker writes
+    // it at the end of its run, so a read during the run could see half of it (the single-horizon line used to read it
+    // every frame, relying on the click's zeroing; D-507 review F5). A training run leaves the table up.
+    const bool rc_at_rest = RunControl_AtRest(run_control);
+    int mh_n = rc_at_rest ? run_control->mh_collect_snap_count : 0;
     if (mh_n > 0) {
         const ImVec4 vg = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 vy = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
@@ -5192,7 +5264,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "Verdict thresholds match the single-run diagnosis: rarest class under\n"
             "15%% of fair share = starved; under 50%% = under-represented; one\n"
             "class >70%% = dominance.");
-    } else if (!rc_shows_run && snap->sample_count > 0) {
+    } else if (rc_at_rest && snap->sample_count > 0) {
         // FoxML colors for diagnostics
         const ImVec4 diag_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 diag_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
@@ -5617,7 +5689,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // trainer reads (E.1.2.D NEW-5) without a term of its own. The gate's
     // terms: Backtest/SuiteStartGates.hpp.
     const SuiteGate train_gate =
-        StartGate_TrainModel(START_GATE_BUILD_TRAINS, side_gate, results->sample_count);
+        StartGate_TrainModel(START_GATE_BUILD_TRAINS, side_gate, state->ui_horizon_count,
+                             RunControl_DatasetSamples(run_control));
     const bool can_train = SuiteGate_Open(&train_gate);
 
     // v5.11.43 — auto-route by horizon count. Single-horizon (count<=1)
@@ -5631,9 +5704,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // ONE click (no separate Run Walk-Forward / Run Full Validation
         // needed). Per-horizon results table renders 1 row.
         // Train Model is the multi-horizon run with N=1 (v5.11.44).
-        int single_h = (state->ui_horizon_count >= 1)
-                     ? state->ui_horizon_list[0]
-                     : Label_EffectiveForwardTicks(state->label_forward_ticks);
+        const int single_h = state->ui_horizon_list[0];   // the gate requires one horizon typed (E.1.3 MP-6 step 10.3)
 
         // MP-1 — the same request builder as Train Multi-Horizon: one horizon, and the operator's
         // training side applies here too (v5.13.5.A — one exit-side model without a CSV). The launch
@@ -5653,42 +5724,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // v5.10.0a.G.1 — Train Multi-Horizon button. Adjacent to Train
     // Model so operators see both options. Gated on horizons being
-    // configured (in-panel CSV input OR cfg.horizon_list fallback).
+    // configured in the panel's CSV (its one source since E.1.3 MP-6 step 10.3,
+    // parsed once at the panel's top — the mode, this gate and the click read one list).
     // v5.10.0a-bugfix2: in-panel CSV editor — operator no longer
     // needs to edit cfg.horizon_list + reload to multi-horizon train.
     // v5.11.43 — only render in multi-horizon mode (single mode shows
     // Train Model, above).
-    const auto& mh_cfg = run_control->results.config_used;
-
-    // Parse the operator's CSV input on each render. Cheap (typically
-    // 1-8 entries; bounded loop). Updates state->ui_horizon_list/_count
-    // so the click handler reads from a stable snapshot.
-    {
-        int n = 0;
-        const char* p = state->ui_horizon_csv;
-        while (*p && n < 8) {
-            while (*p == ' ' || *p == '\t' || *p == ',') p++;
-            if (!*p) break;
-            char* end = nullptr;
-            long v = strtol(p, &end, 10);
-            if (end == p) break;
-            if (v > 0 && v <= 1000000)
-                state->ui_horizon_list[n++] = (int)v;
-            p = end;
-        }
-        state->ui_horizon_count = n;
-    }
-
-    // Effective horizons: operator's UI input takes priority; if
-    // empty (CSV doesn't parse to any valid horizon), fall back to
-    // cfg.horizon_list (back-compat for operators who already wired
-    // the cfg).
-    int eff_horizon_count = state->ui_horizon_count > 0
-                          ? state->ui_horizon_count
-                          : mh_cfg.horizon_count;
-    const int *eff_horizons = state->ui_horizon_count > 0
-                             ? state->ui_horizon_list
-                             : mh_cfg.horizon_list;
 
     // v5.11.43 — second Horizons CSV InputText DELETED. Single source of
     // truth lives at the top of the panel (rendered always, near
@@ -5696,10 +5737,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // there; auto-routing renders the matching Train button here.
 
     // v5.11.40 — broadcast-or-match for TP/SL on the train side too.
-    // Same validation as Collect Multi-Horizon (above). When eff_horizon
-    // came from cfg.horizon_list fallback (operator didn't type a CSV),
-    // ui_horizon_count is 0; in that case alignment uses
-    // eff_horizon_count for the match. v5.13.1.B — the label_kind CSV
+    // Same validation as Collect Multi-Horizon (above), against the CSV's
+    // horizon count. v5.13.1.B — the label_kind CSV
     // follows the same rule. All three are terms of the gate (D-507;
     // Backtest/SuiteStartGates.hpp) — the label-kind misalignment used to
     // grey the button with no reason shown.
@@ -5707,8 +5746,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     int train_sl_n = state->ui_sl_per_horizon_count;
     int train_lk_n = state->ui_label_kind_per_horizon_count;
     const SuiteGate mh_train_gate =
-        StartGate_TrainMultiHorizon(START_GATE_BUILD_TRAINS, side_gate, eff_horizon_count, train_tp_n, train_sl_n,
-                                    train_lk_n, results->sample_count);
+        StartGate_TrainMultiHorizon(START_GATE_BUILD_TRAINS, side_gate, state->ui_horizon_count, train_tp_n, train_sl_n,
+                                    train_lk_n, RunControl_DatasetSamples(run_control));
     const bool mh_can_train = SuiteGate_Open(&mh_train_gate);
     if (!single_horizon_mode) {
     if (!mh_can_train) ImGui::BeginDisabled();
@@ -5749,10 +5788,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Compare-to-Baseline.");
     if (mh_clicked) {
         // MP-1 — every input of the run is snapped HERE by the one request builder (v5.10.0E
-        // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2). The launch snaps
+        // pattern); the horizons are the CSV's, its one source (E.1.3 MP-6 step 10.3). The launch snaps
         // the per-horizon table's horizons once the run has started (MP-6 step 8).
-        TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Multi-Horizon", eff_horizon_count, eff_horizons,
-                                         lf);
+        TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Multi-Horizon", state->ui_horizon_count,
+                                         state->ui_horizon_list, lf);
     }
     if (!mh_can_train) {
         ImGui::EndDisabled();
@@ -5760,8 +5799,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     }
     // (ONE tooltip, on the button above: a second SetItemTooltip here bound to the reason text, or — with the button
     // enabled — replaced the first one, so its Label Kind text never showed; its content moved into the first)
+    } // end !single_horizon_mode (Train Multi-Horizon block)
 
-    // Multi-horizon progress bar (rendered when worker is running)
+    // The training run's progress, its Cancel and its per-horizon table — in BOTH modes: Train Model is the same run with
+    // one horizon (v5.11.44), and these rendered only in multi-horizon mode, so a Train Model run showed no progress and
+    // could not be cancelled (D-505 item 1; E.1.3 MP-6 step 10.2)
     if (SuiteJob_Running(&state->mh_job)) {
         const int done = state->mh_job.progress, total = state->mh_job.total;
         float pct = total > 0 ? (float)done / total : 0.0f;
@@ -5769,7 +5811,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         snprintf(overlay, sizeof(overlay), "horizon %d/%d (current: %d ticks)",
                  done, total, (int)state->mh_current_horizon);
         ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
-        if (ImGui::Button("Cancel Multi-Horizon"))
+        // one label for both Train buttons: a label from the panel's mode would follow a CSV edited mid-run
+        if (ImGui::Button("Cancel Training"))
             SuiteJob_Cancel(&state->mh_job);
     }
 
@@ -5792,7 +5835,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::TableHeadersRow();
 
             const int mh_total = state->mh_job.total;
-            int n_show = mh_total < 8 ? mh_total : 8;
+            const int n_show = mh_total < TrainingPanelState::PANEL_HORIZON_MAX ? mh_total
+                                                                                 : TrainingPanelState::PANEL_HORIZON_MAX;
             for (int h = 0; h < n_show; ++h) {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -5826,7 +5870,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::EndTable();
         }
     }
-    } // end !single_horizon_mode (Train Multi-Horizon block)
 
     // training results — kind-appropriate display.
     // D-d (2026-08-22, operator-decided) — the ~300-line results+Save-Run block
@@ -5865,14 +5908,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // s5 leaf-16 — show the operator what AUTO actually resolved to, so the
     // derived value is visible rather than implied.
     if (state->wf_horizon_ticks == 0) {
-        // the value the clicks will use — it covers the collected labels too (A2); the record is read only with the lease
-        // free (see Full Validation's gate below), and while a run holds it no click can start
-        const bool auto_lease_free = !SuiteLease_Busy();
+        // the value the clicks will use — it covers the collected labels too (A2); the record and the results are read
+        // only while Run Control's outputs are at rest (RunControl_AtRest — a training run writes neither, so it shows
+        // the same value mid-run)
         ImGui::SameLine();
         ImGui::TextDisabled("(auto = %d)",
-                            auto_lease_free ? Training_ResolvePurgeForLabels(state, &run_control->run_config,
-                                                                             &run_control->results)
-                                            : Training_ResolvePurgeHorizon(state));
+                            RunControl_AtRest(run_control)
+                                ? Training_ResolvePurgeForLabels(state, &run_control->run_config, &run_control->results)
+                                : Training_ResolvePurgeHorizon(state));
     }
     ImGui::SetItemTooltip("Label forward window in ticks — drives the purge gap\n"
                           "between train and test folds (prevents labels that look\n"
@@ -5897,7 +5940,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     {
         // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503); while WF itself runs, the
         // running branch below shows its progress and Cancel instead of this button
-        const SuiteGate wf_gate = StartGate_WalkForward(START_GATE_BUILD_TRAINS, results->sample_count);
+        const SuiteGate wf_gate = StartGate_WalkForward(START_GATE_BUILD_TRAINS, RunControl_DatasetSamples(run_control));
         const bool can_wf = SuiteGate_Open(&wf_gate);
         if (SuiteJob_Running(&state->wf_job)) {
             ImGui::ProgressBar(state->wf_job.progress / 100.0f, ImVec2(-1, 0), "Walk-forward...");
@@ -6280,7 +6323,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             StartGate_HyperparamSweep(START_GATE_BUILD_TRAINS, state->hp_num_params, OPT_MAX_PARAMS,
                                       state->hp_ranges[0].steps(),
                                       state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1, OPT_MAX_STEPS,
-                                      OPT_MAX_GRID, hp_data->sample_count);
+                                      OPT_MAX_GRID, RunControl_DatasetSamples(run_control));
         const bool can_hp = SuiteGate_Open(&hp_gate);
 
         if (SuiteJob_Running(&state->hp_job)) {
@@ -6418,16 +6461,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
         const BacktestResults *fv_data = &run_control->results;
         // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503); the model must be of the collected
-        // labels' horizon (R1). The labels' horizon is read from the run's record only while the lease is free: a worker
-        // writes the record under the lease, and this thread is the only one that takes it — busy, both horizons pass
-        // as unknown and the gate's lease term says why; a run that collected no samples has no labels' horizon
-        const bool fv_lease_free = !SuiteLease_Busy();
-        const BacktestRunConfig *fv_rec = &run_control->run_config;
+        // labels' horizon (R1). The model's horizon is parsed from its path, a string only this thread writes; the
+        // labels' is read from the run's record only while Run Control's outputs are at rest (RunControl_AtRest) —
+        // mid-collect it passes as unknown and the gate's lease term says why, while a training run leaves the record at
+        // rest, so a model of another horizon is named even while that run holds the lease (step 10.3's second review,
+        // finding 6); a run that collected no samples has no labels' horizon
         const SuiteGate fv_gate =
             StartGate_FullValidation(START_GATE_BUILD_TRAINS, state->model_path[0] != '\0',
-                                     fv_lease_free ? ModelPath_HorizonOfModelFile(state->model_path) : -1,
-                                     fv_lease_free ? BacktestRunConfig_LabelsHorizon(fv_rec, fv_data->sample_count) : 0,
-                                     fv_data->sample_count);
+                                     ModelPath_HorizonOfModelFile(state->model_path),
+                                     RunControl_AtRest(run_control)
+                                         ? BacktestRunConfig_LabelsHorizon(&run_control->run_config, fv_data->sample_count)
+                                         : 0,
+                                     RunControl_DatasetSamples(run_control));
         const bool can_fv = SuiteGate_Open(&fv_gate);
 
         if (SuiteJob_Running(&state->fv_job)) {

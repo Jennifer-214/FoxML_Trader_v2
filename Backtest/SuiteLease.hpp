@@ -311,7 +311,7 @@ inline void SuiteGate_NeedLease(SuiteGate* g) {
 // [THREAD]_[[FUNNEL_WRITER] [SUITE_WORKER_WRITER] [GUI_READER]]
 // [SYNC]_[ATOMIC]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one suite worker's display + control state — the funnel owns its start (resets it under the lease, then shows the run) and its end (the trampoline clears the run it shows); the worker writes its progress and publishes complete; the panel reads it through the accessors. DISPLAY only — every gate reads the lease]
+// [OVERVIEW]_[one suite worker's display + control state — the funnel owns its start (resets it under the lease, then shows the run) and its end (the trampoline clears the run it shows); the worker writes its progress and publishes complete; the panel reads it through the accessors. DISPLAY only — every gate reads the lease — and, through `running`, the exact guard on its worker's outputs (RunControl_AtRest)]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -338,8 +338,11 @@ static_assert(sizeof(SuiteJob) == 64 && alignof(SuiteJob) == 64, "one suite job 
 // [END_STRUCT]_[SuiteJob]
 //======================================================================
 
-// Display only: a gate reads SuiteLease_Busy(), never this — two readers of "is a run on" is the split authority D-503
-// closed.
+// Display only: a gate's run-in-progress term reads SuiteLease_Busy(), never this — two readers of "is a run on" is the
+// split authority D-503 closed. But `running` is EXACT, and reads lean on it: set on the GUI thread before the spawn,
+// cleared only after the worker's last write (SuiteWorker_ReleaseOnExit) — so a read of the worker's outputs while it
+// is clear cannot race them (RunControl_AtRest, E.1.3 MP-6 step 10.3). Never end it early: a Cancel that wants to look
+// responsive says so in the display, not by clearing the run.
 inline bool SuiteJob_Running(const SuiteJob* j) { return __atomic_load_n(&j->running, __ATOMIC_ACQUIRE) != 0; }
 
 // The run's result is readable — pairs with the worker's SuiteJob_Publish.
