@@ -306,6 +306,9 @@ struct RunControlState {
     // the last run's BacktestRunStatus — the worker writes it before its job publishes; read once the job is done
     uint8_t last_status;
 };
+// Over-aligned through its alignas(64) members: it lives in foxml_suite.cpp's static storage, never malloc / calloc
+// (Check K — an over-aligned type from bare malloc is misaligned, UB).
+static_assert(alignof(RunControlState) == 64, "RunControlState's alignment changed: re-check how it is allocated");
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -3516,8 +3519,9 @@ struct TrainingPanelState {
     int wf_min_train;         // min training samples per fold (default 500)
     SuiteJob wf_job;          // Walk-Forward (D-506): progress is a percent; complete = wf_results readable (release / acquire)
     WalkForwardResults wf_results;
-    // save run (bundles config + model for deployment)
-    char run_name[64];
+    // save run (bundles config + model for deployment) — a typed line on its own cache line (H6; TECH_DEBT-269's last
+    // straddlers, D-507 call 5: aligned, no edit above it walks it across a line)
+    alignas(64) char run_name[64];
     // v5.8.7 — Full Validation (held-out + auto-stamp). Replaces the
     // hand-wired multi-button workflow with a single integrated path
     // that exercises Backtest_RunFullValidation, which is the function
@@ -3565,8 +3569,10 @@ struct TrainingPanelState {
     // (single-horizon Train Model + cfg load + Save Run output paths
     // all read from those float fields). Per-horizon arrays here drive
     // the multi-horizon worker only.
-    char            ui_tp_pct_csv[64];   // e.g. "0.030" or "0.020,0.030,0.040"
-    char            ui_sl_pct_csv[64];
+    // each typed CSV line on its own cache line (H6; TECH_DEBT-269's last straddlers, D-507 call 5) — each aligned, so
+    // a field inserted between them cannot walk the second across a line
+    alignas(64) char ui_tp_pct_csv[64];   // e.g. "0.030" or "0.020,0.030,0.040"
+    alignas(64) char ui_sl_pct_csv[64];
     // alignas: the tp/sl pair fills exactly one 64B line (8+8 floats) — every change to this struct walked it across a
     // line (D-477, the MP-6 deletions, the step-7 jobs); aligned, it stays put. RunControlState's tp/sl echo pair is
     // the precedent (MP-6 step 7).
@@ -3614,7 +3620,7 @@ struct TrainingPanelState {
     // Format: integer label_type values per LABEL_* enum (LabelFunctions.hpp).
     // Operator types e.g. "0,2,1" → horizon_0=binary, horizon_1=multi,
     // horizon_2=regression.
-    char            ui_label_kind_csv[64];
+    alignas(64) char ui_label_kind_csv[64];   // its own cache line (H6; TECH_DEBT-269's last straddler, D-507 call 5)
     alignas(64) int ui_label_kind_per_horizon[PANEL_HORIZON_MAX];   // parsed (broadcast or positional); H6-aligned (Stage-5.5 straddle)
     int             ui_label_kind_per_horizon_count; // 0=empty; 1=broadcast; N=positional
     // D-477 — the collect-time feature mask (hex text + its parsed value; 0 = all-on).
@@ -3623,16 +3629,19 @@ struct TrainingPanelState {
     char     ui_feature_mask_hex[24];
     uint64_t ui_feature_mask;
 };
+// Over-aligned through its alignas(64) members: it lives in foxml_suite.cpp's static storage, never malloc / calloc
+// (Check K — an over-aligned type from bare malloc is misaligned, UB).
+static_assert(alignof(TrainingPanelState) == 64, "TrainingPanelState's alignment changed: re-check how it is allocated");
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-10-02]
+// [UPDATED]_[2026-10-03]
 // [SIZE]_[412288B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[6442]
-// [STRADDLE]_[run_name@11920 · ui_tp_pct_csv@409576 · ui_sl_pct_csv@409640 · ui_label_kind_csv@412036]
+// [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
