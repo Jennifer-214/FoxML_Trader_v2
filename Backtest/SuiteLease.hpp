@@ -19,6 +19,7 @@
 //   - [FUNCTION]_[SuiteGate_NeedLease]
 //   - [FUNCTION]_[SuiteJob_Begin]
 //   - [FUNCTION]_[SuiteJob_End]
+//   - [FUNCTION]_[SuiteWorker_ReportNotStarted]
 //   - [FUNCTION]_[SuiteWorker_LaunchWith]
 // [REFERENCE]_[DECISION]_[[D-503] [D-506] [D-507]]
 //======================================================================================================
@@ -62,7 +63,7 @@
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the lease word (0 = free, else the holder's token), the holder's name for "busy" lines, the last token issued (never reused, so a stale token can never release a later holder), the count of releases refused for a token that does not hold the lease, and when the holder took it (its journal line says how long it held)]
+// [OVERVIEW]_[the lease word (0 = free, else the holder's token), the holder's name for "busy" lines, the last token issued (never reused, so a stale token can never release a later holder), the count of releases refused for a token that does not hold the lease, and when the holder took it (its release line says how long it held)]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -125,7 +126,7 @@ inline void SuiteLease_BusyLine(char* buf, size_t cap) {
 // [END_FUNCTION]_[SuiteLease_BusyLine]
 //======================================================================
 
-// A name for a journal line: callers pass string literals, but a line never prints a null.
+// A name for a log line: callers pass string literals, but a line never prints a null.
 inline const char* SuiteLease_NameOr(const char* name) { return name ? name : "(unnamed)"; }
 
 // The monotonic clock, in nanoseconds — how long a holder held the lease, immune to a wall-clock step. Journald stamps
@@ -141,23 +142,28 @@ inline uint64_t SuiteLease_NowNs() {
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[take the lease for `holder` (a string with static storage — the lease keeps the pointer while held) — a fresh token, or 0 when another run holds it; never waits; either outcome is one journal line]
+// [OVERVIEW]_[take the lease for `holder` (a string with static storage — the lease keeps the pointer while held) — a fresh token, or 0 when another run holds it; never waits; either outcome is one log line, and a refusal's line can also go to the caller (`refused`), in the same words]
 //======================================================================
-// THE JOURNAL LINES (D-507 — her journalctl monitoring, D-493): the lease logs its own transitions, one line each on
-// stderr, so every caller — the suite's funnel, a headless verb — leaves the same record: "acquired by <name> (token
-// N)", "refused <name>: busy — <holder> is running", and Release's "released by <name> (token N) after <S> s". Only a
-// start attempt logs: the buttons' gates read SuiteLease_Busy, which never does.
+// THE LOG LINES (D-507 / D-508): the lease logs its own transitions, one line each on stderr — in the suite that is
+// logging/foxml_suite.log, which its Log panel tails; under a systemd unit, the journal — so every caller (the suite's
+// funnel, a headless verb) leaves the same record: "acquired by <name> (token N)", "refused <name>: busy — <holder> is
+// running", and Release's "released by <name> (token N) after <S> s". Only a start attempt logs: the buttons' gates
+// read SuiteLease_Busy, which never does. A refusal reads the holder ONCE and formats its line once — the log's line
+// and the caller's are the same words, never two reads a release could fall between (D-507 9.3).
 //======================================================================
 // [CODE]
 //======================================================================
-inline uint64_t SuiteLease_TryAcquire(const char* holder) {
+inline uint64_t SuiteLease_TryAcquire(const char* holder, char* refused = nullptr, size_t refused_cap = 0) {
     const uint64_t mine     = __atomic_add_fetch(&g_suite_lease.issued, 1, __ATOMIC_RELAXED);
     uint64_t       expected = 0;
     if (!__atomic_compare_exchange_n(&g_suite_lease.token, &expected, mine, false,
                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-        char busy[128];
+        char busy[128];   // not the gate's line size: a refusal names a long holder in full
         SuiteLease_BusyLine(busy, sizeof(busy));
-        fprintf(stderr, "[suite-lease] refused %s: %s\n", SuiteLease_NameOr(holder), busy);
+        char line[192];
+        snprintf(line, sizeof(line), "refused %s: %s", SuiteLease_NameOr(holder), busy);
+        fprintf(stderr, "[suite-lease] %s\n", line);
+        if (refused && refused_cap) snprintf(refused, refused_cap, "%s", line);
         return 0;
     }
     __atomic_store_n(&g_suite_lease.acquired_ns, SuiteLease_NowNs(), __ATOMIC_RELAXED);
@@ -463,6 +469,31 @@ inline int SuiteWorker_SpawnDetached(void* (*entry)(void*), void* arg) {
 }
 
 //======================================================================
+// [FUNCTION]_[SuiteWorker_ReportNotStarted]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a start that did not happen, said once — "<name>: the worker did not start (<cause>)" logged under [suite-lease] and copied into the caller's launch-failure line; the funnel's failed spawn and every failure before the funnel (no memory for the worker's args, no data files selected) say it here]
+//======================================================================
+// D-507 / D-508: every start that does not happen leaves both the line the operator sees and a log line, in the same
+// words — never one without the other. The funnel's refusal is the lease's own line (SuiteLease_TryAcquire), handed to
+// the caller the same way.
+//======================================================================
+// [CODE]
+//======================================================================
+inline void SuiteWorker_ReportNotStarted(const char* name, const char* cause, char* why, size_t why_cap) {
+    char line[160];
+    snprintf(line, sizeof(line), "%s: the worker did not start (%s)", SuiteLease_NameOr(name), cause ? cause : "?");
+    fprintf(stderr, "[suite-lease] %s\n", line);
+    if (why && why_cap) snprintf(why, why_cap, "%s", line);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SuiteWorker_ReportNotStarted]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[SuiteWorker_LaunchWith]
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [CONCURRENCY]]
@@ -473,24 +504,16 @@ inline int SuiteWorker_SpawnDetached(void* (*entry)(void*), void* arg) {
 //======================================================================
 inline uint8_t SuiteWorker_LaunchWith(SuiteSpawnFn spawn, const char* name, SuiteJob* job, SuiteWorkerFn fn,
                                       void* args, char* why, size_t why_cap) {
-    const uint64_t lease = SuiteLease_TryAcquire(name);
-    if (!lease) {
-        char busy[128];   // not the gate's line size: a refusal names a long holder in full
-        SuiteLease_BusyLine(busy, sizeof(busy));
-        if (why && why_cap) snprintf(why, why_cap, "%s: %s", name, busy);
-        return SUITE_LAUNCH_REFUSED_BUSY;
-    }
+    const uint64_t lease = SuiteLease_TryAcquire(name, why, why_cap);   // a refusal: the lease's own line, said once
+    if (!lease) return SUITE_LAUNCH_REFUSED_BUSY;
     if (job) SuiteJob_Begin(job, lease);
     g_suite_worker_slot = SuiteWorkerSlot{fn, args, lease, job};
     const int rc = spawn(SuiteWorker_Trampoline, &g_suite_worker_slot);
     if (rc != 0) {
-        // the journal reads acquired → did not start → released, in that order
-        char line[160];
-        snprintf(line, sizeof(line), "%s: the worker did not start (%s)", SuiteLease_NameOr(name), strerror(rc));
-        fprintf(stderr, "[suite-lease] %s\n", line);
+        // the log reads acquired → did not start → released, in that order
+        SuiteWorker_ReportNotStarted(name, strerror(rc), why, why_cap);
         if (job) SuiteJob_End(job, lease);
         SuiteLease_Release(lease);
-        if (why && why_cap) snprintf(why, why_cap, "%s", line);
         return SUITE_LAUNCH_SPAWN_FAILED;
     }
     return SUITE_LAUNCH_STARTED;

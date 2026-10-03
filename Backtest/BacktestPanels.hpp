@@ -28,6 +28,7 @@
 #include "TrainingWorkers.hpp"   // E.1.3 MP-1 — the ML producer core the Train buttons drive
 #include "SuiteLease.hpp"        // E.1.3 MP-6 — the suite run lease, the launch funnel and SuiteJob (D-503 / D-506)
 #include "SuiteStartGates.hpp"   // E.1.3 MP-6 — every start button's gate, ImGui-free and cell-tested (D-507)
+#include "SuiteModal.hpp"        // E.1.3 MP-6 — every suite modal, one way + the ONE launch-failure surface (D-507)
 #include "BacktestSharded.hpp"  // phase 13: per-core sharded backtest path
 #include "../ML_Headers/ModelPathSchema.hpp"  // D-431 nested layout — the path-grammar SSoT
 #include <errno.h>   // 2026-09-03 — the data-file sidecar writer fails LOUD with errno (path-schema discipline 5)
@@ -302,7 +303,6 @@ struct RunControlState {
     // now fresh-only (it binds no state dir, loads no learned state from the model tree), an explicit
     // prior FILE is its only learned-state input. Empty = start uniform.
     char bandit_state_prior_path[400];
-    char launch_msg[160];   // GUI thread only — why the last Run Backtest did not start ("" = it did)
     // the last run's BacktestRunStatus — the worker writes it before its job publishes; read once the job is done
     uint8_t last_status;
 };
@@ -311,10 +311,10 @@ struct RunControlState {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-10-01]
-// [SIZE]_[633856B]
+// [UPDATED]_[2026-10-02]
+// [SIZE]_[633728B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[9904]
+// [CACHE_LINES]_[9902]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[RunControlState]
@@ -780,6 +780,10 @@ static inline int RunControl_BuildRequest(BacktestRunConfig *out, const RunContr
 // [END_FUNCTION]_[RunControl_BuildRequest]
 //======================================================================
 
+// The two causes a start reports before the funnel (SuiteWorker_ReportNotStarted), worded once for every start.
+static constexpr const char *START_CAUSE_NO_MEMORY = "out of memory";
+static constexpr const char *START_CAUSE_NO_FILES  = "no data files selected";   // the request builder found none
+
 //======================================================================
 // [FUNCTION]_[RunControl_Start]
 //----------------------------------------------------------------------
@@ -790,27 +794,25 @@ static inline int RunControl_BuildRequest(BacktestRunConfig *out, const RunContr
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void RunControl_Start(RunControlState *state, DataPanelState *data) {
+static inline void RunControl_Start(RunControlState *state, DataPanelState *data, LaunchFailureState *lf) {
     // D-507 — the click writes only its own request; the run's record, its display and the shared results change in
     // the worker, holding the lease — so a start the funnel refuses changes none of them, and a thread that does not
     // start changes none of them either: the funnel ends the job it began, which hides the last results (D-506).
     // (D-483 C's explicit bandit prior rides the request — "" = start uniform.)
     BacktestWorkerArgs *args = TrainingWorkers_AllocZeroed<BacktestWorkerArgs>();
     if (!args) {
-        snprintf(state->launch_msg, sizeof(state->launch_msg), "Run Backtest: out of memory");
+        SuiteWorker_ReportNotStarted("Run Backtest", START_CAUSE_NO_MEMORY, lf->launch_msg, sizeof(lf->launch_msg));
         return;
     }
     args->state = state;
     if (RunControl_BuildRequest(&args->request, state, data, nullptr) == 0) {   // the gate already requires a file
-        snprintf(state->launch_msg, sizeof(state->launch_msg), "Run Backtest: no data files selected");
+        SuiteWorker_ReportNotStarted("Run Backtest", START_CAUSE_NO_FILES, lf->launch_msg, sizeof(lf->launch_msg));
         free(args);
         return;
     }
     // the funnel takes the lease or refuses naming the holder (a refused or failed start leaves the args with us)
-    if (SuiteWorker_Launch("Run Backtest", &state->job, backtest_worker_fn, args, state->launch_msg,
-                           sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
-        state->launch_msg[0] = '\0';
-    else
+    if (SuiteWorker_Launch("Run Backtest", &state->job, backtest_worker_fn, args, lf->launch_msg,
+                           sizeof(lf->launch_msg)) != SUITE_LAUNCH_STARTED)
         free(args);
 }
 //======================================================================
@@ -962,7 +964,7 @@ static inline void GUI_Panel_DataBrowser(DataPanelState *state) {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *data) {
+static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *data, LaunchFailureState *lf) {
     ImGui::Begin("Run Control");
 
     ImGui::InputText("Config", state->config_path, sizeof(state->config_path));
@@ -989,7 +991,7 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
         const bool can_run = SuiteGate_Open(&gate);
         if (!can_run) ImGui::BeginDisabled();
         if (ImGui::Button("Run Backtest")) {
-            RunControl_Start(state, data);
+            RunControl_Start(state, data, lf);
         }
         ImGui::SetItemTooltip(
             "Replays selected files through the engine, computes stats only.\n"
@@ -1001,7 +1003,6 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
             ImGui::EndDisabled();
             SuiteGate_ShowWhy(&gate);
         }
-        if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
     }
 
     if (SuiteJob_Done(&state->job) && !RunControl_HasRun(state)) {
@@ -1968,19 +1969,18 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                              s->compare_candidate_idx >= 0 &&
                              s->compare_baseline_idx != s->compare_candidate_idx);
         if (!can_compare) ImGui::BeginDisabled();
-        if (ImGui::Button("Compare")) {
-            s->compare_modal_open = 1;
-            ImGui::OpenPopup("Compare to Baseline");
-        }
+        const bool compare_clicked = ImGui::Button("Compare");   // its frame opens the modal below
+        if (compare_clicked) s->compare_modal_open = 1;
         if (!can_compare) ImGui::EndDisabled();
 
         // Modal: render unconditionally (ImGui no-ops when not open). Inside:
         // pull both rows, render metric deltas with color-coded thresholds.
         // bool proxy so the int compare_modal_open can drive ImGui's bool*
-        // signature; sync back after the modal returns.
+        // signature; sync back after the modal returns. Opened by the click's
+        // frame and begun in one call — centred each time it appears, never
+        // saved to the ini (SuiteModal_Begin, D-507 9.3).
         bool modal_open_b = (s->compare_modal_open != 0);
-        if (ImGui::BeginPopupModal("Compare to Baseline", &modal_open_b,
-                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (SuiteModal_Begin(compare_clicked, "Compare to Baseline", &modal_open_b)) {
             if (s->compare_baseline_idx >= 0 && s->compare_baseline_idx < s->count &&
                 s->compare_candidate_idx >= 0 && s->compare_candidate_idx < s->count) {
                 const PastRun *base = &s->runs[s->compare_baseline_idx];
@@ -2507,14 +2507,12 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
     // updates, popup never opens. Hoisting OpenPopup here (same scope as
     // BeginPopupModal) makes the IDs match.
     //
-    // Idempotent: ImGui::OpenPopup is a no-op when the popup is already open
-    // (IsPopupOpen guard not strictly needed, but explicit guards make the
-    // single-shot semantic obvious).
-    if (s->pending_delete_idx >= 0 && !ImGui::IsPopupOpen("##DeleteConfirmModal")) {
-        ImGui::OpenPopup("##DeleteConfirmModal");
-    }
-    if (ImGui::BeginPopupModal("##DeleteConfirmModal", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
+    // D-507 9.3 — opened and begun in ONE call (so the two can never sit in
+    // different ID scopes again): opened while a delete is pending, never
+    // over another popup (a plain OpenPopup would close the suite's
+    // launch-failure modal, and it this one, every frame); centred each time
+    // it appears, never saved to the ini (SuiteModal.hpp).
+    if (SuiteModal_Begin(s->pending_delete_idx >= 0, "##DeleteConfirmModal")) {
         if (s->pending_delete_idx >= 0 && s->pending_delete_idx < s->count) {
             PastRun *dr = &s->runs[s->pending_delete_idx];
             ImGui::Text("Delete %s?", dr->dir_name);
@@ -3095,7 +3093,6 @@ struct OptimizerPanelState {
     OptimizerResults results;
     SuiteJob job;   // Grid Search (D-506 — the funnel owns its start and its end; progress counts cells of total)
     char config_path[256];
-    char launch_msg[160];   // GUI thread only — why the last Grid Search did not start ("" = it did)
 };
 //======================================================================
 // [END_CODE]
@@ -3103,9 +3100,9 @@ struct OptimizerPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-02]
-// [SIZE]_[384064B]
+// [SIZE]_[383872B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6001]
+// [CACHE_LINES]_[5998]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OptimizerPanelState]
@@ -3217,7 +3214,7 @@ static inline void *optimizer_worker_fn(void *arg, uint64_t lease) {
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelState *data) {
+static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelState *data, LaunchFailureState *lf) {
     ImGui::Begin("Optimizer");
 
     // parameter config
@@ -3327,27 +3324,32 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
             // the panel's fields stay editable and a running sweep never reads them
             OptWorkerArgs *args = TrainingWorkers_AllocZeroed<OptWorkerArgs>();
             if (!args) {
-                snprintf(state->launch_msg, sizeof(state->launch_msg), "Grid Search: out of memory");
+                SuiteWorker_ReportNotStarted("Grid Search", START_CAUSE_NO_MEMORY, lf->launch_msg,
+                                             sizeof(lf->launch_msg));
             } else {
                 args->state = state;
-                BacktestRunConfig_FromSelection(&args->request, data->files, data->selected, data->file_count,
-                                                DATA_MAX_FILES, state->config_path, "", nullptr);
+                const int files = BacktestRunConfig_FromSelection(&args->request, data->files, data->selected,
+                                                                  data->file_count, DATA_MAX_FILES,
+                                                                  state->config_path, "", nullptr);
                 memcpy(args->ranges, state->ranges, sizeof(args->ranges));
                 args->num_params = state->num_params;
                 args->metric_idx = state->metric_idx;
-                // the funnel resets the job under the lease, or refuses naming the holder
-                if (SuiteWorker_Launch("Grid Search", &state->job, optimizer_worker_fn, args, state->launch_msg,
-                                       sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
-                    state->launch_msg[0] = '\0';
-                else
+                // no files: refused here, as Run Backtest refuses (the gate already requires one); else the funnel
+                // resets the job under the lease, or refuses naming the holder
+                if (files == 0) {
+                    SuiteWorker_ReportNotStarted("Grid Search", START_CAUSE_NO_FILES, lf->launch_msg,
+                                                 sizeof(lf->launch_msg));
                     free(args);
+                } else if (SuiteWorker_Launch("Grid Search", &state->job, optimizer_worker_fn, args, lf->launch_msg,
+                                              sizeof(lf->launch_msg)) != SUITE_LAUNCH_STARTED) {
+                    free(args);
+                }
             }
         }
         if (!can_run) {
             ImGui::EndDisabled();
             SuiteGate_ShowWhy(&gate);
         }
-        if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
     }
 
     // results
@@ -3620,7 +3622,6 @@ struct TrainingPanelState {
     // 64B line boundary on this [THREAD]-tagged struct (the strict layout gate caught it).
     char     ui_feature_mask_hex[24];
     uint64_t ui_feature_mask;
-    char     launch_msg[160];   // GUI thread only — why this panel's last start did not start ("" = it did)
 };
 //======================================================================
 // [END_CODE]
@@ -3628,9 +3629,9 @@ struct TrainingPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-02]
-// [SIZE]_[412416B]
+// [SIZE]_[412288B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6444]
+// [CACHE_LINES]_[6442]
 // [STRADDLE]_[run_name@11920 · ui_tp_pct_csv@409576 · ui_sl_pct_csv@409640 · ui_label_kind_csv@412036]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
@@ -4187,25 +4188,24 @@ static inline FullValidationWorkerArgs *TrainingPanel_FullValidationArgs(Trainin
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[Run Full Validation's launch — build the click-time request and start the worker through the suite's funnel; a refusal or an allocation failure changes nothing, a thread-start failure ends the job the funnel began; each is reported on the panel's launch line, never a crash or a stuck "running"]
+// [OVERVIEW]_[Run Full Validation's launch — build the click-time request and start the worker through the suite's funnel; a refusal or an allocation failure changes nothing, a thread-start failure ends the job the funnel began; each is said in the suite's one launch-failure modal (LaunchFailure_Modal) and the log, never a crash or a stuck "running"]
 //======================================================================
 // [CODE]
 //======================================================================
 static inline void TrainingPanel_LaunchFullValidation(TrainingPanelState *state,
                                                       RunControlState *run_control,
-                                                      const BacktestResults *fv_data) {
+                                                      const BacktestResults *fv_data, LaunchFailureState *lf) {
     FullValidationWorkerArgs *fv_args = TrainingPanel_FullValidationArgs(state, run_control, fv_data);
     if (!fv_args) {
-        snprintf(state->launch_msg, sizeof(state->launch_msg), "Run Full Validation: out of memory");
+        SuiteWorker_ReportNotStarted("Run Full Validation", START_CAUSE_NO_MEMORY, lf->launch_msg,
+                                     sizeof(lf->launch_msg));
         return;
     }
     // the funnel takes the lease and owns the job's start and end: a refusal (it names the holder) changes nothing;
     // a thread that does not start ends the job the funnel began (its last results hide, as the old click did);
-    // either says why on the panel's launch line (MP-6 step 8)
-    if (SuiteWorker_Launch("Run Full Validation", &state->fv_job, fullvalidation_worker_fn, fv_args, state->launch_msg,
-                           sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
-        state->launch_msg[0] = '\0';
-    else
+    // either says why in the suite's one launch-failure window (D-507)
+    if (SuiteWorker_Launch("Run Full Validation", &state->fv_job, fullvalidation_worker_fn, fv_args, lf->launch_msg,
+                           sizeof(lf->launch_msg)) != SUITE_LAUNCH_STARTED)
         free(fv_args);
 }
 //======================================================================
@@ -4430,28 +4430,27 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[both Train buttons' launch — build the click-time request and start the worker through the suite's funnel (true = started; the per-horizon table's horizons snap only then); a refusal or an allocation failure changes nothing, a thread-start failure ends the job the funnel began; each is reported on the panel's launch line]
+// [OVERVIEW]_[both Train buttons' launch — build the click-time request and start the worker through the suite's funnel (true = started; the per-horizon table's horizons snap only then); a refusal or an allocation failure changes nothing, a thread-start failure ends the job the funnel began; each is said in the suite's one launch-failure modal (LaunchFailure_Modal) and the log]
 //======================================================================
 // [CODE]
 //======================================================================
 static inline bool TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
                                                     RunControlState *run_control, const char *name,
-                                                    int horizon_count, const int *horizons) {
+                                                    int horizon_count, const int *horizons, LaunchFailureState *lf) {
     MultiHorizonWorkerArgs *mh_args =
         TrainingPanel_MultiHorizonArgs(state, run_control, horizon_count, horizons);
     if (!mh_args) {
-        snprintf(state->launch_msg, sizeof(state->launch_msg), "%s: out of memory", name);
+        SuiteWorker_ReportNotStarted(name, START_CAUSE_NO_MEMORY, lf->launch_msg, sizeof(lf->launch_msg));
         return false;
     }
     // the funnel takes the lease and owns the job's start and end: a refusal (it names the holder) changes nothing;
     // a thread that does not start ends the job the funnel began (its last results hide, as the old click did);
-    // either says why on the panel's launch line (MP-6 step 8)
-    if (SuiteWorker_Launch(name, &state->mh_job, train_multi_horizon_worker_fn, mh_args, state->launch_msg,
-                           sizeof(state->launch_msg)) != SUITE_LAUNCH_STARTED) {
+    // either says why in the suite's one launch-failure window (D-507)
+    if (SuiteWorker_Launch(name, &state->mh_job, train_multi_horizon_worker_fn, mh_args, lf->launch_msg,
+                           sizeof(lf->launch_msg)) != SUITE_LAUNCH_STARTED) {
         free(mh_args);
         return false;
     }
-    state->launch_msg[0] = '\0';
     // E.1.2.C GUI polish (a) — the per-horizon table's horizons, snapped for the run that STARTED (GUI thread only: the
     // render never reads the live-reparsed ui_horizon_list, and a refused click must not relabel the last run's rows;
     // the arrays are sized PANEL_HORIZON_MAX = HORIZON_LIST_MAX since E.1.2.D leaf 13, so they track the grid)
@@ -4478,7 +4477,7 @@ static inline bool TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
 //======================================================================
 static inline void GUI_Panel_Training(TrainingPanelState *state,
                                        RunControlState *run_control,
-                                       DataPanelState *data) {
+                                       DataPanelState *data, LaunchFailureState *lf) {
     ImGui::Begin("Training");
 
     // label config — display names derived from label_table (single source of truth).
@@ -4888,14 +4887,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // position-0 kind, the barriers, the fee, the horizon, the feature mask)
         BacktestWorkerArgs *args = TrainingWorkers_AllocZeroed<BacktestWorkerArgs>();
         if (!args) {
-            snprintf(state->launch_msg, sizeof(state->launch_msg), "Collect Features: out of memory");
+            SuiteWorker_ReportNotStarted("Collect Features", START_CAUSE_NO_MEMORY, lf->launch_msg,
+                                         sizeof(lf->launch_msg));
         } else {
             args->state = run_control;
             const BacktestLabelRequest labels = TrainingPanel_CollectLabels(state);
-            RunControl_BuildRequest(&args->request, run_control, data, &labels);
-            if (SuiteWorker_Launch("Collect Features", &run_control->job, backtest_worker_fn, args,
-                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED) {
-                state->launch_msg[0] = '\0';
+            // the gate already requires a file
+            if (RunControl_BuildRequest(&args->request, run_control, data, &labels) == 0) {
+                SuiteWorker_ReportNotStarted("Collect Features", START_CAUSE_NO_FILES, lf->launch_msg,
+                                             sizeof(lf->launch_msg));
+                free(args);
+            } else if (SuiteWorker_Launch("Collect Features", &run_control->job, backtest_worker_fn, args,
+                                          lf->launch_msg, sizeof(lf->launch_msg)) == SUITE_LAUNCH_STARTED) {
                 TrainingPanel_ForgetDatasetResults(state);   // only once started: the lease is the collect's now
             } else {
                 free(args);
@@ -4952,12 +4955,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // request inside, the args are ~578 KB — no stack copy.
         auto *args = TrainingWorkers_AllocZeroed<CollectMultiHorizonWorkerArgs>();
         if (!args) {
-            snprintf(state->launch_msg, sizeof(state->launch_msg), "Collect Multi-Horizon: out of memory");
+            SuiteWorker_ReportNotStarted("Collect Multi-Horizon", START_CAUSE_NO_MEMORY, lf->launch_msg,
+                                         sizeof(lf->launch_msg));
         } else {
             CollectMultiHorizonWorkerArgs &snap = *args;
             snap.run_control = run_control;
             const BacktestLabelRequest labels = TrainingPanel_CollectLabels(state);
-            RunControl_BuildRequest(&snap.request, run_control, data, &labels);
+            const int files = RunControl_BuildRequest(&snap.request, run_control, data, &labels);
             snap.snap_horizon_count = mh_collect_horizon_count;
             // v5.11.40 — snap per-horizon TP/SL using broadcast-or-match.
             // single value (count==1) broadcasts to all horizons; N values
@@ -4985,9 +4989,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                     state->ui_label_kind_per_horizon,
                     state->ui_label_kind_per_horizon_count, state->label_type, i);
             }
-            if (SuiteWorker_Launch("Collect Multi-Horizon", &run_control->job, collect_multi_horizon_worker_fn, args,
-                                   state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED) {
-                state->launch_msg[0] = '\0';
+            if (files == 0) {   // the gate already requires a file
+                SuiteWorker_ReportNotStarted("Collect Multi-Horizon", START_CAUSE_NO_FILES, lf->launch_msg,
+                                             sizeof(lf->launch_msg));
+                free(args);
+            } else if (SuiteWorker_Launch("Collect Multi-Horizon", &run_control->job, collect_multi_horizon_worker_fn,
+                                          args, lf->launch_msg, sizeof(lf->launch_msg)) == SUITE_LAUNCH_STARTED) {
                 TrainingPanel_ForgetDatasetResults(state);   // only once started: the lease is the collect's now
             } else {
                 free(args);
@@ -5018,9 +5025,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         SuiteGate_ShowWhy(&mh_collect_gate);
     }
     } // end !single_horizon_mode (Collect Multi-Horizon)
-    // MP-6 — why this panel's last start did not start (refused, naming the run that holds the lease, or failed)
-    if (state->launch_msg[0]) ImGui::TextColored(FoxmlColors::red, "%s", state->launch_msg);
-    // ... and a Run Control run that started but did not happen (its backtest refused the cfg or could not allocate)
+    // A Run Control run that STARTED but did not happen (its backtest refused the cfg or could not allocate) — a run's
+    // outcome, published by its worker, not a start that failed: it stays here, under the collect buttons that started
+    // it (Run Control shows its own under Run Backtest), not in the launch-failure modal, which only a click opens.
     if (SuiteJob_Done(&run_control->job) && !RunControl_HasRun(run_control))
         ImGui::TextColored(FoxmlColors::red, "The last Run Control run did not happen — %s",
                            BacktestRunStatus_Name(run_control->last_status));
@@ -5624,7 +5631,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // MP-1 — the same request builder as Train Multi-Horizon: one horizon, and the operator's
         // training side applies here too (v5.13.5.A — one exit-side model without a CSV). The launch
         // snaps the per-horizon table's horizon once the run has started (MP-6 step 8).
-        if (TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Model", 1, &single_h)) {
+        if (TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Model", 1, &single_h, lf)) {
             // Train Model has always cleared the standalone walk-forward's results (its pipeline runs its own —
             // v5.11.44); now only once this run has started, so a refused click changes nothing (MP-6 step 8)
             SuiteJob_Forget(&state->wf_job);
@@ -5737,7 +5744,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // MP-1 — every input of the run is snapped HERE by the one request builder (v5.10.0E
         // pattern); the effective horizons take the UI CSV over cfg (v5.10.0a-bugfix2). The launch snaps
         // the per-horizon table's horizons once the run has started (MP-6 step 8).
-        TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Multi-Horizon", eff_horizon_count, eff_horizons);
+        TrainingPanel_LaunchMultiHorizon(state, run_control, "Train Multi-Horizon", eff_horizon_count, eff_horizons,
+                                         lf);
     }
     if (!mh_can_train) {
         ImGui::EndDisabled();
@@ -5906,13 +5914,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 wf_args->snap_hp = Training_SnapshotHyperparams(state);
                 auto *heap = (WalkForwardWorkerArgs *)malloc(sizeof(WalkForwardWorkerArgs));
                 if (!heap) {
-                    snprintf(state->launch_msg, sizeof(state->launch_msg), "Walk-Forward: out of memory");
+                    SuiteWorker_ReportNotStarted("Walk-Forward", START_CAUSE_NO_MEMORY, lf->launch_msg,
+                                                 sizeof(lf->launch_msg));
                 } else {
                     *heap = snap;
                     if (SuiteWorker_Launch("Walk-Forward", &state->wf_job, walkforward_worker_fn, heap,
-                                           state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
-                        state->launch_msg[0] = '\0';
-                    else
+                                           lf->launch_msg, sizeof(lf->launch_msg)) != SUITE_LAUNCH_STARTED)
                         free(heap);
                 }
             }
@@ -6298,13 +6305,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 hp_args->snap_wf_min_train = state->wf_min_train;
                 auto *heap = (HyperparamSweepWorkerArgs *)malloc(sizeof(HyperparamSweepWorkerArgs));
                 if (!heap) {
-                    snprintf(state->launch_msg, sizeof(state->launch_msg), "Hyperparam Sweep: out of memory");
+                    SuiteWorker_ReportNotStarted("Hyperparam Sweep", START_CAUSE_NO_MEMORY, lf->launch_msg,
+                                                 sizeof(lf->launch_msg));
                 } else {
                     *heap = snap;
                     if (SuiteWorker_Launch("Hyperparam Sweep", &state->hp_job, hp_sweep_worker_fn, heap,
-                                           state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
-                        state->launch_msg[0] = '\0';
-                    else
+                                           lf->launch_msg, sizeof(lf->launch_msg)) != SUITE_LAUNCH_STARTED)
                         free(heap);
                 }
             }
@@ -6425,7 +6431,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (ImGui::Button("Run Full Validation")) {
                 // MP-1b — every input of the job is snapped HERE by its request builder (the v5.10.0E
                 // click-time pattern; the label params from the run config, the rest from the panel).
-                TrainingPanel_LaunchFullValidation(state, run_control, fv_data);
+                TrainingPanel_LaunchFullValidation(state, run_control, fv_data, lf);
             }
             if (!can_fv) {
                 ImGui::EndDisabled();

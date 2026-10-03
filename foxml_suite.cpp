@@ -291,6 +291,9 @@ int main(int argc, char *argv[]) {
     // training state
     static TrainingPanelState training;
     TrainingPanel_Init(&training);
+    // D-507 — the ONE line saying why the last start did not happen, shared by the three panels that start runs and
+    // shown in one modal (LaunchFailure_Modal, drawn after the panels that start runs)
+    static LaunchFailureState launch_failure;
 
     // log viewer — tails logging/foxml_suite.log so the user can see backtest
     // progress in real time without flipping to a terminal. backtest worker
@@ -422,15 +425,18 @@ int main(int argc, char *argv[]) {
 
         // backtest panels (right side)
         GUI_Panel_DataBrowser(&data_panel);
-        GUI_Panel_RunControl(&run_control, &data_panel);
+        GUI_Panel_RunControl(&run_control, &data_panel, &launch_failure);
         GUI_Panel_Results(&run_control.results);
         GUI_Panel_Comparison(&comparison, &run_control.results);
         // v5.11.57 — pass cfg for Verify Stamp HMAC verification (uses
         // cfg.auto_stamp_secret if set, falls back to devmode otherwise).
         GUI_Panel_PastRuns(&past_runs, &run_control.results.config_used);
-        GUI_Panel_Optimizer(&optimizer, &data_panel);
-        GUI_Panel_Training(&training, &run_control, &data_panel);
+        GUI_Panel_Optimizer(&optimizer, &data_panel, &launch_failure);
+        GUI_Panel_Training(&training, &run_control, &data_panel, &launch_failure);
         GUI_Panel_LogViewer(&log_viewer);
+        // after every panel that starts a run, outside each one's window: the popup opens and begins at the same ID
+        // scope, whichever panel's button failed (Backtest/SuiteModal.hpp)
+        LaunchFailure_Modal(&launch_failure);
 
         // dashboard panels — show backtest engine state (reuse from live GUI)
         if (RunControl_HasRun(&run_control)) {

@@ -13,7 +13,9 @@ flock 200
 #   ./build.sh [target] [--clean]
 #
 # Targets:
-#   engine      ANSI engine + controller_test (build/) — minimal, no ImGui
+#   engine      ANSI engine + controller_test (build/) — the engine binary is
+#               ANSI-only; the lane also builds the ImGui targets and runs the
+#               suite's headless GUI cells (USE_IMGUI_GUI pinned ON, D-507 9.3)
 #   gui         engine_gui + foxml_suite (build_gui/, ImGui+SDL2 + LATENCY +
 #               XGBoost) — the "everything on" build with ALL panels visible
 #               (Latency, Per-Core, ML Intelligence). Requires the pinned,
@@ -24,8 +26,8 @@ flock 200
 #   suite       alias for gui (kept for backward compat)
 #   all         engine + gui (skips gui-lite — opt-in)
 #   test        engine + run controller_test
-#   latency     engine with -DLATENCY_PROFILING=ON (build_lat/, ANSI only,
-#               for raw latency benchmarks without ImGui overhead)
+#   latency     engine with -DLATENCY_PROFILING=ON (build_lat/; the engine
+#               binary is ANSI-only — raw latency without ImGui overhead)
 #   pgo         3-step profile-guided optimization build (v5.11.0.D):
 #               instrument → train run on data/pgo_train.csv → profile-use
 #               rebuild (build_pgo/). 2-8% latency improvement. GCC-only.
@@ -130,7 +132,8 @@ update_bin_links() {
 
 build_engine() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build
-    cmake -B build -DCMAKE_BUILD_TYPE=Release
+    # USE_IMGUI_GUI pinned, not defaulted: the test lane runs the suite's headless GUI cells (D-507 9.3)
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_IMGUI_GUI=ON
     cmake --build build -j"$JOBS"
     link_cfg build
     emit_asm_for_dir build
@@ -271,7 +274,7 @@ build_latency() {
 # for race / data-race detection.
 build_tsan() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_tsan
-    cmake -B build_tsan -DCMAKE_BUILD_TYPE=Debug \
+    cmake -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DUSE_IMGUI_GUI=ON \
         -DCMAKE_CXX_FLAGS="-fsanitize=thread -O1 -g -fno-omit-frame-pointer -DFOXML_SANITIZER_BUILD" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
     cmake --build build_tsan -j"$JOBS"
@@ -283,7 +286,7 @@ build_tsan() {
 # can run more aggressively. Use against engine + controller_test.
 build_asan() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_asan
-    cmake -B build_asan -DCMAKE_BUILD_TYPE=Debug \
+    cmake -B build_asan -DCMAKE_BUILD_TYPE=Debug -DUSE_IMGUI_GUI=ON \
         -DCMAKE_CXX_FLAGS="-fsanitize=address -O1 -g -fno-omit-frame-pointer -DFOXML_SANITIZER_BUILD" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
     cmake --build build_asan -j"$JOBS"
@@ -296,7 +299,7 @@ build_ubsan() {
     # (#11 16B core, blindspot B1) — that no compile error or memcmp surfaces.
     # -fno-sanitize-recover makes the FIRST UB ABORT (so a test run goes red, CI-friendly).
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_ubsan
-    cmake -B build_ubsan -DCMAKE_BUILD_TYPE=Debug \
+    cmake -B build_ubsan -DCMAKE_BUILD_TYPE=Debug -DUSE_IMGUI_GUI=ON \
         -DCMAKE_CXX_FLAGS="-fsanitize=signed-integer-overflow,undefined -fno-sanitize-recover=all -O1 -g -fno-omit-frame-pointer -DFOXML_SANITIZER_BUILD" \
         -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined"
     cmake --build build_ubsan -j"$JOBS"

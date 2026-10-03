@@ -263,6 +263,24 @@ target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
 if(USE_XGBOOST)
     foxml_link_xgboost(controller_test)
 endif()
+# E.1.3 MP-6 step 9.3 (D-507) — the suite's GUI cells run HEADLESS: ImGui's core and its null backend (no SDL2, no
+# OpenGL, no window), so every lane that builds the suite also drives its modal helpers (Backtest/SuiteModal.hpp)
+# through real frames. Built with ImGui's test-engine item hook so a cell can press a widget by its ID — this binary
+# alone links it; the suite and engine_gui keep imgui_lib, hook-free.
+if(USE_IMGUI_GUI)
+    add_library(imgui_headless_lib STATIC
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_null.cpp
+    )
+    target_compile_options(imgui_headless_lib PRIVATE -O2)
+    target_compile_definitions(imgui_headless_lib PUBLIC IMGUI_ENABLE_TEST_ENGINE)
+    target_include_directories(imgui_headless_lib PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends ${IMPLOT_DIR})
+    target_link_libraries(controller_test PRIVATE imgui_headless_lib)
+    target_compile_definitions(controller_test PRIVATE FOXML_SUITE_GUI_CELLS)
+endif()
 # (native-FP pin REMOVED at Ship-B P5 — USE_NATIVE_128 absorbed; one FP path only.)
 find_package(Threads REQUIRED)
 target_link_libraries(controller_test PRIVATE Threads::Threads ssl crypto)
