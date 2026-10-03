@@ -470,6 +470,8 @@ struct BacktestResults {
     char     data_first_file[256];     // basename of data_paths[0]
     char     data_last_file[256];      // basename of data_paths[n-1]
     char     data_list_sha256[65];     // hex; "" = unknown
+    uint8_t  samples_dropped;          // 1 = the label pass aborted and BacktestResults_DropSamples dropped the samples
+                                       // (step 10.7 — the training panel says so); a reset clears it
     // config used (for comparison)
     ControllerConfig<BACKTEST_FP> config_used;
 };
@@ -1168,16 +1170,21 @@ static inline void BacktestRunConfig_RecordLabels(BacktestRunConfig* record, con
 // leaves are pure. Pinned by the batch-vs-sequential memcmp oracle in
 // tests/controller_test.cpp (TOTAL oracle).
 //
-// Output vectors are NAN-prefilled before the walk: on a mid-walk abort
-// (unreadable corpus, sort refusal) unwritten slots read as invalid-label
-// instead of uninitialized heap — a failed pass now counts 0 valid labels
-// downstream rather than training on garbage/stale vectors. Success-path
-// bytes are unaffected (the walk writes every in-corpus sample slot).
+// Output vectors are NAN-prefilled before the walk, and EVERY abort clears
+// them again (E.1.3 MP-6 step 10.7): the walk labels file by file, so an abort
+// part-way used to leave the files already walked labelled and the rest NaN —
+// a partial vector no caller could tell from a whole one (Class 62; the
+// training core trained a horizon on it whenever 50 labels survived). An
+// aborted pass leaves every vector NaN, its counters zero, and returns -1,
+// which every caller branches on. Success-path bytes are unaffected (the walk
+// writes every in-corpus sample slot).
 //
 // Caller must have set results->sample_count, results->sample_tick_indices,
-// results->sample_prices (+ sample_regimes for LABEL_REGIME targets). Uses
-// run_cfg for the corpus (data_paths) + sort mode ONLY — label parameters
-// come from targets[], NOT from run_cfg->label_*.
+// results->sample_prices (+ sample_regimes for LABEL_REGIME targets), and
+// results->config_used (the replay's cfg — its sort mode, step 10.7). Reads
+// run_cfg for the corpus (data_paths, num_data_files), collect_features and
+// the round-trip fee only — the label parameters come from targets[], NOT
+// from run_cfg->label_*.
 //
 // No-op when collect_features=0, sample_count==0, or num_targets<=0.
 //======================================================================================================
@@ -1193,7 +1200,9 @@ static inline void BacktestRunConfig_RecordLabels(BacktestRunConfig* record, con
 //   5-year (4.5B ticks):  144 GB (infeasible) → ~160 MB peak (now feasible)
 //
 // Algorithm:
-//   1. Pre-pass: count ticks per file → file_offsets[] cumsum
+//   1. Pre-pass: count ticks per file → file_offsets[] cumsum (by LINES —
+//      so a file the pass cannot open, or a non-last file whose loader drops a
+//      row, REFUSES: either would number later ticks unlike the replay)
 //   2. Walk files; maintain 2-file sliding window:
 //      - Invariant: buf[0..prev_file_count) = file f
 //      - Invariant: buf[prev_file_count..total) = file f+1 (if exists)
@@ -1215,34 +1224,42 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
                   2 * ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX,
               "batch cap must cover a full both-sides horizon grid");
 
-// Returns: samples labeled (>= 0), or -1 on abort (alloc fail / sort refusal
-// / target overflow — already logged; output vectors hold the NAN prefill
-// past the abort point). The legacy single-target body returned void and
-// printed nothing on abort; the 1-target wrapper preserves that exactly.
-// [[nodiscard]]: a caller that drops the -1 trains on what the pass did not finish (the result guard refuses it).
+// "Nothing labelled" — every output NaN, its counters zero: the state the pass
+// starts its targets in, and the state every abort leaves them in (step 10.7).
+static inline void LabelBatch_ClearTargets(LabelBatchTarget *targets, int num_targets, int sample_count) {
+    for (int t = 0; t < num_targets; t++) {
+        targets[t].nan_total            = 0;
+        targets[t].nan_dropped          = 0;
+        targets[t].degenerate_one_class = 0;
+        for (int s = 0; s < sample_count; s++)
+            targets[t].out_labels[s] = NAN;
+    }
+}
+
+// Returns: samples labeled (>= 0 — every sample, or it refuses), or -1 on
+// abort (an allocation; a STRICT sort refusal; the target overflow; a file it
+// needs but cannot open; a dropped row a later sample lies past; a sample past
+// the corpus it can read — each already logged; every output vector NaN and
+// its counters zero: never part of a pass).
+// [[nodiscard]]: a caller that drops the -1 finds every label NaN and never says why (the result guard refuses it).
 [[nodiscard]] static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
                                               const BacktestRunConfig *run_cfg,
                                               LabelBatchTarget *targets,
                                               int num_targets) {
     if (num_targets <= 0) return 0;
-    if (num_targets > LABEL_BATCH_MAX_TARGETS) {
-        fprintf(stderr, "[backtest] label_compute: %d targets exceeds "
-                "LABEL_BATCH_MAX_TARGETS=%d; refusing\n",
-                num_targets, LABEL_BATCH_MAX_TARGETS);
-        return -1;
-    }
 
     // NAN-prefill every output vector + zero the counters BEFORE the no-op
     // gates too: every non-negative return must leave the outputs in a
     // defined invalid-label state — a 0-return no-op on caller-malloc'd
     // buffers must never hand back uninitialized heap (downstream n_valid
-    // counts then read garbage as labels). Aborts below (alloc fail, sort
-    // refusal) get the same guarantee (see contract above).
-    for (int t = 0; t < num_targets; t++) {
-        targets[t].nan_total = 0;
-        targets[t].nan_dropped = 0;
-        for (int s = 0; s < results->sample_count; s++)
-            targets[t].out_labels[s] = NAN;
+    // counts then read garbage as labels). Every abort leaves them cleared
+    // too — the overflow refusal right below included (see contract above).
+    LabelBatch_ClearTargets(targets, num_targets, results->sample_count);
+    if (num_targets > LABEL_BATCH_MAX_TARGETS) {
+        fprintf(stderr, "[backtest] label_compute: %d targets exceeds "
+                "LABEL_BATCH_MAX_TARGETS=%d; refusing\n",
+                num_targets, LABEL_BATCH_MAX_TARGETS);
+        return -1;
     }
 
     if (!run_cfg->collect_features) return 0;
@@ -1253,32 +1270,53 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
     uint64_t label_start_ns = tt::PhaseTimer_NowNs();
     struct LabelGuard {
         uint64_t start;
-        ~LabelGuard() {
-            tt::PhaseTimer_Global().label_compute_ns +=
-                tt::PhaseTimer_NowNs() - start;
-            tt::PhaseTimer_Global().populated = 1;
+        ~LabelGuard() {   // relaxed atomics: on the training core's parallel fallback N horizons each run a pass
+            __atomic_fetch_add(&tt::PhaseTimer_Global().label_compute_ns, tt::PhaseTimer_NowNs() - start,
+                               __ATOMIC_RELAXED);
+            __atomic_store_n(&tt::PhaseTimer_Global().populated, 1, __ATOMIC_RELAXED);
         }
     } _label_guard{label_start_ns};
+
+    // The last tick any sample indexes (step 10.7, the review's F2 / F4): the
+    // pass needs only the files up to the first one starting past it — that one
+    // is the last samples' forward continuation — and a dropped row matters only
+    // where a sample lies past it. (A cancelled collect's unreached files are
+    // never opened.)
+    int64_t max_tidx = 0;
+    for (int s = 0; s < results->sample_count; s++)
+        if ((int64_t)results->sample_tick_indices[s] > max_tidx) max_tidx = results->sample_tick_indices[s];
 
     // Phase 1 — pre-pass: count ticks per file + compute cumulative offsets.
     // Cheap I/O (line-counting). Needed so we can locate which file contains
     // each sample's tidx during the streaming walk.
     int num_files = run_cfg->num_data_files;
+    int num_walk  = num_files;   // the files the walk reads — cut at the continuation below
     int* file_counts = (int*)calloc(num_files, sizeof(int));
     int64_t* file_offsets = (int64_t*)calloc(num_files + 1, sizeof(int64_t));
-    if (!file_counts || !file_offsets) {
+    HistoricalTick* tick_buf = NULL;
+    // EVERY abort below leaves through here (step 10.7): its buffers freed and
+    // the targets cleared again — the files walked so far keep no labels.
+    auto refuse = [&]() -> int {
+        free(tick_buf);
         free(file_counts);
         free(file_offsets);
-        fprintf(stderr, "[backtest] label_compute: failed to allocate file index\n");
+        LabelBatch_ClearTargets(targets, num_targets, results->sample_count);
         return -1;
+    };
+    if (!file_counts || !file_offsets) {
+        fprintf(stderr, "[backtest] label_compute: failed to allocate file index\n");
+        return refuse();
     }
     int max_per_file = 0;
     for (int f = 0; f < num_files; f++) {
         FILE* fp = fopen(run_cfg->data_paths[f], "r");
         if (!fp) {
-            fprintf(stderr, "[backtest] label_compute: failed to open %s\n",
-                    run_cfg->data_paths[f]);
-            continue;
+            // REFUSE, never skip (step 10.7): the skip left this file's offset unwritten (0), so every later file's
+            // offsets restarted at 0 — and a file the replay read but this pass cannot is ticks it cannot number.
+            // Only a NEEDED file gets here: the loop stops at the continuation.
+            fprintf(stderr, "[backtest] label_compute: failed to open %s — the pass cannot number the ticks "
+                            "past it; refusing\n", run_cfg->data_paths[f]);
+            return refuse();
         }
         int lines = 0;
         char buf[512];
@@ -1287,26 +1325,37 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
         file_counts[f] = (lines > 0) ? (lines - 1) : 0;  // header
         if (file_counts[f] > max_per_file) max_per_file = file_counts[f];
         file_offsets[f + 1] = file_offsets[f] + file_counts[f];
+        if (file_offsets[f] > max_tidx) { num_walk = f + 1; break; }   // starts past every sample: the continuation
     }
-    int64_t total_ticks = file_offsets[num_files];
+    int64_t total_ticks = file_offsets[num_walk];
+    // The pass numbers ticks by each file's LINES (above); the replay numbers them by the ticks the loader KEPT. They
+    // agree only while the loader keeps every row: a row it drops (a bogus price / qty / timestamp) shifts every tick
+    // past that file's kept ones (Class 61) — so the pass refuses when a SAMPLE lies past them (step 10.7; a drop no
+    // sample lies past — the last file's, a continuation's — shifts nothing). The structural form — number by the
+    // replay's own per-file record — is homed with CS-280's corpus pairing (MP-3).
+    auto drop_shifts_later = [&](int g, int kept) -> bool {
+        if (kept == file_counts[g] || max_tidx < file_offsets[g] + kept) return false;
+        fprintf(stderr, "[label] refused: label file %d (%s) — the loader kept %d of its %d rows, which would "
+                        "shift the labels of every sample past them onto other ticks: fix or deselect the file\n", g,
+                run_cfg->data_paths[g], kept, file_counts[g]);
+        return true;
+    };
 
     // Phase 2 — allocate 2-file sliding window. Round up max_per_file by 1024
     // for BacktestData_Load's slack (matches existing pattern).
     int per_file_cap = max_per_file + 1024;
     if (per_file_cap < 1024) per_file_cap = 1024;
     size_t buf_cap = (size_t)per_file_cap * 2;
-    HistoricalTick* tick_buf = (HistoricalTick*)malloc(buf_cap * sizeof(HistoricalTick));
+    tick_buf = (HistoricalTick*)malloc(buf_cap * sizeof(HistoricalTick));
     if (!tick_buf) {
-        free(file_counts);
-        free(file_offsets);
         fprintf(stderr, "[backtest] label_compute: failed to alloc 2-file buf "
                 "(%.0f MB peak)\n", (double)buf_cap * sizeof(HistoricalTick) / 1e6);
-        return -1;
+        return refuse();
     }
     fprintf(stderr, "[backtest] label_compute: streaming 2-file window — "
             "peak %.0f MB (%d files, %lld total ticks)\n",
             (double)buf_cap * sizeof(HistoricalTick) / 1e6,
-            num_files, (long long)total_ticks);
+            num_walk, (long long)total_ticks);
 
     // Phase 3 — resolve per-target label config. Same defaults + Label_WinLoss
     // fallback the single-target path applied, hoisted out of the sample loop.
@@ -1351,9 +1400,11 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
         rt[t].is_regression = LabelType_IsRegression(targets[t].label_type);
         rt[t].is_regime     = (targets[t].label_type == LABEL_REGIME);
     }
-    int sort_mode = run_cfg->use_config_override
-                  ? run_cfg->config_override.csv_sort_check_mode
-                  : CSV_SORT_WARN;
+    // The sort mode the REPLAY ran with (step 10.7) — this pass hard-coded WARN without an override while the replay
+    // read the loaded cfg's: under AUTO it labelled a file in the order the replay had sorted away, under STRICT a file
+    // the replay skipped. (STRICT still refuses here where the replay skips the file: the one stream the two share is
+    // MP-3's, with CS-280.)
+    const int sort_mode = results->config_used.csv_sort_check_mode;
 
     // Phase 4 — sliding-window load + label.
     int prev_file_count_in_buf = 0;  // file f's count once positioned at buf[0]
@@ -1361,13 +1412,14 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
     int sample_cursor = 0;            // monotonic walk through sorted samples
     int64_t prev_file_last_ts = 0;    // for inter-file ordering check
 
-    for (int f = 0; f < num_files; f++) {
+    for (int f = 0; f < num_walk; f++) {
         // Maintain invariant: buf[0..prev_file_count) = file f;
         //                     buf[prev_file_count..total) = file f+1 (if exists)
         if (f == 0) {
             // Initial load: file 0 + file 1 (if exists).
             int n0 = 0;
             BacktestData_Load(tick_buf, &n0, per_file_cap, run_cfg->data_paths[0]);
+            if (drop_shifts_later(0, n0)) return refuse();
             total_in_buf = n0;
             prev_file_count_in_buf = n0;
             // Per-file sort validation (replaces v5.9.2c concat validation).
@@ -1378,22 +1430,21 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
             int sort_rc = BacktestData_ValidateSort(tick_buf, n0, sort_mode,
                                                      file_label);
             if (sort_rc < 0) {
-                free(tick_buf); free(file_counts); free(file_offsets);
-                return -1;
+                return refuse();
             }
             if (n0 > 0) prev_file_last_ts = tick_buf[n0 - 1].timestamp_us;
-            if (num_files > 1) {
+            if (num_walk > 1) {
                 int n1 = 0;
                 BacktestData_Load(tick_buf + total_in_buf, &n1,
                                   (int)(buf_cap - total_in_buf),
                                   run_cfg->data_paths[1]);
+                if (drop_shifts_later(1, n1)) return refuse();
                 snprintf(file_label, sizeof(file_label), "label file 1 (%s)",
                          run_cfg->data_paths[1]);
                 int sort_rc1 = BacktestData_ValidateSort(tick_buf + total_in_buf,
                                                          n1, sort_mode, file_label);
                 if (sort_rc1 < 0) {
-                    free(tick_buf); free(file_counts); free(file_offsets);
-                    return -1;
+                    return refuse();
                 }
                 // Inter-file ordering check.
                 if (n1 > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
@@ -1412,19 +1463,19 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
                     (size_t)file_f_in_buf * sizeof(HistoricalTick));
             total_in_buf = file_f_in_buf;
             prev_file_count_in_buf = file_f_in_buf;
-            if (f + 1 < num_files) {
+            if (f + 1 < num_walk) {
                 int n_next = 0;
                 BacktestData_Load(tick_buf + total_in_buf, &n_next,
                                   (int)(buf_cap - total_in_buf),
                                   run_cfg->data_paths[f + 1]);
+                if (drop_shifts_later(f + 1, n_next)) return refuse();
                 char file_label[280];
                 snprintf(file_label, sizeof(file_label), "label file %d (%s)",
                          f + 1, run_cfg->data_paths[f + 1]);
                 int sort_rc = BacktestData_ValidateSort(tick_buf + total_in_buf,
                                                          n_next, sort_mode, file_label);
                 if (sort_rc < 0) {
-                    free(tick_buf); free(file_counts); free(file_offsets);
-                    return -1;
+                    return refuse();
                 }
                 if (n_next > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
                     fprintf(stderr, "[label] WARN: file %d starts before file %d ends "
@@ -1487,6 +1538,15 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
             }
             sample_cursor++;
         }
+    }
+    // Every sample, or none (step 10.7, the review's F2): a sample past the corpus this pass can read stayed NaN under a
+    // success return — a partial vector reading as whole. Only a corpus changed since the collect (or not the samples'
+    // own) gets here.
+    if (sample_cursor != results->sample_count) {
+        fprintf(stderr, "[label] refused: %d of %d samples index ticks past the corpus this pass can read — its files "
+                        "changed since the collect, or are not the files its samples came from\n",
+                results->sample_count - sample_cursor, results->sample_count);
+        return refuse();
     }
 
     free(tick_buf);
@@ -1555,23 +1615,26 @@ static_assert(LABEL_BATCH_MAX_TARGETS >=
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[single-target forward-scan label pass — 1-job wrapper over Backtest_ComputeLabelsBatch (E.1.2.D leaf 5); same signature + byte-identical labels/stats/stderr as the pre-batch body]
+// [OVERVIEW]_[single-target forward-scan label pass — 1-job wrapper over Backtest_ComputeLabelsBatch (E.1.2.D leaf 5); byte-identical labels/stats/stderr as the pre-batch body; returns the batch's status (step 10.7), and BacktestResults_DropSamples is the collects' fail-closed action on its -1]
 //======================================================================
 // The original E.1 single-target body now lives in Backtest_ComputeLabelsBatch
 // (K=1 is a batch of one). This wrapper preserves the legacy contract exactly:
 // label params from run_cfg->label_*, output to results->labels, NaN counters
 // ACCUMULATED into results->stats (the cross-pass accumulate semantics S3-F3
 // documents — deliberately unchanged here, leaf 13 owns that re-think), and
-// the legacy summary line reading the ACCUMULATED stats. On batch abort the
-// legacy body printed nothing and returned — mirrored below.
+// the legacy summary line reading the ACCUMULATED stats. Returns the batch's
+// status (E.1.3 MP-6 step 10.7 — it returned void and dropped it): samples
+// labelled, 0 for the no-ops, -1 when the pass aborted (it said why; every
+// label NaN). [[nodiscard]]: a collect drops its samples on the -1
+// (BacktestResults_DropSamples), a training horizon fails.
 //======================================================================
 // [CODE]
 //======================================================================
-static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
-                                                      const BacktestRunConfig *run_cfg) {
-    if (!run_cfg->collect_features) return;
-    if (results->sample_count <= 0) return;
-    if (run_cfg->num_data_files <= 0) return;
+[[nodiscard]] static inline int Backtest_ComputeLabelsFromSamples(BacktestResults *results,
+                                                                const BacktestRunConfig *run_cfg) {
+    if (!run_cfg->collect_features) return 0;
+    if (results->sample_count <= 0) return 0;
+    if (run_cfg->num_data_files <= 0) return 0;
 
     LabelBatchTarget t{};
     t.label_type    = run_cfg->label_type;
@@ -1580,7 +1643,7 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     t.forward_ticks = run_cfg->label_forward_ticks;
     t.out_labels    = results->labels;
     int labeled = Backtest_ComputeLabelsBatch(results, run_cfg, &t, 1);
-    if (labeled < 0) return;  // abort already logged; legacy printed nothing here
+    if (labeled < 0) return -1;  // abort already logged; the caller fails closed
 
     // Legacy accumulate-semantics, then the legacy summary line (which reads
     // the ACCUMULATED counters — exactly what the pre-batch body printed).
@@ -1615,6 +1678,21 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                 results->stats.nan_labels_dropped);
     }
     fputc('\n', stderr);
+    return labeled;
+}
+
+// A collect whose label pass aborted has no labels to train on, so its SAMPLES are dropped — every training gate then
+// asks for a collect (E.1.3 MP-6 step 10.7). The ONE fail-closed action both collect paths take (Backtest_Run, the
+// multi-horizon collect); the run happened, so its trades and trade stats stand. What described the dropped labels goes
+// with them (the label NaN counters), and the flag lets the panel say why there are no samples.
+static inline void BacktestResults_DropSamples(BacktestResults *r, const char *who) {
+    fprintf(stderr, "[%s] the label pass aborted (the line above says why) — the collect's %d samples are DROPPED, "
+                    "so nothing trains on them: fix or deselect the file that line names (an unsorted one: "
+                    "csv_sort_check_mode=2, AUTO), then collect again\n", who, r->sample_count);
+    r->sample_count             = 0;
+    r->stats.nan_labels_total   = 0;
+    r->stats.nan_labels_dropped = 0;
+    r->samples_dropped          = 1;
 }
 //======================================================================
 // [END_CODE]
@@ -1685,8 +1763,10 @@ static inline BacktestRunStatus Backtest_Run(uint64_t lease,
                                                          candle_acc, out_snapshot);
     if (st != BACKTEST_RUN_DONE) return st;   // no run happened: no label pass, no phase summary
     // Labels need forward-looking ticks the replay already discarded.
-    // Helper reloads + computes; no-op when collect_features=0.
-    Backtest_ComputeLabelsFromSamples(results, run_cfg);
+    // Helper reloads + computes; no-op when collect_features=0. An aborted pass
+    // DROPS the samples (step 10.7 — fail closed; the run's trades stand).
+    if (Backtest_ComputeLabelsFromSamples(results, run_cfg) < 0)
+        BacktestResults_DropSamples(results, "collect");
     // v5.10.0 Item A — dump phase summary at end of pipeline. Sharded run
     // already set total_ns; bump it to include label_compute time we just
     // did. Skip when nothing recorded (silent no-op).

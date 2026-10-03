@@ -665,7 +665,9 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     //            per-horizon CSV from operator); double-typed, percent
     //            pass-through without /100.
     bool labelled = false;   // did the label pass below run — only then are results.labels the last horizon's
-    if (!SuiteCancel_Requested(&rc->job.cancel) && horizon_count > 0) {
+    // No samples — none collected, or the run's own label pass aborted and dropped them (Backtest_Run, step 10.7) —
+    // means nothing to label: no pass, no table.
+    if (!SuiteCancel_Requested(&rc->job.cancel) && horizon_count > 0 && rc->results.sample_count > 0) {
         LabelBatchTarget bt[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
         float *tmp_bufs[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
         int bt_ok = 1;
@@ -687,7 +689,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
             if (!tmp_bufs[h]) { bt_ok = 0; break; }
             bt[h].out_labels = tmp_bufs[h];
         }
-        int label_rc = -1;   // samples labelled, or -1 = the pass aborted (it logged why; step 10.7 makes that fail closed)
+        int label_rc = -1;   // samples labelled, or -1 = the pass aborted (it logged why) — the dataset is then dropped
         if (!bt_ok) {
             // Pathological small-alloc failure: keep the post-state contract
             // (last horizon into results.labels) and drop the earlier
@@ -700,71 +702,80 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
             label_rc = Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
                                                    bt, horizon_count);
         }
-        // the record describes the labels the results now hold — the LAST horizon's, not the click's position 0:
-        // Full Validation, Walk-Forward and the HP sweep take the labels' identity from it (D-507 review F1; until
-        // MP-3a's labels carry their own params)
-        BacktestRunConfig_RecordLabels(&rc->run_config, &bt[horizon_count - 1]);
-        labelled = true;
-        // Legacy accumulate-semantics: the old loop's every per-horizon walk
-        // folded its NaN counters into results.stats. Same totals, one fold.
-        for (int h = 0; h < horizon_count; ++h) {
-            if (!bt_ok && h < horizon_count - 1) continue;  // never computed
-            rc->results.stats.nan_labels_total   += bt[h].nan_total;
-            rc->results.stats.nan_labels_dropped += bt[h].nan_dropped;
-        }
-        // The label pass above takes no cancel: once begun it runs to its end, and the dataset holds the last horizon's
-        // labels — what Walk-Forward, the HP sweep and Full Validation use. So its summaries always finish (each one O(n),
-        // milliseconds): a cancel here used to leave k < N rows, the last horizon's among the missing, so the table
-        // described the dataset's labels nowhere (the step-9.2 review's A4; E.1.3 MP-6 step 10.4). (A failed buffer
-        // labels only the last horizon and an aborted pass labels part of one — both said above; neither gets a table.)
-        if (SuiteCancel_Requested(&rc->job.cancel) && bt_ok && label_rc >= 0)
-            fprintf(stderr, "[collect-mh] cancel came during the label pass, which cannot stop once begun — all %d "
-                            "horizons were labelled; summarising them\n", horizon_count);
-        int snaps_filled = 0;
-        for (int h = 0; h < horizon_count; ++h) {
-            if (!bt_ok && h < horizon_count - 1) continue;  // no buffer to read
-
-            // E.1.2.G — the per-horizon DISPLAY snapshot, from THIS horizon's
-            // own vector (results->labels only ever holds the last horizon's).
-            // Kind-aware via the same SSoT the single-horizon panel line uses,
-            // which also retires the hand-listed PVS special case that used to
-            // live here (Class-19 shape: registry consumer enumerated by hand).
-            SamplesSnapshot *hs = &rc->mh_collect_snap[h];
-            SamplesSnapshot_ComputeFromLabels(hs, bt[h].out_labels,
-                                              rc->results.sample_count,
-                                              bt[h].label_type);
-            hs->horizon_ticks = horizons[h];
-            rc->mh_collect_tp[h] = tp_pcts[h];
-            rc->mh_collect_sl[h] = sl_pcts[h];
-            snaps_filled = h + 1;
-
-            // stderr line, registry-driven for ANY kind (engine.log → LogViewer)
-            char cls[192]; cls[0] = '\0'; size_t coff = 0;
-            if (hs->label_kind == 2) {
-                int K = hs->num_classes > 16 ? 16 : hs->num_classes;
-                for (int k = 0; k < K && coff < sizeof(cls) - 24; ++k)
-                    coff += snprintf(cls + coff, sizeof(cls) - coff, "%sc%d=%d",
-                                     k ? ", " : "", k, hs->class_counts[k]);
-            } else if (hs->label_kind == 0) {
-                snprintf(cls, sizeof(cls), "%d pos, %d neg, %d neutral",
-                         hs->pos_count, hs->neg_count, hs->neutral_count);
-            } else {
-                snprintf(cls, sizeof(cls), "mean=%.4f sigma=%.4f range=[%.4f, %.4f]",
-                         hs->lmean, hs->lstddev, hs->lmin, hs->lmax);
+        if (label_rc < 0) {
+            // The pass aborted (it said why) and left every label NaN — fail closed (step 10.7): the dataset is DROPPED,
+            // so every training gate asks for a collect, and nothing describes labels that do not exist: no record
+            // update, no table, no summary.
+            BacktestResults_DropSamples(&rc->results, "collect-mh");
+            rc->mh_collect_snap_count = 0;
+        } else {
+            // the record describes the labels the results now hold — the LAST horizon's, not the click's position 0:
+            // Full Validation, Walk-Forward and the HP sweep take the labels' identity from it (D-507 review F1; until
+            // MP-3a's labels carry their own params)
+            BacktestRunConfig_RecordLabels(&rc->run_config, &bt[horizon_count - 1]);
+            labelled = true;
+            // Legacy accumulate-semantics: the old loop's every per-horizon walk
+            // folded its NaN counters into results.stats. Same totals, one fold.
+            for (int h = 0; h < horizon_count; ++h) {
+                if (!bt_ok && h < horizon_count - 1) continue;  // never computed
+                rc->results.stats.nan_labels_total   += bt[h].nan_total;
+                rc->results.stats.nan_labels_dropped += bt[h].nan_dropped;
             }
-            fprintf(stderr, "[collect-mh] horizon=%d ticks kind=%s tp=%.3f sl=%.3f: "
-                            "%d samples (%s)\n",
-                    horizons[h],
-                    (bt[h].label_type >= 0 && bt[h].label_type < LABEL_COUNT)
-                        ? label_table[bt[h].label_type].name : "?",
-                    tp_pcts[h], sl_pcts[h], hs->sample_count, cls);
+            // The label pass above takes no cancel: once begun it runs to its end, and the dataset holds the last horizon's
+            // labels — what Walk-Forward, the HP sweep and Full Validation use. So its summaries always finish (each one O(n),
+            // milliseconds): a cancel here used to leave k < N rows, the last horizon's among the missing, so the table
+            // described the dataset's labels nowhere (the step-9.2 review's A4; E.1.3 MP-6 step 10.4). (A failed buffer
+            // labels only the last horizon — said above; it gets no table. An aborted pass never gets here: it dropped
+            // the dataset above.)
+            if (SuiteCancel_Requested(&rc->job.cancel) && bt_ok)
+                fprintf(stderr, "[collect-mh] cancel came during the label pass, which cannot stop once begun — all %d "
+                                "horizons were labelled; summarising them\n", horizon_count);
+            int snaps_filled = 0;
+            for (int h = 0; h < horizon_count; ++h) {
+                if (!bt_ok && h < horizon_count - 1) continue;  // no buffer to read
+
+                // E.1.2.G — the per-horizon DISPLAY snapshot, from THIS horizon's
+                // own vector (results->labels only ever holds the last horizon's).
+                // Kind-aware via the same SSoT the single-horizon panel line uses,
+                // which also retires the hand-listed PVS special case that used to
+                // live here (Class-19 shape: registry consumer enumerated by hand).
+                SamplesSnapshot *hs = &rc->mh_collect_snap[h];
+                SamplesSnapshot_ComputeFromLabels(hs, bt[h].out_labels,
+                                                  rc->results.sample_count,
+                                                  bt[h].label_type);
+                hs->horizon_ticks = horizons[h];
+                rc->mh_collect_tp[h] = tp_pcts[h];
+                rc->mh_collect_sl[h] = sl_pcts[h];
+                snaps_filled = h + 1;
+
+                // stderr line, registry-driven for ANY kind (engine.log → LogViewer)
+                char cls[192]; cls[0] = '\0'; size_t coff = 0;
+                if (hs->label_kind == 2) {
+                    int K = hs->num_classes > 16 ? 16 : hs->num_classes;
+                    for (int k = 0; k < K && coff < sizeof(cls) - 24; ++k)
+                        coff += snprintf(cls + coff, sizeof(cls) - coff, "%sc%d=%d",
+                                         k ? ", " : "", k, hs->class_counts[k]);
+                } else if (hs->label_kind == 0) {
+                    snprintf(cls, sizeof(cls), "%d pos, %d neg, %d neutral",
+                             hs->pos_count, hs->neg_count, hs->neutral_count);
+                } else {
+                    snprintf(cls, sizeof(cls), "mean=%.4f sigma=%.4f range=[%.4f, %.4f]",
+                             hs->lmean, hs->lstddev, hs->lmin, hs->lmax);
+                }
+                fprintf(stderr, "[collect-mh] horizon=%d ticks kind=%s tp=%.3f sl=%.3f: "
+                                "%d samples (%s)\n",
+                        horizons[h],
+                        (bt[h].label_type >= 0 && bt[h].label_type < LABEL_COUNT)
+                            ? label_table[bt[h].label_type].name : "?",
+                        tp_pcts[h], sl_pcts[h], hs->sample_count, cls);
+            }
+            // count LAST — the GUI reads once the job shows no run, but a torn mid-loop
+            // count would still describe half-filled rows to the first frame. With a
+            // failed buffer only the last horizon was labelled: no per-horizon table
+            // then — rows before it would be a previous collect's (D-507 second
+            // review, R3); the single line below describes the last horizon.
+            rc->mh_collect_snap_count = bt_ok ? snaps_filled : 0;
         }
-        // count LAST — the GUI reads once the job shows no run, but a torn mid-loop
-        // count would still describe half-filled rows to the first frame. With a
-        // failed buffer only the last horizon was labelled: no per-horizon table
-        // then — rows before it would be a previous collect's (D-507 second
-        // review, R3); the single line below describes the last horizon.
-        rc->mh_collect_snap_count = bt_ok ? snaps_filled : 0;
         for (int h = 0; h < horizon_count; ++h) free(tmp_bufs[h]);
     } else if (SuiteCancel_Requested(&rc->job.cancel)) {
         fprintf(stderr, "[collect-mh] cancelled at horizon 0/%d\n", horizon_count);
@@ -5712,6 +5723,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                "— other horizons differ; see [collect-mh] lines",
                                snap->horizon_ticks);
         }
+    } else if (rc_at_rest && run_control->results.samples_dropped) {
+        // the collect ran but its label pass aborted, so its samples were dropped (step 10.7): say why there are none —
+        // a gate's "collect first" alone sends the operator round the same refusal
+        ImGui::TextColored(FoxmlColors::red, "No samples: the last collect's label pass aborted, so its samples were "
+                                             "dropped. The log names the file — fix or deselect it (an unsorted one: "
+                                             "csv_sort_check_mode=2, AUTO), then collect again.");
     }
 
     ImGui::Separator();

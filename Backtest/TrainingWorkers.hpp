@@ -979,8 +979,14 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     // precomputed: Backtest_RunFullValidation + the stamp read label_type /
     // fwd / tp / sl off local_run_cfg downstream. Only the corpus walk is
     // skipped — the batch already produced these exact bytes (memcmp oracle).
-    if (!labels_precomputed) {
-        Backtest_ComputeLabelsFromSamples(results, local_run_cfg);
+    if (!labels_precomputed && Backtest_ComputeLabelsFromSamples(results, local_run_cfg) < 0) {
+        // the walk aborted (it said why) and left every label NaN — this horizon has nothing to train on (step 10.7;
+        // it used to train on the files walked before the abort whenever 50 labels survived)
+        fprintf(stderr, "[mh-train] horizon %d: the label pass aborted — not trained\n", horizon_ticks);
+        TrainingSink_Status(sink.status, "h=%d FAILED: the label pass aborted (see the log)", horizon_ticks);
+        g_wf_marker_horizon = prev_marker;
+        TrainingSink_PublishComplete(sink.complete);   // nothing written on this path
+        return outcome;
     }
 
     int n_valid = 0;
@@ -1608,11 +1614,15 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
     // horizon, and in parallel mode N of them running SIMULTANEOUSLY against the same disk). Targets
     // carry the per-horizon (kind, fwd, tp, sl); both modes consume the vectors below and skip the
     // in-place walk. Buffer-alloc failure degrades to the legacy per-horizon walks (mh_batch_ok=0),
-    // never to wrong labels. A corpus abort keeps precomputed=1: the NAN prefill makes every horizon
-    // refuse on 0 valid labels. (The serial path used to fold the batch's NaN counters into the SHARED
-    // results->stats; the core writes no caller buffer, so serial now matches parallel — CS-271.)
+    // never to wrong labels. A corpus ABORT starts no horizon (step 10.7): the pass leaves every vector
+    // NaN by contract, and the walk labels file by file — before that contract, an abort part-way left
+    // the files already walked labelled, and a horizon with 50 of them trained on part of the corpus
+    // (this comment used to promise "every horizon refuses on 0 valid labels"). (The serial path used
+    // to fold the batch's NaN counters into the SHARED results->stats; the core writes no caller
+    // buffer, so serial now matches parallel — CS-271.)
     float *mh_label_bufs[HMAX] = {0};
     int mh_batch_ok = 1;
+    int mh_labels_aborted = 0;
     {
         LabelBatchTarget bt[HMAX];
         for (int h = 0; h < horizon_count; ++h) {
@@ -1629,8 +1639,9 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         if (mh_batch_ok) {
             int labeled = Backtest_ComputeLabelsBatch(&view, run_cfg, bt, horizon_count);
             if (labeled < 0) {
-                fprintf(stderr, "[mh-train] batched label pass aborted; "
-                                "horizons will refuse on 0 valid labels\n");
+                mh_labels_aborted = 1;
+                fprintf(stderr, "[mh-train] the batched label pass aborted (the line above says why) — "
+                                "no horizon starts\n");
             }
         } else {
             fprintf(stderr, "[mh-train] label batch buffer alloc failed; "
@@ -1638,7 +1649,11 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         }
     }
 
-    if (parallel_mode) {
+    if (mh_labels_aborted) {
+        for (int h = 0; h < horizon_count; ++h)   // the cancel path's shape: each row says why it never ran
+            TrainingSink_Status(sink.horizon[h].status,
+                                "h=%d not started: the label pass aborted (see the log)", req.horizon_ticks[h]);
+    } else if (parallel_mode) {
         fprintf(stderr, "[mh-train] parallel mode: %d horizons on %d workers "
                         "(one single-threaded booster each)\n",
                 horizon_count, n_parallel);
@@ -1762,11 +1777,14 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         out->validated += out->outcome[h].validated;
         out->stamped   += out->outcome[h].stamped;
     }
-    TrainingSink_Status(sink.status,
-                        "Multi-horizon: %d/%d horizons trained, %d validated (held-out), "
-                        "%d stamped. Models in %s/<class>/%s/%s*/.",
-                        out->trained, horizon_count, out->validated, out->stamped,
-                        req.models_root, run_name, MODEL_HORIZON_PREFIX);
+    if (mh_labels_aborted)
+        TrainingSink_Status(sink.status, "Multi-horizon: the label pass aborted (see the log) — nothing trained.");
+    else
+        TrainingSink_Status(sink.status,
+                            "Multi-horizon: %d/%d horizons trained, %d validated (held-out), "
+                            "%d stamped. Models in %s/<class>/%s/%s*/.",
+                            out->trained, horizon_count, out->validated, out->stamped,
+                            req.models_root, run_name, MODEL_HORIZON_PREFIX);
     TrainingSink_FinishRun(sink);
 #else
     (void)req;
