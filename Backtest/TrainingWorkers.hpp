@@ -19,7 +19,7 @@
 //   - [STRUCT]_[TrainingHorizonJob]
 //   - [STRUCT]_[TrainingFvRequest]
 //   - [STRUCT]_[TrainingFvSink]
-//   - [FUNCTION]_[TrainingSink_Status]   (TrainingSink_IsCancelled / _Set / _Load / _PublishComplete / _Finish / _FinishRun / _ForHorizon ride)
+//   - [FUNCTION]_[TrainingSink_Status]   (_Set / _Load / _PublishComplete / _Finish / _FinishRun / _ForHorizon ride)
 //   - [FUNCTION]_[TrainingWorkers_AllocZeroed]
 //   - [FUNCTION]_[TrainingWorkers_ResolveStampSecret]
 //   - [FUNCTION]_[TrainingWorkers_WallClockUs]
@@ -73,6 +73,8 @@
 #include "BacktestEngine.hpp"                  // BacktestResults / BacktestRunConfig / FullValidationResults + the label and validation passes
 #include "../ML_Headers/ModelPathSchema.hpp"   // D-431 nested layout — the path-grammar SSoT
 #include "../MemHeaders/DirCreate.hpp"         // FoxDir_CreateParents (family + horizon chain)
+#include "SuiteLease.hpp"                      // SuiteCancel_Requested — the ONE cancel-word reader (the run review, L2)
+#include "SuiteStartGates.hpp"                 // StartGate_FirstBadHorizon — the horizons a run may train (M1 / NF-5)
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -98,10 +100,15 @@
 //======================================================================
 // [CODE]
 //======================================================================
-struct TrainingStatusLine {
+// alignas(64): a line is written by its one job while the GUI reads it — cross-thread (H6), so each starts its own
+// cache line: two parallel jobs' lines, or a line and the progress counters before it, never share one (the
+// 2026-10-03 run review, I2).
+struct alignas(64) TrainingStatusLine {
     uint64_t seq;        // even = stable, odd = a write in progress — written only by the line's one writer
     char     text[248];  // NUL-terminated; 256 B with the sequence
 };
+static_assert(alignof(TrainingStatusLine) == 64 && sizeof(TrainingStatusLine) % 64 == 0,
+              "a status line is cross-thread (H6): it starts, and ends, on its own cache lines");
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -110,7 +117,7 @@ struct TrainingStatusLine {
 // [UPDATED]_[2026-10-03]
 //----------------------------------------------------------------------
 // [SIZE]_[256B]
-// [ALIGN]_[8]
+// [ALIGN]_[64]
 // [CACHE_LINES]_[4]
 // [STRADDLE]_[none]
 //======================================================================
@@ -582,9 +589,6 @@ inline void TrainingSink_Status(TrainingStatusLine* line, const char* fmt, ...) 
     vsnprintf(text, sizeof(text), fmt, ap);
     va_end(ap);
     TrainingStatusLine_Set(line, text);   // formatted aside, published whole
-}
-inline int TrainingSink_IsCancelled(volatile int* cancel) {
-    return cancel ? __atomic_load_n(cancel, __ATOMIC_RELAXED) : 0;
 }
 inline void TrainingSink_Set(volatile int* p, int v) {
     if (p) __atomic_store_n(p, v, __ATOMIC_RELAXED);
@@ -1153,7 +1157,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
                                                            "mh-train shipped");
                 int it_completed = 0;   // E.1.2.D (scan-2 NEW-1) — real rounds only
                 for (int it = 0; it < hp.n_estimators; ++it) {
-                    if (TrainingSink_IsCancelled(cancel)) break;
+                    if (SuiteCancel_Requested(cancel)) break;
                     if (XGBoosterUpdateOneIter(booster, it, dtrain) != 0) break;
                     it_completed++;
                 }
@@ -1177,7 +1181,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
                     fprintf(stderr, "[mh-train] horizon %d: 0 boosting rounds "
                             "completed (%s) — NOT saving over %s\n",
                             horizon_ticks,
-                            TrainingSink_IsCancelled(cancel) ? "cancelled"
+                            SuiteCancel_Requested(cancel) ? "cancelled"
                                              : "first round failed or n_estimators==0",
                             fv->auto_stamp_path);
                 }
@@ -1257,7 +1261,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
                  "h=%d OK: WF=%.3f HO=%.3f gap=%.3f%s (no stamp requested: auto_stamp_on_held_out=0)",
                  horizon_ticks, wf_metric, ho_metric,
                  fv->wf_to_held_out_gap, bal_buf);
-    } else if (TrainingSink_IsCancelled(cancel)) {
+    } else if (SuiteCancel_Requested(cancel)) {
         TrainingSink_Status(sink.status,
                  "h=%d CANCELLED mid-validation", horizon_ticks);
     } else {
@@ -1488,7 +1492,7 @@ inline void* TrainingWorkers_HorizonThread(void* arg) {
 inline void TrainingWorkers_PoolJob(void* ctx, int h) {
     TrainingHorizonJob* job = ((TrainingHorizonJob**)ctx)[h];
     if (!job) return;
-    if (TrainingSink_IsCancelled(job->sink.cancel)) {
+    if (SuiteCancel_Requested(job->sink.cancel)) {
         TrainingSink_Status(job->sink.status,
                             "h=%d not started: the run was cancelled", job->req.horizon_ticks);
         return;
@@ -1540,6 +1544,20 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         TrainingWorkers_Refuse(sink, "Multi-horizon: %d horizons exceeds the grid cap %d — refused.",
                                horizon_count, HMAX);
         return;
+    }
+    // Each horizon is its own model directory, named by the model path's grammar: a horizon named twice sends two jobs
+    // at one model file, one stamp temp path and one set of records (a stamp could carry one job's label identity over
+    // the other's bytes, valid HMAC and all), and one out of the grammar's range writes a directory the loader never
+    // walks — so either is refused before any artifact write, whoever built the request (the 2026-10-03 run review, M1;
+    // its fold review, NF-5). StartGate_FirstBadHorizon is the rule the panel's parse applies field by field.
+    {
+        const int bad = StartGate_FirstBadHorizon(req.horizon_ticks, horizon_count);
+        if (bad >= 0) {
+            TrainingWorkers_Refuse(sink, "Multi-horizon: horizon %d (position %d) is not one a run may train — each must "
+                                   "be 1..%d and named once (its own model directory); refused.",
+                                   req.horizon_ticks[bad], bad + 1, (int)MODEL_HORIZON_TICKS_MAX);
+            return;
+        }
     }
     // An empty root would put the model tree at the filesystem root ("/<class>/...").
     if (!req.models_root[0] || !req.run_cfg) {
@@ -1634,7 +1652,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         // after the pool returns.
         TrainingHorizonJob *jobs[HMAX] = {0};
         for (int h = 0; h < horizon_count; ++h) {
-            if (TrainingSink_IsCancelled(sink.cancel)) {
+            if (SuiteCancel_Requested(sink.cancel)) {
                 for (int r = h; r < horizon_count; ++r)
                     TrainingSink_Status(sink.horizon[r].status,
                                         "h=%d not started: the run was cancelled", req.horizon_ticks[r]);
@@ -1697,7 +1715,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         // rewrite in turn — the in-place semantics serial always had, on the core's own buffer.
         float *own_labels = NULL;
         for (int h = 0; h < horizon_count; ++h) {
-            if (TrainingSink_IsCancelled(sink.cancel)) {
+            if (SuiteCancel_Requested(sink.cancel)) {
                 fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
                         h, horizon_count);
                 for (int r = h; r < horizon_count; ++r)
@@ -1795,7 +1813,7 @@ inline void TrainingWorkers_FvRequestIdentity(TrainingFvRequest* r,
                                        r->stamp_secret, sizeof(r->stamp_secret));
     if (run_cfg) {
         r->label_type              = run_cfg->label_type;
-        r->label_forward_ticks     = run_cfg->label_forward_ticks;
+        r->label_forward_ticks     = Label_EffectiveForwardTicks(run_cfg->label_forward_ticks);   // the labels' horizon — the gate's rule (the run review, L3)
         r->label_tp_pct            = run_cfg->label_tp_pct;
         r->label_sl_pct            = run_cfg->label_sl_pct;
         r->label_roundtrip_fee_pct = run_cfg->label_roundtrip_fee_pct;   // D-476

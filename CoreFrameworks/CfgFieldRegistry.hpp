@@ -935,7 +935,7 @@ inline constexpr uint32_t CFG_FAULT_FEATURE_MALFORMED    = 1u << 3;  // parse-po
     /* === String arrays awaiting KIND_STRING / KIND_FILE_PATH at .F.4e === */                                            \
     X(char,                 node_model_path,           [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
     X(char,                 node_model_dir,            [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
-    X(char,                 node_horizon_list,         [128],   "KIND_STRING cohort at .F.4e")                            \
+    X(char,                 node_horizon_list,         [128],   "RETIRED storage (E.1.3 MP-6 10.3 tombstone) — never promote") /* H21-TOMBSTONE: node_horizon_list */ \
     X(char,                 node_ensemble_blend_mode,  [16],    "KIND_STRING (or KIND_INT_ENUM) cohort at .F.4e")         \
     X(char,                 node_disabled_horizons,    [128],   "KIND_STRING cohort at .F.4e")                            \
     /* === Per-core symbol (WIP2d-1.A — partial advance of .F.4c.3.A; operator-facing forward-compat for multi-symbol DataStream) === */ \

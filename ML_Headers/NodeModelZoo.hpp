@@ -2528,7 +2528,7 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
 template <unsigned F>
 inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                          const char *base_run_path,
-                                         const int *horizon_list,
+                                         const int *horizons,   // the horizons to load — discovered on disk
                                          int horizon_count,
                                          int backend,
                                          const char* held_out_stamp_secret = nullptr,
@@ -2536,14 +2536,14 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                          int held_out_gate_strict = 0,
                                          int acknowledge_cross_binary_drift = 0) {
     if (!ezoo || !base_run_path || base_run_path[0] == '\0' ||
-        !horizon_list || horizon_count <= 0) return 0;
+        !horizons || horizon_count <= 0) return 0;
 
     if (horizon_count > ENSEMBLE_HORIZON_MAX) horizon_count = ENSEMBLE_HORIZON_MAX;
 
     int total_loaded = 0;
     char per_horizon_dir[512];
     for (int h = 0; h < horizon_count; ++h) {
-        int H = horizon_list[h];
+        int H = horizons[h];
         if (H <= 0) continue;
         // D-431 nested layout — horizon dirs are CHILDREN of the family
         // node ("<base>/horizon_<H>"), built by the schema SSoT. The old

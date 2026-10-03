@@ -11,6 +11,7 @@
 // [CONTAINS]
 //   - [STRUCT]_[SuiteCsvParse] · [FUNCTION]_[SuiteCsv_NextToken] · [FUNCTION]_[SuiteCsv_HasValue] · [FUNCTION]_[SuiteCsv_CopyToken]
 //   - [FUNCTION]_[SuiteCsv_Tiny] · [FUNCTION]_[SuiteCsv_Parse] · [FUNCTION]_[SuiteCsv_RefuseBroadcast]
+//   - [FUNCTION]_[SuiteCsv_StopAtRepeat] · [FUNCTION]_[StartGate_FirstBadHorizon]
 //   - [FUNCTION]_[SuiteCsv_WriteValue] · [FUNCTION]_[SuiteCsv_ErrorLine]
 //   - [FUNCTION]_[StartGate_SelectedFiles]
 //   - [FUNCTION]_[StartGate_RekeySelection]
@@ -47,6 +48,7 @@
 #include <charconv>       // E.1.3 MP-6 step 10.5 — the CSV inputs parse locale-free (H5)
 #include <type_traits>
 #include "SuiteLease.hpp"
+#include "../ML_Headers/ModelPathSchema.hpp"   // MODEL_HORIZON_TICKS_MAX — the largest horizon a model path names
 
 // ==== the CSV inputs a start reads (E.1.3 MP-6 step 10.5) ====
 // The Training panel's four CSV fields — the horizons, the label kinds, TP and SL — parse through ONE parser that STOPS
@@ -65,7 +67,8 @@
 //======================================================================
 enum : int {
     SUITE_CSV_OK = 0, SUITE_CSV_NOT_A_NUMBER = 1, SUITE_CSV_OUT_OF_RANGE = 2, SUITE_CSV_TOO_MANY = 3,
-    SUITE_CSV_UNITS_DIFFER = 4   // one value for horizons whose units differ (SuiteCsv_RefuseBroadcast)
+    SUITE_CSV_UNITS_DIFFER = 4,  // one value for horizons whose units differ (SuiteCsv_RefuseBroadcast)
+    SUITE_CSV_DUPLICATE    = 5   // a value repeating an earlier one, where each must be distinct (SuiteCsv_StopAtRepeat)
 };
 struct SuiteCsvParse {
     int    count;       // values kept, in order
@@ -279,6 +282,71 @@ inline void SuiteCsv_RefuseBroadcast(SuiteCsvParse* r, const char* csv) {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[SuiteCsv_StopAtRepeat]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[stop a parsed list at the first value that repeats an earlier one (SUITE_CSV_DUPLICATE) — for a list whose values each name a distinct thing; the values before it are kept, as at any stop, and a repeat before an earlier stop's position takes its place; SuiteCsv_RepeatsEarlier is the ONE "distinct" rule (StartGate_FirstBadHorizon reads it too)]
+//======================================================================
+// The Horizons list is one: each horizon trains its own model into its own directory, so a repeat sent two jobs at
+// one artifact — the same model file, the same stamp's temp path, the same records — and the run counted both as
+// trained (the 2026-10-03 run review, M1). TP / SL / kind lists repeat values by design; they do not call this.
+//======================================================================
+// [CODE]
+//======================================================================
+template <typename T>
+inline bool SuiteCsv_RepeatsEarlier(const T* values, int i) {
+    for (int j = 0; j < i; ++j)
+        if (values[j] == values[i]) return true;
+    return false;
+}
+template <typename T>
+inline void SuiteCsv_StopAtRepeat(SuiteCsvParse* r, const T* values, const char* csv) {
+    for (int i = 1; i < r->count; ++i) {
+        if (!SuiteCsv_RepeatsEarlier(values, i)) continue;
+        const char* p       = csv ? csv : "";
+        const char* tok_end = p;
+        for (int k = 0; k <= i && SuiteCsv_NextToken(&p, &tok_end); ++k)   // the (i+1)-th token is the repeat's text
+            if (k < i) p = tok_end;
+        SuiteCsv_CopyToken(r->token, sizeof(r->token), p, tok_end);
+        r->count    = i;
+        r->stop     = SUITE_CSV_DUPLICATE;
+        r->stop_pos = i + 1;
+        return;
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[SuiteCsv_StopAtRepeat]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[StartGate_FirstBadHorizon]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the horizons a run may train: each 1..MODEL_HORIZON_TICKS_MAX (a model path's grammar — the loader walks no other) and each distinct (its own model directory) — the index of the first that is not, or -1; the producer core refuses on it, whoever built the request]
+//======================================================================
+// The panel reaches the same verdict field by field — its parse ranges each value to the same bound and stops at a
+// repeat through the same rule (SuiteCsv_RepeatsEarlier) — so the core's check is the request's own guarantee, not a
+// second opinion (the run review's M1; its fold review's NF-5 / option A: a horizon of 0 wrote horizon_0/, which the
+// loader's grammar rejects, and stamped no label parameters at all).
+//======================================================================
+// [CODE]
+//======================================================================
+inline int StartGate_FirstBadHorizon(const int* horizons, int n) {
+    for (int i = 0; i < n; ++i)
+        if (horizons[i] < 1 || horizons[i] > MODEL_HORIZON_TICKS_MAX || SuiteCsv_RepeatsEarlier(horizons, i)) return i;
+    return -1;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[StartGate_FirstBadHorizon]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[SuiteCsv_WriteValue]
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [GUI]]
@@ -327,6 +395,9 @@ inline bool SuiteCsv_ErrorLine(const char* field, const SuiteCsvParse* r, char* 
     else if (r->stop == SUITE_CSV_OUT_OF_RANGE)
         snprintf(out, out_cap, "⚠ %s position %d: '%s' is outside [%.15g, %.15g] — it and the values after it are not "
                  "applied; %s", field, r->stop_pos, r->token, r->lo, r->hi, tail);
+    else if (r->stop == SUITE_CSV_DUPLICATE)
+        snprintf(out, out_cap, "⚠ %s position %d: '%s' repeats an earlier value — each must be distinct; it and the values "
+                 "after it are not applied; %s", field, r->stop_pos, r->token, tail);
     else if (r->stop == SUITE_CSV_UNITS_DIFFER)
         snprintf(out, out_cap, "⚠ %s: one value ('%s') for horizons whose units differ — give one value per horizon; %s",
                  field, r->token, tail);

@@ -46,6 +46,7 @@
 #include "../CoreFrameworks/IndexSpaces.hpp"   // E.1.3 P0/TD-299 — typed per-NODE subscripts
 #include "../CoreFrameworks/ShardedSnapshot.hpp"  // Track E.7 — TUI_CopySnapshotSharded
 #include "PhaseTimers.hpp"  // v5.10.0 Item A — per-phase backtest timers
+#include "SuiteLease.hpp"   // SuiteCancel_Requested — the ONE cancel-word reader (the 2026-10-03 run review, L2)
 #include "../CoreFrameworks/Tick.hpp"
 #include "../DataStream/DepthReplayState.hpp"  // Track E.3 — depth replay
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
@@ -690,7 +691,7 @@ static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
         uint64_t hot_loop_start_ns = tt::PhaseTimer_NowNs();
         uint64_t fc_baseline_ns = tt::PhaseTimer_Global().feature_collect_ns;
         for (int i = 0; i < count; i++) {
-            if (*cancel_flag) goto done;
+            if (SuiteCancel_Requested(cancel_flag)) goto done;
 
             Tick<BACKTEST_FP> t = SharedBacktest_FromHistorical<BACKTEST_FP>(&ticks[i], (uint64_t)total_processed);
 

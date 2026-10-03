@@ -87,11 +87,11 @@ struct HistoricalTick {
 // [CODE]
 //======================================================================
 #define FOREACH_TARGET(X) \
-    X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0, TP_PCT, SL_PCT) \
-    X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0, TP_PCT, SL_PCT) \
+    X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss — NO time barrier: scans to the label buffer's end (the next file's), so the horizon changes nothing", Label_WinLoss,           0, TP_PCT, SL_PCT) \
+    X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral) — NO time barrier: scans to the label buffer's end, so the horizon changes nothing", Label_Barrier,           0, TP_PCT, SL_PCT) \
     X(FORWARD_PNL,        "forward_pnl",        "Forward P&L",        "Continuous: % return over N ticks",                  Label_ForwardPnl,        1, TP_UNUSED, SL_UNUSED) \
     X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            5, TP_UNUSED, SL_UNUSED) \
-    X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0, TP_SIGMA_K, SL_UNUSED) \
+    X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML) — NO time barrier: scans to the label buffer's end; the horizon arrives as the sigma window (D-471 Finding 1)", Label_VolBarrier,        0, TP_SIGMA_K, SL_UNUSED) \
     X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0, TP_UNUSED, SL_UNUSED) \
     X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0, TP_UNUSED, SL_UNUSED) \
     X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3, TP_PCT, SL_PCT) \

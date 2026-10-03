@@ -173,9 +173,9 @@ static inline void CandleAccumulator_Reset(CandleAccumulator *ca) {
 static inline void CandleAccumulator_Push(CandleAccumulator *ca,
                                            double price, double volume, int is_seller) {
     double now = (double)time(NULL);
-    double bucket = (double)((int64_t)(now / ca->interval_sec) * ca->interval_sec);
 
-    pthread_mutex_lock(&ca->lock);
+    pthread_mutex_lock(&ca->lock);   // before interval_sec: SetInterval writes it under the lock (the run review, I6)
+    double bucket = (double)((int64_t)(now / ca->interval_sec) * ca->interval_sec);
 
     // new candle bucket?
     if (!ca->has_current || bucket > ca->current.time_sec) {
@@ -233,9 +233,8 @@ static inline void CandleAccumulator_Push(CandleAccumulator *ca,
 static inline void CandleAccumulator_PushWithTime(CandleAccumulator *ca,
                                                     double price, double volume,
                                                     int is_seller, double tick_time_sec) {
+    pthread_mutex_lock(&ca->lock);   // before interval_sec: SetInterval writes it under the lock (the run review, I6)
     double bucket = (double)((int64_t)(tick_time_sec / ca->interval_sec) * ca->interval_sec);
-
-    pthread_mutex_lock(&ca->lock);
 
     if (!ca->has_current || bucket > ca->current.time_sec) {
         if (ca->has_current) {

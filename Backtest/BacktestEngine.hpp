@@ -2294,8 +2294,9 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         args.snap_train_nthread = data->config_used.xgb_train_nthread > 0
                                 ? data->config_used.xgb_train_nthread : 1;
 
-        // Per-horizon label params (multi-horizon worker sets req_label_*;
-        // single-horizon RFV button leaves at 0).
+        // Per-horizon label params (req_label_*) — the multi-horizon job and Run
+        // Full Validation both set them; the lookahead is the labels' horizon
+        // (Label_EffectiveForwardTicks — the FV request since the run review's L3).
         args.horizon_ticks  = out->req_label_lookahead_ticks;
         args.horizon_tp_pct = out->req_label_tp_pct;
         args.horizon_sl_pct = out->req_label_sl_pct;
@@ -2908,7 +2909,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     int counted_train = 0;
 
     for (int f = 0; f < n_splits; f++) {
-        if (*cancel_flag) break;
+        if (SuiteCancel_Requested(cancel_flag)) break;
 
         PurgedSplit *sp = &wf->splits[f];
         WalkForwardFoldResult *fr = &wf->folds[f];
@@ -3077,7 +3078,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             // trainer already checked per-round; this is the same check, and it is why the two
             // paths felt so different. Breaking here lets the fold finish its bookkeeping and the
             // existing per-fold guard above ends the run on the next iteration.
-            if (cancel_flag && *cancel_flag) {
+            if (SuiteCancel_Requested(cancel_flag)) {
                 fprintf(stderr, "[walkforward] fold %d: cancelled at round %d/%d\n",
                         f + 1, r, n_rounds);
                 break;
@@ -3686,7 +3687,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         // v5.10.0 Item A — xgboost_train phase timer (held-out training).
         uint64_t xgb_ho_start_ns = tt::PhaseTimer_NowNs();
         for (int rr = 0; rr < n_rounds; ++rr) {
-            if (cancel_flag && *cancel_flag) {
+            if (SuiteCancel_Requested(cancel_flag)) {
                 train_aborted = 1;
                 break;
             }
@@ -4088,7 +4089,7 @@ static inline void Backtest_RunSweep(uint64_t lease,
 
     for (int i0 = 0; admissible && i0 < opt->dims[0]; i0++) {
         for (int i1 = 0; i1 < opt->dims[1]; i1++) {
-            if (*cancel_flag) return;
+            if (SuiteCancel_Requested(cancel_flag)) return;
 
             int idx = i0 * opt->dims[1] + i1;
             *current_run = idx + 1;
@@ -4273,7 +4274,7 @@ static inline void Backtest_RunHyperparamTrainSweep(
     if (n_workers <= 1) {
         // SERIAL PATH (also used when total_runs == 1)
         for (int idx = 0; idx < opt->total_runs; ++idx) {
-            if (cancel_flag && *cancel_flag) {
+            if (SuiteCancel_Requested(cancel_flag)) {
                 fprintf(stderr, "[hpsweep] cancelled at cell %d/%d\n",
                         idx, opt->total_runs);
                 return;
@@ -4306,7 +4307,7 @@ static inline void Backtest_RunHyperparamTrainSweep(
         auto worker_thunk = +[](void *arg) -> void* {
             WorkerCtx *c = (WorkerCtx*)arg;
             for (int idx = c->worker_id; idx < c->total_runs; idx += c->n_workers) {
-                if (c->cancel_flag && *c->cancel_flag) return nullptr;
+                if (SuiteCancel_Requested(c->cancel_flag)) return nullptr;
                 (*c->run_cell_fn)(idx);
                 // current_run is monotonic-ish; workers write asynchronously
                 // (this is just for UI progress, exact ordering not required)

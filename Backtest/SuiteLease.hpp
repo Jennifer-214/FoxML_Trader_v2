@@ -231,7 +231,7 @@ enum SuiteGateTone : uint8_t {
 
 struct SuiteGate {
     bool    closed  = false;             // a term failed; a new gate starts with nothing against it
-    uint8_t tone    = SUITE_GATE_WAIT;   // the failed term's SuiteGateTone
+    SuiteGateTone tone = SUITE_GATE_WAIT;   // the failed term's tone
     char    why[62] = {};                // the failed term's reason, as the button shows it
 };
 //======================================================================
@@ -254,7 +254,7 @@ inline bool SuiteGate_Open(const SuiteGate* g) { return !g->closed; }
 // A term that does not hold closes the gate with its reason (printf-style, so a reason can carry its numbers) — unless
 // an earlier term already did: the first failure is the one a button shows.
 __attribute__((format(printf, 4, 0)))
-inline void SuiteGate_Term(SuiteGate* g, bool holds, uint8_t tone, const char* fmt, va_list ap) {
+inline void SuiteGate_Term(SuiteGate* g, bool holds, SuiteGateTone tone, const char* fmt, va_list ap) {
     if (holds || g->closed) return;
     g->closed = true;
     g->tone   = tone;
@@ -355,6 +355,12 @@ inline void SuiteJob_Publish(SuiteJob* j) { __atomic_store_n(&j->complete, 1, __
 inline void SuiteJob_Forget(SuiteJob* j) { __atomic_store_n(&j->complete, 0, __ATOMIC_RELAXED); }
 
 inline void SuiteJob_Cancel(SuiteJob* j) { __atomic_store_n(&j->cancel, 1, __ATOMIC_RELAXED); }
+
+// The ONE reader of a cancel word — SuiteJob_Cancel's twin, for every worker's poll, whether it holds the SuiteJob or
+// only the word a core was handed (NULL = never cancelled). A plain or volatile read of a word another thread stores
+// atomically is a data race under the C++ model — benign on x86, undefined all the same (the 2026-10-03 run review,
+// L2: the collect worker, the sharded driver and the sweeps each read it plainly).
+inline bool SuiteCancel_Requested(const volatile int* word) { return word && __atomic_load_n(word, __ATOMIC_RELAXED) != 0; }
 
 //======================================================================
 // [FUNCTION]_[SuiteJob_Begin]

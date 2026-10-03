@@ -665,7 +665,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     //            per-horizon CSV from operator); double-typed, percent
     //            pass-through without /100.
     bool labelled = false;   // did the label pass below run — only then are results.labels the last horizon's
-    if (!rc->job.cancel && horizon_count > 0) {
+    if (!SuiteCancel_Requested(&rc->job.cancel) && horizon_count > 0) {
         LabelBatchTarget bt[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
         float *tmp_bufs[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
         int bt_ok = 1;
@@ -717,7 +717,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
         // milliseconds): a cancel here used to leave k < N rows, the last horizon's among the missing, so the table
         // described the dataset's labels nowhere (the step-9.2 review's A4; E.1.3 MP-6 step 10.4). (A failed buffer
         // labels only the last horizon and an aborted pass labels part of one — both said above; neither gets a table.)
-        if (rc->job.cancel && bt_ok && label_rc >= 0)
+        if (SuiteCancel_Requested(&rc->job.cancel) && bt_ok && label_rc >= 0)
             fprintf(stderr, "[collect-mh] cancel came during the label pass, which cannot stop once begun — all %d "
                             "horizons were labelled; summarising them\n", horizon_count);
         int snaps_filled = 0;
@@ -766,7 +766,7 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
         // review, R3); the single line below describes the last horizon.
         rc->mh_collect_snap_count = bt_ok ? snaps_filled : 0;
         for (int h = 0; h < horizon_count; ++h) free(tmp_bufs[h]);
-    } else if (rc->job.cancel) {
+    } else if (SuiteCancel_Requested(&rc->job.cancel)) {
         fprintf(stderr, "[collect-mh] cancelled at horizon 0/%d\n", horizon_count);
     }
 
@@ -1986,7 +1986,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
 
     if (s->count == 0) {
         ImGui::TextDisabled("No saved runs found in models/. "
-                            "Train a model and click 'Save Run' in the Training panel.");
+                            "Train a model in the Training panel — each run writes its family here.");
         ImGui::End();
         return;
     }
@@ -3709,9 +3709,9 @@ static_assert(alignof(TrainingPanelState) == 64, "TrainingPanelState's alignment
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-03]
-// [SIZE]_[412608B]
+// [SIZE]_[412672B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6447]
+// [CACHE_LINES]_[6448]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
@@ -4546,7 +4546,7 @@ static inline bool TrainingPanel_LaunchMultiHorizon(TrainingPanelState *state,
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the panel's Horizons CSV → ui_horizon_list / ui_horizon_count / ui_horizon_parse (at most PANEL_HORIZON_MAX, each 1..MODEL_HORIZON_TICKS_MAX — the largest a model path names; it STOPS at the first value it cannot keep and says so — SuiteCsv_Parse) — the ONE source of the panel's horizons (E.1.3 MP-6 step 10.3: no fallback to the last run's config)]
+// [OVERVIEW]_[the panel's Horizons CSV → ui_horizon_list / ui_horizon_count / ui_horizon_parse (at most PANEL_HORIZON_MAX, each 1..MODEL_HORIZON_TICKS_MAX — the largest a model path names — and each distinct: a horizon is a model directory; it STOPS at the first value it cannot keep and says so — SuiteCsv_Parse, SuiteCsv_StopAtRepeat) — the ONE source of the panel's horizons (E.1.3 MP-6 step 10.3: no fallback to the last run's config)]
 //======================================================================
 // Called by TrainingPanel_ParseInputs — ONCE a frame, at the panel's top, before anything reads the horizons: the mode,
 // every gate and every click read one parse, and an edit typed into the CSV reaches them the next frame. (The panel
@@ -4561,6 +4561,7 @@ static inline void TrainingPanel_ParseHorizonCsv(TrainingPanelState *state) {
                                                  *lo = 1.0;
                                                  *hi = MODEL_HORIZON_TICKS_MAX;
                                              });
+    SuiteCsv_StopAtRepeat(&state->ui_horizon_parse, state->ui_horizon_list, state->ui_horizon_csv);
     state->ui_horizon_count = state->ui_horizon_parse.count;
 }
 //======================================================================
@@ -5292,8 +5293,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Empty = Collect Features and Train Model refuse (type a horizon);\n"
         "Walk-Forward, the HP sweep and Full Validation still run on the\n"
         "collected labels.\n"
-        "Max %d horizons, each 1..%d ticks; a value outside that, or not a\n"
-        "number, stops the parse there and says so in red.",
+        "Max %d horizons, each 1..%d ticks and each named once; a value\n"
+        "outside that, not a number, or a horizon typed twice stops the\n"
+        "parse there and says so in red.",
         TrainingPanelState::PANEL_HORIZON_MAX, (int)MODEL_HORIZON_TICKS_MAX);
     ImGui::SameLine();
     ImGui::TextDisabled("(%d horizon%s parsed)",
@@ -5799,10 +5801,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "save paths from Run Name + the nested family layout (D-431).");
 
     // v5.11.48 — Run Name prefix input rendered HERE (before Train buttons)
-    // so operator sees + sets it BEFORE clicking train. The same field is
-    // also rendered post-train near Save Run (legacy location)
-    // so operator can rename for Save Run if needed. Both edit the same
-    // state->run_name buffer.
+    // so operator sees + sets it BEFORE clicking train (its post-train twin
+    // went with the Training panel's Save Run, D-d).
     ImGui::InputText("Run Name (prefix)", state->run_name, sizeof(state->run_name));
     ImGui::SetItemTooltip(
         "Family name. The worker creates ONE family dir and a horizon_<H> child\n"

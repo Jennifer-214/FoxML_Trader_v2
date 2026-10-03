@@ -1256,7 +1256,7 @@ template <unsigned F> struct ControllerConfig {
   // exception: the operator's call). HORIZON_LIST_MAX stays live: it caps the suite's horizon grid
   // (TrainingPanelState::PANEL_HORIZON_MAX, the training core's HMAX) and the label batch.
   static constexpr int HORIZON_LIST_MAX = 8;
-  int      horizon_list[HORIZON_LIST_MAX];  // RETIRED storage — zeroed by the default, never written or read
+  int      horizon_list[HORIZON_LIST_MAX];  // RETIRED storage — zeroed by the default, never written or read  H21-TOMBSTONE: horizon_list
   int      horizon_count;                    // RETIRED storage — likewise
 
   // v5.10.0a.G.6 — global ensemble cfg (per-core overrides via
@@ -2113,7 +2113,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.held_out_max_gb         = 4;   // KEEP — registry INT(8) too loose; held-out fold is smaller cohort
   // RETIRED storage (horizon_list — see the field): zeroed, never read.
   for (int i = 0; i < ControllerConfig<F>::HORIZON_LIST_MAX; ++i)
-      cfg.horizon_list[i] = 0;
+      cfg.horizon_list[i] = 0;   // H21-TOMBSTONE: horizon_list (the retained storage's default)
   cfg.horizon_count = 0;
   // v5.10.0a.G.6 — ensemble cfg defaults. blend_mode "weighted" engages
   // G.7 Bandit-Exp3 path when ensemble active; "selection" stays on G.4
@@ -2146,7 +2146,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
   // v5.11.18a — per-core feature_mask defaults (all-bits-on = no masking)
   for (int i = 0; i < 16; ++i) {
-      cfg.node_horizon_list[i][0] = '\0';
+      cfg.node_horizon_list[i][0] = '\0';   // H21-TOMBSTONE: node_horizon_list (the retained storage's default)
       cfg.node_ensemble_blend_mode[i][0] = '\0';
       cfg.node_disabled_horizons[i][0] = '\0';
       cfg.node_feature_mask[i] = 0xFFFFFFFFFFFFFFFFULL;  // all features enabled
@@ -3103,8 +3103,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // for another meaning). Nothing reads it — the suite's Training panel takes its horizons from its Horizons (CSV),
     // the engine's ensemble discovers its horizons from disk (G.5) — so a line setting it says so, instead of being
     // parsed into storage that changes nothing.
-    if (strcmp(key, "horizon_list") == 0) {
-        fprintf(stderr, "[cfg] WARN: horizon_list='%s' is retired and does nothing — the suite takes its horizons from "
+    if (strcmp(key, "horizon_list") == 0) {   // H21-TOMBSTONE: horizon_list
+        fprintf(stderr, "[cfg] WARN: horizon_list='%s' is retired and does nothing — the suite takes its horizons from "   // H21-TOMBSTONE: horizon_list
                         "the Training panel's Horizons (CSV), and the engine discovers its ensemble's horizons from disk; "
                         "remove the line\n", val);
         continue;
@@ -3326,7 +3326,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         // empty (inherit global).
         // node_N_horizon_list — RETIRED at E.1.3 MP-6 step 10.3 (an H21 tombstone, as the global horizon_list): it was
         // parsed into storage nothing ever read — the ensemble discovers each node's horizons from disk (G.5)
-        if (strcmp(suffix, "horizon_list") == 0) {
+        if (strcmp(suffix, "horizon_list") == 0) {   // H21-TOMBSTONE: horizon_list
             fprintf(stderr, "[cfg] WARN: node_%d_horizon_list='%s' is retired and does nothing — the ensemble discovers "
                             "its horizons from disk; remove the line\n", node_idx, val);
             continue;
